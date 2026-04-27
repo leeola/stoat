@@ -1511,6 +1511,27 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(count) = stoat.take_pending_count() else {
+        return goto_last_line(stoat, false);
+    };
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let mut last_row = rope.max_point().row;
+    if last_row > 0 && rope.line_len(last_row) == 0 {
+        last_row -= 1;
+    }
+    let zero_indexed = count.saturating_sub(1);
+    let target_row = (zero_indexed as u64).min(last_row as u64) as u32;
+    let target_offset = rope.point_to_offset(Point::new(target_row, 0));
+    apply_primary_range(editor, target_offset..target_offset);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_last_line(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

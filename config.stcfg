@@ -186,6 +186,7 @@ on key {
         d -> DeleteSelection();
         u -> Undo();
         U -> Redo();
+        G -> GotoLineNumber();
         > -> IndentSelection();
         < -> UnindentSelection();
         g -> SetMode(goto);

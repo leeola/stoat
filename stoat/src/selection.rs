@@ -1797,6 +1797,41 @@ mod tests {
     }
 
     #[test]
+    fn goto_line_number_jumps_to_count_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
+        h.open_file(&path);
+        h.type_keys("5 G");
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(4, 0)]);
+    }
+
+    #[test]
+    fn goto_line_number_clamps_at_last_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+        h.open_file(&path);
+        h.type_keys("9 9 G");
+        let positions = h.cursor_display_positions();
+        assert_eq!(positions, vec![(3, 0)]);
+    }
+
+    #[test]
+    fn goto_line_number_without_count_jumps_to_last_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.type_keys("G");
+        let with_g = h.cursor_display_positions();
+        let mut h2 = crate::test_harness::TestHarness::with_size(20, 10);
+        let path2 = h2.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h2.open_file(&path2);
+        h2.type_keys("g j");
+        let with_gj = h2.cursor_display_positions();
+        assert_eq!(with_g, with_gj);
+    }
+
+    #[test]
     fn count_prefix_word_clamps_at_buffer_edge() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");

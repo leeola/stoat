@@ -16,13 +16,13 @@ use crate::{
             ExpandSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
             ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
             ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections,
-            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineStart,
-            GotoNextChange, GotoPrevChange, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward, JumpForward,
-            KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
-            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, PageDown, PageUp, Redo, RotateSelectionsBackward,
+            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
+            GotoLineStart, GotoNextChange, GotoPrevChange, GotoWindowBottom, GotoWindowCenter,
+            GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward,
+            JumpForward, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
+            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
+            MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo, RotateSelectionsBackward,
             RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll,
             SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
             SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
@@ -253,6 +253,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(GotoFileStart::DEF, |_| Ok(Box::new(GotoFileStart)));
     add(GotoLastLine::DEF, |_| Ok(Box::new(GotoLastLine)));
+    add(GotoLineNumber::DEF, |_| Ok(Box::new(GotoLineNumber)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
@@ -657,7 +658,8 @@ mod tests {
         // + 2 SelectNextSibling/SelectPrevSibling.
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
         // + 3 SaveSelection/JumpBackward/JumpForward.
-        assert_eq!(all().count(), 182);
+        // + 1 GotoLineNumber.
+        assert_eq!(all().count(), 183);
     }
 
     #[test]
