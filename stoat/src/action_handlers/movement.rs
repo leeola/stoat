@@ -1420,6 +1420,102 @@ pub(super) fn move_to_parent_bound(stoat: &mut Stoat, bound: NodeBound) -> Updat
     UpdateEffect::Redraw
 }
 
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+pub(crate) enum FindKind {
+    NextChar,
+    PrevChar,
+    TillNextChar,
+    TillPrevChar,
+}
+
+pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind) -> UpdateEffect {
+    stoat.pending_find = Some(kind);
+    UpdateEffect::Redraw
+}
+
+pub(crate) fn execute_find(stoat: &mut Stoat, kind: FindKind, ch: char) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    let head_offset = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
+    let head_point = rope.offset_to_point(head_offset);
+    let line_start = rope.point_to_offset(Point::new(head_point.row, 0));
+    let max_row = rope.max_point().row;
+    let line_end = if head_point.row >= max_row {
+        rope.len()
+    } else {
+        rope.point_to_offset(Point::new(head_point.row + 1, 0))
+            .saturating_sub(1)
+    };
+
+    let target = match kind {
+        FindKind::NextChar | FindKind::TillNextChar => {
+            let scan_start = head_offset.saturating_add(
+                rope.chars_at(head_offset)
+                    .next()
+                    .map_or(0, |c| c.len_utf8()),
+            );
+            let mut offset = scan_start;
+            let mut found = None;
+            for c in rope.chars_at(scan_start) {
+                if offset >= line_end || c == '\n' {
+                    break;
+                }
+                if c == ch {
+                    found = Some(offset);
+                    break;
+                }
+                offset += c.len_utf8();
+            }
+            let Some(target) = found else {
+                return UpdateEffect::None;
+            };
+            if matches!(kind, FindKind::TillNextChar) {
+                rope.reversed_chars_at(target)
+                    .next()
+                    .map(|c| target - c.len_utf8())
+                    .unwrap_or(target)
+            } else {
+                target
+            }
+        },
+        FindKind::PrevChar | FindKind::TillPrevChar => {
+            let mut offset = head_offset;
+            let mut found = None;
+            for c in rope.reversed_chars_at(head_offset) {
+                if offset == 0 {
+                    break;
+                }
+                offset -= c.len_utf8();
+                if offset < line_start || c == '\n' {
+                    break;
+                }
+                if c == ch {
+                    found = Some(offset);
+                    break;
+                }
+            }
+            let Some(target) = found else {
+                return UpdateEffect::None;
+            };
+            if matches!(kind, FindKind::TillPrevChar) {
+                let len = rope.chars_at(target).next().map_or(0, |c| c.len_utf8());
+                target + len
+            } else {
+                target
+            }
+        },
+    };
+
+    apply_primary_range(editor, target..target);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

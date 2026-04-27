@@ -1737,6 +1737,66 @@ mod tests {
     }
 
     #[test]
+    fn find_next_char_jumps_forward() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefg\n");
+        h.open_file(&path);
+        h.type_keys("f c");
+        assert_eq!(h.primary_head_offset(), 2);
+    }
+
+    #[test]
+    fn find_next_char_no_match_keeps_cursor() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefg\n");
+        h.open_file(&path);
+        let before = h.primary_head_offset();
+        h.type_keys("f z");
+        assert_eq!(h.primary_head_offset(), before);
+    }
+
+    #[test]
+    fn find_prev_char_jumps_backward() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefg\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l");
+        h.type_keys("F b");
+        assert_eq!(h.primary_head_offset(), 1);
+    }
+
+    #[test]
+    fn till_next_char_lands_one_before() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefg\n");
+        h.open_file(&path);
+        h.type_keys("t c");
+        assert_eq!(h.primary_head_offset(), 1);
+    }
+
+    #[test]
+    fn till_prev_char_lands_one_after() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefg\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l");
+        h.type_keys("T b");
+        assert_eq!(h.primary_head_offset(), 2);
+    }
+
+    #[test]
+    fn find_aborts_on_escape() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcdefg\n");
+        h.open_file(&path);
+        let before = h.primary_head_offset();
+        h.type_keys("f");
+        h.type_keys("Escape");
+        h.type_keys("c");
+        assert_eq!(h.primary_head_offset(), before);
+    }
+
+    #[test]
     fn snapshot_pending_count_appears_in_status_bar() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 6);
         let path = h.write_file("s.txt", "abc\n");

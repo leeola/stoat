@@ -15,18 +15,18 @@ use crate::{
             AlignViewCenter, AlignViewTop, CollapseSelection, Decrement, DeleteSelection,
             ExpandSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
             ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
-            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FlipSelections,
-            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
-            GotoLineStart, GotoNextChange, GotoPrevChange, GotoWindowBottom, GotoWindowCenter,
-            GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward,
-            JumpForward, KeepPrimarySelection, MoveDown, MoveLeft, MoveNextLongWordEnd,
-            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
-            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
-            MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll,
-            SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
+            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
+            FindPrevChar, FlipSelections, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
+            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange, GotoPrevChange,
+            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment,
+            IndentSelection, JumpBackward, JumpForward, KeepPrimarySelection, MoveDown, MoveLeft,
+            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
+            MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
+            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
+            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
             SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TrimSelections, Undo, UnindentSelection,
+            TillNextChar, TillPrevChar, TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -242,6 +242,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SaveSelection::DEF, |_| Ok(Box::new(SaveSelection)));
     add(JumpBackward::DEF, |_| Ok(Box::new(JumpBackward)));
     add(JumpForward::DEF, |_| Ok(Box::new(JumpForward)));
+    add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
+    add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
+    add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
+    add(TillPrevChar::DEF, |_| Ok(Box::new(TillPrevChar)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
     });
@@ -659,7 +663,8 @@ mod tests {
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 GotoLineNumber.
-        assert_eq!(all().count(), 183);
+        // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
+        assert_eq!(all().count(), 187);
     }
 
     #[test]

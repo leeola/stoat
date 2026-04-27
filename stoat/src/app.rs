@@ -80,6 +80,10 @@ pub struct Stoat {
     /// hits an unbound key in normal mode; consumed once via
     /// `take_pending_count` and cleared after every action dispatch.
     pub(crate) pending_count: Option<u32>,
+    /// Pending Vim-style find-char prefix (`f`/`F`/`t`/`T`). When
+    /// Some, the next printable char keypress runs the matching
+    /// find on the focused editor and clears this field.
+    pub(crate) pending_find: Option<action_handlers::movement::FindKind>,
     /// Filesystem the UI layer reads through. Swapped to
     /// [`crate::host::FakeFs`] in tests; all IO outside the host module
     /// itself must route through this field.
@@ -203,6 +207,7 @@ impl Stoat {
             modal_run: None,
             render_tick: 0,
             pending_count: None,
+            pending_find: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
@@ -538,6 +543,14 @@ impl Stoat {
                 }
                 return effect;
             }
+        }
+
+        if self.mode == "normal" && self.pending_find.is_some() {
+            if let KeyCode::Char(ch) = key.code {
+                let kind = self.pending_find.take().expect("checked above");
+                return action_handlers::movement::execute_find(self, kind, ch);
+            }
+            self.pending_find = None;
         }
 
         if self.mode == "normal" && self.pending_count.is_some() && key.modifiers.is_empty() {

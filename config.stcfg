@@ -151,6 +151,10 @@ on key {
         w -> MoveNextWordStart();
         e -> MoveNextWordEnd();
         b -> MovePrevWordStart();
+        f -> FindNextChar();
+        F -> FindPrevChar();
+        t -> TillNextChar();
+        T -> TillPrevChar();
         H -> ExtendLeft();
         J -> ExtendDown();
         K -> ExtendUp();

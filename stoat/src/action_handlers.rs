@@ -4,7 +4,7 @@ mod conflict;
 mod file;
 mod file_finder;
 mod help;
-mod movement;
+pub(crate) mod movement;
 mod palette;
 mod pane;
 mod prompt;
@@ -219,6 +219,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SaveSelection => movement::save_selection(stoat),
         ActionKind::JumpBackward => movement::jump_backward(stoat),
         ActionKind::JumpForward => movement::jump_forward(stoat),
+        ActionKind::FindNextChar => movement::set_pending_find(stoat, movement::FindKind::NextChar),
+        ActionKind::FindPrevChar => movement::set_pending_find(stoat, movement::FindKind::PrevChar),
+        ActionKind::TillNextChar => {
+            movement::set_pending_find(stoat, movement::FindKind::TillNextChar)
+        },
+        ActionKind::TillPrevChar => {
+            movement::set_pending_find(stoat, movement::FindKind::TillPrevChar)
+        },
         ActionKind::GotoWindowTop => movement::goto_window(stoat, movement::WindowAlign::Top),
         ActionKind::GotoWindowCenter => movement::goto_window(stoat, movement::WindowAlign::Center),
         ActionKind::GotoWindowBottom => movement::goto_window(stoat, movement::WindowAlign::Bottom),

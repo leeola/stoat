@@ -421,6 +421,46 @@ define_action!(
 );
 
 define_action!(
+    FindNextCharDef,
+    FindNextChar,
+    "FindNextChar",
+    ActionKind::FindNextChar,
+    "find next char on line",
+    "Wait for the next char keypress, then jump the primary cursor forward to the next occurrence of that char on the current line. Cursor lands on the matched char. No-op when the char does not appear after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    FindPrevCharDef,
+    FindPrevChar,
+    "FindPrevChar",
+    ActionKind::FindPrevChar,
+    "find previous char on line",
+    "Wait for the next char keypress, then jump the primary cursor backward to the previous occurrence of that char on the current line. Cursor lands on the matched char. No-op when the char does not appear before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    TillNextCharDef,
+    TillNextChar,
+    "TillNextChar",
+    ActionKind::TillNextChar,
+    "till next char on line",
+    "Wait for the next char keypress, then jump the primary cursor forward to one position before the next occurrence of that char on the current line. No-op when the char does not appear after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    TillPrevCharDef,
+    TillPrevChar,
+    "TillPrevChar",
+    ActionKind::TillPrevChar,
+    "till previous char on line",
+    "Wait for the next char keypress, then jump the primary cursor backward to one position after the previous occurrence of that char on the current line. No-op when the char does not appear before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendPrevWordStartDef,
     ExtendPrevWordStart,
     "ExtendPrevWordStart",
