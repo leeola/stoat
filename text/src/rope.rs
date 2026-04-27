@@ -452,7 +452,7 @@ impl Rope {
 
     pub fn points_to_offsets_batch(&self, points: &[Point]) -> Vec<usize> {
         let mut indexed: Vec<(usize, Point)> = points.iter().copied().enumerate().collect();
-        indexed.sort_unstable_by(|a, b| a.1.cmp(&b.1));
+        indexed.sort_unstable_by_key(|a| a.1);
 
         let mut results = vec![0usize; points.len()];
         let mut cursor = self.chunks.cursor::<Dimensions<Point, usize>>(());

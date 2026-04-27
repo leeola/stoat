@@ -125,7 +125,7 @@ fn list_ron_files_by_mtime_desc(dir: &Path, fs: &dyn FsHost) -> io::Result<Vec<P
             .unwrap_or(UNIX_EPOCH);
         entries.push((path, mtime));
     }
-    entries.sort_by(|a, b| b.1.cmp(&a.1));
+    entries.sort_by_key(|b| std::cmp::Reverse(b.1));
     Ok(entries.into_iter().map(|(p, _)| p).collect())
 }
 
