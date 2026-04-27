@@ -331,6 +331,16 @@ define_action!(
 );
 
 define_action!(
+    ExpandSelectionDef,
+    ExpandSelection,
+    "ExpandSelection",
+    ActionKind::ExpandSelection,
+    "expand selection to enclosing syntax node",
+    "Expand the primary selection to the smallest tree-sitter node that strictly contains it. If the selection already equals that node, walk to the parent. No-op when the buffer has no syntax tree (plain text or unparseable file types). Primary cursor only; root syntax layer only.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendPrevWordStartDef,
     ExtendPrevWordStart,
     "ExtendPrevWordStart",

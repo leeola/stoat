@@ -12,22 +12,22 @@ size: 80x24
   [0m[36m┌ help: active (normal) ───────────────────────────────────────────────────┐[0m
   [0m[36m│[0m[33m: [0m                                                                        [0m[36m│[0m
   [0m[36m│[0m[1m[30m[44m NOR [0m[97m[100m                                                                     [0m[36m│[0m
-  [0m[36m│[0m[30m[46m   %  SelectAll  select all    [0m[90m│[0m [0m[1m[33mSelectAll[0m                                [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  &[0m[97m  AlignSelections  [0m[90malign se│[0m [0m[36mbound: %[0m                                 [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  ([0m[97m  RotateSelectionsBackward [0m[90m│[0m [0m[97mselect all[0m                               [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  )[0m[97m  RotateSelectionsForward  [0m[90m│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  ,[0m[97m  KeepPrimarySelection  [0m[90mkee│[0m [0m[97mReplace every selection with a single[0m    [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  :[0m[97m  OpenCommandPalette  [0m[90mopen │[0m [0m[97mselection spanning the entire focused[0m    [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  ;[0m[97m  CollapseSelection  [0m[90mcollap│[0m [0m[97mbuffer[0m[33m┌ help ──────────────────────────────┐[0m
-  [0m[36m│[0m[97m [0m[36m  <[0m[97m  UnindentSelection  [0m[90muninde│[0m       [0m[33m│[0m[36m      Esc[0m[97m   close help[0m            [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  >[0m[97m  IndentSelection  [0m[90mindent s│[0m [0m[1m[33mExampl│[0m[1m[36m [0m[36m    i, a[0m[97m   prompt mode[0m           [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenHelp  [0m[90mopen the help m│[0m [0m[90m  Sele[0m[33m│[0m[36m      Ret[0m[97m   submit prompt input[0m   [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-;[0m[97m  FlipSelections  [0m[90mflip sele│[0m       [0m[33m│[0m[36m    j, Dn[0m[97m   next help entry[0m       [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-C[0m[97m  AddSelectionAbove  [0m[90madd cu│[0m       [0m[33m│[0m[36m    k, Up[0m[97m   previous help entry[0m   [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-`[0m[97m  SwitchToUppercase  [0m[90mupperc│[0m       [0m[33m│[0m[36m        g[0m[97m   jump to first help entry[0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-s[0m[97m  SplitSelectionOnNewline  [0m[90m│[0m       [0m[33m│[0m[36m        G[0m[97m   jump to last help entry[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  B[0m[97m  ExtendPrevWordStart  [0m[90mexte│[0m       [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  C[0m[97m  AddSelectionBelow  [0m[90madd cu│[0m       [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m [0m[33m│[0m
+  [0m[36m│[0m[30m[46m    %  SelectAll  select all   [0m[90m│[0m [0m[1m[33mSelectAll[0m                                [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m   &[0m[97m  AlignSelections  [0m[90malign s│[0m [0m[36mbound: %[0m                                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m   ([0m[97m  RotateSelectionsBackward[0m[90m│[0m [0m[97mselect all[0m                               [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m   )[0m[97m  RotateSelectionsForward [0m[90m│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m   ,[0m[97m  KeepPrimarySelection  [0m[90mke│[0m [0m[97mReplace every selection with a single[0m    [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m   :[0m[97m  OpenCommandPalette  [0m[90mopen│[0m [0m[97mselection spanning the entire focused[0m    [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m   ;[0m[97m  CollapseSelection  [0m[90mcolla│[0m [0m[97mbuffer[0m[33m┌ help ──────────────────────────────┐[0m
+  [0m[36m│[0m[97m [0m[36m   <[0m[97m  UnindentSelection  [0m[90munind│[0m       [0m[33m│[0m[36m      Esc[0m[97m   close help[0m            [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m   >[0m[97m  IndentSelection  [0m[90mindent │[0m [0m[1m[33mExampl│[0m[1m[36m [0m[36m    i, a[0m[97m   prompt mode[0m           [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m   ?[0m[97m  OpenHelp  [0m[90mopen the help │[0m [0m[90m  Sele[0m[33m│[0m[36m      Ret[0m[97m   submit prompt input[0m   [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m A-;[0m[97m  FlipSelections  [0m[90mflip sel│[0m       [0m[33m│[0m[36m    j, Dn[0m[97m   next help entry[0m       [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m A-C[0m[97m  AddSelectionAbove  [0m[90madd c│[0m       [0m[33m│[0m[36m    k, Up[0m[97m   previous help entry[0m   [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36mA-Up[0m[97m  ExpandSelection  [0m[90mexpand │[0m       [0m[33m│[0m[36m        g[0m[97m   jump to first help entry[0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m A-`[0m[97m  SwitchToUppercase  [0m[90mupper│[0m       [0m[33m│[0m[36m        G[0m[97m   jump to last help entry[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m A-o[0m[97m  ExpandSelection  [0m[90mexpand │[0m       [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m A-s[0m[97m  SplitSelectionOnNewline [0m[90m│[0m       [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m [0m[33m│[0m
   [0m[36m└───────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m[36m─────┘[0m [0m[33m│[0m
                                           [0m[33m└────────────────────────────────────┘[0m
 [0m[1m[30m[44m NOR [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

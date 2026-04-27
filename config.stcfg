@@ -163,6 +163,8 @@ on key {
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
         Alt-s -> SplitSelectionOnNewline();
+        Alt-o -> ExpandSelection();
+        Alt-Up -> ExpandSelection();
         & -> AlignSelections();
         % -> SelectAll();
         x -> SelectLineBelow();

@@ -48,6 +48,7 @@ pub enum ActionKind {
     ExtendDown,
     ExtendNextWordStart,
     ExtendNextWordEnd,
+    ExpandSelection,
     ExtendPrevWordStart,
     ExtendPrevWordEnd,
     GotoLineStart,

@@ -1237,6 +1237,63 @@ pub(super) enum ChangeDir {
     Prev,
 }
 
+pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, sel_start, sel_end) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let start = buffer_snapshot.resolve_anchor(&sel.start);
+        let end = buffer_snapshot.resolve_anchor(&sel.end);
+        (buffer_id, start, end)
+    };
+
+    let target = {
+        let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
+            return UpdateEffect::None;
+        };
+        let Some(layer) = syntax_map.snapshot().iter_layers().next() else {
+            return UpdateEffect::None;
+        };
+        let root = layer.tree.root_node();
+        let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
+            return UpdateEffect::None;
+        };
+        let node_range = node.byte_range();
+        if node_range.start == sel_start && node_range.end == sel_end {
+            match node.parent() {
+                Some(parent) => parent.byte_range(),
+                None => return UpdateEffect::None,
+            }
+        } else {
+            node_range
+        }
+    };
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    let new_start = new_buf.anchor_at(target.start, Bias::Right);
+    let new_end = new_buf.anchor_at(target.end, Bias::Left);
+    editor.selections.transform(new_buf, |sel| {
+        let mut new = sel.clone();
+        new.start = new_start;
+        new.end = new_end;
+        new.reversed = false;
+        new.goal = SelectionGoal::None;
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

@@ -1498,6 +1498,43 @@ mod tests {
     }
 
     #[test]
+    fn expand_selection_grows_from_cursor_to_token() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let spans = h.selection_spans();
+        assert_eq!(spans, [(3, 7, false)]);
+    }
+
+    #[test]
+    fn expand_selection_walks_to_parent_when_already_on_node() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let first = h.selection_spans()[0];
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let second = h.selection_spans()[0];
+        assert!(
+            second.0 <= first.0 && second.1 >= first.1 && second != first,
+            "second expansion should cover at least the first ({first:?} -> {second:?})"
+        );
+    }
+
+    #[test]
+    fn expand_selection_no_op_without_syntax_map() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "plain text content\n");
+        h.open_file(&path);
+        let before = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        assert_eq!(h.selection_spans(), before);
+    }
+
+    #[test]
     fn goto_next_change_no_op_without_diff_map() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "a\nb\nc\n");
