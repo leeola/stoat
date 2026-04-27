@@ -84,6 +84,10 @@ pub struct Stoat {
     /// Some, the next printable char keypress runs the matching
     /// find on the focused editor and clears this field.
     pub(crate) pending_find: Option<action_handlers::movement::FindKind>,
+    /// Most recent `(FindKind, char)` consumed by `execute_find`.
+    /// `RepeatLastMotion` (Alt-.) replays this pair without
+    /// reading another keypress.
+    pub(crate) last_find: Option<(action_handlers::movement::FindKind, char)>,
     /// Filesystem the UI layer reads through. Swapped to
     /// [`crate::host::FakeFs`] in tests; all IO outside the host module
     /// itself must route through this field.
@@ -208,6 +212,7 @@ impl Stoat {
             render_tick: 0,
             pending_count: None,
             pending_find: None,
+            last_find: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),

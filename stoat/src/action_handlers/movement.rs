@@ -1434,7 +1434,15 @@ pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind) -> UpdateEffec
     UpdateEffect::Redraw
 }
 
+pub(super) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
+    let Some((kind, ch)) = stoat.last_find else {
+        return UpdateEffect::None;
+    };
+    execute_find(stoat, kind, ch)
+}
+
 pub(crate) fn execute_find(stoat: &mut Stoat, kind: FindKind, ch: char) -> UpdateEffect {
+    stoat.last_find = Some((kind, ch));
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };

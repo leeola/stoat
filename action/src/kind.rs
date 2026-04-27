@@ -61,6 +61,7 @@ pub enum ActionKind {
     FindPrevChar,
     TillNextChar,
     TillPrevChar,
+    RepeatLastMotion,
     ExtendPrevWordStart,
     ExtendPrevWordEnd,
     GotoLineStart,

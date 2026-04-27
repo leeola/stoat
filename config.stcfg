@@ -155,6 +155,7 @@ on key {
         F -> FindPrevChar();
         t -> TillNextChar();
         T -> TillPrevChar();
+        Alt-. -> RepeatLastMotion();
         H -> ExtendLeft();
         J -> ExtendDown();
         K -> ExtendUp();

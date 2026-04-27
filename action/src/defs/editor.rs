@@ -461,6 +461,16 @@ define_action!(
 );
 
 define_action!(
+    RepeatLastMotionDef,
+    RepeatLastMotion,
+    "RepeatLastMotion",
+    ActionKind::RepeatLastMotion,
+    "repeat last find motion",
+    "Replay the most recent f/F/t/T find against the same target char. No-op when no find has been executed in this session.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendPrevWordStartDef,
     ExtendPrevWordStart,
     "ExtendPrevWordStart",

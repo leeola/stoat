@@ -1785,6 +1785,44 @@ mod tests {
     }
 
     #[test]
+    fn repeat_last_motion_replays_find_next_char() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabcabc\n");
+        h.open_file(&path);
+        h.type_keys("f c");
+        assert_eq!(h.primary_head_offset(), 2);
+        h.type_keys("alt-.");
+        assert_eq!(h.primary_head_offset(), 5);
+        h.type_keys("alt-.");
+        assert_eq!(h.primary_head_offset(), 8);
+    }
+
+    #[test]
+    fn repeat_last_motion_with_no_history_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "hello\n");
+        h.open_file(&path);
+        let before = h.primary_head_offset();
+        h.type_keys("alt-.");
+        assert_eq!(h.primary_head_offset(), before);
+    }
+
+    #[test]
+    fn repeat_last_motion_uses_most_recent_find_kind() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabcabc\n");
+        h.open_file(&path);
+        h.type_keys("f c");
+        assert_eq!(h.primary_head_offset(), 2);
+        h.type_keys("F a");
+        assert_eq!(h.primary_head_offset(), 0);
+        h.type_keys("l l l l");
+        assert_eq!(h.primary_head_offset(), 4);
+        h.type_keys("alt-.");
+        assert_eq!(h.primary_head_offset(), 3);
+    }
+
+    #[test]
     fn find_aborts_on_escape() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abcdefg\n");
