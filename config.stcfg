@@ -165,6 +165,8 @@ on key {
         Alt-s -> SplitSelectionOnNewline();
         Alt-o -> ExpandSelection();
         Alt-Up -> ExpandSelection();
+        Alt-i -> ShrinkSelection();
+        Alt-Down -> ShrinkSelection();
         & -> AlignSelections();
         % -> SelectAll();
         x -> SelectLineBelow();

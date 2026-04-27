@@ -1279,6 +1279,34 @@ pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let current_range = sel_start..sel_end;
+    if editor.expansion_tip.as_ref() != Some(&current_range) {
+        editor.expansion_history.clear();
+    }
+    editor.expansion_history.push(current_range);
+    editor.expansion_tip = Some(target.clone());
+    apply_primary_range(editor, target);
+    UpdateEffect::Redraw
+}
+
+pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let Some(target) = editor.expansion_history.pop() else {
+        return UpdateEffect::None;
+    };
+    editor.expansion_tip = Some(target.clone());
+    apply_primary_range(editor, target);
+    UpdateEffect::Redraw
+}
+
+fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>) {
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
     let new_start = new_buf.anchor_at(target.start, Bias::Right);
@@ -1291,7 +1319,6 @@ pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
         new.goal = SelectionGoal::None;
         new
     });
-    UpdateEffect::Redraw
 }
 
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {

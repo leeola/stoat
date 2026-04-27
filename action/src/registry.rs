@@ -23,8 +23,8 @@ use crate::{
             MoveNextWordStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
             MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo, RotateSelectionsBackward,
             RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll, SelectLineBelow,
-            SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TrimSelections, Undo, UnindentSelection,
+            ShrinkSelection, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -230,6 +230,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ExtendNextWordEnd::DEF, |_| Ok(Box::new(ExtendNextWordEnd)));
     add(ExpandSelection::DEF, |_| Ok(Box::new(ExpandSelection)));
+    add(ShrinkSelection::DEF, |_| Ok(Box::new(ShrinkSelection)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
     });
@@ -641,7 +642,8 @@ mod tests {
         // + 1 Redo.
         // + 2 GotoNextChange/GotoPrevChange.
         // + 1 ExpandSelection.
-        assert_eq!(all().count(), 174);
+        // + 1 ShrinkSelection.
+        assert_eq!(all().count(), 175);
     }
 
     #[test]

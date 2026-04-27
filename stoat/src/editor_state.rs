@@ -31,6 +31,16 @@ pub(crate) struct EditorState {
     /// currently focused on; `None` means no active move navigation.
     /// Reset whenever the editor's cursor moves off the owning hunk.
     pub(crate) move_source_cursor: Option<(u32, usize)>,
+    /// Stack of selection byte ranges that `expand_selection` walked
+    /// up from. `shrink_selection` pops the top to descend back.
+    /// Cleared when an expand finds the selection drifted off
+    /// [`Self::expansion_tip`], indicating the user wandered off the
+    /// chain.
+    pub(crate) expansion_history: Vec<std::ops::Range<usize>>,
+    /// Range the most recent expand or shrink set the selection to.
+    /// `expand` compares the current selection against this to detect
+    /// chain breakage and clear the history. Transient; not persisted.
+    pub(crate) expansion_tip: Option<std::ops::Range<usize>>,
 }
 
 /// Snapshot of an [`EditorState`] suitable for workspace save/load.
@@ -59,6 +69,8 @@ impl EditorState {
             review_view: None,
             selections: SelectionsCollection::new(),
             move_source_cursor: None,
+            expansion_history: Vec::new(),
+            expansion_tip: None,
         }
     }
 
@@ -76,6 +88,8 @@ impl EditorState {
             review_view: None,
             selections: SelectionsCollection::new(),
             move_source_cursor: None,
+            expansion_history: Vec::new(),
+            expansion_tip: None,
         }
     }
 

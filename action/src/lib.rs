@@ -26,8 +26,8 @@ pub use defs::{
         GotoWindowTop, HalfPageDown, HalfPageUp, IndentSelection, KeepPrimarySelection, MoveDown,
         MoveLeft, MoveNextWordEnd, MoveNextWordStart, MovePrevWordEnd, MovePrevWordStart,
         MoveRight, MoveUp, PageDown, PageUp, Redo, RotateSelectionsBackward,
-        RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SwitchCase,
-        SwitchToLowercase, SwitchToUppercase, TrimSelections, Undo, UnindentSelection,
+        RotateSelectionsForward, ScrollDown, ScrollUp, SelectAll, SelectLineBelow, ShrinkSelection,
+        SwitchCase, SwitchToLowercase, SwitchToUppercase, TrimSelections, Undo, UnindentSelection,
     },
     file::OpenFile,
     file_finder::{

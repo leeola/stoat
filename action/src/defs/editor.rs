@@ -341,6 +341,16 @@ define_action!(
 );
 
 define_action!(
+    ShrinkSelectionDef,
+    ShrinkSelection,
+    "ShrinkSelection",
+    ActionKind::ShrinkSelection,
+    "shrink selection along the expand chain",
+    "Pop the most recent expand step and restore the selection to its prior range. No-op when no expand has run since the chain was last cleared. The chain clears when the user moves the selection off the expand path (next expand starts a fresh stack).",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendPrevWordStartDef,
     ExtendPrevWordStart,
     "ExtendPrevWordStart",

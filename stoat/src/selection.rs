@@ -1535,6 +1535,65 @@ mod tests {
     }
 
     #[test]
+    fn shrink_selection_restores_previous_after_expand() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        let before = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        assert_ne!(h.selection_spans(), before);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+        assert_eq!(h.selection_spans(), before);
+    }
+
+    #[test]
+    fn shrink_walks_full_expansion_chain() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        let step0 = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let step1 = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let step2 = h.selection_spans();
+        assert_ne!(step1, step0);
+        assert_ne!(step2, step1);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+        assert_eq!(h.selection_spans(), step1);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+        assert_eq!(h.selection_spans(), step0);
+    }
+
+    #[test]
+    fn shrink_with_no_history_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        let before = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+        assert_eq!(h.selection_spans(), before);
+    }
+
+    #[test]
+    fn shrink_after_cursor_move_does_not_restore_old_chain() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        h.type_keys("l l");
+        let after_move = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        assert_ne!(h.selection_spans(), after_move);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+        assert_eq!(h.selection_spans(), after_move);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ShrinkSelection);
+        assert_eq!(h.selection_spans(), after_move);
+    }
+
+    #[test]
     fn goto_next_change_no_op_without_diff_map() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "a\nb\nc\n");
