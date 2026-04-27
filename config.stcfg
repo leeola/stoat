@@ -199,6 +199,7 @@ on key {
         z -> SetMode(z);
         ] -> SetMode(bracket_next);
         [ -> SetMode(bracket_prev);
+        m -> SetMode(match);
         R -> OpenReview();
     }
     mode == goto {
@@ -231,6 +232,11 @@ on key {
         Escape -> SetMode(normal);
         g -> [GotoPrevChange(), SetMode(normal)];
         p -> [GotoPrevParagraph(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == match {
+        Escape -> SetMode(normal);
+        m -> [MatchBrackets(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == commits {

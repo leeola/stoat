@@ -2089,6 +2089,80 @@ mod tests {
     }
 
     #[test]
+    fn match_brackets_jumps_open_to_close() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "(abc)\n");
+        h.open_file(&path);
+        h.type_keys("m m");
+        assert_eq!(h.primary_head_offset(), 4);
+    }
+
+    #[test]
+    fn match_brackets_jumps_close_to_open() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "(abc)\n");
+        h.open_file(&path);
+        h.type_keys("4 l m m");
+        assert_eq!(h.primary_head_offset(), 0);
+    }
+
+    #[test]
+    fn match_brackets_handles_nesting() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "((a)(b))\n");
+        h.open_file(&path);
+        h.type_keys("m m");
+        assert_eq!(h.primary_head_offset(), 7);
+    }
+
+    #[test]
+    fn match_brackets_handles_inner_close_to_inner_open() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "((a)(b))\n");
+        h.open_file(&path);
+        h.type_keys("3 l m m");
+        assert_eq!(h.primary_head_offset(), 1);
+    }
+
+    #[test]
+    fn match_brackets_supports_brackets_and_braces() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "[x]{y}\n");
+        h.open_file(&path);
+        h.type_keys("m m");
+        assert_eq!(h.primary_head_offset(), 2);
+        h.type_keys("l m m");
+        assert_eq!(h.primary_head_offset(), 5);
+    }
+
+    #[test]
+    fn match_brackets_no_op_off_bracket() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "(abc)\n");
+        h.open_file(&path);
+        h.type_keys("l m m");
+        assert_eq!(h.primary_head_offset(), 1);
+    }
+
+    #[test]
+    fn match_brackets_no_op_unbalanced() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "(abc\n");
+        h.open_file(&path);
+        h.type_keys("m m");
+        assert_eq!(h.primary_head_offset(), 0);
+    }
+
+    #[test]
+    fn match_brackets_with_multibyte_inside() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "(αβγ)\n");
+        h.open_file(&path);
+        h.type_keys("m m");
+        assert_eq!(h.primary_head_offset(), 7);
+    }
+
+    #[test]
     fn count_prefix_word_clamps_at_buffer_edge() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");

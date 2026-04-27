@@ -20,7 +20,7 @@ use crate::{
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange,
             GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection,
-            JumpBackward, JumpForward, KeepPrimarySelection, MoveDown, MoveLeft,
+            JumpBackward, JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo,
@@ -265,6 +265,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
     add(GotoNextParagraph::DEF, |_| Ok(Box::new(GotoNextParagraph)));
     add(GotoPrevParagraph::DEF, |_| Ok(Box::new(GotoPrevParagraph)));
+    add(MatchBrackets::DEF, |_| Ok(Box::new(MatchBrackets)));
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
@@ -672,7 +673,8 @@ mod tests {
         // + 1 RepeatLastMotion.
         // + 1 GotoColumn.
         // + 2 GotoNextParagraph/GotoPrevParagraph.
-        assert_eq!(all().count(), 191);
+        // + 1 MatchBrackets.
+        assert_eq!(all().count(), 192);
     }
 
     #[test]

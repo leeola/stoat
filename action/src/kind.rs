@@ -75,6 +75,7 @@ pub enum ActionKind {
     GotoPrevChange,
     GotoNextParagraph,
     GotoPrevParagraph,
+    MatchBrackets,
     GotoWindowTop,
     GotoWindowCenter,
     GotoWindowBottom,

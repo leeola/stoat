@@ -601,6 +601,16 @@ define_action!(
 );
 
 define_action!(
+    MatchBracketsDef,
+    MatchBrackets,
+    "MatchBrackets",
+    ActionKind::MatchBrackets,
+    "match brackets",
+    "Move the primary cursor to the bracket that matches the one under the cursor. Supports `()`, `[]`, and `{}`; `<>` is excluded due to ambiguity with comparison operators. Scans forward from an open bracket or backward from a close bracket, tracking nesting depth to find the pair. No-op when the cursor is not on a recognised bracket or when no balanced match exists in the buffer. Naive scan -- a future tree-sitter-aware variant could exclude brackets inside strings and comments. Primary-cursor only.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoWindowTopDef,
     GotoWindowTop,
     "GotoWindowTop",

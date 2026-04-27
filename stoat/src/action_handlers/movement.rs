@@ -1683,6 +1683,82 @@ pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    let head = editor.selections.newest_anchor().head();
+    let head_offset = buffer_snapshot.resolve_anchor(&head);
+    let Some(ch) = rope.chars_at(head_offset).next() else {
+        return UpdateEffect::None;
+    };
+    let Some((open, close, forward)) = bracket_pair(ch) else {
+        return UpdateEffect::None;
+    };
+    let Some(target) = scan_bracket_match(rope, head_offset, ch, open, close, forward) else {
+        return UpdateEffect::None;
+    };
+
+    apply_primary_range(editor, target..target);
+    UpdateEffect::Redraw
+}
+
+fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
+    match ch {
+        '(' => Some(('(', ')', true)),
+        ')' => Some(('(', ')', false)),
+        '[' => Some(('[', ']', true)),
+        ']' => Some(('[', ']', false)),
+        '{' => Some(('{', '}', true)),
+        '}' => Some(('{', '}', false)),
+        _ => None,
+    }
+}
+
+fn scan_bracket_match(
+    rope: &stoat_text::Rope,
+    start: usize,
+    start_ch: char,
+    open: char,
+    close: char,
+    forward: bool,
+) -> Option<usize> {
+    let mut depth: u32 = 1;
+    if forward {
+        let mut cur = start + start_ch.len_utf8();
+        for c in rope.chars_at(cur) {
+            if c == open {
+                depth += 1;
+            } else if c == close {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cur);
+                }
+            }
+            cur += c.len_utf8();
+        }
+        None
+    } else {
+        let mut cur = start;
+        for c in rope.reversed_chars_at(start) {
+            cur -= c.len_utf8();
+            if c == close {
+                depth += 1;
+            } else if c == open {
+                depth -= 1;
+                if depth == 0 {
+                    return Some(cur);
+                }
+            }
+        }
+        None
+    }
+}
+
 pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
     let Some(count) = stoat.take_pending_count() else {
         return goto_last_line(stoat, false);
