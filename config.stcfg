@@ -258,6 +258,10 @@ on key {
         Alt-e -> ExtendMoveParentNodeEnd();
         Alt-n -> ExtendSelectNextSibling();
         Alt-p -> ExtendSelectPrevSibling();
+        Alt-o -> ExpandSelection();
+        Alt-Up -> ExpandSelection();
+        Alt-i -> ShrinkSelection();
+        Alt-Down -> ShrinkSelection();
         Alt-. -> RepeatLastMotion();
         Home -> ExtendToLineStart();
         0 -> ExtendToLineStart();

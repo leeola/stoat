@@ -1389,6 +1389,40 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_alt_o_expands_selection_to_enclosing_node() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l v");
+        let before = h.selection_spans()[0];
+        h.type_keys("Alt-o");
+        let after = h.selection_spans()[0];
+        assert_eq!(h.stoat.mode, "select", "Alt-o stays in select mode");
+        assert!(
+            after.0 <= before.0 && after.1 > before.1,
+            "expansion should cover and exceed the prior selection ({before:?} -> {after:?})"
+        );
+    }
+
+    #[test]
+    fn select_mode_alt_i_shrinks_back_after_expand() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l v");
+        let before = h.selection_spans();
+        h.type_keys("Alt-o");
+        assert_ne!(h.selection_spans(), before, "Alt-o should grow selection");
+        h.type_keys("Alt-i");
+        assert_eq!(h.stoat.mode, "select", "Alt-i stays in select mode");
+        assert_eq!(
+            h.selection_spans(),
+            before,
+            "Alt-i should restore pre-expand selection"
+        );
+    }
+
+    #[test]
     fn submode_status_labels() {
         let theme = crate::theme::Theme::empty();
         let cases = [
