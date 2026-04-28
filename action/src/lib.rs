@@ -19,7 +19,9 @@ pub use defs::{
     editor::{
         AddSelectionBelow, AlignSelections, AlignViewBottom, AlignViewCenter, AlignViewTop,
         CollapseSelection, Decrement, DeleteSelection, ExpandSelection, ExtendDown,
-        ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendLeft, ExtendNextWordEnd,
+        ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
+        ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
+        ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendNextWordEnd,
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
         ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
         ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar, FlipSelections,

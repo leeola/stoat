@@ -249,9 +249,27 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             movement::set_pending_find(stoat, movement::FindKind::TillPrevChar, true)
         },
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
-        ActionKind::GotoWindowTop => movement::goto_window(stoat, movement::WindowAlign::Top),
-        ActionKind::GotoWindowCenter => movement::goto_window(stoat, movement::WindowAlign::Center),
-        ActionKind::GotoWindowBottom => movement::goto_window(stoat, movement::WindowAlign::Bottom),
+        ActionKind::GotoWindowTop => {
+            movement::goto_window(stoat, movement::WindowAlign::Top, false)
+        },
+        ActionKind::GotoWindowCenter => {
+            movement::goto_window(stoat, movement::WindowAlign::Center, false)
+        },
+        ActionKind::GotoWindowBottom => {
+            movement::goto_window(stoat, movement::WindowAlign::Bottom, false)
+        },
+        ActionKind::ExtendGotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, true),
+        ActionKind::ExtendGotoFileStart => movement::goto_file_start(stoat, true),
+        ActionKind::ExtendGotoLastLine => movement::goto_last_line(stoat, true),
+        ActionKind::ExtendGotoWindowTop => {
+            movement::goto_window(stoat, movement::WindowAlign::Top, true)
+        },
+        ActionKind::ExtendGotoWindowCenter => {
+            movement::goto_window(stoat, movement::WindowAlign::Center, true)
+        },
+        ActionKind::ExtendGotoWindowBottom => {
+            movement::goto_window(stoat, movement::WindowAlign::Bottom, true)
+        },
         ActionKind::AlignViewTop => movement::align_view(stoat, movement::ViewAlign::Top),
         ActionKind::AlignViewCenter => movement::align_view(stoat, movement::ViewAlign::Center),
         ActionKind::AlignViewBottom => movement::align_view(stoat, movement::ViewAlign::Bottom),

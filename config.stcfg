@@ -264,6 +264,12 @@ on key {
     }
     mode == select_goto {
         Escape -> SetMode(select);
+        i -> [ExtendGotoFirstNonwhitespace(), SetMode(select)];
+        j -> [ExtendGotoLastLine(), SetMode(select)];
+        k -> [ExtendGotoFileStart(), SetMode(select)];
+        t -> [ExtendGotoWindowTop(), SetMode(select)];
+        c -> [ExtendGotoWindowCenter(), SetMode(select)];
+        b -> [ExtendGotoWindowBottom(), SetMode(select)];
         | -> [ExtendGotoColumn(), SetMode(select)];
         : -> OpenCommandPalette();
     }

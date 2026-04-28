@@ -1403,6 +1403,70 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_g_i_extends_to_first_nonwhitespace() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "    hello\n");
+        h.open_file(&path);
+        h.type_keys("8 l v");
+        h.type_keys("g i");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!((start, end, reversed), (4, 8, true));
+        assert_eq!(h.stoat.mode, "select");
+    }
+
+    #[test]
+    fn select_mode_g_j_extends_to_last_line() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        h.type_keys("g j");
+        let head = h.primary_head_offset();
+        assert_eq!(head, 6, "head extended to start of last content line");
+        assert_eq!(h.stoat.mode, "select");
+    }
+
+    #[test]
+    fn select_mode_g_k_extends_to_file_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\n");
+        h.open_file(&path);
+        h.type_keys("j j j v");
+        h.type_keys("g k");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!((start, end, reversed), (0, 6, true));
+        assert_eq!(h.stoat.mode, "select");
+    }
+
+    #[test]
+    fn select_mode_g_t_extends_to_window_top() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.type_keys("j j v");
+        h.type_keys("g t");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!(
+            (start, end, reversed),
+            (0, 4, true),
+            "head extended to row 0; tail at the original cursor row 2"
+        );
+        assert_eq!(h.stoat.mode, "select");
+    }
+
+    #[test]
+    fn normal_mode_g_i_still_collapses() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "    hello\n");
+        h.open_file(&path);
+        h.type_keys("8 l");
+        h.type_keys("g i");
+        let (start, end, _) = h.selection_spans()[0];
+        assert_eq!((start, end), (4, 4));
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
     fn select_goto_escape_returns_to_select() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abc\n");

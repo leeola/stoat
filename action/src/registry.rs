@@ -14,12 +14,14 @@ use crate::{
             AddSelectionAbove, AddSelectionBelow, AlignSelections, AlignViewBottom,
             AlignViewCenter, AlignViewTop, CollapseSelection, Decrement, DeleteSelection,
             ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
-            ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
-            ExtendPrevWordStart, ExtendRight, ExtendTillNextChar, ExtendTillPrevChar,
-            ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
-            FindNextChar, FindPrevChar, FlipSelections, GotoColumn, GotoFileStart,
-            GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart,
-            GotoNextChange, GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
+            ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
+            ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
+            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
+            ExtendRight, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
+            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
+            FindPrevChar, FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace,
+            GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange,
+            GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection,
             JumpBackward, JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
@@ -283,6 +285,24 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
+    add(ExtendGotoFirstNonwhitespace::DEF, |_| {
+        Ok(Box::new(ExtendGotoFirstNonwhitespace))
+    });
+    add(ExtendGotoFileStart::DEF, |_| {
+        Ok(Box::new(ExtendGotoFileStart))
+    });
+    add(ExtendGotoLastLine::DEF, |_| {
+        Ok(Box::new(ExtendGotoLastLine))
+    });
+    add(ExtendGotoWindowTop::DEF, |_| {
+        Ok(Box::new(ExtendGotoWindowTop))
+    });
+    add(ExtendGotoWindowCenter::DEF, |_| {
+        Ok(Box::new(ExtendGotoWindowCenter))
+    });
+    add(ExtendGotoWindowBottom::DEF, |_| {
+        Ok(Box::new(ExtendGotoWindowBottom))
+    });
     add(AlignViewTop::DEF, |_| Ok(Box::new(AlignViewTop)));
     add(AlignViewCenter::DEF, |_| Ok(Box::new(AlignViewCenter)));
     add(AlignViewBottom::DEF, |_| Ok(Box::new(AlignViewBottom)));
@@ -690,7 +710,9 @@ mod tests {
         // + 1 MatchBrackets.
         // + 4 ExtendFindNextChar/ExtendFindPrevChar/ExtendTillNextChar/ExtendTillPrevChar.
         // + 1 ExtendGotoColumn.
-        assert_eq!(all().count(), 197);
+        // + 6 ExtendGoto{FirstNonwhitespace,FileStart,LastLine,WindowTop,WindowCenter,
+        //   WindowBottom}.
+        assert_eq!(all().count(), 203);
     }
 
     #[test]

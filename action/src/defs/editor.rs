@@ -691,6 +691,66 @@ define_action!(
 );
 
 define_action!(
+    ExtendGotoFirstNonwhitespaceDef,
+    ExtendGotoFirstNonwhitespace,
+    "ExtendGotoFirstNonwhitespace",
+    ActionKind::ExtendGotoFirstNonwhitespace,
+    "extend to first non-whitespace",
+    "Like `GotoFirstNonwhitespace` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendGotoFileStartDef,
+    ExtendGotoFileStart,
+    "ExtendGotoFileStart",
+    ActionKind::ExtendGotoFileStart,
+    "extend to file start",
+    "Like `GotoFileStart` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendGotoLastLineDef,
+    ExtendGotoLastLine,
+    "ExtendGotoLastLine",
+    ActionKind::ExtendGotoLastLine,
+    "extend to last line",
+    "Like `GotoLastLine` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendGotoWindowTopDef,
+    ExtendGotoWindowTop,
+    "ExtendGotoWindowTop",
+    ActionKind::ExtendGotoWindowTop,
+    "extend to window top",
+    "Like `GotoWindowTop` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendGotoWindowCenterDef,
+    ExtendGotoWindowCenter,
+    "ExtendGotoWindowCenter",
+    ActionKind::ExtendGotoWindowCenter,
+    "extend to window center",
+    "Like `GotoWindowCenter` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendGotoWindowBottomDef,
+    ExtendGotoWindowBottom,
+    "ExtendGotoWindowBottom",
+    ActionKind::ExtendGotoWindowBottom,
+    "extend to window bottom",
+    "Like `GotoWindowBottom` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
     AlignViewTopDef,
     AlignViewTop,
     "AlignViewTop",

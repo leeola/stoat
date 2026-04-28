@@ -2104,7 +2104,7 @@ pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign) -> UpdateEffect {
+pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -2126,9 +2126,19 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign) -> UpdateEffect
     let target_offset = rope.point_to_offset(Point::new(target_row, 0));
     let target_anchor = buffer_snapshot.anchor_at(target_offset, Bias::Right);
     editor.selections.transform(buffer_snapshot, |sel| {
-        let mut new = sel.clone();
-        new.collapse_to(target_anchor, SelectionGoal::None);
-        new
+        if extend {
+            extend_head(
+                sel,
+                target_anchor,
+                target_offset,
+                SelectionGoal::None,
+                buffer_snapshot,
+            )
+        } else {
+            let mut new = sel.clone();
+            new.collapse_to(target_anchor, SelectionGoal::None);
+            new
+        }
     });
     UpdateEffect::Redraw
 }
