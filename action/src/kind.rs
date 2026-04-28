@@ -119,6 +119,7 @@ pub enum ActionKind {
     SelectAll,
     SelectLineBelow,
     KeepPrimarySelection,
+    RemovePrimarySelection,
     RotateSelectionsForward,
     RotateSelectionsBackward,
     TrimSelections,

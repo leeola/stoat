@@ -300,6 +300,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SelectAll => movement::select_all(stoat),
         ActionKind::SelectLineBelow => movement::select_line_below(stoat),
         ActionKind::KeepPrimarySelection => movement::keep_primary_selection(stoat),
+        ActionKind::RemovePrimarySelection => movement::remove_primary_selection(stoat),
         ActionKind::RotateSelectionsForward => movement::rotate_selections_forward(stoat),
         ActionKind::RotateSelectionsBackward => movement::rotate_selections_backward(stoat),
         ActionKind::TrimSelections => movement::trim_selections(stoat),

@@ -28,11 +28,11 @@ use crate::{
             MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
             MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
             MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
-            PageUp, Redo, RepeatLastMotion, RotateSelectionsBackward, RotateSelectionsForward,
-            SaveSelection, ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SelectNextSibling,
-            SelectPrevSibling, ShrinkSelection, SplitSelectionOnNewline, SwitchCase,
-            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            TrimSelections, Undo, UnindentSelection,
+            PageUp, Redo, RemovePrimarySelection, RepeatLastMotion, RotateSelectionsBackward,
+            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll,
+            SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
+            SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -344,6 +344,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(KeepPrimarySelection::DEF, |_| {
         Ok(Box::new(KeepPrimarySelection))
     });
+    add(RemovePrimarySelection::DEF, |_| {
+        Ok(Box::new(RemovePrimarySelection))
+    });
     add(RotateSelectionsForward::DEF, |_| {
         Ok(Box::new(RotateSelectionsForward))
     });
@@ -548,6 +551,7 @@ mod tests {
         "SelectAll",
         "SelectLineBelow",
         "KeepPrimarySelection",
+        "RemovePrimarySelection",
         "RotateSelectionsForward",
         "RotateSelectionsBackward",
         "TrimSelections",
@@ -730,7 +734,8 @@ mod tests {
         // + 1 ToggleComments.
         // + 2 ExtendMoveParentNodeStart/ExtendMoveParentNodeEnd.
         // + 2 ExtendSelectNextSibling/ExtendSelectPrevSibling.
-        assert_eq!(all().count(), 208);
+        // + 1 RemovePrimarySelection.
+        assert_eq!(all().count(), 209);
     }
 
     #[test]

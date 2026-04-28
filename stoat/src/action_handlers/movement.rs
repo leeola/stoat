@@ -1357,6 +1357,14 @@ pub(super) fn keep_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn remove_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    editor.selections.remove_primary();
+    UpdateEffect::Redraw
+}
+
 pub(super) fn rotate_selections_forward(stoat: &mut Stoat) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

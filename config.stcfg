@@ -182,6 +182,7 @@ on key {
         % -> SelectAll();
         x -> SelectLineBelow();
         , -> KeepPrimarySelection();
+        Alt-, -> RemovePrimarySelection();
         ( -> RotateSelectionsBackward();
         ) -> RotateSelectionsForward();
         _ -> TrimSelections();

@@ -971,6 +971,16 @@ define_action!(
 );
 
 define_action!(
+    RemovePrimarySelectionDef,
+    RemovePrimarySelection,
+    "RemovePrimarySelection",
+    ActionKind::RemovePrimarySelection,
+    "remove primary selection",
+    "Drop the newest (primary) selection while retaining all others. No-op when only one selection exists.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RotateSelectionsForwardDef,
     RotateSelectionsForward,
     "RotateSelectionsForward",
@@ -1074,6 +1084,14 @@ mod tests {
             ActionKind::KeepPrimarySelection
         );
         assert_eq!(KeepPrimarySelection.def().name(), "KeepPrimarySelection");
+        assert_eq!(
+            RemovePrimarySelection.kind(),
+            ActionKind::RemovePrimarySelection
+        );
+        assert_eq!(
+            RemovePrimarySelection.def().name(),
+            "RemovePrimarySelection"
+        );
         assert_eq!(
             RotateSelectionsForward.kind(),
             ActionKind::RotateSelectionsForward

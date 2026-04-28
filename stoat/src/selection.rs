@@ -82,6 +82,14 @@ impl SelectionsCollection {
         self.disjoint = vec![primary];
     }
 
+    pub(crate) fn remove_primary(&mut self) {
+        if self.disjoint.len() < 2 {
+            return;
+        }
+        let primary_id = self.newest_anchor().id;
+        self.disjoint.retain(|s| s.id != primary_id);
+    }
+
     pub(crate) fn rotate_primary(&mut self, forward: bool) {
         if self.disjoint.len() < 2 {
             return;
@@ -261,6 +269,44 @@ mod tests {
         assert_eq!(remaining.len(), 1);
         assert_eq!(remaining[0].id, 2);
         assert_eq!(remaining[0].goal, SelectionGoal::Column(4));
+    }
+
+    #[test]
+    fn remove_primary_drops_newest() {
+        let multi = singleton("abcdef");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        collection.insert_cursor(
+            snapshot.anchor_at(2, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        collection.insert_cursor(
+            snapshot.anchor_at(4, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        assert_eq!(collection.all_anchors().len(), 3);
+        let dropped_id = collection.newest_anchor().id;
+
+        collection.remove_primary();
+
+        let remaining_ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
+        assert_eq!(remaining_ids, vec![0, 1]);
+        assert!(!remaining_ids.contains(&dropped_id));
+    }
+
+    #[test]
+    fn remove_primary_singleton_is_noop() {
+        let multi = singleton("abcdef");
+        let _snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        let before_id = collection.newest_anchor().id;
+        collection.remove_primary();
+        assert_eq!(collection.all_anchors().len(), 1);
+        assert_eq!(collection.newest_anchor().id, before_id);
     }
 
     #[test]
