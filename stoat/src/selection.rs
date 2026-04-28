@@ -1320,6 +1320,28 @@ mod tests {
     }
 
     #[test]
+    fn submode_status_labels() {
+        let theme = crate::theme::Theme::empty();
+        let cases = [
+            ("goto", "GTO"),
+            ("z", "VWA"),
+            ("bracket_next", "BNX"),
+            ("bracket_prev", "BPV"),
+            ("match", "MAT"),
+            ("select_goto", "SLG"),
+            ("space", "SPC"),
+            ("space_workspace", "SWS"),
+            ("space_pane_nav", "SPN"),
+            ("space_pane_nav_new", "SNN"),
+            ("claude", "CLA"),
+        ];
+        for (mode, expected) in cases {
+            let (label, _) = crate::render::pane::mode_segment(mode, &theme);
+            assert_eq!(label, expected, "label for mode {mode:?}");
+        }
+    }
+
+    #[test]
     fn select_mode_f_extends_forward_to_target_char() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abcdef\n");

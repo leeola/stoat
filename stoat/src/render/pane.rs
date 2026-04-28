@@ -293,6 +293,17 @@ pub(crate) fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static
         "reword" | "reword_insert" => ("RWD", Color::Red, scope::UI_STATUSLINE_REWORD),
         "conflict" => ("CNF", Color::LightRed, scope::UI_STATUSLINE_CONFLICT),
         "review" => ("REV", Color::Cyan, scope::UI_STATUSLINE_REVIEW),
+        "goto" => ("GTO", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "z" => ("VWA", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "bracket_next" => ("BNX", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "bracket_prev" => ("BPV", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "match" => ("MAT", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "select_goto" => ("SLG", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "space" => ("SPC", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "space_workspace" => ("SWS", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "space_pane_nav" => ("SPN", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "space_pane_nav_new" => ("SNN", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
+        "claude" => ("CLA", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
         _ => ("---", Color::Gray, scope::UI_STATUSLINE_DEFAULT),
     };
     let color = theme.get(scope_name).fg.unwrap_or(default);

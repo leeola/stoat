@@ -364,6 +364,7 @@ pub mod scope {
     pub const UI_STATUSLINE_REWORD: &str = "ui.statusline.reword";
     pub const UI_STATUSLINE_CONFLICT: &str = "ui.statusline.conflict";
     pub const UI_STATUSLINE_REVIEW: &str = "ui.statusline.review";
+    pub const UI_STATUSLINE_SUBMODE: &str = "ui.statusline.submode";
     pub const UI_STATUSLINE_DEFAULT: &str = "ui.statusline.default";
 
     pub const DIFF_ADDED: &str = "diff.added";
