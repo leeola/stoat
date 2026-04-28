@@ -1378,6 +1378,51 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_alt_n_extends_to_next_sibling() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {} fn b() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l v");
+        let before_offset = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendSelectNextSibling);
+        let head_after = h.primary_head_offset();
+        let (start, end, _reversed) = h.selection_spans()[0];
+        assert!(
+            head_after > before_offset,
+            "head should have moved forward across siblings"
+        );
+        assert!(end > start, "selection has non-empty range");
+    }
+
+    #[test]
+    fn select_mode_alt_p_extends_to_prev_sibling() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {} fn b() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l l l l v");
+        let before_offset = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendSelectPrevSibling);
+        let head_after = h.primary_head_offset();
+        let (start, end, _reversed) = h.selection_spans()[0];
+        assert!(
+            head_after < before_offset,
+            "head should have moved backward across siblings"
+        );
+        assert!(end > start, "selection has non-empty range");
+    }
+
+    #[test]
+    fn normal_mode_alt_n_still_collapses() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {} fn b() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+        let (start, end, _) = h.selection_spans()[0];
+        assert!(end > start, "normal-mode sibling jump produces a range");
+    }
+
+    #[test]
     fn select_mode_alt_b_extends_to_parent_node_start() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "fn main() { let x = 1; }\n");

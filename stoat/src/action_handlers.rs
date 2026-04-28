@@ -211,10 +211,16 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExpandSelection => movement::expand_selection(stoat),
         ActionKind::ShrinkSelection => movement::shrink_selection(stoat),
         ActionKind::SelectNextSibling => {
-            movement::select_sibling(stoat, movement::SiblingDir::Next)
+            movement::select_sibling(stoat, movement::SiblingDir::Next, false)
         },
         ActionKind::SelectPrevSibling => {
-            movement::select_sibling(stoat, movement::SiblingDir::Prev)
+            movement::select_sibling(stoat, movement::SiblingDir::Prev, false)
+        },
+        ActionKind::ExtendSelectNextSibling => {
+            movement::select_sibling(stoat, movement::SiblingDir::Next, true)
+        },
+        ActionKind::ExtendSelectPrevSibling => {
+            movement::select_sibling(stoat, movement::SiblingDir::Prev, true)
         },
         ActionKind::MoveParentNodeStart => {
             movement::move_to_parent_bound(stoat, movement::NodeBound::Start, false)

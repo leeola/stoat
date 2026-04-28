@@ -1493,7 +1493,7 @@ pub(super) enum SiblingDir {
     Prev,
 }
 
-pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir) -> UpdateEffect {
+pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1534,7 +1534,20 @@ pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir) -> UpdateEffect
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-    apply_primary_range(editor, target);
+    if extend {
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let head_offset = match dir {
+            SiblingDir::Next => target.end,
+            SiblingDir::Prev => target.start,
+        };
+        let new_head = new_buf.anchor_at(head_offset, Bias::Right);
+        editor.selections.transform(new_buf, |sel| {
+            extend_head(sel, new_head, head_offset, sel.goal, new_buf)
+        });
+    } else {
+        apply_primary_range(editor, target);
+    }
     UpdateEffect::Redraw
 }
 

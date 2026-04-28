@@ -381,6 +381,26 @@ define_action!(
 );
 
 define_action!(
+    ExtendSelectNextSiblingDef,
+    ExtendSelectNextSibling,
+    "ExtendSelectNextSibling",
+    ActionKind::ExtendSelectNextSibling,
+    "extend to next syntax sibling",
+    "Like `SelectNextSibling` but extends the primary selection rather than collapsing it. The selection's tail stays put while the head moves to the next named sibling's range.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendSelectPrevSiblingDef,
+    ExtendSelectPrevSibling,
+    "ExtendSelectPrevSibling",
+    ActionKind::ExtendSelectPrevSibling,
+    "extend to previous syntax sibling",
+    "Like `SelectPrevSibling` but extends the primary selection rather than collapsing it. The selection's tail stays put while the head moves to the previous named sibling's range.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveParentNodeStartDef,
     MoveParentNodeStart,
     "MoveParentNodeStart",

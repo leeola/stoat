@@ -18,20 +18,21 @@ use crate::{
             ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
             ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
             ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
-            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
-            FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
-            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange, GotoNextParagraph,
-            GotoPrevChange, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward, JumpForward,
-            KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd,
-            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
-            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
-            MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo, RepeatLastMotion,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
-            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
-            SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
+            ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
+            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
+            ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoColumn,
+            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
+            GotoLineStart, GotoNextChange, GotoNextParagraph, GotoPrevChange, GotoPrevParagraph,
+            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment,
+            IndentSelection, JumpBackward, JumpForward, KeepPrimarySelection, MatchBrackets,
+            MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
+            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
+            PageUp, Redo, RepeatLastMotion, RotateSelectionsBackward, RotateSelectionsForward,
+            SaveSelection, ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SelectNextSibling,
+            SelectPrevSibling, ShrinkSelection, SplitSelectionOnNewline, SwitchCase,
+            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
+            TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -240,6 +241,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShrinkSelection::DEF, |_| Ok(Box::new(ShrinkSelection)));
     add(SelectNextSibling::DEF, |_| Ok(Box::new(SelectNextSibling)));
     add(SelectPrevSibling::DEF, |_| Ok(Box::new(SelectPrevSibling)));
+    add(ExtendSelectNextSibling::DEF, |_| {
+        Ok(Box::new(ExtendSelectNextSibling))
+    });
+    add(ExtendSelectPrevSibling::DEF, |_| {
+        Ok(Box::new(ExtendSelectPrevSibling))
+    });
     add(MoveParentNodeStart::DEF, |_| {
         Ok(Box::new(MoveParentNodeStart))
     });
@@ -722,7 +729,8 @@ mod tests {
         //   WindowBottom}.
         // + 1 ToggleComments.
         // + 2 ExtendMoveParentNodeStart/ExtendMoveParentNodeEnd.
-        assert_eq!(all().count(), 206);
+        // + 2 ExtendSelectNextSibling/ExtendSelectPrevSibling.
+        assert_eq!(all().count(), 208);
     }
 
     #[test]

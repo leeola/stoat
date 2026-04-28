@@ -256,6 +256,8 @@ on key {
         T -> ExtendTillPrevChar();
         Alt-b -> ExtendMoveParentNodeStart();
         Alt-e -> ExtendMoveParentNodeEnd();
+        Alt-n -> ExtendSelectNextSibling();
+        Alt-p -> ExtendSelectPrevSibling();
         Alt-. -> RepeatLastMotion();
         Home -> ExtendToLineStart();
         0 -> ExtendToLineStart();
