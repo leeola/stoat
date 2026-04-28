@@ -75,6 +75,7 @@ pub enum ActionKind {
     GotoLastLine,
     GotoLineNumber,
     GotoColumn,
+    ExtendGotoColumn,
     GotoNextChange,
     GotoPrevChange,
     GotoNextParagraph,

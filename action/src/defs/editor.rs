@@ -601,6 +601,16 @@ define_action!(
 );
 
 define_action!(
+    ExtendGotoColumnDef,
+    ExtendGotoColumn,
+    "ExtendGotoColumn",
+    ActionKind::ExtendGotoColumn,
+    "extend to column from count",
+    "Like `GotoColumn` but extends the primary selection rather than collapsing it. The selection's tail stays put while the head moves to the column.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoNextChangeDef,
     GotoNextChange,
     "GotoNextChange",

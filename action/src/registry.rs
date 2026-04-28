@@ -13,13 +13,13 @@ use crate::{
         editor::{
             AddSelectionAbove, AddSelectionBelow, AlignSelections, AlignViewBottom,
             AlignViewCenter, AlignViewTop, CollapseSelection, Decrement, DeleteSelection,
-            ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendLeft,
-            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
-            ExtendRight, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
-            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
-            FindPrevChar, FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace,
-            GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange,
-            GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
+            ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
+            ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
+            ExtendPrevWordStart, ExtendRight, ExtendTillNextChar, ExtendTillPrevChar,
+            ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
+            FindNextChar, FindPrevChar, FlipSelections, GotoColumn, GotoFileStart,
+            GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart,
+            GotoNextChange, GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
             GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection,
             JumpBackward, JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
@@ -274,6 +274,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoLastLine::DEF, |_| Ok(Box::new(GotoLastLine)));
     add(GotoLineNumber::DEF, |_| Ok(Box::new(GotoLineNumber)));
     add(GotoColumn::DEF, |_| Ok(Box::new(GotoColumn)));
+    add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
     add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
     add(GotoNextParagraph::DEF, |_| Ok(Box::new(GotoNextParagraph)));
@@ -688,7 +689,8 @@ mod tests {
         // + 2 GotoNextParagraph/GotoPrevParagraph.
         // + 1 MatchBrackets.
         // + 4 ExtendFindNextChar/ExtendFindPrevChar/ExtendTillNextChar/ExtendTillPrevChar.
-        assert_eq!(all().count(), 196);
+        // + 1 ExtendGotoColumn.
+        assert_eq!(all().count(), 197);
     }
 
     #[test]

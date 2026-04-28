@@ -259,6 +259,12 @@ on key {
         0 -> ExtendToLineStart();
         End -> ExtendToLineEnd();
         G -> ExtendToLastLine();
+        g -> SetMode(select_goto);
+        : -> OpenCommandPalette();
+    }
+    mode == select_goto {
+        Escape -> SetMode(select);
+        | -> [ExtendGotoColumn(), SetMode(select)];
         : -> OpenCommandPalette();
     }
     mode == commits {

@@ -558,7 +558,8 @@ impl Stoat {
             self.pending_find = None;
         }
 
-        if self.mode == "normal" && self.pending_count.is_some() && key.modifiers.is_empty() {
+        let count_active_mode = self.mode == "normal" || self.mode == "select";
+        if count_active_mode && self.pending_count.is_some() && key.modifiers.is_empty() {
             if let KeyCode::Char(ch) = key.code {
                 if ch.is_ascii_digit() {
                     let digit = ch.to_digit(10).expect("ascii digit");
@@ -576,7 +577,7 @@ impl Stoat {
         let state = StoatKeymapState::from_stoat(self);
         let actions = self.keymap.lookup(&state, &key).map(|a| a.to_vec());
         let Some(actions) = actions else {
-            if self.mode == "normal" {
+            if count_active_mode {
                 if let KeyCode::Char(ch) = key.code {
                     if ch.is_ascii_digit() && key.modifiers.is_empty() {
                         let digit = ch.to_digit(10).expect("ascii digit");

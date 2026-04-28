@@ -1920,7 +1920,7 @@ pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn goto_column(stoat: &mut Stoat) -> UpdateEffect {
+pub(super) fn goto_column(stoat: &mut Stoat, extend: bool) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -1945,7 +1945,16 @@ pub(super) fn goto_column(stoat: &mut Stoat) -> UpdateEffect {
         target_offset = next;
     }
 
-    apply_primary_range(editor, target_offset..target_offset);
+    if extend {
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let new_head = new_buf.anchor_at(target_offset, Bias::Right);
+        editor.selections.transform(new_buf, |sel| {
+            extend_head(sel, new_head, target_offset, sel.goal, new_buf)
+        });
+    } else {
+        apply_primary_range(editor, target_offset..target_offset);
+    }
     UpdateEffect::Redraw
 }
 

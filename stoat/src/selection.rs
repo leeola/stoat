@@ -1378,6 +1378,42 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_g_pipe_extends_to_column() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdefgh\n");
+        h.open_file(&path);
+        h.type_keys("v 5 g |");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!(
+            (start, end, reversed),
+            (0, 4, false),
+            "head extended to column 5 (offset 4) while tail stays at 0"
+        );
+        assert_eq!(h.stoat.mode, "select", "back to select after the chord");
+    }
+
+    #[test]
+    fn normal_mode_g_pipe_still_collapses() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdefgh\n");
+        h.open_file(&path);
+        h.type_keys("5 g |");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 4)]);
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn select_goto_escape_returns_to_select() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("v g");
+        assert_eq!(h.stoat.mode, "select_goto");
+        h.type_keys("Escape");
+        assert_eq!(h.stoat.mode, "select");
+    }
+
+    #[test]
     fn repeat_last_motion_extends_in_select_mode() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "ababab\n");
