@@ -896,12 +896,19 @@ fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<Stri
             chars.next()?;
             let marker = chars.next()?;
             let body = &text[2..];
-            let parsed = u64::from_str_radix(body, kind.radix()).ok()?;
+
+            let digits_only: String = body.chars().filter(|c| *c != '_').collect();
+            if digits_only.is_empty() {
+                return None;
+            }
+
+            let parsed = u64::from_str_radix(&digits_only, kind.radix()).ok()?;
             let new_value = if delta < 0 {
                 parsed.saturating_sub(delta.unsigned_abs())
             } else {
                 parsed.saturating_add(delta as u64)
             };
+
             let body_uppercase = matches!(kind, NumberKind::Hex)
                 && (marker.is_ascii_uppercase()
                     || body
@@ -914,14 +921,48 @@ fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<Stri
                 (NumberKind::Octal, _) => format!("{new_value:o}"),
                 _ => unreachable!(),
             };
-            let padded = if new_body.len() < body.len() {
-                format!("{new_body:0>width$}", width = body.len())
+
+            let padded = if new_body.len() < digits_only.len() {
+                format!("{new_body:0>width$}", width = digits_only.len())
             } else {
                 new_body
             };
-            Some(format!("0{marker}{padded}"))
+
+            let formatted = match group_size_for_body(body) {
+                Some(g) => regroup_right(&padded, g),
+                None => padded,
+            };
+
+            Some(format!("0{marker}{formatted}"))
         },
     }
+}
+
+fn group_size_for_body(body: &str) -> Option<usize> {
+    let trimmed = body.trim_matches('_');
+    let last = trimmed.rfind('_')?;
+    Some(trimmed.len() - last - 1)
+}
+
+fn regroup_right(digits: &str, group_size: usize) -> String {
+    let n = digits.len();
+    if n == 0 || group_size == 0 || n <= group_size {
+        return digits.to_string();
+    }
+    let first_size = if n.is_multiple_of(group_size) {
+        group_size
+    } else {
+        n % group_size
+    };
+    let mut out = String::with_capacity(n + (n - 1) / group_size);
+    out.push_str(&digits[..first_size]);
+    let mut idx = first_size;
+    while idx < n {
+        out.push('_');
+        out.push_str(&digits[idx..idx + group_size]);
+        idx += group_size;
+    }
+    out
 }
 
 pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {

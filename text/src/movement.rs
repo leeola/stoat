@@ -257,10 +257,11 @@ pub struct NumberMatch {
 
 /// Returns the literal at `offset` -- a `0x`/`0X` hex, `0b`/`0B` binary,
 /// `0o`/`0O` octal literal, or a decimal number (with optional leading
-/// `-`). Underscore-separated forms (`0xff_ff`) are rejected because the
-/// caller would need a separator-aware re-format on overflow. Falls
-/// through to [`find_decimal_number_at`] when the surrounding text does
-/// not form a radix literal.
+/// `-`). Underscore separators inside the body (`0xff_ff_ff_ff`) are
+/// accepted; the caller is expected to regroup on emit (see
+/// `compute_number_delta`). Trailing `_`s are excluded from the
+/// captured range. Falls through to [`find_decimal_number_at`] when
+/// the surrounding text does not form a radix literal.
 pub fn find_number_at(rope: &Rope, offset: usize) -> Option<NumberMatch> {
     match find_radix_literal_at(rope, offset) {
         RadixResult::Match(m) => Some(m),
@@ -286,6 +287,7 @@ fn find_radix_literal_at(rope: &Rope, offset: usize) -> RadixResult {
         return RadixResult::NoRadix;
     };
     let head_potential = head == '0'
+        || head == '_'
         || matches!(head, 'x' | 'X' | 'b' | 'B' | 'o' | 'O')
         || head.is_ascii_hexdigit();
     if !head_potential {
@@ -293,16 +295,15 @@ fn find_radix_literal_at(rope: &Rope, offset: usize) -> RadixResult {
     }
 
     let mut start = offset;
-    let mut saw_underscore_back = false;
     for prev in rope.reversed_chars_at(offset) {
-        if prev == '_' {
-            saw_underscore_back = true;
-            break;
+        if prev == '_'
+            || prev.is_ascii_hexdigit()
+            || matches!(prev, 'x' | 'X' | 'b' | 'B' | 'o' | 'O')
+        {
+            start -= prev.len_utf8();
+            continue;
         }
-        if !prev.is_ascii_hexdigit() && !matches!(prev, 'x' | 'X' | 'b' | 'B' | 'o' | 'O') {
-            break;
-        }
-        start -= prev.len_utf8();
+        break;
     }
 
     let mut prefix_iter = rope.chars_at(start);
@@ -313,43 +314,39 @@ fn find_radix_literal_at(rope: &Rope, offset: usize) -> RadixResult {
         return RadixResult::NoRadix;
     };
     if zero != '0' {
-        if saw_underscore_back {
-            return RadixResult::Rejected;
-        }
         return RadixResult::NoRadix;
     }
     let kind = match marker {
         'x' | 'X' => NumberKind::Hex,
         'b' | 'B' => NumberKind::Binary,
         'o' | 'O' => NumberKind::Octal,
-        _ => {
-            if saw_underscore_back {
-                return RadixResult::Rejected;
-            }
-            return RadixResult::NoRadix;
-        },
+        _ => return RadixResult::NoRadix,
     };
-
-    if saw_underscore_back {
-        return RadixResult::Rejected;
-    }
 
     let body_start = start + zero.len_utf8() + marker.len_utf8();
     let mut body_end = body_start;
+    let mut last_digit_end = body_start;
+    let mut saw_digit = false;
     let radix = kind.radix();
     for ch in rope.chars_at(body_start) {
         if ch == '_' {
-            return RadixResult::Rejected;
+            body_end += ch.len_utf8();
+            continue;
         }
         if !ch.is_digit(radix) {
             break;
         }
         body_end += ch.len_utf8();
+        last_digit_end = body_end;
+        saw_digit = true;
     }
 
-    if body_end == body_start {
+    if !saw_digit {
         return RadixResult::Rejected;
     }
+
+    let body_end = last_digit_end;
+
     if offset < start || offset >= body_end {
         return RadixResult::NoRadix;
     }
@@ -966,10 +963,47 @@ mod tests {
     }
 
     #[test]
-    fn find_number_at_rejects_underscored_radix_literal() {
+    fn find_number_at_accepts_underscored_hex_literal() {
         let r = rope("0xff_ff");
+        let expected = Some(NumberMatch {
+            range: 0..7,
+            kind: NumberKind::Hex,
+        });
+        for offset in [0, 2, 4, 5, 6] {
+            assert_eq!(find_number_at(&r, offset), expected, "offset {offset}");
+        }
+    }
+
+    #[test]
+    fn find_number_at_accepts_underscored_binary_literal() {
+        let r = rope("0b1010_1010_1010");
+        assert_eq!(
+            find_number_at(&r, 9),
+            Some(NumberMatch {
+                range: 0..16,
+                kind: NumberKind::Binary,
+            })
+        );
+    }
+
+    #[test]
+    fn find_number_at_excludes_trailing_underscore_from_range() {
+        let r = rope("0xff_ ");
+        assert_eq!(
+            find_number_at(&r, 2),
+            Some(NumberMatch {
+                range: 0..4,
+                kind: NumberKind::Hex,
+            })
+        );
+        assert_eq!(find_number_at(&r, 4), None);
+    }
+
+    #[test]
+    fn find_number_at_rejects_radix_with_no_digits() {
+        let r = rope("0x_");
         assert_eq!(find_number_at(&r, 0), None);
-        assert_eq!(find_number_at(&r, 5), None);
+        assert_eq!(find_number_at(&r, 2), None);
     }
 
     #[test]

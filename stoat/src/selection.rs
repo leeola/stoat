@@ -1275,6 +1275,42 @@ mod tests {
     }
 
     #[test]
+    fn increment_hex_underscored_no_width_change() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0xab_cd\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0xab_ce\n");
+    }
+
+    #[test]
+    fn increment_hex_underscored_overflow_regroups_right() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0xff_ff\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0x1_00_00\n");
+    }
+
+    #[test]
+    fn decrement_binary_underscored_preserves_width() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0b1010_1010\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Decrement);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0b1010_1001\n");
+    }
+
+    #[test]
+    fn decrement_hex_underscored_borrow_pads_left() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0x10_00_00_00\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Decrement);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0x0f_ff_ff_ff\n");
+    }
+
+    #[test]
     fn select_mode_v_enters_then_h_extends_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abcdef\n");
