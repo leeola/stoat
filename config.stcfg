@@ -264,6 +264,16 @@ on key {
         End -> ExtendToLineEnd();
         G -> ExtendToLastLine();
         g -> SetMode(select_goto);
+        ; -> CollapseSelection();
+        Alt-; -> FlipSelections();
+        > -> IndentSelection();
+        < -> UnindentSelection();
+        d -> DeleteSelection();
+        ~ -> SwitchCase();
+        ` -> SwitchToLowercase();
+        Alt-` -> SwitchToUppercase();
+        u -> Undo();
+        U -> Redo();
         : -> OpenCommandPalette();
     }
     mode == select_goto {

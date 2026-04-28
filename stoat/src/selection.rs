@@ -1320,6 +1320,75 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_semicolon_collapses_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v l l l");
+        let before = h.selection_spans()[0];
+        assert!(before.1 > before.0, "selection should be non-empty");
+        h.type_keys(";");
+        let after = h.selection_spans()[0];
+        assert_eq!(after.0, after.1, "; should collapse to a cursor");
+    }
+
+    #[test]
+    fn select_mode_alt_semicolon_flips_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v l l l");
+        let before = h.selection_spans()[0];
+        h.type_keys("Alt-;");
+        let after = h.selection_spans()[0];
+        assert_eq!(after.0, before.0, "tail/head ranges remain the same");
+        assert_eq!(after.1, before.1);
+        assert_ne!(after.2, before.2, "reversed flag flipped");
+    }
+
+    #[test]
+    fn select_mode_indent_indents_selection_lines() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\ndef\n");
+        h.open_file(&path);
+        h.type_keys("v j l");
+        h.type_keys(">");
+        assert_eq!(focused_buffer_text(&mut h), "\tabc\n\tdef\n");
+    }
+
+    #[test]
+    fn select_mode_delete_removes_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v l l l");
+        h.type_keys("d");
+        assert_eq!(focused_buffer_text(&mut h), "def\n");
+    }
+
+    #[test]
+    fn select_mode_tilde_switches_case() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v l l l");
+        h.type_keys("~");
+        assert_eq!(focused_buffer_text(&mut h), "ABCdef\n");
+    }
+
+    #[test]
+    fn select_mode_undo_reverts_prior_edit() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v l l l");
+        h.type_keys("d");
+        assert_eq!(focused_buffer_text(&mut h), "def\n");
+        h.type_keys("u");
+        assert_eq!(focused_buffer_text(&mut h), "abcdef\n");
+    }
+
+    #[test]
     fn submode_status_labels() {
         let theme = crate::theme::Theme::empty();
         let cases = [
