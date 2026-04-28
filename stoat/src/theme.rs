@@ -356,6 +356,7 @@ pub mod scope {
 
     pub const UI_STATUSLINE_NORMAL: &str = "ui.statusline.normal";
     pub const UI_STATUSLINE_INSERT: &str = "ui.statusline.insert";
+    pub const UI_STATUSLINE_SELECT: &str = "ui.statusline.select";
     pub const UI_STATUSLINE_PROMPT: &str = "ui.statusline.prompt";
     pub const UI_STATUSLINE_RUN: &str = "ui.statusline.run";
     pub const UI_STATUSLINE_COMMITS: &str = "ui.statusline.commits";

@@ -285,6 +285,7 @@ pub(crate) fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static
     let (label, default, scope_name) = match mode {
         "normal" => ("NOR", Color::Blue, scope::UI_STATUSLINE_NORMAL),
         "insert" => ("INS", Color::Green, scope::UI_STATUSLINE_INSERT),
+        "select" => ("SEL", Color::Yellow, scope::UI_STATUSLINE_SELECT),
         "prompt" => ("PMT", Color::Green, scope::UI_STATUSLINE_PROMPT),
         "run" => ("RUN", Color::Magenta, scope::UI_STATUSLINE_RUN),
         "commits" => ("COM", Color::Yellow, scope::UI_STATUSLINE_COMMITS),

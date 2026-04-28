@@ -1275,6 +1275,51 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_v_enters_then_h_extends_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("3 l");
+        let before = h.selection_spans();
+        h.type_keys("v");
+        assert_eq!(h.stoat.mode, "select");
+        h.type_keys("h h");
+        let after = h.selection_spans();
+        assert_ne!(after, before, "selection should have extended");
+        assert_eq!(after[0].0, 1, "tail of extended selection at byte 1");
+        assert_eq!(after[0].1, 3, "head of extended selection back at byte 3");
+    }
+
+    #[test]
+    fn select_mode_v_exits_back_to_normal() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        assert_eq!(h.stoat.mode, "select");
+        h.type_keys("v");
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn select_mode_escape_exits_back_to_normal() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        assert_eq!(h.stoat.mode, "select");
+        h.type_keys("Escape");
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn select_mode_status_label_is_sel() {
+        let theme = crate::theme::Theme::empty();
+        let (label, _) = crate::render::pane::mode_segment("select", &theme);
+        assert_eq!(label, "SEL");
+    }
+
+    #[test]
     fn switch_case_empty_selection_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");

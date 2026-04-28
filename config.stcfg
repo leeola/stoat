@@ -138,6 +138,7 @@ on key {
         Space -> SetMode(space);
         : -> OpenCommandPalette();
         i -> SetMode(insert);
+        v -> SetMode(select);
         C -> AddSelectionBelow();
         Alt-C -> AddSelectionAbove();
         h -> MoveLeft();
@@ -237,6 +238,22 @@ on key {
     mode == match {
         Escape -> SetMode(normal);
         m -> [MatchBrackets(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == select {
+        Escape -> SetMode(normal);
+        v -> SetMode(normal);
+        h -> ExtendLeft();
+        j -> ExtendDown();
+        k -> ExtendUp();
+        l -> ExtendRight();
+        w -> ExtendNextWordStart();
+        e -> ExtendNextWordEnd();
+        b -> ExtendPrevWordStart();
+        Home -> ExtendToLineStart();
+        0 -> ExtendToLineStart();
+        End -> ExtendToLineEnd();
+        G -> ExtendToLastLine();
         : -> OpenCommandPalette();
     }
     mode == commits {
