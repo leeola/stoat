@@ -31,6 +31,15 @@ pub struct Args {
     #[arg(short = 'c', long = "continue")]
     pub continue_: bool,
 
+    /// Walk ancestors of the current directory and reopen the workspace
+    /// whose state is the most recently modified. So a session run from
+    /// `~/foo/bar/baz/bang` reopens whichever ancestor (cwd itself, its
+    /// parent, ...) most recently saved a workspace; falls back to a
+    /// fresh workspace anchored at cwd when no ancestor has any state.
+    /// Mutually exclusive with `--continue`.
+    #[arg(short = 'r', long = "resume", conflicts_with = "continue_")]
+    pub resume: bool,
+
     /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
     #[arg(long, env = "STOAT_TEXT_PROTO_LOG")]
@@ -61,14 +70,17 @@ pub fn run() -> Result<(), Box<dyn std::error::Error>> {
         command,
         files,
         continue_,
+        resume,
         text_proto_log,
         ..
     } = Args::parse();
 
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
-        Some(Command::Review) => run_tui(text_proto_log, files, continue_, TuiStart::Review),
-        None => run_tui(text_proto_log, files, continue_, TuiStart::Files),
+        Some(Command::Review) => {
+            run_tui(text_proto_log, files, continue_, resume, TuiStart::Review)
+        },
+        None => run_tui(text_proto_log, files, continue_, resume, TuiStart::Files),
     }
 }
 
@@ -81,6 +93,7 @@ fn run_tui(
     text_proto_log: Option<bool>,
     files: Vec<PathBuf>,
     continue_: bool,
+    resume: bool,
     start: TuiStart,
 ) -> Result<(), Box<dyn std::error::Error>> {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
@@ -103,11 +116,19 @@ fn run_tui(
         theme: None,
     };
 
-    let initial_git_root = std::env::current_dir().unwrap_or_default();
+    let cwd = std::env::current_dir().unwrap_or_default();
+    let initial_git_root = if resume {
+        stoat::workspace::find_resume_anchor(&cwd, &LocalFs)
+            .ok()
+            .flatten()
+            .unwrap_or_else(|| cwd.clone())
+    } else {
+        cwd
+    };
 
     rt.block_on(async {
         let mut stoat = Stoat::new(executor, cli_settings, initial_git_root);
-        if continue_ {
+        if continue_ || resume {
             stoat.load_active_workspace_state();
         }
         stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new(Arc::new(LocalFs))));

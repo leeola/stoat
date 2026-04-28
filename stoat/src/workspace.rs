@@ -16,6 +16,7 @@ use crate::{
     review_session::ReviewSession,
     run::{RunId, RunState},
 };
+pub use persist::find_resume_anchor;
 pub(crate) use persist::{list_workspace_files, state_path_for};
 use ratatui::layout::Rect;
 use serde::{Deserialize, Serialize};

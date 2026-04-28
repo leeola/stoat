@@ -77,14 +77,25 @@ pub(crate) struct WorkspaceStateV1 {
 /// hashed with the stdlib's [`DefaultHasher`] (stable within a Rust release;
 /// acceptable here because a hash mismatch just falls back to a fresh session).
 pub(crate) fn workspace_dir_for(git_root: &Path, fs: &dyn FsHost) -> io::Result<PathBuf> {
+    Ok(anchor_state_dir(
+        &stoat_log::workspace_state_dir()?,
+        git_root,
+        fs,
+    ))
+}
+
+/// Hash-derived state directory for a single anchor under `state_dir`.
+/// Factored so callers (and tests) can supply a custom `state_dir`
+/// rather than always going through `stoat_log::workspace_state_dir`.
+fn anchor_state_dir(state_dir: &Path, anchor: &Path, fs: &dyn FsHost) -> PathBuf {
     use std::hash::{Hash, Hasher};
     let canon = fs
-        .canonicalize(git_root)
-        .unwrap_or_else(|_| git_root.to_path_buf());
+        .canonicalize(anchor)
+        .unwrap_or_else(|_| anchor.to_path_buf());
     let mut hasher = std::collections::hash_map::DefaultHasher::new();
     canon.hash(&mut hasher);
     let name = format!("{:016x}", hasher.finish());
-    Ok(stoat_log::workspace_state_dir()?.join(name))
+    state_dir.join(name)
 }
 
 /// Resolve the on-disk state file path for a specific workspace.
@@ -101,6 +112,57 @@ pub(crate) fn state_path_for(
 /// does not exist.
 pub(crate) fn list_workspace_files(git_root: &Path, fs: &dyn FsHost) -> io::Result<Vec<PathBuf>> {
     list_ron_files_by_mtime_desc(&workspace_dir_for(git_root, fs)?, fs)
+}
+
+/// Walk ancestors of `cwd` (cwd itself first) for any directory whose
+/// workspace state directory contains persisted `.ron` files, and return
+/// the ancestor whose newest file has the highest mtime across all
+/// candidates. Returns `None` when no ancestor has any persisted state.
+///
+/// Backs the binary's `--resume` flag: workspaces are tracked per anchor
+/// directory, and `--resume` cascades up so a session run from
+/// `~/foo/bar/baz/bang` reopens whichever ancestor's state is most
+/// recent. cwd-first iteration means a tie at the same mtime resolves
+/// to the deepest ancestor, which is the natural "most specific match"
+/// when multiple state files were saved at the same instant.
+pub fn find_resume_anchor(cwd: &Path, fs: &dyn FsHost) -> io::Result<Option<PathBuf>> {
+    let state_dir = stoat_log::workspace_state_dir()?;
+    find_resume_anchor_in(&state_dir, cwd, fs)
+}
+
+fn find_resume_anchor_in(
+    state_dir: &Path,
+    cwd: &Path,
+    fs: &dyn FsHost,
+) -> io::Result<Option<PathBuf>> {
+    let mut best: Option<(PathBuf, std::time::SystemTime)> = None;
+    for anc in cwd.ancestors() {
+        let dir = anchor_state_dir(state_dir, anc, fs);
+        if !fs.exists(&dir) {
+            continue;
+        }
+        let mut newest: Option<std::time::SystemTime> = None;
+        for entry in fs.list_dir(&dir)? {
+            let path = dir.join(entry.name.as_str());
+            if path.extension().and_then(|s| s.to_str()) != Some("ron") {
+                continue;
+            }
+            let mtime = fs
+                .metadata(&path)
+                .ok()
+                .flatten()
+                .map(|m| m.modified)
+                .unwrap_or(UNIX_EPOCH);
+            newest = Some(newest.map_or(mtime, |prev| prev.max(mtime)));
+        }
+        if let Some(mtime) = newest {
+            match &best {
+                Some((_, prev_mtime)) if *prev_mtime >= mtime => {},
+                _ => best = Some((anc.to_path_buf(), mtime)),
+            }
+        }
+    }
+    Ok(best.map(|(p, _)| p))
 }
 
 /// Underlying directory scan for [`list_workspace_files`]. Factored so tests
@@ -842,5 +904,80 @@ mod tests {
 
         let listed = list_ron_files_by_mtime_desc(&ws_dir, &fake).unwrap();
         assert_eq!(listed.len(), 2);
+    }
+
+    fn write_anchor_state(state_dir: &Path, anchor: &Path, fake: &FakeFs, name: &str) -> PathBuf {
+        let dir = anchor_state_dir(state_dir, anchor, fake);
+        let path = dir.join(name);
+        fake.insert_file(&path, "");
+        path
+    }
+
+    #[test]
+    fn find_resume_anchor_no_state_returns_none() {
+        let fake = FakeFs::new();
+        let state_dir = PathBuf::from("/state");
+        let cwd = PathBuf::from("/foo/bar/baz");
+        let result = find_resume_anchor_in(&state_dir, &cwd, &fake).unwrap();
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn find_resume_anchor_picks_only_ancestor_with_state() {
+        let fake = FakeFs::new();
+        let state_dir = PathBuf::from("/state");
+        let cwd = PathBuf::from("/foo/bar/baz");
+        let anchor = PathBuf::from("/foo");
+        write_anchor_state(&state_dir, &anchor, &fake, "ws.ron");
+        let result = find_resume_anchor_in(&state_dir, &cwd, &fake).unwrap();
+        assert_eq!(result, Some(anchor));
+    }
+
+    #[test]
+    fn find_resume_anchor_picks_cwd_when_only_cwd_has_state() {
+        let fake = FakeFs::new();
+        let state_dir = PathBuf::from("/state");
+        let cwd = PathBuf::from("/foo/bar/baz");
+        write_anchor_state(&state_dir, &cwd, &fake, "ws.ron");
+        let result = find_resume_anchor_in(&state_dir, &cwd, &fake).unwrap();
+        assert_eq!(result, Some(cwd));
+    }
+
+    #[test]
+    fn find_resume_anchor_prefers_more_recent_anchor() {
+        let fake = FakeFs::new();
+        let state_dir = PathBuf::from("/state");
+        let cwd = PathBuf::from("/foo/bar/baz");
+        write_anchor_state(&state_dir, &PathBuf::from("/foo"), &fake, "old.ron");
+        write_anchor_state(&state_dir, &cwd, &fake, "new.ron");
+        let result = find_resume_anchor_in(&state_dir, &cwd, &fake).unwrap();
+        assert_eq!(result, Some(cwd));
+    }
+
+    #[test]
+    fn find_resume_anchor_prefers_parent_when_parent_newer() {
+        let fake = FakeFs::new();
+        let state_dir = PathBuf::from("/state");
+        let cwd = PathBuf::from("/foo/bar/baz");
+        write_anchor_state(&state_dir, &cwd, &fake, "old.ron");
+        let parent = PathBuf::from("/foo");
+        write_anchor_state(&state_dir, &parent, &fake, "new.ron");
+        let result = find_resume_anchor_in(&state_dir, &cwd, &fake).unwrap();
+        assert_eq!(result, Some(parent));
+    }
+
+    #[test]
+    fn find_resume_anchor_skips_non_ron_files() {
+        let fake = FakeFs::new();
+        let state_dir = PathBuf::from("/state");
+        let cwd = PathBuf::from("/foo/bar");
+        let parent = PathBuf::from("/foo");
+        let parent_dir = anchor_state_dir(&state_dir, &parent, &fake);
+        fake.insert_file(parent_dir.join("notes.txt"), "");
+        let result = find_resume_anchor_in(&state_dir, &cwd, &fake).unwrap();
+        assert_eq!(
+            result, None,
+            "non-.ron files in an ancestor's state dir should be ignored"
+        );
     }
 }
