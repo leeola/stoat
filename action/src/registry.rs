@@ -13,8 +13,9 @@ use crate::{
         editor::{
             AddSelectionAbove, AddSelectionBelow, AlignSelections, AlignViewBottom,
             AlignViewCenter, AlignViewTop, CollapseSelection, Decrement, DeleteSelection,
-            ExpandSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd, ExtendNextWordStart,
-            ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight, ExtendToFileStart,
+            ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendLeft,
+            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
+            ExtendRight, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
             ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
             FindPrevChar, FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace,
             GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange,
@@ -247,6 +248,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
     add(TillPrevChar::DEF, |_| Ok(Box::new(TillPrevChar)));
+    add(ExtendFindNextChar::DEF, |_| {
+        Ok(Box::new(ExtendFindNextChar))
+    });
+    add(ExtendFindPrevChar::DEF, |_| {
+        Ok(Box::new(ExtendFindPrevChar))
+    });
+    add(ExtendTillNextChar::DEF, |_| {
+        Ok(Box::new(ExtendTillNextChar))
+    });
+    add(ExtendTillPrevChar::DEF, |_| {
+        Ok(Box::new(ExtendTillPrevChar))
+    });
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -674,7 +687,8 @@ mod tests {
         // + 1 GotoColumn.
         // + 2 GotoNextParagraph/GotoPrevParagraph.
         // + 1 MatchBrackets.
-        assert_eq!(all().count(), 192);
+        // + 4 ExtendFindNextChar/ExtendFindPrevChar/ExtendTillNextChar/ExtendTillPrevChar.
+        assert_eq!(all().count(), 196);
     }
 
     #[test]

@@ -461,6 +461,46 @@ define_action!(
 );
 
 define_action!(
+    ExtendFindNextCharDef,
+    ExtendFindNextChar,
+    "ExtendFindNextChar",
+    ActionKind::ExtendFindNextChar,
+    "extend to next char on line",
+    "Like `FindNextChar` but extends the primary selection rather than collapsing it. The selection's tail stays put while the head moves to the matched char.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendFindPrevCharDef,
+    ExtendFindPrevChar,
+    "ExtendFindPrevChar",
+    ActionKind::ExtendFindPrevChar,
+    "extend to previous char on line",
+    "Like `FindPrevChar` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendTillNextCharDef,
+    ExtendTillNextChar,
+    "ExtendTillNextChar",
+    ActionKind::ExtendTillNextChar,
+    "extend till next char on line",
+    "Like `TillNextChar` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendTillPrevCharDef,
+    ExtendTillPrevChar,
+    "ExtendTillPrevChar",
+    ActionKind::ExtendTillPrevChar,
+    "extend till previous char on line",
+    "Like `TillPrevChar` but extends the primary selection rather than collapsing it.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

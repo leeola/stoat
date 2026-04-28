@@ -223,13 +223,29 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SaveSelection => movement::save_selection(stoat),
         ActionKind::JumpBackward => movement::jump_backward(stoat),
         ActionKind::JumpForward => movement::jump_forward(stoat),
-        ActionKind::FindNextChar => movement::set_pending_find(stoat, movement::FindKind::NextChar),
-        ActionKind::FindPrevChar => movement::set_pending_find(stoat, movement::FindKind::PrevChar),
+        ActionKind::FindNextChar => {
+            movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
+        },
+        ActionKind::FindPrevChar => {
+            movement::set_pending_find(stoat, movement::FindKind::PrevChar, false)
+        },
         ActionKind::TillNextChar => {
-            movement::set_pending_find(stoat, movement::FindKind::TillNextChar)
+            movement::set_pending_find(stoat, movement::FindKind::TillNextChar, false)
         },
         ActionKind::TillPrevChar => {
-            movement::set_pending_find(stoat, movement::FindKind::TillPrevChar)
+            movement::set_pending_find(stoat, movement::FindKind::TillPrevChar, false)
+        },
+        ActionKind::ExtendFindNextChar => {
+            movement::set_pending_find(stoat, movement::FindKind::NextChar, true)
+        },
+        ActionKind::ExtendFindPrevChar => {
+            movement::set_pending_find(stoat, movement::FindKind::PrevChar, true)
+        },
+        ActionKind::ExtendTillNextChar => {
+            movement::set_pending_find(stoat, movement::FindKind::TillNextChar, true)
+        },
+        ActionKind::ExtendTillPrevChar => {
+            movement::set_pending_find(stoat, movement::FindKind::TillPrevChar, true)
         },
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => movement::goto_window(stoat, movement::WindowAlign::Top),

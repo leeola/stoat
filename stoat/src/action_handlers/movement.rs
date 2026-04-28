@@ -1495,8 +1495,8 @@ pub(crate) enum FindKind {
     TillPrevChar,
 }
 
-pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind) -> UpdateEffect {
-    stoat.pending_find = Some(kind);
+pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind, extend: bool) -> UpdateEffect {
+    stoat.pending_find = Some((kind, extend));
     UpdateEffect::Redraw
 }
 
@@ -1504,10 +1504,16 @@ pub(super) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
     let Some((kind, ch)) = stoat.last_find else {
         return UpdateEffect::None;
     };
-    execute_find(stoat, kind, ch)
+    let extend = stoat.mode == "select";
+    execute_find(stoat, kind, ch, extend)
 }
 
-pub(crate) fn execute_find(stoat: &mut Stoat, kind: FindKind, ch: char) -> UpdateEffect {
+pub(crate) fn execute_find(
+    stoat: &mut Stoat,
+    kind: FindKind,
+    ch: char,
+    extend: bool,
+) -> UpdateEffect {
     stoat.last_find = Some((kind, ch));
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
@@ -1586,7 +1592,16 @@ pub(crate) fn execute_find(stoat: &mut Stoat, kind: FindKind, ch: char) -> Updat
         },
     };
 
-    apply_primary_range(editor, target..target);
+    if extend {
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let new_head = new_buf.anchor_at(target, Bias::Right);
+        editor.selections.transform(new_buf, |sel| {
+            extend_head(sel, new_head, target, sel.goal, new_buf)
+        });
+    } else {
+        apply_primary_range(editor, target..target);
+    }
     UpdateEffect::Redraw
 }
 

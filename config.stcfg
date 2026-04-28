@@ -250,6 +250,11 @@ on key {
         w -> ExtendNextWordStart();
         e -> ExtendNextWordEnd();
         b -> ExtendPrevWordStart();
+        f -> ExtendFindNextChar();
+        F -> ExtendFindPrevChar();
+        t -> ExtendTillNextChar();
+        T -> ExtendTillPrevChar();
+        Alt-. -> RepeatLastMotion();
         Home -> ExtendToLineStart();
         0 -> ExtendToLineStart();
         End -> ExtendToLineEnd();

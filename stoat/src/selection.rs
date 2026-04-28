@@ -1320,6 +1320,81 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_f_extends_forward_to_target_char() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        h.type_keys("f e");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!((start, end, reversed), (0, 4, false));
+    }
+
+    #[test]
+    fn select_mode_capital_f_extends_backward() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("4 l v");
+        h.type_keys("F b");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!((start, end, reversed), (1, 4, true));
+    }
+
+    #[test]
+    fn select_mode_t_extends_till_next_char() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        h.type_keys("t e");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!((start, end, reversed), (0, 3, false));
+    }
+
+    #[test]
+    fn select_mode_capital_t_extends_till_prev_char() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("4 l v");
+        h.type_keys("T b");
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert_eq!((start, end, reversed), (2, 4, true));
+    }
+
+    #[test]
+    fn normal_mode_f_still_collapses_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "abcdef\n");
+        h.open_file(&path);
+        h.type_keys("f e");
+        let (start, end, _) = h.selection_spans()[0];
+        assert_eq!(
+            (start, end),
+            (4, 4),
+            "normal-mode find collapses to cursor at the 'e'"
+        );
+    }
+
+    #[test]
+    fn repeat_last_motion_extends_in_select_mode() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "ababab\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        h.type_keys("f a");
+        let after_first = h.selection_spans()[0];
+        h.type_keys("Alt-.");
+        let after_repeat = h.selection_spans()[0];
+        assert!(
+            after_repeat.1 > after_first.1,
+            "Alt-. should extend further forward, got {after_first:?} -> {after_repeat:?}"
+        );
+        assert_eq!(after_repeat.0, 0, "tail still anchored at the start");
+    }
+
+    #[test]
     fn switch_case_empty_selection_is_noop() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");
