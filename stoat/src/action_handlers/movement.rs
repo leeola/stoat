@@ -1028,6 +1028,108 @@ where
     UpdateEffect::Redraw
 }
 
+pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let Some(language) = ws.buffers.language_for(buffer_id) else {
+        return UpdateEffect::None;
+    };
+    let Some(prefix) = language.line_comment else {
+        return UpdateEffect::None;
+    };
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    let mut rows: Vec<u32> = Vec::new();
+    for sel in editor.selections.all_anchors() {
+        let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+        let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+        let start_row = rope.offset_to_point(start_offset).row;
+        let end_point = rope.offset_to_point(end_offset);
+        let end_row = if end_offset > start_offset && end_point.column == 0 {
+            end_point.row.saturating_sub(1)
+        } else {
+            end_point.row
+        };
+        for row in start_row..=end_row {
+            rows.push(row);
+        }
+    }
+    rows.sort_unstable();
+    rows.dedup();
+
+    let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(rows.len());
+    for row in rows {
+        let line_start = rope.point_to_offset(Point::new(row, 0));
+        let line_len = rope.line_len(row) as usize;
+        let line_end = line_start + line_len;
+        let mut content_start = line_start;
+        for ch in rope.chars_at(line_start) {
+            if content_start >= line_end {
+                break;
+            }
+            if !ch.is_whitespace() {
+                break;
+            }
+            content_start += ch.len_utf8();
+        }
+        if content_start >= line_end {
+            continue;
+        }
+
+        let after_prefix = content_start + prefix.len();
+        let prefix_matches = after_prefix <= line_end
+            && rope
+                .chars_at(content_start)
+                .take(prefix.chars().count())
+                .collect::<String>()
+                == prefix;
+
+        if prefix_matches {
+            let next_char_offset = after_prefix;
+            let next_char = rope.chars_at(next_char_offset).next();
+            let drop_trailing_space = matches!(next_char, Some(' '));
+            let remove_end = if drop_trailing_space {
+                next_char_offset + 1
+            } else {
+                next_char_offset
+            };
+            edits.push((content_start, remove_end, String::new()));
+        } else {
+            edits.push((content_start, content_start, format!("{prefix} ")));
+        }
+    }
+
+    if edits.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    edits.sort_by_key(|(start, _, _)| *start);
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (start, end, replacement) in edits.iter().rev() {
+            guard.edit(*start..*end, replacement);
+        }
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+    editor.selections.transform(new_buf, |sel| sel.clone());
+    UpdateEffect::Redraw
+}
+
 pub(super) fn indent_selection(stoat: &mut Stoat) -> UpdateEffect {
     apply_line_indent(stoat, IndentDir::In)
 }

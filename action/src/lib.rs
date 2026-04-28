@@ -34,7 +34,7 @@ pub use defs::{
         PageUp, Redo, RepeatLastMotion, RotateSelectionsBackward, RotateSelectionsForward,
         SaveSelection, ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SelectNextSibling,
         SelectPrevSibling, ShrinkSelection, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-        TillNextChar, TillPrevChar, TrimSelections, Undo, UnindentSelection,
+        TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
     },
     file::OpenFile,
     file_finder::{

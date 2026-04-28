@@ -111,6 +111,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleCommentsDef,
+    ToggleComments,
+    "ToggleComments",
+    ActionKind::ToggleComments,
+    "toggle line comments",
+    "Toggle the line-comment prefix on every line touched by any selection. The prefix is the language's `line_comment` (e.g. `//` for rust, `#` for toml); buffers whose language has none are a no-op. Each line decides independently: if its first non-whitespace run is the prefix (followed by a space or end-of-content), the prefix and one trailing space are removed; otherwise the prefix and a single space are inserted at the first non-whitespace position. Empty / whitespace-only lines are skipped.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

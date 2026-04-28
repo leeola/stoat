@@ -105,6 +105,7 @@ pub enum ActionKind {
     Redo,
     IndentSelection,
     UnindentSelection,
+    ToggleComments,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

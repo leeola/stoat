@@ -30,7 +30,8 @@ use crate::{
             RepeatLastMotion, RotateSelectionsBackward, RotateSelectionsForward, SaveSelection,
             ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
             ShrinkSelection, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TillNextChar, TillPrevChar, TrimSelections, Undo, UnindentSelection,
+            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,
+            UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -318,6 +319,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Redo::DEF, |_| Ok(Box::new(Redo)));
     add(IndentSelection::DEF, |_| Ok(Box::new(IndentSelection)));
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
+    add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -712,7 +714,8 @@ mod tests {
         // + 1 ExtendGotoColumn.
         // + 6 ExtendGoto{FirstNonwhitespace,FileStart,LastLine,WindowTop,WindowCenter,
         //   WindowBottom}.
-        assert_eq!(all().count(), 203);
+        // + 1 ToggleComments.
+        assert_eq!(all().count(), 204);
     }
 
     #[test]

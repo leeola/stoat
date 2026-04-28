@@ -36,6 +36,11 @@ pub struct Language {
     /// `@end` markers for grammar-driven auto-indentation. Loaded but
     /// not yet wired.
     pub indent_query: Option<Query>,
+    /// Line-comment marker for languages that have one (e.g. `"//"`
+    /// for rust, `"#"` for toml). `None` for languages without line
+    /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
+    /// action to insert / remove the prefix on each line.
+    pub line_comment: Option<&'static str>,
 }
 
 impl Language {
@@ -118,6 +123,7 @@ impl LanguageRegistry {
 struct AuxQuerySources {
     brackets: Option<&'static str>,
     indents: Option<&'static str>,
+    line_comment: Option<&'static str>,
 }
 
 fn make_language(
@@ -157,6 +163,7 @@ fn make_language_with_injections(
         injection_query,
         bracket_query,
         indent_query,
+        line_comment: aux.line_comment,
     }
 }
 
@@ -209,6 +216,7 @@ fn make_rust() -> Language {
             indents: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/rust/indents.scm"
             )),
+            line_comment: Some("//"),
         },
     )
 }
@@ -226,6 +234,7 @@ fn make_json() -> Language {
             indents: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/json/indents.scm"
             )),
+            line_comment: None,
         },
     )
 }
@@ -236,7 +245,10 @@ fn make_toml() -> Language {
         &["toml"],
         grammar::toml(),
         include_str!("../../vendor/helix/runtime/queries/toml/highlights.scm"),
-        AuxQuerySources::default(),
+        AuxQuerySources {
+            line_comment: Some("#"),
+            ..Default::default()
+        },
     )
 }
 
@@ -254,6 +266,7 @@ fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language
             indents: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/markdown/indents.scm"
             )),
+            line_comment: None,
         },
     )
 }

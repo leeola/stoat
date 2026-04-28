@@ -1575,6 +1575,89 @@ mod tests {
     }
 
     #[test]
+    fn toggle_comments_rust_single_line_inserts_prefix() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "let x = 42;\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(focused_buffer_text(&mut h), "// let x = 42;\n");
+    }
+
+    #[test]
+    fn toggle_comments_rust_round_trip() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "let x = 42;\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(focused_buffer_text(&mut h), "let x = 42;\n");
+    }
+
+    #[test]
+    fn toggle_comments_rust_multi_line_selection() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {\n    let x = 42;\n}\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "// fn main() {\n    // let x = 42;\n// }\n",
+            "prefix added at first non-whitespace on each line"
+        );
+    }
+
+    #[test]
+    fn toggle_comments_rust_skips_whitespace_only_lines() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "abc\n   \nxyz\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "// abc\n   \n// xyz\n",
+            "blank line in the middle stays uncommented"
+        );
+    }
+
+    #[test]
+    fn toggle_comments_rust_independent_per_line_when_mixed() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "// abc\nxyz\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "abc\n// xyz\n",
+            "each line toggles independently"
+        );
+    }
+
+    #[test]
+    fn toggle_comments_toml_uses_hash() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.toml", "key = 1\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(focused_buffer_text(&mut h), "# key = 1\n");
+    }
+
+    #[test]
+    fn toggle_comments_json_no_op() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.json", "{}\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "{}\n",
+            "json has no line_comment, action no-ops"
+        );
+    }
+
+    #[test]
     fn indent_selection_inserts_tab_at_cursor_line() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\n");
