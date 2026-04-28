@@ -9,6 +9,12 @@ pub use protocol::{ToMain, ToViewport};
 pub use socket_path::socket_path;
 
 #[cfg(test)]
+// `tokio::spawn` calls in this module run a second concurrent task under
+// the `#[tokio::test]` runtime so a client and a listener (or a writer
+// and a reader) can drive each other. They are not bypassing a stoat
+// `Executor` -- the `viewport` crate is self-contained and has no host
+// bundle to thread one through. Sequential `await`s would deadlock
+// because the producer and consumer sides need to run together.
 mod tests {
     use crate::{
         protocol::{ToMain, ToMainCodec, ToViewport, ToViewportCodec},
