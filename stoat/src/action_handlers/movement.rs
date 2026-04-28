@@ -1544,7 +1544,11 @@ pub(super) enum NodeBound {
     End,
 }
 
-pub(super) fn move_to_parent_bound(stoat: &mut Stoat, bound: NodeBound) -> UpdateEffect {
+pub(super) fn move_to_parent_bound(
+    stoat: &mut Stoat,
+    bound: NodeBound,
+    extend: bool,
+) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1584,7 +1588,16 @@ pub(super) fn move_to_parent_bound(stoat: &mut Stoat, bound: NodeBound) -> Updat
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
-    apply_primary_range(editor, target_offset..target_offset);
+    if extend {
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let new_head = new_buf.anchor_at(target_offset, Bias::Right);
+        editor.selections.transform(new_buf, |sel| {
+            extend_head(sel, new_head, target_offset, sel.goal, new_buf)
+        });
+    } else {
+        apply_primary_range(editor, target_offset..target_offset);
+    }
     UpdateEffect::Redraw
 }
 

@@ -16,22 +16,22 @@ use crate::{
             ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
             ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
             ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
-            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
-            ExtendRight, ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart,
-            ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar,
-            FindPrevChar, FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace,
-            GotoLastLine, GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange,
-            GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
-            GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment, IndentSelection,
-            JumpBackward, JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
-            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
-            MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo,
-            RepeatLastMotion, RotateSelectionsBackward, RotateSelectionsForward, SaveSelection,
-            ScrollDown, ScrollUp, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
-            ShrinkSelection, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,
-            UnindentSelection,
+            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
+            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
+            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
+            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
+            FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
+            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoNextChange, GotoNextParagraph,
+            GotoPrevChange, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
+            HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward, JumpForward,
+            KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
+            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
+            MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Redo, RepeatLastMotion,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
+            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
+            SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -244,6 +244,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(MoveParentNodeStart))
     });
     add(MoveParentNodeEnd::DEF, |_| Ok(Box::new(MoveParentNodeEnd)));
+    add(ExtendMoveParentNodeStart::DEF, |_| {
+        Ok(Box::new(ExtendMoveParentNodeStart))
+    });
+    add(ExtendMoveParentNodeEnd::DEF, |_| {
+        Ok(Box::new(ExtendMoveParentNodeEnd))
+    });
     add(SaveSelection::DEF, |_| Ok(Box::new(SaveSelection)));
     add(JumpBackward::DEF, |_| Ok(Box::new(JumpBackward)));
     add(JumpForward::DEF, |_| Ok(Box::new(JumpForward)));
@@ -715,7 +721,8 @@ mod tests {
         // + 6 ExtendGoto{FirstNonwhitespace,FileStart,LastLine,WindowTop,WindowCenter,
         //   WindowBottom}.
         // + 1 ToggleComments.
-        assert_eq!(all().count(), 204);
+        // + 2 ExtendMoveParentNodeStart/ExtendMoveParentNodeEnd.
+        assert_eq!(all().count(), 206);
     }
 
     #[test]

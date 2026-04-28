@@ -1378,6 +1378,53 @@ mod tests {
     }
 
     #[test]
+    fn select_mode_alt_b_extends_to_parent_node_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() { let x = 1; }\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l l l l l l l l v");
+        let before_offset = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendMoveParentNodeStart);
+        let head_after = h.primary_head_offset();
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert!(
+            head_after < before_offset,
+            "head should have moved earlier in the buffer"
+        );
+        assert!(reversed, "head ahead of tail means selection is reversed");
+        assert!(end > start, "selection has non-empty range");
+    }
+
+    #[test]
+    fn select_mode_alt_e_extends_to_parent_node_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() { let x = 1; }\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l l l l l l l l v");
+        let before_offset = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExtendMoveParentNodeEnd);
+        let head_after = h.primary_head_offset();
+        let (start, end, reversed) = h.selection_spans()[0];
+        assert!(
+            head_after > before_offset,
+            "head should have moved forward in the buffer"
+        );
+        assert!(!reversed, "head ahead of tail means selection is forward");
+        assert!(end > start, "selection has non-empty range");
+    }
+
+    #[test]
+    fn normal_mode_alt_b_still_collapses() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() { let x = 1; }\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l l l l l l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::MoveParentNodeStart);
+        let (start, end, _) = h.selection_spans()[0];
+        assert_eq!(start, end, "normal-mode parent jump collapses to cursor");
+    }
+
+    #[test]
     fn select_mode_g_pipe_extends_to_column() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abcdefgh\n");

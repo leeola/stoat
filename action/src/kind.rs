@@ -54,6 +54,8 @@ pub enum ActionKind {
     SelectPrevSibling,
     MoveParentNodeStart,
     MoveParentNodeEnd,
+    ExtendMoveParentNodeStart,
+    ExtendMoveParentNodeEnd,
     SaveSelection,
     JumpBackward,
     JumpForward,

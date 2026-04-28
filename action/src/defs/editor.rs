@@ -401,6 +401,26 @@ define_action!(
 );
 
 define_action!(
+    ExtendMoveParentNodeStartDef,
+    ExtendMoveParentNodeStart,
+    "ExtendMoveParentNodeStart",
+    ActionKind::ExtendMoveParentNodeStart,
+    "extend to parent node start",
+    "Like `MoveParentNodeStart` but extends the primary selection rather than collapsing it. The selection's tail stays put while the head moves to the parent node's start byte.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ExtendMoveParentNodeEndDef,
+    ExtendMoveParentNodeEnd,
+    "ExtendMoveParentNodeEnd",
+    ActionKind::ExtendMoveParentNodeEnd,
+    "extend to parent node end",
+    "Like `MoveParentNodeEnd` but extends the primary selection rather than collapsing it. The selection's tail stays put while the head moves to the parent node's end byte.",
+    ActionPriority::Rare
+);
+
+define_action!(
     SaveSelectionDef,
     SaveSelection,
     "SaveSelection",
