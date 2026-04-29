@@ -1191,6 +1191,45 @@ mod tests {
         );
     }
 
+    #[test]
+    fn count_prefix_scroll_down_advances_n_rows() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        let scroll_before = h.editor_scroll_rows()[0];
+        h.type_keys("3 z j");
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before + 3);
+    }
+
+    #[test]
+    fn count_prefix_scroll_up_walks_back_n_rows() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("ctrl-f");
+        let scroll_before = h.editor_scroll_rows()[0];
+        assert!(scroll_before >= 3);
+        h.type_keys("3 z k");
+        assert_eq!(h.editor_scroll_rows()[0], scroll_before - 3);
+    }
+
+    #[test]
+    fn count_prefix_scroll_down_clamps_at_max_scroll() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", &page_scratch_content());
+        h.open_file(&path);
+        h.type_keys("9 9 z j");
+        let scroll = h.editor_scroll_rows()[0];
+        let saturating = h.editor_scroll_rows()[0];
+        h.type_keys("z j");
+        assert_eq!(
+            h.editor_scroll_rows()[0],
+            saturating,
+            "scroll_row should be at max_scroll after huge count; further scroll-down is a no-op (got {scroll} -> {})",
+            h.editor_scroll_rows()[0]
+        );
+    }
+
     fn focused_buffer_text(h: &mut crate::test_harness::TestHarness) -> String {
         let ws = h.stoat.active_workspace();
         let focused = ws.panes.focus();

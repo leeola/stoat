@@ -2293,6 +2293,7 @@ pub(super) enum ScrollDir {
 }
 
 pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -2304,8 +2305,8 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
     let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
 
     let new_scroll = match dir {
-        ScrollDir::Up => editor.scroll_row.saturating_sub(1),
-        ScrollDir::Down => editor.scroll_row.saturating_add(1).min(max_scroll),
+        ScrollDir::Up => editor.scroll_row.saturating_sub(count),
+        ScrollDir::Down => editor.scroll_row.saturating_add(count).min(max_scroll),
     };
     if new_scroll == editor.scroll_row {
         return UpdateEffect::None;
