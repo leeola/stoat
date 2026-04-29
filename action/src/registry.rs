@@ -71,8 +71,10 @@ use crate::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace,
         },
     },
+    param::{MissingSnafu, WrongKindSnafu},
     Action, ActionDef, ParamError, ParamKind, ParamValue,
 };
+use snafu::OptionExt;
 use std::{collections::HashMap, path::PathBuf, sync::OnceLock};
 
 pub type CreateFn = fn(&[ParamValue]) -> Result<Box<dyn Action>, ParamError>;
@@ -153,17 +155,17 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenReviewCommit::DEF, |params| {
         let workdir = params
             .first()
-            .ok_or(ParamError::Missing("workdir"))?
+            .context(MissingSnafu { name: "workdir" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "workdir",
                 expected: ParamKind::String,
             })?;
         let sha = params
             .get(1)
-            .ok_or(ParamError::Missing("sha"))?
+            .context(MissingSnafu { name: "sha" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "sha",
                 expected: ParamKind::String,
             })?;
@@ -175,25 +177,25 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenReviewCommitRange::DEF, |params| {
         let workdir = params
             .first()
-            .ok_or(ParamError::Missing("workdir"))?
+            .context(MissingSnafu { name: "workdir" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "workdir",
                 expected: ParamKind::String,
             })?;
         let from = params
             .get(1)
-            .ok_or(ParamError::Missing("from"))?
+            .context(MissingSnafu { name: "from" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "from",
                 expected: ParamKind::String,
             })?;
         let to = params
             .get(2)
-            .ok_or(ParamError::Missing("to"))?
+            .context(MissingSnafu { name: "to" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "to",
                 expected: ParamKind::String,
             })?;
@@ -361,9 +363,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenFile::DEF, |params| {
         let raw = params
             .first()
-            .ok_or(ParamError::Missing("path"))?
+            .context(MissingSnafu { name: "path" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "path",
                 expected: ParamKind::String,
             })?;
@@ -436,9 +438,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Run::DEF, |params| {
         let raw = params
             .first()
-            .ok_or(ParamError::Missing("command"))?
+            .context(MissingSnafu { name: "command" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "command",
                 expected: ParamKind::String,
             })?;
@@ -449,9 +451,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Dump::DEF, |params| {
         let raw = params
             .first()
-            .ok_or(ParamError::Missing("name"))?
+            .context(MissingSnafu { name: "name" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "name",
                 expected: ParamKind::String,
             })?;
@@ -466,9 +468,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RenameWorkspace::DEF, |params| {
         let raw = params
             .first()
-            .ok_or(ParamError::Missing("name"))?
+            .context(MissingSnafu { name: "name" })?
             .as_string()
-            .ok_or(ParamError::WrongKind {
+            .context(WrongKindSnafu {
                 name: "name",
                 expected: ParamKind::String,
             })?;
@@ -668,20 +670,24 @@ mod tests {
     #[test]
     fn open_file_factory_missing_param_errors() {
         let entry = lookup("OpenFile").expect("OpenFile");
-        assert_eq!((entry.create)(&[]).err(), Some(ParamError::Missing("path")));
+        assert!(matches!(
+            (entry.create)(&[]).err(),
+            Some(ParamError::Missing { name: "path", .. })
+        ));
     }
 
     #[test]
     fn open_file_factory_wrong_kind_errors() {
         let entry = lookup("OpenFile").expect("OpenFile");
         let err = (entry.create)(&[ParamValue::Number(1.0)]).err();
-        assert_eq!(
+        assert!(matches!(
             err,
             Some(ParamError::WrongKind {
                 name: "path",
                 expected: ParamKind::String,
+                ..
             })
-        );
+        ));
     }
 
     #[test]

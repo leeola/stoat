@@ -1,3 +1,4 @@
+use snafu::{OptionExt, Snafu};
 use std::fmt;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -39,8 +40,9 @@ impl ParamValue {
             ParamKind::Number => {
                 input
                     .parse::<f64>()
+                    .ok()
                     .map(ParamValue::Number)
-                    .map_err(|_| ParamError::ParseFailure {
+                    .context(ParseFailureSnafu {
                         expected: ParamKind::Number,
                         input: input.to_string(),
                     })
@@ -48,10 +50,11 @@ impl ParamValue {
             ParamKind::Bool => match input.to_ascii_lowercase().as_str() {
                 "true" | "yes" | "1" | "on" => Ok(ParamValue::Bool(true)),
                 "false" | "no" | "0" | "off" => Ok(ParamValue::Bool(false)),
-                _ => Err(ParamError::ParseFailure {
+                _ => ParseFailureSnafu {
                     expected: ParamKind::Bool,
                     input: input.to_string(),
-                }),
+                }
+                .fail(),
             },
         }
     }
@@ -78,34 +81,30 @@ impl ParamValue {
     }
 }
 
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Snafu)]
+#[snafu(visibility(pub))]
 pub enum ParamError {
-    Missing(&'static str),
+    #[snafu(display("missing required parameter `{name}`"))]
+    Missing {
+        name: &'static str,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("parameter `{name}` expects {expected}"))]
     WrongKind {
         name: &'static str,
         expected: ParamKind,
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
+    #[snafu(display("cannot parse `{input}` as {expected}"))]
     ParseFailure {
         expected: ParamKind,
         input: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
     },
 }
-
-impl fmt::Display for ParamError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ParamError::Missing(name) => write!(f, "missing required parameter `{name}`"),
-            ParamError::WrongKind { name, expected } => {
-                write!(f, "parameter `{name}` expects {expected}")
-            },
-            ParamError::ParseFailure { expected, input } => {
-                write!(f, "cannot parse `{input}` as {expected}")
-            },
-        }
-    }
-}
-
-impl std::error::Error for ParamError {}
 
 #[cfg(test)]
 mod tests {

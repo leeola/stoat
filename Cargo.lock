@@ -2151,6 +2151,9 @@ dependencies = [
 [[package]]
 name = "stoat_action"
 version = "0.1.0"
+dependencies = [
+ "snafu",
+]
 
 [[package]]
 name = "stoat_agent_claude_code"
