@@ -9,7 +9,7 @@ use crate::{
     help::Help,
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
-        EnvHost, FsHost, GitHost, LocalEnv, LocalFs, LocalGit,
+        EnvHost, FsHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopLsp,
     },
     keymap::{Keymap, ResolvedAction},
     keymap_state::{normalize_shift_letter, resolve_action, StoatKeymapState},
@@ -100,6 +100,11 @@ pub struct Stoat {
     /// Environment-variable lookups go through this trait so tests can
     /// install [`crate::host::FakeEnv`] without leaking real env state.
     pub(crate) env_host: Arc<dyn EnvHost>,
+    /// Language-server requests route through this trait. Defaults to
+    /// [`NoopLsp`] (every method returns the empty success response)
+    /// until a real `LocalLsp` is wired in; tests install
+    /// [`crate::host::FakeLsp`] to drive end-to-end LSP scenarios.
+    pub(crate) lsp_host: Arc<dyn LspHost>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -218,6 +223,7 @@ impl Stoat {
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
+            lsp_host: Arc::new(NoopLsp),
         }
     }
 
@@ -245,6 +251,19 @@ impl Stoat {
     /// Returns the active [`EnvHost`].
     pub fn env_host(&self) -> &Arc<dyn EnvHost> {
         &self.env_host
+    }
+
+    /// Swap in an alternative [`LspHost`]. The default is [`NoopLsp`]
+    /// (every request returns the empty success response); the test
+    /// harness installs [`crate::host::FakeLsp`] so LSP-driven flows
+    /// run against programmed responses.
+    pub fn set_lsp_host(&mut self, host: Arc<dyn LspHost>) {
+        self.lsp_host = host;
+    }
+
+    /// Returns the active [`LspHost`].
+    pub fn lsp_host(&self) -> &Arc<dyn LspHost> {
+        &self.lsp_host
     }
 
     pub fn active_workspace(&self) -> &Workspace {
