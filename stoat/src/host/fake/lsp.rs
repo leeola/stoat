@@ -5,17 +5,17 @@ use lsp_types::{
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
-    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
-    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
-    Location, MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams,
-    Position, PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext,
-    ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams, ServerCapabilities,
-    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FormattingOptions,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
+    MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams, Position,
+    PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
+    RenameParams, SelectionRange, SelectionRangeParams, ServerCapabilities, SignatureHelp,
+    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri,
+    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -128,6 +128,24 @@ pub fn selection_range_params(path: &str, positions: &[(u32, u32)]) -> Selection
     }
 }
 
+pub fn range_formatting_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> DocumentRangeFormattingParams {
+    DocumentRangeFormattingParams {
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+        options: FormattingOptions::default(),
+        work_done_progress_params: wdp(),
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -206,6 +224,7 @@ struct FakeLspState {
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
     folding_ranges: BTreeMap<Uri, Vec<FoldingRange>>,
     selection_ranges: BTreeMap<LspKey, SelectionRange>,
+    range_formatting: BTreeMap<Uri, Vec<TextEdit>>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -239,6 +258,7 @@ impl FakeLsp {
                 workspace_symbols: BTreeMap::new(),
                 folding_ranges: BTreeMap::new(),
                 selection_ranges: BTreeMap::new(),
+                range_formatting: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -302,6 +322,20 @@ impl FakeLsp {
             .unwrap()
             .selection_ranges
             .insert(LspKey::new(path, line, col), range);
+    }
+
+    /// Programs the [`TextEdit`]s returned for a
+    /// `textDocument/rangeFormatting` call against `path`. The
+    /// fake ignores the request's range and returns whatever was
+    /// programmed for the document; tests arrange edits and the
+    /// requested range to match. Replaces any previously seeded
+    /// edits for the same document.
+    pub fn set_range_formatting(&self, path: &str, edits: Vec<TextEdit>) {
+        self.state
+            .lock()
+            .unwrap()
+            .range_formatting
+            .insert(file_uri(path), edits);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -1042,6 +1076,20 @@ impl LspHost for FakeLsp {
         Ok(None)
     }
 
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> io::Result<Option<Vec<TextEdit>>> {
+        if let Some(err) = self.take_request_failure("textDocument/rangeFormatting") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .range_formatting
+            .get(&params.text_document.uri)
+            .cloned())
+    }
+
     async fn recv_notification(&self) -> Option<LspNotification> {
         self.notif_rx.lock().await.recv().await
     }
@@ -1413,6 +1461,37 @@ mod tests {
 
             let miss = lsp
                 .selection_range(selection_range_params("/src/other.rs", &[(0, 0)]))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn range_formatting_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let edits = vec![
+                TextEdit {
+                    range: Range::new(Position::new(2, 0), Position::new(2, 4)),
+                    new_text: "    ".to_string(),
+                },
+                TextEdit {
+                    range: Range::new(Position::new(3, 8), Position::new(3, 8)),
+                    new_text: ";".to_string(),
+                },
+            ];
+            lsp.set_range_formatting("/src/main.rs", edits.clone());
+
+            let result = lsp
+                .range_formatting(range_formatting_params("/src/main.rs", 2, 0, 4, 0))
+                .await
+                .unwrap()
+                .expect("should have edits");
+            assert_eq!(result, edits);
+
+            let miss = lsp
+                .range_formatting(range_formatting_params("/src/other.rs", 0, 0, 1, 0))
                 .await
                 .unwrap();
             assert!(miss.is_none(), "unprogrammed documents return None");

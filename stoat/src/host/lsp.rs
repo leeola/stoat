@@ -4,14 +4,15 @@ use lsp_types::{
     ColorProviderCapability, CompletionItem, CompletionParams, CompletionResponse,
     DeclarationCapability, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
-    DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
-    FoldingRange, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverParams, HoverProviderCapability, ImplementationProviderCapability, InitializeResult,
-    InlayHint, InlayHintParams, InlayHintServerCapabilities, Location, MessageType, OneOf,
-    PrepareRenameResponse, ProgressToken, ReferenceParams, RenameParams, SelectionRange,
-    SelectionRangeParams, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability, Uri, WorkDoneProgress,
-    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    DocumentHighlight, DocumentHighlightParams, DocumentRangeFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
+    InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
+    ProgressToken, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
+    ServerCapabilities, SignatureHelp, SignatureHelpParams, TextDocumentPositionParams, TextEdit,
+    TypeDefinitionProviderCapability, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     io,
@@ -287,6 +288,10 @@ pub trait LspHost: Send + Sync {
         &self,
         params: DocumentFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>>;
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> io::Result<Option<Vec<TextEdit>>>;
 
     // Server-pushed notifications
 
@@ -468,6 +473,13 @@ impl LspHost for NoopLsp {
     async fn formatting(
         &self,
         _params: DocumentFormattingParams,
+    ) -> io::Result<Option<Vec<TextEdit>>> {
+        Ok(None)
+    }
+
+    async fn range_formatting(
+        &self,
+        _params: DocumentRangeFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>> {
         Ok(None)
     }
