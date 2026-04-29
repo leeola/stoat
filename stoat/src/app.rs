@@ -82,8 +82,10 @@ pub struct Stoat {
     pub(crate) pending_count: Option<u32>,
     /// Pending Vim-style find-char prefix (`f`/`F`/`t`/`T`). When
     /// Some, the next printable char keypress runs the matching
-    /// find on the focused editor and clears this field.
-    pub(crate) pending_find: Option<(action_handlers::movement::FindKind, bool)>,
+    /// find on the focused editor and clears this field. The
+    /// trailing `u32` is the count captured from `pending_count`
+    /// at the time the chord was armed; defaults to 1.
+    pub(crate) pending_find: Option<(action_handlers::movement::FindKind, bool, u32)>,
     /// Most recent `(FindKind, char)` consumed by `execute_find`.
     /// `RepeatLastMotion` (Alt-.) replays this pair without
     /// reading another keypress.
@@ -552,8 +554,8 @@ impl Stoat {
 
         if (self.mode == "normal" || self.mode == "select") && self.pending_find.is_some() {
             if let KeyCode::Char(ch) = key.code {
-                let (kind, extend) = self.pending_find.take().expect("checked above");
-                return action_handlers::movement::execute_find(self, kind, ch, extend);
+                let (kind, extend, count) = self.pending_find.take().expect("checked above");
+                return action_handlers::movement::execute_find(self, kind, ch, extend, count);
             }
             self.pending_find = None;
         }

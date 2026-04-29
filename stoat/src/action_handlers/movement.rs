@@ -1676,7 +1676,8 @@ pub(crate) enum FindKind {
 }
 
 pub(super) fn set_pending_find(stoat: &mut Stoat, kind: FindKind, extend: bool) -> UpdateEffect {
-    stoat.pending_find = Some((kind, extend));
+    let count = stoat.take_pending_count().unwrap_or(1);
+    stoat.pending_find = Some((kind, extend, count));
     UpdateEffect::Redraw
 }
 
@@ -1685,7 +1686,8 @@ pub(super) fn repeat_last_motion(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     let extend = stoat.mode == "select";
-    execute_find(stoat, kind, ch, extend)
+    let count = stoat.take_pending_count().unwrap_or(1);
+    execute_find(stoat, kind, ch, extend, count)
 }
 
 pub(crate) fn execute_find(
@@ -1693,6 +1695,7 @@ pub(crate) fn execute_find(
     kind: FindKind,
     ch: char,
     extend: bool,
+    count: u32,
 ) -> UpdateEffect {
     stoat.last_find = Some((kind, ch));
     let Some(editor) = focused_editor_mut(stoat) else {
@@ -1713,6 +1716,7 @@ pub(crate) fn execute_find(
             .saturating_sub(1)
     };
 
+    let count = count.max(1);
     let target = match kind {
         FindKind::NextChar | FindKind::TillNextChar => {
             let scan_start = head_offset.saturating_add(
@@ -1722,13 +1726,17 @@ pub(crate) fn execute_find(
             );
             let mut offset = scan_start;
             let mut found = None;
+            let mut remaining = count;
             for c in rope.chars_at(scan_start) {
                 if offset >= line_end || c == '\n' {
                     break;
                 }
                 if c == ch {
-                    found = Some(offset);
-                    break;
+                    remaining -= 1;
+                    if remaining == 0 {
+                        found = Some(offset);
+                        break;
+                    }
                 }
                 offset += c.len_utf8();
             }
@@ -1747,6 +1755,7 @@ pub(crate) fn execute_find(
         FindKind::PrevChar | FindKind::TillPrevChar => {
             let mut offset = head_offset;
             let mut found = None;
+            let mut remaining = count;
             for c in rope.reversed_chars_at(head_offset) {
                 if offset == 0 {
                     break;
@@ -1756,8 +1765,11 @@ pub(crate) fn execute_find(
                     break;
                 }
                 if c == ch {
-                    found = Some(offset);
-                    break;
+                    remaining -= 1;
+                    if remaining == 0 {
+                        found = Some(offset);
+                        break;
+                    }
                 }
             }
             let Some(target) = found else {

@@ -2538,6 +2538,66 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_find_next_char_jumps_to_nth_match() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabcabc\n");
+        h.open_file(&path);
+        h.type_keys("3 f c");
+        assert_eq!(h.primary_head_offset(), 8);
+    }
+
+    #[test]
+    fn count_prefix_till_next_char_lands_one_before_nth_match() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabcabc\n");
+        h.open_file(&path);
+        h.type_keys("2 t c");
+        assert_eq!(h.primary_head_offset(), 4);
+    }
+
+    #[test]
+    fn count_prefix_find_prev_char_walks_back_n_matches() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabcabc\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l");
+        assert_eq!(h.primary_head_offset(), 9);
+        h.type_keys("3 F a");
+        assert_eq!(h.primary_head_offset(), 0);
+    }
+
+    #[test]
+    fn count_prefix_till_prev_char_lands_one_after_nth_match() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabcabc\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l l l l");
+        h.type_keys("2 T a");
+        assert_eq!(h.primary_head_offset(), 4);
+    }
+
+    #[test]
+    fn count_prefix_find_no_op_when_fewer_than_count_matches() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabc\n");
+        h.open_file(&path);
+        let before = h.primary_head_offset();
+        h.type_keys("9 f c");
+        assert_eq!(h.primary_head_offset(), before);
+    }
+
+    #[test]
+    fn count_prefix_repeat_last_motion_advances_n_matches() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abcabcabcabc\n");
+        h.open_file(&path);
+        h.type_keys("f c");
+        assert_eq!(h.primary_head_offset(), 2);
+        h.type_keys("3 alt-.");
+        assert_eq!(h.primary_head_offset(), 11);
+    }
+
+    #[test]
     fn snapshot_pending_count_appears_in_status_bar() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 6);
         let path = h.write_file("s.txt", "abc\n");
