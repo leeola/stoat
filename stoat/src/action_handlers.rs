@@ -550,7 +550,7 @@ mod tests {
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
         FlipSelections, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
-        MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, Quit, QuitAll,
+        MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Quit, QuitAll,
         RenameWorkspace, SelectAll, SplitNewRight, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
@@ -1531,5 +1531,74 @@ mod tests {
         // the same target via the transform dedupe.
         assert_eq!(editor::head_offsets(&mut stoat).len(), 1);
         assert_eq!(editor::cursor_display_positions(&mut stoat), vec![(11, 0)]);
+    }
+
+    #[test]
+    fn count_prefix_page_down_moves_n_pages() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        stoat.pending_count = Some(3);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(30, 0)],
+            "3 Ctrl-f with viewport=10 should land at row 30"
+        );
+    }
+
+    #[test]
+    fn count_prefix_half_page_down_moves_n_half_pages() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        stoat.pending_count = Some(3);
+        dispatch(&mut stoat, &HalfPageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(15, 0)],
+            "3 Ctrl-d with viewport=10 (half-page=5) should land at row 15"
+        );
+    }
+
+    #[test]
+    fn count_prefix_page_up_moves_n_pages() {
+        let mut stoat = stoat();
+        let text: String = (0..100).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        dispatch(&mut stoat, &PageDown);
+        dispatch(&mut stoat, &PageDown);
+        dispatch(&mut stoat, &PageDown);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(40, 0)],
+            "test setup: cursor at row 40 after four page-downs"
+        );
+        stoat.pending_count = Some(3);
+        dispatch(&mut stoat, &PageUp);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(10, 0)],
+            "3 Ctrl-b from row 40 with viewport=10 should land at row 10"
+        );
+    }
+
+    #[test]
+    fn count_prefix_page_down_clamps_at_buffer_end() {
+        let mut stoat = stoat();
+        let text: String = (0..30).map(|i| format!("line{i:02}\n")).collect();
+        editor::seed_focused_buffer(&mut stoat, &text);
+        set_focused_viewport_rows(&mut stoat, Some(10));
+        stoat.pending_count = Some(99);
+        dispatch(&mut stoat, &PageDown);
+        assert_eq!(
+            editor::cursor_display_positions(&mut stoat),
+            vec![(30, 0)],
+            "huge count should clamp at last content row"
+        );
     }
 }

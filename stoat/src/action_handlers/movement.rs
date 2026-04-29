@@ -2193,11 +2193,13 @@ pub(super) enum PageDir {
 const DEFAULT_VIEWPORT_ROWS: u32 = 20;
 
 pub(super) fn page_motion(stoat: &mut Stoat, dir: PageDir, half: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
     let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
-    let delta = if half { viewport.div_ceil(2) } else { viewport };
+    let base_delta = if half { viewport.div_ceil(2) } else { viewport };
+    let delta = base_delta.saturating_mul(count);
 
     let display_snapshot = editor.display_map.snapshot();
     let buffer_snapshot = display_snapshot.buffer_snapshot();
