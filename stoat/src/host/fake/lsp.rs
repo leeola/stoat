@@ -5,16 +5,16 @@ use lsp_types::{
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
-    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
-    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
-    ServerCapabilities, SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
+    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
+    Location, MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams,
+    Position, PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext,
+    ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier,
+    WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -107,6 +107,14 @@ pub fn inlay_hint_params(path: &str, start_line: u32, end_line: u32) -> InlayHin
     }
 }
 
+pub fn folding_range_params(path: &str) -> FoldingRangeParams {
+    FoldingRangeParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -183,6 +191,7 @@ struct FakeLspState {
     highlights: BTreeMap<LspKey, Vec<DocumentHighlight>>,
     inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
+    folding_ranges: BTreeMap<Uri, Vec<FoldingRange>>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -214,6 +223,7 @@ impl FakeLsp {
                 highlights: BTreeMap::new(),
                 inlay_hints: BTreeMap::new(),
                 workspace_symbols: BTreeMap::new(),
+                folding_ranges: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -251,6 +261,17 @@ impl FakeLsp {
         let mut caps = (*state.capabilities).clone();
         caps.position_encoding = Some(kind);
         state.capabilities = Arc::new(caps);
+    }
+
+    /// Programs the folding ranges returned for a
+    /// `textDocument/foldingRange` call against `path`. Replaces any
+    /// previously seeded ranges for the same document.
+    pub fn set_folding_ranges(&self, path: &str, ranges: Vec<FoldingRange>) {
+        self.state
+            .lock()
+            .unwrap()
+            .folding_ranges
+            .insert(file_uri(path), ranges);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -889,6 +910,17 @@ impl LspHost for FakeLsp {
         Ok(None)
     }
 
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> io::Result<Option<Vec<FoldingRange>>> {
+        if let Some(err) = self.take_request_failure("textDocument/foldingRange") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state.folding_ranges.get(&params.text_document.uri).cloned())
+    }
+
     async fn workspace_symbol(
         &self,
         params: WorkspaceSymbolParams,
@@ -1249,6 +1281,45 @@ mod tests {
                 },
                 _ => panic!("expected flat"),
             }
+        });
+    }
+
+    #[test]
+    fn folding_range_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let ranges = vec![
+                FoldingRange {
+                    start_line: 0,
+                    start_character: None,
+                    end_line: 4,
+                    end_character: None,
+                    kind: None,
+                    collapsed_text: None,
+                },
+                FoldingRange {
+                    start_line: 6,
+                    start_character: None,
+                    end_line: 12,
+                    end_character: None,
+                    kind: None,
+                    collapsed_text: None,
+                },
+            ];
+            lsp.set_folding_ranges("/src/main.rs", ranges.clone());
+
+            let result = lsp
+                .folding_range(folding_range_params("/src/main.rs"))
+                .await
+                .unwrap()
+                .expect("should have ranges");
+            assert_eq!(result, ranges);
+
+            let miss = lsp
+                .folding_range(folding_range_params("/src/other.rs"))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
         });
     }
 

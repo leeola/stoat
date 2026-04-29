@@ -5,12 +5,13 @@ use lsp_types::{
     DeclarationCapability, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
     DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
-    InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
-    ProgressToken, ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp,
-    SignatureHelpParams, TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability,
-    Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    FoldingRange, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverParams, HoverProviderCapability, ImplementationProviderCapability, InitializeResult,
+    InlayHint, InlayHintParams, InlayHintServerCapabilities, Location, MessageType, OneOf,
+    PrepareRenameResponse, ProgressToken, ReferenceParams, RenameParams, ServerCapabilities,
+    SignatureHelp, SignatureHelpParams, TextDocumentPositionParams, TextEdit,
+    TypeDefinitionProviderCapability, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     io,
@@ -257,6 +258,10 @@ pub trait LspHost: Send + Sync {
         &self,
         params: DocumentSymbolParams,
     ) -> io::Result<Option<DocumentSymbolResponse>>;
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> io::Result<Option<Vec<FoldingRange>>>;
     async fn workspace_symbol(
         &self,
         params: WorkspaceSymbolParams,
@@ -406,6 +411,13 @@ impl LspHost for NoopLsp {
         &self,
         _params: DocumentSymbolParams,
     ) -> io::Result<Option<DocumentSymbolResponse>> {
+        Ok(None)
+    }
+
+    async fn folding_range(
+        &self,
+        _params: FoldingRangeParams,
+    ) -> io::Result<Option<Vec<FoldingRange>>> {
         Ok(None)
     }
 
