@@ -260,7 +260,17 @@ pub trait LspHost: Send + Sync {
     ) -> io::Result<Option<Vec<TextEdit>>>;
 
     // Server-pushed notifications
+
+    /// Wait for the next server-pushed notification. Returns `None`
+    /// when the underlying channel is closed (server gone, no further
+    /// notifications possible). Use [`Self::try_recv_notification`]
+    /// for a non-blocking peek.
     async fn recv_notification(&self) -> Option<LspNotification>;
+
+    /// Non-blocking variant of [`Self::recv_notification`]. Returns
+    /// `None` immediately when no notification is queued or the
+    /// channel is closed.
+    async fn try_recv_notification(&self) -> Option<LspNotification>;
 }
 
 /// Default [`LspHost`] used when no language server is configured.
@@ -413,6 +423,10 @@ impl LspHost for NoopLsp {
     }
 
     async fn recv_notification(&self) -> Option<LspNotification> {
+        None
+    }
+
+    async fn try_recv_notification(&self) -> Option<LspNotification> {
         None
     }
 }

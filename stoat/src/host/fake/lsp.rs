@@ -16,10 +16,14 @@ use lsp_types::{
     WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
-    collections::{BTreeMap, VecDeque},
+    collections::BTreeMap,
     io,
     str::FromStr,
     sync::{Arc, Mutex},
+};
+use tokio::sync::{
+    mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
+    Mutex as TokioMutex,
 };
 
 fn file_uri(path: &str) -> Uri {
@@ -161,6 +165,8 @@ impl LspKey {
 
 pub struct FakeLsp {
     state: Mutex<FakeLspState>,
+    notif_tx: UnboundedSender<LspNotification>,
+    notif_rx: TokioMutex<UnboundedReceiver<LspNotification>>,
 }
 
 struct FakeLspState {
@@ -176,7 +182,6 @@ struct FakeLspState {
     highlights: BTreeMap<LspKey, Vec<DocumentHighlight>>,
     inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
-    notifications: VecDeque<LspNotification>,
     open_documents: BTreeMap<Uri, String>,
     initialized: bool,
     shut_down: bool,
@@ -190,6 +195,7 @@ impl Default for FakeLsp {
 
 impl FakeLsp {
     pub fn new() -> Self {
+        let (notif_tx, notif_rx) = unbounded_channel();
         Self {
             state: Mutex::new(FakeLspState {
                 capabilities: Arc::new(ServerCapabilities::default()),
@@ -204,11 +210,12 @@ impl FakeLsp {
                 highlights: BTreeMap::new(),
                 inlay_hints: BTreeMap::new(),
                 workspace_symbols: BTreeMap::new(),
-                notifications: VecDeque::new(),
                 open_documents: BTreeMap::new(),
                 initialized: false,
                 shut_down: false,
             }),
+            notif_tx,
+            notif_rx: TokioMutex::new(notif_rx),
         }
     }
 
@@ -313,11 +320,7 @@ impl FakeLsp {
     /// diagnostics published asynchronously after analysis,
     /// [`LspNotification::Progress`] frames, etc.
     pub fn push_notification(&self, notification: LspNotification) {
-        self.state
-            .lock()
-            .unwrap()
-            .notifications
-            .push_back(notification);
+        let _ = self.notif_tx.send(notification);
     }
 
     // --- Completions ---
@@ -596,33 +599,45 @@ impl LspHost for FakeLsp {
     }
 
     async fn did_open(&self, params: DidOpenTextDocumentParams) -> io::Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let uri = params.text_document.uri.clone();
-        state
-            .open_documents
-            .insert(uri.clone(), params.text_document.text);
-        if let Some(diagnostics) = state.diagnostics.get(&uri).cloned() {
-            state.notifications.push_back(LspNotification::Diagnostics {
-                uri,
-                diagnostics,
-                version: None,
-            });
+        let pending =
+            {
+                let mut state = self.state.lock().unwrap();
+                let uri = params.text_document.uri.clone();
+                state
+                    .open_documents
+                    .insert(uri.clone(), params.text_document.text);
+                state.diagnostics.get(&uri).cloned().map(|diagnostics| {
+                    LspNotification::Diagnostics {
+                        uri,
+                        diagnostics,
+                        version: None,
+                    }
+                })
+            };
+        if let Some(notif) = pending {
+            let _ = self.notif_tx.send(notif);
         }
         Ok(())
     }
 
     async fn did_change(&self, params: DidChangeTextDocumentParams) -> io::Result<()> {
-        let mut state = self.state.lock().unwrap();
-        let uri = params.text_document.uri.clone();
-        if let Some(change) = params.content_changes.into_iter().last() {
-            state.open_documents.insert(uri.clone(), change.text);
-        }
-        if let Some(diagnostics) = state.diagnostics.get(&uri).cloned() {
-            state.notifications.push_back(LspNotification::Diagnostics {
-                uri,
-                diagnostics,
-                version: None,
-            });
+        let pending =
+            {
+                let mut state = self.state.lock().unwrap();
+                let uri = params.text_document.uri.clone();
+                if let Some(change) = params.content_changes.into_iter().last() {
+                    state.open_documents.insert(uri.clone(), change.text);
+                }
+                state.diagnostics.get(&uri).cloned().map(|diagnostics| {
+                    LspNotification::Diagnostics {
+                        uri,
+                        diagnostics,
+                        version: None,
+                    }
+                })
+            };
+        if let Some(notif) = pending {
+            let _ = self.notif_tx.send(notif);
         }
         Ok(())
     }
@@ -793,7 +808,11 @@ impl LspHost for FakeLsp {
     }
 
     async fn recv_notification(&self) -> Option<LspNotification> {
-        self.state.lock().unwrap().notifications.pop_front()
+        self.notif_rx.lock().await.recv().await
+    }
+
+    async fn try_recv_notification(&self) -> Option<LspNotification> {
+        self.notif_rx.try_lock().ok()?.try_recv().ok()
     }
 }
 
@@ -1109,7 +1128,7 @@ mod tests {
             lsp.did_open(open_params("/src/main.rs", "", "rust"))
                 .await
                 .unwrap();
-            assert!(lsp.recv_notification().await.is_none());
+            assert!(lsp.try_recv_notification().await.is_none());
         });
     }
 
@@ -1183,7 +1202,7 @@ mod tests {
                 },
                 _ => panic!("expected diagnostics notification"),
             }
-            assert!(lsp.recv_notification().await.is_none());
+            assert!(lsp.try_recv_notification().await.is_none());
         });
     }
 
@@ -1234,7 +1253,7 @@ mod tests {
             lsp.push_notification(make("/c.rs"));
 
             let mut received = Vec::new();
-            while let Some(notif) = lsp.recv_notification().await {
+            while let Some(notif) = lsp.try_recv_notification().await {
                 let LspNotification::Diagnostics { uri, .. } = notif else {
                     panic!("expected diagnostics")
                 };
@@ -1244,6 +1263,32 @@ mod tests {
                 received,
                 vec![file_uri("/a.rs"), file_uri("/b.rs"), file_uri("/c.rs"),]
             );
+        });
+    }
+
+    #[test]
+    fn recv_notification_wakes_on_push() {
+        rt().block_on(async {
+            let lsp = Arc::new(FakeLsp::new());
+            let recv_lsp = lsp.clone();
+            let handle = tokio::spawn(async move { recv_lsp.recv_notification().await });
+
+            tokio::task::yield_now().await;
+
+            lsp.push_notification(LspNotification::Diagnostics {
+                uri: file_uri("/late.rs"),
+                diagnostics: Vec::new(),
+                version: None,
+            });
+
+            let notif = handle
+                .await
+                .expect("recv task panicked")
+                .expect("recv returned None");
+            let LspNotification::Diagnostics { uri, .. } = notif else {
+                panic!("expected diagnostics notification")
+            };
+            assert_eq!(uri, file_uri("/late.rs"));
         });
     }
 
