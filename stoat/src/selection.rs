@@ -2117,6 +2117,19 @@ mod tests {
     }
 
     #[test]
+    fn toggle_comments_rust_removes_prefix_without_trailing_space() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "//abc\n");
+        h.open_file(&path);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ToggleComments);
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            "abc\n",
+            "no-space branch must strip only the prefix, not eat `a`"
+        );
+    }
+
+    #[test]
     fn toggle_comments_toml_uses_hash() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.toml", "key = 1\n");
