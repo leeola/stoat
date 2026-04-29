@@ -92,43 +92,41 @@ pub(super) fn split_pane_new(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
 pub(super) fn focus_direction(stoat: &mut Stoat, direction: Direction) {
     let ws = stoat.active_workspace_mut();
     match (ws.focus, direction) {
-        (FocusTarget::Dock(dock_id), Direction::Left) => {
+        (FocusTarget::Dock(dock_id), Direction::Left)
             if ws
                 .docks
                 .get(dock_id)
-                .is_some_and(|d| d.side == DockSide::Right)
-            {
-                ws.focus = FocusTarget::SplitPane(ws.panes.focus());
-            }
+                .is_some_and(|d| d.side == DockSide::Right) =>
+        {
+            ws.focus = FocusTarget::SplitPane(ws.panes.focus());
         },
-        (FocusTarget::Dock(dock_id), Direction::Right) => {
+        (FocusTarget::Dock(dock_id), Direction::Right)
             if ws
                 .docks
                 .get(dock_id)
-                .is_some_and(|d| d.side == DockSide::Left)
-            {
-                ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+                .is_some_and(|d| d.side == DockSide::Left) =>
+        {
+            ws.focus = FocusTarget::SplitPane(ws.panes.focus());
+        },
+        (FocusTarget::SplitPane(_), Direction::Right)
+            if !ws.panes.focus_direction(Direction::Right) =>
+        {
+            if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
+                d.side == DockSide::Right && !matches!(d.visibility, DockVisibility::Hidden)
+            }) {
+                ws.focus = FocusTarget::Dock(dock_id);
             }
         },
-        (FocusTarget::SplitPane(_), Direction::Right) => {
-            if !ws.panes.focus_direction(Direction::Right) {
-                if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
-                    d.side == DockSide::Right && !matches!(d.visibility, DockVisibility::Hidden)
-                }) {
-                    ws.focus = FocusTarget::Dock(dock_id);
-                }
+        (FocusTarget::SplitPane(_), Direction::Left)
+            if !ws.panes.focus_direction(Direction::Left) =>
+        {
+            if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
+                d.side == DockSide::Left && !matches!(d.visibility, DockVisibility::Hidden)
+            }) {
+                ws.focus = FocusTarget::Dock(dock_id);
             }
         },
-        (FocusTarget::SplitPane(_), Direction::Left) => {
-            if !ws.panes.focus_direction(Direction::Left) {
-                if let Some((dock_id, _)) = ws.docks.iter().find(|(_, d)| {
-                    d.side == DockSide::Left && !matches!(d.visibility, DockVisibility::Hidden)
-                }) {
-                    ws.focus = FocusTarget::Dock(dock_id);
-                }
-            }
-        },
-        (FocusTarget::SplitPane(_), _) => {
+        (FocusTarget::SplitPane(_), Direction::Up | Direction::Down) => {
             ws.panes.focus_direction(direction);
         },
         _ => {},
