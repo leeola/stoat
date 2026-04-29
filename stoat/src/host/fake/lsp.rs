@@ -183,6 +183,8 @@ struct FakeLspState {
     inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
     open_documents: BTreeMap<Uri, String>,
+    request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
+    request_failures_persistent: BTreeMap<String, io::ErrorKind>,
     initialized: bool,
     shut_down: bool,
 }
@@ -211,6 +213,8 @@ impl FakeLsp {
                 inlay_hints: BTreeMap::new(),
                 workspace_symbols: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
+                request_failures_oneshot: BTreeMap::new(),
+                request_failures_persistent: BTreeMap::new(),
                 initialized: false,
                 shut_down: false,
             }),
@@ -321,6 +325,59 @@ impl FakeLsp {
     /// [`LspNotification::Progress`] frames, etc.
     pub fn push_notification(&self, notification: LspNotification) {
         let _ = self.notif_tx.send(notification);
+    }
+
+    /// Arm a one-shot failure for the next call that targets `method`
+    /// (e.g. `"textDocument/hover"`). The next matching request
+    /// returns `io::Error::new(kind, "<method>: injected request
+    /// failure")` and clears the arm; subsequent calls behave
+    /// normally. Overwrites any previously armed one-shot for the
+    /// same method.
+    pub fn fail_next_request(&self, method: &str, kind: io::ErrorKind) {
+        self.state
+            .lock()
+            .unwrap()
+            .request_failures_oneshot
+            .insert(method.to_string(), kind);
+    }
+
+    /// Arm a sticky failure for every call that targets `method`.
+    /// Each matching request returns `io::Error::new(kind, ...)`
+    /// until [`Self::clear_method_error`] is called for the same
+    /// method.
+    pub fn set_method_error(&self, method: &str, kind: io::ErrorKind) {
+        self.state
+            .lock()
+            .unwrap()
+            .request_failures_persistent
+            .insert(method.to_string(), kind);
+    }
+
+    /// Clear a sticky failure previously armed via
+    /// [`Self::set_method_error`]. No-op if none was armed.
+    pub fn clear_method_error(&self, method: &str) {
+        self.state
+            .lock()
+            .unwrap()
+            .request_failures_persistent
+            .remove(method);
+    }
+
+    fn take_request_failure(&self, method: &str) -> Option<io::Error> {
+        let kind = {
+            let mut state = self.state.lock().unwrap();
+            if let Some(kind) = state.request_failures_oneshot.remove(method) {
+                kind
+            } else if let Some(&kind) = state.request_failures_persistent.get(method) {
+                kind
+            } else {
+                return None;
+            }
+        };
+        Some(io::Error::new(
+            kind,
+            format!("{method}: injected request failure"),
+        ))
     }
 
     // --- Completions ---
@@ -585,6 +642,9 @@ impl LspHost for FakeLsp {
     }
 
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
+        if let Some(err) = self.take_request_failure("initialize") {
+            return Err(err);
+        }
         let mut state = self.state.lock().unwrap();
         state.initialized = true;
         Ok(InitializeResult {
@@ -594,6 +654,9 @@ impl LspHost for FakeLsp {
     }
 
     async fn shutdown(&self) -> io::Result<()> {
+        if let Some(err) = self.take_request_failure("shutdown") {
+            return Err(err);
+        }
         self.state.lock().unwrap().shut_down = true;
         Ok(())
     }
@@ -656,6 +719,9 @@ impl LspHost for FakeLsp {
     }
 
     async fn hover(&self, params: HoverParams) -> io::Result<Option<Hover>> {
+        if let Some(err) = self.take_request_failure("textDocument/hover") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -668,6 +734,9 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        if let Some(err) = self.take_request_failure("textDocument/definition") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.definitions,
@@ -680,6 +749,9 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        if let Some(err) = self.take_request_failure("textDocument/declaration") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.declarations,
@@ -692,6 +764,9 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        if let Some(err) = self.take_request_failure("textDocument/typeDefinition") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.type_definitions,
@@ -704,6 +779,9 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        if let Some(err) = self.take_request_failure("textDocument/implementation") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.implementations,
@@ -713,6 +791,9 @@ impl LspHost for FakeLsp {
     }
 
     async fn references(&self, params: ReferenceParams) -> io::Result<Option<Vec<Location>>> {
+        if let Some(err) = self.take_request_failure("textDocument/references") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
@@ -725,6 +806,9 @@ impl LspHost for FakeLsp {
         &self,
         params: DocumentHighlightParams,
     ) -> io::Result<Option<Vec<DocumentHighlight>>> {
+        if let Some(err) = self.take_request_failure("textDocument/documentHighlight") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -734,6 +818,9 @@ impl LspHost for FakeLsp {
     }
 
     async fn completion(&self, params: CompletionParams) -> io::Result<Option<CompletionResponse>> {
+        if let Some(err) = self.take_request_failure("textDocument/completion") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
@@ -748,6 +835,9 @@ impl LspHost for FakeLsp {
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> io::Result<CompletionItem> {
+        if let Some(err) = self.take_request_failure("completionItem/resolve") {
+            return Err(err);
+        }
         Ok(item)
     }
 
@@ -755,10 +845,16 @@ impl LspHost for FakeLsp {
         &self,
         _params: CodeActionParams,
     ) -> io::Result<Option<Vec<CodeActionOrCommand>>> {
+        if let Some(err) = self.take_request_failure("textDocument/codeAction") {
+            return Err(err);
+        }
         Ok(None)
     }
 
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
+        if let Some(err) = self.take_request_failure("codeAction/resolve") {
+            return Err(err);
+        }
         Ok(action)
     }
 
@@ -766,6 +862,9 @@ impl LspHost for FakeLsp {
         &self,
         _params: DocumentSymbolParams,
     ) -> io::Result<Option<DocumentSymbolResponse>> {
+        if let Some(err) = self.take_request_failure("textDocument/documentSymbol") {
+            return Err(err);
+        }
         Ok(None)
     }
 
@@ -773,6 +872,9 @@ impl LspHost for FakeLsp {
         &self,
         params: WorkspaceSymbolParams,
     ) -> io::Result<Option<WorkspaceSymbolResponse>> {
+        if let Some(err) = self.take_request_failure("workspace/symbol") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         Ok(state
             .workspace_symbols
@@ -784,19 +886,31 @@ impl LspHost for FakeLsp {
         &self,
         _params: SignatureHelpParams,
     ) -> io::Result<Option<SignatureHelp>> {
+        if let Some(err) = self.take_request_failure("textDocument/signatureHelp") {
+            return Err(err);
+        }
         Ok(None)
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>> {
+        if let Some(err) = self.take_request_failure("textDocument/inlayHint") {
+            return Err(err);
+        }
         let state = self.state.lock().unwrap();
         Ok(state.inlay_hints.get(&params.text_document.uri).cloned())
     }
 
     async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint> {
+        if let Some(err) = self.take_request_failure("inlayHint/resolve") {
+            return Err(err);
+        }
         Ok(hint)
     }
 
     async fn rename(&self, _params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {
+        if let Some(err) = self.take_request_failure("textDocument/rename") {
+            return Err(err);
+        }
         Ok(None)
     }
 
@@ -804,6 +918,9 @@ impl LspHost for FakeLsp {
         &self,
         _params: DocumentFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>> {
+        if let Some(err) = self.take_request_failure("textDocument/formatting") {
+            return Err(err);
+        }
         Ok(None)
     }
 
@@ -1290,6 +1407,76 @@ mod tests {
             };
             assert_eq!(uri, file_uri("/late.rs"));
         });
+    }
+
+    #[test]
+    fn fail_next_request_fires_once() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            lsp.fail_next_request("textDocument/hover", io::ErrorKind::Unsupported);
+
+            let err = lsp
+                .hover(hover_params("/src/main.rs", 0, 0))
+                .await
+                .expect_err("first call should fail");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+            assert!(err.to_string().contains("textDocument/hover"));
+
+            let ok = lsp
+                .hover(hover_params("/src/main.rs", 0, 0))
+                .await
+                .expect("second call should succeed");
+            assert!(ok.is_none());
+        });
+    }
+
+    #[test]
+    fn set_method_error_is_sticky_until_cleared() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            lsp.set_method_error("textDocument/completion", io::ErrorKind::Other);
+
+            for _ in 0..3 {
+                let err = lsp
+                    .completion(completion_params("/src/main.rs", 0, 0))
+                    .await
+                    .expect_err("should fail while sticky error is armed");
+                assert_eq!(err.kind(), io::ErrorKind::Other);
+            }
+
+            lsp.clear_method_error("textDocument/completion");
+            let ok = lsp
+                .completion(completion_params("/src/main.rs", 0, 0))
+                .await
+                .expect("should succeed after clear");
+            assert!(ok.is_none());
+        });
+    }
+
+    #[test]
+    fn fail_next_request_isolates_methods() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            lsp.fail_next_request("textDocument/hover", io::ErrorKind::Unsupported);
+
+            let goto = lsp
+                .goto_definition(definition_params("/src/main.rs", 0, 0))
+                .await
+                .expect("non-armed method should succeed");
+            assert!(goto.is_none());
+
+            let err = lsp
+                .hover(hover_params("/src/main.rs", 0, 0))
+                .await
+                .expect_err("armed method should still fail");
+            assert_eq!(err.kind(), io::ErrorKind::Unsupported);
+        });
+    }
+
+    #[test]
+    fn clear_method_error_no_op_when_unset() {
+        let lsp = FakeLsp::new();
+        lsp.clear_method_error("textDocument/hover");
     }
 
     #[test]
