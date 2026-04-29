@@ -19,7 +19,7 @@ use std::{
     collections::{BTreeMap, VecDeque},
     io,
     str::FromStr,
-    sync::Mutex,
+    sync::{Arc, Mutex},
 };
 
 fn file_uri(path: &str) -> Uri {
@@ -164,6 +164,7 @@ pub struct FakeLsp {
 }
 
 struct FakeLspState {
+    capabilities: Arc<ServerCapabilities>,
     diagnostics: BTreeMap<Uri, Vec<Diagnostic>>,
     hovers: BTreeMap<LspKey, Hover>,
     completions: BTreeMap<LspKey, Vec<CompletionItem>>,
@@ -191,6 +192,7 @@ impl FakeLsp {
     pub fn new() -> Self {
         Self {
             state: Mutex::new(FakeLspState {
+                capabilities: Arc::new(ServerCapabilities::default()),
                 diagnostics: BTreeMap::new(),
                 hovers: BTreeMap::new(),
                 completions: BTreeMap::new(),
@@ -208,6 +210,15 @@ impl FakeLsp {
                 shut_down: false,
             }),
         }
+    }
+
+    /// Replace the server capabilities returned by
+    /// [`LspHost::capabilities`] (and consulted by
+    /// [`LspHost::supports_feature`]). Tests call this before
+    /// driving capability-dependent code paths so the host advertises
+    /// the right feature set.
+    pub fn set_capabilities(&self, capabilities: ServerCapabilities) {
+        self.state.lock().unwrap().capabilities = Arc::new(capabilities);
     }
 
     // --- Hover ---
@@ -548,11 +559,15 @@ fn lookup_goto(
 
 #[async_trait]
 impl LspHost for FakeLsp {
+    fn capabilities(&self) -> Arc<ServerCapabilities> {
+        self.state.lock().unwrap().capabilities.clone()
+    }
+
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
         let mut state = self.state.lock().unwrap();
         state.initialized = true;
         Ok(InitializeResult {
-            capabilities: ServerCapabilities::default(),
+            capabilities: (*state.capabilities).clone(),
             server_info: None,
         })
     }
@@ -1211,6 +1226,100 @@ mod tests {
                 received,
                 vec![file_uri("/a.rs"), file_uri("/b.rs"), file_uri("/c.rs"),]
             );
+        });
+    }
+
+    #[test]
+    fn capabilities_default_empty() {
+        let lsp = FakeLsp::new();
+        let caps = lsp.capabilities();
+        assert!(caps.hover_provider.is_none());
+        assert!(caps.completion_provider.is_none());
+    }
+
+    #[test]
+    fn supports_feature_default_caps() {
+        use crate::host::LanguageServerFeature;
+        let lsp = FakeLsp::new();
+        assert!(!lsp.supports_feature(LanguageServerFeature::Hover));
+        assert!(!lsp.supports_feature(LanguageServerFeature::Completion));
+        assert!(!lsp.supports_feature(LanguageServerFeature::GotoDefinition));
+        assert!(!lsp.supports_feature(LanguageServerFeature::RenameSymbol));
+        // Push diagnostics has no provider field; always considered supported.
+        assert!(lsp.supports_feature(LanguageServerFeature::Diagnostics));
+    }
+
+    #[test]
+    fn set_capabilities_drives_supports_feature() {
+        use crate::host::LanguageServerFeature;
+        use lsp_types::{CompletionOptions, HoverProviderCapability};
+
+        let lsp = FakeLsp::new();
+        let caps = ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            completion_provider: Some(CompletionOptions::default()),
+            ..ServerCapabilities::default()
+        };
+        lsp.set_capabilities(caps);
+
+        assert!(lsp.supports_feature(LanguageServerFeature::Hover));
+        assert!(lsp.supports_feature(LanguageServerFeature::Completion));
+        assert!(!lsp.supports_feature(LanguageServerFeature::GotoDefinition));
+        assert!(!lsp.supports_feature(LanguageServerFeature::RenameSymbol));
+    }
+
+    #[test]
+    fn supports_feature_goto_and_rename_one_of() {
+        use crate::host::LanguageServerFeature;
+        use lsp_types::OneOf;
+
+        let lsp = FakeLsp::new();
+        let caps = ServerCapabilities {
+            definition_provider: Some(OneOf::Left(true)),
+            references_provider: Some(OneOf::Left(true)),
+            rename_provider: Some(OneOf::Left(true)),
+            ..ServerCapabilities::default()
+        };
+        lsp.set_capabilities(caps);
+
+        assert!(lsp.supports_feature(LanguageServerFeature::GotoDefinition));
+        assert!(lsp.supports_feature(LanguageServerFeature::GotoReference));
+        assert!(lsp.supports_feature(LanguageServerFeature::RenameSymbol));
+        assert!(!lsp.supports_feature(LanguageServerFeature::GotoDeclaration));
+    }
+
+    #[test]
+    fn supports_feature_left_false_is_unsupported() {
+        use crate::host::LanguageServerFeature;
+        use lsp_types::OneOf;
+
+        let lsp = FakeLsp::new();
+        let caps = ServerCapabilities {
+            definition_provider: Some(OneOf::Left(false)),
+            ..ServerCapabilities::default()
+        };
+        lsp.set_capabilities(caps);
+
+        assert!(!lsp.supports_feature(LanguageServerFeature::GotoDefinition));
+    }
+
+    #[test]
+    fn initialize_returns_set_capabilities() {
+        rt().block_on(async {
+            use lsp_types::HoverProviderCapability;
+
+            let lsp = FakeLsp::new();
+            let caps = ServerCapabilities {
+                hover_provider: Some(HoverProviderCapability::Simple(true)),
+                ..ServerCapabilities::default()
+            };
+            lsp.set_capabilities(caps);
+
+            let result = lsp.initialize(None).await.unwrap();
+            assert!(matches!(
+                result.capabilities.hover_provider,
+                Some(HoverProviderCapability::Simple(true))
+            ));
         });
     }
 }

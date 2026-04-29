@@ -1,15 +1,21 @@
 use async_trait::async_trait;
 use lsp_types::{
-    CodeAction, CodeActionOrCommand, CodeActionParams, CompletionItem, CompletionParams,
-    CompletionResponse, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    CodeAction, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
+    ColorProviderCapability, CompletionItem, CompletionParams, CompletionResponse,
+    DeclarationCapability, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
     DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, InitializeResult, InlayHint,
-    InlayHintParams, Location, ProgressToken, ReferenceParams, RenameParams, ServerCapabilities,
-    SignatureHelp, SignatureHelpParams, TextEdit, Uri, WorkDoneProgress, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
+    InlayHintServerCapabilities, Location, OneOf, ProgressToken, ReferenceParams, RenameParams,
+    ServerCapabilities, SignatureHelp, SignatureHelpParams, TextEdit,
+    TypeDefinitionProviderCapability, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
-use std::io;
+use std::{
+    io,
+    sync::{Arc, LazyLock},
+};
 
 #[derive(Debug, Clone)]
 pub enum LspNotification {
@@ -24,8 +30,134 @@ pub enum LspNotification {
     },
 }
 
+/// Coarse capability category used to ask "does this server support
+/// feature X" without re-walking the raw [`ServerCapabilities`] at
+/// every callsite. The variant set mirrors the user-facing actions
+/// stoat dispatches; `LspHost::supports_feature` decodes each
+/// against the relevant `ServerCapabilities` field.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
+pub enum LanguageServerFeature {
+    Format,
+    GotoDeclaration,
+    GotoDefinition,
+    GotoTypeDefinition,
+    GotoReference,
+    GotoImplementation,
+    SignatureHelp,
+    Hover,
+    DocumentHighlight,
+    Completion,
+    CodeAction,
+    WorkspaceCommand,
+    DocumentSymbols,
+    WorkspaceSymbols,
+    /// Push-style diagnostics arrive unsolicited; every server is
+    /// considered to support this since opting out is signalled by
+    /// the absence of `publishDiagnostics` traffic, not a capability.
+    Diagnostics,
+    PullDiagnostics,
+    RenameSymbol,
+    InlayHints,
+    DocumentColors,
+}
+
 #[async_trait]
 pub trait LspHost: Send + Sync {
+    /// Capabilities the server reported in its `InitializeResult`.
+    /// Returned by [`Arc`] clone so impls with interior-mutable
+    /// storage (e.g. test fakes that swap capabilities mid-test)
+    /// stay lock-free for readers. Hosts that have not yet
+    /// completed initialization return the empty defaults.
+    fn capabilities(&self) -> Arc<ServerCapabilities>;
+
+    /// Whether the connected server advertises support for
+    /// `feature`. Default impl decodes against the cached
+    /// [`Self::capabilities`]; impls override only when they
+    /// have a cheaper path.
+    fn supports_feature(&self, feature: LanguageServerFeature) -> bool {
+        let caps = self.capabilities();
+        match feature {
+            LanguageServerFeature::Format => matches!(
+                caps.document_formatting_provider,
+                Some(OneOf::Left(true) | OneOf::Right(_))
+            ),
+            LanguageServerFeature::GotoDeclaration => matches!(
+                caps.declaration_provider,
+                Some(
+                    DeclarationCapability::Simple(true)
+                        | DeclarationCapability::RegistrationOptions(_)
+                        | DeclarationCapability::Options(_),
+                )
+            ),
+            LanguageServerFeature::GotoDefinition => matches!(
+                caps.definition_provider,
+                Some(OneOf::Left(true) | OneOf::Right(_))
+            ),
+            LanguageServerFeature::GotoTypeDefinition => matches!(
+                caps.type_definition_provider,
+                Some(
+                    TypeDefinitionProviderCapability::Simple(true)
+                        | TypeDefinitionProviderCapability::Options(_),
+                )
+            ),
+            LanguageServerFeature::GotoReference => matches!(
+                caps.references_provider,
+                Some(OneOf::Left(true) | OneOf::Right(_))
+            ),
+            LanguageServerFeature::GotoImplementation => matches!(
+                caps.implementation_provider,
+                Some(
+                    ImplementationProviderCapability::Simple(true)
+                        | ImplementationProviderCapability::Options(_),
+                )
+            ),
+            LanguageServerFeature::SignatureHelp => caps.signature_help_provider.is_some(),
+            LanguageServerFeature::Hover => matches!(
+                caps.hover_provider,
+                Some(HoverProviderCapability::Simple(true) | HoverProviderCapability::Options(_))
+            ),
+            LanguageServerFeature::DocumentHighlight => matches!(
+                caps.document_highlight_provider,
+                Some(OneOf::Left(true) | OneOf::Right(_))
+            ),
+            LanguageServerFeature::Completion => caps.completion_provider.is_some(),
+            LanguageServerFeature::CodeAction => matches!(
+                caps.code_action_provider,
+                Some(
+                    CodeActionProviderCapability::Simple(true)
+                        | CodeActionProviderCapability::Options(_),
+                )
+            ),
+            LanguageServerFeature::WorkspaceCommand => caps.execute_command_provider.is_some(),
+            LanguageServerFeature::DocumentSymbols => matches!(
+                caps.document_symbol_provider,
+                Some(OneOf::Left(true) | OneOf::Right(_))
+            ),
+            LanguageServerFeature::WorkspaceSymbols => matches!(
+                caps.workspace_symbol_provider,
+                Some(OneOf::Left(true) | OneOf::Right(_))
+            ),
+            LanguageServerFeature::Diagnostics => true,
+            LanguageServerFeature::PullDiagnostics => caps.diagnostic_provider.is_some(),
+            LanguageServerFeature::RenameSymbol => matches!(
+                caps.rename_provider,
+                Some(OneOf::Left(true) | OneOf::Right(_))
+            ),
+            LanguageServerFeature::InlayHints => matches!(
+                caps.inlay_hint_provider,
+                Some(OneOf::Left(true) | OneOf::Right(InlayHintServerCapabilities::Options(_)))
+            ),
+            LanguageServerFeature::DocumentColors => matches!(
+                caps.color_provider,
+                Some(
+                    ColorProviderCapability::Simple(true)
+                        | ColorProviderCapability::ColorProvider(_)
+                        | ColorProviderCapability::Options(_),
+                )
+            ),
+        }
+    }
+
     // Lifecycle
     async fn initialize(&self, root_uri: Option<Uri>) -> io::Result<InitializeResult>;
     async fn shutdown(&self) -> io::Result<()>;
@@ -104,8 +236,15 @@ pub trait LspHost: Send + Sync {
 /// [`crate::host::FakeLsp`] in its place.
 pub struct NoopLsp;
 
+static NOOP_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> =
+    LazyLock::new(|| Arc::new(ServerCapabilities::default()));
+
 #[async_trait]
 impl LspHost for NoopLsp {
+    fn capabilities(&self) -> Arc<ServerCapabilities> {
+        NOOP_CAPABILITIES.clone()
+    }
+
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
         Ok(InitializeResult {
             capabilities: ServerCapabilities::default(),
