@@ -2176,6 +2176,37 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_goto_next_change_jumps_n_changes() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 15);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.open_file(&path);
+        install_diff_hunks(&mut h, &[2, 5, 8]);
+        h.type_keys("2 ] g");
+        assert_eq!(h.primary_head_offset(), 10);
+    }
+
+    #[test]
+    fn count_prefix_goto_prev_change_jumps_back_n_changes() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 15);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.open_file(&path);
+        install_diff_hunks(&mut h, &[2, 5, 8]);
+        h.type_keys("g j");
+        h.type_keys("2 [ g");
+        assert_eq!(h.primary_head_offset(), 10);
+    }
+
+    #[test]
+    fn count_prefix_goto_next_change_clamps_at_last() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 15);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.open_file(&path);
+        install_diff_hunks(&mut h, &[2, 5, 8]);
+        h.type_keys("9 ] g");
+        assert_eq!(h.primary_head_offset(), 16);
+    }
+
+    #[test]
     fn expand_selection_grows_from_cursor_to_token() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "fn main() {}\n");

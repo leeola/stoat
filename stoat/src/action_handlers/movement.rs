@@ -1847,6 +1847,7 @@ fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>)
 }
 
 pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -1861,16 +1862,32 @@ pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     };
 
     let target_row = match dir {
-        ChangeDir::Next => diff_map
-            .hunks_in_range(cursor_row.saturating_add(1)..u32::MAX)
-            .into_iter()
-            .find(|h| h.buffer_start_line > cursor_row)
-            .map(|h| h.buffer_start_line),
-        ChangeDir::Prev => diff_map
-            .hunks_in_range(0..cursor_row)
-            .into_iter()
-            .rfind(|h| h.buffer_start_line < cursor_row)
-            .map(|h| h.buffer_start_line),
+        ChangeDir::Next => {
+            let next: Vec<_> = diff_map
+                .hunks_in_range(cursor_row.saturating_add(1)..u32::MAX)
+                .into_iter()
+                .filter(|h| h.buffer_start_line > cursor_row)
+                .collect();
+            if next.is_empty() {
+                None
+            } else {
+                let idx = (count.saturating_sub(1)).min(next.len() - 1);
+                Some(next[idx].buffer_start_line)
+            }
+        },
+        ChangeDir::Prev => {
+            let prev: Vec<_> = diff_map
+                .hunks_in_range(0..cursor_row)
+                .into_iter()
+                .filter(|h| h.buffer_start_line < cursor_row)
+                .collect();
+            if prev.is_empty() {
+                None
+            } else {
+                let idx = prev.len().saturating_sub(count);
+                Some(prev[idx].buffer_start_line)
+            }
+        },
     };
     let Some(target_row) = target_row else {
         return UpdateEffect::None;
