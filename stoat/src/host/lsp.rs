@@ -7,8 +7,8 @@ use lsp_types::{
     DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
-    InlayHintServerCapabilities, Location, OneOf, ProgressToken, ReferenceParams, RenameParams,
-    ServerCapabilities, SignatureHelp, SignatureHelpParams, TextEdit,
+    InlayHintServerCapabilities, Location, MessageType, OneOf, ProgressToken, ReferenceParams,
+    RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams, TextEdit,
     TypeDefinitionProviderCapability, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
@@ -27,6 +27,22 @@ pub enum LspNotification {
     Progress {
         token: ProgressToken,
         value: WorkDoneProgress,
+    },
+    /// `window/logMessage` -- server-emitted log entry. Severity
+    /// carried by `typ` (`MessageType::ERROR` / `WARNING` / `INFO`
+    /// / `LOG`). Editor typically routes these into a tracing-style
+    /// log rather than user-visible UI.
+    LogMessage { typ: MessageType, message: String },
+    /// `window/showMessage` -- server-initiated message intended
+    /// for user display (toast / status entry).
+    ShowMessage { typ: MessageType, message: String },
+    /// `$/logTrace` -- protocol-level trace; emitted only when the
+    /// client requested `trace=verbose` during initialization.
+    /// `verbose` carries an optional secondary string (extra
+    /// detail; spec calls it `verbose`).
+    LogTrace {
+        message: String,
+        verbose: Option<String>,
     },
 }
 

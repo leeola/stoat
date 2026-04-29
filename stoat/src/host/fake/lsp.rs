@@ -8,12 +8,12 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    NumberOrString, PartialResultParams, Position, PositionEncodingKind, Range, ReferenceContext,
-    ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier,
-    WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind, Range,
+    ReferenceContext, ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp,
+    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri,
+    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -1352,6 +1352,75 @@ mod tests {
                     assert_eq!(begin.percentage, Some(12));
                 },
                 _ => panic!("expected progress notification"),
+            }
+        });
+    }
+
+    #[test]
+    fn push_notification_round_trips_log_message() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            lsp.push_notification(LspNotification::LogMessage {
+                typ: MessageType::WARNING,
+                message: "deprecated API in use".to_string(),
+            });
+
+            let notif = lsp
+                .recv_notification()
+                .await
+                .expect("pushed notification should be receivable");
+            match notif {
+                LspNotification::LogMessage { typ, message } => {
+                    assert_eq!(typ, MessageType::WARNING);
+                    assert_eq!(message, "deprecated API in use");
+                },
+                other => panic!("expected LogMessage, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn push_notification_round_trips_show_message() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            lsp.push_notification(LspNotification::ShowMessage {
+                typ: MessageType::ERROR,
+                message: "rust-analyzer crashed".to_string(),
+            });
+
+            let notif = lsp
+                .recv_notification()
+                .await
+                .expect("pushed notification should be receivable");
+            match notif {
+                LspNotification::ShowMessage { typ, message } => {
+                    assert_eq!(typ, MessageType::ERROR);
+                    assert_eq!(message, "rust-analyzer crashed");
+                },
+                other => panic!("expected ShowMessage, got {other:?}"),
+            }
+        });
+    }
+
+    #[test]
+    fn push_notification_round_trips_log_trace() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            lsp.push_notification(LspNotification::LogTrace {
+                message: "Sending textDocument/completion".to_string(),
+                verbose: Some("position: 12:4".to_string()),
+            });
+
+            let notif = lsp
+                .recv_notification()
+                .await
+                .expect("pushed notification should be receivable");
+            match notif {
+                LspNotification::LogTrace { message, verbose } => {
+                    assert_eq!(message, "Sending textDocument/completion");
+                    assert_eq!(verbose, Some("position: 12:4".to_string()));
+                },
+                other => panic!("expected LogTrace, got {other:?}"),
             }
         });
     }
