@@ -1900,10 +1900,18 @@ pub(super) fn save_selection(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
-    let Some(target) = editor.jumplist.backward() else {
+    let mut target = None;
+    for _ in 0..count {
+        match editor.jumplist.backward() {
+            Some(pos) => target = Some(pos),
+            None => break,
+        }
+    }
+    let Some(target) = target else {
         return UpdateEffect::None;
     };
     apply_primary_range(editor, target..target);
@@ -1911,10 +1919,18 @@ pub(super) fn jump_backward(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn jump_forward(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
-    let Some(target) = editor.jumplist.forward() else {
+    let mut target = None;
+    for _ in 0..count {
+        match editor.jumplist.forward() {
+            Some(pos) => target = Some(pos),
+            None => break,
+        }
+    }
+    let Some(target) = target else {
         return UpdateEffect::None;
     };
     apply_primary_range(editor, target..target);

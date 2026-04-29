@@ -2827,6 +2827,74 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_jump_backward_walks_n_entries() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("l");
+        let a = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            h.primary_head_offset(),
+            a,
+            "3 jumps back from the third saved position should land on the first save"
+        );
+    }
+
+    #[test]
+    fn count_prefix_jump_forward_walks_n_entries() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("l");
+        let _a = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        let _b = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        let c = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        h.stoat.pending_count = Some(2);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpForward);
+        assert_eq!(
+            h.primary_head_offset(),
+            c,
+            "2 jumps forward from oldest should reach the third save"
+        );
+    }
+
+    #[test]
+    fn count_prefix_jump_backward_clamps_at_history_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "abcdefghij\n");
+        h.open_file(&path);
+        h.type_keys("l");
+        let a = h.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SaveSelection);
+        h.type_keys("l l");
+        h.stoat.pending_count = Some(99);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpBackward);
+        assert_eq!(
+            h.primary_head_offset(),
+            a,
+            "huge count should clamp at the oldest jumplist entry"
+        );
+    }
+
+    #[test]
     fn count_prefix_repeats_move_down() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
