@@ -1,4 +1,4 @@
-use crate::host::lsp::{LspHost, LspNotification};
+use crate::host::lsp::{LspHost, LspNotification, OffsetEncoding};
 use async_trait::async_trait;
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionParams, CompletionItem, CompletionList,
@@ -8,12 +8,12 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    NumberOrString, PartialResultParams, Position, Range, ReferenceContext, ReferenceParams,
-    RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams, SymbolInformation,
-    SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    NumberOrString, PartialResultParams, Position, PositionEncodingKind, Range, ReferenceContext,
+    ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier,
+    WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -219,6 +219,24 @@ impl FakeLsp {
     /// the right feature set.
     pub fn set_capabilities(&self, capabilities: ServerCapabilities) {
         self.state.lock().unwrap().capabilities = Arc::new(capabilities);
+    }
+
+    /// Convenience setter that swaps just the
+    /// `position_encoding` field on the stored capabilities so
+    /// [`LspHost::offset_encoding`] reflects `encoding`. Other
+    /// capability fields are preserved. Use this when a test only
+    /// needs to control the negotiated offset encoding without
+    /// rebuilding a full [`ServerCapabilities`].
+    pub fn set_offset_encoding(&self, encoding: OffsetEncoding) {
+        let kind = match encoding {
+            OffsetEncoding::Utf8 => PositionEncodingKind::UTF8,
+            OffsetEncoding::Utf16 => PositionEncodingKind::UTF16,
+            OffsetEncoding::Utf32 => PositionEncodingKind::UTF32,
+        };
+        let mut state = self.state.lock().unwrap();
+        let mut caps = (*state.capabilities).clone();
+        caps.position_encoding = Some(kind);
+        state.capabilities = Arc::new(caps);
     }
 
     // --- Hover ---
@@ -1321,5 +1339,57 @@ mod tests {
                 Some(HoverProviderCapability::Simple(true))
             ));
         });
+    }
+
+    #[test]
+    fn offset_encoding_default_is_utf16() {
+        let lsp = FakeLsp::new();
+        assert_eq!(lsp.offset_encoding(), OffsetEncoding::Utf16);
+    }
+
+    #[test]
+    fn set_offset_encoding_drives_accessor() {
+        let lsp = FakeLsp::new();
+
+        lsp.set_offset_encoding(OffsetEncoding::Utf8);
+        assert_eq!(lsp.offset_encoding(), OffsetEncoding::Utf8);
+
+        lsp.set_offset_encoding(OffsetEncoding::Utf32);
+        assert_eq!(lsp.offset_encoding(), OffsetEncoding::Utf32);
+
+        lsp.set_offset_encoding(OffsetEncoding::Utf16);
+        assert_eq!(lsp.offset_encoding(), OffsetEncoding::Utf16);
+    }
+
+    #[test]
+    fn unknown_position_encoding_falls_back_to_utf16() {
+        let lsp = FakeLsp::new();
+        let caps = ServerCapabilities {
+            position_encoding: Some(PositionEncodingKind::new("utf-1234")),
+            ..ServerCapabilities::default()
+        };
+        lsp.set_capabilities(caps);
+
+        assert_eq!(lsp.offset_encoding(), OffsetEncoding::Utf16);
+    }
+
+    #[test]
+    fn set_offset_encoding_preserves_other_capabilities() {
+        use lsp_types::HoverProviderCapability;
+
+        let lsp = FakeLsp::new();
+        let caps = ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..ServerCapabilities::default()
+        };
+        lsp.set_capabilities(caps);
+
+        lsp.set_offset_encoding(OffsetEncoding::Utf8);
+
+        assert_eq!(lsp.offset_encoding(), OffsetEncoding::Utf8);
+        assert!(matches!(
+            lsp.capabilities().hover_provider,
+            Some(HoverProviderCapability::Simple(true))
+        ));
     }
 }

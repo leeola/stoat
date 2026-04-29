@@ -30,6 +30,24 @@ pub enum LspNotification {
     },
 }
 
+/// Width of the `Position.character` offset negotiated with the
+/// server during initialization. LSP defaults to UTF-16 code units,
+/// but stoat's rope works in UTF-8 byte offsets, so every
+/// position-conversion helper has to know which encoding the server
+/// is using to translate without off-by-one errors on multi-byte
+/// chars.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum OffsetEncoding {
+    /// Offsets count UTF-8 code units (bytes).
+    Utf8,
+    /// Offsets count UTF-16 code units. The LSP default; every
+    /// server is required to support it.
+    #[default]
+    Utf16,
+    /// Offsets count UTF-32 code units (Unicode code points).
+    Utf32,
+}
+
 /// Coarse capability category used to ask "does this server support
 /// feature X" without re-walking the raw [`ServerCapabilities`] at
 /// every callsite. The variant set mirrors the user-facing actions
@@ -69,6 +87,23 @@ pub trait LspHost: Send + Sync {
     /// stay lock-free for readers. Hosts that have not yet
     /// completed initialization return the empty defaults.
     fn capabilities(&self) -> Arc<ServerCapabilities>;
+
+    /// Negotiated [`OffsetEncoding`] for `Position.character` width.
+    /// Default impl reads from
+    /// `capabilities().position_encoding`; absent or unrecognized
+    /// values fall back to UTF-16 per the LSP spec.
+    fn offset_encoding(&self) -> OffsetEncoding {
+        match self
+            .capabilities()
+            .position_encoding
+            .as_ref()
+            .map(|e| e.as_str())
+        {
+            Some("utf-8") => OffsetEncoding::Utf8,
+            Some("utf-32") => OffsetEncoding::Utf32,
+            _ => OffsetEncoding::Utf16,
+        }
+    }
 
     /// Whether the connected server advertises support for
     /// `feature`. Default impl decodes against the cached

@@ -42,5 +42,5 @@ pub use git::{
     RebaseTodoOp, RewriteResult,
 };
 pub use local::{LocalFs, LocalGit};
-pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp};
+pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
 pub use terminal::TerminalHost;
