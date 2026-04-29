@@ -1535,6 +1535,26 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_in_select_mode_extends_n_lines() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\n");
+        h.open_file(&path);
+        h.type_keys("v");
+        assert_eq!(h.stoat.mode, "select");
+        h.type_keys("3 j");
+        let spans = h.selection_spans();
+        assert_eq!(spans.len(), 1);
+        assert_eq!(
+            spans[0].0, 0,
+            "anchor stays at byte 0 while head extends down"
+        );
+        assert_eq!(
+            spans[0].1, 6,
+            "3 j in select mode should extend the head three lines down"
+        );
+    }
+
+    #[test]
     fn select_mode_v_exits_back_to_normal() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abc\n");
