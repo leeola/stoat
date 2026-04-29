@@ -1481,6 +1481,19 @@ pub(super) enum ChangeDir {
 }
 
 pub(super) fn expand_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
+    let mut effect = UpdateEffect::None;
+    for _ in 0..count {
+        match expand_selection_step(stoat) {
+            UpdateEffect::Redraw => effect = UpdateEffect::Redraw,
+            UpdateEffect::None => break,
+            UpdateEffect::Quit => return UpdateEffect::Quit,
+        }
+    }
+    effect
+}
+
+fn expand_selection_step(stoat: &mut Stoat) -> UpdateEffect {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1553,6 +1566,7 @@ fn deepest_containing_layer(
 }
 
 pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1561,7 +1575,14 @@ pub(super) fn shrink_selection(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor");
-    let Some(target) = editor.expansion_history.pop() else {
+    let mut target: Option<std::ops::Range<usize>> = None;
+    for _ in 0..count {
+        match editor.expansion_history.pop() {
+            Some(t) => target = Some(t),
+            None => break,
+        }
+    }
+    let Some(target) = target else {
         return UpdateEffect::None;
     };
     editor.expansion_tip = Some(target.clone());

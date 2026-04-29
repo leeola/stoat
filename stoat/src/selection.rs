@@ -2463,6 +2463,65 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_expand_selection_walks_n_levels() {
+        let mut h_count = crate::test_harness::TestHarness::with_size(40, 5);
+        let path1 = h_count.write_file("s.rs", "fn main() {}\n");
+        h_count.open_file(&path1);
+        h_count.type_keys("l l l");
+        h_count.type_keys("3 alt-o");
+        let count_result = h_count.selection_spans();
+
+        let mut h_loop = crate::test_harness::TestHarness::with_size(40, 5);
+        let path2 = h_loop.write_file("s.rs", "fn main() {}\n");
+        h_loop.open_file(&path2);
+        h_loop.type_keys("l l l");
+        for _ in 0..3 {
+            crate::action_handlers::dispatch(&mut h_loop.stoat, &stoat_action::ExpandSelection);
+        }
+        let loop_result = h_loop.selection_spans();
+
+        assert_eq!(
+            count_result, loop_result,
+            "count-prefix expand should match repeated single expand"
+        );
+    }
+
+    #[test]
+    fn count_prefix_shrink_selection_walks_back_n_levels() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn main() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        let before = h.selection_spans();
+        for _ in 0..3 {
+            crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        }
+        assert_ne!(h.selection_spans(), before);
+        h.type_keys("3 alt-i");
+        assert_eq!(
+            h.selection_spans(),
+            before,
+            "3 alt-i should rewind 3 expansions to the original selection"
+        );
+    }
+
+    #[test]
+    fn count_prefix_expand_selection_clamps_at_root() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn x() {}\n");
+        h.open_file(&path);
+        h.type_keys("l");
+        h.type_keys("9 9 alt-o");
+        let after_huge = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        assert_eq!(
+            h.selection_spans(),
+            after_huge,
+            "additional expand at root should be a no-op"
+        );
+    }
+
+    #[test]
     fn select_next_sibling_jumps_to_next_named_node() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
