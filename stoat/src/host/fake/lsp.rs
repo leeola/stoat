@@ -136,7 +136,7 @@ pub fn change_params(path: &str, version: i32, new_text: &str) -> DidChangeTextD
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct LspKey {
-    uri: Uri,
+    uri: String,
     line: u32,
     character: u32,
 }
@@ -144,7 +144,7 @@ struct LspKey {
 impl LspKey {
     fn new(path: &str, line: u32, col: u32) -> Self {
         Self {
-            uri: file_uri(path),
+            uri: file_uri(path).as_str().to_string(),
             line,
             character: col,
         }
@@ -152,7 +152,7 @@ impl LspKey {
 
     fn from_position(uri: &Uri, pos: &Position) -> Self {
         Self {
-            uri: uri.clone(),
+            uri: uri.as_str().to_string(),
             line: pos.line,
             character: pos.character,
         }
@@ -310,10 +310,6 @@ impl FakeLsp {
 
     // --- Navigation (definition, declaration, type definition, implementation) ---
 
-    // `LspKey` contains an `lsp_types::Uri`, which has interior mutability
-    // for parsed-state caching but is never mutated after construction in
-    // this fake. The `mutable_key_type` lint is a false positive here.
-    #[allow(clippy::mutable_key_type)]
     fn set_goto(
         map: &mut BTreeMap<LspKey, GotoDefinitionResponse>,
         path: &str,
@@ -542,9 +538,6 @@ impl FakeLsp {
     }
 }
 
-// `LspKey` contains an `lsp_types::Uri` whose interior mutability is
-// only used for parse-state caching, never observable mutation.
-#[allow(clippy::mutable_key_type)]
 fn lookup_goto(
     map: &BTreeMap<LspKey, GotoDefinitionResponse>,
     uri: &Uri,
