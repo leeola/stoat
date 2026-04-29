@@ -1635,7 +1635,8 @@ pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -
         let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
             return UpdateEffect::None;
         };
-        let Some(layer) = syntax_map.snapshot().iter_layers().next() else {
+        let snapshot = syntax_map.snapshot();
+        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
             return UpdateEffect::None;
         };
         let root = layer.tree.root_node();
@@ -1715,7 +1716,8 @@ pub(super) fn move_to_parent_bound(
         let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
             return UpdateEffect::None;
         };
-        let Some(layer) = syntax_map.snapshot().iter_layers().next() else {
+        let snapshot = syntax_map.snapshot();
+        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
             return UpdateEffect::None;
         };
         let root = layer.tree.root_node();

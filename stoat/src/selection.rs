@@ -2540,6 +2540,35 @@ mod tests {
     }
 
     #[test]
+    fn select_sibling_pivots_within_injection_layer() {
+        let mut h = crate::test_harness::TestHarness::with_size(60, 10);
+        let path = h.write_file("s.md", "aaa **bbb** ccc *ddd* eee\n");
+        h.open_file(&path);
+        for _ in 0..6 {
+            h.type_keys("l");
+        }
+        assert_eq!(
+            h.primary_head_offset(),
+            6,
+            "test setup: cursor should be on first 'b' of 'bbb'"
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        let initial = h.selection_spans()[0];
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+        let after = h.selection_spans()[0];
+        assert_ne!(
+            after, initial,
+            "next sibling inside the inline injection must shift the selection: \
+             with the host markdown grammar the entire inline content is one leaf"
+        );
+        let line_end = 25;
+        assert!(
+            after.1 <= line_end,
+            "next sibling should not escape past the line end {line_end}, got {after:?}"
+        );
+    }
+
+    #[test]
     fn expand_selection_no_op_without_syntax_map() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.txt", "plain text content\n");
