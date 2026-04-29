@@ -2852,6 +2852,35 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_goto_next_paragraph_jumps_n_paragraphs() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\n\nb\n\nc\n\nd\n");
+        h.open_file(&path);
+        h.type_keys("3 ] p");
+        assert_eq!(h.cursor_display_positions(), vec![(6, 0)]);
+    }
+
+    #[test]
+    fn count_prefix_goto_prev_paragraph_jumps_back_n_paragraphs() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\n\nb\n\nc\n\nd\n");
+        h.open_file(&path);
+        h.type_keys("6 j");
+        assert_eq!(h.cursor_display_positions(), vec![(6, 0)]);
+        h.type_keys("3 [ p");
+        assert_eq!(h.cursor_display_positions(), vec![(0, 0)]);
+    }
+
+    #[test]
+    fn count_prefix_goto_next_paragraph_clamps_at_last_paragraph() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\n\nb\n");
+        h.open_file(&path);
+        h.type_keys("9 ] p");
+        assert_eq!(h.cursor_display_positions(), vec![(2, 0)]);
+    }
+
+    #[test]
     fn match_brackets_jumps_open_to_close() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "(abc)\n");

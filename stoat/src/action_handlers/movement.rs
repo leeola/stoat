@@ -1895,6 +1895,7 @@ pub(super) enum ParaDir {
 }
 
 pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -1910,46 +1911,59 @@ pub(super) fn goto_paragraph(stoat: &mut Stoat, dir: ParaDir) -> UpdateEffect {
     }
     let is_empty = |r: u32| rope.line_len(r) == 0;
 
-    let target_row = match dir {
-        ParaDir::Next => {
-            if cursor_row >= last_content_row {
-                return UpdateEffect::None;
-            }
-            let mut row = cursor_row;
-            while row <= last_content_row && !is_empty(row) {
-                row += 1;
-            }
-            if row > last_content_row {
-                return UpdateEffect::None;
-            }
-            while row <= last_content_row && is_empty(row) {
-                row += 1;
-            }
-            if row > last_content_row {
-                return UpdateEffect::None;
-            }
-            row
-        },
-        ParaDir::Prev => {
-            if cursor_row == 0 {
-                return UpdateEffect::None;
-            }
-            let mut row = cursor_row - 1;
-            while row > 0 && is_empty(row) {
-                row -= 1;
-            }
-            while row > 0 && !is_empty(row) {
-                row -= 1;
-            }
-            if is_empty(row) && row < last_content_row {
-                row += 1;
-            }
-            if row == cursor_row {
-                return UpdateEffect::None;
-            }
-            row
-        },
+    let step = |current: u32| -> Option<u32> {
+        match dir {
+            ParaDir::Next => {
+                if current >= last_content_row {
+                    return None;
+                }
+                let mut row = current;
+                while row <= last_content_row && !is_empty(row) {
+                    row += 1;
+                }
+                if row > last_content_row {
+                    return None;
+                }
+                while row <= last_content_row && is_empty(row) {
+                    row += 1;
+                }
+                if row > last_content_row {
+                    return None;
+                }
+                Some(row)
+            },
+            ParaDir::Prev => {
+                if current == 0 {
+                    return None;
+                }
+                let mut row = current - 1;
+                while row > 0 && is_empty(row) {
+                    row -= 1;
+                }
+                while row > 0 && !is_empty(row) {
+                    row -= 1;
+                }
+                if is_empty(row) && row < last_content_row {
+                    row += 1;
+                }
+                if row == current {
+                    return None;
+                }
+                Some(row)
+            },
+        }
     };
+
+    let mut target_row = cursor_row;
+    for _ in 0..count {
+        match step(target_row) {
+            Some(next) => target_row = next,
+            None => break,
+        }
+    }
+    if target_row == cursor_row {
+        return UpdateEffect::None;
+    }
 
     let target_offset = rope.point_to_offset(Point::new(target_row, 0));
     apply_primary_range(editor, target_offset..target_offset);
