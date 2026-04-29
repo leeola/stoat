@@ -158,6 +158,19 @@ enum AddDirection {
 }
 
 fn add_selection_in_direction(stoat: &mut Stoat, dir: AddDirection) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
+    let mut effect = UpdateEffect::None;
+    for _ in 0..count {
+        match add_selection_in_direction_step(stoat, dir) {
+            UpdateEffect::Redraw => effect = UpdateEffect::Redraw,
+            UpdateEffect::None => break,
+            UpdateEffect::Quit => return UpdateEffect::Quit,
+        }
+    }
+    effect
+}
+
+fn add_selection_in_direction_step(stoat: &mut Stoat, dir: AddDirection) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };

@@ -650,6 +650,52 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_add_selection_below_inserts_n_cursors() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.type_keys("3 shift-C");
+        let spans = h.selection_spans();
+        assert_eq!(
+            spans.len(),
+            4,
+            "3C from 1 cursor should leave 4 cursors total (got {spans:?})"
+        );
+    }
+
+    #[test]
+    fn count_prefix_add_selection_above_inserts_n_cursors() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.type_keys("4 j");
+        h.type_keys("3 alt-shift-C");
+        let spans = h.selection_spans();
+        assert_eq!(
+            spans.len(),
+            4,
+            "3 Alt-C from 1 cursor should leave 4 cursors total (got {spans:?})"
+        );
+    }
+
+    #[test]
+    fn count_prefix_add_selection_below_clamps_at_buffer_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\n");
+        h.open_file(&path);
+        h.type_keys("9 9 shift-C");
+        let spans = h.selection_spans();
+        assert!(
+            spans.len() <= 4,
+            "huge count should clamp at buffer end (3 lines means at most 3 cursors below the start, got {spans:?})"
+        );
+        assert!(
+            spans.len() > 1,
+            "should have added at least one cursor below (got {spans:?})"
+        );
+    }
+
+    #[test]
     fn snapshot_move_right() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "hello world\n");
