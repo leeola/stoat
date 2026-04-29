@@ -1412,18 +1412,20 @@ pub(super) fn remove_primary_selection(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn rotate_selections_forward(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
-    editor.selections.rotate_primary(true);
+    editor.selections.rotate_primary_by(true, count);
     UpdateEffect::Redraw
 }
 
 pub(super) fn rotate_selections_backward(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
-    editor.selections.rotate_primary(false);
+    editor.selections.rotate_primary_by(false, count);
     UpdateEffect::Redraw
 }
 

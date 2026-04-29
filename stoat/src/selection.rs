@@ -90,8 +90,8 @@ impl SelectionsCollection {
         self.disjoint.retain(|s| s.id != primary_id);
     }
 
-    pub(crate) fn rotate_primary(&mut self, forward: bool) {
-        if self.disjoint.len() < 2 {
+    pub(crate) fn rotate_primary_by(&mut self, forward: bool, count: u32) {
+        if self.disjoint.len() < 2 || count == 0 {
             return;
         }
         let primary_id = self.newest_anchor().id;
@@ -101,10 +101,14 @@ impl SelectionsCollection {
             .position(|s| s.id == primary_id)
             .expect("primary id must be in disjoint");
         let len = self.disjoint.len();
+        let offset = (count as usize) % len;
+        if offset == 0 {
+            return;
+        }
         let new_idx = if forward {
-            (primary_idx + 1) % len
+            (primary_idx + offset) % len
         } else {
-            (primary_idx + len - 1) % len
+            (primary_idx + len - offset) % len
         };
         let new_id = self.next_selection_id;
         self.next_selection_id += 1;
@@ -316,9 +320,9 @@ mod tests {
         let mut collection = SelectionsCollection::new();
 
         let before_id = collection.newest_anchor().id;
-        collection.rotate_primary(true);
+        collection.rotate_primary_by(true, 1);
         assert_eq!(collection.newest_anchor().id, before_id);
-        collection.rotate_primary(false);
+        collection.rotate_primary_by(false, 1);
         assert_eq!(collection.newest_anchor().id, before_id);
     }
 
@@ -343,11 +347,11 @@ mod tests {
         };
 
         assert_eq!(primary_offset(&collection), 6);
-        collection.rotate_primary(true);
+        collection.rotate_primary_by(true, 1);
         assert_eq!(primary_offset(&collection), 0);
-        collection.rotate_primary(true);
+        collection.rotate_primary_by(true, 1);
         assert_eq!(primary_offset(&collection), 3);
-        collection.rotate_primary(true);
+        collection.rotate_primary_by(true, 1);
         assert_eq!(primary_offset(&collection), 6);
     }
 
@@ -372,11 +376,11 @@ mod tests {
         };
 
         assert_eq!(primary_offset(&collection), 6);
-        collection.rotate_primary(false);
+        collection.rotate_primary_by(false, 1);
         assert_eq!(primary_offset(&collection), 3);
-        collection.rotate_primary(false);
+        collection.rotate_primary_by(false, 1);
         assert_eq!(primary_offset(&collection), 0);
-        collection.rotate_primary(false);
+        collection.rotate_primary_by(false, 1);
         assert_eq!(primary_offset(&collection), 6);
     }
 
@@ -968,6 +972,52 @@ mod tests {
         assert_eq!(h.primary_head_offset(), before);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RotateSelectionsBackward);
         assert_eq!(h.primary_head_offset(), before);
+    }
+
+    #[test]
+    fn count_prefix_rotate_forward_cycles_n_positions() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\njkl\n");
+        h.open_file(&path);
+        h.type_keys("C C C");
+        assert_eq!(h.head_offsets(), vec![0, 4, 8, 12]);
+        assert_eq!(h.primary_head_offset(), 12);
+        h.type_keys("2 )");
+        assert_eq!(
+            h.primary_head_offset(),
+            4,
+            "2 ) from primary at offset 12 should land on offset 4 (wraps from 12 -> 0 -> 4)"
+        );
+    }
+
+    #[test]
+    fn count_prefix_rotate_backward_cycles_n_positions() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\njkl\n");
+        h.open_file(&path);
+        h.type_keys("C C C");
+        assert_eq!(h.primary_head_offset(), 12);
+        h.type_keys("2 (");
+        assert_eq!(
+            h.primary_head_offset(),
+            4,
+            "2 ( from primary at offset 12 should land on offset 4"
+        );
+    }
+
+    #[test]
+    fn count_prefix_rotate_full_cycle_is_noop() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 6);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\njkl\n");
+        h.open_file(&path);
+        h.type_keys("C C C");
+        let before = h.primary_head_offset();
+        h.type_keys("4 )");
+        assert_eq!(
+            h.primary_head_offset(),
+            before,
+            "rotating by len cycles should leave the primary at the same offset"
+        );
     }
 
     #[test]
