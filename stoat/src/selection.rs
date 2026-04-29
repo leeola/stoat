@@ -2118,6 +2118,56 @@ mod tests {
         assert_eq!(focused_buffer_text(&mut h), before);
     }
 
+    #[test]
+    fn count_prefix_undo_walks_back_n_steps() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+        h.type_keys("3 u");
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    }
+
+    #[test]
+    fn count_prefix_redo_walks_forward_n_steps() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        h.type_keys("3 u");
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+        h.type_keys("3 U");
+        assert_eq!(focused_buffer_text(&mut h), "ABC\n");
+    }
+
+    #[test]
+    fn count_prefix_undo_redo_round_trip_with_huge_count() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("%");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        let after_edit = focused_buffer_text(&mut h);
+        h.type_keys("9 9 u");
+        h.type_keys("9 9 U");
+        assert_eq!(
+            focused_buffer_text(&mut h),
+            after_edit,
+            "huge undo + huge redo should round-trip back to post-edit state"
+        );
+    }
+
     fn install_diff_hunks(h: &mut crate::test_harness::TestHarness, line_starts: &[u32]) {
         use crate::diff_map::{DiffHunk, DiffHunkStatus, DiffMap};
         let hunks: Vec<DiffHunk> = line_starts

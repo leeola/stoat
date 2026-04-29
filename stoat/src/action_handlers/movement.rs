@@ -1032,16 +1032,18 @@ pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn undo(stoat: &mut Stoat) -> UpdateEffect {
-    apply_buffer_history(stoat, |buf| buf.undo())
+    let count = stoat.take_pending_count().unwrap_or(1);
+    apply_buffer_history(stoat, count, |buf| buf.undo())
 }
 
 pub(super) fn redo(stoat: &mut Stoat) -> UpdateEffect {
-    apply_buffer_history(stoat, |buf| buf.redo())
+    let count = stoat.take_pending_count().unwrap_or(1);
+    apply_buffer_history(stoat, count, |buf| buf.redo())
 }
 
-fn apply_buffer_history<F>(stoat: &mut Stoat, op: F) -> UpdateEffect
+fn apply_buffer_history<F>(stoat: &mut Stoat, count: u32, op: F) -> UpdateEffect
 where
-    F: FnOnce(&mut crate::buffer::TextBuffer) -> bool,
+    F: Fn(&mut crate::buffer::TextBuffer) -> bool,
 {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
@@ -1052,13 +1054,20 @@ where
 
     let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
 
-    let did_change = {
+    let any_changed = {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        op(&mut guard)
+        let mut any = false;
+        for _ in 0..count {
+            if !op(&mut guard) {
+                break;
+            }
+            any = true;
+        }
+        any
     };
 
-    if !did_change {
+    if !any_changed {
         return UpdateEffect::None;
     }
 
