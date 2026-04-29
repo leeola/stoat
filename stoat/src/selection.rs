@@ -2564,6 +2564,78 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_select_sibling_walks_n_siblings() {
+        let mut h_count = crate::test_harness::TestHarness::with_size(40, 5);
+        let path1 = h_count.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n");
+        h_count.open_file(&path1);
+        h_count.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h_count.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h_count.stoat, &stoat_action::ExpandSelection);
+        h_count.type_keys("3 alt-n");
+        let count_result = h_count.selection_spans();
+
+        let mut h_loop = crate::test_harness::TestHarness::with_size(40, 5);
+        let path2 = h_loop.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\nfn d() {}\n");
+        h_loop.open_file(&path2);
+        h_loop.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h_loop.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h_loop.stoat, &stoat_action::ExpandSelection);
+        for _ in 0..3 {
+            crate::action_handlers::dispatch(&mut h_loop.stoat, &stoat_action::SelectNextSibling);
+        }
+        let loop_result = h_loop.selection_spans();
+
+        assert_eq!(
+            count_result, loop_result,
+            "count-prefix select_sibling should match repeated single dispatch"
+        );
+    }
+
+    #[test]
+    fn count_prefix_select_sibling_clamps_at_chain_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        h.type_keys("9 alt-n");
+        let after_huge = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectNextSibling);
+        assert_eq!(
+            h.selection_spans(),
+            after_huge,
+            "next sibling at end-of-chain after huge count should be a no-op"
+        );
+    }
+
+    #[test]
+    fn count_prefix_move_to_parent_walks_higher_than_single_step() {
+        let mut h_single = crate::test_harness::TestHarness::with_size(40, 5);
+        let p1 = h_single.write_file("s.rs", "fn main() { let x = (1 + 2); }\n");
+        h_single.open_file(&p1);
+        h_single.type_keys("l l l l l l l l l l l l l l l l l l l l l l");
+        let starting = h_single.primary_head_offset();
+        crate::action_handlers::dispatch(&mut h_single.stoat, &stoat_action::MoveParentNodeStart);
+        let single_offset = h_single.primary_head_offset();
+        assert!(
+            single_offset < starting,
+            "1 Alt-b should move backward from {starting} (got {single_offset})"
+        );
+
+        let mut h_count = crate::test_harness::TestHarness::with_size(40, 5);
+        let p2 = h_count.write_file("s.rs", "fn main() { let x = (1 + 2); }\n");
+        h_count.open_file(&p2);
+        h_count.type_keys("l l l l l l l l l l l l l l l l l l l l l l");
+        h_count.type_keys("3 alt-b");
+        let count_offset = h_count.primary_head_offset();
+        assert!(
+            count_offset < single_offset,
+            "3 Alt-b should walk further up than 1 Alt-b ({single_offset} -> {count_offset})"
+        );
+    }
+
+    #[test]
     fn select_sibling_no_op_at_tree_edge() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.rs", "fn only() {}\n");

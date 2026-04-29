@@ -1597,6 +1597,7 @@ pub(super) enum SiblingDir {
 }
 
 pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1626,14 +1627,25 @@ pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -
         let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
             return UpdateEffect::None;
         };
-        let sibling = match dir {
-            SiblingDir::Next => node.next_named_sibling(),
-            SiblingDir::Prev => node.prev_named_sibling(),
-        };
-        match sibling {
-            Some(s) => s.byte_range(),
-            None => return UpdateEffect::None,
+        let mut current = node;
+        let mut moved = false;
+        for _ in 0..count {
+            let next = match dir {
+                SiblingDir::Next => current.next_named_sibling(),
+                SiblingDir::Prev => current.prev_named_sibling(),
+            };
+            match next {
+                Some(s) => {
+                    current = s;
+                    moved = true;
+                },
+                None => break,
+            }
         }
+        if !moved {
+            return UpdateEffect::None;
+        }
+        current.byte_range()
     };
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
@@ -1665,6 +1677,7 @@ pub(super) fn move_to_parent_bound(
     bound: NodeBound,
     extend: bool,
 ) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1694,12 +1707,23 @@ pub(super) fn move_to_parent_bound(
         let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
             return UpdateEffect::None;
         };
-        let Some(parent) = node.parent() else {
+        let mut current = node;
+        let mut moved = false;
+        for _ in 0..count {
+            match current.parent() {
+                Some(p) => {
+                    current = p;
+                    moved = true;
+                },
+                None => break,
+            }
+        }
+        if !moved {
             return UpdateEffect::None;
-        };
+        }
         match bound {
-            NodeBound::Start => parent.start_byte(),
-            NodeBound::End => parent.end_byte(),
+            NodeBound::Start => current.start_byte(),
+            NodeBound::End => current.end_byte(),
         }
     };
 
