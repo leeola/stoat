@@ -10,11 +10,12 @@ use lsp_types::{
     HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
     Location, MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams,
     Position, PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext,
-    ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier,
-    WorkDoneProgress, WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams, ServerCapabilities,
+    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -115,6 +116,18 @@ pub fn folding_range_params(path: &str) -> FoldingRangeParams {
     }
 }
 
+pub fn selection_range_params(path: &str, positions: &[(u32, u32)]) -> SelectionRangeParams {
+    SelectionRangeParams {
+        text_document: text_doc_id(path),
+        positions: positions
+            .iter()
+            .map(|(line, col)| Position::new(*line, *col))
+            .collect(),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -192,6 +205,7 @@ struct FakeLspState {
     inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
     folding_ranges: BTreeMap<Uri, Vec<FoldingRange>>,
+    selection_ranges: BTreeMap<LspKey, SelectionRange>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -224,6 +238,7 @@ impl FakeLsp {
                 inlay_hints: BTreeMap::new(),
                 workspace_symbols: BTreeMap::new(),
                 folding_ranges: BTreeMap::new(),
+                selection_ranges: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -272,6 +287,21 @@ impl FakeLsp {
             .unwrap()
             .folding_ranges
             .insert(file_uri(path), ranges);
+    }
+
+    /// Programs the [`SelectionRange`] chain returned for the
+    /// `textDocument/selectionRange` call whose request position
+    /// matches `(path, line, col)`. Each call to
+    /// [`LspHost::selection_range`] looks up every position in the
+    /// request; if any position is unprogrammed the host returns
+    /// `None`. Replaces any previously seeded chain for the same
+    /// position.
+    pub fn set_selection_range(&self, path: &str, line: u32, col: u32, range: SelectionRange) {
+        self.state
+            .lock()
+            .unwrap()
+            .selection_ranges
+            .insert(LspKey::new(path, line, col), range);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -921,6 +951,29 @@ impl LspHost for FakeLsp {
         Ok(state.folding_ranges.get(&params.text_document.uri).cloned())
     }
 
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> io::Result<Option<Vec<SelectionRange>>> {
+        if let Some(err) = self.take_request_failure("textDocument/selectionRange") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let uri = &params.text_document.uri;
+        let mut chains = Vec::with_capacity(params.positions.len());
+        for pos in &params.positions {
+            let Some(chain) = state
+                .selection_ranges
+                .get(&LspKey::from_position(uri, pos))
+                .cloned()
+            else {
+                return Ok(None);
+            };
+            chains.push(chain);
+        }
+        Ok(Some(chains))
+    }
+
     async fn workspace_symbol(
         &self,
         params: WorkspaceSymbolParams,
@@ -1317,6 +1370,49 @@ mod tests {
 
             let miss = lsp
                 .folding_range(folding_range_params("/src/other.rs"))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn selection_range_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let inner = SelectionRange {
+                range: Range::new(Position::new(4, 8), Position::new(4, 11)),
+                parent: None,
+            };
+            let outer = SelectionRange {
+                range: Range::new(Position::new(4, 4), Position::new(4, 18)),
+                parent: Some(Box::new(inner.clone())),
+            };
+            let other = SelectionRange {
+                range: Range::new(Position::new(7, 0), Position::new(9, 1)),
+                parent: None,
+            };
+            lsp.set_selection_range("/src/main.rs", 4, 9, outer.clone());
+            lsp.set_selection_range("/src/main.rs", 7, 4, other.clone());
+
+            let result = lsp
+                .selection_range(selection_range_params("/src/main.rs", &[(4, 9), (7, 4)]))
+                .await
+                .unwrap()
+                .expect("should have ranges");
+            assert_eq!(result, vec![outer, other]);
+
+            let partial = lsp
+                .selection_range(selection_range_params("/src/main.rs", &[(4, 9), (99, 99)]))
+                .await
+                .unwrap();
+            assert!(
+                partial.is_none(),
+                "any unprogrammed position collapses the response"
+            );
+
+            let miss = lsp
+                .selection_range(selection_range_params("/src/other.rs", &[(0, 0)]))
                 .await
                 .unwrap();
             assert!(miss.is_none(), "unprogrammed documents return None");

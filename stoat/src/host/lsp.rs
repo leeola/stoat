@@ -8,10 +8,10 @@ use lsp_types::{
     FoldingRange, FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover,
     HoverParams, HoverProviderCapability, ImplementationProviderCapability, InitializeResult,
     InlayHint, InlayHintParams, InlayHintServerCapabilities, Location, MessageType, OneOf,
-    PrepareRenameResponse, ProgressToken, ReferenceParams, RenameParams, ServerCapabilities,
-    SignatureHelp, SignatureHelpParams, TextDocumentPositionParams, TextEdit,
-    TypeDefinitionProviderCapability, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    PrepareRenameResponse, ProgressToken, ReferenceParams, RenameParams, SelectionRange,
+    SelectionRangeParams, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability, Uri, WorkDoneProgress,
+    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     io,
@@ -262,6 +262,10 @@ pub trait LspHost: Send + Sync {
         &self,
         params: FoldingRangeParams,
     ) -> io::Result<Option<Vec<FoldingRange>>>;
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> io::Result<Option<Vec<SelectionRange>>>;
     async fn workspace_symbol(
         &self,
         params: WorkspaceSymbolParams,
@@ -418,6 +422,13 @@ impl LspHost for NoopLsp {
         &self,
         _params: FoldingRangeParams,
     ) -> io::Result<Option<Vec<FoldingRange>>> {
+        Ok(None)
+    }
+
+    async fn selection_range(
+        &self,
+        _params: SelectionRangeParams,
+    ) -> io::Result<Option<Vec<SelectionRange>>> {
         Ok(None)
     }
 
