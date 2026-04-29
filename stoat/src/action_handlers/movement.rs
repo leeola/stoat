@@ -1298,6 +1298,7 @@ pub(super) fn select_all(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn select_line_below(stoat: &mut Stoat) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1);
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
@@ -1331,13 +1332,15 @@ pub(super) fn select_line_below(stoat: &mut Stoat) -> UpdateEffect {
         let already_line_shaped =
             start_offset == current_line_start && end_offset == current_line_end;
 
-        let (new_start_offset, new_end_offset) = if already_line_shaped {
-            (current_line_start, line_start(end_row + 2))
+        let extension_rows = if already_line_shaped {
+            count
         } else {
-            (current_line_start, current_line_end)
+            count.saturating_sub(1)
         };
+        let target_end_row = end_row.saturating_add(extension_rows);
+        let new_end_offset = line_start(target_end_row.saturating_add(1));
 
-        let start_anchor = buffer_snapshot.anchor_at(new_start_offset, Bias::Left);
+        let start_anchor = buffer_snapshot.anchor_at(current_line_start, Bias::Left);
         let end_anchor = buffer_snapshot.anchor_at(new_end_offset, Bias::Right);
         let mut new = sel.clone();
         new.start = start_anchor;

@@ -2951,6 +2951,55 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_extends_select_line_below() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.type_keys("3 x");
+        let spans = h.selection_spans();
+        assert_eq!(spans.len(), 1);
+        let three_lines_len = "a\nb\nc\n".len();
+        assert_eq!(
+            (spans[0].0, spans[0].1),
+            (0, three_lines_len),
+            "3x from line 0 should select three lines"
+        );
+    }
+
+    #[test]
+    fn count_prefix_extends_already_line_shaped_select_line_below() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\n");
+        h.open_file(&path);
+        h.type_keys("x");
+        h.type_keys("2 x");
+        let spans = h.selection_spans();
+        assert_eq!(spans.len(), 1);
+        let three_lines_len = "a\nb\nc\n".len();
+        assert_eq!(
+            (spans[0].0, spans[0].1),
+            (0, three_lines_len),
+            "x then 2x should grow to three lines total"
+        );
+    }
+
+    #[test]
+    fn count_prefix_select_line_below_clamps_at_buffer_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "a\nb\n");
+        h.open_file(&path);
+        h.type_keys("9 9 x");
+        let spans = h.selection_spans();
+        assert_eq!(spans.len(), 1);
+        let buffer_len = "a\nb\n".len();
+        assert_eq!(
+            (spans[0].0, spans[0].1),
+            (0, buffer_len),
+            "huge count should clamp at buffer end"
+        );
+    }
+
+    #[test]
     fn save_selection_truncates_forward_history() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.txt", "abcdefghij\n");
