@@ -2069,6 +2069,42 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_indent_inserts_n_tabs() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\n");
+        h.open_file(&path);
+        h.type_keys("3 >");
+        assert_eq!(focused_buffer_text(&mut h), "\t\t\tabc\n");
+    }
+
+    #[test]
+    fn count_prefix_unindent_removes_n_tabs() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "\t\t\tabc\n");
+        h.open_file(&path);
+        h.type_keys("2 <");
+        assert_eq!(focused_buffer_text(&mut h), "\tabc\n");
+    }
+
+    #[test]
+    fn count_prefix_unindent_removes_n_space_groups() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "        abc\n");
+        h.open_file(&path);
+        h.type_keys("2 <");
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    }
+
+    #[test]
+    fn count_prefix_unindent_clamps_at_available_indent() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "\tabc\n");
+        h.open_file(&path);
+        h.type_keys("9 <");
+        assert_eq!(focused_buffer_text(&mut h), "abc\n");
+    }
+
+    #[test]
     fn indent_selection_dedupes_lines_across_multi_cursors() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "abc\ndef\nghi\n");

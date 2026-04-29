@@ -1199,6 +1199,7 @@ enum IndentDir {
 const INDENT_WIDTH: usize = 4;
 
 fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
+    let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -1231,26 +1232,44 @@ fn apply_line_indent(stoat: &mut Stoat, dir: IndentDir) -> UpdateEffect {
         rows.sort_unstable();
         rows.dedup();
 
-        let mut edits: Vec<(usize, usize, &'static str)> = Vec::with_capacity(rows.len());
+        let mut edits: Vec<(usize, usize, String)> = Vec::with_capacity(rows.len());
         for row in rows {
             let line_start = rope.point_to_offset(Point::new(row, 0));
             match dir {
-                IndentDir::In => edits.push((line_start, line_start, "\t")),
+                IndentDir::In => {
+                    edits.push((line_start, line_start, "\t".repeat(count)));
+                },
                 IndentDir::Out => {
-                    let mut chars = rope.chars_at(line_start);
-                    let first = chars.next();
-                    if first == Some('\t') {
-                        edits.push((line_start, line_start + 1, ""));
-                    } else if first == Some(' ') {
-                        let mut count = 1;
-                        for ch in chars {
-                            if ch == ' ' && count < INDENT_WIDTH {
-                                count += 1;
-                            } else {
-                                break;
-                            }
+                    let head: Vec<char> = rope
+                        .chars_at(line_start)
+                        .take(count.saturating_mul(INDENT_WIDTH))
+                        .collect();
+                    let mut consumed = 0usize;
+                    let mut idx = 0usize;
+                    for _ in 0..count {
+                        if idx >= head.len() {
+                            break;
                         }
-                        edits.push((line_start, line_start + count, ""));
+                        match head[idx] {
+                            '\t' => {
+                                idx += 1;
+                                consumed += 1;
+                            },
+                            ' ' => {
+                                let group_start = idx;
+                                while idx < head.len()
+                                    && head[idx] == ' '
+                                    && idx - group_start < INDENT_WIDTH
+                                {
+                                    idx += 1;
+                                }
+                                consumed += idx - group_start;
+                            },
+                            _ => break,
+                        }
+                    }
+                    if consumed > 0 {
+                        edits.push((line_start, line_start + consumed, String::new()));
                     }
                 },
             }
