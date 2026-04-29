@@ -817,11 +817,13 @@ where
 }
 
 pub(super) fn increment(stoat: &mut Stoat) -> UpdateEffect {
-    apply_number_delta(stoat, 1)
+    let count = stoat.take_pending_count().unwrap_or(1) as i64;
+    apply_number_delta(stoat, count)
 }
 
 pub(super) fn decrement(stoat: &mut Stoat) -> UpdateEffect {
-    apply_number_delta(stoat, -1)
+    let count = stoat.take_pending_count().unwrap_or(1) as i64;
+    apply_number_delta(stoat, -count)
 }
 
 fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {

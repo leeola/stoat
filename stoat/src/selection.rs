@@ -1396,6 +1396,33 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_increment_adds_count() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 10\n");
+        h.open_file(&path);
+        h.type_keys("5 ctrl-a");
+        assert_eq!(focused_buffer_text(&mut h), "let x = 15\n");
+    }
+
+    #[test]
+    fn count_prefix_decrement_subtracts_count() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 10\n");
+        h.open_file(&path);
+        h.type_keys("3 ctrl-x");
+        assert_eq!(focused_buffer_text(&mut h), "let x = 7\n");
+    }
+
+    #[test]
+    fn count_prefix_increment_hex_uses_count() {
+        let mut h = crate::test_harness::TestHarness::with_size(30, 5);
+        let path = h.write_file("s.txt", "let x = 0x10\n");
+        h.open_file(&path);
+        h.type_keys("4 ctrl-a");
+        assert_eq!(focused_buffer_text(&mut h), "let x = 0x14\n");
+    }
+
+    #[test]
     fn select_mode_v_enters_then_h_extends_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "abcdef\n");
