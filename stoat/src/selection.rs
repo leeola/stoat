@@ -3177,6 +3177,24 @@ mod tests {
     }
 
     #[test]
+    fn count_prefix_repeats_next_long_word_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "foo.bar baz qux quux\n");
+        h.open_file(&path);
+        h.stoat.pending_count = Some(3);
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::defs::editor::MoveNextLongWordStart,
+        );
+        assert_eq!(
+            h.primary_head_offset(),
+            15,
+            "long-word treats `foo.bar` as one word, so 3W from offset 0 \
+             advances past `baz qux ` to the space before `quux`"
+        );
+    }
+
+    #[test]
     fn goto_line_number_jumps_to_count_line() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
