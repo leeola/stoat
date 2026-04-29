@@ -7,10 +7,10 @@ use lsp_types::{
     DocumentHighlight, DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
-    InlayHintServerCapabilities, Location, MessageType, OneOf, ProgressToken, ReferenceParams,
-    RenameParams, ServerCapabilities, SignatureHelp, SignatureHelpParams, TextEdit,
-    TypeDefinitionProviderCapability, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
+    ProgressToken, ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp,
+    SignatureHelpParams, TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability,
+    Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     io,
@@ -269,6 +269,10 @@ pub trait LspHost: Send + Sync {
     async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint>;
 
     // Editing
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> io::Result<Option<PrepareRenameResponse>>;
     async fn rename(&self, params: RenameParams) -> io::Result<Option<WorkspaceEdit>>;
     async fn formatting(
         &self,
@@ -425,6 +429,13 @@ impl LspHost for NoopLsp {
 
     async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint> {
         Ok(hint)
+    }
+
+    async fn prepare_rename(
+        &self,
+        _params: TextDocumentPositionParams,
+    ) -> io::Result<Option<PrepareRenameResponse>> {
+        Ok(None)
     }
 
     async fn rename(&self, _params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {

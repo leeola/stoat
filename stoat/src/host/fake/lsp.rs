@@ -8,12 +8,13 @@ use lsp_types::{
     DocumentHighlightParams, DocumentSymbolParams, DocumentSymbolResponse, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
     InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind, Range,
-    ReferenceContext, ReferenceParams, RenameParams, ServerCapabilities, SignatureHelp,
-    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri,
-    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
+    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameParams,
+    ServerCapabilities, SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -182,6 +183,7 @@ struct FakeLspState {
     highlights: BTreeMap<LspKey, Vec<DocumentHighlight>>,
     inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
+    prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
     request_failures_persistent: BTreeMap<String, io::ErrorKind>,
@@ -212,6 +214,7 @@ impl FakeLsp {
                 highlights: BTreeMap::new(),
                 inlay_hints: BTreeMap::new(),
                 workspace_symbols: BTreeMap::new(),
+                prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
                 request_failures_persistent: BTreeMap::new(),
@@ -248,6 +251,24 @@ impl FakeLsp {
         let mut caps = (*state.capabilities).clone();
         caps.position_encoding = Some(kind);
         state.capabilities = Arc::new(caps);
+    }
+
+    /// Programs a [`PrepareRenameResponse`] returned for the
+    /// `textDocument/prepareRename` call whose position matches
+    /// `(path, line, col)`. Tests use this to drive the rename
+    /// pre-flight UI flow without a real server.
+    pub fn set_prepare_rename(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        response: PrepareRenameResponse,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .prepare_renames
+            .insert(LspKey::new(path, line, col), response);
     }
 
     // --- Hover ---
@@ -907,6 +928,18 @@ impl LspHost for FakeLsp {
         Ok(hint)
     }
 
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> io::Result<Option<PrepareRenameResponse>> {
+        if let Some(err) = self.take_request_failure("textDocument/prepareRename") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(&params.text_document.uri, &params.position);
+        Ok(state.prepare_renames.get(&key).cloned())
+    }
+
     async fn rename(&self, _params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {
         if let Some(err) = self.take_request_failure("textDocument/rename") {
             return Err(err);
@@ -942,6 +975,42 @@ mod tests {
             .enable_all()
             .build()
             .unwrap()
+    }
+
+    #[test]
+    fn prepare_rename_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            lsp.set_prepare_rename(
+                "/src/main.rs",
+                4,
+                7,
+                PrepareRenameResponse::RangeWithPlaceholder {
+                    range: Range::new(Position::new(4, 4), Position::new(4, 11)),
+                    placeholder: "do_thing".to_string(),
+                },
+            );
+
+            let response = lsp
+                .prepare_rename(text_doc_pos("/src/main.rs", 4, 7))
+                .await
+                .unwrap()
+                .expect("programmed response");
+            match response {
+                PrepareRenameResponse::RangeWithPlaceholder { range, placeholder } => {
+                    assert_eq!(range.start, Position::new(4, 4));
+                    assert_eq!(range.end, Position::new(4, 11));
+                    assert_eq!(placeholder, "do_thing");
+                },
+                other => panic!("expected RangeWithPlaceholder, got {other:?}"),
+            }
+
+            let miss = lsp
+                .prepare_rename(text_doc_pos("/src/main.rs", 99, 99))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed positions return None");
+        });
     }
 
     #[test]
