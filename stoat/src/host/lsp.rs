@@ -13,7 +13,7 @@ use lsp_types::{
     DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams, FoldingRange,
     FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
     HoverProviderCapability, ImplementationProviderCapability, InitializeResult, InlayHint,
-    InlayHintParams, InlayHintServerCapabilities, Location, MessageType, OneOf,
+    InlayHintParams, InlayHintServerCapabilities, Location, MessageType, NumberOrString, OneOf,
     PrepareRenameResponse, ProgressToken, ReferenceParams, RenameFilesParams, RenameParams,
     SelectionRange, SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
@@ -55,6 +55,42 @@ pub enum LspNotification {
         message: String,
         verbose: Option<String>,
     },
+}
+
+/// Server-to-client request that the editor must answer via
+/// [`LspHost::reply`]. Distinct from [`LspNotification`] (which is
+/// fire-and-forget) because the JSON-RPC envelope carries an `id`
+/// the server uses to correlate the eventual response. The struct is
+/// intentionally untyped: `params` is the raw JSON the server sent
+/// and the editor decodes it based on `method`. Typed decoding lives
+/// at a higher layer (see TODO line 155).
+#[derive(Debug, Clone)]
+pub struct IncomingRequest {
+    /// JSON-RPC request id. Echo this back to [`LspHost::reply`] so
+    /// the server can correlate the response with the original
+    /// request.
+    pub id: NumberOrString,
+    /// LSP method name (e.g. `"workspace/applyEdit"`,
+    /// `"window/showMessageRequest"`). Drives how the editor
+    /// deserializes [`Self::params`].
+    pub method: String,
+    /// Raw request parameters. Decode with
+    /// `serde_json::from_value::<MethodParams>(params)` once the
+    /// editor has matched [`Self::method`].
+    pub params: Value,
+}
+
+/// JSON-RPC error envelope returned in place of a successful result
+/// from [`LspHost::reply`]. Mirrors the spec shape (`code`, `message`,
+/// optional `data`); `lsp_types` deliberately omits the JSON-RPC
+/// envelope so we model it locally. Code values follow the JSON-RPC
+/// 2.0 + LSP error-code conventions (e.g. `-32601` for
+/// `MethodNotFound`, `-32603` for `InternalError`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct LspResponseError {
+    pub code: i64,
+    pub message: String,
+    pub data: Option<Value>,
 }
 
 /// Width of the `Position.character` offset negotiated with the
@@ -390,6 +426,35 @@ pub trait LspHost: Send + Sync {
     /// `None` immediately when no notification is queued or the
     /// channel is closed.
     async fn try_recv_notification(&self) -> Option<LspNotification>;
+
+    // Server-initiated requests
+
+    /// Wait for the next server-initiated [`IncomingRequest`]. Each
+    /// returned request *must* be answered with [`Self::reply`]
+    /// quoting the same id; the server blocks until a response
+    /// arrives. Distinct channel from [`Self::recv_notification`]
+    /// because notifications and requests are different LSP message
+    /// types. `None` means the channel is closed (server gone, no
+    /// further requests possible).
+    async fn recv_incoming_request(&self) -> Option<IncomingRequest>;
+
+    /// Non-blocking variant of [`Self::recv_incoming_request`].
+    /// Returns `None` immediately when no request is queued or the
+    /// channel is closed.
+    async fn try_recv_incoming_request(&self) -> Option<IncomingRequest>;
+
+    /// Send the response for an [`IncomingRequest`]. `id` echoes the
+    /// id from the request so the server can correlate; `result` is
+    /// `Ok(value)` for success or `Err(error)` for an error envelope.
+    /// The caller is responsible for serializing typed responses
+    /// (`serde_json::to_value`); the trait stays method-agnostic so
+    /// new request methods do not require a new trait method per
+    /// type.
+    async fn reply(
+        &self,
+        id: NumberOrString,
+        result: Result<Value, LspResponseError>,
+    ) -> io::Result<()>;
 }
 
 /// Default [`LspHost`] used when no language server is configured.
@@ -703,5 +768,21 @@ impl LspHost for NoopLsp {
 
     async fn try_recv_notification(&self) -> Option<LspNotification> {
         None
+    }
+
+    async fn recv_incoming_request(&self) -> Option<IncomingRequest> {
+        None
+    }
+
+    async fn try_recv_incoming_request(&self) -> Option<IncomingRequest> {
+        None
+    }
+
+    async fn reply(
+        &self,
+        _id: NumberOrString,
+        _result: Result<Value, LspResponseError>,
+    ) -> io::Result<()> {
+        Ok(())
     }
 }

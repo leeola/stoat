@@ -1,4 +1,6 @@
-use crate::host::lsp::{LspHost, LspNotification, OffsetEncoding};
+use crate::host::lsp::{
+    IncomingRequest, LspHost, LspNotification, LspResponseError, OffsetEncoding,
+};
 use async_trait::async_trait;
 use lsp_types::{
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
@@ -372,6 +374,17 @@ pub fn execute_command_params(command: &str, arguments: Vec<Value>) -> ExecuteCo
     }
 }
 
+/// Build an [`IncomingRequest`] with an `i32` id (most LSP servers
+/// use numeric ids; tests can construct a [`NumberOrString::String`]
+/// id manually if the string variant is needed).
+pub fn incoming_request(method: &str, id: i32, params: Value) -> IncomingRequest {
+    IncomingRequest {
+        id: NumberOrString::Number(id),
+        method: method.to_string(),
+        params,
+    }
+}
+
 // --- FakeLsp ---
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -403,6 +416,8 @@ pub struct FakeLsp {
     state: Mutex<FakeLspState>,
     notif_tx: UnboundedSender<LspNotification>,
     notif_rx: TokioMutex<UnboundedReceiver<LspNotification>>,
+    req_tx: UnboundedSender<IncomingRequest>,
+    req_rx: TokioMutex<UnboundedReceiver<IncomingRequest>>,
 }
 
 struct FakeLspState {
@@ -440,6 +455,7 @@ struct FakeLspState {
     observed_watched_file_changes: Vec<DidChangeWatchedFilesParams>,
     observed_configuration_changes: Vec<DidChangeConfigurationParams>,
     observed_workspace_folder_changes: Vec<DidChangeWorkspaceFoldersParams>,
+    observed_replies: Vec<(NumberOrString, Result<Value, LspResponseError>)>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -457,6 +473,7 @@ impl Default for FakeLsp {
 impl FakeLsp {
     pub fn new() -> Self {
         let (notif_tx, notif_rx) = unbounded_channel();
+        let (req_tx, req_rx) = unbounded_channel();
         Self {
             state: Mutex::new(FakeLspState {
                 capabilities: Arc::new(ServerCapabilities::default()),
@@ -493,6 +510,7 @@ impl FakeLsp {
                 observed_watched_file_changes: Vec::new(),
                 observed_configuration_changes: Vec::new(),
                 observed_workspace_folder_changes: Vec::new(),
+                observed_replies: Vec::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -502,6 +520,8 @@ impl FakeLsp {
             }),
             notif_tx,
             notif_rx: TokioMutex::new(notif_rx),
+            req_tx,
+            req_rx: TokioMutex::new(req_rx),
         }
     }
 
@@ -812,6 +832,23 @@ impl FakeLsp {
             .unwrap()
             .observed_workspace_folder_changes
             .clone()
+    }
+
+    /// Inject a synthetic server-initiated request onto the fake's
+    /// incoming-request channel. The next
+    /// [`LspHost::recv_incoming_request`] call returns this request,
+    /// after which the editor is expected to answer via
+    /// [`LspHost::reply`]. Quiet-fails if the channel is closed
+    /// (matches the production "server gone" case).
+    pub fn push_incoming_request(&self, req: IncomingRequest) {
+        let _ = self.req_tx.send(req);
+    }
+
+    /// Snapshot of every reply the host has received via
+    /// [`LspHost::reply`] in call order. Tests assert the editor
+    /// answered an [`IncomingRequest`] with the right id and result.
+    pub fn observed_replies(&self) -> Vec<(NumberOrString, Result<Value, LspResponseError>)> {
+        self.state.lock().unwrap().observed_replies.clone()
     }
 
     /// Programs the response value returned for a
@@ -1845,6 +1882,27 @@ impl LspHost for FakeLsp {
     async fn try_recv_notification(&self) -> Option<LspNotification> {
         self.notif_rx.try_lock().ok()?.try_recv().ok()
     }
+
+    async fn recv_incoming_request(&self) -> Option<IncomingRequest> {
+        self.req_rx.lock().await.recv().await
+    }
+
+    async fn try_recv_incoming_request(&self) -> Option<IncomingRequest> {
+        self.req_rx.try_lock().ok()?.try_recv().ok()
+    }
+
+    async fn reply(
+        &self,
+        id: NumberOrString,
+        result: Result<Value, LspResponseError>,
+    ) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_replies
+            .push((id, result));
+        Ok(())
+    }
 }
 
 #[cfg(test)]
@@ -2769,6 +2827,57 @@ mod tests {
             assert_eq!(lsp.observed_watched_file_changes(), vec![watched]);
             assert_eq!(lsp.observed_configuration_changes(), vec![configuration]);
             assert_eq!(lsp.observed_workspace_folder_changes(), vec![folders]);
+        });
+    }
+
+    #[test]
+    fn incoming_request_round_trip() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            assert!(lsp.try_recv_incoming_request().await.is_none());
+
+            let apply_edit_params = serde_json::json!({"label": "Rename foo", "edit": {}});
+            lsp.push_incoming_request(incoming_request(
+                "workspace/applyEdit",
+                7,
+                apply_edit_params.clone(),
+            ));
+            lsp.push_incoming_request(incoming_request(
+                "workspace/configuration",
+                8,
+                serde_json::json!({"items": []}),
+            ));
+
+            let first = lsp.recv_incoming_request().await.expect("first request");
+            assert_eq!(first.id, NumberOrString::Number(7));
+            assert_eq!(first.method, "workspace/applyEdit");
+            assert_eq!(first.params, apply_edit_params);
+
+            let second = lsp.recv_incoming_request().await.expect("second request");
+            assert_eq!(second.id, NumberOrString::Number(8));
+
+            lsp.reply(first.id.clone(), Ok(serde_json::json!({"applied": true})))
+                .await
+                .unwrap();
+            let server_error = LspResponseError {
+                code: -32603,
+                message: "internal error".to_string(),
+                data: None,
+            };
+            lsp.reply(second.id.clone(), Err(server_error.clone()))
+                .await
+                .unwrap();
+
+            let replies = lsp.observed_replies();
+            assert_eq!(replies.len(), 2);
+            assert_eq!(
+                replies[0],
+                (
+                    NumberOrString::Number(7),
+                    Ok(serde_json::json!({"applied": true})),
+                )
+            );
+            assert_eq!(replies[1], (NumberOrString::Number(8), Err(server_error)));
         });
     }
 
