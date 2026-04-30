@@ -1,9 +1,10 @@
 use async_trait::async_trait;
 use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
-    ColorProviderCapability, CompletionItem, CompletionParams, CompletionResponse,
-    DeclarationCapability, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentDiagnosticParams,
+    ColorInformation, ColorPresentation, ColorPresentationParams, ColorProviderCapability,
+    CompletionItem, CompletionParams, CompletionResponse, DeclarationCapability, Diagnostic,
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentColorParams, DocumentDiagnosticParams,
     DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
     DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams,
     DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
@@ -261,6 +262,14 @@ pub trait LspHost: Send + Sync {
         params: DocumentLinkParams,
     ) -> io::Result<Option<Vec<DocumentLink>>>;
     async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink>;
+    async fn document_color(
+        &self,
+        params: DocumentColorParams,
+    ) -> io::Result<Option<Vec<ColorInformation>>>;
+    async fn color_presentation(
+        &self,
+        params: ColorPresentationParams,
+    ) -> io::Result<Option<Vec<ColorPresentation>>>;
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -435,6 +444,20 @@ impl LspHost for NoopLsp {
 
     async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink> {
         Ok(link)
+    }
+
+    async fn document_color(
+        &self,
+        _params: DocumentColorParams,
+    ) -> io::Result<Option<Vec<ColorInformation>>> {
+        Ok(None)
+    }
+
+    async fn color_presentation(
+        &self,
+        _params: ColorPresentationParams,
+    ) -> io::Result<Option<Vec<ColorPresentation>>> {
+        Ok(None)
     }
 
     async fn document_symbol(

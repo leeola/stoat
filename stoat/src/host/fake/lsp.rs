@@ -1,12 +1,13 @@
 use crate::host::lsp::{LspHost, LspNotification, OffsetEncoding};
 use async_trait::async_trait;
 use lsp_types::{
-    CodeAction, CodeActionOrCommand, CodeActionParams, CompletionItem, CompletionList,
-    CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    CodeAction, CodeActionOrCommand, CodeActionParams, Color, ColorInformation, ColorPresentation,
+    ColorPresentationParams, CompletionItem, CompletionList, CompletionParams, CompletionResponse,
+    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentColorParams,
+    DocumentDiagnosticParams, DocumentDiagnosticReportResult, DocumentFormattingParams,
+    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
+    DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
     DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FormattingOptions,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
@@ -165,6 +166,34 @@ pub fn document_link_params(path: &str) -> DocumentLinkParams {
     }
 }
 
+pub fn document_color_params(path: &str) -> DocumentColorParams {
+    DocumentColorParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn color_presentation_params(
+    path: &str,
+    color: Color,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> ColorPresentationParams {
+    ColorPresentationParams {
+        text_document: text_doc_id(path),
+        color,
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -246,6 +275,8 @@ struct FakeLspState {
     range_formatting: BTreeMap<Uri, Vec<TextEdit>>,
     document_diagnostics: BTreeMap<Uri, DocumentDiagnosticReportResult>,
     document_links: BTreeMap<Uri, Vec<DocumentLink>>,
+    document_colors: BTreeMap<Uri, Vec<ColorInformation>>,
+    color_presentations: BTreeMap<Uri, Vec<ColorPresentation>>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -282,6 +313,8 @@ impl FakeLsp {
                 range_formatting: BTreeMap::new(),
                 document_diagnostics: BTreeMap::new(),
                 document_links: BTreeMap::new(),
+                document_colors: BTreeMap::new(),
+                color_presentations: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -387,6 +420,31 @@ impl FakeLsp {
             .unwrap()
             .document_links
             .insert(file_uri(path), links);
+    }
+
+    /// Programs the [`ColorInformation`] entries returned for a
+    /// `textDocument/documentColor` call against `path`. Replaces
+    /// any previously seeded colors for the same document.
+    pub fn set_document_colors(&self, path: &str, colors: Vec<ColorInformation>) {
+        self.state
+            .lock()
+            .unwrap()
+            .document_colors
+            .insert(file_uri(path), colors);
+    }
+
+    /// Programs the [`ColorPresentation`] entries returned for a
+    /// `textDocument/colorPresentation` call against `path`. The
+    /// fake ignores the request's color and range fields and
+    /// returns whatever was programmed for the document; tests
+    /// arrange the URI and presentations to match. Replaces any
+    /// previously seeded presentations for the same document.
+    pub fn set_color_presentations(&self, path: &str, presentations: Vec<ColorPresentation>) {
+        self.state
+            .lock()
+            .unwrap()
+            .color_presentations
+            .insert(file_uri(path), presentations);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -1033,6 +1091,34 @@ impl LspHost for FakeLsp {
         Ok(link)
     }
 
+    async fn document_color(
+        &self,
+        params: DocumentColorParams,
+    ) -> io::Result<Option<Vec<ColorInformation>>> {
+        if let Some(err) = self.take_request_failure("textDocument/documentColor") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .document_colors
+            .get(&params.text_document.uri)
+            .cloned())
+    }
+
+    async fn color_presentation(
+        &self,
+        params: ColorPresentationParams,
+    ) -> io::Result<Option<Vec<ColorPresentation>>> {
+        if let Some(err) = self.take_request_failure("textDocument/colorPresentation") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .color_presentations
+            .get(&params.text_document.uri)
+            .cloned())
+    }
+
     async fn document_symbol(
         &self,
         _params: DocumentSymbolParams,
@@ -1655,6 +1741,70 @@ mod tests {
                 .await
                 .unwrap();
             assert!(miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn document_color_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let red = Color {
+                red: 1.0,
+                green: 0.0,
+                blue: 0.0,
+                alpha: 1.0,
+            };
+            let colors = vec![ColorInformation {
+                range: Range::new(Position::new(3, 12), Position::new(3, 19)),
+                color: red,
+            }];
+            let presentations = vec![
+                ColorPresentation {
+                    label: "#ff0000".to_string(),
+                    text_edit: None,
+                    additional_text_edits: None,
+                },
+                ColorPresentation {
+                    label: "rgb(255, 0, 0)".to_string(),
+                    text_edit: None,
+                    additional_text_edits: None,
+                },
+            ];
+            lsp.set_document_colors("/src/main.css", colors.clone());
+            lsp.set_color_presentations("/src/main.css", presentations.clone());
+
+            let color_result = lsp
+                .document_color(document_color_params("/src/main.css"))
+                .await
+                .unwrap()
+                .expect("should have colors");
+            assert_eq!(color_result, colors);
+
+            let pres_result = lsp
+                .color_presentation(color_presentation_params(
+                    "/src/main.css",
+                    red,
+                    3,
+                    12,
+                    3,
+                    19,
+                ))
+                .await
+                .unwrap()
+                .expect("should have presentations");
+            assert_eq!(pres_result, presentations);
+
+            let color_miss = lsp
+                .document_color(document_color_params("/src/other.css"))
+                .await
+                .unwrap();
+            assert!(color_miss.is_none(), "unprogrammed documents return None");
+
+            let pres_miss = lsp
+                .color_presentation(color_presentation_params("/src/other.css", red, 0, 0, 0, 0))
+                .await
+                .unwrap();
+            assert!(pres_miss.is_none(), "unprogrammed documents return None");
         });
     }
 
