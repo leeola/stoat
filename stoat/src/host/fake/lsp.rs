@@ -78,6 +78,14 @@ pub fn hover_params(path: &str, line: u32, col: u32) -> HoverParams {
     }
 }
 
+pub fn signature_help_params(path: &str, line: u32, col: u32) -> SignatureHelpParams {
+    SignatureHelpParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+        context: None,
+    }
+}
+
 pub fn completion_params(path: &str, line: u32, col: u32) -> CompletionParams {
     CompletionParams {
         text_document_position: text_doc_pos(path, line, col),
@@ -455,6 +463,7 @@ struct FakeLspState {
     semantic_tokens_full: BTreeMap<Uri, SemanticTokensResult>,
     semantic_tokens_range: BTreeMap<Uri, SemanticTokensRangeResult>,
     document_symbols: BTreeMap<Uri, DocumentSymbolResponse>,
+    signature_helps: BTreeMap<LspKey, SignatureHelp>,
     call_hierarchy_prepare: BTreeMap<LspKey, Vec<CallHierarchyItem>>,
     call_hierarchy_incoming: BTreeMap<LspKey, Vec<CallHierarchyIncomingCall>>,
     call_hierarchy_outgoing: BTreeMap<LspKey, Vec<CallHierarchyOutgoingCall>>,
@@ -511,6 +520,7 @@ impl FakeLsp {
                 semantic_tokens_full: BTreeMap::new(),
                 semantic_tokens_range: BTreeMap::new(),
                 document_symbols: BTreeMap::new(),
+                signature_helps: BTreeMap::new(),
                 call_hierarchy_prepare: BTreeMap::new(),
                 call_hierarchy_incoming: BTreeMap::new(),
                 call_hierarchy_outgoing: BTreeMap::new(),
@@ -927,6 +937,20 @@ impl FakeLsp {
             .unwrap()
             .hovers
             .insert(LspKey::new(path, line, col), hover);
+    }
+
+    // --- Signature help ---
+
+    /// Programs the [`SignatureHelp`] returned for a
+    /// `textDocument/signatureHelp` call whose request position
+    /// matches `(path, line, col)`. Replaces any previously seeded
+    /// help for the same position.
+    pub fn set_signature_help(&self, path: &str, line: u32, col: u32, help: SignatureHelp) {
+        self.state
+            .lock()
+            .unwrap()
+            .signature_helps
+            .insert(LspKey::new(path, line, col), help);
     }
 
     // --- Diagnostics ---
@@ -1808,12 +1832,17 @@ impl LspHost for FakeLsp {
 
     async fn signature_help(
         &self,
-        _params: SignatureHelpParams,
+        params: SignatureHelpParams,
     ) -> io::Result<Option<SignatureHelp>> {
         if let Some(err) = self.take_request_failure("textDocument/signatureHelp") {
             return Err(err);
         }
-        Ok(None)
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(
+            &params.text_document_position_params.text_document.uri,
+            &params.text_document_position_params.position,
+        );
+        Ok(state.signature_helps.get(&key).cloned())
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>> {
@@ -2657,6 +2686,60 @@ mod tests {
                 .await
                 .unwrap();
             assert!(miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn signature_help_programmed_response() {
+        use lsp_types::{ParameterInformation, ParameterLabel, SignatureInformation};
+
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let help = SignatureHelp {
+                signatures: vec![SignatureInformation {
+                    label: "fn add(x: i32, y: i32) -> i32".to_string(),
+                    documentation: None,
+                    parameters: Some(vec![
+                        ParameterInformation {
+                            label: ParameterLabel::Simple("x: i32".to_string()),
+                            documentation: None,
+                        },
+                        ParameterInformation {
+                            label: ParameterLabel::Simple("y: i32".to_string()),
+                            documentation: None,
+                        },
+                    ]),
+                    active_parameter: Some(1),
+                }],
+                active_signature: Some(0),
+                active_parameter: Some(1),
+            };
+            lsp.set_signature_help("/src/main.rs", 12, 18, help.clone());
+
+            let hit = lsp
+                .signature_help(signature_help_params("/src/main.rs", 12, 18))
+                .await
+                .unwrap()
+                .expect("programmed response");
+            assert_eq!(hit, help);
+
+            let position_miss = lsp
+                .signature_help(signature_help_params("/src/main.rs", 12, 0))
+                .await
+                .unwrap();
+            assert!(
+                position_miss.is_none(),
+                "unprogrammed position returns None"
+            );
+
+            let document_miss = lsp
+                .signature_help(signature_help_params("/src/other.rs", 12, 18))
+                .await
+                .unwrap();
+            assert!(
+                document_miss.is_none(),
+                "unprogrammed documents return None"
+            );
         });
     }
 
