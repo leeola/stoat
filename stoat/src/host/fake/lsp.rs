@@ -10,12 +10,12 @@ use lsp_types::{
     DocumentDiagnosticParams, DocumentDiagnosticReportResult, DocumentFormattingParams,
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
     DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FormattingOptions,
+    DocumentSymbolResponse, FileRename, FoldingRange, FoldingRangeParams, FormattingOptions,
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
     InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
     MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams, Position,
     PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
-    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
+    RenameFilesParams, RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
     SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
@@ -327,6 +327,22 @@ pub fn change_params(path: &str, version: i32, new_text: &str) -> DidChangeTextD
     }
 }
 
+/// Builds [`RenameFilesParams`] from a slice of `(old_path,
+/// new_path)` pairs. Each path is converted to a `file://` URI
+/// via [`file_uri`] so test inputs match the URIs the fake's
+/// `will_rename` lookup uses.
+pub fn rename_files_params(renames: &[(&str, &str)]) -> RenameFilesParams {
+    RenameFilesParams {
+        files: renames
+            .iter()
+            .map(|(old, new)| FileRename {
+                old_uri: file_uri(old).as_str().to_string(),
+                new_uri: file_uri(new).as_str().to_string(),
+            })
+            .collect(),
+    }
+}
+
 // --- FakeLsp ---
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -388,6 +404,8 @@ struct FakeLspState {
     type_hierarchy_prepare: BTreeMap<LspKey, Vec<TypeHierarchyItem>>,
     type_hierarchy_supertypes: BTreeMap<LspKey, Vec<TypeHierarchyItem>>,
     type_hierarchy_subtypes: BTreeMap<LspKey, Vec<TypeHierarchyItem>>,
+    will_renames: BTreeMap<(String, String), WorkspaceEdit>,
+    observed_renames: Vec<RenameFilesParams>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -434,6 +452,8 @@ impl FakeLsp {
                 type_hierarchy_prepare: BTreeMap::new(),
                 type_hierarchy_supertypes: BTreeMap::new(),
                 type_hierarchy_subtypes: BTreeMap::new(),
+                will_renames: BTreeMap::new(),
+                observed_renames: Vec::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -700,6 +720,29 @@ impl FakeLsp {
             .unwrap()
             .type_hierarchy_subtypes
             .insert(LspKey::new(path, line, col), items);
+    }
+
+    /// Programs the [`WorkspaceEdit`] returned for a
+    /// `workspace/willRenameFiles` request whose first
+    /// [`FileRename`] entry matches `(old_path, new_path)`. The
+    /// fake keys on the first entry only -- multi-file rename
+    /// requests look up only the head pair, mirroring the typical
+    /// editor flow of renaming one file at a time. Replaces any
+    /// previously seeded edit for the same pair.
+    pub fn set_will_rename(&self, old_path: &str, new_path: &str, edit: WorkspaceEdit) {
+        let key = (
+            file_uri(old_path).as_str().to_string(),
+            file_uri(new_path).as_str().to_string(),
+        );
+        self.state.lock().unwrap().will_renames.insert(key, edit);
+    }
+
+    /// Snapshot of every [`RenameFilesParams`] received via
+    /// [`LspHost::did_rename`] in call order. Tests use this to
+    /// assert the editor notified the server about a completed
+    /// rename.
+    pub fn observed_renames(&self) -> Vec<RenameFilesParams> {
+        self.state.lock().unwrap().observed_renames.clone()
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -1188,6 +1231,11 @@ impl LspHost for FakeLsp {
         Ok(())
     }
 
+    async fn did_rename(&self, params: RenameFilesParams) -> io::Result<()> {
+        self.state.lock().unwrap().observed_renames.push(params);
+        Ok(())
+    }
+
     async fn hover(&self, params: HoverParams) -> io::Result<Option<Hover>> {
         if let Some(err) = self.take_request_failure("textDocument/hover") {
             return Err(err);
@@ -1618,6 +1666,18 @@ impl LspHost for FakeLsp {
             .range_formatting
             .get(&params.text_document.uri)
             .cloned())
+    }
+
+    async fn will_rename(&self, params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>> {
+        if let Some(err) = self.take_request_failure("workspace/willRenameFiles") {
+            return Err(err);
+        }
+        let Some(first) = params.files.first() else {
+            return Ok(None);
+        };
+        let key = (first.old_uri.clone(), first.new_uri.clone());
+        let state = self.state.lock().unwrap();
+        Ok(state.will_renames.get(&key).cloned())
     }
 
     async fn recv_notification(&self) -> Option<LspNotification> {
@@ -2378,6 +2438,53 @@ mod tests {
                 .await
                 .unwrap();
             assert!(super_miss.is_none(), "unprogrammed items return None");
+        });
+    }
+
+    #[test]
+    fn rename_file_ops_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let edit = WorkspaceEdit {
+                changes: Some(
+                    BTreeMap::from([(file_uri("/src/old.rs"), vec![])])
+                        .into_iter()
+                        .collect(),
+                ),
+                ..Default::default()
+            };
+            lsp.set_will_rename("/src/old.rs", "/src/new.rs", edit.clone());
+
+            let returned = lsp
+                .will_rename(rename_files_params(&[("/src/old.rs", "/src/new.rs")]))
+                .await
+                .unwrap()
+                .expect("should have programmed edit");
+            assert_eq!(returned, edit);
+
+            let miss = lsp
+                .will_rename(rename_files_params(&[("/src/other.rs", "/src/new.rs")]))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed pair returns None");
+
+            let empty = lsp
+                .will_rename(RenameFilesParams { files: vec![] })
+                .await
+                .unwrap();
+            assert!(empty.is_none(), "empty files vec returns None");
+
+            assert!(lsp.observed_renames().is_empty());
+
+            let first = rename_files_params(&[("/src/old.rs", "/src/new.rs")]);
+            let second = rename_files_params(&[
+                ("/src/foo.rs", "/src/foo2.rs"),
+                ("/src/bar.rs", "/src/bar2.rs"),
+            ]);
+            lsp.did_rename(first.clone()).await.unwrap();
+            lsp.did_rename(second.clone()).await.unwrap();
+
+            assert_eq!(lsp.observed_renames(), vec![first, second]);
         });
     }
 

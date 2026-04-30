@@ -13,12 +13,13 @@ use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
     InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
-    ProgressToken, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability, TypeHierarchyItem,
-    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
-    WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    ProgressToken, ReferenceParams, RenameFilesParams, RenameParams, SelectionRange,
+    SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
+    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
+    SignatureHelpParams, TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     io,
@@ -226,6 +227,7 @@ pub trait LspHost: Send + Sync {
     async fn did_change(&self, params: DidChangeTextDocumentParams) -> io::Result<()>;
     async fn did_save(&self, params: DidSaveTextDocumentParams) -> io::Result<()>;
     async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()>;
+    async fn did_rename(&self, params: RenameFilesParams) -> io::Result<()>;
 
     // Navigation
     async fn hover(&self, params: HoverParams) -> io::Result<Option<Hover>>;
@@ -347,6 +349,7 @@ pub trait LspHost: Send + Sync {
         &self,
         params: DocumentRangeFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>>;
+    async fn will_rename(&self, params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>>;
 
     // Server-pushed notifications
 
@@ -403,6 +406,10 @@ impl LspHost for NoopLsp {
     }
 
     async fn did_close(&self, _params: DidCloseTextDocumentParams) -> io::Result<()> {
+        Ok(())
+    }
+
+    async fn did_rename(&self, _params: RenameFilesParams) -> io::Result<()> {
         Ok(())
     }
 
@@ -624,6 +631,10 @@ impl LspHost for NoopLsp {
         &self,
         _params: DocumentRangeFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>> {
+        Ok(None)
+    }
+
+    async fn will_rename(&self, _params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>> {
         Ok(None)
     }
 
