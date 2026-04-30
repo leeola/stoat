@@ -195,6 +195,14 @@ pub fn document_link_params(path: &str) -> DocumentLinkParams {
     }
 }
 
+pub fn document_symbol_params(path: &str) -> DocumentSymbolParams {
+    DocumentSymbolParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
 pub fn document_color_params(path: &str) -> DocumentColorParams {
     DocumentColorParams {
         text_document: text_doc_id(path),
@@ -446,6 +454,7 @@ struct FakeLspState {
     color_presentations: BTreeMap<Uri, Vec<ColorPresentation>>,
     semantic_tokens_full: BTreeMap<Uri, SemanticTokensResult>,
     semantic_tokens_range: BTreeMap<Uri, SemanticTokensRangeResult>,
+    document_symbols: BTreeMap<Uri, DocumentSymbolResponse>,
     call_hierarchy_prepare: BTreeMap<LspKey, Vec<CallHierarchyItem>>,
     call_hierarchy_incoming: BTreeMap<LspKey, Vec<CallHierarchyIncomingCall>>,
     call_hierarchy_outgoing: BTreeMap<LspKey, Vec<CallHierarchyOutgoingCall>>,
@@ -501,6 +510,7 @@ impl FakeLsp {
                 color_presentations: BTreeMap::new(),
                 semantic_tokens_full: BTreeMap::new(),
                 semantic_tokens_range: BTreeMap::new(),
+                document_symbols: BTreeMap::new(),
                 call_hierarchy_prepare: BTreeMap::new(),
                 call_hierarchy_incoming: BTreeMap::new(),
                 call_hierarchy_outgoing: BTreeMap::new(),
@@ -671,6 +681,22 @@ impl FakeLsp {
             .unwrap()
             .semantic_tokens_range
             .insert(file_uri(path), result);
+    }
+
+    /// Programs the [`DocumentSymbolResponse`] returned for a
+    /// `textDocument/documentSymbol` call against `path`. Both
+    /// [`DocumentSymbolResponse::Flat`] and
+    /// [`DocumentSymbolResponse::Nested`] variants round-trip; tests
+    /// pick the shape they need. Replaces any previously seeded
+    /// response for the same document. Distinct from
+    /// [`Self::add_workspace_symbol`], which seeds the
+    /// `workspace/symbol` query lookup.
+    pub fn set_document_symbols(&self, path: &str, response: DocumentSymbolResponse) {
+        self.state
+            .lock()
+            .unwrap()
+            .document_symbols
+            .insert(file_uri(path), response);
     }
 
     /// Programs the [`CallHierarchyItem`]s returned for a
@@ -1706,12 +1732,16 @@ impl LspHost for FakeLsp {
 
     async fn document_symbol(
         &self,
-        _params: DocumentSymbolParams,
+        params: DocumentSymbolParams,
     ) -> io::Result<Option<DocumentSymbolResponse>> {
         if let Some(err) = self.take_request_failure("textDocument/documentSymbol") {
             return Err(err);
         }
-        Ok(None)
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .document_symbols
+            .get(&params.text_document.uri)
+            .cloned())
     }
 
     async fn document_diagnostic(
@@ -2560,6 +2590,73 @@ mod tests {
                 .await
                 .unwrap();
             assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn document_symbol_programmed_response() {
+        use lsp_types::DocumentSymbol;
+
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            #[allow(deprecated)]
+            let inner = DocumentSymbol {
+                name: "helper".to_string(),
+                detail: Some("fn() -> ()".to_string()),
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                deprecated: None,
+                range: Range::new(Position::new(2, 4), Position::new(4, 5)),
+                selection_range: Range::new(Position::new(2, 7), Position::new(2, 13)),
+                children: None,
+            };
+            #[allow(deprecated)]
+            let outer = DocumentSymbol {
+                name: "Foo".to_string(),
+                detail: None,
+                kind: SymbolKind::STRUCT,
+                tags: None,
+                deprecated: None,
+                range: Range::new(Position::new(0, 0), Position::new(10, 1)),
+                selection_range: Range::new(Position::new(0, 7), Position::new(0, 10)),
+                children: Some(vec![inner.clone()]),
+            };
+            let nested = DocumentSymbolResponse::Nested(vec![outer.clone()]);
+            lsp.set_document_symbols("/src/lib.rs", nested.clone());
+
+            let nested_result = lsp
+                .document_symbol(document_symbol_params("/src/lib.rs"))
+                .await
+                .unwrap()
+                .expect("should have nested symbols");
+            assert_eq!(nested_result, nested);
+
+            #[allow(deprecated)]
+            let flat = DocumentSymbolResponse::Flat(vec![SymbolInformation {
+                name: "do_thing".to_string(),
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                deprecated: None,
+                location: Location::new(
+                    file_uri("/src/main.rs"),
+                    Range::new(Position::new(3, 0), Position::new(5, 1)),
+                ),
+                container_name: None,
+            }]);
+            lsp.set_document_symbols("/src/main.rs", flat.clone());
+
+            let flat_result = lsp
+                .document_symbol(document_symbol_params("/src/main.rs"))
+                .await
+                .unwrap()
+                .expect("should have flat symbols");
+            assert_eq!(flat_result, flat);
+
+            let miss = lsp
+                .document_symbol(document_symbol_params("/src/other.rs"))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
         });
     }
 
