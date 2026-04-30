@@ -12,9 +12,10 @@ use lsp_types::{
     ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
     InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
     ProgressToken, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
-    ServerCapabilities, SignatureHelp, SignatureHelpParams, TextDocumentPositionParams, TextEdit,
-    TypeDefinitionProviderCapability, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability, Uri, WorkDoneProgress,
+    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     io,
@@ -270,6 +271,14 @@ pub trait LspHost: Send + Sync {
         &self,
         params: ColorPresentationParams,
     ) -> io::Result<Option<Vec<ColorPresentation>>>;
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> io::Result<Option<SemanticTokensResult>>;
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> io::Result<Option<SemanticTokensRangeResult>>;
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -457,6 +466,20 @@ impl LspHost for NoopLsp {
         &self,
         _params: ColorPresentationParams,
     ) -> io::Result<Option<Vec<ColorPresentation>>> {
+        Ok(None)
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        _params: SemanticTokensParams,
+    ) -> io::Result<Option<SemanticTokensResult>> {
+        Ok(None)
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        _params: SemanticTokensRangeParams,
+    ) -> io::Result<Option<SemanticTokensRangeResult>> {
         Ok(None)
     }
 

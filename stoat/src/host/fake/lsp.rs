@@ -13,11 +13,13 @@ use lsp_types::{
     InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
     MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams, Position,
     PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
-    RenameParams, SelectionRange, SelectionRangeParams, ServerCapabilities, SignatureHelp,
-    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri,
-    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
+    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -194,6 +196,32 @@ pub fn color_presentation_params(
     }
 }
 
+pub fn semantic_tokens_params(path: &str) -> SemanticTokensParams {
+    SemanticTokensParams {
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+        text_document: text_doc_id(path),
+    }
+}
+
+pub fn semantic_tokens_range_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> SemanticTokensRangeParams {
+    SemanticTokensRangeParams {
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -277,6 +305,8 @@ struct FakeLspState {
     document_links: BTreeMap<Uri, Vec<DocumentLink>>,
     document_colors: BTreeMap<Uri, Vec<ColorInformation>>,
     color_presentations: BTreeMap<Uri, Vec<ColorPresentation>>,
+    semantic_tokens_full: BTreeMap<Uri, SemanticTokensResult>,
+    semantic_tokens_range: BTreeMap<Uri, SemanticTokensRangeResult>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -315,6 +345,8 @@ impl FakeLsp {
                 document_links: BTreeMap::new(),
                 document_colors: BTreeMap::new(),
                 color_presentations: BTreeMap::new(),
+                semantic_tokens_full: BTreeMap::new(),
+                semantic_tokens_range: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -445,6 +477,31 @@ impl FakeLsp {
             .unwrap()
             .color_presentations
             .insert(file_uri(path), presentations);
+    }
+
+    /// Programs the [`SemanticTokensResult`] returned for a
+    /// `textDocument/semanticTokens/full` call against `path`.
+    /// Replaces any previously seeded result for the same document.
+    pub fn set_semantic_tokens_full(&self, path: &str, result: SemanticTokensResult) {
+        self.state
+            .lock()
+            .unwrap()
+            .semantic_tokens_full
+            .insert(file_uri(path), result);
+    }
+
+    /// Programs the [`SemanticTokensRangeResult`] returned for a
+    /// `textDocument/semanticTokens/range` call against `path`.
+    /// The fake ignores the request's range and returns whatever
+    /// was programmed for the document; tests arrange URI and
+    /// range to match. Replaces any previously seeded result for
+    /// the same document.
+    pub fn set_semantic_tokens_range(&self, path: &str, result: SemanticTokensRangeResult) {
+        self.state
+            .lock()
+            .unwrap()
+            .semantic_tokens_range
+            .insert(file_uri(path), result);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -1115,6 +1172,34 @@ impl LspHost for FakeLsp {
         let state = self.state.lock().unwrap();
         Ok(state
             .color_presentations
+            .get(&params.text_document.uri)
+            .cloned())
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> io::Result<Option<SemanticTokensResult>> {
+        if let Some(err) = self.take_request_failure("textDocument/semanticTokens/full") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .semantic_tokens_full
+            .get(&params.text_document.uri)
+            .cloned())
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> io::Result<Option<SemanticTokensRangeResult>> {
+        if let Some(err) = self.take_request_failure("textDocument/semanticTokens/range") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .semantic_tokens_range
             .get(&params.text_document.uri)
             .cloned())
     }
@@ -1805,6 +1890,64 @@ mod tests {
                 .await
                 .unwrap();
             assert!(pres_miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn semantic_tokens_programmed_response() {
+        use lsp_types::{SemanticToken, SemanticTokens};
+
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let tokens = SemanticTokens {
+                result_id: Some("rev-1".to_string()),
+                data: vec![
+                    SemanticToken {
+                        delta_line: 0,
+                        delta_start: 0,
+                        length: 3,
+                        token_type: 1,
+                        token_modifiers_bitset: 0,
+                    },
+                    SemanticToken {
+                        delta_line: 0,
+                        delta_start: 4,
+                        length: 5,
+                        token_type: 2,
+                        token_modifiers_bitset: 0,
+                    },
+                ],
+            };
+            let full = SemanticTokensResult::Tokens(tokens.clone());
+            let range = SemanticTokensRangeResult::Tokens(tokens.clone());
+            lsp.set_semantic_tokens_full("/src/main.rs", full.clone());
+            lsp.set_semantic_tokens_range("/src/main.rs", range.clone());
+
+            let full_result = lsp
+                .semantic_tokens_full(semantic_tokens_params("/src/main.rs"))
+                .await
+                .unwrap()
+                .expect("should have tokens");
+            assert_eq!(full_result, full);
+
+            let range_result = lsp
+                .semantic_tokens_range(semantic_tokens_range_params("/src/main.rs", 0, 0, 10, 0))
+                .await
+                .unwrap()
+                .expect("should have range tokens");
+            assert_eq!(range_result, range);
+
+            let full_miss = lsp
+                .semantic_tokens_full(semantic_tokens_params("/src/other.rs"))
+                .await
+                .unwrap();
+            assert!(full_miss.is_none(), "unprogrammed documents return None");
+
+            let range_miss = lsp
+                .semantic_tokens_range(semantic_tokens_range_params("/src/other.rs", 0, 0, 0, 0))
+                .await
+                .unwrap();
+            assert!(range_miss.is_none(), "unprogrammed documents return None");
         });
     }
 
