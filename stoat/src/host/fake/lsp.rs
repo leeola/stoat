@@ -119,6 +119,23 @@ pub fn inlay_hint_params(path: &str, start_line: u32, end_line: u32) -> InlayHin
     }
 }
 
+pub fn range_inlay_hint_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> InlayHintParams {
+    InlayHintParams {
+        work_done_progress_params: wdp(),
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+    }
+}
+
 pub fn folding_range_params(path: &str) -> FoldingRangeParams {
     FoldingRangeParams {
         text_document: text_doc_id(path),
@@ -400,6 +417,7 @@ struct FakeLspState {
     references: BTreeMap<LspKey, Vec<Location>>,
     highlights: BTreeMap<LspKey, Vec<DocumentHighlight>>,
     inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
+    range_inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
     folding_ranges: BTreeMap<Uri, Vec<FoldingRange>>,
     selection_ranges: BTreeMap<LspKey, SelectionRange>,
@@ -452,6 +470,7 @@ impl FakeLsp {
                 references: BTreeMap::new(),
                 highlights: BTreeMap::new(),
                 inlay_hints: BTreeMap::new(),
+                range_inlay_hints: BTreeMap::new(),
                 workspace_symbols: BTreeMap::new(),
                 folding_ranges: BTreeMap::new(),
                 selection_ranges: BTreeMap::new(),
@@ -1151,6 +1170,23 @@ impl FakeLsp {
         self.add_inlay_hint(path, line, col, param_label, InlayHintKind::PARAMETER);
     }
 
+    /// Programs the [`InlayHint`]s returned by
+    /// [`LspHost::range_inlay_hint`] -- the viewport-bounded sibling of
+    /// [`LspHost::inlay_hint`]. The fake ignores the request's range
+    /// and returns whatever was programmed for the document; tests
+    /// arrange URI and range to match. Replaces any previously seeded
+    /// hints for the same document. Distinct from the
+    /// [`Self::add_inlay_hint`] / [`Self::add_type_hint`] /
+    /// [`Self::add_parameter_hint`] family, which seed responses for
+    /// the full-document [`LspHost::inlay_hint`] call.
+    pub fn set_range_inlay_hints(&self, path: &str, hints: Vec<InlayHint>) {
+        self.state
+            .lock()
+            .unwrap()
+            .range_inlay_hints
+            .insert(file_uri(path), hints);
+    }
+
     // --- Workspace symbols ---
 
     pub fn add_workspace_symbol(
@@ -1725,6 +1761,20 @@ impl LspHost for FakeLsp {
         Ok(hint)
     }
 
+    async fn range_inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> io::Result<Option<Vec<InlayHint>>> {
+        if let Some(err) = self.take_request_failure("textDocument/inlayHint") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .range_inlay_hints
+            .get(&params.text_document.uri)
+            .cloned())
+    }
+
     async fn prepare_rename(
         &self,
         params: TextDocumentPositionParams,
@@ -2050,6 +2100,51 @@ mod tests {
                 InlayHintLabel::String(s) => assert_eq!(s, ": i32"),
                 _ => panic!("expected string label"),
             }
+        });
+    }
+
+    #[test]
+    fn range_inlay_hint_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let viewport_hint = InlayHint {
+                position: Position::new(7, 12),
+                label: InlayHintLabel::String(": u32".to_string()),
+                kind: Some(InlayHintKind::TYPE),
+                text_edits: None,
+                tooltip: None,
+                padding_left: None,
+                padding_right: None,
+                data: None,
+            };
+            lsp.set_range_inlay_hints("/src/main.rs", vec![viewport_hint.clone()]);
+            lsp.add_type_hint("/src/main.rs", 3, 8, ": i32");
+
+            let viewport = lsp
+                .range_inlay_hint(range_inlay_hint_params("/src/main.rs", 5, 0, 10, 0))
+                .await
+                .unwrap();
+            let hints = viewport.expect("viewport hints programmed");
+            assert_eq!(hints.len(), 1);
+            assert_eq!(hints[0].position, Position::new(7, 12));
+            match &hints[0].label {
+                InlayHintLabel::String(s) => assert_eq!(s, ": u32"),
+                _ => panic!("expected string label"),
+            }
+
+            let unmapped = lsp
+                .range_inlay_hint(range_inlay_hint_params("/src/other.rs", 0, 0, 1, 0))
+                .await
+                .unwrap();
+            assert!(unmapped.is_none());
+
+            let full = lsp
+                .inlay_hint(inlay_hint_params("/src/main.rs", 0, 20))
+                .await
+                .unwrap()
+                .expect("full-doc hints programmed");
+            assert_eq!(full.len(), 1);
+            assert_eq!(full[0].position, Position::new(3, 8));
         });
     }
 

@@ -344,8 +344,22 @@ pub trait LspHost: Send + Sync {
         &self,
         params: SignatureHelpParams,
     ) -> io::Result<Option<SignatureHelp>>;
+    /// `textDocument/inlayHint` request for an arbitrary range
+    /// (typically the full document). Use [`Self::range_inlay_hint`]
+    /// when the range is the editor's current viewport, so the server
+    /// load is bounded to visible rows; the LSP wire method is the
+    /// same in both cases.
     async fn inlay_hint(&self, params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>>;
     async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint>;
+
+    /// Viewport-bounded variant of [`Self::inlay_hint`]. The LSP
+    /// wire method (`textDocument/inlayHint`) is identical, but the
+    /// range carried in `params` is the editor's currently visible
+    /// region. Splitting the trait surface lets callers signal load-
+    /// bounding intent and lets test fakes program separate
+    /// responses for full-document and viewport requests.
+    async fn range_inlay_hint(&self, params: InlayHintParams)
+        -> io::Result<Option<Vec<InlayHint>>>;
 
     // Editing
     async fn prepare_rename(
@@ -641,6 +655,13 @@ impl LspHost for NoopLsp {
 
     async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint> {
         Ok(hint)
+    }
+
+    async fn range_inlay_hint(
+        &self,
+        _params: InlayHintParams,
+    ) -> io::Result<Option<Vec<InlayHint>>> {
+        Ok(None)
     }
 
     async fn prepare_rename(
