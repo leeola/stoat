@@ -10,20 +10,21 @@ use lsp_types::{
     DocumentDiagnosticParams, DocumentDiagnosticReportResult, DocumentFormattingParams,
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
     DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, FileRename, FoldingRange, FoldingRangeParams, FormattingOptions,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
-    MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams, Position,
-    PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
-    RenameFilesParams, RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
-    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
-    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
+    DocumentSymbolResponse, ExecuteCommandParams, FileRename, FoldingRange, FoldingRangeParams,
+    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
+    Location, MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams,
+    Position, PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext,
+    ReferenceParams, RenameFilesParams, RenameParams, SelectionRange, SelectionRangeParams,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextEdit, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
     VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
     WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
+use serde_json::Value;
 use std::{
     collections::BTreeMap,
     io,
@@ -343,6 +344,14 @@ pub fn rename_files_params(renames: &[(&str, &str)]) -> RenameFilesParams {
     }
 }
 
+pub fn execute_command_params(command: &str, arguments: Vec<Value>) -> ExecuteCommandParams {
+    ExecuteCommandParams {
+        command: command.to_string(),
+        arguments,
+        work_done_progress_params: wdp(),
+    }
+}
+
 // --- FakeLsp ---
 
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -406,6 +415,7 @@ struct FakeLspState {
     type_hierarchy_subtypes: BTreeMap<LspKey, Vec<TypeHierarchyItem>>,
     will_renames: BTreeMap<(String, String), WorkspaceEdit>,
     observed_renames: Vec<RenameFilesParams>,
+    executed_commands: BTreeMap<String, Value>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -454,6 +464,7 @@ impl FakeLsp {
                 type_hierarchy_subtypes: BTreeMap::new(),
                 will_renames: BTreeMap::new(),
                 observed_renames: Vec::new(),
+                executed_commands: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -743,6 +754,20 @@ impl FakeLsp {
     /// rename.
     pub fn observed_renames(&self) -> Vec<RenameFilesParams> {
         self.state.lock().unwrap().observed_renames.clone()
+    }
+
+    /// Programs the response value returned for a
+    /// `workspace/executeCommand` request whose `params.command`
+    /// matches `command`. Replaces any previously seeded
+    /// response for the same command name. Tests assert the
+    /// fake returns the seeded `Value`; unprogrammed commands
+    /// return `None`.
+    pub fn set_execute_command(&self, command: &str, response: Value) {
+        self.state
+            .lock()
+            .unwrap()
+            .executed_commands
+            .insert(command.to_string(), response);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -1680,6 +1705,14 @@ impl LspHost for FakeLsp {
         Ok(state.will_renames.get(&key).cloned())
     }
 
+    async fn execute_command(&self, params: ExecuteCommandParams) -> io::Result<Option<Value>> {
+        if let Some(err) = self.take_request_failure("workspace/executeCommand") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state.executed_commands.get(&params.command).cloned())
+    }
+
     async fn recv_notification(&self) -> Option<LspNotification> {
         self.notif_rx.lock().await.recv().await
     }
@@ -2485,6 +2518,45 @@ mod tests {
             lsp.did_rename(second.clone()).await.unwrap();
 
             assert_eq!(lsp.observed_renames(), vec![first, second]);
+        });
+    }
+
+    #[test]
+    fn execute_command_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let response = serde_json::json!({"applied": true});
+            lsp.set_execute_command("rust-analyzer.applyImport", response.clone());
+
+            let returned = lsp
+                .execute_command(execute_command_params(
+                    "rust-analyzer.applyImport",
+                    vec![serde_json::json!("foo::Bar")],
+                ))
+                .await
+                .unwrap()
+                .expect("should have programmed response");
+            assert_eq!(returned, response);
+
+            let miss = lsp
+                .execute_command(execute_command_params("rust-analyzer.unknown", vec![]))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed command returns None");
+
+            lsp.fail_next_request("workspace/executeCommand", io::ErrorKind::Other);
+            let err = lsp
+                .execute_command(execute_command_params("rust-analyzer.applyImport", vec![]))
+                .await
+                .expect_err("primed failure should propagate");
+            assert_eq!(err.kind(), io::ErrorKind::Other);
+
+            let after = lsp
+                .execute_command(execute_command_params("rust-analyzer.applyImport", vec![]))
+                .await
+                .unwrap()
+                .expect("one-shot failure clears after first call");
+            assert_eq!(after, response);
         });
     }
 

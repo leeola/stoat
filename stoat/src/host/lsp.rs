@@ -9,18 +9,19 @@ use lsp_types::{
     DidSaveTextDocumentParams, DocumentColorParams, DocumentDiagnosticParams,
     DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
     DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
-    InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
-    ProgressToken, ReferenceParams, RenameFilesParams, RenameParams, SelectionRange,
-    SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
+    DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams, FoldingRange,
+    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
+    HoverProviderCapability, ImplementationProviderCapability, InitializeResult, InlayHint,
+    InlayHintParams, InlayHintServerCapabilities, Location, MessageType, OneOf,
+    PrepareRenameResponse, ProgressToken, ReferenceParams, RenameFilesParams, RenameParams,
+    SelectionRange, SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
     SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
     SignatureHelpParams, TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability,
     TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
     TypeHierarchySupertypesParams, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
+use serde_json::Value;
 use std::{
     io,
     sync::{Arc, LazyLock},
@@ -350,6 +351,7 @@ pub trait LspHost: Send + Sync {
         params: DocumentRangeFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>>;
     async fn will_rename(&self, params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>>;
+    async fn execute_command(&self, params: ExecuteCommandParams) -> io::Result<Option<Value>>;
 
     // Server-pushed notifications
 
@@ -635,6 +637,10 @@ impl LspHost for NoopLsp {
     }
 
     async fn will_rename(&self, _params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>> {
+        Ok(None)
+    }
+
+    async fn execute_command(&self, _params: ExecuteCommandParams) -> io::Result<Option<Value>> {
         Ok(None)
     }
 
