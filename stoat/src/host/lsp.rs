@@ -5,7 +5,8 @@ use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
     ColorInformation, ColorPresentation, ColorPresentationParams, ColorProviderCapability,
     CompletionItem, CompletionParams, CompletionResponse, DeclarationCapability, Diagnostic,
-    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, DocumentColorParams, DocumentDiagnosticParams,
     DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
     DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams,
@@ -229,6 +230,16 @@ pub trait LspHost: Send + Sync {
     async fn did_save(&self, params: DidSaveTextDocumentParams) -> io::Result<()>;
     async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()>;
     async fn did_rename(&self, params: RenameFilesParams) -> io::Result<()>;
+    async fn did_change_watched_files(&self, params: DidChangeWatchedFilesParams)
+        -> io::Result<()>;
+    async fn did_change_configuration(
+        &self,
+        params: DidChangeConfigurationParams,
+    ) -> io::Result<()>;
+    async fn did_change_workspace_folders(
+        &self,
+        params: DidChangeWorkspaceFoldersParams,
+    ) -> io::Result<()>;
 
     // Navigation
     async fn hover(&self, params: HoverParams) -> io::Result<Option<Hover>>;
@@ -412,6 +423,27 @@ impl LspHost for NoopLsp {
     }
 
     async fn did_rename(&self, _params: RenameFilesParams) -> io::Result<()> {
+        Ok(())
+    }
+
+    async fn did_change_watched_files(
+        &self,
+        _params: DidChangeWatchedFilesParams,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+
+    async fn did_change_configuration(
+        &self,
+        _params: DidChangeConfigurationParams,
+    ) -> io::Result<()> {
+        Ok(())
+    }
+
+    async fn did_change_workspace_folders(
+        &self,
+        _params: DidChangeWorkspaceFoldersParams,
+    ) -> io::Result<()> {
         Ok(())
     }
 

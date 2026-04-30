@@ -5,24 +5,27 @@ use lsp_types::{
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CodeAction, CodeActionOrCommand, CodeActionParams, Color, ColorInformation, ColorPresentation,
     ColorPresentationParams, CompletionItem, CompletionList, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
+    Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentColorParams,
     DocumentDiagnosticParams, DocumentDiagnosticReportResult, DocumentFormattingParams,
     DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
     DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandParams, FileRename, FoldingRange, FoldingRangeParams,
-    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
-    HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
-    Location, MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams,
-    Position, PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext,
-    ReferenceParams, RenameFilesParams, RenameParams, SelectionRange, SelectionRangeParams,
-    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
-    SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier,
-    TextDocumentItem, TextDocumentPositionParams, TextEdit, TypeHierarchyItem,
-    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
+    DocumentSymbolResponse, ExecuteCommandParams, FileChangeType, FileEvent, FileRename,
+    FoldingRange, FoldingRangeParams, FormattingOptions, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
+    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
+    MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
+    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameFilesParams,
+    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
+    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
     VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersChangeEvent,
+    WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::Value;
 use std::{
@@ -416,6 +419,9 @@ struct FakeLspState {
     will_renames: BTreeMap<(String, String), WorkspaceEdit>,
     observed_renames: Vec<RenameFilesParams>,
     executed_commands: BTreeMap<String, Value>,
+    observed_watched_file_changes: Vec<DidChangeWatchedFilesParams>,
+    observed_configuration_changes: Vec<DidChangeConfigurationParams>,
+    observed_workspace_folder_changes: Vec<DidChangeWorkspaceFoldersParams>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -465,6 +471,9 @@ impl FakeLsp {
                 will_renames: BTreeMap::new(),
                 observed_renames: Vec::new(),
                 executed_commands: BTreeMap::new(),
+                observed_watched_file_changes: Vec::new(),
+                observed_configuration_changes: Vec::new(),
+                observed_workspace_folder_changes: Vec::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -754,6 +763,36 @@ impl FakeLsp {
     /// rename.
     pub fn observed_renames(&self) -> Vec<RenameFilesParams> {
         self.state.lock().unwrap().observed_renames.clone()
+    }
+
+    /// Snapshot of every [`DidChangeWatchedFilesParams`] received
+    /// via [`LspHost::did_change_watched_files`] in call order.
+    pub fn observed_watched_file_changes(&self) -> Vec<DidChangeWatchedFilesParams> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_watched_file_changes
+            .clone()
+    }
+
+    /// Snapshot of every [`DidChangeConfigurationParams`] received
+    /// via [`LspHost::did_change_configuration`] in call order.
+    pub fn observed_configuration_changes(&self) -> Vec<DidChangeConfigurationParams> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_configuration_changes
+            .clone()
+    }
+
+    /// Snapshot of every [`DidChangeWorkspaceFoldersParams`] received
+    /// via [`LspHost::did_change_workspace_folders`] in call order.
+    pub fn observed_workspace_folder_changes(&self) -> Vec<DidChangeWorkspaceFoldersParams> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_workspace_folder_changes
+            .clone()
     }
 
     /// Programs the response value returned for a
@@ -1258,6 +1297,42 @@ impl LspHost for FakeLsp {
 
     async fn did_rename(&self, params: RenameFilesParams) -> io::Result<()> {
         self.state.lock().unwrap().observed_renames.push(params);
+        Ok(())
+    }
+
+    async fn did_change_watched_files(
+        &self,
+        params: DidChangeWatchedFilesParams,
+    ) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_watched_file_changes
+            .push(params);
+        Ok(())
+    }
+
+    async fn did_change_configuration(
+        &self,
+        params: DidChangeConfigurationParams,
+    ) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_configuration_changes
+            .push(params);
+        Ok(())
+    }
+
+    async fn did_change_workspace_folders(
+        &self,
+        params: DidChangeWorkspaceFoldersParams,
+    ) -> io::Result<()> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_workspace_folder_changes
+            .push(params);
         Ok(())
     }
 
@@ -2557,6 +2632,48 @@ mod tests {
                 .unwrap()
                 .expect("one-shot failure clears after first call");
             assert_eq!(after, response);
+        });
+    }
+
+    #[test]
+    fn workspace_state_notifications_recorded() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+
+            let watched = DidChangeWatchedFilesParams {
+                changes: vec![FileEvent::new(
+                    file_uri("/src/main.rs"),
+                    FileChangeType::CHANGED,
+                )],
+            };
+            lsp.did_change_watched_files(watched.clone()).await.unwrap();
+
+            let configuration = DidChangeConfigurationParams {
+                settings: serde_json::json!({"rust-analyzer": {"checkOnSave": true}}),
+            };
+            lsp.did_change_configuration(configuration.clone())
+                .await
+                .unwrap();
+
+            let folders = DidChangeWorkspaceFoldersParams {
+                event: WorkspaceFoldersChangeEvent {
+                    added: vec![WorkspaceFolder {
+                        uri: file_uri("/workspace/added"),
+                        name: "added".to_string(),
+                    }],
+                    removed: vec![WorkspaceFolder {
+                        uri: file_uri("/workspace/removed"),
+                        name: "removed".to_string(),
+                    }],
+                },
+            };
+            lsp.did_change_workspace_folders(folders.clone())
+                .await
+                .unwrap();
+
+            assert_eq!(lsp.observed_watched_file_changes(), vec![watched]);
+            assert_eq!(lsp.observed_configuration_changes(), vec![configuration]);
+            assert_eq!(lsp.observed_workspace_folder_changes(), vec![folders]);
         });
     }
 
