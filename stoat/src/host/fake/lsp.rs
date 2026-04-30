@@ -1,6 +1,8 @@
 use crate::host::lsp::{LspHost, LspNotification, OffsetEncoding};
 use async_trait::async_trait;
 use lsp_types::{
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CodeAction, CodeActionOrCommand, CodeActionParams, Color, ColorInformation, ColorPresentation,
     ColorPresentationParams, CompletionItem, CompletionList, CompletionParams, CompletionResponse,
     Diagnostic, DiagnosticSeverity, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
@@ -222,6 +224,42 @@ pub fn semantic_tokens_range_params(
     }
 }
 
+pub fn call_hierarchy_prepare_params(
+    path: &str,
+    line: u32,
+    col: u32,
+) -> CallHierarchyPrepareParams {
+    CallHierarchyPrepareParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+    }
+}
+
+/// Builds a minimal [`CallHierarchyItem`] anchored at
+/// `(path, line, col)`. The item's `range` and `selection_range`
+/// both span a single position so the fake's lookup
+/// (`item.range.start`) matches `(line, col)`.
+pub fn call_hierarchy_item(
+    path: &str,
+    name: &str,
+    kind: SymbolKind,
+    line: u32,
+    col: u32,
+) -> CallHierarchyItem {
+    let pos = Position::new(line, col);
+    let range = Range::new(pos, pos);
+    CallHierarchyItem {
+        name: name.to_string(),
+        kind,
+        tags: None,
+        detail: None,
+        uri: file_uri(path),
+        range,
+        selection_range: range,
+        data: None,
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -307,6 +345,9 @@ struct FakeLspState {
     color_presentations: BTreeMap<Uri, Vec<ColorPresentation>>,
     semantic_tokens_full: BTreeMap<Uri, SemanticTokensResult>,
     semantic_tokens_range: BTreeMap<Uri, SemanticTokensRangeResult>,
+    call_hierarchy_prepare: BTreeMap<LspKey, Vec<CallHierarchyItem>>,
+    call_hierarchy_incoming: BTreeMap<LspKey, Vec<CallHierarchyIncomingCall>>,
+    call_hierarchy_outgoing: BTreeMap<LspKey, Vec<CallHierarchyOutgoingCall>>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -347,6 +388,9 @@ impl FakeLsp {
                 color_presentations: BTreeMap::new(),
                 semantic_tokens_full: BTreeMap::new(),
                 semantic_tokens_range: BTreeMap::new(),
+                call_hierarchy_prepare: BTreeMap::new(),
+                call_hierarchy_incoming: BTreeMap::new(),
+                call_hierarchy_outgoing: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -502,6 +546,62 @@ impl FakeLsp {
             .unwrap()
             .semantic_tokens_range
             .insert(file_uri(path), result);
+    }
+
+    /// Programs the [`CallHierarchyItem`]s returned for a
+    /// `textDocument/prepareCallHierarchy` call whose request
+    /// position matches `(path, line, col)`. Replaces any
+    /// previously seeded items for the same position.
+    pub fn set_prepare_call_hierarchy(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        items: Vec<CallHierarchyItem>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .call_hierarchy_prepare
+            .insert(LspKey::new(path, line, col), items);
+    }
+
+    /// Programs the [`CallHierarchyIncomingCall`]s returned when
+    /// `callHierarchy/incomingCalls` is sent with an item anchored
+    /// at `(path, line, col)`. The fake matches on the requested
+    /// item's `range.start`, so tests should construct items via
+    /// [`call_hierarchy_item`] (or set `range.start` to match).
+    pub fn set_call_hierarchy_incoming_calls(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        calls: Vec<CallHierarchyIncomingCall>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .call_hierarchy_incoming
+            .insert(LspKey::new(path, line, col), calls);
+    }
+
+    /// Programs the [`CallHierarchyOutgoingCall`]s returned when
+    /// `callHierarchy/outgoingCalls` is sent with an item anchored
+    /// at `(path, line, col)`. Lookup matches on the requested
+    /// item's `range.start` -- see
+    /// [`Self::set_call_hierarchy_incoming_calls`].
+    pub fn set_call_hierarchy_outgoing_calls(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        calls: Vec<CallHierarchyOutgoingCall>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .call_hierarchy_outgoing
+            .insert(LspKey::new(path, line, col), calls);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -1202,6 +1302,45 @@ impl LspHost for FakeLsp {
             .semantic_tokens_range
             .get(&params.text_document.uri)
             .cloned())
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<CallHierarchyItem>>> {
+        if let Some(err) = self.take_request_failure("textDocument/prepareCallHierarchy") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(
+            &params.text_document_position_params.text_document.uri,
+            &params.text_document_position_params.position,
+        );
+        Ok(state.call_hierarchy_prepare.get(&key).cloned())
+    }
+
+    async fn call_hierarchy_incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        if let Some(err) = self.take_request_failure("callHierarchy/incomingCalls") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
+        Ok(state.call_hierarchy_incoming.get(&key).cloned())
+    }
+
+    async fn call_hierarchy_outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        if let Some(err) = self.take_request_failure("callHierarchy/outgoingCalls") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
+        Ok(state.call_hierarchy_outgoing.get(&key).cloned())
     }
 
     async fn document_symbol(
@@ -1960,6 +2099,86 @@ mod tests {
                 .await
                 .unwrap();
             assert!(result.is_none());
+        });
+    }
+
+    #[test]
+    fn call_hierarchy_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let target = call_hierarchy_item("/src/lib.rs", "do_thing", SymbolKind::FUNCTION, 5, 4);
+            let caller = call_hierarchy_item("/src/main.rs", "run", SymbolKind::FUNCTION, 12, 0);
+            let callee =
+                call_hierarchy_item("/src/util.rs", "log_event", SymbolKind::FUNCTION, 30, 0);
+
+            lsp.set_prepare_call_hierarchy("/src/lib.rs", 5, 4, vec![target.clone()]);
+            lsp.set_call_hierarchy_incoming_calls(
+                "/src/lib.rs",
+                5,
+                4,
+                vec![CallHierarchyIncomingCall {
+                    from: caller.clone(),
+                    from_ranges: vec![Range::new(Position::new(13, 4), Position::new(13, 12))],
+                }],
+            );
+            lsp.set_call_hierarchy_outgoing_calls(
+                "/src/lib.rs",
+                5,
+                4,
+                vec![CallHierarchyOutgoingCall {
+                    to: callee.clone(),
+                    from_ranges: vec![Range::new(Position::new(7, 8), Position::new(7, 17))],
+                }],
+            );
+
+            let prepared = lsp
+                .prepare_call_hierarchy(call_hierarchy_prepare_params("/src/lib.rs", 5, 4))
+                .await
+                .unwrap()
+                .expect("should have items");
+            assert_eq!(prepared, vec![target.clone()]);
+
+            let incoming = lsp
+                .call_hierarchy_incoming_calls(CallHierarchyIncomingCallsParams {
+                    item: target.clone(),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .await
+                .unwrap()
+                .expect("should have incoming calls");
+            assert_eq!(incoming.len(), 1);
+            assert_eq!(incoming[0].from, caller);
+
+            let outgoing = lsp
+                .call_hierarchy_outgoing_calls(CallHierarchyOutgoingCallsParams {
+                    item: target.clone(),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .await
+                .unwrap()
+                .expect("should have outgoing calls");
+            assert_eq!(outgoing.len(), 1);
+            assert_eq!(outgoing[0].to, callee);
+
+            let prep_miss = lsp
+                .prepare_call_hierarchy(call_hierarchy_prepare_params("/src/lib.rs", 99, 99))
+                .await
+                .unwrap();
+            assert!(prep_miss.is_none(), "unprogrammed positions return None");
+
+            let other_item =
+                call_hierarchy_item("/src/lib.rs", "other", SymbolKind::FUNCTION, 42, 0);
+            let in_miss = lsp
+                .call_hierarchy_incoming_calls(CallHierarchyIncomingCallsParams {
+                    item: other_item.clone(),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .await
+                .unwrap();
+            assert!(in_miss.is_none(), "unprogrammed items return None");
         });
     }
 

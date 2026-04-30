@@ -1,5 +1,7 @@
 use async_trait::async_trait;
 use lsp_types::{
+    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
+    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
     CodeAction, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
     ColorInformation, ColorPresentation, ColorPresentationParams, ColorProviderCapability,
     CompletionItem, CompletionParams, CompletionResponse, DeclarationCapability, Diagnostic,
@@ -279,6 +281,18 @@ pub trait LspHost: Send + Sync {
         &self,
         params: SemanticTokensRangeParams,
     ) -> io::Result<Option<SemanticTokensRangeResult>>;
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<CallHierarchyItem>>>;
+    async fn call_hierarchy_incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyIncomingCall>>>;
+    async fn call_hierarchy_outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>>;
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -480,6 +494,27 @@ impl LspHost for NoopLsp {
         &self,
         _params: SemanticTokensRangeParams,
     ) -> io::Result<Option<SemanticTokensRangeResult>> {
+        Ok(None)
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        _params: CallHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<CallHierarchyItem>>> {
+        Ok(None)
+    }
+
+    async fn call_hierarchy_incoming_calls(
+        &self,
+        _params: CallHierarchyIncomingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        Ok(None)
+    }
+
+    async fn call_hierarchy_outgoing_calls(
+        &self,
+        _params: CallHierarchyOutgoingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
         Ok(None)
     }
 
