@@ -3,10 +3,11 @@ use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
     ColorProviderCapability, CompletionItem, CompletionParams, CompletionResponse,
     DeclarationCapability, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentFormattingParams,
-    DocumentHighlight, DocumentHighlightParams, DocumentRangeFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentDiagnosticParams,
+    DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
     InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
     ProgressToken, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
@@ -259,6 +260,10 @@ pub trait LspHost: Send + Sync {
         &self,
         params: DocumentSymbolParams,
     ) -> io::Result<Option<DocumentSymbolResponse>>;
+    async fn document_diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> io::Result<Option<DocumentDiagnosticReportResult>>;
     async fn folding_range(
         &self,
         params: FoldingRangeParams,
@@ -420,6 +425,13 @@ impl LspHost for NoopLsp {
         &self,
         _params: DocumentSymbolParams,
     ) -> io::Result<Option<DocumentSymbolResponse>> {
+        Ok(None)
+    }
+
+    async fn document_diagnostic(
+        &self,
+        _params: DocumentDiagnosticParams,
+    ) -> io::Result<Option<DocumentDiagnosticReportResult>> {
         Ok(None)
     }
 

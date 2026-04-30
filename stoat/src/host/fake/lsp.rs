@@ -4,18 +4,19 @@ use lsp_types::{
     CodeAction, CodeActionOrCommand, CodeActionParams, CompletionItem, CompletionList,
     CompletionParams, CompletionResponse, Diagnostic, DiagnosticSeverity,
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind,
-    DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FormattingOptions,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
-    InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
-    MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams, Position,
-    PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
-    RenameParams, SelectionRange, SelectionRangeParams, ServerCapabilities, SignatureHelp,
-    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri,
-    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
+    FoldingRangeParams, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover,
+    HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel,
+    InlayHintParams, Location, MarkupContent, MarkupKind, MessageType, NumberOrString,
+    PartialResultParams, Position, PositionEncodingKind, PrepareRenameResponse, Range,
+    ReferenceContext, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
+    ServerCapabilities, SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -146,6 +147,16 @@ pub fn range_formatting_params(
     }
 }
 
+pub fn document_diagnostic_params(path: &str) -> DocumentDiagnosticParams {
+    DocumentDiagnosticParams {
+        text_document: text_doc_id(path),
+        identifier: None,
+        previous_result_id: None,
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -225,6 +236,7 @@ struct FakeLspState {
     folding_ranges: BTreeMap<Uri, Vec<FoldingRange>>,
     selection_ranges: BTreeMap<LspKey, SelectionRange>,
     range_formatting: BTreeMap<Uri, Vec<TextEdit>>,
+    document_diagnostics: BTreeMap<Uri, DocumentDiagnosticReportResult>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -259,6 +271,7 @@ impl FakeLsp {
                 folding_ranges: BTreeMap::new(),
                 selection_ranges: BTreeMap::new(),
                 range_formatting: BTreeMap::new(),
+                document_diagnostics: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -336,6 +349,20 @@ impl FakeLsp {
             .unwrap()
             .range_formatting
             .insert(file_uri(path), edits);
+    }
+
+    /// Programs the pull-style diagnostic report returned for a
+    /// `textDocument/diagnostic` call against `path`. Distinct from
+    /// the push-style diagnostics seeded via [`Self::add_error`] /
+    /// [`Self::add_warning`], which the fake delivers through
+    /// [`LspNotification::Diagnostics`] on `did_open` / `did_change`.
+    /// Replaces any previously seeded report for the same document.
+    pub fn set_document_diagnostic(&self, path: &str, report: DocumentDiagnosticReportResult) {
+        self.state
+            .lock()
+            .unwrap()
+            .document_diagnostics
+            .insert(file_uri(path), report);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -974,6 +1001,20 @@ impl LspHost for FakeLsp {
         Ok(None)
     }
 
+    async fn document_diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> io::Result<Option<DocumentDiagnosticReportResult>> {
+        if let Some(err) = self.take_request_failure("textDocument/diagnostic") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state
+            .document_diagnostics
+            .get(&params.text_document.uri)
+            .cloned())
+    }
+
     async fn folding_range(
         &self,
         params: FoldingRangeParams,
@@ -1492,6 +1533,45 @@ mod tests {
 
             let miss = lsp
                 .range_formatting(range_formatting_params("/src/other.rs", 0, 0, 1, 0))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn document_diagnostic_programmed_response() {
+        use lsp_types::{
+            DocumentDiagnosticReport, FullDocumentDiagnosticReport,
+            RelatedFullDocumentDiagnosticReport,
+        };
+
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let diag = Diagnostic::new_simple(
+                Range::new(Position::new(2, 4), Position::new(2, 8)),
+                "unused variable".to_string(),
+            );
+            let report = DocumentDiagnosticReportResult::Report(DocumentDiagnosticReport::Full(
+                RelatedFullDocumentDiagnosticReport {
+                    related_documents: None,
+                    full_document_diagnostic_report: FullDocumentDiagnosticReport {
+                        result_id: Some("rev-1".to_string()),
+                        items: vec![diag.clone()],
+                    },
+                },
+            ));
+            lsp.set_document_diagnostic("/src/main.rs", report.clone());
+
+            let result = lsp
+                .document_diagnostic(document_diagnostic_params("/src/main.rs"))
+                .await
+                .unwrap()
+                .expect("should have report");
+            assert_eq!(result, report);
+
+            let miss = lsp
+                .document_diagnostic(document_diagnostic_params("/src/other.rs"))
                 .await
                 .unwrap();
             assert!(miss.is_none(), "unprogrammed documents return None");
