@@ -5,9 +5,9 @@ use lsp_types::{
     DeclarationCapability, Diagnostic, DidChangeTextDocumentParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentDiagnosticParams,
     DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
-    DocumentHighlightParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, FoldingRange, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
     ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
     InlayHintServerCapabilities, Location, MessageType, OneOf, PrepareRenameResponse,
     ProgressToken, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
@@ -256,6 +256,11 @@ pub trait LspHost: Send + Sync {
         params: CodeActionParams,
     ) -> io::Result<Option<Vec<CodeActionOrCommand>>>;
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction>;
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> io::Result<Option<Vec<DocumentLink>>>;
+    async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink>;
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -419,6 +424,17 @@ impl LspHost for NoopLsp {
 
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
         Ok(action)
+    }
+
+    async fn document_link(
+        &self,
+        _params: DocumentLinkParams,
+    ) -> io::Result<Option<Vec<DocumentLink>>> {
+        Ok(None)
+    }
+
+    async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink> {
+        Ok(link)
     }
 
     async fn document_symbol(

@@ -6,17 +6,17 @@ use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     DidSaveTextDocumentParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
     DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse, FoldingRange,
-    FoldingRangeParams, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover,
-    HoverContents, HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel,
-    InlayHintParams, Location, MarkupContent, MarkupKind, MessageType, NumberOrString,
-    PartialResultParams, Position, PositionEncodingKind, PrepareRenameResponse, Range,
-    ReferenceContext, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
-    ServerCapabilities, SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, FoldingRange, FoldingRangeParams, FormattingOptions,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents, HoverParams,
+    InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams, Location,
+    MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams, Position,
+    PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext, ReferenceParams,
+    RenameParams, SelectionRange, SelectionRangeParams, ServerCapabilities, SignatureHelp,
+    SignatureHelpParams, SymbolInformation, SymbolKind, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams, TextEdit, Uri,
+    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -157,6 +157,14 @@ pub fn document_diagnostic_params(path: &str) -> DocumentDiagnosticParams {
     }
 }
 
+pub fn document_link_params(path: &str) -> DocumentLinkParams {
+    DocumentLinkParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -237,6 +245,7 @@ struct FakeLspState {
     selection_ranges: BTreeMap<LspKey, SelectionRange>,
     range_formatting: BTreeMap<Uri, Vec<TextEdit>>,
     document_diagnostics: BTreeMap<Uri, DocumentDiagnosticReportResult>,
+    document_links: BTreeMap<Uri, Vec<DocumentLink>>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -272,6 +281,7 @@ impl FakeLsp {
                 selection_ranges: BTreeMap::new(),
                 range_formatting: BTreeMap::new(),
                 document_diagnostics: BTreeMap::new(),
+                document_links: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -363,6 +373,20 @@ impl FakeLsp {
             .unwrap()
             .document_diagnostics
             .insert(file_uri(path), report);
+    }
+
+    /// Programs the [`DocumentLink`]s returned for a
+    /// `textDocument/documentLink` call against `path`. The
+    /// resolve step (`documentLink/resolve`) is a passthrough on
+    /// the fake -- tests should program fully-resolved links up
+    /// front. Replaces any previously seeded links for the same
+    /// document.
+    pub fn set_document_links(&self, path: &str, links: Vec<DocumentLink>) {
+        self.state
+            .lock()
+            .unwrap()
+            .document_links
+            .insert(file_uri(path), links);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -991,6 +1015,24 @@ impl LspHost for FakeLsp {
         Ok(action)
     }
 
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> io::Result<Option<Vec<DocumentLink>>> {
+        if let Some(err) = self.take_request_failure("textDocument/documentLink") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        Ok(state.document_links.get(&params.text_document.uri).cloned())
+    }
+
+    async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink> {
+        if let Some(err) = self.take_request_failure("documentLink/resolve") {
+            return Err(err);
+        }
+        Ok(link)
+    }
+
     async fn document_symbol(
         &self,
         _params: DocumentSymbolParams,
@@ -1572,6 +1614,44 @@ mod tests {
 
             let miss = lsp
                 .document_diagnostic(document_diagnostic_params("/src/other.rs"))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn document_link_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let links = vec![
+                DocumentLink {
+                    range: Range::new(Position::new(1, 4), Position::new(1, 28)),
+                    target: Some(file_uri("/src/lib.rs")),
+                    tooltip: Some("Open lib.rs".to_string()),
+                    data: None,
+                },
+                DocumentLink {
+                    range: Range::new(Position::new(5, 10), Position::new(5, 32)),
+                    target: None,
+                    tooltip: None,
+                    data: None,
+                },
+            ];
+            lsp.set_document_links("/src/main.rs", links.clone());
+
+            let result = lsp
+                .document_link(document_link_params("/src/main.rs"))
+                .await
+                .unwrap()
+                .expect("should have links");
+            assert_eq!(result, links);
+
+            let resolved = lsp.document_link_resolve(links[1].clone()).await.unwrap();
+            assert_eq!(resolved, links[1], "fake resolve is a passthrough");
+
+            let miss = lsp
+                .document_link(document_link_params("/src/other.rs"))
                 .await
                 .unwrap();
             assert!(miss.is_none(), "unprogrammed documents return None");
