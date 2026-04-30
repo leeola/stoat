@@ -3,11 +3,12 @@ use crate::host::lsp::{
 };
 use async_trait::async_trait;
 use lsp_types::{
-    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
-    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    CodeAction, CodeActionOrCommand, CodeActionParams, Color, ColorInformation, ColorPresentation,
-    ColorPresentationParams, CompletionItem, CompletionList, CompletionParams, CompletionResponse,
-    Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
+    ApplyWorkspaceEditParams, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
+    CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
+    CallHierarchyPrepareParams, CodeAction, CodeActionOrCommand, CodeActionParams, Color,
+    ColorInformation, ColorPresentation, ColorPresentationParams, CompletionItem, CompletionList,
+    CompletionParams, CompletionResponse, ConfigurationItem, ConfigurationParams, Diagnostic,
+    DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
     DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
     DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentColorParams,
     DocumentDiagnosticParams, DocumentDiagnosticReportResult, DocumentFormattingParams,
@@ -374,11 +375,13 @@ pub fn execute_command_params(command: &str, arguments: Vec<Value>) -> ExecuteCo
     }
 }
 
-/// Build an [`IncomingRequest`] with an `i32` id (most LSP servers
-/// use numeric ids; tests can construct a [`NumberOrString::String`]
-/// id manually if the string variant is needed).
+/// Build an [`IncomingRequest::Unknown`] for a method this host has
+/// not yet been taught about. Tests for typed variants
+/// (`IncomingRequest::WorkspaceApplyEdit`, etc.) construct the
+/// variant directly so the params type stays checked at compile
+/// time; this helper exists for the fallback path.
 pub fn incoming_request(method: &str, id: i32, params: Value) -> IncomingRequest {
-    IncomingRequest {
+    IncomingRequest::Unknown {
         id: NumberOrString::Number(id),
         method: method.to_string(),
         params,
@@ -2836,40 +2839,77 @@ mod tests {
             let lsp = FakeLsp::new();
             assert!(lsp.try_recv_incoming_request().await.is_none());
 
-            let apply_edit_params = serde_json::json!({"label": "Rename foo", "edit": {}});
+            let apply_edit = ApplyWorkspaceEditParams {
+                label: Some("Rename foo".to_string()),
+                edit: WorkspaceEdit::default(),
+            };
+            lsp.push_incoming_request(IncomingRequest::WorkspaceApplyEdit {
+                id: NumberOrString::Number(7),
+                params: apply_edit.clone(),
+            });
+
+            let configuration = ConfigurationParams {
+                items: vec![ConfigurationItem {
+                    scope_uri: None,
+                    section: Some("rust-analyzer".to_string()),
+                }],
+            };
+            lsp.push_incoming_request(IncomingRequest::WorkspaceConfiguration {
+                id: NumberOrString::Number(8),
+                params: configuration.clone(),
+            });
+
             lsp.push_incoming_request(incoming_request(
-                "workspace/applyEdit",
-                7,
-                apply_edit_params.clone(),
-            ));
-            lsp.push_incoming_request(incoming_request(
-                "workspace/configuration",
-                8,
-                serde_json::json!({"items": []}),
+                "experimental/customMethod",
+                9,
+                serde_json::json!({"hint": "future"}),
             ));
 
-            let first = lsp.recv_incoming_request().await.expect("first request");
-            assert_eq!(first.id, NumberOrString::Number(7));
-            assert_eq!(first.method, "workspace/applyEdit");
-            assert_eq!(first.params, apply_edit_params);
+            match lsp.recv_incoming_request().await.expect("apply edit") {
+                IncomingRequest::WorkspaceApplyEdit { id, params } => {
+                    assert_eq!(id, NumberOrString::Number(7));
+                    assert_eq!(params, apply_edit);
+                },
+                other => panic!("expected WorkspaceApplyEdit, got {other:?}"),
+            }
 
-            let second = lsp.recv_incoming_request().await.expect("second request");
-            assert_eq!(second.id, NumberOrString::Number(8));
+            match lsp.recv_incoming_request().await.expect("configuration") {
+                IncomingRequest::WorkspaceConfiguration { id, params } => {
+                    assert_eq!(id, NumberOrString::Number(8));
+                    assert_eq!(params, configuration);
+                },
+                other => panic!("expected WorkspaceConfiguration, got {other:?}"),
+            }
 
-            lsp.reply(first.id.clone(), Ok(serde_json::json!({"applied": true})))
-                .await
-                .unwrap();
+            match lsp.recv_incoming_request().await.expect("unknown") {
+                IncomingRequest::Unknown { id, method, params } => {
+                    assert_eq!(id, NumberOrString::Number(9));
+                    assert_eq!(method, "experimental/customMethod");
+                    assert_eq!(params, serde_json::json!({"hint": "future"}));
+                },
+                other => panic!("expected Unknown, got {other:?}"),
+            }
+
+            lsp.reply(
+                NumberOrString::Number(7),
+                Ok(serde_json::json!({"applied": true})),
+            )
+            .await
+            .unwrap();
             let server_error = LspResponseError {
                 code: -32603,
                 message: "internal error".to_string(),
                 data: None,
             };
-            lsp.reply(second.id.clone(), Err(server_error.clone()))
+            lsp.reply(NumberOrString::Number(8), Err(server_error.clone()))
+                .await
+                .unwrap();
+            lsp.reply(NumberOrString::Number(9), Ok(Value::Null))
                 .await
                 .unwrap();
 
             let replies = lsp.observed_replies();
-            assert_eq!(replies.len(), 2);
+            assert_eq!(replies.len(), 3);
             assert_eq!(
                 replies[0],
                 (
@@ -2878,7 +2918,23 @@ mod tests {
                 )
             );
             assert_eq!(replies[1], (NumberOrString::Number(8), Err(server_error)));
+            assert_eq!(replies[2], (NumberOrString::Number(9), Ok(Value::Null)));
         });
+    }
+
+    #[test]
+    fn incoming_request_id_accessor() {
+        let apply_edit = IncomingRequest::WorkspaceApplyEdit {
+            id: NumberOrString::Number(42),
+            params: ApplyWorkspaceEditParams {
+                label: None,
+                edit: WorkspaceEdit::default(),
+            },
+        };
+        assert_eq!(apply_edit.id(), &NumberOrString::Number(42));
+
+        let unknown = incoming_request("custom/method", 11, Value::Null);
+        assert_eq!(unknown.id(), &NumberOrString::Number(11));
     }
 
     #[test]

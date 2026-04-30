@@ -1,25 +1,27 @@
 use async_trait::async_trait;
 use lsp_types::{
-    CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
-    CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    CodeAction, CodeActionOrCommand, CodeActionParams, CodeActionProviderCapability,
-    ColorInformation, ColorPresentation, ColorPresentationParams, ColorProviderCapability,
-    CompletionItem, CompletionParams, CompletionResponse, DeclarationCapability, Diagnostic,
-    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
-    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
-    DidSaveTextDocumentParams, DocumentColorParams, DocumentDiagnosticParams,
-    DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
-    DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams,
-    DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams, FoldingRange,
-    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
-    HoverProviderCapability, ImplementationProviderCapability, InitializeResult, InlayHint,
-    InlayHintParams, InlayHintServerCapabilities, Location, MessageType, NumberOrString, OneOf,
-    PrepareRenameResponse, ProgressToken, ReferenceParams, RenameFilesParams, RenameParams,
-    SelectionRange, SelectionRangeParams, SemanticTokensParams, SemanticTokensRangeParams,
-    SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities, SignatureHelp,
-    SignatureHelpParams, TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
-    TypeHierarchySupertypesParams, Uri, WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams,
+    ApplyWorkspaceEditParams, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
+    CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
+    CallHierarchyPrepareParams, CodeAction, CodeActionOrCommand, CodeActionParams,
+    CodeActionProviderCapability, ColorInformation, ColorPresentation, ColorPresentationParams,
+    ColorProviderCapability, CompletionItem, CompletionParams, CompletionResponse,
+    ConfigurationParams, DeclarationCapability, Diagnostic, DidChangeConfigurationParams,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentColorParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentLink,
+    DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    DocumentSymbolResponse, ExecuteCommandParams, FoldingRange, FoldingRangeParams,
+    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
+    ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
+    InlayHintServerCapabilities, Location, MessageType, NumberOrString, OneOf,
+    PrepareRenameResponse, ProgressToken, ReferenceParams, RegistrationParams, RenameFilesParams,
+    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
+    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
+    ShowMessageRequestParams, SignatureHelp, SignatureHelpParams, TextDocumentPositionParams,
+    TextEdit, TypeDefinitionProviderCapability, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, UnregistrationParams, Uri,
+    WorkDoneProgress, WorkDoneProgressCreateParams, WorkspaceEdit, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
 use serde_json::Value;
@@ -60,24 +62,82 @@ pub enum LspNotification {
 /// Server-to-client request that the editor must answer via
 /// [`LspHost::reply`]. Distinct from [`LspNotification`] (which is
 /// fire-and-forget) because the JSON-RPC envelope carries an `id`
-/// the server uses to correlate the eventual response. The struct is
-/// intentionally untyped: `params` is the raw JSON the server sent
-/// and the editor decodes it based on `method`. Typed decoding lives
-/// at a higher layer (see TODO line 155).
+/// the server uses to correlate the eventual response. Each variant
+/// pairs the `id` with the typed params struct from `lsp_types`;
+/// production transports decode the wire JSON eagerly so the editor
+/// can pattern-match on method instead of branching on a string.
+/// [`Self::Unknown`] is the fallback for methods this host has not
+/// been taught about.
 #[derive(Debug, Clone)]
-pub struct IncomingRequest {
-    /// JSON-RPC request id. Echo this back to [`LspHost::reply`] so
-    /// the server can correlate the response with the original
-    /// request.
-    pub id: NumberOrString,
-    /// LSP method name (e.g. `"workspace/applyEdit"`,
-    /// `"window/showMessageRequest"`). Drives how the editor
-    /// deserializes [`Self::params`].
-    pub method: String,
-    /// Raw request parameters. Decode with
-    /// `serde_json::from_value::<MethodParams>(params)` once the
-    /// editor has matched [`Self::method`].
-    pub params: Value,
+pub enum IncomingRequest {
+    /// `window/showMessageRequest` -- server asks the user a
+    /// picker question; reply selects one of
+    /// `params.actions` or replies `null` for dismissal.
+    ShowMessageRequest {
+        id: NumberOrString,
+        params: ShowMessageRequestParams,
+    },
+    /// `window/workDoneProgress/create` -- server reserves a
+    /// progress token before emitting [`LspNotification::Progress`].
+    /// Reply `null` to acknowledge or with an error to refuse.
+    WorkDoneProgressCreate {
+        id: NumberOrString,
+        params: WorkDoneProgressCreateParams,
+    },
+    /// `client/registerCapability` -- server dynamically registers
+    /// capabilities (file watchers, command sets, etc.). Reply
+    /// `null` to acknowledge.
+    RegisterCapability {
+        id: NumberOrString,
+        params: RegistrationParams,
+    },
+    /// `client/unregisterCapability` -- inverse of
+    /// [`Self::RegisterCapability`]. Reply `null` to acknowledge.
+    UnregisterCapability {
+        id: NumberOrString,
+        params: UnregistrationParams,
+    },
+    /// `workspace/configuration` -- server pulls editor settings.
+    /// Reply with `Vec<Value>` matching `params.items` order;
+    /// missing settings are sent back as `Value::Null`.
+    WorkspaceConfiguration {
+        id: NumberOrString,
+        params: ConfigurationParams,
+    },
+    /// `workspace/applyEdit` -- server requests a workspace edit
+    /// (rename refactor, code action). Reply with
+    /// `ApplyWorkspaceEditResponse` carrying `applied` plus an
+    /// optional failure reason.
+    WorkspaceApplyEdit {
+        id: NumberOrString,
+        params: ApplyWorkspaceEditParams,
+    },
+    /// Fallback for methods this host has not yet been taught
+    /// about. `params` carries the raw wire JSON; the editor can
+    /// surface the request without forcing a host update for every
+    /// new LSP method.
+    Unknown {
+        id: NumberOrString,
+        method: String,
+        params: Value,
+    },
+}
+
+impl IncomingRequest {
+    /// JSON-RPC request id, regardless of variant. The editor
+    /// echoes this back to [`LspHost::reply`] so the server can
+    /// correlate the response with the originating request.
+    pub fn id(&self) -> &NumberOrString {
+        match self {
+            Self::ShowMessageRequest { id, .. }
+            | Self::WorkDoneProgressCreate { id, .. }
+            | Self::RegisterCapability { id, .. }
+            | Self::UnregisterCapability { id, .. }
+            | Self::WorkspaceConfiguration { id, .. }
+            | Self::WorkspaceApplyEdit { id, .. }
+            | Self::Unknown { id, .. } => id,
+        }
+    }
 }
 
 /// JSON-RPC error envelope returned in place of a successful result
