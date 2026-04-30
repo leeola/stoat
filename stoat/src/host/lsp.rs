@@ -16,8 +16,9 @@ use lsp_types::{
     ProgressToken, ReferenceParams, RenameParams, SelectionRange, SelectionRangeParams,
     SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
     SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
-    TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability, Uri, WorkDoneProgress,
-    WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    TextDocumentPositionParams, TextEdit, TypeDefinitionProviderCapability, TypeHierarchyItem,
+    TypeHierarchyPrepareParams, TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
+    WorkDoneProgress, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     io,
@@ -293,6 +294,18 @@ pub trait LspHost: Send + Sync {
         &self,
         params: CallHierarchyOutgoingCallsParams,
     ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>>;
+    async fn prepare_type_hierarchy(
+        &self,
+        params: TypeHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>>;
+    async fn type_hierarchy_supertypes(
+        &self,
+        params: TypeHierarchySupertypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>>;
+    async fn type_hierarchy_subtypes(
+        &self,
+        params: TypeHierarchySubtypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>>;
     async fn document_symbol(
         &self,
         params: DocumentSymbolParams,
@@ -515,6 +528,27 @@ impl LspHost for NoopLsp {
         &self,
         _params: CallHierarchyOutgoingCallsParams,
     ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        Ok(None)
+    }
+
+    async fn prepare_type_hierarchy(
+        &self,
+        _params: TypeHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        Ok(None)
+    }
+
+    async fn type_hierarchy_supertypes(
+        &self,
+        _params: TypeHierarchySupertypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        Ok(None)
+    }
+
+    async fn type_hierarchy_subtypes(
+        &self,
+        _params: TypeHierarchySubtypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
         Ok(None)
     }
 

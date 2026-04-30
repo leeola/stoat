@@ -19,9 +19,10 @@ use lsp_types::{
     SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
     SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
-    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    TextDocumentPositionParams, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
+    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
+    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
+    WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     collections::BTreeMap,
@@ -260,6 +261,42 @@ pub fn call_hierarchy_item(
     }
 }
 
+pub fn type_hierarchy_prepare_params(
+    path: &str,
+    line: u32,
+    col: u32,
+) -> TypeHierarchyPrepareParams {
+    TypeHierarchyPrepareParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+    }
+}
+
+/// Builds a minimal [`TypeHierarchyItem`] anchored at
+/// `(path, line, col)`. The item's `range` and `selection_range`
+/// both span a single position so the fake's supertypes/subtypes
+/// lookup (`item.range.start`) matches `(line, col)`.
+pub fn type_hierarchy_item(
+    path: &str,
+    name: &str,
+    kind: SymbolKind,
+    line: u32,
+    col: u32,
+) -> TypeHierarchyItem {
+    let pos = Position::new(line, col);
+    let range = Range::new(pos, pos);
+    TypeHierarchyItem {
+        name: name.to_string(),
+        kind,
+        tags: None,
+        detail: None,
+        uri: file_uri(path),
+        range,
+        selection_range: range,
+        data: None,
+    }
+}
+
 pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
     WorkspaceSymbolParams {
         partial_result_params: prp(),
@@ -348,6 +385,9 @@ struct FakeLspState {
     call_hierarchy_prepare: BTreeMap<LspKey, Vec<CallHierarchyItem>>,
     call_hierarchy_incoming: BTreeMap<LspKey, Vec<CallHierarchyIncomingCall>>,
     call_hierarchy_outgoing: BTreeMap<LspKey, Vec<CallHierarchyOutgoingCall>>,
+    type_hierarchy_prepare: BTreeMap<LspKey, Vec<TypeHierarchyItem>>,
+    type_hierarchy_supertypes: BTreeMap<LspKey, Vec<TypeHierarchyItem>>,
+    type_hierarchy_subtypes: BTreeMap<LspKey, Vec<TypeHierarchyItem>>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -391,6 +431,9 @@ impl FakeLsp {
                 call_hierarchy_prepare: BTreeMap::new(),
                 call_hierarchy_incoming: BTreeMap::new(),
                 call_hierarchy_outgoing: BTreeMap::new(),
+                type_hierarchy_prepare: BTreeMap::new(),
+                type_hierarchy_supertypes: BTreeMap::new(),
+                type_hierarchy_subtypes: BTreeMap::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -602,6 +645,61 @@ impl FakeLsp {
             .unwrap()
             .call_hierarchy_outgoing
             .insert(LspKey::new(path, line, col), calls);
+    }
+
+    /// Programs the [`TypeHierarchyItem`]s returned for a
+    /// `textDocument/prepareTypeHierarchy` call whose request
+    /// position matches `(path, line, col)`. Replaces any
+    /// previously seeded items for the same position.
+    pub fn set_prepare_type_hierarchy(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        items: Vec<TypeHierarchyItem>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .type_hierarchy_prepare
+            .insert(LspKey::new(path, line, col), items);
+    }
+
+    /// Programs the supertype [`TypeHierarchyItem`]s returned when
+    /// `typeHierarchy/supertypes` is sent with an item anchored at
+    /// `(path, line, col)`. The fake matches on the requested
+    /// item's `range.start`, so tests should construct items via
+    /// [`type_hierarchy_item`] (or set `range.start` to match).
+    pub fn set_type_hierarchy_supertypes(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        items: Vec<TypeHierarchyItem>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .type_hierarchy_supertypes
+            .insert(LspKey::new(path, line, col), items);
+    }
+
+    /// Programs the subtype [`TypeHierarchyItem`]s returned when
+    /// `typeHierarchy/subtypes` is sent with an item anchored at
+    /// `(path, line, col)`. Lookup matches on the requested item's
+    /// `range.start` -- see [`Self::set_type_hierarchy_supertypes`].
+    pub fn set_type_hierarchy_subtypes(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        items: Vec<TypeHierarchyItem>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .type_hierarchy_subtypes
+            .insert(LspKey::new(path, line, col), items);
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -1341,6 +1439,45 @@ impl LspHost for FakeLsp {
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.call_hierarchy_outgoing.get(&key).cloned())
+    }
+
+    async fn prepare_type_hierarchy(
+        &self,
+        params: TypeHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        if let Some(err) = self.take_request_failure("textDocument/prepareTypeHierarchy") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(
+            &params.text_document_position_params.text_document.uri,
+            &params.text_document_position_params.position,
+        );
+        Ok(state.type_hierarchy_prepare.get(&key).cloned())
+    }
+
+    async fn type_hierarchy_supertypes(
+        &self,
+        params: TypeHierarchySupertypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        if let Some(err) = self.take_request_failure("typeHierarchy/supertypes") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
+        Ok(state.type_hierarchy_supertypes.get(&key).cloned())
+    }
+
+    async fn type_hierarchy_subtypes(
+        &self,
+        params: TypeHierarchySubtypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        if let Some(err) = self.take_request_failure("typeHierarchy/subtypes") {
+            return Err(err);
+        }
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
+        Ok(state.type_hierarchy_subtypes.get(&key).cloned())
     }
 
     async fn document_symbol(
@@ -2179,6 +2316,68 @@ mod tests {
                 .await
                 .unwrap();
             assert!(in_miss.is_none(), "unprogrammed items return None");
+        });
+    }
+
+    #[test]
+    fn type_hierarchy_programmed_response() {
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let target = type_hierarchy_item("/src/shape.rs", "Square", SymbolKind::CLASS, 10, 6);
+            let parent = type_hierarchy_item("/src/shape.rs", "Polygon", SymbolKind::CLASS, 4, 6);
+            let child =
+                type_hierarchy_item("/src/shape.rs", "FilledSquare", SymbolKind::CLASS, 30, 6);
+
+            lsp.set_prepare_type_hierarchy("/src/shape.rs", 10, 6, vec![target.clone()]);
+            lsp.set_type_hierarchy_supertypes("/src/shape.rs", 10, 6, vec![parent.clone()]);
+            lsp.set_type_hierarchy_subtypes("/src/shape.rs", 10, 6, vec![child.clone()]);
+
+            let prepared = lsp
+                .prepare_type_hierarchy(type_hierarchy_prepare_params("/src/shape.rs", 10, 6))
+                .await
+                .unwrap()
+                .expect("should have items");
+            assert_eq!(prepared, vec![target.clone()]);
+
+            let supertypes = lsp
+                .type_hierarchy_supertypes(TypeHierarchySupertypesParams {
+                    item: target.clone(),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .await
+                .unwrap()
+                .expect("should have supertypes");
+            assert_eq!(supertypes, vec![parent]);
+
+            let subtypes = lsp
+                .type_hierarchy_subtypes(TypeHierarchySubtypesParams {
+                    item: target.clone(),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .await
+                .unwrap()
+                .expect("should have subtypes");
+            assert_eq!(subtypes, vec![child]);
+
+            let prep_miss = lsp
+                .prepare_type_hierarchy(type_hierarchy_prepare_params("/src/shape.rs", 99, 99))
+                .await
+                .unwrap();
+            assert!(prep_miss.is_none(), "unprogrammed positions return None");
+
+            let other_item =
+                type_hierarchy_item("/src/shape.rs", "Other", SymbolKind::CLASS, 42, 0);
+            let super_miss = lsp
+                .type_hierarchy_supertypes(TypeHierarchySupertypesParams {
+                    item: other_item.clone(),
+                    work_done_progress_params: WorkDoneProgressParams::default(),
+                    partial_result_params: PartialResultParams::default(),
+                })
+                .await
+                .unwrap();
+            assert!(super_miss.is_none(), "unprogrammed items return None");
         });
     }
 
