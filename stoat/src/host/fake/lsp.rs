@@ -5,15 +5,15 @@ use async_trait::async_trait;
 use lsp_types::{
     ApplyWorkspaceEditParams, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
-    CallHierarchyPrepareParams, CodeAction, CodeActionOrCommand, CodeActionParams, Color,
-    ColorInformation, ColorPresentation, ColorPresentationParams, CompletionItem, CompletionList,
-    CompletionParams, CompletionResponse, ConfigurationItem, ConfigurationParams, Diagnostic,
-    DiagnosticSeverity, DidChangeConfigurationParams, DidChangeTextDocumentParams,
-    DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams,
-    DidOpenTextDocumentParams, DidSaveTextDocumentParams, DocumentColorParams,
-    DocumentDiagnosticParams, DocumentDiagnosticReportResult, DocumentFormattingParams,
-    DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams, DocumentLink,
-    DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
+    CallHierarchyPrepareParams, CodeAction, CodeActionContext, CodeActionOrCommand,
+    CodeActionParams, Color, ColorInformation, ColorPresentation, ColorPresentationParams,
+    CompletionItem, CompletionList, CompletionParams, CompletionResponse, ConfigurationItem,
+    ConfigurationParams, Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams,
+    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
+    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
+    DocumentColorParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
+    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
+    DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
     DocumentSymbolResponse, ExecuteCommandParams, FileChangeType, FileEvent, FileRename,
     FoldingRange, FoldingRangeParams, FormattingOptions, GotoDefinitionParams,
     GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
@@ -182,6 +182,29 @@ pub fn range_formatting_params(
         ),
         options: FormattingOptions::default(),
         work_done_progress_params: wdp(),
+    }
+}
+
+pub fn code_action_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> CodeActionParams {
+    CodeActionParams {
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+        context: CodeActionContext {
+            diagnostics: Vec::new(),
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
     }
 }
 
@@ -464,6 +487,7 @@ struct FakeLspState {
     semantic_tokens_range: BTreeMap<Uri, SemanticTokensRangeResult>,
     document_symbols: BTreeMap<Uri, DocumentSymbolResponse>,
     signature_helps: BTreeMap<LspKey, SignatureHelp>,
+    code_actions: BTreeMap<Uri, Vec<CodeActionOrCommand>>,
     call_hierarchy_prepare: BTreeMap<LspKey, Vec<CallHierarchyItem>>,
     call_hierarchy_incoming: BTreeMap<LspKey, Vec<CallHierarchyIncomingCall>>,
     call_hierarchy_outgoing: BTreeMap<LspKey, Vec<CallHierarchyOutgoingCall>>,
@@ -521,6 +545,7 @@ impl FakeLsp {
                 semantic_tokens_range: BTreeMap::new(),
                 document_symbols: BTreeMap::new(),
                 signature_helps: BTreeMap::new(),
+                code_actions: BTreeMap::new(),
                 call_hierarchy_prepare: BTreeMap::new(),
                 call_hierarchy_incoming: BTreeMap::new(),
                 call_hierarchy_outgoing: BTreeMap::new(),
@@ -613,6 +638,20 @@ impl FakeLsp {
             .unwrap()
             .range_formatting
             .insert(file_uri(path), edits);
+    }
+
+    /// Programs the [`CodeActionOrCommand`]s returned for a
+    /// `textDocument/codeAction` call against `path`. The fake
+    /// ignores the request's range and context and returns whatever
+    /// was programmed for the document; tests arrange URI and
+    /// range to match. Replaces any previously seeded actions for
+    /// the same document.
+    pub fn set_code_actions(&self, path: &str, actions: Vec<CodeActionOrCommand>) {
+        self.state
+            .lock()
+            .unwrap()
+            .code_actions
+            .insert(file_uri(path), actions);
     }
 
     /// Programs the pull-style diagnostic report returned for a
@@ -1587,12 +1626,13 @@ impl LspHost for FakeLsp {
 
     async fn code_action(
         &self,
-        _params: CodeActionParams,
+        params: CodeActionParams,
     ) -> io::Result<Option<Vec<CodeActionOrCommand>>> {
         if let Some(err) = self.take_request_failure("textDocument/codeAction") {
             return Err(err);
         }
-        Ok(None)
+        let state = self.state.lock().unwrap();
+        Ok(state.code_actions.get(&params.text_document.uri).cloned())
     }
 
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
@@ -2740,6 +2780,45 @@ mod tests {
                 document_miss.is_none(),
                 "unprogrammed documents return None"
             );
+        });
+    }
+
+    #[test]
+    fn code_action_programmed_response() {
+        use lsp_types::{CodeActionKind, Command};
+
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let action = CodeActionOrCommand::CodeAction(CodeAction {
+                title: "Replace with Vec::new()".to_string(),
+                kind: Some(CodeActionKind::QUICKFIX),
+                diagnostics: None,
+                edit: None,
+                command: None,
+                is_preferred: Some(true),
+                disabled: None,
+                data: None,
+            });
+            let command = CodeActionOrCommand::Command(Command {
+                title: "Restart rust-analyzer".to_string(),
+                command: "rust-analyzer.restart".to_string(),
+                arguments: None,
+            });
+            let actions = vec![action, command];
+            lsp.set_code_actions("/src/main.rs", actions.clone());
+
+            let hit = lsp
+                .code_action(code_action_params("/src/main.rs", 5, 0, 5, 12))
+                .await
+                .unwrap()
+                .expect("programmed response");
+            assert_eq!(hit, actions);
+
+            let miss = lsp
+                .code_action(code_action_params("/src/other.rs", 0, 0, 0, 0))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
         });
     }
 
