@@ -46,7 +46,7 @@ define_action!(
     "Increment",
     ActionKind::Increment,
     "increment number under cursor",
-    "Increment the decimal number at or after the primary cursor on its current line by one. When the cursor is on a digit the run of digits there is the target; otherwise the search walks forward to the first digit on the same line and uses the run that begins there. The scan never crosses a line ending. A leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Operates on the primary cursor only.",
+    "Increment the decimal number at or after each cursor on its current line by one. When a cursor is on a digit the run of digits there is the target; otherwise the search walks forward to the first digit on the same line and uses the run that begins there. The scan never crosses a line ending. A leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Two cursors that find the same number share a single edit.",
     ActionPriority::Rare
 );
 
@@ -56,7 +56,7 @@ define_action!(
     "Decrement",
     ActionKind::Decrement,
     "decrement number under cursor",
-    "Decrement the decimal number at or after the primary cursor on its current line by one. When the cursor is on a digit the run of digits there is the target; otherwise the search walks forward to the first digit on the same line and uses the run that begins there. The scan never crosses a line ending. A leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Operates on the primary cursor only.",
+    "Decrement the decimal number at or after each cursor on its current line by one. When a cursor is on a digit the run of digits there is the target; otherwise the search walks forward to the first digit on the same line and uses the run that begins there. The scan never crosses a line ending. A leading `-` is included only when the dash is preceded by whitespace, line start, or non-word punctuation. Two cursors that find the same number share a single edit.",
     ActionPriority::Rare
 );
 
@@ -856,7 +856,7 @@ define_action!(
     "SwitchCase",
     ActionKind::SwitchCase,
     "toggle case",
-    "Toggle the case of every character in the primary selection: uppercase becomes lowercase and vice versa. Digits, punctuation, and non-letter characters pass through unchanged. Operates on the primary cursor only.",
+    "Toggle the case of every character in each selection: uppercase becomes lowercase and vice versa. Digits, punctuation, and non-letter characters pass through unchanged.",
     ActionPriority::Rare
 );
 
@@ -866,7 +866,7 @@ define_action!(
     "SwitchToUppercase",
     ActionKind::SwitchToUppercase,
     "uppercase selection",
-    "Uppercase every character in the primary selection. Already-uppercase and non-letter characters pass through unchanged. Operates on the primary cursor only.",
+    "Uppercase every character in each selection. Already-uppercase and non-letter characters pass through unchanged.",
     ActionPriority::Rare
 );
 
@@ -876,7 +876,7 @@ define_action!(
     "SwitchToLowercase",
     ActionKind::SwitchToLowercase,
     "lowercase selection",
-    "Lowercase every character in the primary selection. Already-lowercase and non-letter characters pass through unchanged. Operates on the primary cursor only.",
+    "Lowercase every character in each selection. Already-lowercase and non-letter characters pass through unchanged.",
     ActionPriority::Rare
 );
 
