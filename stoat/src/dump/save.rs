@@ -2,9 +2,10 @@ use super::{
     bundle, dumps_dir,
     meta::DumpMeta,
     snapshot::{ActiveRebaseSnap, WorkspaceSnapshot},
-    walker, DumpError, DumpId,
+    walker, CreateDirSnafu, DumpError, DumpId, RonSnafu, WriteDumpSnafu,
 };
 use crate::{app::Stoat, host::FsHost, workspace::Workspace};
+use snafu::ResultExt;
 use std::path::Path;
 use time::OffsetDateTime;
 
@@ -22,7 +23,9 @@ pub fn save_at(
 ) -> Result<DumpId, DumpError> {
     let id = DumpId::new(name, at)?;
     let dumps = dumps_dir()?;
-    fs.create_dir_all(&dumps)?;
+    fs.create_dir_all(&dumps).with_context(|_| CreateDirSnafu {
+        path: dumps.clone(),
+    })?;
     let archive_path = dumps.join(id.filename());
     write_archive(
         stoat.active_workspace(),
@@ -63,12 +66,20 @@ pub(crate) fn write_archive(
         dropped_fields,
         workspace: snapshot,
     };
-    let meta_ron = meta.to_ron().map_err(|e| DumpError::Ron(e.to_string()))?;
+    let meta_ron = meta.to_ron().map_err(|e| {
+        RonSnafu {
+            reason: e.to_string(),
+        }
+        .build()
+    })?;
 
     let entries = walker::gather_workspace_files(fs, &git_root)?;
 
     let bundle_bytes = bundle::serialize(&meta_ron, &entries)?;
-    fs.write(archive_path, &bundle_bytes)?;
+    fs.write(archive_path, &bundle_bytes)
+        .with_context(|_| WriteDumpSnafu {
+            path: archive_path.to_path_buf(),
+        })?;
     Ok(())
 }
 

@@ -1,12 +1,12 @@
-use super::DumpError;
+use super::{DumpError, ListDumpsDirSnafu, ReadDumpSnafu, WalkSnafu};
 use crate::host::FsHost;
 use ignore::{
     gitignore::{Gitignore, GitignoreBuilder},
     Match,
 };
+use snafu::ResultExt;
 use std::{
     collections::BTreeMap,
-    io,
     path::{Path, PathBuf},
 };
 
@@ -39,14 +39,21 @@ fn walk(
 ) -> Result<(), DumpError> {
     let pushed = read_gitignore(fs, dir, chain)?;
 
-    let mut entries = fs.list_dir(dir)?;
+    let mut entries = fs.list_dir(dir).with_context(|_| ListDumpsDirSnafu {
+        path: dir.to_path_buf(),
+    })?;
     entries.sort_by(|a, b| a.name.cmp(&b.name));
 
     for entry in entries {
         let path = dir.join(entry.name.as_str());
         let rel = path
             .strip_prefix(root)
-            .map_err(|e| DumpError::Io(io::Error::other(e.to_string())))?
+            .map_err(|e| {
+                WalkSnafu {
+                    reason: e.to_string(),
+                }
+                .build()
+            })?
             .to_path_buf();
 
         let force_include = is_force_included(&rel);
@@ -59,7 +66,8 @@ fn walk(
             walk(fs, root, &path, chain, out)?;
         } else {
             let mut buf = Vec::new();
-            fs.read(&path, &mut buf)?;
+            fs.read(&path, &mut buf)
+                .with_context(|_| ReadDumpSnafu { path: path.clone() })?;
             out.insert(rel, buf);
         }
     }
@@ -80,9 +88,14 @@ fn read_gitignore(
         return Ok(false);
     }
     let mut buf = Vec::new();
-    fs.read(&path, &mut buf)?;
-    let text = std::str::from_utf8(&buf)
-        .map_err(|e| DumpError::Io(io::Error::other(format!(".gitignore not UTF-8: {e}"))))?;
+    fs.read(&path, &mut buf)
+        .with_context(|_| ReadDumpSnafu { path: path.clone() })?;
+    let text = std::str::from_utf8(&buf).map_err(|e| {
+        WalkSnafu {
+            reason: format!(".gitignore not UTF-8: {e}"),
+        }
+        .build()
+    })?;
     chain.push(dir.to_path_buf(), text)?;
     Ok(true)
 }
@@ -107,13 +120,19 @@ impl GitignoreChain {
     fn push(&mut self, root: PathBuf, content: &str) -> Result<(), DumpError> {
         let mut builder = GitignoreBuilder::new(&root);
         for line in content.lines() {
-            builder
-                .add_line(None, line)
-                .map_err(|e| DumpError::Io(io::Error::other(e.to_string())))?;
+            builder.add_line(None, line).map_err(|e| {
+                WalkSnafu {
+                    reason: e.to_string(),
+                }
+                .build()
+            })?;
         }
-        let gi = builder
+        let gi = builder.build().map_err(|e| {
+            WalkSnafu {
+                reason: e.to_string(),
+            }
             .build()
-            .map_err(|e| DumpError::Io(io::Error::other(e.to_string())))?;
+        })?;
         self.matchers.push((root, gi));
         Ok(())
     }

@@ -24,6 +24,7 @@ const FORCE_INCLUDE_DIRS: &[&str] = &[".git", ".stoat"];
 use crate::host::FsHost;
 pub use meta::DumpMeta;
 pub use save::save_at;
+use snafu::{ResultExt, Snafu};
 use std::{
     io,
     path::{Path, PathBuf},
@@ -53,9 +54,12 @@ impl DumpId {
     pub fn new(name: &str, at: OffsetDateTime) -> Result<Self, DumpError> {
         let sanitized = sanitize_name(name)?;
         let at_utc = at.to_offset(UtcOffset::UTC);
-        let timestamp = at_utc
-            .format(&TIMESTAMP_FORMAT)
-            .map_err(|e| DumpError::Time(e.to_string()))?;
+        let timestamp = at_utc.format(&TIMESTAMP_FORMAT).map_err(|e| {
+            TimeSnafu {
+                reason: e.to_string(),
+            }
+            .build()
+        })?;
         Ok(Self(format!("{timestamp}_{sanitized}")))
     }
 
@@ -107,44 +111,120 @@ pub struct DumpEntry {
     pub modified: Option<SystemTime>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum DumpError {
-    EmptyName,
-    Io(io::Error),
-    Ron(String),
-    Time(String),
-    NotFound(String),
-    Ambiguous { query: String, matches: Vec<DumpId> },
+    #[snafu(display("dump name is empty after sanitization"))]
+    EmptyName {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("dump metadata serialization failed: {reason}"))]
+    Ron {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("timestamp handling failed: {reason}"))]
+    Time {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("no dump matches '{query}'"))]
+    NotFound {
+        query: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("'{query}' matches multiple dumps: {}", display_matches(matches)))]
+    Ambiguous {
+        query: String,
+        matches: Vec<DumpId>,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("dump bundle format: {reason}"))]
+    BundleFormat {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("workspace walk failed: {reason}"))]
+    Walk {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to resolve XDG data directory"))]
+    ResolveDataDir {
+        source: io::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to create directory: {}", path.display()))]
+    CreateDir {
+        source: io::Error,
+        path: PathBuf,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to read dump file: {}", path.display()))]
+    ReadDump {
+        source: io::Error,
+        path: PathBuf,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to write dump file: {}", path.display()))]
+    WriteDump {
+        source: io::Error,
+        path: PathBuf,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to remove dump file: {}", path.display()))]
+    RemoveDump {
+        source: io::Error,
+        path: PathBuf,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to list directory: {}", path.display()))]
+    ListDumpsDir {
+        source: io::Error,
+        path: PathBuf,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to read metadata: {}", path.display()))]
+    MetadataDump {
+        source: io::Error,
+        path: PathBuf,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
-impl std::fmt::Display for DumpError {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            Self::EmptyName => write!(f, "dump name is empty after sanitization"),
-            Self::Io(e) => write!(f, "I/O error: {e}"),
-            Self::Ron(s) => write!(f, "dump metadata serialization failed: {s}"),
-            Self::Time(s) => write!(f, "timestamp handling failed: {s}"),
-            Self::NotFound(q) => write!(f, "no dump matches '{q}'"),
-            Self::Ambiguous { query, matches } => {
-                write!(f, "'{query}' matches multiple dumps: ")?;
-                for (i, m) in matches.iter().enumerate() {
-                    if i > 0 {
-                        f.write_str(", ")?;
-                    }
-                    f.write_str(m.as_str())?;
-                }
-                Ok(())
-            },
-        }
-    }
-}
-
-impl std::error::Error for DumpError {}
-
-impl From<io::Error> for DumpError {
-    fn from(e: io::Error) -> Self {
-        Self::Io(e)
-    }
+fn display_matches(matches: &[DumpId]) -> String {
+    matches
+        .iter()
+        .map(|m| m.as_str())
+        .collect::<Vec<_>>()
+        .join(", ")
 }
 
 /// Sanitize a user-supplied name into a path-friendly slug.
@@ -194,7 +274,7 @@ pub fn sanitize_name(raw: &str) -> Result<String, DumpError> {
     }
 
     if collapsed.is_empty() {
-        return Err(DumpError::EmptyName);
+        return EmptyNameSnafu.fail();
     }
     Ok(collapsed)
 }
@@ -202,7 +282,7 @@ pub fn sanitize_name(raw: &str) -> Result<String, DumpError> {
 /// Returns the directory where dump archives are stored:
 /// `<XDG_DATA_HOME>/stoat/dumps/`. Does not create the directory.
 pub fn dumps_dir() -> Result<PathBuf, DumpError> {
-    Ok(data_dir()?.join(DUMPS_SUBDIR))
+    Ok(data_dir().context(ResolveDataDirSnafu)?.join(DUMPS_SUBDIR))
 }
 
 /// List all dump archives, newest first. Ignores non-archive files in
@@ -214,7 +294,10 @@ pub fn list(fs: &dyn FsHost) -> Result<Vec<DumpEntry>, DumpError> {
         return Ok(Vec::new());
     }
     let mut entries = Vec::new();
-    for entry in fs.list_dir(&dir)? {
+    let listing = fs
+        .list_dir(&dir)
+        .with_context(|_| ListDumpsDirSnafu { path: dir.clone() })?;
+    for entry in listing {
         if entry.is_dir {
             continue;
         }
@@ -222,7 +305,9 @@ pub fn list(fs: &dyn FsHost) -> Result<Vec<DumpEntry>, DumpError> {
             continue;
         };
         let path = dir.join(entry.name.as_str());
-        let meta = fs.metadata(&path)?;
+        let meta = fs
+            .metadata(&path)
+            .with_context(|_| MetadataDumpSnafu { path: path.clone() })?;
         let (size_bytes, modified) = match meta {
             Some(m) => (m.len, Some(m.modified)),
             None => (0, None),
@@ -247,7 +332,10 @@ pub fn resolve(query: &str, fs: &dyn FsHost) -> Result<DumpEntry, DumpError> {
     let mut all = list(fs)?;
     all.retain(|e| e.id.as_str() == query || e.id.name().map(|n| n == query).unwrap_or(false));
     if all.is_empty() {
-        return Err(DumpError::NotFound(query.to_string()));
+        return NotFoundSnafu {
+            query: query.to_string(),
+        }
+        .fail();
     }
     Ok(all.remove(0))
 }
@@ -256,9 +344,13 @@ pub fn resolve(query: &str, fs: &dyn FsHost) -> Result<DumpEntry, DumpError> {
 pub fn remove(id: &DumpId, fs: &dyn FsHost) -> Result<(), DumpError> {
     let path = dumps_dir()?.join(id.filename());
     if !fs.exists(&path) {
-        return Err(DumpError::NotFound(id.as_str().to_string()));
+        return NotFoundSnafu {
+            query: id.as_str().to_string(),
+        }
+        .fail();
     }
-    fs.remove_file(&path)?;
+    fs.remove_file(&path)
+        .with_context(|_| RemoveDumpSnafu { path: path.clone() })?;
     Ok(())
 }
 
@@ -268,7 +360,12 @@ pub fn clean_older_than(days: u64, fs: &dyn FsHost) -> Result<Vec<DumpId>, DumpE
     let now = SystemTime::now();
     let cutoff = now
         .checked_sub(std::time::Duration::from_secs(days * 86_400))
-        .ok_or_else(|| DumpError::Time("overflow computing cutoff".to_string()))?;
+        .ok_or_else(|| {
+            TimeSnafu {
+                reason: "overflow computing cutoff".to_string(),
+            }
+            .build()
+        })?;
     let entries = list(fs)?;
     let mut removed = Vec::new();
     for entry in entries {
@@ -276,7 +373,10 @@ pub fn clean_older_than(days: u64, fs: &dyn FsHost) -> Result<Vec<DumpId>, DumpE
             continue;
         };
         if modified < cutoff {
-            fs.remove_file(&entry.path)?;
+            fs.remove_file(&entry.path)
+                .with_context(|_| RemoveDumpSnafu {
+                    path: entry.path.clone(),
+                })?;
             removed.push(entry.id);
         }
     }
@@ -290,7 +390,10 @@ pub fn clean_older_than(days: u64, fs: &dyn FsHost) -> Result<Vec<DumpId>, DumpE
 pub fn extract(id: &DumpId, dest: &Path, fs: &dyn FsHost) -> Result<(), DumpError> {
     let archive = dumps_dir()?.join(id.filename());
     if !fs.exists(&archive) {
-        return Err(DumpError::NotFound(id.as_str().to_string()));
+        return NotFoundSnafu {
+            query: id.as_str().to_string(),
+        }
+        .fail();
     }
     read_archive(&archive, dest, fs)
 }
@@ -304,22 +407,35 @@ pub(crate) fn read_archive(
     fs: &dyn FsHost,
 ) -> Result<(), DumpError> {
     let mut buf = Vec::new();
-    fs.read(archive_path, &mut buf)?;
+    fs.read(archive_path, &mut buf)
+        .with_context(|_| ReadDumpSnafu {
+            path: archive_path.to_path_buf(),
+        })?;
     let (meta_ron, entries) = bundle::deserialize(&buf)?;
 
     for (rel, content) in &entries {
         let target = dest.join(rel);
         if let Some(parent) = target.parent() {
-            fs.create_dir_all(parent)?;
+            fs.create_dir_all(parent).with_context(|_| CreateDirSnafu {
+                path: parent.to_path_buf(),
+            })?;
         }
-        fs.write(&target, content)?;
+        fs.write(&target, content)
+            .with_context(|_| WriteDumpSnafu {
+                path: target.clone(),
+            })?;
     }
 
     let meta_target = dest.join(meta::META_PATH_IN_ARCHIVE);
     if let Some(parent) = meta_target.parent() {
-        fs.create_dir_all(parent)?;
+        fs.create_dir_all(parent).with_context(|_| CreateDirSnafu {
+            path: parent.to_path_buf(),
+        })?;
     }
-    fs.write(&meta_target, meta_ron.as_bytes())?;
+    fs.write(&meta_target, meta_ron.as_bytes())
+        .with_context(|_| WriteDumpSnafu {
+            path: meta_target.clone(),
+        })?;
     Ok(())
 }
 
@@ -341,9 +457,22 @@ pub fn hydrate(
     fs: &dyn FsHost,
 ) -> Result<(), DumpError> {
     let mut buf = Vec::new();
-    fs.read(meta_path, &mut buf)?;
-    let ron = String::from_utf8(buf).map_err(|e| DumpError::Io(io::Error::other(e.to_string())))?;
-    let meta = DumpMeta::from_ron(&ron).map_err(|e| DumpError::Ron(e.to_string()))?;
+    fs.read(meta_path, &mut buf)
+        .with_context(|_| ReadDumpSnafu {
+            path: meta_path.to_path_buf(),
+        })?;
+    let ron = String::from_utf8(buf).map_err(|e| {
+        RonSnafu {
+            reason: e.to_string(),
+        }
+        .build()
+    })?;
+    let meta = DumpMeta::from_ron(&ron).map_err(|e| {
+        RonSnafu {
+            reason: e.to_string(),
+        }
+        .build()
+    })?;
     apply_snapshot(stoat, meta.workspace);
     Ok(())
 }
@@ -418,9 +547,18 @@ mod tests {
 
     #[test]
     fn sanitize_empty_errors() {
-        assert!(matches!(sanitize_name(""), Err(DumpError::EmptyName)));
-        assert!(matches!(sanitize_name("   "), Err(DumpError::EmptyName)));
-        assert!(matches!(sanitize_name("!@#$"), Err(DumpError::EmptyName)));
+        assert!(matches!(
+            sanitize_name(""),
+            Err(DumpError::EmptyName { .. })
+        ));
+        assert!(matches!(
+            sanitize_name("   "),
+            Err(DumpError::EmptyName { .. })
+        ));
+        assert!(matches!(
+            sanitize_name("!@#$"),
+            Err(DumpError::EmptyName { .. })
+        ));
     }
 
     #[test]

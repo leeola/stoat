@@ -1,5 +1,5 @@
-use super::DumpError;
-use std::{collections::BTreeMap, io, path::PathBuf};
+use super::{BundleFormatSnafu, DumpError};
+use std::{collections::BTreeMap, path::PathBuf};
 
 const MAGIC: &[u8; 4] = b"SDMP";
 const VERSION: u8 = 1;
@@ -13,12 +13,16 @@ pub(crate) fn serialize(
 ) -> Result<Vec<u8>, DumpError> {
     let meta_bytes = meta_ron.as_bytes();
     if meta_bytes.len() > u32::MAX as usize {
-        return Err(DumpError::Io(io::Error::other("dump metadata too large")));
+        return BundleFormatSnafu {
+            reason: "dump metadata too large".to_string(),
+        }
+        .fail();
     }
     if entries.len() > u32::MAX as usize {
-        return Err(DumpError::Io(io::Error::other(
-            "dump contains too many entries",
-        )));
+        return BundleFormatSnafu {
+            reason: "dump contains too many entries".to_string(),
+        }
+        .fail();
     }
 
     let mut out = Vec::with_capacity(estimate_size(meta_bytes.len(), entries));
@@ -30,16 +34,17 @@ pub(crate) fn serialize(
 
     for (path, content) in entries {
         let path_str = path.to_str().ok_or_else(|| {
-            DumpError::Io(io::Error::other(format!(
-                "non-UTF-8 path in dump: {}",
-                path.display()
-            )))
+            BundleFormatSnafu {
+                reason: format!("non-UTF-8 path in dump: {}", path.display()),
+            }
+            .build()
         })?;
         let path_bytes = path_str.as_bytes();
         if path_bytes.len() > u16::MAX as usize {
-            return Err(DumpError::Io(io::Error::other(format!(
-                "dump entry path exceeds 64KB: {path_str}"
-            ))));
+            return BundleFormatSnafu {
+                reason: format!("dump entry path exceeds 64KB: {path_str}"),
+            }
+            .fail();
         }
         out.extend_from_slice(&(path_bytes.len() as u16).to_le_bytes());
         out.extend_from_slice(path_bytes);
@@ -51,28 +56,34 @@ pub(crate) fn serialize(
 }
 
 /// Deserialize a bundle written by [`serialize`]. Returns the metadata
-/// RON string and the file map. Errors with descriptive `DumpError::Io`
-/// messages on truncation, bad magic, or unknown version.
+/// RON string and the file map. Errors as [`DumpError::BundleFormat`]
+/// on truncation, bad magic, or unknown version.
 pub(crate) fn deserialize(bytes: &[u8]) -> Result<(String, BTreeMap<PathBuf, Vec<u8>>), DumpError> {
     let mut cur = Cursor::new(bytes);
     let magic = cur.take(4)?;
     if magic != MAGIC {
-        return Err(DumpError::Io(io::Error::other(format!(
-            "bad dump magic: expected {:?}, got {magic:?}",
-            MAGIC
-        ))));
+        return BundleFormatSnafu {
+            reason: format!("bad dump magic: expected {:?}, got {magic:?}", MAGIC),
+        }
+        .fail();
     }
     let version = cur.take(1)?[0];
     if version != VERSION {
-        return Err(DumpError::Io(io::Error::other(format!(
-            "unsupported dump version: {version}"
-        ))));
+        return BundleFormatSnafu {
+            reason: format!("unsupported dump version: {version}"),
+        }
+        .fail();
     }
 
     let meta_len = cur.read_u32()? as usize;
     let meta_bytes = cur.take(meta_len)?;
     let meta_ron = std::str::from_utf8(meta_bytes)
-        .map_err(|e| DumpError::Io(io::Error::other(format!("dump metadata not UTF-8: {e}"))))?
+        .map_err(|e| {
+            BundleFormatSnafu {
+                reason: format!("dump metadata not UTF-8: {e}"),
+            }
+            .build()
+        })?
         .to_string();
 
     let entry_count = cur.read_u32()? as usize;
@@ -81,7 +92,10 @@ pub(crate) fn deserialize(bytes: &[u8]) -> Result<(String, BTreeMap<PathBuf, Vec
         let path_len = cur.read_u16()? as usize;
         let path_bytes = cur.take(path_len)?;
         let path_str = std::str::from_utf8(path_bytes).map_err(|e| {
-            DumpError::Io(io::Error::other(format!("dump entry path not UTF-8: {e}")))
+            BundleFormatSnafu {
+                reason: format!("dump entry path not UTF-8: {e}"),
+            }
+            .build()
         })?;
         let content_len = cur.read_u64()? as usize;
         let content = cur.take(content_len)?.to_vec();
@@ -89,10 +103,13 @@ pub(crate) fn deserialize(bytes: &[u8]) -> Result<(String, BTreeMap<PathBuf, Vec
     }
 
     if cur.pos != bytes.len() {
-        return Err(DumpError::Io(io::Error::other(format!(
-            "trailing bytes after dump payload: {} unread",
-            bytes.len() - cur.pos
-        ))));
+        return BundleFormatSnafu {
+            reason: format!(
+                "trailing bytes after dump payload: {} unread",
+                bytes.len() - cur.pos
+            ),
+        }
+        .fail();
     }
 
     Ok((meta_ron, entries))
@@ -118,16 +135,21 @@ impl<'a> Cursor<'a> {
     }
 
     fn take(&mut self, n: usize) -> Result<&'a [u8], DumpError> {
-        let end = self
-            .pos
-            .checked_add(n)
-            .ok_or_else(|| DumpError::Io(io::Error::other("dump payload length overflow")))?;
+        let end = self.pos.checked_add(n).ok_or_else(|| {
+            BundleFormatSnafu {
+                reason: "dump payload length overflow".to_string(),
+            }
+            .build()
+        })?;
         if end > self.bytes.len() {
-            return Err(DumpError::Io(io::Error::other(format!(
-                "dump truncated: wanted {n} bytes at offset {}, have {}",
-                self.pos,
-                self.bytes.len() - self.pos
-            ))));
+            return BundleFormatSnafu {
+                reason: format!(
+                    "dump truncated: wanted {n} bytes at offset {}, have {}",
+                    self.pos,
+                    self.bytes.len() - self.pos
+                ),
+            }
+            .fail();
         }
         let slice = &self.bytes[self.pos..end];
         self.pos = end;
