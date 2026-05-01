@@ -2026,6 +2026,26 @@ mod tests {
     }
 
     #[test]
+    fn switch_case_applies_to_each_split_cursor_range() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc\ndef\nghi\n");
+        h.open_file(&path);
+        h.type_keys("% alt-s");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SwitchCase);
+        assert_eq!(focused_buffer_text(&mut h), "ABC\nDEF\nGHI\n");
+    }
+
+    #[test]
+    fn increment_applies_to_each_split_cursor_range() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "1\n2\n3\n");
+        h.open_file(&path);
+        h.type_keys("2 shift-C");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Increment);
+        assert_eq!(focused_buffer_text(&mut h), "2\n3\n4\n");
+    }
+
+    #[test]
     fn delete_selection_removes_full_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "hello world\n");

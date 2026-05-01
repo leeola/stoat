@@ -786,43 +786,59 @@ where
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, primary_id, start, end, new_text) = {
+    let (buffer_id, mut edits) = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let primary_id = sel.id;
-        let start = buffer_snapshot.resolve_anchor(&sel.start);
-        let end = buffer_snapshot.resolve_anchor(&sel.end);
-        if start == end {
-            return UpdateEffect::None;
-        }
-        let text = buffer_snapshot.rope().slice(start..end).to_string();
-        let new_text = transform(&text);
-        if new_text == text {
-            return UpdateEffect::None;
-        }
-        (buffer_id, primary_id, start, end, new_text)
+        let edits: Vec<(usize, usize, usize, String)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .filter_map(|sel| {
+                let s = buffer_snapshot.resolve_anchor(&sel.start);
+                let e = buffer_snapshot.resolve_anchor(&sel.end);
+                if s == e {
+                    return None;
+                }
+                let text = buffer_snapshot.rope().slice(s..e).to_string();
+                let new_text = transform(&text);
+                if new_text == text {
+                    return None;
+                }
+                Some((sel.id, s, e, new_text))
+            })
+            .collect();
+        (buffer_id, edits)
     };
+
+    if edits.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    edits.sort_by_key(|(_, s, _, _)| *s);
 
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        guard.edit(start..end, &new_text);
+        for (_, s, e, new_text) in edits.iter().rev() {
+            guard.edit(*s..*e, new_text);
+        }
     }
+
+    let edited_ranges: std::collections::HashMap<usize, (usize, usize)> = edits
+        .iter()
+        .map(|(id, s, _, new_text)| (*id, (*s, *s + new_text.len())))
+        .collect();
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
-    let new_end = start + new_text.len();
-    let start_anchor = new_buf.anchor_at(start, Bias::Left);
-    let end_anchor = new_buf.anchor_at(new_end, Bias::Right);
-    editor.selections.transform(new_buf, |s| {
-        let mut new = s.clone();
-        if new.id == primary_id {
-            new.start = start_anchor;
-            new.end = end_anchor;
+    editor.selections.transform(new_buf, |sel| {
+        let mut new = sel.clone();
+        if let Some((s, e)) = edited_ranges.get(&sel.id) {
+            new.start = new_buf.anchor_at(*s, Bias::Left);
+            new.end = new_buf.anchor_at(*e, Bias::Right);
         }
         new
     });
@@ -847,53 +863,64 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         _ => return UpdateEffect::None,
     };
 
-    let (buffer_id, primary_id, start, end, new_text) = {
+    let (buffer_id, mut edits) = {
         let editor = ws.editors.get_mut(editor_id).expect("editor");
         let buffer_id = editor.buffer_id;
         let display_snapshot = editor.display_map.snapshot();
         let buffer_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let primary_id = sel.id;
-        let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
         let rope = buffer_snapshot.rope();
-        let Some(num_match) = find_number_seeking(rope, head_offset) else {
-            return UpdateEffect::None;
-        };
-        let text = rope
-            .slice(num_match.range.start..num_match.range.end)
-            .to_string();
-        let Some(new_text) = compute_number_delta(&text, num_match.kind, delta) else {
-            return UpdateEffect::None;
-        };
-        if new_text == text {
-            return UpdateEffect::None;
-        }
-        (
-            buffer_id,
-            primary_id,
-            num_match.range.start,
-            num_match.range.end,
-            new_text,
-        )
+        let mut seen = std::collections::HashSet::<(usize, usize)>::new();
+        let edits: Vec<(usize, usize, usize, String)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .filter_map(|sel| {
+                let head_offset = buffer_snapshot.resolve_anchor(&sel.head());
+                let num_match = find_number_seeking(rope, head_offset)?;
+                let key = (num_match.range.start, num_match.range.end);
+                if !seen.insert(key) {
+                    return None;
+                }
+                let text = rope
+                    .slice(num_match.range.start..num_match.range.end)
+                    .to_string();
+                let new_text = compute_number_delta(&text, num_match.kind, delta)?;
+                if new_text == text {
+                    return None;
+                }
+                Some((sel.id, num_match.range.start, num_match.range.end, new_text))
+            })
+            .collect();
+        (buffer_id, edits)
     };
+
+    if edits.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    edits.sort_by_key(|(_, s, _, _)| *s);
 
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        guard.edit(start..end, &new_text);
+        for (_, s, e, new_text) in edits.iter().rev() {
+            guard.edit(*s..*e, new_text);
+        }
     }
+
+    let edited_ranges: std::collections::HashMap<usize, (usize, usize)> = edits
+        .iter()
+        .map(|(id, s, _, new_text)| (*id, (*s, *s + new_text.len())))
+        .collect();
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
     let new_display = editor.display_map.snapshot();
     let new_buf = new_display.buffer_snapshot();
-    let new_end = start + new_text.len();
-    let start_anchor = new_buf.anchor_at(start, Bias::Left);
-    let end_anchor = new_buf.anchor_at(new_end, Bias::Right);
-    editor.selections.transform(new_buf, |s| {
-        let mut new = s.clone();
-        if new.id == primary_id {
-            new.start = start_anchor;
-            new.end = end_anchor;
+    editor.selections.transform(new_buf, |sel| {
+        let mut new = sel.clone();
+        if let Some((s, e)) = edited_ranges.get(&sel.id) {
+            new.start = new_buf.anchor_at(*s, Bias::Left);
+            new.end = new_buf.anchor_at(*e, Bias::Right);
         }
         new
     });
