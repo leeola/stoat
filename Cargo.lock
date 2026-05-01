@@ -2134,6 +2134,7 @@ dependencies = [
  "serde",
  "serde_json",
  "slotmap",
+ "snafu",
  "stoat_action",
  "stoat_config",
  "stoat_language",

@@ -28,6 +28,7 @@ unicode-width.workspace = true
 slotmap.workspace = true
 lsp-types.workspace = true
 async-trait.workspace = true
+snafu = { workspace = true }
 portable-pty.workspace = true
 vte.workspace = true
 ignore.workspace = true

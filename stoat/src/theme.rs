@@ -5,7 +5,8 @@
 //! `syntax.keyword.control` inherit from `syntax.keyword` when unspecified.
 
 use ratatui::style::{Color, Modifier, Style};
-use std::{collections::HashMap, fmt};
+use snafu::{OptionExt, Snafu};
+use std::collections::HashMap;
 use stoat_config::{Config, Expr, Setting, Spanned, Statement, ThemeBlock, Value};
 
 #[derive(Debug, Clone)]
@@ -51,7 +52,10 @@ impl Theme {
             .filter(|t| t.node.name.node == name)
             .collect();
         if blocks.is_empty() {
-            return Err(ThemeError::ThemeNotFound(name.to_string()));
+            return ThemeNotFoundSnafu {
+                name: name.to_string(),
+            }
+            .fail();
         }
 
         let mut palette: HashMap<String, Color> = HashMap::new();
@@ -129,10 +133,16 @@ fn apply_setting(
     }
 
     let Some((field, scope_parts)) = path.split_last() else {
-        return Err(ThemeError::InvalidScopePath(String::new()));
+        return InvalidScopePathSnafu {
+            path: String::new(),
+        }
+        .fail();
     };
     if scope_parts.is_empty() {
-        return Err(ThemeError::InvalidScopePath(path.join(".")));
+        return InvalidScopePathSnafu {
+            path: path.join("."),
+        }
+        .fail();
     }
     let scope = scope_parts.join(".");
     apply_field(&scope, field, &setting.value.node, palette, fg, bg, mods)
@@ -158,10 +168,11 @@ fn apply_field(
             mods.insert(scope.to_string(), resolve_modifiers(value)?);
         },
         other => {
-            return Err(ThemeError::UnknownField {
+            return UnknownFieldSnafu {
                 scope: scope.to_string(),
                 field: other.to_string(),
-            });
+            }
+            .fail();
         },
     }
     Ok(())
@@ -174,7 +185,7 @@ fn resolve_color_from_expr(
     match expr {
         Expr::Value(v) => resolve_color_from_value(v, palette),
         Expr::Variable(name) => lookup_named_or_palette(name, palette),
-        Expr::If { .. } => Err(ThemeError::UnsupportedExpr),
+        Expr::If { .. } => UnsupportedExprSnafu.fail(),
     }
 }
 
@@ -185,7 +196,10 @@ fn resolve_color_from_value(
     match value {
         Value::Ident(name) => lookup_named_or_palette(name, palette),
         Value::String(s) => parse_color_string(s),
-        other => Err(ThemeError::InvalidColorValue(format!("{other:?}"))),
+        other => InvalidColorValueSnafu {
+            value: format!("{other:?}"),
+        }
+        .fail(),
     }
 }
 
@@ -197,30 +211,45 @@ fn lookup_named_or_palette(
         .get(name)
         .copied()
         .or_else(|| named_color(name))
-        .ok_or_else(|| ThemeError::UnknownColor(name.to_string()))
+        .context(UnknownColorSnafu {
+            name: name.to_string(),
+        })
 }
 
 fn parse_color_string(s: &str) -> Result<Color, ThemeError> {
     if let Some(hex) = s.strip_prefix('#') {
         if hex.len() != 6 {
-            return Err(ThemeError::InvalidHexColor(s.to_string()));
+            return InvalidHexColorSnafu {
+                value: s.to_string(),
+            }
+            .fail();
         }
         let r = u8::from_str_radix(&hex[0..2], 16)
-            .map_err(|_| ThemeError::InvalidHexColor(s.to_string()))?;
+            .ok()
+            .context(InvalidHexColorSnafu {
+                value: s.to_string(),
+            })?;
         let g = u8::from_str_radix(&hex[2..4], 16)
-            .map_err(|_| ThemeError::InvalidHexColor(s.to_string()))?;
+            .ok()
+            .context(InvalidHexColorSnafu {
+                value: s.to_string(),
+            })?;
         let b = u8::from_str_radix(&hex[4..6], 16)
-            .map_err(|_| ThemeError::InvalidHexColor(s.to_string()))?;
+            .ok()
+            .context(InvalidHexColorSnafu {
+                value: s.to_string(),
+            })?;
         return Ok(Color::Rgb(r, g, b));
     }
     if let Some(inner) = s.strip_prefix("ansi(").and_then(|t| t.strip_suffix(')')) {
-        let n: u8 = inner
-            .trim()
-            .parse()
-            .map_err(|_| ThemeError::InvalidColorValue(s.to_string()))?;
+        let n: u8 = inner.trim().parse().ok().context(InvalidColorValueSnafu {
+            value: s.to_string(),
+        })?;
         return Ok(Color::Indexed(n));
     }
-    named_color(s).ok_or_else(|| ThemeError::UnknownColor(s.to_string()))
+    named_color(s).context(UnknownColorSnafu {
+        name: s.to_string(),
+    })
 }
 
 fn named_color(s: &str) -> Option<Color> {
@@ -254,12 +283,20 @@ fn resolve_modifiers(value: &Value) -> Result<Modifier, ThemeError> {
             for item in items {
                 match &item.node {
                     Value::Ident(name) => m |= named_modifier(name)?,
-                    other => return Err(ThemeError::InvalidModifier(format!("{other:?}"))),
+                    other => {
+                        return InvalidModifierSnafu {
+                            value: format!("{other:?}"),
+                        }
+                        .fail();
+                    },
                 }
             }
             Ok(m)
         },
-        other => Err(ThemeError::InvalidModifier(format!("{other:?}"))),
+        other => InvalidModifierSnafu {
+            value: format!("{other:?}"),
+        }
+        .fail(),
     }
 }
 
@@ -275,44 +312,73 @@ fn named_modifier(s: &str) -> Result<Modifier, ThemeError> {
         "slowblink" => Modifier::SLOW_BLINK,
         "rapidblink" => Modifier::RAPID_BLINK,
         "hidden" => Modifier::HIDDEN,
-        _ => return Err(ThemeError::UnknownModifier(s.to_string())),
+        _ => {
+            return UnknownModifierSnafu {
+                name: s.to_string(),
+            }
+            .fail();
+        },
     })
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Snafu)]
+#[snafu(visibility(pub))]
 pub enum ThemeError {
-    ThemeNotFound(String),
-    UnknownColor(String),
-    InvalidHexColor(String),
-    InvalidColorValue(String),
-    InvalidScopePath(String),
-    UnknownField { scope: String, field: String },
-    UnknownModifier(String),
-    InvalidModifier(String),
-    UnsupportedExpr,
+    #[snafu(display("theme '{name}' not found in config"))]
+    ThemeNotFound {
+        name: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("unknown palette ref or named color: '{name}'"))]
+    UnknownColor {
+        name: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("invalid hex color: '{value}'"))]
+    InvalidHexColor {
+        value: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("invalid color value: {value}"))]
+    InvalidColorValue {
+        value: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("invalid scope path: '{path}'"))]
+    InvalidScopePath {
+        path: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("unknown theme field '{field}' at scope '{scope}'"))]
+    UnknownField {
+        scope: String,
+        field: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("unknown modifier: '{name}'"))]
+    UnknownModifier {
+        name: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("invalid modifier value: {value}"))]
+    InvalidModifier {
+        value: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("if-expressions are not supported inside theme blocks"))]
+    UnsupportedExpr {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
-
-impl fmt::Display for ThemeError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        match self {
-            ThemeError::ThemeNotFound(n) => write!(f, "theme '{n}' not found in config"),
-            ThemeError::UnknownColor(n) => write!(f, "unknown palette ref or named color: '{n}'"),
-            ThemeError::InvalidHexColor(s) => write!(f, "invalid hex color: '{s}'"),
-            ThemeError::InvalidColorValue(s) => write!(f, "invalid color value: {s}"),
-            ThemeError::InvalidScopePath(s) => write!(f, "invalid scope path: '{s}'"),
-            ThemeError::UnknownField { scope, field } => {
-                write!(f, "unknown theme field '{field}' at scope '{scope}'")
-            },
-            ThemeError::UnknownModifier(s) => write!(f, "unknown modifier: '{s}'"),
-            ThemeError::InvalidModifier(s) => write!(f, "invalid modifier value: {s}"),
-            ThemeError::UnsupportedExpr => {
-                write!(f, "if-expressions are not supported inside theme blocks")
-            },
-        }
-    }
-}
-
-impl std::error::Error for ThemeError {}
 
 /// Typed constants for every UI scope. Call sites use these instead of
 /// string literals so typos become compile errors. Syntax scopes
@@ -423,10 +489,10 @@ mod tests {
     #[test]
     fn missing_theme_errors() {
         let src = "theme dark { ui.cursor.fg = red; }";
-        assert_eq!(
+        assert!(matches!(
             load_err(src, "light"),
-            ThemeError::ThemeNotFound("light".into())
-        );
+            ThemeError::ThemeNotFound { name, .. } if name == "light"
+        ));
     }
 
     #[test]
@@ -534,40 +600,38 @@ mod tests {
     #[test]
     fn unknown_color_ident_errors() {
         let src = "theme t { ui.cursor.fg = notacolor; }";
-        assert_eq!(
+        assert!(matches!(
             load_err(src, "t"),
-            ThemeError::UnknownColor("notacolor".into())
-        );
+            ThemeError::UnknownColor { name, .. } if name == "notacolor"
+        ));
     }
 
     #[test]
     fn invalid_hex_errors() {
         let src = r##"theme t { ui.cursor.fg = "#gggggg"; }"##;
-        assert_eq!(
+        assert!(matches!(
             load_err(src, "t"),
-            ThemeError::InvalidHexColor("#gggggg".into())
-        );
+            ThemeError::InvalidHexColor { value, .. } if value == "#gggggg"
+        ));
     }
 
     #[test]
     fn unknown_field_errors() {
         let src = "theme t { ui.cursor = { color: red }; }";
-        assert_eq!(
+        assert!(matches!(
             load_err(src, "t"),
-            ThemeError::UnknownField {
-                scope: "ui.cursor".into(),
-                field: "color".into(),
-            }
-        );
+            ThemeError::UnknownField { scope, field, .. }
+                if scope == "ui.cursor" && field == "color"
+        ));
     }
 
     #[test]
     fn unknown_modifier_errors() {
         let src = "theme t { ui.cursor = { fg: red, modifiers: [sparkles] }; }";
-        assert_eq!(
+        assert!(matches!(
             load_err(src, "t"),
-            ThemeError::UnknownModifier("sparkles".into())
-        );
+            ThemeError::UnknownModifier { name, .. } if name == "sparkles"
+        ));
     }
 
     #[test]
