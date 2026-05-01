@@ -2182,6 +2182,7 @@ name = "stoat_bin"
 version = "0.1.0"
 dependencies = [
  "clap",
+ "snafu",
  "stoat",
  "stoat_agent_claude_code",
  "stoat_scheduler",

@@ -1,7 +1,8 @@
 use clap::Subcommand;
-use std::{env, io, process::Command};
+use snafu::{whatever, ResultExt, Whatever};
+use std::{env, process::Command};
 use stoat::{
-    dump::{self, DumpEntry, DumpError},
+    dump::{self, DumpEntry},
     host::LocalFs,
 };
 use tempfile::Builder as TempBuilder;
@@ -28,7 +29,7 @@ pub enum DumpCommand {
     },
 }
 
-pub fn run(sub: DumpCommand) -> Result<(), Box<dyn std::error::Error>> {
+pub fn run(sub: DumpCommand) -> Result<(), Whatever> {
     match sub {
         DumpCommand::Ls => ls(),
         DumpCommand::Open { id } => open(&id),
@@ -37,8 +38,8 @@ pub fn run(sub: DumpCommand) -> Result<(), Box<dyn std::error::Error>> {
     }
 }
 
-fn ls() -> Result<(), Box<dyn std::error::Error>> {
-    let entries = dump::list(&LocalFs)?;
+fn ls() -> Result<(), Whatever> {
+    let entries = dump::list(&LocalFs).whatever_context("list workspace dumps")?;
     if entries.is_empty() {
         println!("No dumps found under $XDG_DATA_HOME/stoat/dumps/.");
         return Ok(());
@@ -94,36 +95,41 @@ fn human_size(bytes: u64) -> String {
     }
 }
 
-fn open(query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let entry = dump::resolve(query, &LocalFs).map_err(describe)?;
-    let tempdir = TempBuilder::new().prefix("stoat-dump-").tempdir()?;
-    dump::extract(&entry.id, tempdir.path(), &LocalFs).map_err(describe)?;
+fn open(query: &str) -> Result<(), Whatever> {
+    let entry = dump::resolve(query, &LocalFs).whatever_context("resolve dump id")?;
+    let tempdir = TempBuilder::new()
+        .prefix("stoat-dump-")
+        .tempdir()
+        .whatever_context("create tempdir for dump extract")?;
+    dump::extract(&entry.id, tempdir.path(), &LocalFs).whatever_context("extract dump")?;
 
-    let current_exe = env::current_exe()?;
+    let current_exe = env::current_exe().whatever_context("locate current stoat binary")?;
     let status = Command::new(&current_exe)
         .current_dir(tempdir.path())
         .env(
             "STOAT_DUMP_LOAD",
             tempdir.path().join(".stoat").join("dump.ron"),
         )
-        .status()?;
+        .status()
+        .whatever_context("spawn nested stoat process")?;
 
     // TempDir drops here -> cleaned up.
     if !status.success() {
-        return Err(io::Error::other(format!("stoat exited with status {status}")).into());
+        whatever!("stoat exited with status {status}");
     }
     Ok(())
 }
 
-fn rm(query: &str) -> Result<(), Box<dyn std::error::Error>> {
-    let entry = dump::resolve(query, &LocalFs).map_err(describe)?;
-    dump::remove(&entry.id, &LocalFs).map_err(describe)?;
+fn rm(query: &str) -> Result<(), Whatever> {
+    let entry = dump::resolve(query, &LocalFs).whatever_context("resolve dump id")?;
+    dump::remove(&entry.id, &LocalFs).whatever_context("remove dump")?;
     println!("Removed {}", entry.id);
     Ok(())
 }
 
-fn clean(older_than_days: u64) -> Result<(), Box<dyn std::error::Error>> {
-    let removed = dump::clean_older_than(older_than_days, &LocalFs).map_err(describe)?;
+fn clean(older_than_days: u64) -> Result<(), Whatever> {
+    let removed =
+        dump::clean_older_than(older_than_days, &LocalFs).whatever_context("clean stale dumps")?;
     if removed.is_empty() {
         println!("No dumps older than {older_than_days} days.");
     } else {
@@ -133,11 +139,4 @@ fn clean(older_than_days: u64) -> Result<(), Box<dyn std::error::Error>> {
         println!("{} dumps removed.", removed.len());
     }
     Ok(())
-}
-
-/// Preserve the structured message of a [`DumpError`] across the
-/// `Box<dyn Error>` boundary. Without this the top-level formatter on
-/// [`DumpError`] is hidden behind `Debug`.
-fn describe(err: DumpError) -> io::Error {
-    io::Error::other(err.to_string())
 }

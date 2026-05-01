@@ -23,6 +23,7 @@ stoat = { path = "../stoat" }
 stoat_agent_claude_code = { path = "../agent/claude_code" }
 stoat_scheduler = { path = "../scheduler" }
 clap.workspace = true
+snafu.workspace = true
 tracing.workspace = true
 tokio.workspace = true
 tempfile.workspace = true

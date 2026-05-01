@@ -1,4 +1,5 @@
 use clap::{ArgAction, Parser, Subcommand};
+use snafu::{ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{host::LocalFs, Axis, Settings, Stoat};
 use stoat_agent_claude_code::ClaudeCodeLauncher;
@@ -65,7 +66,7 @@ enum Command {
     },
 }
 
-pub fn run() -> Result<(), Box<dyn std::error::Error>> {
+pub fn run() -> Result<(), Whatever> {
     let Args {
         command,
         files,
@@ -95,7 +96,7 @@ fn run_tui(
     continue_: bool,
     resume: bool,
     start: TuiStart,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> Result<(), Whatever> {
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
     // Capacity 1: natural backpressure -- main thread won't render ahead
     // if the UI thread hasn't flushed the previous frame yet
@@ -105,7 +106,8 @@ fn run_tui(
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
-        .build()?;
+        .build()
+        .whatever_context("build tokio runtime")?;
     // FIXME: Replace TestScheduler with a production scheduler
     let scheduler = Arc::new(TestScheduler::new());
     let executor = scheduler.executor();
@@ -162,9 +164,13 @@ fn run_tui(
         }
 
         stoat.run(event_rx, render_tx).await
-    })?;
+    })
+    .whatever_context("stoat event loop")?;
 
-    ui_handle.join().expect("ui thread panicked")?;
+    ui_handle
+        .join()
+        .expect("ui thread panicked")
+        .whatever_context("ui thread")?;
 
     Ok(())
 }
