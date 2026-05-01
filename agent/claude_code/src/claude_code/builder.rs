@@ -2,11 +2,11 @@ use crate::{
     claude_code::{
         ClaudeCode, SessionConfig,
         control::{DispatcherDeps, run_dispatcher},
-        process::ProcessBuilder as ProcessBuilderInner,
+        process::{ProcessBuilder as ProcessBuilderInner, SessionError, SessionIdMissingSnafu},
     },
     messages::{PermissionMode, SettingSource},
 };
-use anyhow::Result;
+use snafu::OptionExt;
 use std::{path::PathBuf, sync::Arc};
 use stoat::host::{HookCallback, PermissionCallback};
 use stoat_log::TextProtoLog;
@@ -314,7 +314,7 @@ impl ClaudeCodeBuilder {
     }
 
     /// Build with automatic logic - create new if no session_id, otherwise resume
-    pub async fn build(self) -> Result<ClaudeCode> {
+    pub async fn build(self) -> Result<ClaudeCode, SessionError> {
         let existing_session_id = self.managed_session_id.or(self.config.session_id);
         match existing_session_id {
             None => self.spawn(uuid::Uuid::new_v4(), SpawnMode::New).await,
@@ -323,7 +323,7 @@ impl ClaudeCodeBuilder {
     }
 
     /// Only create a new session (never resume)
-    pub async fn create_new(self) -> Result<ClaudeCode> {
+    pub async fn create_new(self) -> Result<ClaudeCode, SessionError> {
         let session_id = self
             .managed_session_id
             .or(self.config.session_id)
@@ -332,11 +332,11 @@ impl ClaudeCodeBuilder {
     }
 
     /// Only resume an existing session (never create)
-    pub async fn resume(self) -> Result<ClaudeCode> {
+    pub async fn resume(self) -> Result<ClaudeCode, SessionError> {
         let session_id = self
             .managed_session_id
             .or(self.config.session_id)
-            .ok_or_else(|| anyhow::anyhow!("Session ID required for resume"))?;
+            .context(SessionIdMissingSnafu)?;
         self.spawn(session_id, SpawnMode::Resume).await
     }
 
@@ -344,7 +344,10 @@ impl ClaudeCodeBuilder {
     /// the CLI invocation, reuses the parent's session id as the
     /// `--resume` target, and allocates a fresh UUID for the new
     /// session. Returns the newly spawned [`ClaudeCode`].
-    pub async fn fork_from(mut self, parent_session_id: uuid::Uuid) -> Result<ClaudeCode> {
+    pub async fn fork_from(
+        mut self,
+        parent_session_id: uuid::Uuid,
+    ) -> Result<ClaudeCode, SessionError> {
         self.config.fork_session = true;
         self.config.session_id = Some(parent_session_id);
         self.managed_session_id = Some(parent_session_id);
@@ -353,7 +356,11 @@ impl ClaudeCodeBuilder {
         self.spawn(parent_session_id, SpawnMode::Resume).await
     }
 
-    async fn spawn(self, session_id: uuid::Uuid, mode: SpawnMode) -> Result<ClaudeCode> {
+    async fn spawn(
+        self,
+        session_id: uuid::Uuid,
+        mode: SpawnMode,
+    ) -> Result<ClaudeCode, SessionError> {
         let (stdin_tx, stdin_rx) = mpsc::channel::<String>(32);
         // `inner_tx`/`inner_rx` is the direct pipe from the stdout
         // handler. When a permission callback is registered, we drain
@@ -367,14 +374,8 @@ impl ClaudeCodeBuilder {
         );
 
         let process = match mode {
-            SpawnMode::New => process_builder
-                .new_session()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to create new session: {:?}", e))?,
-            SpawnMode::Resume => process_builder
-                .resume_session()
-                .await
-                .map_err(|e| anyhow::anyhow!("Failed to resume session: {:?}", e))?,
+            SpawnMode::New => process_builder.new_session().await?,
+            SpawnMode::Resume => process_builder.resume_session().await?,
         };
 
         // Interpose the control dispatcher whenever control-protocol

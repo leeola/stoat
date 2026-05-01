@@ -3,9 +3,12 @@ mod control;
 pub mod process;
 
 pub use self::builder::ClaudeCodeBuilder;
-use self::{control::ControlWaiters, process::Process};
+use self::{
+    control::ControlWaiters,
+    process::{Process, SessionError},
+};
 use crate::messages::{PermissionMode, SdkMessage, SettingSource};
-use anyhow::{Context, Result};
+use snafu::{ResultExt, Snafu};
 use std::{
     collections::{HashMap, VecDeque},
     path::PathBuf,
@@ -15,6 +18,44 @@ use std::{
 use stoat::host::AgentMessage;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tracing::info;
+
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
+pub enum ControlError {
+    #[snafu(display("control_request rejected by CLI: {msg}"))]
+    RequestRejected {
+        msg: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("control_response channel closed before acknowledgement"))]
+    ResponseChannelClosed {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to serialize control frame as JSON"))]
+    JsonSerialize {
+        source: serde_json::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to send message to Claude Code"))]
+    RequestSendFailed {
+        source: mpsc::error::SendError<String>,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+
+    #[snafu(display("Failed to send control request to Claude Code"))]
+    ControlRequestSendFailed {
+        source: mpsc::error::SendError<String>,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+}
 
 /// Programmatic MCP server configuration, written to a temp file that
 /// the CLI reads via `--mcp-config`.
@@ -218,7 +259,7 @@ impl ClaudeCode {
     }
 
     /// Create a new ClaudeCode with the given configuration
-    pub async fn new(config: SessionConfig) -> Result<Self> {
+    pub async fn new(config: SessionConfig) -> Result<Self, SessionError> {
         ClaudeCodeBuilder::new().with_config(config).build().await
     }
 
@@ -258,7 +299,7 @@ impl ClaudeCode {
         }
     }
 
-    pub async fn send_message(&self, content: &str) -> Result<()> {
+    pub async fn send_message(&self, content: &str) -> Result<(), ControlError> {
         // Stamp a unique UUID on the outbound user frame so the
         // adapter can identify and drop the CLI's echo when
         // `replay-user-messages` is enabled.
@@ -286,18 +327,18 @@ impl ClaudeCode {
             "parent_tool_use_id": null,
         });
 
-        let message = serde_json::to_string(&user_msg)?;
+        let message = serde_json::to_string(&user_msg).context(JsonSerializeSnafu)?;
         self.process_stdin_tx
             .send(message)
             .await
-            .context("Failed to send message to Claude Code")?;
+            .context(RequestSendFailedSnafu)?;
         Ok(())
     }
 
     /// Shut the subprocess down. Inherent counterpart of
     /// [`ClaudeCodeSession::shutdown`] so the trait impl can delegate here
     /// without a name collision.
-    pub(crate) async fn shutdown_inner(&self) -> Result<()> {
+    pub(crate) async fn shutdown_inner(&self) {
         info!(
             "Shutting down ClaudeCode for session: {}",
             self.managed_session_id
@@ -310,7 +351,6 @@ impl ClaudeCode {
         if let Some(process) = maybe_process {
             let _ = process.close().await;
         }
-        Ok(())
     }
 
     /// Get the current session ID.
@@ -348,7 +388,7 @@ impl ClaudeCode {
 
     /// Request the CLI switch to a different model mid-session via the
     /// control protocol. Awaits the CLI's ack.
-    pub async fn set_model(&self, model_id: &str) -> Result<()> {
+    pub async fn set_model(&self, model_id: &str) -> Result<(), ControlError> {
         self.send_control_request_awaited(serde_json::json!({
             "subtype": "set_model",
             "model": model_id,
@@ -359,7 +399,7 @@ impl ClaudeCode {
 
     /// Request the CLI switch to a different permission mode
     /// mid-session via the control protocol. Awaits the CLI's ack.
-    pub async fn set_permission_mode(&self, mode: &str) -> Result<()> {
+    pub async fn set_permission_mode(&self, mode: &str) -> Result<(), ControlError> {
         self.send_control_request_awaited(serde_json::json!({
             "subtype": "set_permission_mode",
             "mode": mode,
@@ -371,7 +411,7 @@ impl ClaudeCode {
     /// Interrupt the current turn. Awaits the CLI's control_response
     /// ack; returns `Ok(())` on success and an error carrying the
     /// CLI's error message on failure.
-    pub async fn interrupt(&self) -> Result<()> {
+    pub async fn interrupt(&self) -> Result<(), ControlError> {
         self.send_control_request_awaited(serde_json::json!({ "subtype": "interrupt" }))
             .await
             .map(|_| ())
@@ -380,7 +420,10 @@ impl ClaudeCode {
     /// Fire-and-forget variant of [`send_control_request_awaited`] for
     /// callers that don't need the ack. The request is written to
     /// stdin but no correlator entry is registered.
-    pub async fn send_control_request(&self, request: serde_json::Value) -> Result<()> {
+    pub async fn send_control_request(
+        &self,
+        request: serde_json::Value,
+    ) -> Result<(), ControlError> {
         let request_id = format!("stoat_{}", uuid::Uuid::new_v4());
         self.write_control_request(request_id, request).await
     }
@@ -391,7 +434,7 @@ impl ClaudeCode {
     pub async fn send_control_request_awaited(
         &self,
         request: serde_json::Value,
-    ) -> Result<serde_json::Value> {
+    ) -> Result<serde_json::Value, ControlError> {
         let request_id = format!("stoat_{}", uuid::Uuid::new_v4());
         let (tx, rx) = tokio::sync::oneshot::channel();
         {
@@ -405,9 +448,7 @@ impl ClaudeCode {
             .await?;
         match rx.await {
             Ok(control::ControlAck::Success(body)) => Ok(body),
-            Ok(control::ControlAck::Error(msg)) => {
-                Err(anyhow::anyhow!("control_request failed: {msg}"))
-            },
+            Ok(control::ControlAck::Error(msg)) => RequestRejectedSnafu { msg }.fail(),
             Err(_) => {
                 // Waiter was dropped without a response; clean up and
                 // bail.
@@ -416,9 +457,7 @@ impl ClaudeCode {
                     .lock()
                     .expect("control_waiters mutex poisoned");
                 waiters.remove(&request_id);
-                Err(anyhow::anyhow!(
-                    "control_response channel closed before acknowledgement"
-                ))
+                ResponseChannelClosedSnafu.fail()
             },
         }
     }
@@ -427,17 +466,17 @@ impl ClaudeCode {
         &self,
         request_id: String,
         request: serde_json::Value,
-    ) -> Result<()> {
+    ) -> Result<(), ControlError> {
         let frame = serde_json::json!({
             "type": "control_request",
             "request_id": request_id,
             "request": request,
         });
-        let line = serde_json::to_string(&frame)?;
+        let line = serde_json::to_string(&frame).context(JsonSerializeSnafu)?;
         self.process_stdin_tx
             .send(line)
             .await
-            .context("Failed to send control request")?;
+            .context(ControlRequestSendFailedSnafu)?;
         Ok(())
     }
 

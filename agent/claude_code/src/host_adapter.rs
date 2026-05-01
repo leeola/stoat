@@ -647,7 +647,8 @@ impl ClaudeCodeSession for ClaudeCode {
     }
 
     async fn shutdown(&self) -> io::Result<()> {
-        self.shutdown_inner().await.map_err(io::Error::other)
+        self.shutdown_inner().await;
+        Ok(())
     }
 
     async fn interrupt(&self) -> io::Result<()> {

@@ -7,7 +7,6 @@ authors = ["Lee Olayvar <leegit@fastmail.com>"]
 license-file = "../LICENSE"
 
 [dependencies]
-anyhow = "1"
 async-trait.workspace = true
 futures = { workspace = true }
 serde = { version = "1", features = ["derive"] }
