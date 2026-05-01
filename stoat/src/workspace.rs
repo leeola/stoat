@@ -261,7 +261,7 @@ impl Workspace {
             let mut prior = self.buffers.take_syntax(buffer_id);
             let mut prior_map = self.buffers.take_syntax_map(buffer_id);
 
-            let deadline = std::time::Instant::now() + std::time::Duration::from_millis(1);
+            let deadline = executor.now() + std::time::Duration::from_millis(1);
             if let Some(out) = parse_buffer_step(
                 buffer_id,
                 snapshot.clone(),

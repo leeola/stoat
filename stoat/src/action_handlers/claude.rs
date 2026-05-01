@@ -241,6 +241,7 @@ pub(super) fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     }
 
+    let now = stoat.executor.now();
     {
         let ws = stoat.active_workspace_mut();
         let Some(chat) = ws.chats.get_mut(&session_id) else {
@@ -250,7 +251,7 @@ pub(super) fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
             role: ChatRole::User,
             content: ChatMessageContent::Text(text.clone()),
         });
-        chat.active_since = Some(std::time::Instant::now());
+        chat.active_since = Some(now);
 
         let Some(buffer) = ws.buffers.get(chat.input.buffer_id) else {
             return UpdateEffect::None;
