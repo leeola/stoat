@@ -5,10 +5,13 @@
 //! and flushing rendered buffers to the terminal. Physical thread isolation
 //! guarantees that terminal IO latency is independent of main-thread workload.
 
-use crossterm::event::{Event, EventStream};
+use crossterm::{
+    event::{DisableMouseCapture, EnableMouseCapture, Event, EventStream},
+    execute,
+};
 use futures::StreamExt;
 use ratatui::buffer::Buffer;
-use std::{io, thread};
+use std::{env, io, thread};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 pub fn spawn(
@@ -23,7 +26,21 @@ pub fn spawn(
 
         rt.block_on(async move {
             let mut terminal = ratatui::init();
+            // FIXME: route through EnvHost once it exists. Parent multiplexers
+            // (tmux, zellij) own the mouse drag-select gesture; capturing
+            // here would steal their events, breaking the user's expected
+            // workflow.
+            let inside_mux = env::var_os("TMUX").is_some() || env::var_os("ZELLIJ").is_some();
+            let mouse_captured = if inside_mux {
+                false
+            } else {
+                execute!(io::stdout(), EnableMouseCapture)?;
+                true
+            };
             let result = run(&event_tx, &mut render_rx, &mut terminal).await;
+            if mouse_captured {
+                let _ = execute!(io::stdout(), DisableMouseCapture);
+            }
             ratatui::restore();
             result
         })
