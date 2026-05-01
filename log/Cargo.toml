@@ -9,6 +9,7 @@ workspace = true
 
 [dependencies]
 etcetera.workspace = true
+snafu.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
