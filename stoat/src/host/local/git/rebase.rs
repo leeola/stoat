@@ -4,7 +4,8 @@
 
 use crate::host::{
     git::{
-        CherryPickOutcome, ConflictedFile, GitApplyError, RebaseError, RebaseTodo, RebaseTodoOp,
+        CherryPickOutcome, ConflictSnafu, ConflictedFile, GitApplyError, RebaseBackendSnafu,
+        RebaseError, RebaseTodo, RebaseTodoOp,
     },
     local::git::tree::read_blob,
 };
@@ -20,8 +21,7 @@ pub(super) fn run_rebase(
     onto: &str,
     todo: &[RebaseTodo],
 ) -> Result<String, RebaseError> {
-    let onto_oid =
-        git2::Oid::from_str(onto).map_err(|e| RebaseError::Backend(e.message().to_string()))?;
+    let onto_oid = git2::Oid::from_str(onto).map_err(rebase_backend)?;
     let mut current_id = onto_oid;
 
     let mut last_commit: Option<git2::Oid> = None;
@@ -40,7 +40,10 @@ pub(super) fn run_rebase(
             },
             RebaseTodoOp::Squash | RebaseTodoOp::Fixup => {
                 let prev = last_commit.ok_or_else(|| {
-                    RebaseError::Backend("squash/fixup without a preceding pick".into())
+                    RebaseBackendSnafu {
+                        reason: "squash/fixup without a preceding pick",
+                    }
+                    .build()
                 })?;
                 let prev_commit = repo.find_commit(prev).map_err(rebase_backend)?;
                 let entry_oid = git2::Oid::from_str(&entry.sha).map_err(rebase_backend)?;
@@ -50,9 +53,10 @@ pub(super) fn run_rebase(
                     .cherrypick_commit(&entry_commit, &prev_commit, 0, None)
                     .map_err(rebase_backend)?;
                 if index.has_conflicts() {
-                    return Err(RebaseError::Conflict {
+                    return ConflictSnafu {
                         at_sha: entry.sha.clone(),
-                    });
+                    }
+                    .fail();
                 }
                 let merged_tree_id = index.write_tree_to(repo).map_err(rebase_backend)?;
                 let merged_tree = repo.find_tree(merged_tree_id).map_err(rebase_backend)?;
@@ -183,9 +187,10 @@ fn pick_onto(repo: &Repository, sha: &str, onto: git2::Oid) -> Result<git2::Oid,
         .cherrypick_commit(&entry_commit, &onto_commit, 0, None)
         .map_err(rebase_backend)?;
     if index.has_conflicts() {
-        return Err(RebaseError::Conflict {
+        return ConflictSnafu {
             at_sha: sha.to_string(),
-        });
+        }
+        .fail();
     }
     let tree_id = index.write_tree_to(repo).map_err(rebase_backend)?;
     let tree = repo.find_tree(tree_id).map_err(rebase_backend)?;
@@ -197,5 +202,8 @@ fn pick_onto(repo: &Repository, sha: &str, onto: git2::Oid) -> Result<git2::Oid,
 }
 
 fn rebase_backend(e: git2::Error) -> RebaseError {
-    RebaseError::Backend(e.message().to_string())
+    RebaseBackendSnafu {
+        reason: e.message().to_string(),
+    }
+    .build()
 }

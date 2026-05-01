@@ -104,8 +104,8 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
             active.pause = None;
             drive_rebase(stoat)
         },
-        Err(GitApplyError::Backend(msg)) => {
-            emit_rebase_error(stoat, "reword failed", Some(msg));
+        Err(GitApplyError::Backend { reason, .. }) => {
+            emit_rebase_error(stoat, "reword failed", Some(reason));
             UpdateEffect::Redraw
         },
     }

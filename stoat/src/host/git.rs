@@ -1,4 +1,5 @@
 use serde::{Deserialize, Serialize};
+use snafu::Snafu;
 use std::{
     collections::BTreeMap,
     path::{Path, PathBuf},
@@ -33,11 +34,17 @@ pub struct ChangedFile {
     pub staged: bool,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Snafu)]
+#[snafu(visibility(pub))]
 pub enum GitApplyError {
     /// Backend (libgit2, ssh, fake) surfaced a failure. Message is
     /// human-readable and free of secrets.
-    Backend(String),
+    #[snafu(display("git backend failure: {reason}"))]
+    Backend {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 /// Metadata for a single commit, populated by [`GitRepo::log_commits`].
@@ -270,9 +277,25 @@ pub struct ConflictedFile {
     pub theirs: Option<String>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Snafu)]
+#[snafu(visibility(pub))]
 pub enum RebaseError {
-    Backend(String),
-    Conflict { at_sha: String },
-    DirtyWorktree,
+    #[snafu(display("rebase backend failure: {reason}"))]
+    #[snafu(context(name(RebaseBackendSnafu)))]
+    Backend {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("rebase conflict at {at_sha}"))]
+    Conflict {
+        at_sha: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("rebase requires a clean worktree"))]
+    DirtyWorktree {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }

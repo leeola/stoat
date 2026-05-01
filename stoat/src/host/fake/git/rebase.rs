@@ -5,8 +5,8 @@
 
 use super::{FakeCommit, FakeRepoState, RecordedRebase};
 use crate::host::git::{
-    CherryPickOutcome, ConflictedFile, GitApplyError, RebaseError, RebaseTodo, RebaseTodoOp,
-    RewriteResult,
+    BackendSnafu, CherryPickOutcome, ConflictSnafu, ConflictedFile, GitApplyError,
+    RebaseBackendSnafu, RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult,
 };
 use std::{
     collections::{BTreeMap, BTreeSet, HashMap},
@@ -22,13 +22,17 @@ pub(super) fn rewrite_commit(
 ) -> Result<RewriteResult, GitApplyError> {
     if let Some(c) = &state.conflict_at {
         if c == sha || descendants.iter().any(|d| d == c) {
-            return Err(GitApplyError::Backend(format!(
-                "simulated cherry-pick conflict at {c}"
-            )));
+            return BackendSnafu {
+                reason: format!("simulated cherry-pick conflict at {c}"),
+            }
+            .fail();
         }
     }
     let Some(target) = state.commits.get(sha).cloned() else {
-        return Err(GitApplyError::Backend(format!("unknown sha: {sha}")));
+        return BackendSnafu {
+            reason: format!("unknown sha: {sha}"),
+        }
+        .fail();
     };
 
     state.synth_counter += 1;
@@ -55,9 +59,10 @@ pub(super) fn rewrite_commit(
 
     for desc_sha in descendants {
         let Some(desc) = state.commits.get(desc_sha).cloned() else {
-            return Err(GitApplyError::Backend(format!(
-                "unknown descendant sha: {desc_sha}"
-            )));
+            return BackendSnafu {
+                reason: format!("unknown descendant sha: {desc_sha}"),
+            }
+            .fail();
         };
         state.synth_counter += 1;
         let new_sha = format!(
@@ -92,11 +97,14 @@ pub(super) fn run_rebase(
 ) -> Result<String, RebaseError> {
     if let Some(c) = &state.conflict_at {
         if todo.iter().any(|t| &t.sha == c) {
-            return Err(RebaseError::Conflict { at_sha: c.clone() });
+            return ConflictSnafu { at_sha: c.clone() }.fail();
         }
     }
     if !state.commits.contains_key(onto) && !onto.is_empty() {
-        return Err(RebaseError::Backend(format!("unknown onto sha: {onto}")));
+        return RebaseBackendSnafu {
+            reason: format!("unknown onto sha: {onto}"),
+        }
+        .fail();
     }
 
     let mut current = onto.to_string();
@@ -108,10 +116,10 @@ pub(super) fn run_rebase(
             RebaseTodoOp::Drop => continue,
             RebaseTodoOp::Pick | RebaseTodoOp::Reword | RebaseTodoOp::Edit => {
                 let Some(src) = state.commits.get(&entry.sha).cloned() else {
-                    return Err(RebaseError::Backend(format!(
-                        "unknown sha in rebase: {}",
-                        entry.sha
-                    )));
+                    return RebaseBackendSnafu {
+                        reason: format!("unknown sha in rebase: {}", entry.sha),
+                    }
+                    .fail();
                 };
                 state.synth_counter += 1;
                 let new_sha = format!(
@@ -134,18 +142,22 @@ pub(super) fn run_rebase(
             },
             RebaseTodoOp::Squash | RebaseTodoOp::Fixup => {
                 let Some(prev_sha) = last_commit.clone() else {
-                    return Err(RebaseError::Backend(
-                        "squash/fixup without preceding pick".into(),
-                    ));
+                    return RebaseBackendSnafu {
+                        reason: "squash/fixup without preceding pick",
+                    }
+                    .fail();
                 };
                 let Some(prev) = state.commits.get(&prev_sha).cloned() else {
-                    return Err(RebaseError::Backend("previous commit missing".into()));
+                    return RebaseBackendSnafu {
+                        reason: "previous commit missing",
+                    }
+                    .fail();
                 };
                 let Some(src) = state.commits.get(&entry.sha).cloned() else {
-                    return Err(RebaseError::Backend(format!(
-                        "unknown sha in rebase: {}",
-                        entry.sha
-                    )));
+                    return RebaseBackendSnafu {
+                        reason: format!("unknown sha in rebase: {}", entry.sha),
+                    }
+                    .fail();
                 };
                 let mut merged_tree = prev.tree.clone();
                 for (path, content) in &src.tree {
@@ -230,14 +242,16 @@ pub(super) fn cherry_pick_tree(
         }
     }
     let Some(source) = state.commits.get(source_sha).cloned() else {
-        return Err(GitApplyError::Backend(format!(
-            "unknown source sha: {source_sha}"
-        )));
+        return BackendSnafu {
+            reason: format!("unknown source sha: {source_sha}"),
+        }
+        .fail();
     };
     let Some(onto) = state.commits.get(onto_sha).cloned() else {
-        return Err(GitApplyError::Backend(format!(
-            "unknown onto sha: {onto_sha}"
-        )));
+        return BackendSnafu {
+            reason: format!("unknown onto sha: {onto_sha}"),
+        }
+        .fail();
     };
     // Deterministic merge: start from onto's tree, then overlay the
     // diff introduced by source against its parent. Sufficient for

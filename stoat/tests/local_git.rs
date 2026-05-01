@@ -252,8 +252,8 @@ fn apply_to_index_rejects_malformed_patch() {
     let err = repo
         .apply_to_index("not a patch")
         .expect_err("garbage must fail");
-    let GitApplyError::Backend(msg) = err;
-    assert!(!msg.is_empty(), "error message must be non-empty");
+    let GitApplyError::Backend { reason, .. } = err;
+    assert!(!reason.is_empty(), "error message must be non-empty");
 }
 
 #[test]
@@ -270,8 +270,8 @@ fn apply_to_index_rejects_conflicting_patch() {
     let err = repo
         .apply_to_index(patch)
         .expect_err("conflicting context must fail");
-    let GitApplyError::Backend(msg) = err;
-    assert!(!msg.is_empty(), "error must have message");
+    let GitApplyError::Backend { reason, .. } = err;
+    assert!(!reason.is_empty(), "error must have message");
 }
 
 #[test]
@@ -520,6 +520,6 @@ fn apply_to_index_rejects_double_apply() {
     let err = repo
         .apply_to_index(patch)
         .expect_err("context no longer matches on second apply");
-    let GitApplyError::Backend(msg) = err;
-    assert!(!msg.is_empty());
+    let GitApplyError::Backend { reason, .. } = err;
+    assert!(!reason.is_empty());
 }

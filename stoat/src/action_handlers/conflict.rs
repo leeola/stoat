@@ -167,8 +167,8 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
             active.pause = None;
             drive_rebase(stoat)
         },
-        Err(GitApplyError::Backend(msg)) => {
-            emit_rebase_error(stoat, "conflict commit failed", Some(msg));
+        Err(GitApplyError::Backend { reason, .. }) => {
+            emit_rebase_error(stoat, "conflict commit failed", Some(reason));
             UpdateEffect::Redraw
         },
     }

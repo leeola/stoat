@@ -3,8 +3,8 @@ mod rebase;
 use crate::host::{
     fake::FakeFs,
     git::{
-        ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
-        GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
+        BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
+        CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
     },
 };
 use std::{
@@ -501,7 +501,10 @@ impl GitRepo for FakeGitRepo {
         let mut state = self.state.lock().unwrap();
         state.applied_patches.push(patch.to_string());
         match &state.apply_error {
-            Some(msg) => Err(GitApplyError::Backend(msg.clone())),
+            Some(msg) => BackendSnafu {
+                reason: msg.clone(),
+            }
+            .fail(),
             None => Ok(()),
         }
     }
@@ -560,10 +563,16 @@ impl GitRepo for FakeGitRepo {
     ) -> Result<String, GitApplyError> {
         let mut state = self.state.lock().unwrap();
         let Some(head_sha) = state.head.clone() else {
-            return Err(GitApplyError::Backend("HEAD has no commit".into()));
+            return BackendSnafu {
+                reason: "HEAD has no commit",
+            }
+            .fail();
         };
         let Some(head_commit) = state.commits.get(&head_sha).cloned() else {
-            return Err(GitApplyError::Backend("HEAD commit missing".into()));
+            return BackendSnafu {
+                reason: "HEAD commit missing",
+            }
+            .fail();
         };
         state.synth_counter += 1;
         let new_sha = format!(
@@ -627,7 +636,10 @@ impl GitRepo for FakeGitRepo {
         let mut state = self.state.lock().unwrap();
         if let Some(p) = parent_sha {
             if !state.commits.contains_key(p) {
-                return Err(GitApplyError::Backend(format!("unknown parent sha: {p}")));
+                return BackendSnafu {
+                    reason: format!("unknown parent sha: {p}"),
+                }
+                .fail();
             }
         }
         state.synth_counter += 1;
@@ -652,7 +664,10 @@ impl GitRepo for FakeGitRepo {
     fn update_head(&self, sha: &str) -> Result<(), GitApplyError> {
         let mut state = self.state.lock().unwrap();
         if !state.commits.contains_key(sha) {
-            return Err(GitApplyError::Backend(format!("unknown sha: {sha}")));
+            return BackendSnafu {
+                reason: format!("unknown sha: {sha}"),
+            }
+            .fail();
         }
         state.head = Some(sha.to_string());
         Ok(())
@@ -884,7 +899,10 @@ mod tests {
         let err = repo
             .apply_to_index("--- a/x\n+++ b/x\n")
             .expect_err("must error");
-        assert_eq!(err, GitApplyError::Backend("disk full".into()));
+        assert!(matches!(
+            err,
+            GitApplyError::Backend { reason, .. } if reason == "disk full"
+        ));
         assert_eq!(
             host.applied_patches(&workdir()),
             vec!["--- a/x\n+++ b/x\n".to_string()],

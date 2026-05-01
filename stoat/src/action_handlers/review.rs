@@ -117,8 +117,8 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
                 );
                 reopen_review_on_commit(stoat, &workdir, &new_sha);
             },
-            Err(GitApplyError::Backend(msg)) => {
-                emit_review_error_badge(stoat, "amend failed", Some(msg));
+            Err(GitApplyError::Backend { reason, .. }) => {
+                emit_review_error_badge(stoat, "amend failed", Some(reason));
             },
         }
     } else {
@@ -144,8 +144,8 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
                 );
                 reopen_review_on_commit(stoat, &workdir, &new_sha);
             },
-            Err(GitApplyError::Backend(msg)) => {
-                emit_review_error_badge(stoat, "rewrite failed", Some(msg));
+            Err(GitApplyError::Backend { reason, .. }) => {
+                emit_review_error_badge(stoat, "rewrite failed", Some(reason));
             },
         }
     }
@@ -417,7 +417,7 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
     for (_, patch) in &staged {
         match repo.apply_to_index(patch) {
             Ok(()) => applied += 1,
-            Err(GitApplyError::Backend(msg)) => failures.push(msg),
+            Err(GitApplyError::Backend { reason, .. }) => failures.push(reason),
         }
     }
 

@@ -2,8 +2,8 @@ mod rebase;
 mod tree;
 
 use crate::host::git::{
-    ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
-    GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
+    BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
+    CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
 };
 use git2::{ApplyLocation, Diff, DiffOptions, Repository, Sort, Status, StatusOptions};
 use std::{
@@ -117,10 +117,9 @@ impl GitRepo for LocalGitRepo {
 
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let repo = self.repo.lock().expect("git repo lock");
-        let diff = Diff::from_buffer(patch.as_bytes())
-            .map_err(|e| GitApplyError::Backend(e.message().to_string()))?;
+        let diff = Diff::from_buffer(patch.as_bytes()).map_err(err_msg)?;
         repo.apply(&diff, ApplyLocation::Index, None)
-            .map_err(|e| GitApplyError::Backend(e.message().to_string()))
+            .map_err(err_msg)
     }
 
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
@@ -297,9 +296,10 @@ impl GitRepo for LocalGitRepo {
                 .cherrypick_commit(&desc_commit, &onto_commit, 0, None)
                 .map_err(err_msg)?;
             if index.has_conflicts() {
-                return Err(GitApplyError::Backend(format!(
-                    "cherry-pick conflict at {desc_sha}"
-                )));
+                return BackendSnafu {
+                    reason: format!("cherry-pick conflict at {desc_sha}"),
+                }
+                .fail();
             }
             let picked_tree_oid = index.write_tree_to(&repo).map_err(err_msg)?;
             let picked_tree = repo.find_tree(picked_tree_oid).map_err(err_msg)?;
@@ -435,5 +435,8 @@ impl GitRepo for LocalGitRepo {
 }
 
 fn err_msg(e: git2::Error) -> GitApplyError {
-    GitApplyError::Backend(e.message().to_string())
+    BackendSnafu {
+        reason: e.message().to_string(),
+    }
+    .build()
 }

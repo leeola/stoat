@@ -245,8 +245,8 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                                 _ => unreachable!(),
                             }
                         },
-                        Err(GitApplyError::Backend(msg)) => {
-                            emit_rebase_error(stoat, "create_commit failed", Some(msg));
+                        Err(GitApplyError::Backend { reason, .. }) => {
+                            emit_rebase_error(stoat, "create_commit failed", Some(reason));
                             return UpdateEffect::Redraw;
                         },
                     },
@@ -265,8 +265,8 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                         stoat.mode = "conflict".into();
                         return UpdateEffect::Redraw;
                     },
-                    Err(GitApplyError::Backend(msg)) => {
-                        emit_rebase_error(stoat, "cherry-pick failed", Some(msg));
+                    Err(GitApplyError::Backend { reason, .. }) => {
+                        emit_rebase_error(stoat, "cherry-pick failed", Some(reason));
                         return UpdateEffect::Redraw;
                     },
                 }
@@ -330,8 +330,8 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                                 active.last_pick_sha = Some(new_sha);
                                 active.last_message = Some(combined);
                             },
-                            Err(GitApplyError::Backend(msg)) => {
-                                emit_rebase_error(stoat, "squash commit failed", Some(msg));
+                            Err(GitApplyError::Backend { reason, .. }) => {
+                                emit_rebase_error(stoat, "squash commit failed", Some(reason));
                                 return UpdateEffect::Redraw;
                             },
                         }
@@ -351,8 +351,8 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                         stoat.mode = "conflict".into();
                         return UpdateEffect::Redraw;
                     },
-                    Err(GitApplyError::Backend(msg)) => {
-                        emit_rebase_error(stoat, "squash cherry-pick failed", Some(msg));
+                    Err(GitApplyError::Backend { reason, .. }) => {
+                        emit_rebase_error(stoat, "squash cherry-pick failed", Some(reason));
                         return UpdateEffect::Redraw;
                     },
                 }
