@@ -2010,12 +2010,10 @@ impl LspHost for FakeLsp {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stoat_scheduler::TestScheduler;
 
-    fn rt() -> tokio::runtime::Runtime {
-        tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap()
+    fn rt() -> TestScheduler {
+        TestScheduler::new()
     }
 
     #[test]
@@ -3455,12 +3453,12 @@ mod tests {
 
     #[test]
     fn recv_notification_wakes_on_push() {
-        rt().block_on(async {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        scheduler.block_on(async {
             let lsp = Arc::new(FakeLsp::new());
             let recv_lsp = lsp.clone();
-            let handle = tokio::spawn(async move { recv_lsp.recv_notification().await });
-
-            tokio::task::yield_now().await;
+            let task = executor.spawn(async move { recv_lsp.recv_notification().await });
 
             lsp.push_notification(LspNotification::Diagnostics {
                 uri: file_uri("/late.rs"),
@@ -3468,10 +3466,7 @@ mod tests {
                 version: None,
             });
 
-            let notif = handle
-                .await
-                .expect("recv task panicked")
-                .expect("recv returned None");
+            let notif = task.await.expect("recv returned None");
             let LspNotification::Diagnostics { uri, .. } = notif else {
                 panic!("expected diagnostics notification")
             };
