@@ -18,6 +18,7 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
 
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     let pty_tx = stoat.pty_tx.clone();
+    let executor = stoat.executor.clone();
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];
     let focused = ws.panes.focus();
@@ -62,7 +63,8 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(handle) = &mut run_state.shell_handle {
         let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
         handle.send_command(&text, &sentinel);
-    } else if let Ok(handle) = crate::run::spawn_shell(&run_state.cwd, width, pty_tx, id) {
+    } else if let Ok(handle) = crate::run::spawn_shell(&executor, &run_state.cwd, width, pty_tx, id)
+    {
         let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
         run_state.shell_handle = Some(handle);
         if let Some(h) = &mut run_state.shell_handle {
@@ -173,7 +175,7 @@ pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
         .push(OutputBlock::new(command.to_owned(), width));
     let id = ws.runs.insert(state);
 
-    match crate::run::spawn_oneshot(command, &cwd, width, pty_tx, id) {
+    match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, pty_tx, id) {
         Ok(handle) => {
             let ws = stoat.active_workspace_mut();
             if let Some(run_state) = ws.runs.get_mut(id) {

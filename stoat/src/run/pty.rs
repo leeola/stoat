@@ -2,6 +2,7 @@ use super::RunId;
 use crate::host::terminal::{PtyTerminal, TerminalHost};
 use portable_pty::CommandBuilder;
 use std::{path::PathBuf, sync::Arc};
+use stoat_scheduler::Executor;
 use tokio::sync::mpsc;
 
 pub enum PtyNotification {
@@ -46,6 +47,7 @@ impl ShellHandle {
 }
 
 pub fn spawn_shell(
+    executor: &Executor,
     cwd: &PathBuf,
     width: u16,
     pty_tx: mpsc::Sender<PtyNotification>,
@@ -81,12 +83,15 @@ pub fn spawn_shell(
         .map_err(std::io::Error::other)?;
 
     let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
-    tokio::spawn(reader_task(host.clone(), run_id, pty_tx));
+    executor
+        .spawn(reader_task(host.clone(), run_id, pty_tx))
+        .detach();
 
     Ok(ShellHandle::new(host))
 }
 
 pub fn spawn_oneshot(
+    executor: &Executor,
     command: &str,
     cwd: &PathBuf,
     width: u16,
@@ -121,7 +126,9 @@ pub fn spawn_oneshot(
         .map_err(std::io::Error::other)?;
 
     let host: Arc<dyn TerminalHost> = Arc::new(PtyTerminal::new(writer, child, reader));
-    tokio::spawn(reader_task(host.clone(), run_id, pty_tx));
+    executor
+        .spawn(reader_task(host.clone(), run_id, pty_tx))
+        .detach();
 
     Ok(ShellHandle::new(host))
 }
