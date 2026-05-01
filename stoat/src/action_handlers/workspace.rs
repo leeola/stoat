@@ -24,7 +24,7 @@ pub(super) fn copy_workspace(stoat: &mut Stoat) -> UpdateEffect {
     state.claude_session_id = None;
     state.rebase = None;
     state.rebase_active = None;
-    state.uid = WorkspaceUid::now();
+    state.uid = WorkspaceUid::now(&stoat.executor);
 
     stoat.save_workspace(stoat.active_workspace());
 

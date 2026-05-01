@@ -27,7 +27,7 @@ use std::{
     path::PathBuf,
     pin::Pin,
     task::{Context, Poll},
-    time::{SystemTime, UNIX_EPOCH},
+    time::UNIX_EPOCH,
 };
 use stoat_scheduler::{Executor, Task};
 
@@ -46,8 +46,9 @@ new_key_type! {
 pub struct WorkspaceUid(pub u64);
 
 impl WorkspaceUid {
-    pub(crate) fn now() -> Self {
-        let nanos = SystemTime::now()
+    pub(crate) fn now(executor: &Executor) -> Self {
+        let nanos = executor
+            .system_now()
             .duration_since(UNIX_EPOCH)
             .map(|d| d.as_nanos() as u64)
             .unwrap_or(0);
@@ -137,7 +138,7 @@ impl Workspace {
         let initial_focus = panes.focus();
         panes.pane_mut(initial_focus).view = View::Editor(editor_id);
 
-        let uid = WorkspaceUid::now();
+        let uid = WorkspaceUid::now(executor);
         let name = name::default_workspace_name(uid);
 
         Self {

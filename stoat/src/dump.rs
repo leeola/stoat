@@ -31,6 +31,7 @@ use std::{
     time::SystemTime,
 };
 use stoat_log::data_dir;
+use stoat_scheduler::Executor;
 use time::{format_description::FormatItem, macros::format_description, OffsetDateTime, UtcOffset};
 
 const TIMESTAMP_FORMAT: &[FormatItem<'_>] =
@@ -356,8 +357,12 @@ pub fn remove(id: &DumpId, fs: &dyn FsHost) -> Result<(), DumpError> {
 
 /// Delete every dump older than `days` whole days. Returns the ids of
 /// the archives that were removed.
-pub fn clean_older_than(days: u64, fs: &dyn FsHost) -> Result<Vec<DumpId>, DumpError> {
-    let now = SystemTime::now();
+pub fn clean_older_than(
+    days: u64,
+    fs: &dyn FsHost,
+    executor: &Executor,
+) -> Result<Vec<DumpId>, DumpError> {
+    let now = executor.system_now();
     let cutoff = now
         .checked_sub(std::time::Duration::from_secs(days * 86_400))
         .ok_or_else(|| {

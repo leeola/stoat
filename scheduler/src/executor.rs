@@ -4,7 +4,7 @@ use std::{
     pin::Pin,
     sync::Arc,
     task::{Context, Poll},
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime},
 };
 
 #[derive(Clone)]
@@ -39,6 +39,13 @@ impl Executor {
     /// clock through `advance_clock`; production code reads real wall time.
     pub fn now(&self) -> Instant {
         self.scheduler.clock().now()
+    }
+
+    /// Wall-clock time according to the scheduler's [`Clock`](crate::Clock).
+    /// Tests driven by [`TestScheduler`](crate::TestScheduler) advance this
+    /// in lock-step with [`Executor::now`] through `advance_clock`.
+    pub fn system_now(&self) -> SystemTime {
+        self.scheduler.clock().system_now()
     }
 }
 

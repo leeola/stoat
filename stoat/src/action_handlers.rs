@@ -544,7 +544,7 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use stoat_action::{
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
         ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
@@ -1334,6 +1334,7 @@ mod tests {
         let mut h = Stoat::test();
         let source_uid = h.stoat.active_workspace().uid;
 
+        h.advance_clock(Duration::from_nanos(1));
         h.type_action("CopyWorkspace()");
 
         let copy_uid = h.stoat.active_workspace().uid;

@@ -377,7 +377,7 @@ mod tests {
         host::FakeFs,
         pane::{Axis, DockSide, DockVisibility, Placement},
     };
-    use std::sync::Arc;
+    use std::{sync::Arc, time::Duration};
     use stoat_scheduler::TestScheduler;
 
     fn executor() -> Executor {
@@ -823,7 +823,8 @@ mod tests {
     fn uid_round_trips_through_save_and_restore() {
         let fake = FakeFs::new();
         let ws_dir = PathBuf::from("/test");
-        let exec = executor();
+        let scheduler = Arc::new(TestScheduler::new());
+        let exec = scheduler.executor();
 
         let ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let original_uid = ws.uid;
@@ -831,6 +832,7 @@ mod tests {
         let state_path = ws_dir.join("state.ron");
         ws.save_state(&state_path, &fake).unwrap();
 
+        scheduler.advance_clock(Duration::from_nanos(1));
         let mut fresh = Workspace::new(ws_dir.clone(), &exec);
         assert_ne!(fresh.uid, original_uid, "new workspaces get distinct uids");
         fresh.restore_state(&state_path, &fake, &exec).unwrap();
@@ -891,9 +893,11 @@ mod tests {
     fn different_uids_sit_side_by_side() {
         let fake = FakeFs::new();
         let ws_dir = PathBuf::from("/test");
-        let exec = executor();
+        let scheduler = Arc::new(TestScheduler::new());
+        let exec = scheduler.executor();
 
         let ws_a = new_laid_out_workspace(ws_dir.clone(), &exec);
+        scheduler.advance_clock(Duration::from_nanos(1));
         let ws_b = new_laid_out_workspace(ws_dir.clone(), &exec);
         assert_ne!(ws_a.uid, ws_b.uid);
 

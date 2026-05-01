@@ -1,10 +1,11 @@
 use clap::Subcommand;
 use snafu::{whatever, ResultExt, Whatever};
-use std::{env, process::Command};
+use std::{env, process::Command, sync::Arc};
 use stoat::{
     dump::{self, DumpEntry},
     host::LocalFs,
 };
+use stoat_scheduler::TestScheduler;
 use tempfile::Builder as TempBuilder;
 
 #[derive(Subcommand, Debug)]
@@ -128,8 +129,11 @@ fn rm(query: &str) -> Result<(), Whatever> {
 }
 
 fn clean(older_than_days: u64) -> Result<(), Whatever> {
-    let removed =
-        dump::clean_older_than(older_than_days, &LocalFs).whatever_context("clean stale dumps")?;
+    // FIXME: Replace TestScheduler with a production scheduler
+    let scheduler = Arc::new(TestScheduler::new());
+    let executor = scheduler.executor();
+    let removed = dump::clean_older_than(older_than_days, &LocalFs, &executor)
+        .whatever_context("clean stale dumps")?;
     if removed.is_empty() {
         println!("No dumps older than {older_than_days} days.");
     } else {
