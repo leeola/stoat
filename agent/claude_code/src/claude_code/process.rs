@@ -1,5 +1,5 @@
 use crate::messages::{PermissionMode, SdkMessage, SettingSource, SystemSubtype};
-use snafu::{ResultExt, Snafu};
+use snafu::{OptionExt, ResultExt, Snafu};
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use stoat_log::TextProtoLog;
 use tokio::{
@@ -33,33 +33,65 @@ struct HandlerDeps {
 /// symmetric; only [`SessionAlreadyExists`] and [`SessionNotFound`] are
 /// specific to one direction.
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum SessionError {
     #[snafu(display("Session ID {session_id} is already in use"))]
-    SessionAlreadyExists { session_id: String },
+    SessionAlreadyExists {
+        session_id: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("No conversation found with session ID: {session_id}"))]
-    SessionNotFound { session_id: String },
+    SessionNotFound {
+        session_id: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("Failed to recover channels from failed process"))]
-    ChannelRecoveryFailed { source: CloseError },
+    ChannelRecoveryFailed {
+        source: CloseError,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("Failed to spawn Claude process"))]
-    SpawnFailed { source: std::io::Error },
+    SpawnFailed {
+        source: std::io::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("Failed to get process stdio"))]
-    StdioFailed,
+    StdioFailed {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("session_id is required but not provided"))]
-    SessionIdMissing,
+    SessionIdMissing {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 #[derive(Debug, Snafu)]
+#[snafu(visibility(pub))]
 pub enum CloseError {
     #[snafu(display("Failed to kill process"))]
-    KillFailed { source: std::io::Error },
+    KillFailed {
+        source: std::io::Error,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 
     #[snafu(display("Handler task panicked: {}", task))]
-    HandlerPanicked { task: String },
+    HandlerPanicked {
+        task: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
 }
 
 pub struct Process {
@@ -408,14 +440,11 @@ impl ProcessBuilder {
         let _session_id = self
             .session_id
             .as_ref()
-            .ok_or(SessionError::SessionIdMissing)?
+            .context(SessionIdMissingSnafu)?
             .clone();
 
         let args = self.build_args(use_resume);
-        let mut child = self
-            .spawn_child(args)
-            .await
-            .map_err(|e| SessionError::SpawnFailed { source: e })?;
+        let mut child = self.spawn_child(args).await.context(SpawnFailedSnafu)?;
 
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
@@ -658,9 +687,9 @@ impl ProcessBuilder {
     fn extract_stdio(
         child: &mut Child,
     ) -> Result<(ChildStdin, ChildStdout, ChildStderr), SessionError> {
-        let stdin = child.stdin.take().ok_or(SessionError::StdioFailed)?;
-        let stdout = child.stdout.take().ok_or(SessionError::StdioFailed)?;
-        let stderr = child.stderr.take().ok_or(SessionError::StdioFailed)?;
+        let stdin = child.stdin.take().context(StdioFailedSnafu)?;
+        let stdout = child.stdout.take().context(StdioFailedSnafu)?;
+        let stderr = child.stderr.take().context(StdioFailedSnafu)?;
         Ok((stdin, stdout, stderr))
     }
 
@@ -837,16 +866,14 @@ impl Process {
             let _ = tx.send(());
         }
 
-        let stdin_rx = self
-            .stdin_handle
-            .await
-            .map_err(|_| CloseError::HandlerPanicked {
-                task: "stdin".to_string(),
-            })?;
+        let stdin_rx = self.stdin_handle.await.ok().context(HandlerPanickedSnafu {
+            task: "stdin".to_string(),
+        })?;
         let stdout_tx = self
             .stdout_handle
             .await
-            .map_err(|_| CloseError::HandlerPanicked {
+            .ok()
+            .context(HandlerPanickedSnafu {
                 task: "stdout".to_string(),
             })?;
         let last_stderr = self.stderr_handle.await.unwrap_or_default();
