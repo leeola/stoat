@@ -109,7 +109,15 @@ fn render_palette_filter(
     write_str(buf, inner.x, input_row, ":", prompt_style);
 
     let input_area = Rect::new(inner.x + 2, input_row, inner.width.saturating_sub(2), 1);
-    input.render(&mut ws.editors, input_area, true, "prompt", theme, buf);
+    input.render(
+        &mut ws.editors,
+        input_area,
+        true,
+        "prompt",
+        theme,
+        &std::collections::BTreeMap::new(),
+        buf,
+    );
 
     let separator_row = inner.y + 1;
     let separator_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
@@ -248,7 +256,15 @@ fn render_palette_collect_args(
         (inner.x + inner.width).saturating_sub(value_col),
         1,
     );
-    input.render(&mut ws.editors, input_area, true, "prompt", theme, buf);
+    input.render(
+        &mut ws.editors,
+        input_area,
+        true,
+        "prompt",
+        theme,
+        &std::collections::BTreeMap::new(),
+        buf,
+    );
     row += 1;
 
     if let Some(msg) = error {

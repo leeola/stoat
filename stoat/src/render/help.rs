@@ -12,11 +12,13 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn render_help(
     help: &Help,
     stoat_mode: &str,
     ws: &mut crate::workspace::Workspace,
     theme: &crate::theme::Theme,
+    mode_badges: &std::collections::BTreeMap<String, String>,
     area: Rect,
     buf: &mut Buffer,
 ) {
@@ -84,7 +86,7 @@ pub(crate) fn render_help(
         HelpInput::Insert => "insert",
         HelpInput::Normal => "normal",
     };
-    let (mode_label, mode_bg) = mode_segment(mode_str, theme);
+    let (mode_label, mode_bg) = mode_segment(mode_str, theme, mode_badges);
     let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
     let chip = format!(" {mode_label} ");
     write_str(buf, inner.x, status_row, &chip, mode_style);

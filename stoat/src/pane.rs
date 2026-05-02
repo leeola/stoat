@@ -1003,6 +1003,7 @@ mod tests {
                 claude_default_placement: Some(stoat_config::ClaudePlacement::DockRight),
                 theme: None,
                 mouse_capture: None,
+                mode_badges: std::collections::BTreeMap::new(),
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);

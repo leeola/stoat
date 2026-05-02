@@ -119,6 +119,7 @@ fn run_tui(
         claude_default_placement: None,
         theme: None,
         mouse_capture: None,
+        mode_badges: std::collections::BTreeMap::new(),
     };
 
     let cwd = std::env::current_dir().unwrap_or_default();

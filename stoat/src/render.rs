@@ -62,6 +62,11 @@ pub(crate) struct FrameCtx<'a> {
     /// string with byte-offset values. Painted by the focused editor's
     /// render path; non-focused panes ignore this field.
     pub(crate) goto_word_labels: Option<&'a std::collections::BTreeMap<String, usize>>,
+    /// Per-mode status-line badge overrides resolved from `Settings`.
+    /// `mode_segment` consults this before falling back to its hardcoded
+    /// badge table; user-defined modes can supply an entry here so the
+    /// status line shows something more meaningful than `---`.
+    pub(crate) mode_badges: &'a std::collections::BTreeMap<String, String>,
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -127,6 +132,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
+        mode_badges: &stoat.settings.mode_badges,
     };
 
     let split_focused = ws.panes.focus();
@@ -226,7 +232,15 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
         }
     } else if let Some(help) = &stoat.help {
-        help::render_help(help, &stoat.mode, ws, &stoat.theme, size, buf);
+        help::render_help(
+            help,
+            &stoat.mode,
+            ws,
+            &stoat.theme,
+            &stoat.settings.mode_badges,
+            size,
+            buf,
+        );
         let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false);
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");
         let bindings: Vec<_> = raw

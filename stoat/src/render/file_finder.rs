@@ -58,9 +58,15 @@ pub(crate) fn render_file_finder(
     let input_row = inner.y;
     write_str(buf, inner.x, input_row, ">", prompt_style);
     let input_area = Rect::new(inner.x + 2, input_row, inner.width.saturating_sub(2), 1);
-    finder
-        .input
-        .render(&mut ws.editors, input_area, true, "prompt", theme, buf);
+    finder.input.render(
+        &mut ws.editors,
+        input_area,
+        true,
+        "prompt",
+        theme,
+        &std::collections::BTreeMap::new(),
+        buf,
+    );
 
     let separator_row = inner.y + 1;
     for col in inner.x..inner.x + inner.width {

@@ -7,6 +7,7 @@
 //! `settings.field.unwrap_or(default)` at the point of use.
 
 use crate::ast::{Config, EventType, Setting, Statement, Value};
+use std::collections::BTreeMap;
 
 /// Default placement for a newly-opened Claude chat.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -40,6 +41,12 @@ pub struct Settings {
     /// Mouse-capture policy at terminal startup. `None` falls back to
     /// [`MouseCapturePolicy::Auto`].
     pub mouse_capture: Option<MouseCapturePolicy>,
+    /// Per-mode status-line badge label overrides, keyed by mode name.
+    /// Set via `ui.mode_badge.<name> = "ABC";` in stcfg. Renderer
+    /// consults this map before falling back to its hardcoded badge
+    /// table; user-defined modes can supply their own entry here so
+    /// the status line shows something more meaningful than `---`.
+    pub mode_badges: BTreeMap<String, String>,
 }
 
 impl Settings {
@@ -64,6 +71,8 @@ impl Settings {
     /// Right-hand wins: any `Some(_)` field in `other` overrides the
     /// corresponding field in `self`. Used to layer CLI over stcfg.
     pub fn merge(self, other: Settings) -> Settings {
+        let mut mode_badges = self.mode_badges;
+        mode_badges.extend(other.mode_badges);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             claude_default_placement: other
@@ -71,6 +80,7 @@ impl Settings {
                 .or(self.claude_default_placement),
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
+            mode_badges,
         }
     }
 
@@ -100,6 +110,11 @@ impl Settings {
             ["theme"] => {
                 if let Value::Ident(s) | Value::String(s) = &setting.value.node {
                     self.theme = Some(s.clone());
+                }
+            },
+            ["ui", "mode_badge", name] => {
+                if let Value::String(badge) | Value::Ident(badge) = &setting.value.node {
+                    self.mode_badges.insert((*name).to_string(), badge.clone());
                 }
             },
             ["mouse", "capture"] => {
@@ -143,6 +158,7 @@ mod tests {
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -157,6 +173,7 @@ mod tests {
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -171,6 +188,7 @@ mod tests {
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -194,12 +212,14 @@ mod tests {
             claude_default_placement: None,
             theme: None,
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: Some(true),
             claude_default_placement: None,
             theme: None,
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
@@ -208,6 +228,7 @@ mod tests {
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -219,6 +240,7 @@ mod tests {
             claude_default_placement: None,
             theme: None,
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
@@ -228,6 +250,7 @@ mod tests {
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -250,6 +273,7 @@ mod tests {
                 claude_default_placement: Some(ClaudePlacement::Pane),
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -264,6 +288,7 @@ mod tests {
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -278,6 +303,7 @@ mod tests {
                 claude_default_placement: Some(ClaudePlacement::DockRight),
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -301,6 +327,7 @@ mod tests {
             claude_default_placement: Some(ClaudePlacement::DockRight),
             theme: None,
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
@@ -310,6 +337,7 @@ mod tests {
                 claude_default_placement: Some(ClaudePlacement::DockRight),
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -324,6 +352,7 @@ mod tests {
                 claude_default_placement: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -338,6 +367,7 @@ mod tests {
                 claude_default_placement: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -349,12 +379,14 @@ mod tests {
             claude_default_placement: None,
             theme: Some("a".into()),
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
             claude_default_placement: None,
             theme: Some("b".into()),
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
     }
@@ -366,12 +398,14 @@ mod tests {
             claude_default_placement: Some(ClaudePlacement::Pane),
             theme: None,
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockLeft),
             theme: None,
             mouse_capture: None,
+            mode_badges: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
@@ -380,6 +414,7 @@ mod tests {
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
                 theme: None,
                 mouse_capture: None,
+                mode_badges: BTreeMap::new(),
             }
         );
     }
@@ -430,6 +465,76 @@ mod tests {
         assert_eq!(
             left.merge(right).mouse_capture,
             Some(MouseCapturePolicy::Never)
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_mode_badge_string() {
+        let config = parse_ok(r#"on init { ui.mode_badge.foo = "FOO"; }"#);
+        let badges = Settings::from_config(&config).mode_badges;
+        assert_eq!(
+            badges,
+            BTreeMap::from([("foo".to_string(), "FOO".to_string())])
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_mode_badge_ident() {
+        let config = parse_ok("on init { ui.mode_badge.bar = BAR; }");
+        let badges = Settings::from_config(&config).mode_badges;
+        assert_eq!(
+            badges,
+            BTreeMap::from([("bar".to_string(), "BAR".to_string())])
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_multiple_mode_badges() {
+        let config = parse_ok(
+            r#"on init {
+                ui.mode_badge.foo = "FOO";
+                ui.mode_badge.bar = "BAR";
+            }"#,
+        );
+        let badges = Settings::from_config(&config).mode_badges;
+        assert_eq!(
+            badges,
+            BTreeMap::from([
+                ("foo".to_string(), "FOO".to_string()),
+                ("bar".to_string(), "BAR".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn from_config_ignores_wrong_type_mode_badge() {
+        let config = parse_ok("on init { ui.mode_badge.foo = true; }");
+        assert!(Settings::from_config(&config).mode_badges.is_empty());
+    }
+
+    #[test]
+    fn merge_extends_mode_badges_with_right_winning() {
+        let left = Settings {
+            mode_badges: BTreeMap::from([
+                ("foo".to_string(), "FOO".to_string()),
+                ("shared".to_string(), "L".to_string()),
+            ]),
+            ..Settings::default()
+        };
+        let right = Settings {
+            mode_badges: BTreeMap::from([
+                ("bar".to_string(), "BAR".to_string()),
+                ("shared".to_string(), "R".to_string()),
+            ]),
+            ..Settings::default()
+        };
+        assert_eq!(
+            left.merge(right).mode_badges,
+            BTreeMap::from([
+                ("foo".to_string(), "FOO".to_string()),
+                ("bar".to_string(), "BAR".to_string()),
+                ("shared".to_string(), "R".to_string()),
+            ])
         );
     }
 }

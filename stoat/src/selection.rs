@@ -1579,8 +1579,31 @@ mod tests {
     #[test]
     fn select_mode_status_label_is_sel() {
         let theme = crate::theme::Theme::empty();
-        let (label, _) = crate::render::pane::mode_segment("select", &theme);
+        let badges = std::collections::BTreeMap::new();
+        let (label, _) = crate::render::pane::mode_segment("select", &theme, &badges);
         assert_eq!(label, "SEL");
+    }
+
+    #[test]
+    fn config_badge_overrides_hardcoded_label() {
+        let theme = crate::theme::Theme::empty();
+        let mut badges = std::collections::BTreeMap::new();
+        badges.insert("select".to_string(), "VIS".to_string());
+        let (label, _) = crate::render::pane::mode_segment("select", &theme, &badges);
+        assert_eq!(label, "VIS");
+    }
+
+    #[test]
+    fn config_badge_supplies_label_for_user_defined_mode() {
+        let theme = crate::theme::Theme::empty();
+        let mut badges = std::collections::BTreeMap::new();
+        badges.insert("custom".to_string(), "CUS".to_string());
+        let (label, _) = crate::render::pane::mode_segment("custom", &theme, &badges);
+        assert_eq!(label, "CUS");
+        // No badge entry -> hardcoded fallback for unknown mode is "---".
+        let empty = std::collections::BTreeMap::new();
+        let (label, _) = crate::render::pane::mode_segment("custom", &theme, &empty);
+        assert_eq!(label, "---");
     }
 
     #[test]
@@ -1702,8 +1725,9 @@ mod tests {
             ("space_pane_nav_new", "SNN"),
             ("claude", "CLA"),
         ];
+        let badges = std::collections::BTreeMap::new();
         for (mode, expected) in cases {
-            let (label, _) = crate::render::pane::mode_segment(mode, &theme);
+            let (label, _) = crate::render::pane::mode_segment(mode, &theme, &badges);
             assert_eq!(label, expected, "label for mode {mode:?}");
         }
     }

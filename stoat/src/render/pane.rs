@@ -125,7 +125,7 @@ pub(crate) fn render_overlay_status(
 
     let mut cursor = area.x;
     if is_focused {
-        let (mode_label, mode_bg) = mode_segment(mode, theme);
+        let (mode_label, mode_bg) = mode_segment(mode, theme, frame.mode_badges);
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
         cursor = paint_segment(
             buf,
@@ -219,7 +219,7 @@ fn render_pane_status(
 
     let mut cursor = area.x;
     if is_focused {
-        let (label, mode_bg) = mode_segment(mode, theme);
+        let (label, mode_bg) = mode_segment(mode, theme, frame.mode_badges);
         let mode_style = theme.get(crate::theme::scope::UI_MODE_LABEL).bg(mode_bg);
         cursor = paint_segment(buf, y, cursor, end_x, &format!(" {label} "), mode_style);
         let ws_style = base_style.add_modifier(Modifier::BOLD);
@@ -331,9 +331,13 @@ fn paint_segment(
     x
 }
 
-pub(crate) fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static str, Color) {
+pub(crate) fn mode_segment(
+    mode: &str,
+    theme: &crate::theme::Theme,
+    mode_badges: &std::collections::BTreeMap<String, String>,
+) -> (std::borrow::Cow<'static, str>, Color) {
     use crate::theme::scope;
-    let (label, default, scope_name) = match mode {
+    let (default_label, default, scope_name) = match mode {
         "normal" => ("NOR", Color::Blue, scope::UI_STATUSLINE_NORMAL),
         "insert" => ("INS", Color::Green, scope::UI_STATUSLINE_INSERT),
         "select" => ("SEL", Color::Yellow, scope::UI_STATUSLINE_SELECT),
@@ -358,6 +362,10 @@ pub(crate) fn mode_segment(mode: &str, theme: &crate::theme::Theme) -> (&'static
         _ => ("---", Color::Gray, scope::UI_STATUSLINE_DEFAULT),
     };
     let color = theme.get(scope_name).fg.unwrap_or(default);
+    let label = match mode_badges.get(mode) {
+        Some(badge) => std::borrow::Cow::Owned(badge.clone()),
+        None => std::borrow::Cow::Borrowed(default_label),
+    };
     (label, color)
 }
 

@@ -326,6 +326,7 @@ impl InputView {
     /// split borrows of workspace fields - like
     /// [`crate::render::pane::render_pane`] via [`crate::render::PaneCtx`] -
     /// can reuse their existing borrow without conflict.
+    #[allow(clippy::too_many_arguments)]
     pub(crate) fn render(
         &self,
         editors: &mut SlotMap<EditorId, EditorState>,
@@ -333,6 +334,7 @@ impl InputView {
         is_focused: bool,
         current_mode: &str,
         theme: &Theme,
+        mode_badges: &std::collections::BTreeMap<String, String>,
         buf: &mut Buffer,
     ) {
         if area.width == 0 || area.height == 0 {
@@ -361,18 +363,21 @@ impl InputView {
                 status_area,
                 current_mode,
                 theme,
+                mode_badges,
                 buf,
             );
         }
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn render_input_status(
     editors: &mut SlotMap<EditorId, EditorState>,
     editor_id: EditorId,
     area: Rect,
     mode: &str,
     theme: &Theme,
+    mode_badges: &std::collections::BTreeMap<String, String>,
     buf: &mut Buffer,
 ) {
     let bar_style = theme.get(scope::UI_STATUSBAR_FOCUSED);
@@ -380,7 +385,7 @@ fn render_input_status(
         buf[(col, area.y)].set_char(' ').set_style(bar_style);
     }
 
-    let (label, color) = mode_segment(mode, theme);
+    let (label, color) = mode_segment(mode, theme, mode_badges);
     let mode_label_style = theme.get(scope::UI_MODE_LABEL).bg(color);
     let label_text = format!(" {label} ");
     write_str(buf, area.x, area.y, &label_text, mode_label_style);

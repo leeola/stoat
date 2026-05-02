@@ -123,9 +123,15 @@ pub(crate) fn render_run_pane(
     write_str(buf, area.x, input_row, "$ ", prompt_style);
 
     let input_area = Rect::new(area.x + 2, input_row, area.width.saturating_sub(2), 1);
-    run_state
-        .input
-        .render(editors, input_area, is_focused, "prompt", theme, buf);
+    run_state.input.render(
+        editors,
+        input_area,
+        is_focused,
+        "prompt",
+        theme,
+        &std::collections::BTreeMap::new(),
+        buf,
+    );
 }
 
 enum OutputLine<'a> {

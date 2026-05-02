@@ -461,6 +461,7 @@ mod tests {
             claude_default_placement: Some(ClaudePlacement::DockRight),
             theme: None,
             mouse_capture: None,
+            mode_badges: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
         assert_eq!(claude_panes(&h.stoat), vec![]);
@@ -477,6 +478,7 @@ mod tests {
             claude_default_placement: Some(ClaudePlacement::DockLeft),
             theme: None,
             mouse_capture: None,
+            mode_badges: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
         assert_eq!(claude_panes(&h.stoat), vec![]);
@@ -503,6 +505,7 @@ mod tests {
             claude_default_placement: Some(ClaudePlacement::DockRight),
             theme: None,
             mouse_capture: None,
+            mode_badges: std::collections::BTreeMap::new(),
         });
         let id = h.claude().open();
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ClaudeToPane);
@@ -539,6 +542,7 @@ mod tests {
             claude_default_placement: Some(ClaudePlacement::DockRight),
             theme: None,
             mouse_capture: None,
+            mode_badges: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
         for (_, dock) in &mut h.stoat.active_workspace_mut().docks {
