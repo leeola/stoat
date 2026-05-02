@@ -27,7 +27,7 @@ pub use claude_code::{
     PlanEntry, PlanEntryStatus, SessionStateEvent, TaskEvent, TerminalMeta, TokenUsage,
     ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind, ToolPermissionContext,
 };
-pub use clipboard::{ClipboardHost, NoopClipboard};
+pub use clipboard::{osc52_should_emit, ClipboardHost, NoopClipboard};
 pub use env::{EnvHost, LocalEnv};
 #[cfg(test)]
 pub use fake::{

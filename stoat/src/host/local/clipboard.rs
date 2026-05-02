@@ -1,5 +1,6 @@
 use crate::host::ClipboardHost;
-use std::io;
+use base64::{engine::general_purpose::STANDARD, Engine};
+use std::io::{self, Write};
 
 /// Production [`ClipboardHost`] backed by [`arboard::Clipboard`].
 ///
@@ -14,5 +15,14 @@ impl ClipboardHost for LocalClipboard {
     fn set(&self, text: &str) -> io::Result<()> {
         let mut clipboard = arboard::Clipboard::new().map_err(io::Error::other)?;
         clipboard.set_text(text).map_err(io::Error::other)
+    }
+
+    fn osc52_emit(&self, text: &str) -> io::Result<()> {
+        let payload = STANDARD.encode(text.as_bytes());
+        let mut stdout = io::stdout().lock();
+        stdout.write_all(b"\x1b]52;c;")?;
+        stdout.write_all(payload.as_bytes())?;
+        stdout.write_all(b"\x1b\\")?;
+        stdout.flush()
     }
 }

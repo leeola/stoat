@@ -603,6 +603,7 @@ impl Stoat {
             return false;
         };
         let clipboard_host = self.clipboard_host.clone();
+        let env_host = self.env_host.clone();
         let ws = self.active_workspace_mut();
         let Some(run_state) = ws.runs.get_mut(run_id) else {
             return false;
@@ -652,6 +653,15 @@ impl Stoat {
                         error = %err,
                         "clipboard write failed"
                     );
+                }
+                if crate::host::osc52_should_emit(env_host.as_ref()) {
+                    if let Err(err) = clipboard_host.osc52_emit(&text) {
+                        tracing::warn!(
+                            target: "stoat::app",
+                            error = %err,
+                            "OSC 52 emit failed"
+                        );
+                    }
                 }
                 false
             },
@@ -1977,5 +1987,55 @@ mod tests {
         h.stoat
             .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 2));
         assert_eq!(h.fake_clipboard().writes(), vec!["oo\nba"]);
+    }
+
+    fn drag_select_ell_in_hello(h: &mut crate::test_harness::TestHarness) {
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 3, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
+    }
+
+    #[test]
+    fn osc52_emit_fires_in_ssh_without_mux() {
+        let mut h = Stoat::test();
+        h.fake_env().set("SSH_CONNECTION", "1.2.3.4 22 5.6.7.8 22");
+        let _ = open_run_with_output(&mut h, b"hello\n");
+        drag_select_ell_in_hello(&mut h);
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+        assert_eq!(h.fake_clipboard().osc52_emits(), vec!["ell"]);
+    }
+
+    #[test]
+    fn osc52_emit_skipped_inside_tmux() {
+        let mut h = Stoat::test();
+        h.fake_env().set("SSH_CONNECTION", "1.2.3.4 22 5.6.7.8 22");
+        h.fake_env().set("TMUX", "/tmp/tmux-1000/default,1234,0");
+        let _ = open_run_with_output(&mut h, b"hello\n");
+        drag_select_ell_in_hello(&mut h);
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+        assert!(h.fake_clipboard().osc52_emits().is_empty());
+    }
+
+    #[test]
+    fn osc52_emit_skipped_inside_zellij() {
+        let mut h = Stoat::test();
+        h.fake_env().set("SSH_TTY", "/dev/pts/0");
+        h.fake_env().set("ZELLIJ", "0");
+        let _ = open_run_with_output(&mut h, b"hello\n");
+        drag_select_ell_in_hello(&mut h);
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+        assert!(h.fake_clipboard().osc52_emits().is_empty());
+    }
+
+    #[test]
+    fn osc52_emit_skipped_locally() {
+        let mut h = Stoat::test();
+        let _ = open_run_with_output(&mut h, b"hello\n");
+        drag_select_ell_in_hello(&mut h);
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+        assert!(h.fake_clipboard().osc52_emits().is_empty());
     }
 }
