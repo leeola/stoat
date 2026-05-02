@@ -1606,6 +1606,66 @@ mod tests {
         assert_eq!(label, "---");
     }
 
+    fn theme_from_src(src: &str) -> crate::theme::Theme {
+        let (config, errors) = stoat_config::parse(src);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let config = config.expect("expected successful parse");
+        crate::theme::Theme::from_config(&config, "t").expect("theme load failed")
+    }
+
+    #[test]
+    fn theme_per_mode_color_overrides_default() {
+        let theme = theme_from_src(r#"theme t { ui.statusline.normal.fg = red; }"#);
+        let badges = std::collections::BTreeMap::new();
+        let (_, color) = crate::render::pane::mode_segment("normal", &theme, &badges);
+        assert_eq!(color, ratatui::style::Color::Red);
+    }
+
+    #[test]
+    fn theme_per_mode_color_for_user_defined_mode() {
+        let theme = theme_from_src(r#"theme t { ui.statusline.custom.fg = magenta; }"#);
+        let badges = std::collections::BTreeMap::new();
+        let (_, color) = crate::render::pane::mode_segment("custom", &theme, &badges);
+        assert_eq!(color, ratatui::style::Color::Magenta);
+    }
+
+    #[test]
+    fn legacy_submode_scope_still_colors_all_submodes() {
+        let theme = theme_from_src(r#"theme t { ui.statusline.submode.fg = cyan; }"#);
+        let badges = std::collections::BTreeMap::new();
+        for mode in [
+            "goto",
+            "z",
+            "match",
+            "space",
+            "space_workspace",
+            "space_pane_nav",
+            "claude",
+        ] {
+            let (_, color) = crate::render::pane::mode_segment(mode, &theme, &badges);
+            assert_eq!(
+                color,
+                ratatui::style::Color::Cyan,
+                "submode `{mode}` should inherit the legacy submode color",
+            );
+        }
+    }
+
+    #[test]
+    fn theme_per_mode_color_wins_over_legacy_submode_scope() {
+        let theme = theme_from_src(
+            r#"theme t {
+                ui.statusline.submode.fg = cyan;
+                ui.statusline.goto.fg = red;
+            }"#,
+        );
+        let badges = std::collections::BTreeMap::new();
+        let (_, goto_color) = crate::render::pane::mode_segment("goto", &theme, &badges);
+        let (_, space_color) = crate::render::pane::mode_segment("space", &theme, &badges);
+        assert_eq!(goto_color, ratatui::style::Color::Red);
+        assert_eq!(space_color, ratatui::style::Color::Cyan);
+    }
+
     #[test]
     fn select_mode_semicolon_collapses_selection() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);

@@ -337,7 +337,7 @@ pub(crate) fn mode_segment(
     mode_badges: &std::collections::BTreeMap<String, String>,
 ) -> (std::borrow::Cow<'static, str>, Color) {
     use crate::theme::scope;
-    let (default_label, default, scope_name) = match mode {
+    let (default_label, default, legacy_scope) = match mode {
         "normal" => ("NOR", Color::Blue, scope::UI_STATUSLINE_NORMAL),
         "insert" => ("INS", Color::Green, scope::UI_STATUSLINE_INSERT),
         "select" => ("SEL", Color::Yellow, scope::UI_STATUSLINE_SELECT),
@@ -361,7 +361,12 @@ pub(crate) fn mode_segment(
         "claude" => ("CLA", Color::DarkGray, scope::UI_STATUSLINE_SUBMODE),
         _ => ("---", Color::Gray, scope::UI_STATUSLINE_DEFAULT),
     };
-    let color = theme.get(scope_name).fg.unwrap_or(default);
+    let per_mode_scope = format!("ui.statusline.{mode}");
+    let color = theme
+        .try_get(&per_mode_scope)
+        .and_then(|s| s.fg)
+        .or_else(|| theme.try_get(legacy_scope).and_then(|s| s.fg))
+        .unwrap_or(default);
     let label = match mode_badges.get(mode) {
         Some(badge) => std::borrow::Cow::Owned(badge.clone()),
         None => std::borrow::Cow::Borrowed(default_label),
