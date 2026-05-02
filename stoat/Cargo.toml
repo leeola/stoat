@@ -36,6 +36,7 @@ nucleo.workspace = true
 tempfile.workspace = true
 ron.workspace = true
 time.workspace = true
+blake3.workspace = true
 
 [dev-dependencies]
 insta = "1"

@@ -66,6 +66,7 @@ time = { version = "0.3", features = [
   "macros",
   "serde",
 ] }
+blake3 = "1"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

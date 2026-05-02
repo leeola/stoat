@@ -317,35 +317,13 @@ pub(crate) struct BufferEntrySnap {
     pub history: BufferHistory,
 }
 
-/// Compute a blake3-style 32-byte fingerprint of `text` suitable for
-/// keying [`CachedDiff`]. Implemented via the standard library's
-/// [`DefaultHasher`] chained twice for 32 bytes; the crate has no
-/// dependency on a cryptographic hash and the key only needs to
-/// distinguish distinct base texts, not resist adversarial collision.
+/// 32-byte blake3 hash of `text`. Used both to key [`CachedDiff`] in
+/// the buffer registry and to populate
+/// [`stoat_language::structural_diff::BufferRef::fingerprint`] for
+/// cross-file move detection in the structural diff pipeline.
 #[allow(dead_code)]
 pub(crate) fn fingerprint_bytes(text: &str) -> [u8; 32] {
-    use std::hash::{Hash, Hasher};
-    let mut out = [0u8; 32];
-    let mut h1 = std::collections::hash_map::DefaultHasher::new();
-    text.hash(&mut h1);
-    let a = h1.finish();
-    let mut h2 = std::collections::hash_map::DefaultHasher::new();
-    0xAAu8.hash(&mut h2);
-    text.hash(&mut h2);
-    let b = h2.finish();
-    let mut h3 = std::collections::hash_map::DefaultHasher::new();
-    0xBBu8.hash(&mut h3);
-    text.hash(&mut h3);
-    let c = h3.finish();
-    let mut h4 = std::collections::hash_map::DefaultHasher::new();
-    0xCCu8.hash(&mut h4);
-    text.hash(&mut h4);
-    let d = h4.finish();
-    out[0..8].copy_from_slice(&a.to_le_bytes());
-    out[8..16].copy_from_slice(&b.to_le_bytes());
-    out[16..24].copy_from_slice(&c.to_le_bytes());
-    out[24..32].copy_from_slice(&d.to_le_bytes());
-    out
+    blake3::hash(text.as_bytes()).into()
 }
 
 #[cfg(test)]
