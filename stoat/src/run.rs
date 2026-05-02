@@ -6,6 +6,7 @@ use crate::{
     workspace::Workspace,
 };
 pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
+use ratatui::layout::Rect;
 use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
@@ -88,6 +89,63 @@ impl RunState {
     /// avoid leaking editor slots.
     pub fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
+    }
+
+    /// Translates a focused-pane-relative `(col, row)` cell into the active
+    /// block's `(grid_col, grid_row)`. Returns `None` when the position falls
+    /// on the input row, on a non-active block's region, on a header / status
+    /// / blank line, on a row scrolled off-screen, or past the active grid's
+    /// width. Mirrors the layout that
+    /// [`crate::render::run_pane::render_run_pane`] builds.
+    pub fn active_block_grid_pos(&self, area: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
+        if area.height < 2 || area.width < 4 {
+            return None;
+        }
+        if col >= area.width || row >= area.height {
+            return None;
+        }
+        let output_height = area.height.saturating_sub(1) as usize;
+        if (row as usize) >= output_height {
+            return None;
+        }
+
+        let active_idx = self.blocks.len().checked_sub(1)?;
+        let active = &self.blocks[active_idx];
+
+        let mut idx = 0usize;
+        for block in &self.blocks[..active_idx] {
+            idx += 1;
+            idx += block.grid.line_count();
+            if block.error.is_some() {
+                idx += 1;
+            }
+            if block.finished {
+                idx += 1;
+            }
+            idx += 1;
+        }
+        let active_grid_start = idx + 1;
+        let active_grid_end = active_grid_start + active.grid.line_count();
+
+        let mut total = active_grid_end;
+        if active.error.is_some() {
+            total += 1;
+        }
+        if active.finished {
+            total += 1;
+        }
+        total += 1;
+
+        let start = total.saturating_sub(output_height + self.scroll_offset);
+        let line_idx = start + row as usize;
+
+        if line_idx < active_grid_start || line_idx >= active_grid_end {
+            return None;
+        }
+        if col >= active.grid.width() {
+            return None;
+        }
+        Some((col, (line_idx - active_grid_start) as u16))
     }
 }
 

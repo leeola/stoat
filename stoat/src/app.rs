@@ -15,11 +15,13 @@ use crate::{
     keymap_state::{normalize_shift_letter, resolve_action, StoatKeymapState},
     pane::{FocusTarget, View},
     rebase::RebasePause,
-    run::{PtyNotification, RunId},
+    run::{GridSelection, PtyNotification, RunId},
     workspace::{Workspace, WorkspaceId},
     workspace_picker::{PickerOutcome, WorkspacePicker},
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
+use crossterm::event::{
+    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+};
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
@@ -557,6 +559,9 @@ impl Stoat {
         let Some((col, row)) = self.translate_mouse_to_focused(mouse.column, mouse.row) else {
             return UpdateEffect::None;
         };
+        if self.handle_run_pane_mouse(mouse.kind, col, row) {
+            return UpdateEffect::Redraw;
+        }
         tracing::trace!(
             target: "stoat::app",
             kind = ?mouse.kind,
@@ -565,6 +570,71 @@ impl Stoat {
             "mouse event routed to focused element"
         );
         UpdateEffect::None
+    }
+
+    /// Routes left-button Down/Drag/Up events on a focused run pane into
+    /// the active block's [`GridSelection`]. Returns `true` when the event
+    /// mutated state. `Up(Left)` is recognised but intentionally does not
+    /// mutate -- the selection persists for the auto-copy bullet to consume.
+    fn handle_run_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
+        let target = {
+            let ws = self.active_workspace();
+            match ws.focus {
+                FocusTarget::SplitPane(pane_id) => {
+                    let pane = ws.panes.pane(pane_id);
+                    if let View::Run(id) = pane.view {
+                        Some((id, pane.area))
+                    } else {
+                        None
+                    }
+                },
+                FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).and_then(|dock| {
+                    if let View::Run(id) = dock.view {
+                        Some((id, dock.area))
+                    } else {
+                        None
+                    }
+                }),
+            }
+        };
+        let Some((run_id, area)) = target else {
+            return false;
+        };
+        let ws = self.active_workspace_mut();
+        let Some(run_state) = ws.runs.get_mut(run_id) else {
+            return false;
+        };
+        let pos = run_state.active_block_grid_pos(area, col, row);
+        let Some(block) = run_state.active_block_mut() else {
+            return false;
+        };
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(pos) = pos else {
+                    return false;
+                };
+                block.selection = Some(GridSelection {
+                    anchor: pos,
+                    head: pos,
+                });
+                true
+            },
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some(pos) = pos else {
+                    return false;
+                };
+                let Some(sel) = block.selection.as_mut() else {
+                    return false;
+                };
+                if sel.head == pos {
+                    return false;
+                }
+                sel.head = pos;
+                true
+            },
+            MouseEventKind::Up(MouseButton::Left) => false,
+            _ => false,
+        }
     }
 
     /// Returns the focused element's area-relative cell for the given
@@ -1695,5 +1765,149 @@ mod tests {
         });
         h.drain_lsp();
         h.assert_snapshot("lsp_progress_indexing");
+    }
+
+    fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {
+        let run_id = h.open_run();
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
+        h.submit_run("ls");
+        h.inject_run_output(run_id, output);
+        run_id
+    }
+
+    fn mouse_event(kind: MouseEventKind, column: u16, row: u16) -> Event {
+        Event::Mouse(MouseEvent {
+            kind,
+            column,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    #[test]
+    fn mouse_down_anchors_run_pane_selection() {
+        let mut h = Stoat::test();
+        let run_id = open_run_with_output(&mut h, b"hello\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1));
+        let block = h
+            .stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .expect("run state exists")
+            .active_block()
+            .expect("active block exists");
+        assert_eq!(
+            block.selection,
+            Some(GridSelection {
+                anchor: (2, 0),
+                head: (2, 0),
+            }),
+        );
+    }
+
+    #[test]
+    fn mouse_drag_updates_run_pane_selection_head() {
+        let mut h = Stoat::test();
+        let run_id = open_run_with_output(&mut h, b"hello\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 4, 2));
+        let block = h
+            .stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .expect("run state exists")
+            .active_block()
+            .expect("active block exists");
+        assert_eq!(
+            block.selection,
+            Some(GridSelection {
+                anchor: (1, 0),
+                head: (4, 1),
+            }),
+        );
+    }
+
+    #[test]
+    fn mouse_up_leaves_run_pane_selection_in_place() {
+        let mut h = Stoat::test();
+        let run_id = open_run_with_output(&mut h, b"hello\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 3, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
+        let block = h
+            .stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .expect("run state exists")
+            .active_block()
+            .expect("active block exists");
+        assert_eq!(
+            block.selection,
+            Some(GridSelection {
+                anchor: (3, 0),
+                head: (3, 0),
+            }),
+        );
+    }
+
+    #[test]
+    fn mouse_down_outside_active_block_does_not_select() {
+        let mut h = Stoat::test();
+        let run_id = open_run_with_output(&mut h, b"hello\n");
+        for (col, row) in [(2u16, 0u16), (2, 3), (2, 9), (50, 1)] {
+            h.stoat.update(mouse_event(
+                MouseEventKind::Down(MouseButton::Left),
+                col,
+                row,
+            ));
+            let block = h
+                .stoat
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .expect("run state exists")
+                .active_block()
+                .expect("active block exists");
+            assert_eq!(
+                block.selection, None,
+                "click at ({col},{row}) should not anchor",
+            );
+        }
+    }
+
+    #[test]
+    fn mouse_drag_without_prior_down_is_noop() {
+        let mut h = Stoat::test();
+        let run_id = open_run_with_output(&mut h, b"hello\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 2, 1));
+        let block = h
+            .stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .expect("run state exists")
+            .active_block()
+            .expect("active block exists");
+        assert_eq!(block.selection, None);
+    }
+
+    #[test]
+    fn mouse_on_non_run_view_is_noop() {
+        let mut h = Stoat::test();
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
+        let effect = h
+            .stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5));
+        assert_eq!(effect, UpdateEffect::None);
     }
 }
