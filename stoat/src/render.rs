@@ -58,6 +58,10 @@ pub(crate) struct FrameCtx<'a> {
     /// Painted in the right side of the status bar so users see
     /// "rust-analyzer indexing" / "checking" progress.
     pub(crate) lsp_progress: Option<&'a crate::lsp::progress::LspProgressEntry>,
+    /// Active labels for an in-progress `GotoWord` jump, keyed by label
+    /// string with byte-offset values. Painted by the focused editor's
+    /// render path; non-focused panes ignore this field.
+    pub(crate) goto_word_labels: Option<&'a std::collections::BTreeMap<String, usize>>,
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -122,6 +126,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         render_tick: stoat.render_tick,
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
+        goto_word_labels: stoat.pending_goto_word.as_ref(),
     };
 
     let split_focused = ws.panes.focus();

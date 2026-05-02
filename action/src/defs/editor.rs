@@ -741,6 +741,16 @@ define_action!(
 );
 
 define_action!(
+    GotoWordDef,
+    GotoWord,
+    "GotoWord",
+    ActionKind::GotoWord,
+    "goto labelled word in viewport",
+    "Label every word start visible in the focused editor's viewport with a one- or two-character tag (single-char when there are <= 26 candidates, otherwise two-char). The next character keystrokes narrow to a unique label and jump the cursor to that word. Mirrors Helix's two-character interactive label jump.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendGotoFirstNonwhitespaceDef,
     ExtendGotoFirstNonwhitespace,
     "ExtendGotoFirstNonwhitespace",

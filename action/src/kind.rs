@@ -90,6 +90,7 @@ pub enum ActionKind {
     GotoWindowTop,
     GotoWindowCenter,
     GotoWindowBottom,
+    GotoWord,
     ExtendGotoFirstNonwhitespace,
     ExtendGotoFileStart,
     ExtendGotoLastLine,

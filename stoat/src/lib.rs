@@ -11,6 +11,7 @@ pub mod display_map;
 pub mod dump;
 mod editor_state;
 pub mod file_finder;
+pub(crate) mod goto_word;
 pub mod help;
 pub mod host;
 mod input_view;

@@ -88,6 +88,15 @@ pub struct Stoat {
     /// trailing `u32` is the count captured from `pending_count`
     /// at the time the chord was armed; defaults to 1.
     pub(crate) pending_find: Option<(action_handlers::movement::FindKind, bool, u32)>,
+    /// Active label set for an in-progress `goto_word` jump. `Some`
+    /// after `GotoWord` is dispatched until the user types a unique
+    /// label or types a non-matching prefix. Renderer overlays the
+    /// label strings on their target positions while this is set.
+    pub(crate) pending_goto_word: Option<std::collections::BTreeMap<String, usize>>,
+    /// Characters typed so far to disambiguate the active goto-word
+    /// label. Always paired with [`Self::pending_goto_word`]: when
+    /// that field is `None` this is empty.
+    pub(crate) pending_goto_word_input: String,
     /// Most recent `(FindKind, char)` consumed by `execute_find`.
     /// `RepeatLastMotion` (Alt-.) replays this pair without
     /// reading another keypress.
@@ -231,6 +240,8 @@ impl Stoat {
             render_tick: 0,
             pending_count: None,
             pending_find: None,
+            pending_goto_word: None,
+            pending_goto_word_input: String::new(),
             last_find: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
@@ -766,6 +777,30 @@ impl Stoat {
                 return action_handlers::movement::execute_find(self, kind, ch, extend, count);
             }
             self.pending_find = None;
+        }
+
+        if (self.mode == "normal" || self.mode == "select") && self.pending_goto_word.is_some() {
+            if let KeyCode::Char(ch) = key.code {
+                let labels = self.pending_goto_word.as_ref().expect("checked above");
+                match crate::goto_word::step_jump(labels, &self.pending_goto_word_input, ch) {
+                    crate::goto_word::JumpStep::Jump(offset) => {
+                        self.pending_goto_word = None;
+                        self.pending_goto_word_input.clear();
+                        return action_handlers::movement::jump_to_offset(self, offset);
+                    },
+                    crate::goto_word::JumpStep::Continue => {
+                        self.pending_goto_word_input.push(ch);
+                        return UpdateEffect::Redraw;
+                    },
+                    crate::goto_word::JumpStep::Cancel => {
+                        self.pending_goto_word = None;
+                        self.pending_goto_word_input.clear();
+                        return UpdateEffect::Redraw;
+                    },
+                }
+            }
+            self.pending_goto_word = None;
+            self.pending_goto_word_input.clear();
         }
 
         let count_active_mode = self.mode == "normal" || self.mode == "select";

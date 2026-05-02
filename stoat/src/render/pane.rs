@@ -4,7 +4,7 @@ use crate::{
     pane::{Divider, DividerOrientation, Pane, View},
     render::{
         claude_pane::render_claude_pane,
-        editor::{editor_cursor_position, render_editor},
+        editor::{editor_cursor_position, render_editor_with_overlay},
         layout::split_pane_status,
         run_pane::render_run_pane,
         FrameCtx, PaneCtx,
@@ -50,7 +50,20 @@ pub(crate) fn render_pane(
         },
         View::Editor(editor_id) => {
             if let Some(editor) = editors.get_mut(*editor_id) {
-                render_editor(editor, content_area, text_style, theme, buf, is_focused);
+                let labels = if is_focused {
+                    frame.goto_word_labels
+                } else {
+                    None
+                };
+                render_editor_with_overlay(
+                    editor,
+                    content_area,
+                    text_style,
+                    theme,
+                    buf,
+                    is_focused,
+                    labels,
+                );
             }
         },
         View::Run(run_id) => {

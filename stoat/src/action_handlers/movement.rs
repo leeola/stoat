@@ -2469,6 +2469,55 @@ pub(super) fn scroll_view(stoat: &mut Stoat, dir: ScrollDir) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Collapse every selection to a single point at `offset`. Returns
+/// `UpdateEffect::None` when there is no focused editor or `offset`
+/// is past the end of the focused buffer.
+pub(crate) fn jump_to_offset(stoat: &mut Stoat, offset: usize) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let clamped = offset.min(rope.len());
+    let target_anchor = buffer_snapshot.anchor_at(clamped, Bias::Right);
+    editor.selections.transform(buffer_snapshot, |sel| {
+        let mut new = sel.clone();
+        new.collapse_to(target_anchor, SelectionGoal::None);
+        new
+    });
+    UpdateEffect::Redraw
+}
+
+pub(super) fn goto_word(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let viewport = editor.viewport_rows.unwrap_or(DEFAULT_VIEWPORT_ROWS).max(1);
+    let scroll_row = editor.scroll_row;
+
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+
+    let first_row = scroll_row;
+    let last_row = scroll_row.saturating_add(viewport.saturating_sub(1));
+
+    let max_targets = crate::goto_word::ALPHABET.len() * crate::goto_word::ALPHABET.len();
+    let targets = crate::goto_word::find_word_starts(rope, first_row, last_row, max_targets);
+    let labels = crate::goto_word::assign_labels(&targets, crate::goto_word::ALPHABET);
+
+    if labels.is_empty() {
+        stoat.pending_goto_word = None;
+        stoat.pending_goto_word_input.clear();
+        return UpdateEffect::None;
+    }
+
+    stoat.pending_goto_word = Some(labels);
+    stoat.pending_goto_word_input.clear();
+    UpdateEffect::Redraw
+}
+
 pub(super) fn align_view(stoat: &mut Stoat, align: ViewAlign) -> UpdateEffect {
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

@@ -23,14 +23,14 @@ use crate::{
             ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoColumn,
             GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
             GotoLineStart, GotoNextChange, GotoNextParagraph, GotoPrevChange, GotoPrevParagraph,
-            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, HalfPageDown, HalfPageUp, Increment,
-            IndentSelection, JumpBackward, JumpForward, KeepPrimarySelection, MatchBrackets,
-            MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
-            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
-            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown,
-            PageUp, Redo, RemovePrimarySelection, RepeatLastMotion, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll,
-            SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
+            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp,
+            Increment, IndentSelection, JumpBackward, JumpForward, KeepPrimarySelection,
+            MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
+            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
+            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
+            MoveRight, MoveUp, PageDown, PageUp, Redo, RemovePrimarySelection, RepeatLastMotion,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
+            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
             SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
         },
@@ -305,6 +305,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
     add(GotoWindowBottom::DEF, |_| Ok(Box::new(GotoWindowBottom)));
+    add(GotoWord::DEF, |_| Ok(Box::new(GotoWord)));
     add(ExtendGotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(ExtendGotoFirstNonwhitespace))
     });
@@ -749,7 +750,8 @@ mod tests {
         // + 1 RemovePrimarySelection.
         // + 1 OpenChangedFilePicker.
         // + 1 OpenBufferPicker.
-        assert_eq!(all().count(), 211);
+        // + 1 GotoWord.
+        assert_eq!(all().count(), 212);
     }
 
     #[test]

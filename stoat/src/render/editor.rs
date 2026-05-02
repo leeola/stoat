@@ -1,5 +1,10 @@
 use crate::{editor_state::EditorState, render::review::render_review};
-use ratatui::{buffer::Buffer, layout::Rect, style::Style};
+use ratatui::{
+    buffer::Buffer,
+    layout::Rect,
+    style::{Modifier, Style},
+};
+use std::collections::BTreeMap;
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -8,6 +13,19 @@ pub(crate) fn render_editor(
     theme: &crate::theme::Theme,
     buf: &mut Buffer,
     is_focused: bool,
+) {
+    render_editor_with_overlay(editor, inner, fallback_style, theme, buf, is_focused, None);
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn render_editor_with_overlay(
+    editor: &mut EditorState,
+    inner: Rect,
+    fallback_style: Style,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+    is_focused: bool,
+    goto_word_labels: Option<&BTreeMap<String, usize>>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
 
@@ -105,6 +123,29 @@ pub(crate) fn render_editor(
                 };
                 cell.set_char(char_to_paint);
                 cell.set_style(cursor_style);
+            }
+        }
+    }
+
+    if let Some(labels) = goto_word_labels {
+        let label_style = fallback_style.add_modifier(Modifier::REVERSED | Modifier::BOLD);
+        for (label, &offset) in labels {
+            let rope = buffer_snapshot.rope();
+            if offset > rope.len() {
+                continue;
+            }
+            let point = rope.offset_to_point(offset);
+            let display = snapshot.buffer_to_display(point);
+            if display.row < editor.scroll_row || display.row >= end_row {
+                continue;
+            }
+            let y = inner.y + (display.row - editor.scroll_row) as u16;
+            for (i, ch) in label.chars().enumerate() {
+                let x = inner.x + display.column as u16 + i as u16;
+                if x >= right || y >= bottom {
+                    break;
+                }
+                buf[(x, y)].set_char(ch).set_style(label_style);
             }
         }
     }

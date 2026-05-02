@@ -287,6 +287,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoWindowBottom => {
             movement::goto_window(stoat, movement::WindowAlign::Bottom, false)
         },
+        ActionKind::GotoWord => movement::goto_word(stoat),
         ActionKind::ExtendGotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, true),
         ActionKind::ExtendGotoFileStart => movement::goto_file_start(stoat, true),
         ActionKind::ExtendGotoLastLine => movement::goto_last_line(stoat, true),
