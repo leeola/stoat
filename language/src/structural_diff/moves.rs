@@ -990,6 +990,199 @@ mod tests {
         );
     }
 
+    /// Run mark_unchanged + find_moves_changeset on `pairs` and return
+    /// the per-file LHS arenas, RHS arenas, and emitted records.
+    fn find_moves_changeset_in(
+        pairs: &[(&str, &str)],
+    ) -> (Vec<SyntaxArena>, Vec<SyntaxArena>, Vec<ChangesetMoveRecord>) {
+        let mut lhs_arenas: Vec<SyntaxArena> = Vec::new();
+        let mut rhs_arenas: Vec<SyntaxArena> = Vec::new();
+        let mut roots: Vec<(SyntaxId, SyntaxId)> = Vec::new();
+        for (lhs, rhs) in pairs {
+            let (la, lr) = lower(lhs);
+            let (ra, rr) = lower(rhs);
+            lhs_arenas.push(la);
+            rhs_arenas.push(ra);
+            roots.push((lr, rr));
+        }
+
+        let mut preprocesses: Vec<PreprocessResult> = (0..pairs.len())
+            .map(|i| mark_unchanged(&lhs_arenas[i], roots[i].0, &rhs_arenas[i], roots[i].1))
+            .collect();
+
+        let records = {
+            let mut inputs: Vec<FileMoveInput<'_>> = preprocesses
+                .iter_mut()
+                .enumerate()
+                .map(|(i, pre)| FileMoveInput {
+                    lhs_arena: &lhs_arenas[i],
+                    rhs_arena: &rhs_arenas[i],
+                    lhs_changes: &mut pre.lhs_changes,
+                    rhs_changes: &mut pre.rhs_changes,
+                })
+                .collect();
+            find_moves_changeset(&mut inputs)
+        };
+
+        (lhs_arenas, rhs_arenas, records)
+    }
+
+    #[test]
+    fn changeset_detects_cross_file_move() {
+        // Function `migrated` lives at the top of file 0's lhs and
+        // disappears in file 0's rhs; the same function reappears at
+        // the bottom of file 1's rhs. The move pass must emit one
+        // record whose lhs_source file index differs from its
+        // rhs_target file index.
+        let pairs: &[(&str, &str)] = &[
+            (
+                "fn migrated() { let x = 1; let y = 2; let z = 3; }\n\
+                 fn stays_a() { call_a(); }",
+                "fn stays_a() { call_a(); }",
+            ),
+            (
+                "fn stays_b() { call_b(); }",
+                "fn stays_b() { call_b(); }\n\
+                 fn migrated() { let x = 1; let y = 2; let z = 3; }",
+            ),
+        ];
+        let (lhs_arenas, rhs_arenas, records) = find_moves_changeset_in(pairs);
+
+        let cross_file = records.iter().find(|r| {
+            r.lhs_sources
+                .iter()
+                .any(|(src_fi, _)| *src_fi != r.rhs_target.0)
+        });
+        let record = cross_file.expect("at least one record must cross file boundaries");
+        assert_eq!(record.lhs_sources.len(), 1, "unambiguous cross-file move");
+        let (src_fi, src_id) = record.lhs_sources[0];
+        let (tgt_fi, tgt_id) = record.rhs_target;
+        assert_ne!(
+            src_fi, tgt_fi,
+            "source and target must live in different files"
+        );
+        assert_eq!(src_fi, 0, "source is the LHS function in file 0");
+        assert_eq!(tgt_fi, 1, "target is the RHS function in file 1");
+        assert_eq!(
+            lhs_arenas[src_fi].get(src_id).content_id(),
+            rhs_arenas[tgt_fi].get(tgt_id).content_id(),
+            "matched subtree must share content_id across files"
+        );
+        let src_text = &pairs[src_fi].0[full_byte_range(&lhs_arenas[src_fi], src_id)];
+        let tgt_text = &pairs[tgt_fi].1[full_byte_range(&rhs_arenas[tgt_fi], tgt_id)];
+        assert_eq!(src_text, tgt_text, "moved subtree must be byte-equal");
+        assert!(src_text.contains("fn migrated"));
+    }
+
+    #[test]
+    fn changeset_consolidation_across_files() {
+        // Same heavy block exists in two LHS files; the RHS introduces
+        // a single shared helper in file 0 (file 1's RHS just calls
+        // it). The N:1 consolidation must group both LHS sources into
+        // one record, and the two sources must live in different
+        // files.
+        let pairs: &[(&str, &str)] = &[
+            (
+                "fn first() { let temp = heavy_computation(a, b, c); save(temp); }",
+                "fn shared() { let temp = heavy_computation(a, b, c); save(temp); }\n\
+                 fn first() { shared(); }",
+            ),
+            (
+                "fn second() { let temp = heavy_computation(a, b, c); save(temp); }",
+                "fn second() { shared(); }",
+            ),
+        ];
+        let (lhs_arenas, rhs_arenas, records) = find_moves_changeset_in(pairs);
+
+        let consolidation = records
+            .iter()
+            .find(|r| r.lhs_sources.len() >= 2)
+            .expect("must detect N:1 consolidation across files");
+        assert_eq!(
+            consolidation.lhs_sources.len(),
+            2,
+            "exactly two LHS sources for a 2:1 consolidation"
+        );
+        let mut source_files: Vec<usize> = consolidation
+            .lhs_sources
+            .iter()
+            .map(|(fi, _)| *fi)
+            .collect();
+        source_files.sort();
+        assert_eq!(
+            source_files,
+            vec![0, 1],
+            "the two LHS sources must live in different files"
+        );
+        let target_cid = rhs_arenas[consolidation.rhs_target.0]
+            .get(consolidation.rhs_target.1)
+            .content_id();
+        for (src_fi, src_id) in &consolidation.lhs_sources {
+            assert_eq!(
+                lhs_arenas[*src_fi].get(*src_id).content_id(),
+                target_cid,
+                "every source must share content_id with the target"
+            );
+        }
+    }
+
+    #[test]
+    fn changeset_duplication_across_files() {
+        // One LHS callsite for `render_widget`; two RHS files each
+        // contain a copy. The 1:N duplication must emit two records
+        // sharing the same LHS source, with rhs_targets in different
+        // files.
+        let pairs: &[(&str, &str)] = &[
+            (
+                "fn only() { render_widget(config, style, theme); }",
+                "fn only() {}",
+            ),
+            ("", "fn first() { render_widget(config, style, theme); }"),
+            ("", "fn second() { render_widget(config, style, theme); }"),
+        ];
+        let (lhs_arenas, rhs_arenas, records) = find_moves_changeset_in(pairs);
+
+        let render_records: Vec<&ChangesetMoveRecord> = records
+            .iter()
+            .filter(|r| {
+                let (tgt_fi, tgt_id) = r.rhs_target;
+                let rhs_text = &pairs[tgt_fi].1[full_byte_range(&rhs_arenas[tgt_fi], tgt_id)];
+                rhs_text.contains("render_widget")
+            })
+            .collect();
+        assert_eq!(
+            render_records.len(),
+            2,
+            "one record per duplication target across files"
+        );
+
+        let src_a = render_records[0]
+            .lhs_sources
+            .first()
+            .copied()
+            .expect("record 0 has a source");
+        let src_b = render_records[1]
+            .lhs_sources
+            .first()
+            .copied()
+            .expect("record 1 has a source");
+        assert_eq!(
+            src_a, src_b,
+            "both duplication targets share the LHS source"
+        );
+        assert_eq!(src_a.0, 0, "the shared LHS source lives in file 0");
+        let lhs_text = &pairs[src_a.0].0[full_byte_range(&lhs_arenas[src_a.0], src_a.1)];
+        assert!(lhs_text.contains("render_widget"));
+
+        let mut target_files: Vec<usize> = render_records.iter().map(|r| r.rhs_target.0).collect();
+        target_files.sort();
+        assert_eq!(
+            target_files,
+            vec![1, 2],
+            "the two RHS targets must live in different files"
+        );
+    }
+
     #[test]
     fn changeset_with_one_file_matches_single_file_records() {
         // The single-file find_moves wrapper round-trips the records

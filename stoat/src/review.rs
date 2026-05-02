@@ -752,4 +752,50 @@ fn second() {
         h.open_review_from_texts(&[("consolidate.rs", base, rhs)]);
         h.assert_snapshot("review_move_consolidation");
     }
+
+    #[test]
+    fn snapshot_review_cross_file_move() {
+        // Function `migrated` lives at the top of a.rs's base and is
+        // gone from a.rs's rhs; it reappears at the bottom of b.rs's
+        // rhs. The cross-file `diff_changeset` pass must emit Moved
+        // hunks on both files (referencing the foreign BufferRef in
+        // their MoveMetadata), and the renderer must surface them
+        // with the moved-span styling rather than red/green
+        // add/delete on either side.
+        let mut h = TestHarness::with_size(140, 32);
+        let a_base = "\
+fn migrated() {
+    let x = 1;
+    let y = 2;
+    let z = 3;
+}
+
+fn stays_a() {
+    call_a();
+}
+";
+        let a_rhs = "\
+fn stays_a() {
+    call_a();
+}
+";
+        let b_base = "\
+fn stays_b() {
+    call_b();
+}
+";
+        let b_rhs = "\
+fn stays_b() {
+    call_b();
+}
+
+fn migrated() {
+    let x = 1;
+    let y = 2;
+    let z = 3;
+}
+";
+        h.open_review_from_texts(&[("a.rs", a_base, a_rhs), ("b.rs", b_base, b_rhs)]);
+        h.assert_snapshot("review_cross_file_move");
+    }
 }
