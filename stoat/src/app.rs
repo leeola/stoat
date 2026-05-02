@@ -105,6 +105,11 @@ pub struct Stoat {
     /// until a real `LocalLsp` is wired in; tests install
     /// [`crate::host::FakeLsp`] to drive end-to-end LSP scenarios.
     pub(crate) lsp_host: Arc<dyn LspHost>,
+    /// System-clipboard writes route through this trait. Defaults to
+    /// [`NoopClipboard`] so headless or display-less environments do
+    /// not error on the first clipboard event; tests install
+    /// [`crate::host::FakeClipboard`] to assert on writes.
+    pub(crate) clipboard_host: Arc<dyn crate::host::ClipboardHost>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -224,6 +229,7 @@ impl Stoat {
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
             lsp_host: Arc::new(NoopLsp),
+            clipboard_host: Arc::new(crate::host::NoopClipboard),
         }
     }
 
@@ -251,6 +257,19 @@ impl Stoat {
     /// Returns the active [`EnvHost`].
     pub fn env_host(&self) -> &Arc<dyn EnvHost> {
         &self.env_host
+    }
+
+    /// Swap in an alternative [`crate::host::ClipboardHost`]. The default
+    /// is [`crate::host::NoopClipboard`]; production binaries install
+    /// [`crate::host::LocalClipboard`] (arboard-backed) and tests
+    /// install [`crate::host::FakeClipboard`].
+    pub fn set_clipboard_host(&mut self, host: Arc<dyn crate::host::ClipboardHost>) {
+        self.clipboard_host = host;
+    }
+
+    /// Returns the active [`crate::host::ClipboardHost`].
+    pub fn clipboard_host(&self) -> &Arc<dyn crate::host::ClipboardHost> {
+        &self.clipboard_host
     }
 
     /// Swap in an alternative [`LspHost`]. The default is [`NoopLsp`]
@@ -862,6 +881,7 @@ impl Stoat {
     }
 
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
+        let clipboard_host = self.clipboard_host.clone();
         let ws = self.active_workspace_mut();
         match notif {
             PtyNotification::Output { run_id, data } => {
@@ -872,6 +892,15 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 block.feed(&data);
+                for text in block.grid.clipboard_writes.drain(..) {
+                    if let Err(err) = clipboard_host.set(&text) {
+                        tracing::warn!(
+                            target: "stoat::app",
+                            error = %err,
+                            "clipboard write failed"
+                        );
+                    }
+                }
                 if block.grid.alt_screen_detected {
                     block.error = Some("this command requires a full terminal".into());
                     block.finished = true;

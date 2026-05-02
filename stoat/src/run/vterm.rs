@@ -1,3 +1,4 @@
+use base64::{engine::general_purpose::STANDARD, Engine};
 use ratatui::style::{Color, Modifier};
 use std::ops::Range;
 
@@ -33,6 +34,10 @@ pub struct VtermGrid {
     /// straddle two PTY reads finish parsing on the second call instead
     /// of being dropped at the chunk boundary.
     parser: vte::Parser,
+    /// OSC 52 ("set clipboard") payloads decoded from the input stream.
+    /// Callers drain after [`Self::feed`] and forward to a clipboard
+    /// host; the grid does not own clipboard side effects.
+    pub clipboard_writes: Vec<String>,
 }
 
 impl VtermGrid {
@@ -47,6 +52,7 @@ impl VtermGrid {
             pen_modifiers: Modifier::empty(),
             alt_screen_detected: false,
             parser: vte::Parser::new(),
+            clipboard_writes: Vec::new(),
         }
     }
 
@@ -156,7 +162,44 @@ impl vte::Perform for VtermGrid {
     }
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
-    fn osc_dispatch(&mut self, _params: &[&[u8]], _bell_terminated: bool) {}
+    fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        // OSC 52 -- "set clipboard". Format: ESC ] 52 ; <Pc> ; <Pd> ST,
+        // where <Pc> is the selection ("c" / "p" / "s" / mixed / empty)
+        // and <Pd> is base64-encoded text. We honour writes targeted at
+        // the system clipboard ("c", empty, or mixed including "c") and
+        // ignore primary-only ("p") since the editor has no separate
+        // primary-selection plumbing yet.
+        if params.len() < 3 || params[0] != b"52" {
+            return;
+        }
+        let selection = params[1];
+        let targets_clipboard =
+            selection.is_empty() || selection.iter().any(|&b| b == b'c' || b == b's');
+        if !targets_clipboard {
+            return;
+        }
+        let bytes = match STANDARD.decode(params[2]) {
+            Ok(bytes) => bytes,
+            Err(err) => {
+                tracing::debug!(
+                    target: "stoat::run::vterm",
+                    error = %err,
+                    "OSC 52 base64 decode failed; dropping payload"
+                );
+                return;
+            },
+        };
+        match String::from_utf8(bytes) {
+            Ok(text) => self.clipboard_writes.push(text),
+            Err(err) => {
+                tracing::debug!(
+                    target: "stoat::run::vterm",
+                    error = %err,
+                    "OSC 52 payload not UTF-8; dropping"
+                );
+            },
+        }
+    }
 
     fn csi_dispatch(
         &mut self,

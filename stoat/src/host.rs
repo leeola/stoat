@@ -9,6 +9,7 @@
 //! - Small `Copy` return types for metadata
 
 pub mod claude_code;
+pub mod clipboard;
 pub mod env;
 #[cfg(test)]
 pub mod fake;
@@ -26,14 +27,15 @@ pub use claude_code::{
     PlanEntry, PlanEntryStatus, SessionStateEvent, TaskEvent, TerminalMeta, TokenUsage,
     ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind, ToolPermissionContext,
 };
+pub use clipboard::{ClipboardHost, NoopClipboard};
 pub use env::{EnvHost, LocalEnv};
 #[cfg(test)]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
     terminal::{inject_done, inject_output, FakeTerminal},
-    workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeEnv, FakeFs, FakeFsOp,
-    FakeGit, FakeLsp, FakeRepoBuilder,
+    workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeClipboard, FakeEnv, FakeFs,
+    FakeFsOp, FakeGit, FakeLsp, FakeRepoBuilder,
 };
 pub use fs::{FsDirEntry, FsHost, FsMetadata};
 pub use git::{
@@ -41,6 +43,6 @@ pub use git::{
     ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
     RebaseTodoOp, RewriteResult,
 };
-pub use local::{LocalFs, LocalGit};
+pub use local::{LocalClipboard, LocalFs, LocalGit};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
 pub use terminal::TerminalHost;

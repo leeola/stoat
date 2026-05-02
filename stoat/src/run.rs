@@ -193,4 +193,51 @@ mod tests {
         grid.feed(b"abc");
         assert_eq!(grid.text_in(0..5, 5..10), "");
     }
+
+    #[test]
+    fn osc52_clipboard_decodes_base64_payload() {
+        let mut grid = VtermGrid::new(20);
+        // ESC ] 52 ; c ; aGVsbG8= ESC \  -- base64("hello")
+        grid.feed(b"\x1b]52;c;aGVsbG8=\x1b\\");
+        assert_eq!(grid.clipboard_writes, vec!["hello"]);
+    }
+
+    #[test]
+    fn osc52_clipboard_accepts_empty_selection_field() {
+        let mut grid = VtermGrid::new(20);
+        // ESC ] 52 ; ; aGVsbG8= ESC \ -- empty selection means default
+        grid.feed(b"\x1b]52;;aGVsbG8=\x1b\\");
+        assert_eq!(grid.clipboard_writes, vec!["hello"]);
+    }
+
+    #[test]
+    fn osc52_drops_primary_only_selection() {
+        let mut grid = VtermGrid::new(20);
+        // ESC ] 52 ; p ; aGVsbG8= ESC \ -- primary only, no clipboard component
+        grid.feed(b"\x1b]52;p;aGVsbG8=\x1b\\");
+        assert!(grid.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn osc52_drops_malformed_base64() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]52;c;not_valid_base64!@#\x1b\\");
+        assert!(grid.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn osc_other_commands_do_not_write_clipboard() {
+        let mut grid = VtermGrid::new(20);
+        // OSC 0 (set window title) is a different command
+        grid.feed(b"\x1b]0;some title\x1b\\");
+        assert!(grid.clipboard_writes.is_empty());
+    }
+
+    #[test]
+    fn osc52_accepts_clipboard_in_mixed_selection() {
+        let mut grid = VtermGrid::new(20);
+        // selection "cs" = clipboard + screen, both target system clipboard
+        grid.feed(b"\x1b]52;cs;aGVsbG8=\x1b\\");
+        assert_eq!(grid.clipboard_writes, vec!["hello"]);
+    }
 }

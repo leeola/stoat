@@ -53,6 +53,7 @@ pub struct TestHarness {
     pub(crate) fake_git: Arc<crate::host::FakeGit>,
     pub(crate) fake_env: Arc<crate::host::FakeEnv>,
     pub(crate) fake_lsp: Arc<crate::host::FakeLsp>,
+    pub(crate) fake_clipboard: Arc<crate::host::FakeClipboard>,
     pub(crate) claude_fakes: HashMap<ClaudeSessionId, Arc<crate::host::FakeClaudeCode>>,
     pub(crate) claude_tool_id_counter: u64,
     frames: Vec<Frame>,
@@ -74,6 +75,7 @@ impl TestHarness {
         let fake_git = Arc::new(crate::host::FakeGit::new());
         let fake_env = Arc::new(crate::host::FakeEnv::new());
         let fake_lsp = Arc::new(crate::host::FakeLsp::new());
+        let fake_clipboard = Arc::new(crate::host::FakeClipboard::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;
         stoat.active_workspace_mut().name = String::new();
@@ -82,6 +84,7 @@ impl TestHarness {
         stoat.set_git_host(fake_git.clone());
         stoat.set_env_host(fake_env.clone());
         stoat.set_lsp_host(fake_lsp.clone());
+        stoat.set_clipboard_host(fake_clipboard.clone());
         stoat.update(Event::Resize(width, height));
 
         let mut harness = Self {
@@ -92,6 +95,7 @@ impl TestHarness {
             fake_git,
             fake_env,
             fake_lsp,
+            fake_clipboard,
             claude_fakes: HashMap::new(),
             claude_tool_id_counter: 0,
             frames: Vec::new(),
@@ -141,6 +145,13 @@ impl TestHarness {
         &self.fake_lsp
     }
 
+    /// Expose the [`crate::host::FakeClipboard`] backing this harness
+    /// so tests can read writes that flowed through
+    /// `stoat.clipboard_host()`.
+    pub fn fake_clipboard(&self) -> &Arc<crate::host::FakeClipboard> {
+        &self.fake_clipboard
+    }
+
     /// Assert that every host installed on [`Stoat`] still points at the
     /// fake originally constructed by this harness. Detects test code that
     /// swaps a real host (e.g. [`crate::host::LocalFs`]) back in via the
@@ -173,6 +184,11 @@ impl TestHarness {
             alloc_ptr(&self.stoat.lsp_host),
             alloc_ptr(&self.fake_lsp),
             "LspHost was replaced during the test; real LSP traffic may have escaped"
+        );
+        assert_eq!(
+            alloc_ptr(&self.stoat.clipboard_host),
+            alloc_ptr(&self.fake_clipboard),
+            "ClipboardHost was replaced during the test; real clipboard writes may have escaped"
         );
         let claude = self
             .stoat
