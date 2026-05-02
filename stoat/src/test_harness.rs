@@ -75,6 +75,7 @@ impl TestHarness {
         let fake_git = Arc::new(crate::host::FakeGit::new());
         let fake_env = Arc::new(crate::host::FakeEnv::new());
         let fake_lsp = Arc::new(crate::host::FakeLsp::new());
+        fake_lsp.set_executor(executor.clone());
         let fake_clipboard = Arc::new(crate::host::FakeClipboard::new());
         let mut stoat = Stoat::new(executor, settings, std::path::PathBuf::new());
         stoat.persistence_disabled = true;

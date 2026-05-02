@@ -36,7 +36,9 @@ use std::{
     io,
     str::FromStr,
     sync::{Arc, Mutex},
+    time::Duration,
 };
+use stoat_scheduler::Executor;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
     Mutex as TokioMutex,
@@ -460,6 +462,7 @@ pub struct FakeLsp {
     notif_rx: TokioMutex<UnboundedReceiver<LspNotification>>,
     req_tx: UnboundedSender<IncomingRequest>,
     req_rx: TokioMutex<UnboundedReceiver<IncomingRequest>>,
+    executor: Mutex<Option<Executor>>,
 }
 
 struct FakeLspState {
@@ -506,6 +509,7 @@ struct FakeLspState {
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
     request_failures_persistent: BTreeMap<String, io::ErrorKind>,
+    request_delays: BTreeMap<String, Duration>,
     initialized: bool,
     shut_down: bool,
 }
@@ -565,6 +569,7 @@ impl FakeLsp {
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
                 request_failures_persistent: BTreeMap::new(),
+                request_delays: BTreeMap::new(),
                 initialized: false,
                 shut_down: false,
             }),
@@ -572,6 +577,7 @@ impl FakeLsp {
             notif_rx: TokioMutex::new(notif_rx),
             req_tx,
             req_rx: TokioMutex::new(req_rx),
+            executor: Mutex::new(None),
         }
     }
 
@@ -1115,6 +1121,48 @@ impl FakeLsp {
         ))
     }
 
+    /// Install the [`Executor`] used by [`Self::set_request_delay`] to
+    /// schedule per-request timer waits. Call once after construction;
+    /// without an executor `set_request_delay` records the delay but
+    /// requests resolve immediately.
+    pub fn set_executor(&self, executor: Executor) {
+        *self.executor.lock().unwrap() = Some(executor);
+    }
+
+    /// Arm a sticky delay for every request that targets `method`
+    /// (e.g. `"textDocument/hover"`). Each matching call awaits the
+    /// configured duration on the installed [`Executor`] timer before
+    /// the response (success or failure) is produced. Overwrites any
+    /// previously armed delay for the same method. Has no effect on
+    /// notifications, which have no response.
+    pub fn set_request_delay(&self, method: &str, duration: Duration) {
+        self.state
+            .lock()
+            .unwrap()
+            .request_delays
+            .insert(method.to_string(), duration);
+    }
+
+    /// Clear a delay previously armed via [`Self::set_request_delay`].
+    /// No-op if none was armed.
+    pub fn clear_request_delay(&self, method: &str) {
+        self.state.lock().unwrap().request_delays.remove(method);
+    }
+
+    async fn apply_delay(&self, method: &str) {
+        let duration = self
+            .state
+            .lock()
+            .unwrap()
+            .request_delays
+            .get(method)
+            .copied();
+        let Some(duration) = duration else { return };
+        let executor = self.executor.lock().unwrap().clone();
+        let Some(executor) = executor else { return };
+        executor.timer(duration).await;
+    }
+
     // --- Completions ---
 
     pub fn set_completions(&self, path: &str, line: u32, col: u32, labels: &[&str]) {
@@ -1394,6 +1442,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn initialize(&self, _root_uri: Option<Uri>) -> io::Result<InitializeResult> {
+        self.apply_delay("initialize").await;
         if let Some(err) = self.take_request_failure("initialize") {
             return Err(err);
         }
@@ -1406,6 +1455,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn shutdown(&self) -> io::Result<()> {
+        self.apply_delay("shutdown").await;
         if let Some(err) = self.take_request_failure("shutdown") {
             return Err(err);
         }
@@ -1513,6 +1563,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn hover(&self, params: HoverParams) -> io::Result<Option<Hover>> {
+        self.apply_delay("textDocument/hover").await;
         if let Some(err) = self.take_request_failure("textDocument/hover") {
             return Err(err);
         }
@@ -1528,6 +1579,7 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.apply_delay("textDocument/definition").await;
         if let Some(err) = self.take_request_failure("textDocument/definition") {
             return Err(err);
         }
@@ -1543,6 +1595,7 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.apply_delay("textDocument/declaration").await;
         if let Some(err) = self.take_request_failure("textDocument/declaration") {
             return Err(err);
         }
@@ -1558,6 +1611,7 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.apply_delay("textDocument/typeDefinition").await;
         if let Some(err) = self.take_request_failure("textDocument/typeDefinition") {
             return Err(err);
         }
@@ -1573,6 +1627,7 @@ impl LspHost for FakeLsp {
         &self,
         params: GotoDefinitionParams,
     ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.apply_delay("textDocument/implementation").await;
         if let Some(err) = self.take_request_failure("textDocument/implementation") {
             return Err(err);
         }
@@ -1585,6 +1640,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn references(&self, params: ReferenceParams) -> io::Result<Option<Vec<Location>>> {
+        self.apply_delay("textDocument/references").await;
         if let Some(err) = self.take_request_failure("textDocument/references") {
             return Err(err);
         }
@@ -1600,6 +1656,7 @@ impl LspHost for FakeLsp {
         &self,
         params: DocumentHighlightParams,
     ) -> io::Result<Option<Vec<DocumentHighlight>>> {
+        self.apply_delay("textDocument/documentHighlight").await;
         if let Some(err) = self.take_request_failure("textDocument/documentHighlight") {
             return Err(err);
         }
@@ -1612,6 +1669,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn completion(&self, params: CompletionParams) -> io::Result<Option<CompletionResponse>> {
+        self.apply_delay("textDocument/completion").await;
         if let Some(err) = self.take_request_failure("textDocument/completion") {
             return Err(err);
         }
@@ -1629,6 +1687,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn completion_resolve(&self, item: CompletionItem) -> io::Result<CompletionItem> {
+        self.apply_delay("completionItem/resolve").await;
         if let Some(err) = self.take_request_failure("completionItem/resolve") {
             return Err(err);
         }
@@ -1639,6 +1698,7 @@ impl LspHost for FakeLsp {
         &self,
         params: CodeActionParams,
     ) -> io::Result<Option<Vec<CodeActionOrCommand>>> {
+        self.apply_delay("textDocument/codeAction").await;
         if let Some(err) = self.take_request_failure("textDocument/codeAction") {
             return Err(err);
         }
@@ -1647,6 +1707,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
+        self.apply_delay("codeAction/resolve").await;
         if let Some(err) = self.take_request_failure("codeAction/resolve") {
             return Err(err);
         }
@@ -1657,6 +1718,7 @@ impl LspHost for FakeLsp {
         &self,
         params: DocumentLinkParams,
     ) -> io::Result<Option<Vec<DocumentLink>>> {
+        self.apply_delay("textDocument/documentLink").await;
         if let Some(err) = self.take_request_failure("textDocument/documentLink") {
             return Err(err);
         }
@@ -1665,6 +1727,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink> {
+        self.apply_delay("documentLink/resolve").await;
         if let Some(err) = self.take_request_failure("documentLink/resolve") {
             return Err(err);
         }
@@ -1675,6 +1738,7 @@ impl LspHost for FakeLsp {
         &self,
         params: DocumentColorParams,
     ) -> io::Result<Option<Vec<ColorInformation>>> {
+        self.apply_delay("textDocument/documentColor").await;
         if let Some(err) = self.take_request_failure("textDocument/documentColor") {
             return Err(err);
         }
@@ -1689,6 +1753,7 @@ impl LspHost for FakeLsp {
         &self,
         params: ColorPresentationParams,
     ) -> io::Result<Option<Vec<ColorPresentation>>> {
+        self.apply_delay("textDocument/colorPresentation").await;
         if let Some(err) = self.take_request_failure("textDocument/colorPresentation") {
             return Err(err);
         }
@@ -1703,6 +1768,7 @@ impl LspHost for FakeLsp {
         &self,
         params: SemanticTokensParams,
     ) -> io::Result<Option<SemanticTokensResult>> {
+        self.apply_delay("textDocument/semanticTokens/full").await;
         if let Some(err) = self.take_request_failure("textDocument/semanticTokens/full") {
             return Err(err);
         }
@@ -1717,6 +1783,7 @@ impl LspHost for FakeLsp {
         &self,
         params: SemanticTokensRangeParams,
     ) -> io::Result<Option<SemanticTokensRangeResult>> {
+        self.apply_delay("textDocument/semanticTokens/range").await;
         if let Some(err) = self.take_request_failure("textDocument/semanticTokens/range") {
             return Err(err);
         }
@@ -1731,6 +1798,7 @@ impl LspHost for FakeLsp {
         &self,
         params: CallHierarchyPrepareParams,
     ) -> io::Result<Option<Vec<CallHierarchyItem>>> {
+        self.apply_delay("textDocument/prepareCallHierarchy").await;
         if let Some(err) = self.take_request_failure("textDocument/prepareCallHierarchy") {
             return Err(err);
         }
@@ -1746,6 +1814,7 @@ impl LspHost for FakeLsp {
         &self,
         params: CallHierarchyIncomingCallsParams,
     ) -> io::Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        self.apply_delay("callHierarchy/incomingCalls").await;
         if let Some(err) = self.take_request_failure("callHierarchy/incomingCalls") {
             return Err(err);
         }
@@ -1758,6 +1827,7 @@ impl LspHost for FakeLsp {
         &self,
         params: CallHierarchyOutgoingCallsParams,
     ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        self.apply_delay("callHierarchy/outgoingCalls").await;
         if let Some(err) = self.take_request_failure("callHierarchy/outgoingCalls") {
             return Err(err);
         }
@@ -1770,6 +1840,7 @@ impl LspHost for FakeLsp {
         &self,
         params: TypeHierarchyPrepareParams,
     ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        self.apply_delay("textDocument/prepareTypeHierarchy").await;
         if let Some(err) = self.take_request_failure("textDocument/prepareTypeHierarchy") {
             return Err(err);
         }
@@ -1785,6 +1856,7 @@ impl LspHost for FakeLsp {
         &self,
         params: TypeHierarchySupertypesParams,
     ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        self.apply_delay("typeHierarchy/supertypes").await;
         if let Some(err) = self.take_request_failure("typeHierarchy/supertypes") {
             return Err(err);
         }
@@ -1797,6 +1869,7 @@ impl LspHost for FakeLsp {
         &self,
         params: TypeHierarchySubtypesParams,
     ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        self.apply_delay("typeHierarchy/subtypes").await;
         if let Some(err) = self.take_request_failure("typeHierarchy/subtypes") {
             return Err(err);
         }
@@ -1809,6 +1882,7 @@ impl LspHost for FakeLsp {
         &self,
         params: DocumentSymbolParams,
     ) -> io::Result<Option<DocumentSymbolResponse>> {
+        self.apply_delay("textDocument/documentSymbol").await;
         if let Some(err) = self.take_request_failure("textDocument/documentSymbol") {
             return Err(err);
         }
@@ -1823,6 +1897,7 @@ impl LspHost for FakeLsp {
         &self,
         params: DocumentDiagnosticParams,
     ) -> io::Result<Option<DocumentDiagnosticReportResult>> {
+        self.apply_delay("textDocument/diagnostic").await;
         if let Some(err) = self.take_request_failure("textDocument/diagnostic") {
             return Err(err);
         }
@@ -1837,6 +1912,7 @@ impl LspHost for FakeLsp {
         &self,
         params: FoldingRangeParams,
     ) -> io::Result<Option<Vec<FoldingRange>>> {
+        self.apply_delay("textDocument/foldingRange").await;
         if let Some(err) = self.take_request_failure("textDocument/foldingRange") {
             return Err(err);
         }
@@ -1848,6 +1924,7 @@ impl LspHost for FakeLsp {
         &self,
         params: SelectionRangeParams,
     ) -> io::Result<Option<Vec<SelectionRange>>> {
+        self.apply_delay("textDocument/selectionRange").await;
         if let Some(err) = self.take_request_failure("textDocument/selectionRange") {
             return Err(err);
         }
@@ -1871,6 +1948,7 @@ impl LspHost for FakeLsp {
         &self,
         params: WorkspaceSymbolParams,
     ) -> io::Result<Option<WorkspaceSymbolResponse>> {
+        self.apply_delay("workspace/symbol").await;
         if let Some(err) = self.take_request_failure("workspace/symbol") {
             return Err(err);
         }
@@ -1885,6 +1963,7 @@ impl LspHost for FakeLsp {
         &self,
         params: SignatureHelpParams,
     ) -> io::Result<Option<SignatureHelp>> {
+        self.apply_delay("textDocument/signatureHelp").await;
         if let Some(err) = self.take_request_failure("textDocument/signatureHelp") {
             return Err(err);
         }
@@ -1897,6 +1976,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn inlay_hint(&self, params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>> {
+        self.apply_delay("textDocument/inlayHint").await;
         if let Some(err) = self.take_request_failure("textDocument/inlayHint") {
             return Err(err);
         }
@@ -1905,6 +1985,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint> {
+        self.apply_delay("inlayHint/resolve").await;
         if let Some(err) = self.take_request_failure("inlayHint/resolve") {
             return Err(err);
         }
@@ -1915,6 +1996,7 @@ impl LspHost for FakeLsp {
         &self,
         params: InlayHintParams,
     ) -> io::Result<Option<Vec<InlayHint>>> {
+        self.apply_delay("textDocument/inlayHint").await;
         if let Some(err) = self.take_request_failure("textDocument/inlayHint") {
             return Err(err);
         }
@@ -1929,6 +2011,7 @@ impl LspHost for FakeLsp {
         &self,
         params: TextDocumentPositionParams,
     ) -> io::Result<Option<PrepareRenameResponse>> {
+        self.apply_delay("textDocument/prepareRename").await;
         if let Some(err) = self.take_request_failure("textDocument/prepareRename") {
             return Err(err);
         }
@@ -1938,6 +2021,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn rename(&self, _params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {
+        self.apply_delay("textDocument/rename").await;
         if let Some(err) = self.take_request_failure("textDocument/rename") {
             return Err(err);
         }
@@ -1948,6 +2032,7 @@ impl LspHost for FakeLsp {
         &self,
         _params: DocumentFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>> {
+        self.apply_delay("textDocument/formatting").await;
         if let Some(err) = self.take_request_failure("textDocument/formatting") {
             return Err(err);
         }
@@ -1958,6 +2043,7 @@ impl LspHost for FakeLsp {
         &self,
         params: DocumentRangeFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>> {
+        self.apply_delay("textDocument/rangeFormatting").await;
         if let Some(err) = self.take_request_failure("textDocument/rangeFormatting") {
             return Err(err);
         }
@@ -1969,6 +2055,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn will_rename(&self, params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>> {
+        self.apply_delay("workspace/willRenameFiles").await;
         if let Some(err) = self.take_request_failure("workspace/willRenameFiles") {
             return Err(err);
         }
@@ -1981,6 +2068,7 @@ impl LspHost for FakeLsp {
     }
 
     async fn execute_command(&self, params: ExecuteCommandParams) -> io::Result<Option<Value>> {
+        self.apply_delay("workspace/executeCommand").await;
         if let Some(err) = self.take_request_failure("workspace/executeCommand") {
             return Err(err);
         }
@@ -2021,7 +2109,7 @@ impl LspHost for FakeLsp {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stoat_scheduler::TestScheduler;
+    use stoat_scheduler::{Clock, TestScheduler};
 
     fn rt() -> TestScheduler {
         TestScheduler::new()
@@ -3553,6 +3641,100 @@ mod tests {
     fn clear_method_error_no_op_when_unset() {
         let lsp = FakeLsp::new();
         lsp.clear_method_error("textDocument/hover");
+    }
+
+    #[test]
+    fn request_delay_blocks_until_clock_advances() {
+        use std::sync::atomic::{AtomicBool, Ordering};
+
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let lsp = Arc::new(FakeLsp::new());
+        lsp.set_executor(executor.clone());
+        lsp.set_request_delay("textDocument/hover", Duration::from_millis(800));
+
+        let done = Arc::new(AtomicBool::new(false));
+        executor
+            .spawn({
+                let lsp = lsp.clone();
+                let done = done.clone();
+                async move {
+                    let _ = lsp.hover(hover_params("/src/main.rs", 0, 0)).await;
+                    done.store(true, Ordering::SeqCst);
+                }
+            })
+            .detach();
+
+        scheduler.advance_clock(Duration::from_millis(700));
+        assert!(
+            !done.load(Ordering::SeqCst),
+            "request must not complete before the configured delay elapses"
+        );
+
+        scheduler.advance_clock(Duration::from_millis(200));
+        assert!(
+            done.load(Ordering::SeqCst),
+            "request must complete once the configured delay elapses"
+        );
+    }
+
+    #[test]
+    fn request_delay_per_method_isolated() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let lsp = FakeLsp::new();
+        lsp.set_executor(executor);
+        lsp.set_request_delay("textDocument/hover", Duration::from_millis(800));
+
+        let start = scheduler.test_clock().now();
+        scheduler.block_on(async {
+            let _ = lsp
+                .completion(completion_params("/src/main.rs", 0, 0))
+                .await
+                .unwrap();
+        });
+        assert_eq!(
+            scheduler.test_clock().now() - start,
+            Duration::ZERO,
+            "completion has no delay armed and must resolve immediately"
+        );
+    }
+
+    #[test]
+    fn clear_request_delay_removes_delay() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let lsp = FakeLsp::new();
+        lsp.set_executor(executor);
+        lsp.set_request_delay("textDocument/hover", Duration::from_millis(800));
+        lsp.clear_request_delay("textDocument/hover");
+
+        let start = scheduler.test_clock().now();
+        scheduler.block_on(async {
+            let _ = lsp.hover(hover_params("/src/main.rs", 0, 0)).await.unwrap();
+        });
+        assert_eq!(
+            scheduler.test_clock().now() - start,
+            Duration::ZERO,
+            "cleared delay must not block the request"
+        );
+    }
+
+    #[test]
+    fn request_delay_without_executor_resolves_immediately() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let lsp = FakeLsp::new();
+        lsp.set_request_delay("textDocument/hover", Duration::from_millis(800));
+
+        let start = scheduler.test_clock().now();
+        scheduler.block_on(async {
+            let _ = lsp.hover(hover_params("/src/main.rs", 0, 0)).await.unwrap();
+        });
+        assert_eq!(
+            scheduler.test_clock().now() - start,
+            Duration::ZERO,
+            "without an installed executor the delay is recorded but not awaited"
+        );
     }
 
     #[test]
