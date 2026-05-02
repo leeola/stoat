@@ -1002,6 +1002,7 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: Some(stoat_config::ClaudePlacement::DockRight),
                 theme: None,
+                mouse_capture: None,
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);

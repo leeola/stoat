@@ -59,5 +59,19 @@ pub use pane::{
     PaneTree, Placement, View,
 };
 pub use run::RunId;
-pub use stoat_config::Settings;
+pub use stoat_config::{MouseCapturePolicy, Settings};
 pub use stoat_log as log;
+
+/// Resolves the [`MouseCapturePolicy`] from the compiled-in default
+/// keymap. Returns [`MouseCapturePolicy::Auto`] when the setting is
+/// unset or the keymap has parse errors, since the UI thread starts
+/// before the main `Stoat` instance and must not block on config
+/// failure.
+pub fn default_mouse_capture_policy() -> MouseCapturePolicy {
+    let (config, _errors) = stoat_config::parse(app::DEFAULT_KEYMAP);
+    config
+        .as_ref()
+        .map(Settings::from_config)
+        .and_then(|s| s.mouse_capture)
+        .unwrap_or(MouseCapturePolicy::Auto)
+}

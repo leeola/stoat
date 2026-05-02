@@ -34,7 +34,7 @@ use stoat_scheduler::Executor;
 use stoat_text::Bias;
 use tokio::sync::mpsc::{Receiver, Sender};
 
-const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
+pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateEffect {

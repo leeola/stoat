@@ -16,6 +16,17 @@ pub enum ClaudePlacement {
     DockRight,
 }
 
+/// Mouse-capture policy applied at terminal startup. `Auto` keeps the
+/// parent-multiplexer guard (capture disabled when `$TMUX` or `$ZELLIJ`
+/// is set so the parent owns drag-select); `Always` forces capture on
+/// regardless of nesting; `Never` disables it unconditionally.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MouseCapturePolicy {
+    Auto,
+    Always,
+    Never,
+}
+
 /// Top-level resolved settings struct.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Settings {
@@ -26,6 +37,9 @@ pub struct Settings {
     /// Name of the active theme block. Resolves against `theme NAME { ... }`
     /// blocks in the config. `None` means "use the compiled-in default".
     pub theme: Option<String>,
+    /// Mouse-capture policy at terminal startup. `None` falls back to
+    /// [`MouseCapturePolicy::Auto`].
+    pub mouse_capture: Option<MouseCapturePolicy>,
 }
 
 impl Settings {
@@ -56,6 +70,7 @@ impl Settings {
                 .claude_default_placement
                 .or(self.claude_default_placement),
             theme: other.theme.or(self.theme),
+            mouse_capture: other.mouse_capture.or(self.mouse_capture),
         }
     }
 
@@ -87,6 +102,21 @@ impl Settings {
                     self.theme = Some(s.clone());
                 }
             },
+            ["mouse", "capture"] => {
+                let raw = match &setting.value.node {
+                    Value::String(s) | Value::Ident(s) => Some(s.as_str()),
+                    _ => None,
+                };
+                let policy = match raw {
+                    Some("auto") => Some(MouseCapturePolicy::Auto),
+                    Some("always") => Some(MouseCapturePolicy::Always),
+                    Some("never") => Some(MouseCapturePolicy::Never),
+                    _ => None,
+                };
+                if let Some(p) = policy {
+                    self.mouse_capture = Some(p);
+                }
+            },
             _ => {},
         }
     }
@@ -112,6 +142,7 @@ mod tests {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -125,6 +156,7 @@ mod tests {
                 text_proto_log: Some(false),
                 claude_default_placement: None,
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -138,6 +170,7 @@ mod tests {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -160,11 +193,13 @@ mod tests {
             text_proto_log: Some(false),
             claude_default_placement: None,
             theme: None,
+            mouse_capture: None,
         };
         let right = Settings {
             text_proto_log: Some(true),
             claude_default_placement: None,
             theme: None,
+            mouse_capture: None,
         };
         assert_eq!(
             left.merge(right),
@@ -172,6 +207,7 @@ mod tests {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -182,6 +218,7 @@ mod tests {
             text_proto_log: Some(true),
             claude_default_placement: None,
             theme: None,
+            mouse_capture: None,
         };
         let right = Settings::default();
         assert_eq!(
@@ -190,6 +227,7 @@ mod tests {
                 text_proto_log: Some(true),
                 claude_default_placement: None,
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -211,6 +249,7 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::Pane),
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -224,6 +263,7 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -237,6 +277,7 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockRight),
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -259,6 +300,7 @@ mod tests {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockRight),
             theme: None,
+            mouse_capture: None,
         };
         let right = Settings::default();
         assert_eq!(
@@ -267,6 +309,7 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockRight),
                 theme: None,
+                mouse_capture: None,
             }
         );
     }
@@ -280,6 +323,7 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: None,
                 theme: Some("default_dark".into()),
+                mouse_capture: None,
             }
         );
     }
@@ -293,6 +337,7 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: None,
                 theme: Some("default_dark".into()),
+                mouse_capture: None,
             }
         );
     }
@@ -303,11 +348,13 @@ mod tests {
             text_proto_log: None,
             claude_default_placement: None,
             theme: Some("a".into()),
+            mouse_capture: None,
         };
         let right = Settings {
             text_proto_log: None,
             claude_default_placement: None,
             theme: Some("b".into()),
+            mouse_capture: None,
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
     }
@@ -318,11 +365,13 @@ mod tests {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::Pane),
             theme: None,
+            mouse_capture: None,
         };
         let right = Settings {
             text_proto_log: None,
             claude_default_placement: Some(ClaudePlacement::DockLeft),
             theme: None,
+            mouse_capture: None,
         };
         assert_eq!(
             left.merge(right),
@@ -330,7 +379,57 @@ mod tests {
                 text_proto_log: None,
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
                 theme: None,
+                mouse_capture: None,
             }
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_mouse_capture_auto() {
+        let config = parse_ok(r#"on init { mouse.capture = "auto"; }"#);
+        assert_eq!(
+            Settings::from_config(&config).mouse_capture,
+            Some(MouseCapturePolicy::Auto),
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_mouse_capture_always() {
+        let config = parse_ok(r#"on init { mouse.capture = "always"; }"#);
+        assert_eq!(
+            Settings::from_config(&config).mouse_capture,
+            Some(MouseCapturePolicy::Always),
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_mouse_capture_never_ident() {
+        let config = parse_ok("on init { mouse.capture = never; }");
+        assert_eq!(
+            Settings::from_config(&config).mouse_capture,
+            Some(MouseCapturePolicy::Never),
+        );
+    }
+
+    #[test]
+    fn from_config_ignores_unknown_mouse_capture_value() {
+        let config = parse_ok(r#"on init { mouse.capture = "elsewhere"; }"#);
+        assert_eq!(Settings::from_config(&config).mouse_capture, None);
+    }
+
+    #[test]
+    fn merge_right_overrides_mouse_capture() {
+        let left = Settings {
+            mouse_capture: Some(MouseCapturePolicy::Auto),
+            ..Settings::default()
+        };
+        let right = Settings {
+            mouse_capture: Some(MouseCapturePolicy::Never),
+            ..Settings::default()
+        };
+        assert_eq!(
+            left.merge(right).mouse_capture,
+            Some(MouseCapturePolicy::Never)
         );
     }
 }
