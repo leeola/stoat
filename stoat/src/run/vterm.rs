@@ -396,12 +396,66 @@ fn first_param(params: &[u16], default: u16) -> u16 {
         .unwrap_or(default)
 }
 
+/// A two-anchor selection over a [`VtermGrid`]. Coordinates are
+/// `(col, row)` cell positions in the grid's coordinate space, not
+/// terminal-relative -- consumers translate from screen coords to grid
+/// coords before constructing the selection. `anchor` is the click
+/// position; `head` follows the drag. [`Self::bounds`] normalizes the
+/// pair for row-major iteration regardless of drag direction.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GridSelection {
+    pub anchor: (u16, u16),
+    pub head: (u16, u16),
+}
+
+impl GridSelection {
+    /// Returns `(low, high)` in row-major order: lower-row first, and
+    /// within the same row, lower-column first. Independent of the
+    /// drag direction the selection was constructed from.
+    pub fn bounds(&self) -> ((u16, u16), (u16, u16)) {
+        let (a_col, a_row) = self.anchor;
+        let (h_col, h_row) = self.head;
+        if (a_row, a_col) <= (h_row, h_col) {
+            ((a_col, a_row), (h_col, h_row))
+        } else {
+            ((h_col, h_row), (a_col, a_row))
+        }
+    }
+
+    /// Reports whether `(col, row)` falls inside the selection in
+    /// row-major scan order. Single-row selections cover columns
+    /// `[low_col, high_col]` inclusive; multi-row selections cover
+    /// `[low_col, end-of-row]` on the first row, every column on
+    /// intermediate rows, and `[start-of-row, high_col]` on the last
+    /// row. Endpoints are inclusive on both sides.
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        let ((low_col, low_row), (high_col, high_row)) = self.bounds();
+        if row < low_row || row > high_row {
+            return false;
+        }
+        if low_row == high_row {
+            return col >= low_col && col <= high_col;
+        }
+        if row == low_row {
+            col >= low_col
+        } else if row == high_row {
+            col <= high_col
+        } else {
+            true
+        }
+    }
+}
+
 pub struct OutputBlock {
     pub command: String,
     pub grid: VtermGrid,
     pub finished: bool,
     pub exit_status: Option<i32>,
     pub error: Option<String>,
+    /// Active selection over [`Self::grid`]. `None` means no selection;
+    /// populated by mouse-drag handlers and consumed by the run-pane
+    /// renderer to paint reverse-video over the covered cells.
+    pub selection: Option<GridSelection>,
 }
 
 impl OutputBlock {
@@ -412,6 +466,7 @@ impl OutputBlock {
             finished: false,
             exit_status: None,
             error: None,
+            selection: None,
         }
     }
 

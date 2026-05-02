@@ -9,7 +9,7 @@ pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
-pub use vterm::{OutputBlock, StyledCell, VtermGrid};
+pub use vterm::{GridSelection, OutputBlock, StyledCell, VtermGrid};
 
 new_key_type! {
     pub struct RunId;
@@ -239,5 +239,60 @@ mod tests {
         // selection "cs" = clipboard + screen, both target system clipboard
         grid.feed(b"\x1b]52;cs;aGVsbG8=\x1b\\");
         assert_eq!(grid.clipboard_writes, vec!["hello"]);
+    }
+
+    #[test]
+    fn grid_selection_bounds_normalizes_drag_direction() {
+        let forward = GridSelection {
+            anchor: (3, 1),
+            head: (8, 4),
+        };
+        let reversed = GridSelection {
+            anchor: (8, 4),
+            head: (3, 1),
+        };
+        assert_eq!(forward.bounds(), reversed.bounds());
+        assert_eq!(forward.bounds(), ((3, 1), (8, 4)));
+    }
+
+    #[test]
+    fn grid_selection_bounds_swaps_columns_when_rows_match() {
+        let sel = GridSelection {
+            anchor: (10, 2),
+            head: (3, 2),
+        };
+        assert_eq!(sel.bounds(), ((3, 2), (10, 2)));
+    }
+
+    #[test]
+    fn grid_selection_contains_single_row() {
+        let sel = GridSelection {
+            anchor: (3, 1),
+            head: (8, 1),
+        };
+        assert!(!sel.contains(2, 1));
+        assert!(sel.contains(3, 1));
+        assert!(sel.contains(5, 1));
+        assert!(sel.contains(8, 1));
+        assert!(!sel.contains(9, 1));
+        assert!(!sel.contains(5, 0));
+        assert!(!sel.contains(5, 2));
+    }
+
+    #[test]
+    fn grid_selection_contains_multi_row() {
+        let sel = GridSelection {
+            anchor: (5, 1),
+            head: (3, 3),
+        };
+        assert!(!sel.contains(4, 1));
+        assert!(sel.contains(5, 1));
+        assert!(sel.contains(99, 1));
+        assert!(sel.contains(0, 2));
+        assert!(sel.contains(99, 2));
+        assert!(sel.contains(0, 3));
+        assert!(sel.contains(3, 3));
+        assert!(!sel.contains(4, 3));
+        assert!(!sel.contains(0, 4));
     }
 }

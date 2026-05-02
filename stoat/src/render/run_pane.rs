@@ -1,8 +1,11 @@
-use crate::{render::text::write_str, run::RunState};
+use crate::{
+    render::text::write_str,
+    run::{GridSelection, RunState},
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::Style,
+    style::{Modifier, Style},
     widgets::{Block, Borders, Widget},
 };
 
@@ -25,7 +28,11 @@ pub(crate) fn render_run_pane(
     for block in &run_state.blocks {
         output_lines.push(OutputLine::CommandHeader(block.command.as_str()));
         for row_idx in 0..block.grid.line_count() {
-            output_lines.push(OutputLine::GridRow(&block.grid, row_idx));
+            output_lines.push(OutputLine::GridRow(
+                &block.grid,
+                row_idx,
+                block.selection.as_ref(),
+            ));
         }
         if let Some(err) = &block.error {
             output_lines.push(OutputLine::Error(err.as_str()));
@@ -50,15 +57,18 @@ pub(crate) fn render_run_pane(
                 let display: String = cmd.chars().take(max_w).collect();
                 write_str(buf, area.x + 2, y, &display, cmd_style);
             },
-            OutputLine::GridRow(grid, row_idx) => {
+            OutputLine::GridRow(grid, row_idx, selection) => {
                 let row = grid.row(*row_idx);
                 let w = (area.width as usize).min(grid.width() as usize);
+                let row_u16 = u16::try_from(*row_idx).unwrap_or(u16::MAX);
                 for (col, cell) in row.iter().enumerate().take(w) {
-                    if cell.ch == ' '
+                    let col_u16 = u16::try_from(col).unwrap_or(u16::MAX);
+                    let selected = selection.is_some_and(|sel| sel.contains(col_u16, row_u16));
+                    let blank = cell.ch == ' '
                         && cell.fg.is_none()
                         && cell.bg.is_none()
-                        && cell.modifiers.is_empty()
-                    {
+                        && cell.modifiers.is_empty();
+                    if blank && !selected {
                         continue;
                     }
                     let mut style = Style::default();
@@ -69,6 +79,9 @@ pub(crate) fn render_run_pane(
                         style = style.bg(bg);
                     }
                     style = style.add_modifier(cell.modifiers);
+                    if selected {
+                        style = style.add_modifier(Modifier::REVERSED);
+                    }
                     let x = area.x + col as u16;
                     if x < area.x + area.width {
                         buf[(x, y)].set_char(cell.ch).set_style(style);
@@ -117,7 +130,7 @@ pub(crate) fn render_run_pane(
 
 enum OutputLine<'a> {
     CommandHeader(&'a str),
-    GridRow(&'a crate::run::VtermGrid, usize),
+    GridRow(&'a crate::run::VtermGrid, usize, Option<&'a GridSelection>),
     Error(&'a str),
     Status(i32),
     Blank,
