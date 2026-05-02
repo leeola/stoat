@@ -54,6 +54,10 @@ pub(crate) struct FrameCtx<'a> {
     /// user knows a partial count is in flight; cleared after every
     /// action dispatch.
     pub(crate) pending_count: Option<u32>,
+    /// Most recently updated in-progress LSP work-done entry, if any.
+    /// Painted in the right side of the status bar so users see
+    /// "rust-analyzer indexing" / "checking" progress.
+    pub(crate) lsp_progress: Option<&'a crate::lsp::progress::LspProgressEntry>,
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -117,6 +121,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         theme: &stoat.theme,
         render_tick: stoat.render_tick,
         pending_count: stoat.pending_count,
+        lsp_progress: stoat.lsp_progress.current(),
     };
 
     let split_focused = ws.panes.focus();

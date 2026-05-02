@@ -110,6 +110,11 @@ pub struct Stoat {
     /// not error on the first clipboard event; tests install
     /// [`crate::host::FakeClipboard`] to assert on writes.
     pub(crate) clipboard_host: Arc<dyn crate::host::ClipboardHost>,
+    /// Tracks `$/progress` notifications so the status bar can show
+    /// the freshest in-progress operation. Drained from
+    /// [`crate::host::LspHost::try_recv_notification`] inside
+    /// [`Stoat::update`].
+    pub(crate) lsp_progress: crate::lsp::progress::LspProgressMap,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -230,6 +235,7 @@ impl Stoat {
             env_host: Arc::new(LocalEnv),
             lsp_host: Arc::new(NoopLsp),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
+            lsp_progress: crate::lsp::progress::LspProgressMap::new(),
         }
     }
 
@@ -501,6 +507,7 @@ impl Stoat {
     }
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
+        self.drain_lsp_notifications();
         match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -511,6 +518,38 @@ impl Stoat {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => UpdateEffect::None,
+        }
+    }
+
+    /// Drains every notification currently buffered on
+    /// [`crate::host::LspHost::try_recv_notification`] and dispatches
+    /// each by variant. `Progress` updates the [`crate::lsp::progress::LspProgressMap`];
+    /// other variants log via tracing for now and become future
+    /// per-feature consumer hooks. Cap is per-tick to avoid starving
+    /// the event loop on a pathological notification burst; the
+    /// remainder drains on the next update.
+    fn drain_lsp_notifications(&mut self) {
+        use futures::FutureExt;
+        let host = self.lsp_host.clone();
+        for _ in 0..256 {
+            // try_recv_notification is implemented on top of a
+            // non-blocking channel poll, so its future resolves
+            // synchronously; now_or_never returns Some immediately.
+            // Any host that breaks that contract returns None here
+            // and the drain ends safely.
+            let Some(slot) = host.try_recv_notification().now_or_never() else {
+                break;
+            };
+            let Some(notification) = slot else {
+                break;
+            };
+            if !self.lsp_progress.update(&notification) {
+                tracing::debug!(
+                    target: "stoat::app",
+                    ?notification,
+                    "unhandled LSP notification"
+                );
+            }
         }
     }
 

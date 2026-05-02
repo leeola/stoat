@@ -255,10 +255,48 @@ fn render_pane_status(
                     &text,
                     base_style.add_modifier(Modifier::BOLD),
                 );
+                right_anchor = start;
+            }
+        }
+        if let Some(entry) = frame.lsp_progress {
+            let text = lsp_progress_label(entry);
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                paint_segment(
+                    buf,
+                    y,
+                    start,
+                    right_anchor,
+                    &text,
+                    base_style.add_modifier(Modifier::ITALIC),
+                );
             }
         }
     }
     let _ = cursor;
+}
+
+/// Formats an LSP progress entry for the status bar. Always padded with
+/// leading and trailing spaces so adjacent segments stay separated.
+fn lsp_progress_label(entry: &crate::lsp::progress::LspProgressEntry) -> String {
+    let mut body = entry.title.clone();
+    if let Some(message) = &entry.message {
+        if !body.is_empty() {
+            body.push_str(": ");
+        }
+        body.push_str(message);
+    }
+    if let Some(pct) = entry.percentage {
+        if !body.is_empty() {
+            body.push(' ');
+        }
+        body.push_str(&format!("{pct}%"));
+    }
+    if body.is_empty() {
+        body.push_str("...");
+    }
+    format!(" {body} ")
 }
 
 fn paint_segment(
