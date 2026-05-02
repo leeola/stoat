@@ -501,6 +501,7 @@ struct FakeLspState {
     observed_configuration_changes: Vec<DidChangeConfigurationParams>,
     observed_workspace_folder_changes: Vec<DidChangeWorkspaceFoldersParams>,
     observed_replies: Vec<(NumberOrString, Result<Value, LspResponseError>)>,
+    observed_opens: Vec<DidOpenTextDocumentParams>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -559,6 +560,7 @@ impl FakeLsp {
                 observed_configuration_changes: Vec::new(),
                 observed_workspace_folder_changes: Vec::new(),
                 observed_replies: Vec::new(),
+                observed_opens: Vec::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -880,6 +882,14 @@ impl FakeLsp {
     /// rename.
     pub fn observed_renames(&self) -> Vec<RenameFilesParams> {
         self.state.lock().unwrap().observed_renames.clone()
+    }
+
+    /// Snapshot of every [`DidOpenTextDocumentParams`] received
+    /// via [`LspHost::did_open`] in call order. Tests use this to
+    /// assert that the editor notified the server when a buffer
+    /// was opened, and that re-opens dedupe at the call site.
+    pub fn observed_opens(&self) -> Vec<DidOpenTextDocumentParams> {
+        self.state.lock().unwrap().observed_opens.clone()
     }
 
     /// Snapshot of every [`DidChangeWatchedFilesParams`] received
@@ -1410,7 +1420,8 @@ impl LspHost for FakeLsp {
                 let uri = params.text_document.uri.clone();
                 state
                     .open_documents
-                    .insert(uri.clone(), params.text_document.text);
+                    .insert(uri.clone(), params.text_document.text.clone());
+                state.observed_opens.push(params.clone());
                 state.diagnostics.get(&uri).cloned().map(|diagnostics| {
                     LspNotification::Diagnostics {
                         uri,

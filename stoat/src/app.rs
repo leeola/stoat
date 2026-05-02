@@ -97,6 +97,12 @@ pub struct Stoat {
     /// label. Always paired with [`Self::pending_goto_word`]: when
     /// that field is `None` this is empty.
     pub(crate) pending_goto_word_input: String,
+    /// Buffers for which `LspHost::did_open` has been dispatched.
+    /// Dedupes re-opens of the same path: [`crate::buffer_registry::BufferRegistry::open`]
+    /// returns the existing entry on second open, but the LSP
+    /// notification must fire exactly once per buffer over its
+    /// lifetime.
+    pub(crate) lsp_opened: std::collections::HashSet<BufferId>,
     /// Most recent `(FindKind, char)` consumed by `execute_find`.
     /// `RepeatLastMotion` (Alt-.) replays this pair without
     /// reading another keypress.
@@ -242,6 +248,7 @@ impl Stoat {
             pending_find: None,
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
+            lsp_opened: std::collections::HashSet::new(),
             last_find: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),

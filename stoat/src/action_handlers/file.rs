@@ -33,15 +33,21 @@ pub(crate) fn open_file_in_pane(
 
     let lang = stoat.language_registry.for_path(&absolute);
     let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace_mut();
 
-    let (buffer_id, buffer) = ws.buffers.open(&absolute, &content);
-    if let Some(lang) = lang {
-        if ws.buffers.language_for(buffer_id).is_none() {
-            ws.buffers.set_language(buffer_id, lang);
+    let (buffer_id, buffer) = {
+        let ws = stoat.active_workspace_mut();
+        let (buffer_id, buffer) = ws.buffers.open(&absolute, &content);
+        if let Some(lang) = lang {
+            if ws.buffers.language_for(buffer_id).is_none() {
+                ws.buffers.set_language(buffer_id, lang);
+            }
         }
-    }
+        (buffer_id, buffer)
+    };
 
+    super::lsp::notify_buffer_opened(stoat, buffer_id, &absolute, &content);
+
+    let ws = stoat.active_workspace_mut();
     if let View::Editor(eid) = ws.panes.pane(target).view {
         if ws
             .editors
