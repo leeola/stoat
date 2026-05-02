@@ -92,11 +92,13 @@ pub struct FileFinder {
 }
 
 impl FileFinder {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         ws: &mut Workspace,
         executor: Executor,
         previous_mode: String,
         open_intent: OpenIntent,
+        initial_scope: FinderScope,
         git_root: PathBuf,
         all_paths: Vec<PathBuf>,
         modified_paths: Vec<PathBuf>,
@@ -113,7 +115,7 @@ impl FileFinder {
         let preview_editor_state = EditorState::new(preview_buffer, shared_buffer, executor);
         let preview_editor = ws.editors.insert(preview_editor_state);
 
-        let scope = FinderScope::All;
+        let scope = initial_scope;
         let mut filtered = Vec::new();
         let mut selected = 0;
         refilter(
@@ -838,6 +840,50 @@ mod tests {
             frame.content
         );
         assert!(h.stoat.file_finder.is_none());
+    }
+
+    #[test]
+    fn space_g_opens_finder_in_modified_scope() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[("a.rs", "v1\n"), ("b.rs", "v1\n"), ("c.rs", "v1\n")],
+        );
+        {
+            let mut builder = h.fake_git().add_repo(&root).with_fs(h.fake_fs());
+            builder.head_file("a.rs", "v1\n");
+            builder.modified("b.rs", "v1\n", "v2\n");
+            builder.head_file("c.rs", "v1\n");
+        }
+
+        h.type_keys("space g");
+        let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
+        assert_eq!(finder.scope(), FinderScope::Modified);
+        let base: Vec<PathBuf> = finder.base_paths().to_vec();
+        assert_eq!(base.len(), 1, "Modified scope should list only b.rs");
+        assert!(base[0].ends_with("b.rs"));
+        assert_eq!(h.snapshot().mode, "prompt");
+    }
+
+    #[test]
+    fn backtab_from_changed_file_picker_toggles_back_to_all() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[("a.rs", "v1\n"), ("b.rs", "v1\n"), ("c.rs", "v1\n")],
+        );
+        {
+            let mut builder = h.fake_git().add_repo(&root).with_fs(h.fake_fs());
+            builder.head_file("a.rs", "v1\n");
+            builder.modified("b.rs", "v1\n", "v2\n");
+            builder.head_file("c.rs", "v1\n");
+        }
+
+        h.type_keys("space g");
+        h.type_keys("backtab");
+        let finder = h.stoat.file_finder.as_ref().unwrap();
+        assert_eq!(finder.scope(), FinderScope::All);
+        assert_eq!(finder.base_paths().len(), 3);
     }
 
     #[test]

@@ -414,6 +414,7 @@ on key {
         c -> SetMode(claude);
         w -> SetMode(space_workspace);
         p -> OpenFileFinder();
+        g -> OpenChangedFilePicker();
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];

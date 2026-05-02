@@ -1,6 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    file_finder::{FileFinder, OpenIntent},
+    file_finder::{FileFinder, FinderScope, OpenIntent},
 };
 use std::path::PathBuf;
 use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
@@ -11,7 +11,11 @@ use stoat_action::{OpenFile, SplitNewDown, SplitNewRight};
 /// list at open time. Always restores to normal mode on close: the finder
 /// is a top-level modal, so returning to a leader mode like `space`
 /// surfaces a confusing secondary menu instead of a clean editor state.
-pub(super) fn open_file_finder(stoat: &mut Stoat, open_intent: OpenIntent) -> UpdateEffect {
+pub(super) fn open_file_finder(
+    stoat: &mut Stoat,
+    open_intent: OpenIntent,
+    initial_scope: FinderScope,
+) -> UpdateEffect {
     if stoat.file_finder.is_some() {
         return UpdateEffect::None;
     }
@@ -28,6 +32,7 @@ pub(super) fn open_file_finder(stoat: &mut Stoat, open_intent: OpenIntent) -> Up
         executor,
         previous_mode,
         open_intent,
+        initial_scope,
         git_root,
         all_paths,
         modified_paths,

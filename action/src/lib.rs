@@ -40,8 +40,8 @@ pub use defs::{
     },
     file::OpenFile,
     file_finder::{
-        FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenFileFinder,
-        OpenFileFinderHSplit, OpenFileFinderVSplit,
+        FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenChangedFilePicker,
+        OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit,
     },
     help::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,

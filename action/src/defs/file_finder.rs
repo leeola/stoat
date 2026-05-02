@@ -146,6 +146,54 @@ impl Action for OpenFileFinderVSplit {
 }
 
 #[derive(Debug)]
+pub struct OpenChangedFilePickerDef;
+
+impl ActionDef for OpenChangedFilePickerDef {
+    fn name(&self) -> &'static str {
+        "OpenChangedFilePicker"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenChangedFilePicker
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open the changed-file picker"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open the file finder modal pre-filtered to files with uncommitted git \
+         changes. Shift-Tab flips back to the All scope (every tracked file in \
+         the workspace)."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenChangedFilePicker;
+
+impl OpenChangedFilePicker {
+    pub const DEF: &OpenChangedFilePickerDef = &OpenChangedFilePickerDef;
+}
+
+impl Action for OpenChangedFilePicker {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct FileFinderSelectPrevDef;
 
 impl ActionDef for FileFinderSelectPrevDef {
@@ -311,6 +359,13 @@ mod tests {
         );
         assert_eq!(OpenFileFinderVSplit.def().name(), "OpenFileFinderVSplit");
         assert!(OpenFileFinderVSplit.def().palette_visible());
+
+        assert_eq!(
+            OpenChangedFilePicker.kind(),
+            ActionKind::OpenChangedFilePicker
+        );
+        assert_eq!(OpenChangedFilePicker.def().name(), "OpenChangedFilePicker");
+        assert!(OpenChangedFilePicker.def().palette_visible());
 
         assert_eq!(
             FileFinderSelectPrev.kind(),

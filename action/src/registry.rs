@@ -36,8 +36,8 @@ use crate::{
         },
         file::OpenFile,
         file_finder::{
-            FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenFileFinder,
-            OpenFileFinderHSplit, OpenFileFinderVSplit,
+            FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev,
+            OpenChangedFilePicker, OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit,
         },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
@@ -115,6 +115,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(OpenFileFinderVSplit::DEF, |_| {
         Ok(Box::new(OpenFileFinderVSplit))
+    });
+    add(OpenChangedFilePicker::DEF, |_| {
+        Ok(Box::new(OpenChangedFilePicker))
     });
     add(FileFinderSelectPrev::DEF, |_| {
         Ok(Box::new(FileFinderSelectPrev))
@@ -523,6 +526,7 @@ mod tests {
         "OpenFileFinder",
         "OpenFileFinderHSplit",
         "OpenFileFinderVSplit",
+        "OpenChangedFilePicker",
         "FileFinderSelectPrev",
         "FileFinderSelectNext",
         "FileFinderScopeToggle",
@@ -741,7 +745,8 @@ mod tests {
         // + 2 ExtendMoveParentNodeStart/ExtendMoveParentNodeEnd.
         // + 2 ExtendSelectNextSibling/ExtendSelectPrevSibling.
         // + 1 RemovePrimarySelection.
-        assert_eq!(all().count(), 209);
+        // + 1 OpenChangedFilePicker.
+        assert_eq!(all().count(), 210);
     }
 
     #[test]
