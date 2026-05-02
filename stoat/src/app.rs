@@ -528,7 +528,7 @@ impl Stoat {
     /// per-feature consumer hooks. Cap is per-tick to avoid starving
     /// the event loop on a pathological notification burst; the
     /// remainder drains on the next update.
-    fn drain_lsp_notifications(&mut self) {
+    pub(crate) fn drain_lsp_notifications(&mut self) {
         use futures::FutureExt;
         let host = self.lsp_host.clone();
         for _ in 0..256 {
@@ -1677,5 +1677,23 @@ mod tests {
         h.stoat.active_workspace_mut().focus = FocusTarget::Dock(dangling);
         let translated = h.stoat.translate_mouse_to_focused(10, 10);
         assert_eq!(translated, None);
+    }
+
+    #[test]
+    fn snapshot_lsp_progress_indexing() {
+        use crate::host::LspNotification;
+        use lsp_types::{NumberOrString, WorkDoneProgress, WorkDoneProgressBegin};
+        let mut h = Stoat::test();
+        h.fake_lsp().push_notification(LspNotification::Progress {
+            token: NumberOrString::Number(1),
+            value: WorkDoneProgress::Begin(WorkDoneProgressBegin {
+                title: "indexing".into(),
+                cancellable: None,
+                message: None,
+                percentage: Some(25),
+            }),
+        });
+        h.drain_lsp();
+        h.assert_snapshot("lsp_progress_indexing");
     }
 }

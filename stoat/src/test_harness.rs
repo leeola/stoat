@@ -145,6 +145,13 @@ impl TestHarness {
         &self.fake_lsp
     }
 
+    /// Drives a notification drain so tests that pushed onto
+    /// [`crate::host::FakeLsp`] before any `update` event still see
+    /// the dispatched state in the next snapshot.
+    pub fn drain_lsp(&mut self) {
+        self.stoat.drain_lsp_notifications();
+    }
+
     /// Expose the [`crate::host::FakeClipboard`] backing this harness
     /// so tests can read writes that flowed through
     /// `stoat.clipboard_host()`.
