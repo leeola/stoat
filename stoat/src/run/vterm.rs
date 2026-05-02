@@ -68,6 +68,38 @@ impl VtermGrid {
         self.width
     }
 
+    /// Extract the row-major text covered by `selection`. Single-row
+    /// selections cover columns `[low_col, high_col]` inclusive;
+    /// multi-row selections cover `[low_col, end-of-row]` on the first
+    /// row, every column on intermediate rows, and `[start, high_col]`
+    /// on the last row -- mirroring [`GridSelection::contains`]. Per-row
+    /// trailing whitespace is trimmed and rows join with `\n` with no
+    /// trailing newline. Out-of-grid selections produce `""`.
+    pub fn text_for_selection(&self, selection: &GridSelection) -> String {
+        let ((low_col, low_row), (high_col, high_row)) = selection.bounds();
+        let width = self.width as usize;
+        let low_col = low_col as usize;
+        let high_col = high_col as usize;
+        let low_row = low_row as usize;
+        let high_row = high_row as usize;
+
+        if low_row >= self.cells.len() {
+            return String::new();
+        }
+
+        if low_row == high_row {
+            return self.text_in(low_col..high_col.saturating_add(1), low_row..high_row + 1);
+        }
+
+        let mut parts: Vec<String> = Vec::with_capacity(high_row - low_row + 1);
+        parts.push(self.text_in(low_col..width, low_row..low_row + 1));
+        if high_row > low_row + 1 {
+            parts.push(self.text_in(0..width, low_row + 1..high_row));
+        }
+        parts.push(self.text_in(0..high_col.saturating_add(1), high_row..high_row + 1));
+        parts.join("\n")
+    }
+
     /// Extract the characters within a column/row rect as a string. Both
     /// ranges are clamped to grid bounds, trailing whitespace is trimmed
     /// per row, and rows are joined with `\n` with no trailing newline.

@@ -353,4 +353,64 @@ mod tests {
         assert!(!sel.contains(4, 3));
         assert!(!sel.contains(0, 4));
     }
+
+    #[test]
+    fn text_for_selection_single_row() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"hello world");
+        let sel = GridSelection {
+            anchor: (1, 0),
+            head: (3, 0),
+        };
+        assert_eq!(grid.text_for_selection(&sel), "ell");
+    }
+
+    #[test]
+    fn text_for_selection_multi_row_joins_with_newline() {
+        let mut grid = VtermGrid::new(8);
+        grid.feed(b"foo\r\nbar\r\nbaz");
+        let sel = GridSelection {
+            anchor: (1, 0),
+            head: (1, 2),
+        };
+        assert_eq!(grid.text_for_selection(&sel), "oo\nbar\nba");
+    }
+
+    #[test]
+    fn text_for_selection_normalises_reverse_drag() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"abcdef");
+        let forward = GridSelection {
+            anchor: (1, 0),
+            head: (4, 0),
+        };
+        let reverse = GridSelection {
+            anchor: (4, 0),
+            head: (1, 0),
+        };
+        assert_eq!(grid.text_for_selection(&forward), "bcde");
+        assert_eq!(grid.text_for_selection(&reverse), "bcde");
+    }
+
+    #[test]
+    fn text_for_selection_out_of_bounds_returns_empty() {
+        let mut grid = VtermGrid::new(5);
+        grid.feed(b"hi");
+        let sel = GridSelection {
+            anchor: (0, 5),
+            head: (4, 7),
+        };
+        assert_eq!(grid.text_for_selection(&sel), "");
+    }
+
+    #[test]
+    fn text_for_selection_three_rows_keeps_middle() {
+        let mut grid = VtermGrid::new(6);
+        grid.feed(b"alpha\r\nbeta\r\ngamma");
+        let sel = GridSelection {
+            anchor: (2, 0),
+            head: (2, 2),
+        };
+        assert_eq!(grid.text_for_selection(&sel), "pha\nbeta\ngam");
+    }
 }

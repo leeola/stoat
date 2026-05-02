@@ -574,8 +574,10 @@ impl Stoat {
 
     /// Routes left-button Down/Drag/Up events on a focused run pane into
     /// the active block's [`GridSelection`]. Returns `true` when the event
-    /// mutated state. `Up(Left)` is recognised but intentionally does not
-    /// mutate -- the selection persists for the auto-copy bullet to consume.
+    /// mutated state. `Up(Left)` finalises the drag by extracting the
+    /// row-major selection text and pushing it to the
+    /// [`crate::host::ClipboardHost`]; the selection itself persists in
+    /// place. Click-without-drag (`anchor == head`) is a no-op.
     fn handle_run_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
         let target = {
             let ws = self.active_workspace();
@@ -600,6 +602,7 @@ impl Stoat {
         let Some((run_id, area)) = target else {
             return false;
         };
+        let clipboard_host = self.clipboard_host.clone();
         let ws = self.active_workspace_mut();
         let Some(run_state) = ws.runs.get_mut(run_id) else {
             return false;
@@ -632,7 +635,26 @@ impl Stoat {
                 sel.head = pos;
                 true
             },
-            MouseEventKind::Up(MouseButton::Left) => false,
+            MouseEventKind::Up(MouseButton::Left) => {
+                let Some(sel) = block.selection.as_ref() else {
+                    return false;
+                };
+                if sel.anchor == sel.head {
+                    return false;
+                }
+                let text = block.grid.text_for_selection(sel);
+                if text.is_empty() {
+                    return false;
+                }
+                if let Err(err) = clipboard_host.set(&text) {
+                    tracing::warn!(
+                        target: "stoat::app",
+                        error = %err,
+                        "clipboard write failed"
+                    );
+                }
+                false
+            },
             _ => false,
         }
     }
@@ -1909,5 +1931,51 @@ mod tests {
             .stoat
             .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5));
         assert_eq!(effect, UpdateEffect::None);
+    }
+
+    #[test]
+    fn mouse_up_after_drag_writes_selection_to_clipboard() {
+        let mut h = Stoat::test();
+        let _ = open_run_with_output(&mut h, b"hello\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 3, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 3, 1));
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+    }
+
+    #[test]
+    fn mouse_up_without_drag_skips_clipboard() {
+        let mut h = Stoat::test();
+        let _ = open_run_with_output(&mut h, b"hello\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 2, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 1));
+        assert!(h.fake_clipboard().writes().is_empty());
+    }
+
+    #[test]
+    fn mouse_up_with_no_selection_skips_clipboard() {
+        let mut h = Stoat::test();
+        let _ = open_run_with_output(&mut h, b"hello\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 2, 1));
+        assert!(h.fake_clipboard().writes().is_empty());
+    }
+
+    #[test]
+    fn mouse_up_multi_row_drag_writes_joined_lines() {
+        let mut h = Stoat::test();
+        let _ = open_run_with_output(&mut h, b"foo\nbar\n");
+        h.stoat
+            .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 1, 1));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Drag(MouseButton::Left), 1, 2));
+        h.stoat
+            .update(mouse_event(MouseEventKind::Up(MouseButton::Left), 1, 2));
+        assert_eq!(h.fake_clipboard().writes(), vec!["oo\nba"]);
     }
 }
