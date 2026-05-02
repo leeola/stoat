@@ -100,36 +100,109 @@ pub struct MoveRecord {
     pub lhs_sources: Vec<SyntaxId>,
 }
 
-/// Run the move pass. Mutates the two change maps in place, rewriting
-/// paired nodes from [`ChangeKind::Pending`] to [`ChangeKind::Moved`].
-/// Returns the list of [`MoveRecord`]s in RHS byte order; the caller
-/// threads them through to [`super::DiffChange::move_metadata`].
-///
-/// Scans every node in both arenas, not just `Pending` ones, because
-/// the unchanged-preprocessing pass greedily pairs one LHS copy of a
-/// repeated [`ContentId`] with one RHS copy. In a consolidation
-/// scenario (N LHS sources merged into one shared RHS location) only
-/// `N - 1` LHS copies remain Pending; looking at the full arena lets
-/// us emit the complete N-source record so downstream callers can
-/// offer every candidate jump target. Content ids whose copies all
-/// remain [`ChangeKind::Unchanged`] after preprocessing AND whose
-/// counts match across sides are skipped: that is structural
-/// preservation, not a move.
+/// Cross-file analogue of [`MoveRecord`]. `(file_idx, SyntaxId)`
+/// tuples index into the slice passed to [`find_moves_changeset`]; the
+/// caller maps `file_idx` back to the corresponding
+/// [`super::BufferRef`] / arena / line index when materialising
+/// [`super::MoveSource`]s.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ChangesetMoveRecord {
+    pub rhs_target: (usize, SyntaxId),
+    pub lhs_sources: Vec<(usize, SyntaxId)>,
+}
+
+/// One file's contribution to [`find_moves_changeset`]. `lhs_arena` and
+/// `rhs_arena` are the parsed-and-lowered arenas for the file's two
+/// sides; `lhs_changes` and `rhs_changes` are the post-preprocessing
+/// change maps the move pass mutates in place (residual `Pending`
+/// nodes become `Moved` when paired).
+pub struct FileMoveInput<'a> {
+    pub lhs_arena: &'a SyntaxArena,
+    pub rhs_arena: &'a SyntaxArena,
+    pub lhs_changes: &'a mut ChangeMap,
+    pub rhs_changes: &'a mut ChangeMap,
+}
+
+/// Run the move pass against a single file. Convenience wrapper around
+/// [`find_moves_changeset`] for callers (chiefly
+/// [`super::diff_with_language`] and the single-file tier-1 tests) that
+/// only diff one file at a time. Mutates the two change maps in place,
+/// rewriting paired nodes from [`ChangeKind::Pending`] to
+/// [`ChangeKind::Moved`].
 pub fn find_moves(
     lhs_arena: &SyntaxArena,
     rhs_arena: &SyntaxArena,
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
 ) -> Vec<MoveRecord> {
-    let lhs_parents = build_parent_map(lhs_arena);
-    let rhs_parents = build_parent_map(rhs_arena);
-    let lhs_leaf_counts = precompute_leaf_counts(lhs_arena);
-    let rhs_leaf_counts = precompute_leaf_counts(rhs_arena);
-    let lhs_depths = precompute_depths(&lhs_parents);
-    let rhs_depths = precompute_depths(&rhs_parents);
+    let mut input = [FileMoveInput {
+        lhs_arena,
+        rhs_arena,
+        lhs_changes,
+        rhs_changes,
+    }];
+    find_moves_changeset(&mut input)
+        .into_iter()
+        .map(|r| MoveRecord {
+            rhs_target: r.rhs_target.1,
+            lhs_sources: r.lhs_sources.into_iter().map(|(_, id)| id).collect(),
+        })
+        .collect()
+}
 
-    let lhs_by_cid = index_all_candidates(lhs_arena, &lhs_leaf_counts);
-    let rhs_by_cid = index_all_candidates(rhs_arena, &rhs_leaf_counts);
+/// Run the move pass across a changeset of files. Indexes
+/// [`ContentId`] candidates over the union of all per-file LHS arenas
+/// and RHS arenas, then runs the same shrink-shared / proximity-pair
+/// pairing logic as the single-file path on `(file_idx, SyntaxId)`
+/// tuples. Emits [`ChangesetMoveRecord`]s sorted by
+/// `(rhs_file_idx, byte_start)` for determinism. Cross-file moves are
+/// detected naturally: a `ContentId` that appears in file 0's LHS and
+/// file 1's RHS pairs across the file boundary.
+///
+/// See [`find_moves`] for the single-file conventions this generalises
+/// (scans full arena including Unchanged copies, applies
+/// [`MIN_LEAVES`] / [`MAX_AMBIGUITY`] / [`is_trivial`] gates,
+/// structural-preservation skip).
+pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMoveRecord> {
+    let n = files.len();
+
+    let mut lhs_parents_per: Vec<Vec<Option<SyntaxId>>> = Vec::with_capacity(n);
+    let mut rhs_parents_per: Vec<Vec<Option<SyntaxId>>> = Vec::with_capacity(n);
+    let mut lhs_leaf_counts_per: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut rhs_leaf_counts_per: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut lhs_depths_per: Vec<Vec<usize>> = Vec::with_capacity(n);
+    let mut rhs_depths_per: Vec<Vec<usize>> = Vec::with_capacity(n);
+    for f in files.iter() {
+        let lhs_parents = build_parent_map(f.lhs_arena);
+        let rhs_parents = build_parent_map(f.rhs_arena);
+        let lhs_leaves = precompute_leaf_counts(f.lhs_arena);
+        let rhs_leaves = precompute_leaf_counts(f.rhs_arena);
+        let lhs_depths = precompute_depths(&lhs_parents);
+        let rhs_depths = precompute_depths(&rhs_parents);
+        lhs_parents_per.push(lhs_parents);
+        rhs_parents_per.push(rhs_parents);
+        lhs_leaf_counts_per.push(lhs_leaves);
+        rhs_leaf_counts_per.push(rhs_leaves);
+        lhs_depths_per.push(lhs_depths);
+        rhs_depths_per.push(rhs_depths);
+    }
+
+    let mut lhs_by_cid: HashMap<ContentId, Vec<FileNode>> = HashMap::new();
+    let mut rhs_by_cid: HashMap<ContentId, Vec<FileNode>> = HashMap::new();
+    for (file_idx, f) in files.iter().enumerate() {
+        for (cid, ids) in index_all_candidates(f.lhs_arena, &lhs_leaf_counts_per[file_idx]) {
+            lhs_by_cid
+                .entry(cid)
+                .or_default()
+                .extend(ids.into_iter().map(|id| (file_idx, id)));
+        }
+        for (cid, ids) in index_all_candidates(f.rhs_arena, &rhs_leaf_counts_per[file_idx]) {
+            rhs_by_cid
+                .entry(cid)
+                .or_default()
+                .extend(ids.into_iter().map(|id| (file_idx, id)));
+        }
+    }
 
     let mut shared: Vec<(ContentId, usize, usize)> = lhs_by_cid
         .iter()
@@ -137,13 +210,13 @@ pub fn find_moves(
             rhs_by_cid.get(cid).map(|rhs_ids| {
                 let leaves = ids
                     .iter()
-                    .map(|id| lhs_leaf_counts[id.0])
+                    .map(|(fi, id)| lhs_leaf_counts_per[*fi][id.0])
                     .max()
                     .unwrap_or(0);
                 let min_depth = ids
                     .iter()
-                    .map(|id| lhs_depths[id.0])
-                    .chain(rhs_ids.iter().map(|id| rhs_depths[id.0]))
+                    .map(|(fi, id)| lhs_depths_per[*fi][id.0])
+                    .chain(rhs_ids.iter().map(|(fi, id)| rhs_depths_per[*fi][id.0]))
                     .min()
                     .unwrap_or(0);
                 (*cid, leaves, min_depth)
@@ -157,9 +230,9 @@ pub fn find_moves(
     // tiebreaker.
     shared.sort_by(|a, b| b.1.cmp(&a.1).then(a.2.cmp(&b.2)).then(a.0.cmp(&b.0)));
 
-    let mut paired_lhs: HashSet<SyntaxId> = HashSet::new();
-    let mut paired_rhs: HashSet<SyntaxId> = HashSet::new();
-    let mut records: Vec<MoveRecord> = Vec::new();
+    let mut paired_lhs: HashSet<FileNode> = HashSet::new();
+    let mut paired_rhs: HashSet<FileNode> = HashSet::new();
+    let mut records: Vec<ChangesetMoveRecord> = Vec::new();
 
     for (cid, _, _) in &shared {
         let lhs_cand = lhs_by_cid.get(cid).expect("cid in shared set");
@@ -168,8 +241,8 @@ pub fn find_moves(
             continue;
         }
 
-        let lhs_avail = filter_unpaired(lhs_cand, &paired_lhs, &lhs_parents);
-        let rhs_avail = filter_unpaired(rhs_cand, &paired_rhs, &rhs_parents);
+        let lhs_avail = filter_unpaired_multi(lhs_cand, &paired_lhs, &lhs_parents_per);
+        let rhs_avail = filter_unpaired_multi(rhs_cand, &paired_rhs, &rhs_parents_per);
         if lhs_avail.is_empty() || rhs_avail.is_empty() {
             continue;
         }
@@ -179,17 +252,16 @@ pub fn find_moves(
         if lhs_avail.len() == rhs_avail.len()
             && lhs_avail
                 .iter()
-                .all(|id| lhs_changes.get(*id) == ChangeKind::Unchanged)
+                .all(|(fi, id)| files[*fi].lhs_changes.get(*id) == ChangeKind::Unchanged)
             && rhs_avail
                 .iter()
-                .all(|id| rhs_changes.get(*id) == ChangeKind::Unchanged)
+                .all(|(fi, id)| files[*fi].rhs_changes.get(*id) == ChangeKind::Unchanged)
         {
             continue;
         }
 
-        emit_records(
-            lhs_arena,
-            rhs_arena,
+        emit_records_multi(
+            files,
             &lhs_avail,
             &rhs_avail,
             &mut paired_lhs,
@@ -198,16 +270,27 @@ pub fn find_moves(
         );
     }
 
-    for id in &paired_lhs {
-        mark_subtree_moved(lhs_arena, *id, lhs_changes);
+    for (fi, id) in &paired_lhs {
+        let f = &mut files[*fi];
+        mark_subtree_moved(f.lhs_arena, *id, f.lhs_changes);
     }
-    for id in &paired_rhs {
-        mark_subtree_moved(rhs_arena, *id, rhs_changes);
+    for (fi, id) in &paired_rhs {
+        let f = &mut files[*fi];
+        mark_subtree_moved(f.rhs_arena, *id, f.rhs_changes);
     }
 
-    records.sort_by_key(|r| byte_start(rhs_arena, r.rhs_target));
+    records.sort_by_key(|r| {
+        let (fi, id) = r.rhs_target;
+        (fi, byte_start(files[fi].rhs_arena, id))
+    });
     records
 }
+
+/// `(file_idx, SyntaxId)` pair used internally by
+/// [`find_moves_changeset`] to identify a syntax node within the
+/// changeset. The same alias is exposed via
+/// [`ChangesetMoveRecord::rhs_target`] / `lhs_sources`.
+type FileNode = (usize, SyntaxId);
 
 /// Walk every node in `arena` and group by [`ContentId`]. Includes
 /// Unchanged nodes so consolidation and duplication counts reflect
@@ -246,35 +329,36 @@ fn is_trivial(arena: &SyntaxArena, id: SyntaxId) -> bool {
     }
 }
 
-fn filter_unpaired(
-    candidates: &[SyntaxId],
-    paired: &HashSet<SyntaxId>,
-    parents: &[Option<SyntaxId>],
-) -> Vec<SyntaxId> {
+fn filter_unpaired_multi(
+    candidates: &[FileNode],
+    paired: &HashSet<FileNode>,
+    parents_per: &[Vec<Option<SyntaxId>>],
+) -> Vec<FileNode> {
     candidates
         .iter()
         .copied()
-        .filter(|id| !paired.contains(id) && !ancestor_in_set(parents, *id, paired))
+        .filter(|(fi, id)| {
+            !paired.contains(&(*fi, *id)) && !ancestor_in_set_multi(parents_per, *fi, *id, paired)
+        })
         .collect()
 }
 
-fn emit_records(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
-    lhs_avail: &[SyntaxId],
-    rhs_avail: &[SyntaxId],
-    paired_lhs: &mut HashSet<SyntaxId>,
-    paired_rhs: &mut HashSet<SyntaxId>,
-    records: &mut Vec<MoveRecord>,
+fn emit_records_multi(
+    files: &[FileMoveInput<'_>],
+    lhs_avail: &[FileNode],
+    rhs_avail: &[FileNode],
+    paired_lhs: &mut HashSet<FileNode>,
+    paired_rhs: &mut HashSet<FileNode>,
+    records: &mut Vec<ChangesetMoveRecord>,
 ) {
     let mut lhs_sorted = lhs_avail.to_vec();
-    lhs_sorted.sort_by_key(|id| byte_start(lhs_arena, *id));
+    lhs_sorted.sort_by_key(|(fi, id)| (*fi, byte_start(files[*fi].lhs_arena, *id)));
     let mut rhs_sorted = rhs_avail.to_vec();
-    rhs_sorted.sort_by_key(|id| byte_start(rhs_arena, *id));
+    rhs_sorted.sort_by_key(|(fi, id)| (*fi, byte_start(files[*fi].rhs_arena, *id)));
 
     match (lhs_sorted.len(), rhs_sorted.len()) {
         (1, 1) => {
-            records.push(MoveRecord {
+            records.push(ChangesetMoveRecord {
                 rhs_target: rhs_sorted[0],
                 lhs_sources: vec![lhs_sorted[0]],
             });
@@ -290,7 +374,7 @@ fn emit_records(
                 paired_lhs.insert(*src);
             }
             paired_rhs.insert(target);
-            records.push(MoveRecord {
+            records.push(ChangesetMoveRecord {
                 rhs_target: target,
                 lhs_sources: lhs_sorted,
             });
@@ -302,7 +386,7 @@ fn emit_records(
             paired_lhs.insert(src);
             for target in rhs_sorted {
                 paired_rhs.insert(target);
-                records.push(MoveRecord {
+                records.push(ChangesetMoveRecord {
                     rhs_target: target,
                     lhs_sources: vec![src],
                 });
@@ -314,14 +398,14 @@ fn emit_records(
             for (&lhs, &rhs) in lhs_sorted.iter().zip(rhs_sorted.iter()) {
                 paired_lhs.insert(lhs);
                 paired_rhs.insert(rhs);
-                records.push(MoveRecord {
+                records.push(ChangesetMoveRecord {
                     rhs_target: rhs,
                     lhs_sources: vec![lhs],
                 });
             }
             for &target in &rhs_sorted[n..m] {
                 paired_rhs.insert(target);
-                records.push(MoveRecord {
+                records.push(ChangesetMoveRecord {
                     rhs_target: target,
                     lhs_sources: lhs_sorted.clone(),
                 });
@@ -340,7 +424,7 @@ fn emit_records(
                     paired_lhs.insert(*src);
                 }
                 paired_rhs.insert(rhs_sorted[k]);
-                records.push(MoveRecord {
+                records.push(ChangesetMoveRecord {
                     rhs_target: rhs_sorted[k],
                     lhs_sources: sources,
                 });
@@ -361,10 +445,16 @@ fn build_parent_map(arena: &SyntaxArena) -> Vec<Option<SyntaxId>> {
     parents
 }
 
-fn ancestor_in_set(parents: &[Option<SyntaxId>], id: SyntaxId, set: &HashSet<SyntaxId>) -> bool {
+fn ancestor_in_set_multi(
+    parents_per: &[Vec<Option<SyntaxId>>],
+    file_idx: usize,
+    id: SyntaxId,
+    set: &HashSet<FileNode>,
+) -> bool {
+    let parents = &parents_per[file_idx];
     let mut cur = parents[id.0];
     while let Some(p) = cur {
-        if set.contains(&p) {
+        if set.contains(&(file_idx, p)) {
             return true;
         }
         cur = parents[p.0];
@@ -822,6 +912,125 @@ mod tests {
                     .iter()
                     .all(|r| r.lhs_sources.len() <= MAX_AMBIGUITY),
             "records must never exceed MAX_AMBIGUITY sources; got {run_heavy_moves:?}"
+        );
+    }
+
+    #[test]
+    fn cross_file_function_migration() {
+        // Same function exists only on file 0's LHS and only on file
+        // 1's RHS. The cross-file move pass must pair them across the
+        // file boundary.
+        let lhs_a = "fn relocated() { let x = 1; let y = 2; let z = 3; }\n\
+                     fn stays_a() { call_a(); }";
+        let rhs_a = "fn stays_a() { call_a(); }";
+        let lhs_b = "fn stays_b() { call_b(); }";
+        let rhs_b = "fn stays_b() { call_b(); }\n\
+                     fn relocated() { let x = 1; let y = 2; let z = 3; }";
+
+        let (lhs_arena_a, _) = lower(lhs_a);
+        let (rhs_arena_a, _) = lower(rhs_a);
+        let (lhs_arena_b, _) = lower(lhs_b);
+        let (rhs_arena_b, _) = lower(rhs_b);
+
+        let mut pre_a = mark_unchanged(&lhs_arena_a, lower(lhs_a).1, &rhs_arena_a, lower(rhs_a).1);
+        let mut pre_b = mark_unchanged(&lhs_arena_b, lower(lhs_b).1, &rhs_arena_b, lower(rhs_b).1);
+
+        let cs_records = {
+            let mut input = [
+                FileMoveInput {
+                    lhs_arena: &lhs_arena_a,
+                    rhs_arena: &rhs_arena_a,
+                    lhs_changes: &mut pre_a.lhs_changes,
+                    rhs_changes: &mut pre_a.rhs_changes,
+                },
+                FileMoveInput {
+                    lhs_arena: &lhs_arena_b,
+                    rhs_arena: &rhs_arena_b,
+                    lhs_changes: &mut pre_b.lhs_changes,
+                    rhs_changes: &mut pre_b.rhs_changes,
+                },
+            ];
+            find_moves_changeset(&mut input)
+        };
+
+        let cross: Vec<&ChangesetMoveRecord> = cs_records
+            .iter()
+            .filter(|r| r.rhs_target.0 != r.lhs_sources.first().map_or(usize::MAX, |s| s.0))
+            .collect();
+        assert_eq!(
+            cross.len(),
+            1,
+            "exactly one cross-file move expected; got {cs_records:?}"
+        );
+
+        let record = cross[0];
+        assert_eq!(record.lhs_sources.len(), 1, "unambiguous cross-file move");
+        assert_eq!(record.lhs_sources[0].0, 0, "source lives in file 0");
+        assert_eq!(record.rhs_target.0, 1, "target lives in file 1");
+
+        let lhs_text = &lhs_a[full_byte_range(&lhs_arena_a, record.lhs_sources[0].1)];
+        let rhs_text = &rhs_b[full_byte_range(&rhs_arena_b, record.rhs_target.1)];
+        assert_eq!(
+            lhs_text, rhs_text,
+            "moved subtree must be byte-for-byte equal across files"
+        );
+        assert_eq!(
+            lhs_arena_a.get(record.lhs_sources[0].1).content_id(),
+            rhs_arena_b.get(record.rhs_target.1).content_id(),
+            "moved subtree must share content_id across files"
+        );
+
+        assert!(
+            is_moved(&pre_a.lhs_changes, record.lhs_sources[0].1),
+            "file 0 LHS source must be tagged Moved"
+        );
+        assert!(
+            is_moved(&pre_b.rhs_changes, record.rhs_target.1),
+            "file 1 RHS target must be tagged Moved"
+        );
+    }
+
+    #[test]
+    fn changeset_with_one_file_matches_single_file_records() {
+        // The single-file find_moves wrapper round-trips the records
+        // produced by find_moves_changeset for a one-file slice.
+        let lhs = "fn alpha() { let x = 1; let y = 2; let z = 3; }\n\
+                   fn beta() { let p = 10; let q = 20; let r = 30; }";
+        let rhs = "fn beta() { let p = 10; let q = 20; let r = 30; }\n\
+                   fn alpha() { let x = 1; let y = 2; let z = 3; }";
+
+        let (lhs_arena, lhs_root) = lower(lhs);
+        let (rhs_arena, rhs_root) = lower(rhs);
+
+        let mut pre_wrapper = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
+        let wrapper_records = find_moves(
+            &lhs_arena,
+            &rhs_arena,
+            &mut pre_wrapper.lhs_changes,
+            &mut pre_wrapper.rhs_changes,
+        );
+
+        let mut pre_cs = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
+        let cs_records = {
+            let mut input = [FileMoveInput {
+                lhs_arena: &lhs_arena,
+                rhs_arena: &rhs_arena,
+                lhs_changes: &mut pre_cs.lhs_changes,
+                rhs_changes: &mut pre_cs.rhs_changes,
+            }];
+            find_moves_changeset(&mut input)
+        };
+
+        let cs_as_record: Vec<MoveRecord> = cs_records
+            .iter()
+            .map(|r| MoveRecord {
+                rhs_target: r.rhs_target.1,
+                lhs_sources: r.lhs_sources.iter().map(|(_, id)| *id).collect(),
+            })
+            .collect();
+        assert_eq!(
+            wrapper_records, cs_as_record,
+            "single-file slice through find_moves_changeset must match find_moves output"
         );
     }
 }

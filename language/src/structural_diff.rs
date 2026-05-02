@@ -43,9 +43,9 @@ pub use arena::{Atom, List, Syntax, SyntaxArena, SyntaxId};
 pub use content_id::ContentId;
 pub use line_diff::diff_lines;
 pub use lower::lower_tree;
-pub use moves::{find_moves, MoveRecord};
+pub use moves::{find_moves, ChangesetMoveRecord, FileMoveInput, MoveRecord};
 use std::{ops::Range, path::PathBuf, sync::Arc};
-pub use tree_diff::diff_with_language;
+pub use tree_diff::{diff_changeset, diff_with_language};
 pub use unchanged::{
     mark_unchanged, ChangeKind as PreprocessChangeKind, ChangeMap, PreprocessResult,
 };
@@ -130,6 +130,22 @@ pub struct MoveSource {
 pub struct BufferRef {
     pub path: PathBuf,
     pub fingerprint: [u8; 32],
+}
+
+/// One file's contribution to a [`diff_changeset`] call. Owned strings
+/// match the per-file [`diff_with_language`] entry's argument shape so
+/// callers can hand the same buffers to either path.
+///
+/// `language: None` falls back to [`diff_lines`] for that file --
+/// cross-file moves require a parse on both sides, so unparsed inputs
+/// produce a normal line-diff and do not participate in cross-file
+/// move detection.
+#[derive(Clone)]
+pub struct FileDiffInput {
+    pub buffer: BufferRef,
+    pub language: Option<Arc<crate::Language>>,
+    pub lhs_text: String,
+    pub rhs_text: String,
 }
 
 /// Result of [`diff`] / [`diff_lines`]. `fell_back_to_line_diff` is `true`

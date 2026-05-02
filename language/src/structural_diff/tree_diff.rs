@@ -23,11 +23,13 @@
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     dijkstra::{populate_change_map, shortest_path, SearchOutcome, DEFAULT_GRAPH_LIMIT},
+    line_diff,
     lower::lower_tree,
-    moves::{find_moves, MoveRecord},
+    moves::{find_moves_changeset, ChangesetMoveRecord, FileMoveInput},
     sliders::fix_all_sliders,
     unchanged::{mark_unchanged, ChangeKind, ChangeMap},
-    ChangeKind as DiffChangeKind, DiffChange, DiffResult, MoveMetadata, MoveSource, Side,
+    BufferRef, ChangeKind as DiffChangeKind, DiffChange, DiffResult, FileDiffInput, MoveMetadata,
+    MoveSource, Side,
 };
 use crate::{parse, Language};
 use std::{
@@ -69,6 +71,178 @@ pub fn diff_with_language_cancellable(
     rhs: &str,
     cancel: Option<&AtomicBool>,
 ) -> Option<DiffResult> {
+    let mut prepared = prepare_per_file(language, lhs, rhs, cancel)?;
+
+    let records = {
+        let mut input = [FileMoveInput {
+            lhs_arena: &prepared.lhs_arena,
+            rhs_arena: &prepared.rhs_arena,
+            lhs_changes: &mut prepared.lhs_changes,
+            rhs_changes: &mut prepared.rhs_changes,
+        }];
+        find_moves_changeset(&mut input)
+    };
+
+    let no_buffer: [Option<&BufferRef>; 1] = [None];
+    let view_borrowed: [PreparedFileView<'_>; 1] = [PreparedFileView {
+        lhs_arena: &prepared.lhs_arena,
+        rhs_arena: &prepared.rhs_arena,
+        lhs_lines: &prepared.lhs_lines,
+        rhs_lines: &prepared.rhs_lines,
+    }];
+    Some(finalize_per_file(
+        &prepared,
+        0,
+        &records,
+        &no_buffer,
+        &view_borrowed,
+    ))
+}
+
+/// Run [`diff_with_language`]-quality diffs across a multi-file
+/// changeset. Move detection runs over the union of all per-file
+/// arenas so a function migrating from `inputs[i].buffer` to
+/// `inputs[j].buffer` is tagged [`super::ChangeKind::Moved`] (with
+/// [`MoveSource::buffer`] identifying the counterpart file) instead
+/// of surfacing as a deletion in `i` plus an addition in `j`.
+///
+/// Returns one [`DiffResult`] per input in input order. Inputs whose
+/// `language` is `None` (or whose parse fails) fall back to
+/// [`super::diff_lines`] for that file and do not participate in
+/// cross-file move detection.
+pub fn diff_changeset(inputs: Vec<FileDiffInput>) -> Vec<DiffResult> {
+    enum Slot {
+        Structural(PreparedFile),
+        LineDiff { lhs_text: String, rhs_text: String },
+    }
+
+    let mut slots: Vec<Slot> = inputs
+        .into_iter()
+        .map(|input| match input.language.as_ref() {
+            Some(lang) => match prepare_per_file(lang, &input.lhs_text, &input.rhs_text, None) {
+                Some(prepared) => Slot::Structural(PreparedFile {
+                    buffer: input.buffer,
+                    ..prepared
+                }),
+                None => Slot::LineDiff {
+                    lhs_text: input.lhs_text,
+                    rhs_text: input.rhs_text,
+                },
+            },
+            None => Slot::LineDiff {
+                lhs_text: input.lhs_text,
+                rhs_text: input.rhs_text,
+            },
+        })
+        .collect();
+
+    let cs_records = {
+        let mut move_inputs: Vec<FileMoveInput<'_>> = Vec::new();
+        for slot in slots.iter_mut() {
+            if let Slot::Structural(p) = slot {
+                move_inputs.push(FileMoveInput {
+                    lhs_arena: &p.lhs_arena,
+                    rhs_arena: &p.rhs_arena,
+                    lhs_changes: &mut p.lhs_changes,
+                    rhs_changes: &mut p.rhs_changes,
+                });
+            }
+        }
+        find_moves_changeset(&mut move_inputs)
+    };
+
+    // Build per-file index map (slot index -> structural index in cs_records' tuples).
+    // cs_records refer to file indices in the move_inputs slice, which only contains
+    // Structural slots in slot-iteration order. Map each Structural slot's iteration
+    // index back so finalize_per_file can identify "this file's records".
+    let structural_idx: Vec<Option<usize>> = {
+        let mut next_struct = 0usize;
+        slots
+            .iter()
+            .map(|slot| match slot {
+                Slot::Structural(_) => {
+                    let i = next_struct;
+                    next_struct += 1;
+                    Some(i)
+                },
+                Slot::LineDiff { .. } => None,
+            })
+            .collect()
+    };
+
+    let buffer_refs: Vec<Option<&BufferRef>> = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            Slot::Structural(p) => Some(Some(&p.buffer)),
+            Slot::LineDiff { .. } => None,
+        })
+        .collect();
+
+    let views: Vec<PreparedFileView<'_>> = slots
+        .iter()
+        .filter_map(|slot| match slot {
+            Slot::Structural(p) => Some(PreparedFileView {
+                lhs_arena: &p.lhs_arena,
+                rhs_arena: &p.rhs_arena,
+                lhs_lines: &p.lhs_lines,
+                rhs_lines: &p.rhs_lines,
+            }),
+            Slot::LineDiff { .. } => None,
+        })
+        .collect();
+
+    slots
+        .iter()
+        .enumerate()
+        .map(|(slot_idx, slot)| match slot {
+            Slot::Structural(p) => {
+                let my_struct_idx = structural_idx[slot_idx].expect("structural slot");
+                finalize_per_file(p, my_struct_idx, &cs_records, &buffer_refs, &views)
+            },
+            Slot::LineDiff { lhs_text, rhs_text } => line_diff::diff_lines(lhs_text, rhs_text),
+        })
+        .collect()
+}
+
+/// Per-file output of [`prepare_per_file`]: the parsed-and-preprocessed
+/// state that the move pass mutates and that
+/// [`finalize_per_file`] consumes to emit a [`DiffResult`].
+struct PreparedFile {
+    buffer: BufferRef,
+    lhs_arena: SyntaxArena,
+    rhs_arena: SyntaxArena,
+    lhs_root: SyntaxId,
+    rhs_root: SyntaxId,
+    lhs_changes: ChangeMap,
+    rhs_changes: ChangeMap,
+    lhs_lines: LineIndex,
+    rhs_lines: LineIndex,
+}
+
+/// Borrowed view of the arenas + line indices for one prepared file.
+/// Used by [`build_move_metadata_changeset`] when materialising
+/// [`MoveSource`]s for cross-file moves.
+struct PreparedFileView<'a> {
+    lhs_arena: &'a SyntaxArena,
+    rhs_arena: &'a SyntaxArena,
+    lhs_lines: &'a LineIndex,
+    rhs_lines: &'a LineIndex,
+}
+
+/// Run the parse / lower / preprocess / Dijkstra / slider stages for
+/// one file. Returns `None` if either side fails to parse, mirroring
+/// the existing [`diff_with_language`] fallback contract -- the caller
+/// then routes that file through [`super::diff_lines`].
+///
+/// `buffer` is filled in by [`diff_changeset`] after this returns; the
+/// single-file [`diff_with_language_cancellable`] caller substitutes a
+/// placeholder it never observes.
+fn prepare_per_file(
+    language: &Arc<Language>,
+    lhs: &str,
+    rhs: &str,
+    cancel: Option<&AtomicBool>,
+) -> Option<PreparedFile> {
     let lhs_tree = parse(language, lhs, None)?;
     let rhs_tree = parse(language, rhs, None)?;
     let (lhs_arena, lhs_root) = lower_tree(&lhs_tree, lhs);
@@ -99,45 +273,50 @@ pub fn diff_with_language_cancellable(
     fix_all_sliders(&lhs_arena, lhs_root, &mut preprocess.lhs_changes);
     fix_all_sliders(&rhs_arena, rhs_root, &mut preprocess.rhs_changes);
 
-    let records = find_moves(
-        &lhs_arena,
-        &rhs_arena,
-        &mut preprocess.lhs_changes,
-        &mut preprocess.rhs_changes,
-    );
+    Some(PreparedFile {
+        buffer: BufferRef {
+            path: std::path::PathBuf::new(),
+            fingerprint: [0u8; 32],
+        },
+        lhs_arena,
+        rhs_arena,
+        lhs_root,
+        rhs_root,
+        lhs_changes: preprocess.lhs_changes,
+        rhs_changes: preprocess.rhs_changes,
+        lhs_lines: LineIndex::new(lhs),
+        rhs_lines: LineIndex::new(rhs),
+    })
+}
 
-    let lhs_lines = LineIndex::new(lhs);
-    let rhs_lines = LineIndex::new(rhs);
-    let lhs_meta = build_move_metadata(
-        &lhs_arena,
-        &rhs_arena,
-        &records,
-        Side::Lhs,
-        &lhs_lines,
-        &rhs_lines,
-    );
-    let rhs_meta = build_move_metadata(
-        &lhs_arena,
-        &rhs_arena,
-        &records,
-        Side::Rhs,
-        &lhs_lines,
-        &rhs_lines,
-    );
+/// Convert a prepared file's residual change maps and the changeset's
+/// move records into a [`DiffResult`]. `my_idx` is this file's index
+/// in the structural slice (`buffer_refs` and `views`); records whose
+/// `rhs_target.0` or any `lhs_sources[*].0` equals `my_idx` contribute
+/// metadata for this file.
+fn finalize_per_file(
+    prepared: &PreparedFile,
+    my_idx: usize,
+    cs_records: &[ChangesetMoveRecord],
+    buffer_refs: &[Option<&BufferRef>],
+    views: &[PreparedFileView<'_>],
+) -> DiffResult {
+    let lhs_meta = build_move_metadata_changeset(cs_records, my_idx, Side::Lhs, buffer_refs, views);
+    let rhs_meta = build_move_metadata_changeset(cs_records, my_idx, Side::Rhs, buffer_refs, views);
 
     let mut changes = Vec::new();
     collect_changes(
-        &lhs_arena,
-        lhs_root,
-        &preprocess.lhs_changes,
+        &prepared.lhs_arena,
+        prepared.lhs_root,
+        &prepared.lhs_changes,
         &lhs_meta,
         Side::Lhs,
         &mut changes,
     );
     collect_changes(
-        &rhs_arena,
-        rhs_root,
-        &preprocess.rhs_changes,
+        &prepared.rhs_arena,
+        prepared.rhs_root,
+        &prepared.rhs_changes,
         &rhs_meta,
         Side::Rhs,
         &mut changes,
@@ -145,10 +324,10 @@ pub fn diff_with_language_cancellable(
     changes.sort_by_key(|c| (c.byte_range.start, c.byte_range.end));
     pair_adjacent_replacements(&mut changes);
 
-    Some(DiffResult {
+    DiffResult {
         changes,
         fell_back_to_line_diff: false,
-    })
+    }
 }
 
 /// Walk an arena depth-first and emit one [`DiffChange`] per maximal
@@ -289,48 +468,61 @@ fn pair_adjacent_replacements(changes: &mut [DiffChange]) {
 /// by [`collect_changes`] to classify each emitted atom.
 type MoveMetadataMap = HashMap<SyntaxId, Arc<MoveMetadata>>;
 
-/// Expand the [`MoveRecord`] list into one per-atom metadata map for
-/// one side of the diff. For each record:
-///
-/// - On the RHS side, the target subtree's descendants all carry metadata listing the LHS sources
-///   (multiple entries = ambiguous).
-/// - On the LHS side, each source subtree carries metadata pointing back at the record's RHS
-///   target. In the 1:N duplication case, a single LHS source appears in multiple records; those
-///   records' RHS targets are accumulated into the source's metadata.sources so the caller can jump
-///   to any of the duplicate targets.
-///
-/// The returned map keys every descendant of the move root, not just
-/// the root itself, because the per-atom walk in [`collect_changes`]
-/// needs O(1) lookup on the leaf.
-fn build_move_metadata(
-    lhs_arena: &SyntaxArena,
-    rhs_arena: &SyntaxArena,
-    records: &[MoveRecord],
+/// Cross-file analogue of the legacy `build_move_metadata` helper.
+/// Walks the changeset's records and emits a per-atom metadata map
+/// for `my_idx`'s side `side`. Cross-file [`MoveSource`]s carry the
+/// source file's [`BufferRef`]; intra-file (`my_idx == other_idx`)
+/// sources keep `buffer: None` per the
+/// [`super::MoveSource`] documented invariant.
+fn build_move_metadata_changeset(
+    cs_records: &[ChangesetMoveRecord],
+    my_idx: usize,
     side: Side,
-    lhs_lines: &LineIndex,
-    rhs_lines: &LineIndex,
+    buffer_refs: &[Option<&BufferRef>],
+    views: &[PreparedFileView<'_>],
 ) -> MoveMetadataMap {
     let mut roots_with_sources: HashMap<SyntaxId, Vec<MoveSource>> = HashMap::new();
 
-    for record in records {
+    for record in cs_records {
         match side {
             Side::Rhs => {
+                if record.rhs_target.0 != my_idx {
+                    continue;
+                }
                 let sources: Vec<MoveSource> = record
                     .lhs_sources
                     .iter()
-                    .map(|id| move_source_for(lhs_arena, *id, Side::Lhs, lhs_lines))
+                    .map(|(src_idx, src_id)| {
+                        move_source_for_changeset(
+                            *src_idx,
+                            *src_id,
+                            Side::Lhs,
+                            my_idx,
+                            buffer_refs,
+                            views,
+                        )
+                    })
                     .collect();
                 roots_with_sources
-                    .entry(record.rhs_target)
+                    .entry(record.rhs_target.1)
                     .or_default()
                     .extend(sources);
             },
             Side::Lhs => {
-                let target_source =
-                    move_source_for(rhs_arena, record.rhs_target, Side::Rhs, rhs_lines);
-                for src in &record.lhs_sources {
+                let target_source = move_source_for_changeset(
+                    record.rhs_target.0,
+                    record.rhs_target.1,
+                    Side::Rhs,
+                    my_idx,
+                    buffer_refs,
+                    views,
+                );
+                for (src_idx, src_id) in &record.lhs_sources {
+                    if *src_idx != my_idx {
+                        continue;
+                    }
                     roots_with_sources
-                        .entry(*src)
+                        .entry(*src_id)
                         .or_default()
                         .push(target_source.clone());
                 }
@@ -340,8 +532,8 @@ fn build_move_metadata(
 
     let mut out: MoveMetadataMap = HashMap::new();
     let arena = match side {
-        Side::Lhs => lhs_arena,
-        Side::Rhs => rhs_arena,
+        Side::Lhs => views[my_idx].lhs_arena,
+        Side::Rhs => views[my_idx].rhs_arena,
     };
     for (root, sources) in roots_with_sources {
         let meta = Arc::new(MoveMetadata { sources });
@@ -362,11 +554,34 @@ fn walk_descendants(arena: &SyntaxArena, root: SyntaxId, f: &mut impl FnMut(Synt
     }
 }
 
-fn move_source_for(arena: &SyntaxArena, id: SyntaxId, side: Side, lines: &LineIndex) -> MoveSource {
-    let byte_range = full_byte_range(arena, id);
+/// Build a [`MoveSource`] pointing at `(src_idx, src_id)` on `side`.
+/// `viewer_idx` is the file the [`MoveMetadata`] is being assembled
+/// for; when `src_idx == viewer_idx` the move is intra-file and
+/// `buffer` is `None` (documented invariant). When `src_idx !=
+/// viewer_idx` the source lives in a different file and `buffer` is
+/// `Some(buffer_refs[src_idx])`.
+fn move_source_for_changeset(
+    src_idx: usize,
+    src_id: SyntaxId,
+    side: Side,
+    viewer_idx: usize,
+    buffer_refs: &[Option<&BufferRef>],
+    views: &[PreparedFileView<'_>],
+) -> MoveSource {
+    let view = &views[src_idx];
+    let (arena, lines): (&SyntaxArena, &LineIndex) = match side {
+        Side::Lhs => (view.lhs_arena, view.lhs_lines),
+        Side::Rhs => (view.rhs_arena, view.rhs_lines),
+    };
+    let byte_range = full_byte_range(arena, src_id);
     let line_range = lines.lines_for(&byte_range);
+    let buffer = if src_idx == viewer_idx {
+        None
+    } else {
+        buffer_refs[src_idx].cloned()
+    };
     MoveSource {
-        buffer: None,
+        buffer,
         side,
         byte_range,
         line_range,
@@ -701,5 +916,127 @@ mod tests {
         // The structural-diff pipeline completed; we got changes even
         // though Dijkstra bailed immediately.
         assert!(!result.changes.is_empty());
+    }
+
+    #[test]
+    fn changeset_detects_cross_file_function_migration() {
+        let lang = rust_lang();
+        let buf_a = BufferRef {
+            path: std::path::PathBuf::from("a.rs"),
+            fingerprint: [1u8; 32],
+        };
+        let buf_b = BufferRef {
+            path: std::path::PathBuf::from("b.rs"),
+            fingerprint: [2u8; 32],
+        };
+
+        let inputs = vec![
+            FileDiffInput {
+                buffer: buf_a.clone(),
+                language: Some(lang.clone()),
+                lhs_text: "fn relocated() { let x = 1; let y = 2; let z = 3; }\n\
+                           fn stays_a() { call_a(); }"
+                    .to_string(),
+                rhs_text: "fn stays_a() { call_a(); }".to_string(),
+            },
+            FileDiffInput {
+                buffer: buf_b.clone(),
+                language: Some(lang.clone()),
+                lhs_text: "fn stays_b() { call_b(); }".to_string(),
+                rhs_text: "fn stays_b() { call_b(); }\n\
+                           fn relocated() { let x = 1; let y = 2; let z = 3; }"
+                    .to_string(),
+            },
+        ];
+
+        let results = diff_changeset(inputs);
+        assert_eq!(results.len(), 2);
+
+        let file_a_lhs_moved: Vec<&DiffChange> = results[0]
+            .changes
+            .iter()
+            .filter(|c| c.side == Side::Lhs && c.kind == DiffChangeKind::Moved)
+            .collect();
+        assert!(
+            !file_a_lhs_moved.is_empty(),
+            "file 0 LHS must contain Moved hunks for the migrated function; got {:?}",
+            results[0].changes
+        );
+        let meta = file_a_lhs_moved[0]
+            .move_metadata
+            .as_ref()
+            .expect("Moved hunk must carry metadata");
+        assert!(
+            meta.sources
+                .iter()
+                .any(|s| s.buffer.as_ref() == Some(&buf_b)),
+            "file 0 LHS Moved hunk must point at file 1 via BufferRef; got sources {:?}",
+            meta.sources
+        );
+
+        let file_b_rhs_moved: Vec<&DiffChange> = results[1]
+            .changes
+            .iter()
+            .filter(|c| c.side == Side::Rhs && c.kind == DiffChangeKind::Moved)
+            .collect();
+        assert!(
+            !file_b_rhs_moved.is_empty(),
+            "file 1 RHS must contain Moved hunks for the migrated function; got {:?}",
+            results[1].changes
+        );
+        let meta = file_b_rhs_moved[0]
+            .move_metadata
+            .as_ref()
+            .expect("Moved hunk must carry metadata");
+        assert!(
+            meta.sources
+                .iter()
+                .any(|s| s.buffer.as_ref() == Some(&buf_a)),
+            "file 1 RHS Moved hunk must point at file 0 via BufferRef; got sources {:?}",
+            meta.sources
+        );
+    }
+
+    #[test]
+    fn changeset_intra_file_move_keeps_buffer_none() {
+        // A move within a single file must keep MoveSource.buffer = None
+        // even when invoked through the multi-file API. The documented
+        // invariant on MoveSource is that intra-file moves carry no
+        // BufferRef.
+        let lang = rust_lang();
+        let inputs = vec![FileDiffInput {
+            buffer: BufferRef {
+                path: std::path::PathBuf::from("a.rs"),
+                fingerprint: [1u8; 32],
+            },
+            language: Some(lang),
+            lhs_text: "fn alpha() { let x = 1; let y = 2; let z = 3; }\n\
+                       fn beta() { let p = 10; let q = 20; let r = 30; }"
+                .to_string(),
+            rhs_text: "fn beta() { let p = 10; let q = 20; let r = 30; }\n\
+                       fn alpha() { let x = 1; let y = 2; let z = 3; }"
+                .to_string(),
+        }];
+
+        let results = diff_changeset(inputs);
+        assert_eq!(results.len(), 1);
+        let moved: Vec<&DiffChange> = results[0]
+            .changes
+            .iter()
+            .filter(|c| c.kind == DiffChangeKind::Moved)
+            .collect();
+        assert!(
+            !moved.is_empty(),
+            "intra-file swap must produce Moved hunks"
+        );
+        for change in &moved {
+            let meta = change.move_metadata.as_ref().expect("metadata required");
+            for source in &meta.sources {
+                assert!(
+                    source.buffer.is_none(),
+                    "intra-file MoveSource must have buffer=None; got {source:?}"
+                );
+            }
+        }
     }
 }
