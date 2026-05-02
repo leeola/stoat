@@ -24,7 +24,7 @@ pub mod text_proto;
 
 pub use paths::{data_dir, state_dir, workspace_state_dir};
 use snafu::{ResultExt, Snafu};
-use std::{env, fs, io, path::PathBuf};
+use std::{fs, io, path::PathBuf};
 pub use text_proto::{log_dir, TextProtoLog};
 use tracing_subscriber::{filter::ParseError, fmt, EnvFilter};
 
@@ -72,8 +72,12 @@ pub enum LogInitError {
 /// Initialize logging to `<XDG_STATE_HOME>/stoat/logs/stoat-<pid>.log`.
 ///
 /// Writes to a file so tracing output never hits the raw-mode terminal.
-pub fn init() -> Result<(), LogInitError> {
-    let filter = create_filter()?;
+/// `stoat_log` takes precedence over `rust_log`; both `None` falls back
+/// to the compiled-in default of `warn,stoat=info,stoat_bin=info`.
+/// Callers resolve env state at the binary boundary; this crate does
+/// not read the process environment.
+pub fn init(stoat_log: Option<String>, rust_log: Option<String>) -> Result<(), LogInitError> {
+    let filter = create_filter(stoat_log, rust_log)?;
     let dir = log_dir().context(ResolveLogDirSnafu)?;
     fs::create_dir_all(&dir).with_context(|_| CreateLogDirSnafu { path: dir.clone() })?;
     let path = dir.join(format!("stoat-{}.log", std::process::id()));
@@ -91,12 +95,15 @@ pub fn init() -> Result<(), LogInitError> {
     Ok(())
 }
 
-fn create_filter() -> Result<EnvFilter, LogInitError> {
-    if let Ok(stoat_log) = env::var("STOAT_LOG") {
+fn create_filter(
+    stoat_log: Option<String>,
+    rust_log: Option<String>,
+) -> Result<EnvFilter, LogInitError> {
+    if let Some(stoat_log) = stoat_log {
         return expand_stoat_log(&stoat_log);
     }
 
-    if let Ok(rust_log) = env::var("RUST_LOG") {
+    if let Some(rust_log) = rust_log {
         return EnvFilter::try_new(rust_log).context(BuildEnvFilterSnafu);
     }
 
