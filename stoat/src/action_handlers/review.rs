@@ -4,6 +4,7 @@ use crate::{
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState},
     pane::View,
+    review::ReviewFileInput,
     review_session::{ReviewSession, ReviewSource, ReviewViewState},
     workspace::Workspace,
 };
@@ -600,6 +601,7 @@ fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
         workdir: workdir.clone(),
     });
 
+    let mut inputs: Vec<ReviewFileInput> = Vec::with_capacity(changed.len());
     for file in &changed {
         let buffer_text = match read_string_via_host(&*stoat.fs_host, &file.path) {
             Ok(t) => t,
@@ -621,14 +623,15 @@ fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
             .unwrap_or(&file.path)
             .display()
             .to_string();
-        session.add_file(
-            file.path.clone(),
+        inputs.push(ReviewFileInput {
+            path: file.path.clone(),
             rel_path,
-            lang,
-            Arc::new(base_text),
-            Arc::new(buffer_text),
-        );
+            language: lang,
+            base_text: Arc::new(base_text),
+            buffer_text: Arc::new(buffer_text),
+        });
     }
+    session.add_files(inputs);
 
     if session.order.is_empty() {
         tracing::warn!("open_review: no diff hunks to display");
@@ -695,17 +698,17 @@ fn scan_agent_edits(
     let mut session = ReviewSession::new(ReviewSource::AgentEdits {
         edits: Arc::new(edits.to_vec()),
     });
-    for edit in edits {
-        let lang = stoat.language_registry.for_path(&edit.path);
-        let rel_path = edit.path.display().to_string();
-        session.add_file(
-            edit.path.clone(),
-            rel_path,
-            lang,
-            edit.base_text.clone(),
-            edit.proposed_text.clone(),
-        );
-    }
+    let inputs: Vec<ReviewFileInput> = edits
+        .iter()
+        .map(|edit| ReviewFileInput {
+            path: edit.path.clone(),
+            rel_path: edit.path.display().to_string(),
+            language: stoat.language_registry.for_path(&edit.path),
+            base_text: edit.base_text.clone(),
+            buffer_text: edit.proposed_text.clone(),
+        })
+        .collect();
+    session.add_files(inputs);
     if session.order.is_empty() {
         return None;
     }
@@ -733,6 +736,7 @@ fn build_session_from_trees(
         return None;
     }
     let mut session = ReviewSession::new(source);
+    let mut inputs: Vec<ReviewFileInput> = Vec::new();
     for rel in paths {
         let base = base_tree.get(rel).cloned().unwrap_or_default();
         let buffer = new_tree.get(rel).cloned().unwrap_or_default();
@@ -741,14 +745,15 @@ fn build_session_from_trees(
         }
         let abs = workdir.join(rel);
         let lang = stoat.language_registry.for_path(&abs);
-        session.add_file(
-            abs,
-            rel.display().to_string(),
-            lang,
-            Arc::new(base),
-            Arc::new(buffer),
-        );
+        inputs.push(ReviewFileInput {
+            path: abs,
+            rel_path: rel.display().to_string(),
+            language: lang,
+            base_text: Arc::new(base),
+            buffer_text: Arc::new(buffer),
+        });
     }
+    session.add_files(inputs);
     if session.order.is_empty() {
         return None;
     }

@@ -456,6 +456,7 @@ impl TestHarness {
     pub fn open_review_from_texts(&mut self, files: &[(&str, &str, &str)]) {
         use crate::{
             action_handlers,
+            review::ReviewFileInput,
             review_session::{InMemoryFile, ReviewSession, ReviewSource},
         };
         use std::path::PathBuf;
@@ -472,17 +473,17 @@ impl TestHarness {
         let mut session = ReviewSession::new(ReviewSource::InMemory {
             files: Arc::new(in_memory.clone()),
         });
-        for file in &in_memory {
-            let lang = self.stoat.language_registry.for_path(&file.path);
-            let rel_path = file.path.display().to_string();
-            session.add_file(
-                file.path.clone(),
-                rel_path,
-                lang,
-                file.base_text.clone(),
-                file.buffer_text.clone(),
-            );
-        }
+        let inputs: Vec<ReviewFileInput> = in_memory
+            .iter()
+            .map(|file| ReviewFileInput {
+                path: file.path.clone(),
+                rel_path: file.path.display().to_string(),
+                language: self.stoat.language_registry.for_path(&file.path),
+                base_text: file.base_text.clone(),
+                buffer_text: file.buffer_text.clone(),
+            })
+            .collect();
+        session.add_files(inputs);
 
         if session.order.is_empty() {
             return;

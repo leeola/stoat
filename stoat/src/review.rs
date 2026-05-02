@@ -1,8 +1,23 @@
-use std::{ops::Range, sync::Arc};
+use crate::buffer_registry::fingerprint_bytes;
+use std::{ops::Range, path::PathBuf, sync::Arc};
 use stoat_language::{
-    structural_diff::{self, ChangeKind as LangChangeKind, DiffChange, Side},
+    structural_diff::{
+        self, BufferRef, ChangeKind as LangChangeKind, DiffChange, DiffResult, FileDiffInput, Side,
+    },
     Language,
 };
+
+/// One file's contribution to a review session. Used both by the
+/// changeset entry point [`extract_review_hunks_changeset`] and as
+/// the input shape for [`crate::review_session::ReviewSession::add_files`].
+#[derive(Clone)]
+pub(crate) struct ReviewFileInput {
+    pub path: PathBuf,
+    pub rel_path: String,
+    pub language: Option<Arc<Language>>,
+    pub base_text: Arc<String>,
+    pub buffer_text: Arc<String>,
+}
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReviewSide {
@@ -43,17 +58,47 @@ pub(crate) struct ReviewHunk {
     pub(crate) rows: Vec<ReviewRow>,
 }
 
-pub(crate) fn extract_review_hunks(
-    language: Option<&Arc<Language>>,
+/// Multi-file entry point that runs one cross-file
+/// [`structural_diff::diff_changeset`] over the union of all inputs
+/// before extracting per-file hunks. Returns one `Vec<ReviewHunk>`
+/// per input in input order. Cross-file [`stoat_language::structural_diff::ChangeKind::Moved`]
+/// metadata produced by the diff pass survives into the returned
+/// hunks via the existing
+/// [`stoat_language::structural_diff::DiffChange::move_metadata`] field.
+pub(crate) fn extract_review_hunks_changeset(
+    files: &[ReviewFileInput],
+    context: u32,
+) -> Vec<Vec<ReviewHunk>> {
+    let inputs: Vec<FileDiffInput> = files
+        .iter()
+        .map(|f| FileDiffInput {
+            buffer: BufferRef {
+                path: f.path.clone(),
+                fingerprint: fingerprint_bytes(&f.buffer_text),
+            },
+            language: f.language.clone(),
+            lhs_text: (*f.base_text).clone(),
+            rhs_text: (*f.buffer_text).clone(),
+        })
+        .collect();
+
+    let diff_results = structural_diff::diff_changeset(inputs);
+
+    files
+        .iter()
+        .zip(diff_results)
+        .map(|(f, diff)| {
+            extract_review_hunks_from_diff(&diff, &f.base_text, &f.buffer_text, context)
+        })
+        .collect()
+}
+
+fn extract_review_hunks_from_diff(
+    diff_result: &DiffResult,
     base_text: &str,
     buffer_text: &str,
     context: u32,
 ) -> Vec<ReviewHunk> {
-    let diff_result = match language {
-        Some(lang) => structural_diff::diff_with_language_or_lines(lang, base_text, buffer_text),
-        None => structural_diff::diff(base_text, buffer_text),
-    };
-
     let lhs_lines = split_lines(base_text);
     let rhs_lines = split_lines(buffer_text);
 
@@ -371,7 +416,17 @@ mod tests {
     use super::*;
 
     fn hunks(base: &str, buffer: &str, ctx: u32) -> Vec<ReviewHunk> {
-        extract_review_hunks(None, base, buffer, ctx)
+        let inputs = vec![ReviewFileInput {
+            path: PathBuf::from("test.txt"),
+            rel_path: "test.txt".to_string(),
+            language: None,
+            base_text: Arc::new(base.to_string()),
+            buffer_text: Arc::new(buffer.to_string()),
+        }];
+        extract_review_hunks_changeset(&inputs, ctx)
+            .into_iter()
+            .next()
+            .unwrap_or_default()
     }
 
     #[test]

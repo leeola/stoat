@@ -1,5 +1,6 @@
 use crate::{
     app::{Stoat, UpdateEffect},
+    review::ReviewFileInput,
     review_session::{ReviewSession, ReviewSource},
 };
 use std::{path::Path, sync::Arc};
@@ -290,6 +291,7 @@ fn build_session_from_trees_pure(
         return None;
     }
     let mut session = ReviewSession::new(source);
+    let mut inputs: Vec<ReviewFileInput> = Vec::new();
     for rel in paths {
         let base = base_tree.get(rel).cloned().unwrap_or_default();
         let buffer = new_tree.get(rel).cloned().unwrap_or_default();
@@ -298,14 +300,15 @@ fn build_session_from_trees_pure(
         }
         let abs = workdir.join(rel);
         let lang = language_registry.for_path(&abs);
-        session.add_file(
-            abs,
-            rel.display().to_string(),
-            lang,
-            Arc::new(base),
-            Arc::new(buffer),
-        );
+        inputs.push(ReviewFileInput {
+            path: abs,
+            rel_path: rel.display().to_string(),
+            language: lang,
+            base_text: Arc::new(base),
+            buffer_text: Arc::new(buffer),
+        });
     }
+    session.add_files(inputs);
     if session.order.is_empty() {
         return None;
     }

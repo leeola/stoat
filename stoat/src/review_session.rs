@@ -1,6 +1,9 @@
 use crate::{
     editor_state::EditorId,
-    review::{extract_review_hunks, line_byte_offsets, split_lines, ReviewHunk, ReviewRow},
+    review::{
+        extract_review_hunks_changeset, line_byte_offsets, split_lines, ReviewFileInput,
+        ReviewHunk, ReviewRow,
+    },
 };
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
@@ -273,10 +276,11 @@ impl ReviewSession {
         }
     }
 
-    /// Parse `base_text` against `buffer_text` with the given language and
-    /// append one [`ReviewFile`] plus its chunks to the session. Returns
-    /// the ids of the chunks that were added, in visit order. Files that
-    /// produce no hunks are still recorded so that indexing stays stable.
+    /// Single-file convenience wrapper around [`Self::add_files`].
+    /// Test-only because production callers always have multiple files
+    /// in hand and must batch them through `add_files` for cross-file
+    /// move detection to fire.
+    #[cfg(test)]
     pub(crate) fn add_file(
         &mut self,
         path: PathBuf,
@@ -285,52 +289,74 @@ impl ReviewSession {
         base_text: Arc<String>,
         buffer_text: Arc<String>,
     ) -> Vec<ReviewChunkId> {
-        let hunks = extract_review_hunks(language.as_ref(), &base_text, &buffer_text, 3);
-        let file_index = self.files.len();
-
-        let base_offsets = line_byte_offsets(&split_lines(&base_text));
-        let buffer_offsets = line_byte_offsets(&split_lines(&buffer_text));
-
-        let mut chunk_ids: Vec<ReviewChunkId> = Vec::with_capacity(hunks.len());
-        for (chunk_index_in_file, hunk) in hunks.into_iter().enumerate() {
-            let id = self.alloc_id();
-            let (base_line_range, buffer_line_range) = hunk_line_ranges(&hunk);
-            let base_byte_range = lines_to_bytes(&base_offsets, &base_line_range);
-            let buffer_byte_range = lines_to_bytes(&buffer_offsets, &buffer_line_range);
-
-            self.chunks.insert(
-                id,
-                ReviewChunk {
-                    id,
-                    file_index,
-                    chunk_index_in_file,
-                    hunk,
-                    buffer_line_range,
-                    base_line_range,
-                    buffer_byte_range,
-                    base_byte_range,
-                    status: ChunkStatus::Pending,
-                },
-            );
-            self.order.push(id);
-            chunk_ids.push(id);
-        }
-
-        self.files.push(ReviewFile {
+        let mut result = self.add_files(vec![ReviewFileInput {
             path,
             rel_path,
             language,
             base_text,
             buffer_text,
-            chunks: chunk_ids.clone(),
-        });
+        }]);
+        result.pop().unwrap_or_default()
+    }
+
+    /// Add one or more files to the session in a single cross-file
+    /// structural-diff pass. Returns one chunk-id list per input in
+    /// input order. Files that produce no hunks are still recorded
+    /// (with an empty chunk list) so that subsequent file indices
+    /// stay stable.
+    pub(crate) fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
+        let hunks_per_file = extract_review_hunks_changeset(&files, 3);
+        let mut all_chunk_ids: Vec<Vec<ReviewChunkId>> = Vec::with_capacity(files.len());
+
+        for (file, hunks) in files.into_iter().zip(hunks_per_file) {
+            let file_index = self.files.len();
+
+            let base_offsets = line_byte_offsets(&split_lines(&file.base_text));
+            let buffer_offsets = line_byte_offsets(&split_lines(&file.buffer_text));
+
+            let mut chunk_ids: Vec<ReviewChunkId> = Vec::with_capacity(hunks.len());
+            for (chunk_index_in_file, hunk) in hunks.into_iter().enumerate() {
+                let id = self.alloc_id();
+                let (base_line_range, buffer_line_range) = hunk_line_ranges(&hunk);
+                let base_byte_range = lines_to_bytes(&base_offsets, &base_line_range);
+                let buffer_byte_range = lines_to_bytes(&buffer_offsets, &buffer_line_range);
+
+                self.chunks.insert(
+                    id,
+                    ReviewChunk {
+                        id,
+                        file_index,
+                        chunk_index_in_file,
+                        hunk,
+                        buffer_line_range,
+                        base_line_range,
+                        buffer_byte_range,
+                        base_byte_range,
+                        status: ChunkStatus::Pending,
+                    },
+                );
+                self.order.push(id);
+                chunk_ids.push(id);
+            }
+
+            self.files.push(ReviewFile {
+                path: file.path,
+                rel_path: file.rel_path,
+                language: file.language,
+                base_text: file.base_text,
+                buffer_text: file.buffer_text,
+                chunks: chunk_ids.clone(),
+            });
+
+            all_chunk_ids.push(chunk_ids);
+        }
 
         if self.cursor.current.is_none() {
             self.cursor.current = self.order.first().copied();
         }
 
         self.version += 1;
-        chunk_ids
+        all_chunk_ids
     }
 
     #[allow(dead_code)]
