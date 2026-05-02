@@ -19,7 +19,7 @@ use crate::{
     workspace::{Workspace, WorkspaceId},
     workspace_picker::{PickerOutcome, WorkspacePicker},
 };
-use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
+use crossterm::event::{Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseEvent};
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
@@ -509,8 +509,37 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
+            Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => UpdateEffect::None,
         }
+    }
+
+    fn handle_mouse(&mut self, mouse: MouseEvent) -> UpdateEffect {
+        let Some((col, row)) = self.translate_mouse_to_focused(mouse.column, mouse.row) else {
+            return UpdateEffect::None;
+        };
+        tracing::trace!(
+            target: "stoat::app",
+            kind = ?mouse.kind,
+            col,
+            row,
+            "mouse event routed to focused element"
+        );
+        UpdateEffect::None
+    }
+
+    /// Returns the focused element's area-relative cell for the given
+    /// terminal-relative `(column, row)`. Coordinates above or left of
+    /// the focused element saturate to `0`. Returns `None` when the
+    /// focus points at a dock that no longer exists in the workspace's
+    /// dock map.
+    pub(crate) fn translate_mouse_to_focused(&self, column: u16, row: u16) -> Option<(u16, u16)> {
+        let ws = self.active_workspace();
+        let area = match ws.focus {
+            FocusTarget::SplitPane(pane_id) => ws.panes.pane(pane_id).area,
+            FocusTarget::Dock(dock_id) => ws.docks.get(dock_id)?.area,
+        };
+        Some((column.saturating_sub(area.x), row.saturating_sub(area.y)))
     }
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
@@ -1565,5 +1594,49 @@ mod tests {
         let mut h = Stoat::test();
         h.type_keys("space");
         h.assert_snapshot("space_mode");
+    }
+
+    #[test]
+    fn mouse_translates_to_focused_pane_coords() {
+        let mut h = Stoat::test();
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(10, 5, 20, 8);
+        let translated = h.stoat.translate_mouse_to_focused(15, 9);
+        assert_eq!(translated, Some((5, 4)));
+    }
+
+    #[test]
+    fn mouse_above_focused_pane_saturates_to_zero() {
+        let mut h = Stoat::test();
+        let pane_id = h.stoat.active_workspace().panes.focus();
+        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(10, 5, 20, 8);
+        let translated = h.stoat.translate_mouse_to_focused(3, 2);
+        assert_eq!(translated, Some((0, 0)));
+    }
+
+    #[test]
+    fn mouse_routes_to_focused_dock_when_focus_is_dock() {
+        use crate::pane::{DockPanel, DockSide, DockVisibility, View};
+        let mut h = Stoat::test();
+        let dock_id = h.stoat.active_workspace_mut().docks.insert(DockPanel {
+            view: View::Label("dock".into()),
+            side: DockSide::Right,
+            visibility: DockVisibility::Open { width: 30 },
+            default_width: 30,
+            area: Rect::new(50, 0, 30, 24),
+        });
+        h.stoat.active_workspace_mut().focus = FocusTarget::Dock(dock_id);
+        let translated = h.stoat.translate_mouse_to_focused(60, 7);
+        assert_eq!(translated, Some((10, 7)));
+    }
+
+    #[test]
+    fn mouse_returns_none_when_focused_dock_missing() {
+        use crate::pane::DockId;
+        let mut h = Stoat::test();
+        let dangling = DockId::default();
+        h.stoat.active_workspace_mut().focus = FocusTarget::Dock(dangling);
+        let translated = h.stoat.translate_mouse_to_focused(10, 10);
+        assert_eq!(translated, None);
     }
 }
