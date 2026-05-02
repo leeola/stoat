@@ -413,11 +413,17 @@ on key {
         t -> [OpenRun(), SetMode(run)];
         c -> SetMode(claude);
         w -> SetMode(space_workspace);
+        b -> SetMode(space_buffer);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == space_buffer {
+        Escape -> SetMode(normal);
+        b -> OpenBufferPicker();
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

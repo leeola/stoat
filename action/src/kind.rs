@@ -19,6 +19,7 @@ pub enum ActionKind {
     OpenFileFinderHSplit,
     OpenFileFinderVSplit,
     OpenChangedFilePicker,
+    OpenBufferPicker,
     FileFinderSelectPrev,
     FileFinderSelectNext,
     FileFinderScopeToggle,

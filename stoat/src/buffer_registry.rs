@@ -135,6 +135,15 @@ impl BufferRegistry {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
     }
 
+    /// Returns paths of currently-open path-bound buffers in lexicographic
+    /// order. Scratch buffers (with no path) are skipped. The deterministic
+    /// ordering matches what the file finder shows for the All scope.
+    pub(crate) fn open_paths(&self) -> Vec<PathBuf> {
+        let mut paths: Vec<PathBuf> = self.path_to_id.keys().cloned().collect();
+        paths.sort();
+        paths
+    }
+
     pub(crate) fn language_for(&self, id: BufferId) -> Option<Arc<Language>> {
         self.buffers.get(&id)?.language.clone()
     }

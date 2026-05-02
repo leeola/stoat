@@ -42,6 +42,7 @@ pub(crate) fn render_file_finder(
     let title = match finder.scope() {
         FinderScope::All => " file finder (all) ",
         FinderScope::Modified => " file finder (modified) ",
+        FinderScope::Buffers => " file finder (buffers) ",
     };
     let block = Block::default()
         .borders(Borders::ALL)

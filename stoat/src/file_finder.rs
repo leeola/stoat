@@ -44,6 +44,11 @@ pub enum FinderScope {
     /// Files with uncommitted git changes. Refreshed on every scope toggle
     /// so the list stays current.
     Modified,
+    /// Currently-open path-bound buffers from the workspace's
+    /// [`BufferRegistry`]. Captured at open time. Reachable only through
+    /// the dedicated `OpenBufferPicker` action; Shift-Tab from this scope
+    /// flips back to [`FinderScope::All`].
+    Buffers,
 }
 
 /// What the finder should do with the selected file when the user submits.
@@ -72,6 +77,9 @@ pub struct FileFinder {
     pub(crate) all_paths: Vec<PathBuf>,
     /// Absolute paths of currently-modified files. Re-queried on scope toggle.
     pub(crate) modified_paths: Vec<PathBuf>,
+    /// Absolute paths of currently-open buffers. Captured once at open time;
+    /// not re-queried on scope toggle.
+    pub(crate) buffer_paths: Vec<PathBuf>,
     /// Indices into the currently active scope's `Vec`, after filtering.
     pub(crate) filtered: Vec<usize>,
     pub(crate) selected: usize,
@@ -102,6 +110,7 @@ impl FileFinder {
         git_root: PathBuf,
         all_paths: Vec<PathBuf>,
         modified_paths: Vec<PathBuf>,
+        buffer_paths: Vec<PathBuf>,
     ) -> Self {
         let input = InputView::create(
             ws,
@@ -123,6 +132,7 @@ impl FileFinder {
             scope,
             &all_paths,
             &modified_paths,
+            &buffer_paths,
             &git_root,
             &mut filtered,
             &mut selected,
@@ -136,6 +146,7 @@ impl FileFinder {
             git_root,
             all_paths,
             modified_paths,
+            buffer_paths,
             filtered,
             selected,
             last_filter_text: String::new(),
@@ -155,6 +166,7 @@ impl FileFinder {
         match self.scope {
             FinderScope::All => &self.all_paths,
             FinderScope::Modified => &self.modified_paths,
+            FinderScope::Buffers => &self.buffer_paths,
         }
     }
 
@@ -181,7 +193,10 @@ impl FileFinder {
     /// Flip the scope, optionally refreshing the Modified list before
     /// rerunning the filter against the new base. `git_host` is borrowed
     /// only when switching *to* Modified so the caller can skip the
-    /// discover call when switching away.
+    /// discover call when switching away. From [`FinderScope::Buffers`]
+    /// the toggle returns to [`FinderScope::All`]; the Buffers scope is
+    /// reachable only through the dedicated `OpenBufferPicker` action,
+    /// not through this toggle.
     pub(crate) fn toggle_scope(&mut self, git_host: &dyn GitHost) {
         self.scope = match self.scope {
             FinderScope::All => {
@@ -189,6 +204,7 @@ impl FileFinder {
                 FinderScope::Modified
             },
             FinderScope::Modified => FinderScope::All,
+            FinderScope::Buffers => FinderScope::All,
         };
         self.selected = 0;
         self.last_filter_text = String::new();
@@ -212,6 +228,7 @@ impl FileFinder {
             self.scope,
             &self.all_paths,
             &self.modified_paths,
+            &self.buffer_paths,
             &self.git_root,
             &mut self.filtered,
             &mut self.selected,
@@ -423,11 +440,13 @@ fn display_for(path: &Path, git_root: &Path) -> String {
 /// fuzzy -- matched against the repo-relative display form. Each tier is
 /// lexicographically sorted. Mirrors the palette's three-tier layout so
 /// users feel the same ranking behavior across modals.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     text: &str,
     scope: FinderScope,
     all_paths: &[PathBuf],
     modified_paths: &[PathBuf],
+    buffer_paths: &[PathBuf],
     git_root: &Path,
     filtered: &mut Vec<usize>,
     selected: &mut usize,
@@ -435,6 +454,7 @@ pub(crate) fn refilter(
     let base: &[PathBuf] = match scope {
         FinderScope::All => all_paths,
         FinderScope::Modified => modified_paths,
+        FinderScope::Buffers => buffer_paths,
     };
 
     let needle = text.to_lowercase();
@@ -510,6 +530,7 @@ mod tests {
         scope: FinderScope,
         all: &[PathBuf],
         modified: &[PathBuf],
+        buffers: &[PathBuf],
         git_root: &Path,
     ) -> Vec<String> {
         let mut filtered = Vec::new();
@@ -519,6 +540,7 @@ mod tests {
             scope,
             all,
             modified,
+            buffers,
             git_root,
             &mut filtered,
             &mut selected,
@@ -526,6 +548,7 @@ mod tests {
         let base: &[PathBuf] = match scope {
             FinderScope::All => all,
             FinderScope::Modified => modified,
+            FinderScope::Buffers => buffers,
         };
         filtered
             .iter()
@@ -538,7 +561,8 @@ mod tests {
         let git_root = p("/r");
         let all = vec![p("/r/b.rs"), p("/r/a.rs"), p("/r/sub/c.rs")];
         let modified = vec![];
-        let listed = names("", FinderScope::All, &all, &modified, &git_root);
+        let buffers = vec![];
+        let listed = names("", FinderScope::All, &all, &modified, &buffers, &git_root);
         assert_eq!(listed, vec!["a.rs", "b.rs", "sub/c.rs"]);
     }
 
@@ -551,7 +575,7 @@ mod tests {
             p("/r/fee/nile.rs"),  // fuzzy (f..i..l..e)
             p("/r/unrelated.rs"), // filtered out
         ];
-        let listed = names("file", FinderScope::All, &all, &[], &git_root);
+        let listed = names("file", FinderScope::All, &all, &[], &[], &git_root);
         assert_eq!(listed, vec!["file.rs", "sub/file.rs", "fee/nile.rs"]);
     }
 
@@ -559,7 +583,7 @@ mod tests {
     fn case_insensitive_filter() {
         let git_root = p("/r");
         let all = vec![p("/r/Foo.rs"), p("/r/bar.rs")];
-        let listed = names("foo", FinderScope::All, &all, &[], &git_root);
+        let listed = names("foo", FinderScope::All, &all, &[], &[], &git_root);
         assert_eq!(listed, vec!["Foo.rs"]);
     }
 
@@ -568,7 +592,7 @@ mod tests {
         let git_root = p("/r");
         let all = vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")];
         let modified = vec![p("/r/b.rs")];
-        let listed = names("", FinderScope::Modified, &all, &modified, &git_root);
+        let listed = names("", FinderScope::Modified, &all, &modified, &[], &git_root);
         assert_eq!(listed, vec!["b.rs"]);
     }
 
@@ -577,8 +601,17 @@ mod tests {
         let git_root = p("/r");
         let all = vec![p("/r/a.rs"), p("/r/b.rs")];
         let modified = vec![];
-        let listed = names("", FinderScope::Modified, &all, &modified, &git_root);
+        let listed = names("", FinderScope::Modified, &all, &modified, &[], &git_root);
         assert!(listed.is_empty());
+    }
+
+    #[test]
+    fn buffers_scope_filters_against_buffer_list() {
+        let git_root = p("/r");
+        let all = vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")];
+        let buffers = vec![p("/r/a.rs"), p("/r/c.rs")];
+        let listed = names("", FinderScope::Buffers, &all, &[], &buffers, &git_root);
+        assert_eq!(listed, vec!["a.rs", "c.rs"]);
     }
 
     #[test]
@@ -591,6 +624,7 @@ mod tests {
             "b",
             FinderScope::All,
             &all,
+            &[],
             &[],
             &git_root,
             &mut filtered,
@@ -863,6 +897,66 @@ mod tests {
         assert_eq!(base.len(), 1, "Modified scope should list only b.rs");
         assert!(base[0].ends_with("b.rs"));
         assert_eq!(h.snapshot().mode, "prompt");
+    }
+
+    #[test]
+    fn space_b_b_opens_finder_in_buffers_scope() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[
+                ("a.rs", "fn a() {}"),
+                ("b.rs", "fn b() {}"),
+                ("c.rs", "fn c() {}"),
+            ],
+        );
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("c.rs"),
+            },
+        );
+
+        h.type_keys("space b b");
+        let finder = h.stoat.file_finder.as_ref().expect("finder should be open");
+        assert_eq!(finder.scope(), FinderScope::Buffers);
+        let base: Vec<PathBuf> = finder.base_paths().to_vec();
+        assert_eq!(base.len(), 2, "Buffers scope should list only open buffers");
+        assert!(base.iter().any(|p| p.ends_with("a.rs")));
+        assert!(base.iter().any(|p| p.ends_with("c.rs")));
+        assert!(!base.iter().any(|p| p.ends_with("b.rs")));
+        assert_eq!(h.snapshot().mode, "prompt");
+    }
+
+    #[test]
+    fn backtab_from_buffer_picker_toggles_to_all() {
+        let mut h = crate::Stoat::test();
+        let root = seed_finder_workspace(
+            &mut h,
+            &[
+                ("a.rs", "fn a() {}"),
+                ("b.rs", "fn b() {}"),
+                ("c.rs", "fn c() {}"),
+            ],
+        );
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenFile {
+                path: root.join("a.rs"),
+            },
+        );
+
+        h.type_keys("space b b");
+        h.type_keys("backtab");
+        let finder = h.stoat.file_finder.as_ref().unwrap();
+        assert_eq!(finder.scope(), FinderScope::All);
+        assert_eq!(finder.base_paths().len(), 3);
     }
 
     #[test]

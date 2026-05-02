@@ -25,6 +25,7 @@ pub(super) fn open_file_finder(
     let git_root = stoat.active_workspace().git_root.clone();
     let all_paths = crate::file_finder::walk_workspace_files(&*stoat.fs_host, &git_root);
     let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
+    let buffer_paths = stoat.active_workspace().buffers.open_paths();
 
     let ws = stoat.active_workspace_mut();
     stoat.file_finder = Some(FileFinder::new(
@@ -36,6 +37,7 @@ pub(super) fn open_file_finder(
         git_root,
         all_paths,
         modified_paths,
+        buffer_paths,
     ));
     stoat.mode = "prompt".into();
     UpdateEffect::Redraw

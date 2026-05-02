@@ -115,6 +115,11 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             crate::file_finder::OpenIntent::Replace,
             crate::file_finder::FinderScope::Modified,
         ),
+        ActionKind::OpenBufferPicker => file_finder::open_file_finder(
+            stoat,
+            crate::file_finder::OpenIntent::Replace,
+            crate::file_finder::FinderScope::Buffers,
+        ),
         ActionKind::FileFinderSelectPrev => file_finder::file_finder_move_selection(stoat, -1),
         ActionKind::FileFinderSelectNext => file_finder::file_finder_move_selection(stoat, 1),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),

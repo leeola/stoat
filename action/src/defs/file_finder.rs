@@ -194,6 +194,54 @@ impl Action for OpenChangedFilePicker {
 }
 
 #[derive(Debug)]
+pub struct OpenBufferPickerDef;
+
+impl ActionDef for OpenBufferPickerDef {
+    fn name(&self) -> &'static str {
+        "OpenBufferPicker"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenBufferPicker
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open the buffer picker"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open the file finder modal scoped to currently-open buffers. \
+         Selecting a row switches the focused pane to that buffer. \
+         Shift-Tab flips to the All scope (every tracked file in the workspace)."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenBufferPicker;
+
+impl OpenBufferPicker {
+    pub const DEF: &OpenBufferPickerDef = &OpenBufferPickerDef;
+}
+
+impl Action for OpenBufferPicker {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct FileFinderSelectPrevDef;
 
 impl ActionDef for FileFinderSelectPrevDef {
@@ -366,6 +414,10 @@ mod tests {
         );
         assert_eq!(OpenChangedFilePicker.def().name(), "OpenChangedFilePicker");
         assert!(OpenChangedFilePicker.def().palette_visible());
+
+        assert_eq!(OpenBufferPicker.kind(), ActionKind::OpenBufferPicker);
+        assert_eq!(OpenBufferPicker.def().name(), "OpenBufferPicker");
+        assert!(OpenBufferPicker.def().palette_visible());
 
         assert_eq!(
             FileFinderSelectPrev.kind(),
