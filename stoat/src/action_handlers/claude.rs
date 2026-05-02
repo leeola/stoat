@@ -98,6 +98,7 @@ fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
             active_since: None,
             protocol_session_id: None,
             follow: false,
+            usage: crate::host::TokenUsage::default(),
         },
     );
 

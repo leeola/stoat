@@ -53,15 +53,20 @@ pub(crate) fn render_claude_pane(
 
     let meta_style = theme.get(s::CHAT_META);
     let time_style = theme.get(s::CHAT_TIME);
-    write_str(buf, msg_area.x, msg_area.y, "Claude", meta_style);
+    let mut header_x = msg_area.x;
+    write_str(buf, header_x, msg_area.y, "Claude", meta_style);
+    header_x += "Claude".chars().count() as u16;
     if chat.follow {
-        write_str(
-            buf,
-            msg_area.x + "Claude".len() as u16,
-            msg_area.y,
-            " \u{25cf} follow",
-            meta_style,
-        );
+        const FOLLOW_BADGE: &str = " \u{25cf} follow";
+        write_str(buf, header_x, msg_area.y, FOLLOW_BADGE, meta_style);
+        header_x += FOLLOW_BADGE.chars().count() as u16;
+    }
+    if let Some(counter) = format_token_counter(&chat.usage) {
+        let labeled = format!("  {counter}");
+        let labeled_w = labeled.chars().count() as u16;
+        if header_x + labeled_w <= msg_area.x + msg_area.width {
+            write_str(buf, header_x, msg_area.y, &labeled, meta_style);
+        }
     }
 
     let body_area = Rect::new(
@@ -283,6 +288,34 @@ fn format_tool_result_preview(content: &str) -> String {
     }
 }
 
+/// Hardcoded context window for current Claude models. Replace with a
+/// per-model lookup once `ModelInfo` carries window size.
+const CONTEXT_WINDOW_TOKENS: u64 = 200_000;
+
+fn format_token_count(tokens: u64) -> String {
+    if tokens >= 1_000_000 {
+        format!("{:.1}M", tokens as f64 / 1_000_000.0)
+    } else if tokens >= 1_000 {
+        format!("{:.1}k", tokens as f64 / 1_000.0)
+    } else {
+        tokens.to_string()
+    }
+}
+
+fn format_token_counter(usage: &crate::host::TokenUsage) -> Option<String> {
+    let input_total =
+        usage.input_tokens + usage.cache_creation_input_tokens + usage.cache_read_input_tokens;
+    if input_total == 0 && usage.output_tokens == 0 {
+        return None;
+    }
+    Some(format!(
+        "{} / {} ctx, {} out",
+        format_token_count(input_total),
+        format_token_count(CONTEXT_WINDOW_TOKENS),
+        format_token_count(usage.output_tokens),
+    ))
+}
+
 fn build_tool_result_map(messages: &[ChatMessage]) -> HashMap<&str, &str> {
     use crate::claude_chat::ChatMessageContent;
     let mut m = HashMap::new();
@@ -315,4 +348,60 @@ fn compute_throbber_label(messages: &[ChatMessage], result_map: &HashMap<&str, &
         }
     }
     "Thinking...".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{format_token_count, format_token_counter};
+    use crate::host::TokenUsage;
+
+    #[test]
+    fn format_token_count_under_thousand() {
+        assert_eq!(format_token_count(0), "0");
+        assert_eq!(format_token_count(999), "999");
+    }
+
+    #[test]
+    fn format_token_count_kilo_range() {
+        assert_eq!(format_token_count(1_000), "1.0k");
+        assert_eq!(format_token_count(1_500), "1.5k");
+        assert_eq!(format_token_count(12_345), "12.3k");
+    }
+
+    #[test]
+    fn format_token_count_mega_range() {
+        assert_eq!(format_token_count(1_000_000), "1.0M");
+        assert_eq!(format_token_count(2_500_000), "2.5M");
+    }
+
+    #[test]
+    fn format_token_counter_skips_zero_usage() {
+        assert_eq!(format_token_counter(&TokenUsage::default()), None);
+    }
+
+    #[test]
+    fn format_token_counter_sums_input_variants() {
+        let usage = TokenUsage {
+            input_tokens: 1_000,
+            output_tokens: 200,
+            cache_creation_input_tokens: 500,
+            cache_read_input_tokens: 300,
+        };
+        assert_eq!(
+            format_token_counter(&usage),
+            Some("1.8k / 200.0k ctx, 200 out".to_string())
+        );
+    }
+
+    #[test]
+    fn format_token_counter_renders_when_only_output_set() {
+        let usage = TokenUsage {
+            output_tokens: 50,
+            ..TokenUsage::default()
+        };
+        assert_eq!(
+            format_token_counter(&usage),
+            Some("0 / 200.0k ctx, 50 out".to_string())
+        );
+    }
 }

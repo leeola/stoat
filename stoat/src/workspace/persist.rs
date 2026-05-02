@@ -552,6 +552,7 @@ mod tests {
                 active_since: None,
                 protocol_session_id: Some("00000000-0000-4000-8000-000000000abc".into()),
                 follow: false,
+                usage: crate::host::TokenUsage::default(),
             },
         );
 

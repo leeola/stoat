@@ -1340,13 +1340,15 @@ impl Stoat {
                     } => {
                         chat.protocol_session_id = Some(proto_id.clone());
                     },
+                    AgentMessage::Usage { accumulated, .. } => {
+                        chat.usage = accumulated.clone();
+                    },
                     AgentMessage::Unknown { .. }
                     | AgentMessage::ServerToolUse { .. }
                     | AgentMessage::ServerToolResult { .. }
                     | AgentMessage::ToolUpdate { .. }
                     | AgentMessage::PartialToolInput { .. }
                     | AgentMessage::Plan { .. }
-                    | AgentMessage::Usage { .. }
                     | AgentMessage::ModeChanged { .. }
                     | AgentMessage::ModelChanged { .. }
                     | AgentMessage::FilesPersisted { .. }

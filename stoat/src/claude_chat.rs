@@ -1,4 +1,7 @@
-use crate::{host::ClaudeSessionId, input_view::InputView};
+use crate::{
+    host::{ClaudeSessionId, TokenUsage},
+    input_view::InputView,
+};
 use std::time::Instant;
 
 // FIXME: Claude session state not persisted across workspace save/load. On
@@ -42,6 +45,10 @@ pub struct ClaudeChatState {
     /// target file in an editor pane and move the cursor to the line Claude
     /// is touching (when known). Toggled via `ClaudeToggleFollow`.
     pub follow: bool,
+    /// Running token totals for this session, sourced from
+    /// [`AgentMessage::Usage`]'s `accumulated` field. Drives the chat
+    /// header counter and is zero until the first usage event arrives.
+    pub usage: TokenUsage,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -586,6 +593,39 @@ mod tests {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.claude().open();
         h.assert_snapshot("claude_as_pane");
+    }
+
+    #[test]
+    fn snapshot_claude_header_shows_token_counter() {
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).usage(crate::host::TokenUsage {
+            input_tokens: 12_000,
+            output_tokens: 3_200,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        });
+        h.assert_snapshot("claude_header_with_token_counter");
+    }
+
+    #[test]
+    fn usage_event_updates_chat_state() {
+        let mut h = TestHarness::default();
+        let id = h.claude().open();
+        h.claude().get_session(id).usage(crate::host::TokenUsage {
+            input_tokens: 1_500,
+            output_tokens: 250,
+            cache_creation_input_tokens: 0,
+            cache_read_input_tokens: 0,
+        });
+        let chat = h
+            .stoat
+            .active_workspace()
+            .chats
+            .get(&id)
+            .expect("chat exists");
+        assert_eq!(chat.usage.input_tokens, 1_500);
+        assert_eq!(chat.usage.output_tokens, 250);
     }
 
     #[test]

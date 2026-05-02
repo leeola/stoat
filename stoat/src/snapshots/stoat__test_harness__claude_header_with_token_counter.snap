@@ -1,0 +1,20 @@
+---
+source: stoat/src/test_harness.rs
+assertion_line: 435
+expression: text
+---
+actions: claude_message
+focused: #1 of 1
+mode: prompt
+size: 60x10
+---
+[0m[90mClaude  12.0k / 200.0k ctx, 3.2k out[0m
+
+
+
+
+
+
+[0m[90m------------------------------------------------------------[0m
+[0m[7m [0m
+[0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[claude]                                    [0m
