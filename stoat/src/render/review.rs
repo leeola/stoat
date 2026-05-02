@@ -1,4 +1,8 @@
-use crate::{display_map::BlockRowKind, editor_state::EditorState, review::ReviewRow};
+use crate::{
+    display_map::BlockRowKind,
+    editor_state::EditorState,
+    review::{MoveProvenance, ReviewRow},
+};
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -119,6 +123,17 @@ pub(crate) fn render_review(
                                 &l.moved_spans,
                                 move_hl,
                             );
+                            if let Some(prov) = l.move_provenance.as_ref() {
+                                render_move_chip(
+                                    buf,
+                                    left_text_x,
+                                    y,
+                                    l.text.chars().count(),
+                                    left_content_w,
+                                    prov,
+                                    move_hl,
+                                );
+                            }
                         } else {
                             render_empty_num(buf, left_num_x, y, dim_style);
                         }
@@ -136,6 +151,17 @@ pub(crate) fn render_review(
                                 &r.moved_spans,
                                 move_hl,
                             );
+                            if let Some(prov) = r.move_provenance.as_ref() {
+                                render_move_chip(
+                                    buf,
+                                    right_text_x,
+                                    y,
+                                    r.text.chars().count(),
+                                    right_content_w,
+                                    prov,
+                                    move_hl,
+                                );
+                            }
                         } else {
                             render_empty_num(buf, right_num_x, y, dim_style);
                         }
@@ -205,6 +231,36 @@ pub(crate) fn render_empty_num(buf: &mut Buffer, x: u16, y: u16, style: Style) {
     }
 }
 
+/// Paint a `<- {rel_path}:{line+1}` chip after the rendered side text
+/// to surface that the moved hunk's source lives in a different file
+/// of the same review session. `text_cols` is the column count
+/// already consumed by [`render_side_text`]; the chip starts two
+/// columns later (so the gap is visually obvious) and truncates if
+/// fewer columns remain. No-op when `text_cols + 2 >= max_cols`.
+pub(crate) fn render_move_chip(
+    buf: &mut Buffer,
+    start_x: u16,
+    y: u16,
+    text_cols: usize,
+    max_cols: usize,
+    prov: &MoveProvenance,
+    style: Style,
+) {
+    let chip_start_col = text_cols.saturating_add(2);
+    if chip_start_col >= max_cols {
+        return;
+    }
+    let chip = format!("<- {}:{}", prov.rel_path, prov.line + 1);
+    let available = max_cols - chip_start_col;
+    for (i, ch) in chip.chars().take(available).enumerate() {
+        let x = start_x + (chip_start_col + i) as u16;
+        if x >= buf.area.x + buf.area.width {
+            break;
+        }
+        buf[(x, y)].set_char(ch).set_style(style);
+    }
+}
+
 /// Render text with sub-line change span highlighting. Characters
 /// within any `spans` range get `highlight_style`; characters within
 /// any `moved_spans` range get the diff theme's move color (cyan)
@@ -249,5 +305,77 @@ pub(crate) fn render_side_text(
             base_style
         };
         buf[(x, y)].set_char(ch).set_style(style);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn buffer_text(buf: &Buffer, y: u16) -> String {
+        (buf.area.x..buf.area.x + buf.area.width)
+            .map(|x| buf[(x, y)].symbol().chars().next().unwrap_or(' '))
+            .collect()
+    }
+
+    #[test]
+    fn move_chip_paints_text_after_two_col_gap() {
+        let area = Rect::new(0, 0, 50, 1);
+        let mut buf = Buffer::empty(area);
+        let prov = MoveProvenance {
+            rel_path: "a.rs".to_string(),
+            line: 0,
+        };
+        render_move_chip(&mut buf, 0, 0, 5, 50, &prov, Style::default());
+        let text = buffer_text(&buf, 0);
+        assert_eq!(&text[..7], "       ", "5-col text + 2-col gap before chip");
+        assert_eq!(&text[7..16], "<- a.rs:1", "chip text follows the gap");
+    }
+
+    #[test]
+    fn move_chip_no_op_when_text_fills_max_cols() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let prov = MoveProvenance {
+            rel_path: "long_name.rs".to_string(),
+            line: 100,
+        };
+        render_move_chip(&mut buf, 0, 0, 19, 20, &prov, Style::default());
+        let text = buffer_text(&buf, 0);
+        assert!(
+            !text.contains("<-"),
+            "chip must not paint when text fills max_cols; got {text:?}"
+        );
+    }
+
+    #[test]
+    fn move_chip_truncates_when_room_runs_out() {
+        let area = Rect::new(0, 0, 20, 1);
+        let mut buf = Buffer::empty(area);
+        let prov = MoveProvenance {
+            rel_path: "long_name.rs".to_string(),
+            line: 99,
+        };
+        render_move_chip(&mut buf, 0, 0, 5, 20, &prov, Style::default());
+        let text = buffer_text(&buf, 0);
+        // text_cols=5 + 2-col gap = chip starts at col 7; max_cols=20 leaves 13 cols.
+        // "<- long_name.rs:100" is 19 chars; truncated to 13: "<- long_name.".
+        assert_eq!(&text[7..20], "<- long_name.", "chip truncates to fit");
+    }
+
+    #[test]
+    fn move_chip_uses_one_based_line_number() {
+        let area = Rect::new(0, 0, 30, 1);
+        let mut buf = Buffer::empty(area);
+        let prov = MoveProvenance {
+            rel_path: "x.rs".to_string(),
+            line: 41,
+        };
+        render_move_chip(&mut buf, 0, 0, 0, 30, &prov, Style::default());
+        let text = buffer_text(&buf, 0);
+        assert!(
+            text.contains("<- x.rs:42"),
+            "chip prints 1-based line number; got {text:?}"
+        );
     }
 }

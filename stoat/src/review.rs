@@ -1,5 +1,9 @@
 use crate::buffer_registry::fingerprint_bytes;
-use std::{ops::Range, path::PathBuf, sync::Arc};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat_language::{
     structural_diff::{
         self, BufferRef, ChangeKind as LangChangeKind, DiffChange, DiffResult, FileDiffInput, Side,
@@ -19,6 +23,18 @@ pub(crate) struct ReviewFileInput {
     pub buffer_text: Arc<String>,
 }
 
+/// Cross-file move provenance for a single review row. Set when the
+/// row participates in a [`stoat_language::structural_diff::ChangeKind::Moved`]
+/// hunk whose [`stoat_language::structural_diff::MoveSource`] points
+/// at a *different* file in the same review session. Intra-file moves
+/// keep this as `None`. The renderer paints a chip
+/// `<- {rel_path}:{line+1}` next to the row when set.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct MoveProvenance {
+    pub(crate) rel_path: String,
+    pub(crate) line: u32,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub(crate) struct ReviewSide {
     pub(crate) text: String,
@@ -33,6 +49,8 @@ pub(crate) struct ReviewSide {
     /// a glance that the change is a relocation rather than a gain or
     /// loss.
     pub(crate) moved_spans: Vec<Range<usize>>,
+    /// First cross-file move source covering this row, if any.
+    pub(crate) move_provenance: Option<MoveProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -64,7 +82,9 @@ pub(crate) struct ReviewHunk {
 /// per input in input order. Cross-file [`stoat_language::structural_diff::ChangeKind::Moved`]
 /// metadata produced by the diff pass survives into the returned
 /// hunks via the existing
-/// [`stoat_language::structural_diff::DiffChange::move_metadata`] field.
+/// [`stoat_language::structural_diff::DiffChange::move_metadata`] field
+/// and a per-row [`MoveProvenance`] chip that the renderer paints
+/// next to cross-file moved rows.
 pub(crate) fn extract_review_hunks_changeset(
     files: &[ReviewFileInput],
     context: u32,
@@ -88,7 +108,19 @@ pub(crate) fn extract_review_hunks_changeset(
         .iter()
         .zip(diff_results)
         .map(|(f, diff)| {
-            extract_review_hunks_from_diff(&diff, &f.base_text, &f.buffer_text, context)
+            let rel_path_for = |path: &Path| -> Option<String> {
+                files
+                    .iter()
+                    .find(|other| other.path == path)
+                    .map(|other| other.rel_path.clone())
+            };
+            extract_review_hunks_from_diff(
+                &diff,
+                &f.base_text,
+                &f.buffer_text,
+                context,
+                &rel_path_for,
+            )
         })
         .collect()
 }
@@ -98,6 +130,7 @@ fn extract_review_hunks_from_diff(
     base_text: &str,
     buffer_text: &str,
     context: u32,
+    rel_path_for: &dyn Fn(&Path) -> Option<String>,
 ) -> Vec<ReviewHunk> {
     let lhs_lines = split_lines(base_text);
     let rhs_lines = split_lines(buffer_text);
@@ -109,6 +142,10 @@ fn extract_review_hunks_from_diff(
     let rhs_spans = collect_line_spans(&rhs_lines, &diff_result.changes, Side::Rhs);
     let lhs_moved = collect_moved_spans(&lhs_lines, &diff_result.changes, Side::Lhs);
     let rhs_moved = collect_moved_spans(&rhs_lines, &diff_result.changes, Side::Rhs);
+    let lhs_prov =
+        collect_moved_provenance(&lhs_lines, &diff_result.changes, Side::Lhs, rel_path_for);
+    let rhs_prov =
+        collect_moved_provenance(&rhs_lines, &diff_result.changes, Side::Rhs, rel_path_for);
 
     let all_rows = structural_walk(
         WalkSide {
@@ -116,12 +153,14 @@ fn extract_review_hunks_from_diff(
             changed: &lhs_changed,
             spans: &lhs_spans,
             moved: &lhs_moved,
+            provenance: &lhs_prov,
         },
         WalkSide {
             lines: &rhs_lines,
             changed: &rhs_changed,
             spans: &rhs_spans,
             moved: &rhs_moved,
+            provenance: &rhs_prov,
         },
     );
     extract_hunks_with_context(&all_rows, context)
@@ -197,6 +236,63 @@ fn collect_moved_spans(
     })
 }
 
+/// Per-line cross-file move provenance. For each line on `side` that
+/// participates in a [`LangChangeKind::Moved`] change whose first
+/// `MoveSource` carries `Some(BufferRef)` for a *different* file
+/// (resolved via `rel_path_for`), emit `Some(MoveProvenance { rel_path,
+/// line })`. Intra-file moves and lines untouched by a Moved change get
+/// `None`. The renderer paints the chip with the move-highlight style.
+fn collect_moved_provenance(
+    lines: &[&str],
+    changes: &[DiffChange],
+    side: Side,
+    rel_path_for: &dyn Fn(&Path) -> Option<String>,
+) -> Vec<Option<MoveProvenance>> {
+    let mut out: Vec<Option<MoveProvenance>> = vec![None; lines.len()];
+    if lines.is_empty() {
+        return out;
+    }
+
+    let offsets = line_byte_offsets(lines);
+
+    for change in changes {
+        if change.side != side
+            || change.byte_range.start >= change.byte_range.end
+            || !matches!(change.kind, LangChangeKind::Moved)
+        {
+            continue;
+        }
+        let metadata = match change.move_metadata.as_ref() {
+            Some(m) => m,
+            None => continue,
+        };
+        let foreign = metadata.sources.iter().find_map(|s| {
+            let path = s.buffer.as_ref()?.path.as_path();
+            let rel_path = rel_path_for(path)?;
+            Some(MoveProvenance {
+                rel_path,
+                line: s.line_range.start,
+            })
+        });
+        let Some(prov) = foreign else {
+            continue;
+        };
+        let cr = &change.byte_range;
+        let first = offsets.partition_point(|&(_, end)| end < cr.start);
+        for (i, &(line_start, _line_end)) in offsets[first..].iter().enumerate() {
+            if line_start >= cr.end {
+                break;
+            }
+            let row = first + i;
+            if out[row].is_none() {
+                out[row] = Some(prov.clone());
+            }
+        }
+    }
+
+    out
+}
+
 fn collect_spans_by(
     lines: &[&str],
     changes: &[DiffChange],
@@ -250,6 +346,7 @@ struct WalkSide<'a> {
     changed: &'a [bool],
     spans: &'a [Vec<Range<usize>>],
     moved: &'a [Vec<Range<usize>>],
+    provenance: &'a [Option<MoveProvenance>],
 }
 
 /// Walk both files using unchanged lines as alignment anchors. Changed
@@ -274,12 +371,14 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                     line_num: old_line,
                     change_spans: Vec::new(),
                     moved_spans: Vec::new(),
+                    move_provenance: None,
                 },
                 right: ReviewSide {
                     text: rhs.lines[ri].to_string(),
                     line_num: new_line,
                     change_spans: Vec::new(),
                     moved_spans: Vec::new(),
+                    move_provenance: None,
                 },
             });
             li += 1;
@@ -299,6 +398,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                 line_num: old_line,
                 change_spans: lhs.spans[li].clone(),
                 moved_spans: lhs.moved[li].clone(),
+                move_provenance: lhs.provenance[li].clone(),
             });
             li += 1;
             old_line += 1;
@@ -310,6 +410,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                 line_num: new_line,
                 change_spans: rhs.spans[ri].clone(),
                 moved_spans: rhs.moved[ri].clone(),
+                move_provenance: rhs.provenance[ri].clone(),
             });
             ri += 1;
             new_line += 1;
@@ -325,12 +426,14 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                         line_num: old_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),
+                        move_provenance: None,
                     }),
                     right: Some(ReviewSide {
                         text: rhs.lines[ri].to_string(),
                         line_num: new_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),
+                        move_provenance: None,
                     }),
                 });
                 li += 1;
@@ -344,6 +447,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                         line_num: old_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),
+                        move_provenance: None,
                     }),
                     right: None,
                 });
@@ -357,6 +461,7 @@ fn structural_walk(lhs: WalkSide<'_>, rhs: WalkSide<'_>) -> Vec<ReviewRow> {
                         line_num: new_line,
                         change_spans: Vec::new(),
                         moved_spans: Vec::new(),
+                        move_provenance: None,
                     }),
                 });
                 ri += 1;
