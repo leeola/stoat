@@ -351,7 +351,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             if let Some(summary) = movement::current_move_summary(stoat) {
                 tracing::info!(
                     sources = summary.source_count,
-                    same_side_target = ?summary.target_line,
+                    same_side_target = ?summary.target_ref,
                     "move relationships under cursor"
                 );
                 UpdateEffect::Redraw

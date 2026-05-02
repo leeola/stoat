@@ -6,6 +6,7 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
     pane::View,
 };
+use stoat_language::structural_diff::BufferRef;
 use stoat_text::{
     find_number_seeking, next_long_word_end, next_long_word_start, next_word_end, next_word_start,
     prev_long_word_end, prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias,
@@ -20,15 +21,27 @@ pub(super) enum MoveNavigation {
     Target,
 }
 
+/// Per-source navigation target carried by [`MoveSummary`]: the line
+/// to land on plus the optional foreign-buffer pointer. `buffer ==
+/// None` means the source lives in the same file (and same focused
+/// editor) as the hunk under the cursor; `buffer == Some(_)` means
+/// the source lives in a different file and `move_nav` must open or
+/// focus that buffer before positioning the cursor.
+#[derive(Clone, Debug)]
+pub(super) struct MoveSourceRef {
+    pub(super) line: u32,
+    pub(super) buffer: Option<BufferRef>,
+}
+
 /// Resolved move-provenance summary for the hunk under the editor's
 /// cursor. Used by the move-navigation action handlers.
 pub(super) struct MoveSummary {
     /// Line the hunk starts on in the buffer.
     pub(super) hunk_line: u32,
-    /// Candidate source line numbers, zero or more.
-    pub(super) source_lines: Vec<u32>,
-    /// If the hunk is the LHS side of a move, the paired RHS target line.
-    pub(super) target_line: Option<u32>,
+    /// Candidate source locations, zero or more.
+    pub(super) source_refs: Vec<MoveSourceRef>,
+    /// If the hunk is the LHS side of a move, the paired RHS target.
+    pub(super) target_ref: Option<MoveSourceRef>,
     /// Number of candidate sources (>1 = ambiguous move).
     pub(super) source_count: usize,
 }
@@ -50,21 +63,27 @@ pub(super) fn current_move_summary(stoat: &mut Stoat) -> Option<MoveSummary> {
         .iter()
         .chain(detail.base_spans.iter())
         .find_map(|s| s.move_metadata.clone())?;
-    let source_lines: Vec<u32> = metadata
+    let source_refs: Vec<MoveSourceRef> = metadata
         .sources
         .iter()
-        .map(|s| s.line_range.start)
+        .map(|s| MoveSourceRef {
+            line: s.line_range.start,
+            buffer: s.buffer.clone(),
+        })
         .collect();
-    let target_line = if detail.buffer_spans.is_empty() && !detail.base_spans.is_empty() {
-        metadata.sources.first().map(|s| s.line_range.start)
+    let target_ref = if detail.buffer_spans.is_empty() && !detail.base_spans.is_empty() {
+        metadata.sources.first().map(|s| MoveSourceRef {
+            line: s.line_range.start,
+            buffer: s.buffer.clone(),
+        })
     } else {
         None
     };
     Some(MoveSummary {
         hunk_line: cursor_line,
         source_count: metadata.sources.len(),
-        source_lines,
-        target_line,
+        source_refs,
+        target_ref,
     })
 }
 
@@ -72,48 +91,57 @@ pub(super) fn move_nav(stoat: &mut Stoat, nav: MoveNavigation) -> UpdateEffect {
     let Some(summary) = current_move_summary(stoat) else {
         return UpdateEffect::None;
     };
-    if summary.source_lines.is_empty() && summary.target_line.is_none() {
+    if summary.source_refs.is_empty() && summary.target_ref.is_none() {
         return UpdateEffect::None;
+    }
+
+    let target_ref: Option<MoveSourceRef> = {
+        let Some(editor) = focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        match nav {
+            MoveNavigation::FirstSource => {
+                editor.move_source_cursor = Some((summary.hunk_line, 0));
+                summary.source_refs.first().cloned()
+            },
+            MoveNavigation::NextSource => {
+                let idx = match editor.move_source_cursor {
+                    Some((line, i)) if line == summary.hunk_line => {
+                        (i + 1) % summary.source_refs.len().max(1)
+                    },
+                    _ => 0,
+                };
+                editor.move_source_cursor = Some((summary.hunk_line, idx));
+                summary.source_refs.get(idx).cloned()
+            },
+            MoveNavigation::PrevSource => {
+                let len = summary.source_refs.len().max(1);
+                let idx = match editor.move_source_cursor {
+                    Some((line, i)) if line == summary.hunk_line => (i + len - 1) % len,
+                    _ => len.saturating_sub(1),
+                };
+                editor.move_source_cursor = Some((summary.hunk_line, idx));
+                summary.source_refs.get(idx).cloned()
+            },
+            MoveNavigation::Target => summary.target_ref,
+        }
+    };
+
+    let Some(target_ref) = target_ref else {
+        return UpdateEffect::None;
+    };
+
+    if let Some(buffer_ref) = target_ref.buffer.as_ref() {
+        let focused = stoat.active_workspace().panes.focus();
+        if super::file::open_file_in_pane(stoat, focused, &buffer_ref.path).is_none() {
+            return UpdateEffect::None;
+        }
     }
 
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;
     };
-
-    let target_row = match nav {
-        MoveNavigation::FirstSource => {
-            editor.move_source_cursor = Some((summary.hunk_line, 0));
-            summary.source_lines.first().copied()
-        },
-        MoveNavigation::NextSource => {
-            let idx = match editor.move_source_cursor {
-                Some((line, i)) if line == summary.hunk_line => {
-                    (i + 1) % summary.source_lines.len().max(1)
-                },
-                _ => 0,
-            };
-            editor.move_source_cursor = Some((summary.hunk_line, idx));
-            summary.source_lines.get(idx).copied()
-        },
-        MoveNavigation::PrevSource => {
-            let len = summary.source_lines.len().max(1);
-            let idx = match editor.move_source_cursor {
-                Some((line, i)) if line == summary.hunk_line => (i + len - 1) % len,
-                _ => len.saturating_sub(1),
-            };
-            editor.move_source_cursor = Some((summary.hunk_line, idx));
-            summary.source_lines.get(idx).copied()
-        },
-        MoveNavigation::Target => summary.target_line,
-    };
-
-    let Some(row) = target_row else {
-        return UpdateEffect::None;
-    };
-    // Move the cursor to the resolved row. Full cross-file navigation
-    // (opening a different buffer when MoveSource.buffer is Some) lands
-    // in Phase 9 alongside the workspace-wide move index.
-    set_cursor_row(editor, row);
+    set_cursor_row(editor, target_ref.line);
     UpdateEffect::Redraw
 }
 
@@ -2502,4 +2530,184 @@ pub(super) fn goto_window(stoat: &mut Stoat, align: WindowAlign, extend: bool) -
         }
     });
     UpdateEffect::Redraw
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        diff_map::{
+            ChangeKind as DmChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail,
+        },
+        pane::View,
+        test_harness::TestHarness,
+    };
+    use std::sync::Arc;
+    use stoat_language::structural_diff::{MoveMetadata, MoveSource, Side};
+
+    fn install_moved_hunk_to_other_file(
+        h: &mut TestHarness,
+        moved_line: u32,
+        target_path: &std::path::Path,
+        target_line: u32,
+    ) {
+        let buffer_ref = BufferRef {
+            path: target_path.to_path_buf(),
+            fingerprint: [7u8; 32],
+        };
+        let metadata = Arc::new(MoveMetadata {
+            sources: vec![MoveSource {
+                buffer: Some(buffer_ref),
+                side: Side::Lhs,
+                byte_range: 0..0,
+                line_range: target_line..(target_line + 1),
+            }],
+        });
+        let detail = Arc::new(TokenDetail {
+            buffer_spans: vec![ChangeSpan {
+                byte_range: 0..0,
+                kind: DmChangeKind::Moved,
+                move_metadata: Some(metadata),
+            }],
+            base_spans: Vec::new(),
+        });
+        let hunk = DiffHunk {
+            status: DiffHunkStatus::Moved,
+            buffer_start_line: moved_line,
+            buffer_line_range: moved_line..(moved_line + 1),
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: Some(detail),
+        };
+        let dm = DiffMap::from_hunks([hunk], None);
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        guard.diff_map = Some(dm);
+    }
+
+    fn focused_buffer_path(h: &TestHarness) -> std::path::PathBuf {
+        let ws = h.stoat.active_workspace();
+        let focused = ws.panes.focus();
+        let editor_id = match ws.panes.pane(focused).view {
+            View::Editor(id) => id,
+            _ => panic!("focused pane is not an editor"),
+        };
+        let buffer_id = ws.editors[editor_id].buffer_id;
+        ws.buffers
+            .path_for(buffer_id)
+            .expect("buffer has a path")
+            .to_path_buf()
+    }
+
+    fn focused_head_row(h: &mut TestHarness) -> u32 {
+        let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buffer_snapshot.resolve_anchor(&head);
+        buffer_snapshot.rope().offset_to_point(offset).row
+    }
+
+    #[test]
+    fn move_nav_jumps_to_foreign_buffer_path() {
+        let mut h = TestHarness::with_size(40, 10);
+        let a_path = h.write_file("a.rs", "a0\na1\na2\na3\na4\n");
+        let b_path = h.write_file("b.rs", "b0\nb1\nb2\nb3\nb4\n");
+        h.open_file(&a_path);
+        install_moved_hunk_to_other_file(&mut h, 2, &b_path, 3);
+
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            set_cursor_row(editor, 2);
+        }
+        assert_eq!(
+            focused_head_row(&mut h),
+            2,
+            "cursor on the moved hunk in a.rs"
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpToMoveSource);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            b_path,
+            "focused pane switched to b.rs"
+        );
+        assert_eq!(
+            focused_head_row(&mut h),
+            3,
+            "cursor on the source line in b.rs"
+        );
+    }
+
+    #[test]
+    fn move_nav_intra_file_stays_in_buffer() {
+        let mut h = TestHarness::with_size(40, 10);
+        let a_path = h.write_file("a.rs", "a0\na1\na2\na3\na4\n");
+        h.open_file(&a_path);
+
+        let metadata = Arc::new(MoveMetadata {
+            sources: vec![MoveSource {
+                buffer: None,
+                side: Side::Lhs,
+                byte_range: 0..0,
+                line_range: 4..5,
+            }],
+        });
+        let detail = Arc::new(TokenDetail {
+            buffer_spans: vec![ChangeSpan {
+                byte_range: 0..0,
+                kind: DmChangeKind::Moved,
+                move_metadata: Some(metadata),
+            }],
+            base_spans: Vec::new(),
+        });
+        let hunk = DiffHunk {
+            status: DiffHunkStatus::Moved,
+            buffer_start_line: 2,
+            buffer_line_range: 2..3,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: Some(detail),
+        };
+        {
+            let dm = DiffMap::from_hunks([hunk], None);
+            let ws = h.stoat.active_workspace();
+            let focused = ws.panes.focus();
+            let editor_id = match ws.panes.pane(focused).view {
+                View::Editor(id) => id,
+                _ => panic!("focused pane is not an editor"),
+            };
+            let buffer_id = ws.editors[editor_id].buffer_id;
+            let buffer = ws.buffers.get(buffer_id).expect("buffer");
+            let mut guard = buffer.write().expect("poisoned");
+            guard.diff_map = Some(dm);
+        }
+
+        {
+            let editor = focused_editor_mut(&mut h.stoat).expect("focused editor");
+            set_cursor_row(editor, 2);
+        }
+        assert_eq!(focused_head_row(&mut h), 2);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::JumpToMoveSource);
+
+        assert_eq!(
+            focused_buffer_path(&h),
+            a_path,
+            "stayed in a.rs (intra-file move)"
+        );
+        assert_eq!(
+            focused_head_row(&mut h),
+            4,
+            "cursor on the source line in a.rs"
+        );
+    }
 }
