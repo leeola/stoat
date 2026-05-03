@@ -26,7 +26,6 @@ use std::{
     fs::{File, OpenOptions},
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
-    process,
     sync::{
         atomic::{AtomicU64, Ordering},
         mpsc::{sync_channel, RecvTimeoutError, SyncSender, TrySendError},
@@ -74,15 +73,10 @@ impl fmt::Debug for TextProtoLog {
 }
 
 impl TextProtoLog {
-    /// Opens `<log_dir>/<kind>-<pid>.jsonl`, creating the directory if needed.
-    pub fn create(kind: &str) -> io::Result<Self> {
-        let dir = log_dir()?;
-        std::fs::create_dir_all(&dir)?;
-        let path = dir.join(format!("{kind}-{}.jsonl", process::id()));
-        Self::create_at(&path)
-    }
-
     /// Opens an explicit path. The file is truncated if it exists.
+    /// Callers are responsible for ensuring the parent directory
+    /// exists; this constructor performs no filesystem mutation
+    /// beyond opening the file itself.
     pub fn create_at(path: &Path) -> io::Result<Self> {
         let file = OpenOptions::new()
             .create(true)

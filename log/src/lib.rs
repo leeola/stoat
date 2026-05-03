@@ -31,21 +31,6 @@ use tracing_subscriber::{filter::ParseError, fmt, EnvFilter};
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
 pub enum LogInitError {
-    #[snafu(display("Failed to resolve log directory"))]
-    ResolveLogDir {
-        source: io::Error,
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
-
-    #[snafu(display("Failed to create log directory: {}", path.display()))]
-    CreateLogDir {
-        source: io::Error,
-        path: PathBuf,
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
-
     #[snafu(display("Failed to open log file: {}", path.display()))]
     OpenLogFile {
         source: io::Error,
@@ -69,23 +54,27 @@ pub enum LogInitError {
     },
 }
 
-/// Initialize logging to `<XDG_STATE_HOME>/stoat/logs/stoat-<pid>.log`.
+/// Initialize logging to `log_path`, appending if the file already exists.
 ///
 /// Writes to a file so tracing output never hits the raw-mode terminal.
 /// `stoat_log` takes precedence over `rust_log`; both `None` falls back
 /// to the compiled-in default of `warn,stoat=info,stoat_bin=info`.
-/// Callers resolve env state at the binary boundary; this crate does
-/// not read the process environment.
-pub fn init(stoat_log: Option<String>, rust_log: Option<String>) -> Result<(), LogInitError> {
+/// Callers resolve env state and the log file path at the binary
+/// boundary, including ensuring the parent directory exists; this
+/// crate does not read the process environment or create directories.
+pub fn init(
+    stoat_log: Option<String>,
+    rust_log: Option<String>,
+    log_path: PathBuf,
+) -> Result<(), LogInitError> {
     let filter = create_filter(stoat_log, rust_log)?;
-    let dir = log_dir().context(ResolveLogDirSnafu)?;
-    fs::create_dir_all(&dir).with_context(|_| CreateLogDirSnafu { path: dir.clone() })?;
-    let path = dir.join(format!("stoat-{}.log", std::process::id()));
     let file = fs::OpenOptions::new()
         .create(true)
         .append(true)
-        .open(&path)
-        .with_context(|_| OpenLogFileSnafu { path: path.clone() })?;
+        .open(&log_path)
+        .with_context(|_| OpenLogFileSnafu {
+            path: log_path.clone(),
+        })?;
     fmt()
         .with_env_filter(filter)
         .with_writer(file)

@@ -1,7 +1,14 @@
 fn main() {
     let stoat_log = std::env::var("STOAT_LOG").ok();
     let rust_log = std::env::var("RUST_LOG").ok();
-    if let Err(e) = stoat::log::init(stoat_log, rust_log) {
+    let log_path = match resolve_log_path() {
+        Ok(p) => p,
+        Err(e) => {
+            eprintln!("Failed to prepare log directory: {e}");
+            std::process::exit(1);
+        },
+    };
+    if let Err(e) = stoat::log::init(stoat_log, rust_log, log_path) {
         eprintln!("Failed to initialize logging: {e}");
         std::process::exit(1);
     }
@@ -12,4 +19,10 @@ fn main() {
         eprintln!("Error: {e}");
         std::process::exit(1);
     }
+}
+
+fn resolve_log_path() -> std::io::Result<std::path::PathBuf> {
+    let dir = stoat::log::log_dir()?;
+    std::fs::create_dir_all(&dir)?;
+    Ok(dir.join(format!("stoat-{}.log", std::process::id())))
 }
