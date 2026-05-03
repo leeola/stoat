@@ -20,6 +20,7 @@ pub(crate) mod run_pane;
 pub(crate) mod symbol_picker;
 pub(crate) mod text;
 pub(crate) mod workspace_picker;
+pub(crate) mod workspace_symbol_picker;
 
 use crate::{
     app::Stoat,
@@ -232,6 +233,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
     code_action::render_code_action(stoat, buf);
     rename_input::render_rename_input(stoat, buf);
     symbol_picker::render_symbol_picker(stoat, buf);
+    workspace_symbol_picker::render_workspace_symbol(stoat, buf);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::render_badges(
         &ws.badges,

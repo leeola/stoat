@@ -249,6 +249,23 @@ pub struct Stoat {
     /// Selectable document-symbol picker waiting for the user to
     /// choose a symbol to jump to (number keys 1-9) or cancel.
     pub(crate) pending_symbol_picker: Option<action_handlers::lsp::SymbolPicker>,
+
+    /// One-line input modal for the workspace-symbol query. Created
+    /// by `open_workspace_symbol_picker`; consumed by
+    /// `workspace_symbol_submit` (Enter) which fires the request, or
+    /// `workspace_symbol_cancel` (Escape) which discards.
+    pub(crate) workspace_symbol_input: Option<action_handlers::lsp::WorkspaceSymbolInputState>,
+
+    /// In-flight `workspace/symbol` request. Polled by
+    /// [`action_handlers::lsp::pump_lsp_workspace_symbol`]; on
+    /// `Ready(Some)` populates [`Self::pending_workspace_symbol_picker`].
+    pub(crate) pending_workspace_symbol_request:
+        Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceSymbolResponse>>>,
+
+    /// Selectable workspace-symbol picker. The user chose a query
+    /// from the input modal; this picker shows up to nine matching
+    /// symbols. Picking opens the symbol's file at its location.
+    pub(crate) pending_workspace_symbol_picker: Option<action_handlers::lsp::WorkspaceSymbolPicker>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -396,6 +413,9 @@ impl Stoat {
             pending_rename: None,
             pending_symbol_picker_request: None,
             pending_symbol_picker: None,
+            workspace_symbol_input: None,
+            pending_workspace_symbol_request: None,
+            pending_workspace_symbol_picker: None,
         }
     }
 
@@ -1141,6 +1161,27 @@ impl Stoat {
             self.pending_symbol_picker_request = None;
         }
 
+        if (self.mode == "normal" || self.mode == "select")
+            && self.pending_workspace_symbol_picker.is_some()
+        {
+            if let KeyCode::Char(ch) = key.code {
+                if let Some(digit) = ch.to_digit(10) {
+                    if (1..=9).contains(&digit) {
+                        let index = (digit - 1) as usize;
+                        action_handlers::lsp::pick_workspace_symbol(self, index);
+                        return UpdateEffect::Redraw;
+                    }
+                }
+            }
+            if matches!(key.code, KeyCode::Esc) {
+                self.pending_workspace_symbol_picker = None;
+                self.pending_workspace_symbol_request = None;
+                return UpdateEffect::Redraw;
+            }
+            self.pending_workspace_symbol_picker = None;
+            self.pending_workspace_symbol_request = None;
+        }
+
         if (self.mode == "normal" || self.mode == "select") && self.pending_find.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let (kind, extend, count) = self.pending_find.take().expect("checked above");
@@ -1218,6 +1259,7 @@ impl Stoat {
         let mut dispatched_code_action = false;
         let mut dispatched_rename_symbol = false;
         let mut dispatched_symbol_picker = false;
+        let mut dispatched_workspace_symbol_picker = false;
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
@@ -1237,6 +1279,9 @@ impl Stoat {
             }
             if ra.name == "OpenSymbolPicker" {
                 dispatched_symbol_picker = true;
+            }
+            if ra.name == "OpenWorkspaceSymbolPicker" {
+                dispatched_workspace_symbol_picker = true;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {
                 dispatched_action = true;
@@ -1265,6 +1310,10 @@ impl Stoat {
                 self.pending_symbol_picker = None;
                 self.pending_symbol_picker_request = None;
             }
+            if !dispatched_workspace_symbol_picker {
+                self.pending_workspace_symbol_picker = None;
+                self.pending_workspace_symbol_request = None;
+            }
         }
         effect
     }
@@ -1288,6 +1337,14 @@ impl Stoat {
 
         if let Some(help) = &self.help {
             return Some((help.input.editor_id, help.input.buffer_id));
+        }
+
+        if let Some(rename) = &self.rename_input {
+            return Some((rename.input.editor_id, rename.input.buffer_id));
+        }
+
+        if let Some(ws_sym) = &self.workspace_symbol_input {
+            return Some((ws_sym.input.editor_id, ws_sym.input.buffer_id));
         }
 
         if let Some((editor_id, buffer_id)) = ws
@@ -1993,6 +2050,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_prepare_rename(self);
         action_handlers::lsp::pump_lsp_rename(self);
         action_handlers::lsp::pump_lsp_symbol_picker(self);
+        action_handlers::lsp::pump_lsp_workspace_symbol(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf

@@ -157,6 +157,7 @@ pub enum ActionKind {
     CodeAction,
     RenameSymbol,
     OpenSymbolPicker,
+    OpenWorkspaceSymbolPicker,
     ReviewNextChunk,
     ReviewPrevChunk,
     ReviewStageChunk,

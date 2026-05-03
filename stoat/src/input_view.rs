@@ -55,6 +55,7 @@ pub(crate) enum SubmitTarget {
     ClaudeChat,
     FileFinder,
     RenameSymbol,
+    WorkspaceSymbolPicker,
 }
 
 impl InputView {

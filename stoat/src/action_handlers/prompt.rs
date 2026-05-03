@@ -8,6 +8,9 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if super::lsp::rename_input_submit(stoat) {
         return UpdateEffect::Redraw;
     }
+    if super::lsp::workspace_symbol_submit(stoat) {
+        return UpdateEffect::Redraw;
+    }
     if let Some(effect) = super::file_finder::file_finder_submit(stoat) {
         return effect;
     }
@@ -46,6 +49,9 @@ fn focused_target(stoat: &Stoat) -> Option<crate::input_view::SubmitTarget> {
 
 pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if super::lsp::rename_input_cancel(stoat) {
+        return UpdateEffect::Redraw;
+    }
+    if super::lsp::workspace_symbol_cancel(stoat) {
         return UpdateEffect::Redraw;
     }
     if let Some(effect) = super::file_finder::file_finder_cancel(stoat) {

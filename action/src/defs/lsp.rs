@@ -123,3 +123,17 @@ define_action!(
      capability or returns no symbols.",
     ActionPriority::Common
 );
+
+define_action!(
+    OpenWorkspaceSymbolPickerDef,
+    OpenWorkspaceSymbolPicker,
+    "OpenWorkspaceSymbolPicker",
+    ActionKind::OpenWorkspaceSymbolPicker,
+    "search workspace symbols",
+    "Open a one-line input modal for a workspace-symbol query. \
+     Submitting fires `workspace/symbol` and presents the response as \
+     a numbered popup. Number keys 1-9 select a symbol; on select the \
+     cursor opens the target file at the symbol's location. No-op when \
+     the server does not advertise the capability.",
+    ActionPriority::Common
+);

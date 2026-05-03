@@ -22,7 +22,8 @@ use lsp_types::{
     Position, PrepareRenameResponse, Range, RenameParams, SymbolInformation,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit,
+    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
+    WorkspaceSymbolResponse,
 };
 use std::{
     future::Future,
@@ -1397,6 +1398,215 @@ pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
         return false;
     };
     crate::action_handlers::movement::jump_to_offset(stoat, entry.anchor_offset);
+    true
+}
+
+/// Open input modal for the workspace-symbol query. Carries the
+/// [`crate::input_view::InputView`] so render can paint the
+/// embedded editor and submit can read the typed query;
+/// `previous_mode` restores the pre-action mode on cancel/submit;
+/// `anchor_offset` anchors the modal popup to the cursor.
+#[derive(Debug)]
+pub(crate) struct WorkspaceSymbolInputState {
+    pub(crate) input: crate::input_view::InputView,
+    pub(crate) anchor_offset: usize,
+    pub(crate) previous_mode: String,
+}
+
+/// One entry in [`WorkspaceSymbolPicker`]. `title` is the symbol
+/// name; `path` is the absolute filesystem path to open; `position`
+/// is the LSP position in the target file.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceSymbolEntry {
+    pub(crate) title: String,
+    pub(crate) path: PathBuf,
+    pub(crate) position: Position,
+}
+
+/// Cursor-anchored workspace-symbol picker. Painted as a numbered
+/// popup; the user picks with keys `1`..=`9`, dismisses with
+/// Escape or any other action.
+#[derive(Debug, Clone)]
+pub(crate) struct WorkspaceSymbolPicker {
+    pub(crate) entries: Vec<WorkspaceSymbolEntry>,
+    pub(crate) anchor_offset: usize,
+}
+
+/// Open the workspace-symbol query input modal. Capability-gates on
+/// [`LanguageServerFeature::WorkspaceSymbols`]; transitions to
+/// "prompt" so typing routes through `handle_insert_key` into the
+/// modal's [`crate::input_view::InputView`]. The modal seed is
+/// empty; submit fires the request, cancel restores the previous
+/// mode.
+pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::WorkspaceSymbols)
+    {
+        return UpdateEffect::None;
+    }
+
+    let anchor_offset = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        buf_snap.resolve_anchor(&head)
+    };
+
+    let previous_mode = stoat.mode.clone();
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let input = crate::input_view::InputView::create(
+        ws,
+        executor,
+        crate::input_view::SubmitTarget::WorkspaceSymbolPicker,
+        "",
+        "prompt",
+        1,
+    );
+    stoat.workspace_symbol_input = Some(WorkspaceSymbolInputState {
+        input,
+        anchor_offset,
+        previous_mode,
+    });
+    stoat.mode = "prompt".into();
+    UpdateEffect::Redraw
+}
+
+/// Submit the workspace-symbol input: read the query text, fire
+/// `workspace/symbol`, restore previous mode, and tear down the
+/// modal. Returns true when the modal was open.
+pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
+    let Some(state) = stoat.workspace_symbol_input.take() else {
+        return false;
+    };
+    let query = state.input.text(stoat.active_workspace());
+    let previous_mode = state.previous_mode.clone();
+    let anchor_offset = state.anchor_offset;
+    let ws = stoat.active_workspace_mut();
+    state.input.dispose(ws);
+    stoat.mode = previous_mode;
+
+    let params = WorkspaceSymbolParams {
+        query,
+        work_done_progress_params: WorkDoneProgressParams::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        match lsp.workspace_symbol(params).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "workspace_symbol request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_workspace_symbol_request = Some(task);
+    stoat.pending_workspace_symbol_picker = Some(WorkspaceSymbolPicker {
+        entries: Vec::new(),
+        anchor_offset,
+    });
+    true
+}
+
+/// Cancel the workspace-symbol input modal. Restores the previous
+/// mode and disposes the embedded input.
+pub(crate) fn workspace_symbol_cancel(stoat: &mut Stoat) -> bool {
+    let Some(state) = stoat.workspace_symbol_input.take() else {
+        return false;
+    };
+    let previous_mode = state.previous_mode.clone();
+    let ws = stoat.active_workspace_mut();
+    state.input.dispose(ws);
+    stoat.mode = previous_mode;
+    true
+}
+
+/// Poll any in-flight workspace-symbol request and translate the
+/// response into a [`WorkspaceSymbolPicker`]. Drops the picker when
+/// the response is empty or `None`. v1 caps at the first 9
+/// entries (number-key cap). Handles only the
+/// [`WorkspaceSymbolResponse::Flat`] variant in v1; nested
+/// `WorkspaceSymbol` entries are dropped (rare in practice).
+pub(crate) fn pump_lsp_workspace_symbol(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_workspace_symbol_request.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(response)) => {
+            let entries = workspace_symbol_entries(response);
+            if entries.is_empty() {
+                stoat.pending_workspace_symbol_picker = None;
+            } else if let Some(picker) = stoat.pending_workspace_symbol_picker.as_mut() {
+                picker.entries = entries;
+            }
+            true
+        },
+        Poll::Ready(None) => {
+            stoat.pending_workspace_symbol_picker = None;
+            true
+        },
+        Poll::Pending => {
+            stoat.pending_workspace_symbol_request = Some(task);
+            false
+        },
+    }
+}
+
+fn workspace_symbol_entries(response: WorkspaceSymbolResponse) -> Vec<WorkspaceSymbolEntry> {
+    let mut entries: Vec<WorkspaceSymbolEntry> = Vec::new();
+    match response {
+        WorkspaceSymbolResponse::Flat(items) => {
+            for SymbolInformation { name, location, .. } in items {
+                let Some(path) = crate::app::lsp_uri_to_path(&location.uri) else {
+                    continue;
+                };
+                entries.push(WorkspaceSymbolEntry {
+                    title: name,
+                    path,
+                    position: location.range.start,
+                });
+            }
+        },
+        WorkspaceSymbolResponse::Nested(_) => {
+            // v1 limitation: nested results are dropped; recorded as a
+            // follow-up item in the TODO. Servers commonly return Flat
+            // and the fake only emits Flat, so this is the practical path.
+        },
+    }
+    entries.truncate(9);
+    entries
+}
+
+/// Apply the user's pick from the open workspace-symbol picker:
+/// open the symbol's file in the focused pane and jump the primary
+/// cursor to the symbol's position. Clears the picker.
+pub(crate) fn pick_workspace_symbol(stoat: &mut Stoat, index: usize) -> bool {
+    let Some(picker) = stoat.pending_workspace_symbol_picker.take() else {
+        return false;
+    };
+    let Some(entry) = picker.entries.into_iter().nth(index) else {
+        return false;
+    };
+    let focused = stoat.active_workspace().panes.focus();
+    crate::action_handlers::file::open_file_in_pane(stoat, focused, &entry.path);
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+        return true;
+    };
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let rope = buf_snap.rope().clone();
+    let offset = crate::lsp::util::lsp_pos_to_byte_offset(&rope, entry.position, encoding);
+    crate::action_handlers::movement::jump_to_offset(stoat, offset);
     true
 }
 
@@ -2985,5 +3195,157 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
         h.assert_snapshot("snapshot_symbol_picker");
+    }
+
+    fn enable_workspace_symbols(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            workspace_symbol_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn workspace_symbol_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        assert!(h.stoat.workspace_symbol_input.is_none());
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn workspace_symbol_opens_input_modal() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        assert!(h.stoat.workspace_symbol_input.is_some());
+        assert_eq!(h.stoat.mode, "prompt");
+    }
+
+    #[test]
+    fn workspace_symbol_submit_populates_picker() {
+        use lsp_types::SymbolKind;
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let root = seed(
+            &mut h,
+            &[("main.rs", "fn foo() {}\n"), ("lib.rs", "fn bar() {}\n")],
+        );
+        let main = root.join("main.rs");
+        let lib = root.join("lib.rs");
+        open_buffer(&mut h, main.clone());
+        h.fake_lsp().add_workspace_symbol(
+            "f",
+            "foo",
+            SymbolKind::FUNCTION,
+            main.to_str().unwrap(),
+            0,
+            3,
+        );
+        h.fake_lsp().add_workspace_symbol(
+            "f",
+            "bar",
+            SymbolKind::FUNCTION,
+            lib.to_str().unwrap(),
+            0,
+            3,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        h.type_keys("f");
+        crate::action_handlers::lsp::workspace_symbol_submit(&mut h.stoat);
+        h.settle();
+        let picker = h
+            .stoat
+            .pending_workspace_symbol_picker
+            .as_ref()
+            .expect("picker open");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn workspace_symbol_pick_opens_target_file() {
+        use lsp_types::SymbolKind;
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let root = seed(
+            &mut h,
+            &[("main.rs", "fn foo() {}\n"), ("lib.rs", "fn bar() {}\n")],
+        );
+        let main = root.join("main.rs");
+        let lib = root.join("lib.rs");
+        open_buffer(&mut h, main.clone());
+        h.fake_lsp().add_workspace_symbol(
+            "bar",
+            "bar",
+            SymbolKind::FUNCTION,
+            lib.to_str().unwrap(),
+            0,
+            3,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        h.type_keys("b a r");
+        crate::action_handlers::lsp::workspace_symbol_submit(&mut h.stoat);
+        h.settle();
+        crate::action_handlers::lsp::pick_workspace_symbol(&mut h.stoat, 0);
+        let ws = h.stoat.active_workspace();
+        let pane = ws.panes.pane(ws.panes.focus());
+        let crate::pane::View::Editor(editor_id) = pane.view else {
+            panic!("not an editor");
+        };
+        let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+        let path = ws
+            .buffers
+            .path_for(buffer_id)
+            .expect("buffer path")
+            .to_path_buf();
+        assert_eq!(path, lib);
+        assert_eq!(cursor_offset(&mut h), 3);
+    }
+
+    #[test]
+    fn workspace_symbol_cancel_clears_modal() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        assert!(h.stoat.workspace_symbol_input.is_some());
+        let cancelled = crate::action_handlers::lsp::workspace_symbol_cancel(&mut h.stoat);
+        assert!(cancelled);
+        assert!(h.stoat.workspace_symbol_input.is_none());
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn space_l_shift_s_triggers_workspace_symbol() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        h.type_keys("space l shift-s");
+        h.settle();
+        assert!(h.stoat.workspace_symbol_input.is_some());
+        assert_eq!(h.stoat.mode, "prompt");
+    }
+
+    #[test]
+    fn snapshot_workspace_symbol_input() {
+        let mut h = TestHarness::with_size(40, 12);
+        enable_workspace_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        h.assert_snapshot("snapshot_workspace_symbol_input");
     }
 }
