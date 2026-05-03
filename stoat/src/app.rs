@@ -239,6 +239,16 @@ pub struct Stoat {
     /// the edit is applied via
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
     pub(crate) pending_rename: Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>>,
+
+    /// In-flight `textDocument/documentSymbol` request. Polled by
+    /// [`action_handlers::lsp::pump_lsp_symbol_picker`]; on response
+    /// populates [`Self::pending_symbol_picker`].
+    pub(crate) pending_symbol_picker_request:
+        Option<stoat_scheduler::Task<Option<lsp_types::DocumentSymbolResponse>>>,
+
+    /// Selectable document-symbol picker waiting for the user to
+    /// choose a symbol to jump to (number keys 1-9) or cancel.
+    pub(crate) pending_symbol_picker: Option<action_handlers::lsp::SymbolPicker>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -384,6 +394,8 @@ impl Stoat {
             pending_prepare_rename: None,
             rename_input: None,
             pending_rename: None,
+            pending_symbol_picker_request: None,
+            pending_symbol_picker: None,
         }
     }
 
@@ -1109,6 +1121,26 @@ impl Stoat {
             self.pending_code_action_request = None;
         }
 
+        if (self.mode == "normal" || self.mode == "select") && self.pending_symbol_picker.is_some()
+        {
+            if let KeyCode::Char(ch) = key.code {
+                if let Some(digit) = ch.to_digit(10) {
+                    if (1..=9).contains(&digit) {
+                        let index = (digit - 1) as usize;
+                        action_handlers::lsp::pick_symbol(self, index);
+                        return UpdateEffect::Redraw;
+                    }
+                }
+            }
+            if matches!(key.code, KeyCode::Esc) {
+                self.pending_symbol_picker = None;
+                self.pending_symbol_picker_request = None;
+                return UpdateEffect::Redraw;
+            }
+            self.pending_symbol_picker = None;
+            self.pending_symbol_picker_request = None;
+        }
+
         if (self.mode == "normal" || self.mode == "select") && self.pending_find.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let (kind, extend, count) = self.pending_find.take().expect("checked above");
@@ -1185,6 +1217,7 @@ impl Stoat {
         let mut dispatched_hover = false;
         let mut dispatched_code_action = false;
         let mut dispatched_rename_symbol = false;
+        let mut dispatched_symbol_picker = false;
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
@@ -1201,6 +1234,9 @@ impl Stoat {
             }
             if ra.name == "RenameSymbol" {
                 dispatched_rename_symbol = true;
+            }
+            if ra.name == "OpenSymbolPicker" {
+                dispatched_symbol_picker = true;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {
                 dispatched_action = true;
@@ -1224,6 +1260,10 @@ impl Stoat {
             }
             if !dispatched_rename_symbol {
                 self.pending_prepare_rename = None;
+            }
+            if !dispatched_symbol_picker {
+                self.pending_symbol_picker = None;
+                self.pending_symbol_picker_request = None;
             }
         }
         effect
@@ -1952,6 +1992,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_code_action_resolve(self);
         action_handlers::lsp::pump_lsp_prepare_rename(self);
         action_handlers::lsp::pump_lsp_rename(self);
+        action_handlers::lsp::pump_lsp_symbol_picker(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf

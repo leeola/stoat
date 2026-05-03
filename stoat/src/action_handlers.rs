@@ -393,6 +393,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::Hover => lsp::hover(stoat),
         ActionKind::CodeAction => lsp::code_action(stoat),
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),
+        ActionKind::OpenSymbolPicker => lsp::open_symbol_picker(stoat),
         ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
         ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
         ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),

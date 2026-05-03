@@ -156,6 +156,7 @@ pub enum ActionKind {
     Hover,
     CodeAction,
     RenameSymbol,
+    OpenSymbolPicker,
     ReviewNextChunk,
     ReviewPrevChunk,
     ReviewStageChunk,

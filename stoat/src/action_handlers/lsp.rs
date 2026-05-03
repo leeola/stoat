@@ -17,8 +17,9 @@ use crate::{
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
-    HoverParams, MarkedString, Position, PrepareRenameResponse, Range, RenameParams,
+    DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
+    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, MarkedString,
+    Position, PrepareRenameResponse, Range, RenameParams, SymbolInformation,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
     TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit,
@@ -1208,6 +1209,195 @@ pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
             false
         },
     }
+}
+
+/// One entry in [`SymbolPicker`]. `title` is the symbol name as
+/// painted in the popup; `anchor_offset` is the byte offset in the
+/// focused buffer that the cursor jumps to on selection (resolved
+/// from the symbol's `selection_range.start` for nested responses or
+/// `location.range.start` for flat responses).
+#[derive(Debug, Clone)]
+pub(crate) struct SymbolEntry {
+    pub(crate) title: String,
+    pub(crate) anchor_offset: usize,
+}
+
+/// Cursor-anchored document-symbol picker. Painted as a numbered
+/// popup; the user picks with keys `1`..=`9`, dismisses with
+/// Escape or any other action.
+#[derive(Debug, Clone)]
+pub(crate) struct SymbolPicker {
+    pub(crate) entries: Vec<SymbolEntry>,
+    pub(crate) anchor_offset: usize,
+}
+
+/// Issue a `textDocument/documentSymbol` request for the focused
+/// buffer. The async response is stored on
+/// [`Stoat::pending_symbol_picker_request`] and applied by
+/// [`pump_lsp_symbol_picker`] on the next render tick.
+///
+/// No-op when the focused pane is not an editor, the buffer has no
+/// path, or the server does not advertise
+/// [`LanguageServerFeature::DocumentSymbols`].
+pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::DocumentSymbols)
+    {
+        return UpdateEffect::None;
+    }
+
+    let (anchor_offset, buffer_id) = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        (buf_snap.resolve_anchor(&head), editor.buffer_id)
+    };
+
+    let Some(source_path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&source_path) else {
+        return UpdateEffect::None;
+    };
+
+    let params = DocumentSymbolParams {
+        text_document: TextDocumentIdentifier { uri: source_uri },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        match lsp.document_symbol(params).await {
+            Ok(resp) => resp,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "document_symbol request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_symbol_picker_request = Some(task);
+    stoat.pending_symbol_picker = Some(SymbolPicker {
+        entries: Vec::new(),
+        anchor_offset,
+    });
+    UpdateEffect::None
+}
+
+/// Poll any in-flight document-symbol request and translate the
+/// response into a [`SymbolPicker`]. Flattens the nested
+/// `DocumentSymbol` tree via DFS so a single keystroke (1-9)
+/// selects from the leading 9 entries in document order. Drops the
+/// picker when the response is empty or `None`.
+pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_symbol_picker_request.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(response)) => {
+            let encoding = stoat.lsp_host.offset_encoding();
+            let rope = {
+                let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+                    stoat.pending_symbol_picker = None;
+                    return true;
+                };
+                let snapshot = editor.display_map.snapshot();
+                let buf_snap = snapshot.buffer_snapshot();
+                buf_snap.rope().clone()
+            };
+            let entries = symbol_picker_entries(&rope, encoding, response);
+            if entries.is_empty() {
+                stoat.pending_symbol_picker = None;
+            } else if let Some(picker) = stoat.pending_symbol_picker.as_mut() {
+                picker.entries = entries;
+            }
+            true
+        },
+        Poll::Ready(None) => {
+            stoat.pending_symbol_picker = None;
+            true
+        },
+        Poll::Pending => {
+            stoat.pending_symbol_picker_request = Some(task);
+            false
+        },
+    }
+}
+
+/// Convert a [`DocumentSymbolResponse`] into a flat list of picker
+/// entries, resolving each symbol's LSP position to a byte offset
+/// in the supplied rope. Entries are limited to the first 9 in
+/// document order (number-key cap; v1 limitation).
+fn symbol_picker_entries(
+    rope: &Rope,
+    encoding: OffsetEncoding,
+    response: DocumentSymbolResponse,
+) -> Vec<SymbolEntry> {
+    let mut entries: Vec<SymbolEntry> = Vec::new();
+    match response {
+        DocumentSymbolResponse::Flat(items) => {
+            for SymbolInformation { name, location, .. } in items {
+                let offset =
+                    crate::lsp::util::lsp_pos_to_byte_offset(rope, location.range.start, encoding);
+                entries.push(SymbolEntry {
+                    title: name,
+                    anchor_offset: offset,
+                });
+            }
+        },
+        DocumentSymbolResponse::Nested(items) => {
+            fn walk(
+                rope: &Rope,
+                encoding: OffsetEncoding,
+                items: Vec<DocumentSymbol>,
+                out: &mut Vec<SymbolEntry>,
+            ) {
+                for symbol in items {
+                    let offset = crate::lsp::util::lsp_pos_to_byte_offset(
+                        rope,
+                        symbol.selection_range.start,
+                        encoding,
+                    );
+                    out.push(SymbolEntry {
+                        title: symbol.name,
+                        anchor_offset: offset,
+                    });
+                    if let Some(children) = symbol.children {
+                        walk(rope, encoding, children, out);
+                    }
+                }
+            }
+            walk(rope, encoding, items, &mut entries);
+        },
+    }
+    entries.truncate(9);
+    entries
+}
+
+/// Apply the user's pick from the open symbol picker: jump the
+/// primary cursor to the selected entry's anchor offset and clear
+/// the picker. No-op when no picker is open or `index` is out of
+/// range.
+pub(crate) fn pick_symbol(stoat: &mut Stoat, index: usize) -> bool {
+    let Some(picker) = stoat.pending_symbol_picker.take() else {
+        return false;
+    };
+    let Some(entry) = picker.entries.into_iter().nth(index) else {
+        return false;
+    };
+    crate::action_handlers::movement::jump_to_offset(stoat, entry.anchor_offset);
+    true
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
@@ -2578,5 +2768,222 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
         h.settle();
         h.assert_snapshot("snapshot_rename_input");
+    }
+
+    use lsp_types::{DocumentSymbol, DocumentSymbolResponse};
+
+    fn enable_document_symbols(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            document_symbol_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    fn flat_symbol(name: &str, file: &str, line: u32, col: u32) -> lsp_types::SymbolInformation {
+        use lsp_types::{
+            Location, Position as LspPosition, Range as LspRange, SymbolInformation, SymbolKind,
+            Uri,
+        };
+        use std::str::FromStr;
+        #[allow(deprecated)]
+        SymbolInformation {
+            name: name.to_string(),
+            kind: SymbolKind::FUNCTION,
+            tags: None,
+            deprecated: None,
+            location: Location {
+                uri: Uri::from_str(&format!("file://{file}")).expect("uri"),
+                range: LspRange::new(LspPosition::new(line, col), LspPosition::new(line, col + 1)),
+            },
+            container_name: None,
+        }
+    }
+
+    #[test]
+    fn symbol_picker_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol("foo", path.to_str().unwrap(), 0, 3)]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        assert!(h.stoat.pending_symbol_picker.is_none());
+        assert!(h.stoat.pending_symbol_picker_request.is_none());
+    }
+
+    #[test]
+    fn symbol_picker_no_response_clears_picker() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        assert!(h.stoat.pending_symbol_picker.is_none());
+    }
+
+    #[test]
+    fn symbol_picker_populates_with_flat_symbols() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\nfn bar() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![
+                flat_symbol("foo", path.to_str().unwrap(), 0, 3),
+                flat_symbol("bar", path.to_str().unwrap(), 1, 3),
+            ]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn symbol_picker_flattens_nested_symbols() {
+        use lsp_types::{Position as LspPosition, Range as LspRange, SymbolKind};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn outer() {\n  fn inner() {}\n}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let range = LspRange::new(LspPosition::new(0, 0), LspPosition::new(0, 1));
+        let inner = {
+            #[allow(deprecated)]
+            DocumentSymbol {
+                name: "inner".to_string(),
+                detail: None,
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                deprecated: None,
+                range,
+                selection_range: range,
+                children: None,
+            }
+        };
+        let outer = {
+            #[allow(deprecated)]
+            DocumentSymbol {
+                name: "outer".to_string(),
+                detail: None,
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                deprecated: None,
+                range,
+                selection_range: range,
+                children: Some(vec![inner]),
+            }
+        };
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Nested(vec![outer]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
+        assert_eq!(titles, vec!["outer", "inner"]);
+    }
+
+    #[test]
+    fn symbol_picker_pick_jumps_to_offset() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\nfn bar() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![
+                flat_symbol("foo", path.to_str().unwrap(), 0, 3),
+                flat_symbol("bar", path.to_str().unwrap(), 1, 3),
+            ]),
+        );
+        h.type_keys("space l s");
+        h.settle();
+        h.type_keys("2");
+        assert!(h.stoat.pending_symbol_picker.is_none());
+        assert_eq!(cursor_offset(&mut h), 15);
+    }
+
+    #[test]
+    fn symbol_picker_caps_at_nine_entries() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "x\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let many: Vec<lsp_types::SymbolInformation> = (0..15)
+            .map(|i| flat_symbol(&format!("sym{i}"), path.to_str().unwrap(), 0, 0))
+            .collect();
+        h.fake_lsp()
+            .set_document_symbols(path.to_str().unwrap(), DocumentSymbolResponse::Flat(many));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
+        assert_eq!(picker.entries.len(), 9);
+    }
+
+    #[test]
+    fn symbol_picker_escape_dismisses() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol("foo", path.to_str().unwrap(), 0, 3)]),
+        );
+        h.type_keys("space l s");
+        h.settle();
+        assert!(h.stoat.pending_symbol_picker.is_some());
+        h.type_keys("escape");
+        assert!(h.stoat.pending_symbol_picker.is_none());
+    }
+
+    #[test]
+    fn space_l_s_triggers_symbol_picker() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![flat_symbol("foo", path.to_str().unwrap(), 0, 3)]),
+        );
+        h.type_keys("space l s");
+        h.settle();
+        assert!(h.stoat.pending_symbol_picker.is_some());
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn snapshot_symbol_picker() {
+        let mut h = TestHarness::with_size(40, 12);
+        enable_document_symbols(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_document_symbols(
+            path.to_str().unwrap(),
+            DocumentSymbolResponse::Flat(vec![
+                flat_symbol("foo", path.to_str().unwrap(), 0, 3),
+                flat_symbol("bar", path.to_str().unwrap(), 1, 3),
+            ]),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
+        h.settle();
+        h.assert_snapshot("snapshot_symbol_picker");
     }
 }

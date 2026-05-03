@@ -50,7 +50,7 @@ pub use defs::{
     },
     lsp::{
         CodeAction, GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
-        GotoTypeDefinition, Hover, RenameSymbol,
+        GotoTypeDefinition, Hover, OpenSymbolPicker, RenameSymbol,
     },
     palette::OpenCommandPalette,
     pane::{

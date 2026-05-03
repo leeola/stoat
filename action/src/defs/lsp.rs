@@ -109,3 +109,17 @@ define_action!(
      No-op when the server does not advertise the capability.",
     ActionPriority::Common
 );
+
+define_action!(
+    OpenSymbolPickerDef,
+    OpenSymbolPicker,
+    "OpenSymbolPicker",
+    ActionKind::OpenSymbolPicker,
+    "show document symbols",
+    "Issue an LSP `textDocument/documentSymbol` request for the focused \
+     buffer and present the response as a numbered popup. Number keys \
+     1-9 select a symbol; on select the cursor jumps to the symbol's \
+     definition. No-op when the server does not advertise the \
+     capability or returns no symbols.",
+    ActionPriority::Common
+);
