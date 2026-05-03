@@ -1013,12 +1013,20 @@ impl Stoat {
         let (editor_id, buffer_id) = self.focused_editor_ids()?;
 
         match key.code {
+            KeyCode::Char('w') if key.modifiers == KeyModifiers::CONTROL => {
+                self.editor_delete_word_backward(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
                 let mut buf = [0u8; 4];
                 let s = ch.encode_utf8(&mut buf);
                 self.editor_insert(editor_id, buffer_id, s);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Backspace if key.modifiers == KeyModifiers::ALT => {
+                self.editor_delete_word_backward(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Backspace => {
@@ -1117,6 +1125,38 @@ impl Stoat {
             .map(|ch| ch.len_utf8())
             .unwrap_or(0);
         let start = offset - prev_len;
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(start..offset, "");
+        }
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        let anchor = new_buf.anchor_at(start, Bias::Right);
+        editor.selections.transform(new_buf, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            new
+        });
+    }
+
+    fn editor_delete_word_backward(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        let ws = self.active_workspace_mut();
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let buffer = match ws.buffers.get(buffer_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        let start = stoat_text::prev_word_start(buf_snapshot.rope(), offset);
+        if start == offset {
+            return;
+        }
         {
             let mut guard = buffer.write().expect("poisoned");
             guard.edit(start..offset, "");
@@ -1766,7 +1806,7 @@ fn detail_for_message(message: &AgentMessage) -> Option<String> {
 mod tests {
     use super::*;
     use crate::buffer::TextBuffer;
-    use std::path::Path;
+    use std::path::{Path, PathBuf};
 
     /// When `parse_buffer_step` aborts on the deadline, the prior state
     /// passed via `&mut Option<_>` must remain populated so the caller
@@ -2221,5 +2261,55 @@ mod tests {
         drag_select_ell_in_hello(&mut h);
         assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
         assert!(h.fake_clipboard().osc52_emits().is_empty());
+    }
+
+    fn open_scratch_file(h: &mut crate::test_harness::TestHarness, contents: &str) -> PathBuf {
+        let path = PathBuf::from("/ws/buf.txt");
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/ws");
+        action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        path
+    }
+
+    fn buffer_text(h: &crate::test_harness::TestHarness, path: &Path) -> String {
+        let ws = h.stoat.active_workspace();
+        let id = ws.buffers.id_for_path(path).expect("buffer registered");
+        let buf = ws.buffers.get(id).expect("buffer present");
+        let guard = buf.read().expect("buffer lock");
+        guard.rope().to_string()
+    }
+
+    #[test]
+    fn ctrl_w_in_insert_mode_deletes_previous_word() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("foo bar baz");
+        h.type_keys("ctrl-w");
+        assert_eq!(buffer_text(&h, &path), "foo bar ");
+        h.type_keys("ctrl-w");
+        assert_eq!(buffer_text(&h, &path), "foo ");
+    }
+
+    #[test]
+    fn ctrl_w_at_buffer_start_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("ctrl-w");
+        assert_eq!(buffer_text(&h, &path), "");
+    }
+
+    #[test]
+    fn alt_backspace_in_insert_mode_deletes_previous_word() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("alpha beta gamma");
+        h.type_keys("alt-backspace");
+        assert_eq!(buffer_text(&h, &path), "alpha beta ");
     }
 }
