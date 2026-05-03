@@ -150,6 +150,7 @@ pub enum ActionKind {
     QueryMoveRelationships,
     GotoNextDiagnostic,
     GotoPrevDiagnostic,
+    GotoDefinition,
     ReviewNextChunk,
     ReviewPrevChunk,
     ReviewStageChunk,

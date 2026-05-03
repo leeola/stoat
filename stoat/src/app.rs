@@ -177,6 +177,15 @@ pub struct Stoat {
     /// [`crate::host::LspHost::try_recv_notification`] inside
     /// [`Stoat::update`].
     pub(crate) lsp_progress: crate::lsp::progress::LspProgressMap,
+    /// In-flight `textDocument/definition` request. Replacing the entry
+    /// drops the prior task, cancelling its spawned future before the
+    /// response can land. Polled by
+    /// [`action_handlers::pump_lsp_jumps`] at the top of each render
+    /// tick; `Ready(Some)` opens the target file in the focused pane
+    /// (when cross-file) and jumps the primary cursor; `Ready(None)`
+    /// silently drops.
+    pub(crate) pending_goto_definition:
+        Option<stoat_scheduler::Task<Option<action_handlers::lsp::JumpTarget>>>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -313,6 +322,7 @@ impl Stoat {
             lsp_host: Arc::new(NoopLsp),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
+            pending_goto_definition: None,
         }
     }
 
@@ -1831,6 +1841,7 @@ impl Stoat {
         self.render_tick += 1;
         self.drive_parse_jobs();
         action_handlers::pump_commits(self);
+        action_handlers::pump_lsp_jumps(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf
@@ -1865,7 +1876,7 @@ impl Stoat {
 /// Convert an LSP `file:` URI to a [`PathBuf`]. Returns `None` for any
 /// other scheme; non-`file:` diagnostic notifications are silently
 /// dropped because stoat has no concept of remote-path buffers today.
-fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
+pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     if uri.scheme().map(|s| s.as_str()) != Some("file") {
         return None;
     }

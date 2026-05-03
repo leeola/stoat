@@ -443,6 +443,7 @@ on key {
         Escape -> SetMode(normal);
         w -> [GotoNextDiagnostic(), SetMode(normal)];
         W -> [GotoPrevDiagnostic(), SetMode(normal)];
+        j -> [GotoDefinition(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

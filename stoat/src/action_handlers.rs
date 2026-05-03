@@ -27,6 +27,7 @@ use crate::{
 pub(crate) use claude::handle_follow_tool_use;
 pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::close_file_finder;
+pub(crate) use lsp::pump_lsp_jumps;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
 use std::path::Path;
@@ -386,6 +387,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoPrevDiagnostic => {
             lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Prev)
         },
+        ActionKind::GotoDefinition => lsp::goto_definition(stoat),
         ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
         ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
         ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),

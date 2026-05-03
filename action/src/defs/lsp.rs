@@ -23,3 +23,17 @@ define_action!(
      when no diagnostic lies before the cursor. Does not wrap.",
     ActionPriority::Rare
 );
+
+define_action!(
+    GotoDefinitionDef,
+    GotoDefinition,
+    "GotoDefinition",
+    ActionKind::GotoDefinition,
+    "jump to symbol definition",
+    "Move the primary cursor to the definition of the symbol under the cursor \
+     by issuing an LSP `textDocument/definition` request. Multi-file targets \
+     open the destination file in the focused pane before jumping. Multiple \
+     candidates jump to the first; no-op when the server returns nothing or \
+     does not advertise the capability.",
+    ActionPriority::Common
+);

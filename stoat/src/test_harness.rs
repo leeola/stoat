@@ -401,7 +401,8 @@ impl TestHarness {
             self.scheduler.run_until_parked();
             let claude = self.stoat.drain_claude_notifications();
             let commits = crate::action_handlers::pump_commits(&mut self.stoat);
-            if !claude && !commits {
+            let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
+            if !claude && !commits && !lsp_jumps {
                 break;
             }
         }

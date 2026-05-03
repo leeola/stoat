@@ -9,14 +9,27 @@
 //! still pending; both wait on user-facing buffer-save / buffer-close
 //! actions that do not yet exist.
 
-use crate::{app::Stoat, buffer::BufferId, host::OffsetEncoding};
+use crate::{
+    app::{Stoat, UpdateEffect},
+    buffer::BufferId,
+    host::{LanguageServerFeature, OffsetEncoding},
+};
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, Position, Range,
-    TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
-    TextDocumentSyncKind, VersionedTextDocumentIdentifier,
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
+    GotoDefinitionResponse, Position, Range, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, VersionedTextDocumentIdentifier,
 };
-use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
+use std::{
+    future::Future,
+    path::{Path, PathBuf},
+    pin::Pin,
+    str::FromStr,
+    sync::Arc,
+    task::{Context, Poll},
+    time::Duration,
+};
 use stoat_text::{patch::Patch, Rope};
 
 /// Quiet window after the last edit before a buffer's `did_change`
@@ -37,14 +50,11 @@ pub(crate) enum DiagnosticDirection {
 /// LSP diagnostic for that buffer. No-op when the focused pane is
 /// not an editor, the buffer has no path, or no diagnostic lies in
 /// the requested direction.
-pub(crate) fn goto_diagnostic(
-    stoat: &mut Stoat,
-    direction: DiagnosticDirection,
-) -> crate::app::UpdateEffect {
+pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection) -> UpdateEffect {
     let encoding = stoat.lsp_host.offset_encoding();
     let (cursor_offset, buffer_id, rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
-            return crate::app::UpdateEffect::None;
+            return UpdateEffect::None;
         };
         let snapshot = editor.display_map.snapshot();
         let buffer_snapshot = snapshot.buffer_snapshot();
@@ -55,7 +65,7 @@ pub(crate) fn goto_diagnostic(
 
     let path = match stoat.active_workspace().buffers.path_for(buffer_id) {
         Some(p) => p.to_path_buf(),
-        None => return crate::app::UpdateEffect::None,
+        None => return UpdateEffect::None,
     };
 
     let mut offsets: Vec<usize> = stoat
@@ -72,7 +82,7 @@ pub(crate) fn goto_diagnostic(
     };
 
     let Some(target) = target else {
-        return crate::app::UpdateEffect::None;
+        return UpdateEffect::None;
     };
 
     crate::action_handlers::movement::jump_to_offset(stoat, target)
@@ -378,6 +388,165 @@ fn resolve_sync_kind(cap: &Option<TextDocumentSyncCapability>) -> TextDocumentSy
             o.change.unwrap_or(TextDocumentSyncKind::NONE)
         },
         None => TextDocumentSyncKind::NONE,
+    }
+}
+
+/// Resolved target of an in-flight `textDocument/definition` request.
+/// `path` is an absolute filesystem path (file-scheme URIs only;
+/// non-`file:` responses are dropped because stoat has no remote-buffer
+/// concept). `offset` is a byte offset into that file's rope after
+/// applying the host's negotiated [`OffsetEncoding`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct JumpTarget {
+    pub(crate) path: PathBuf,
+    pub(crate) offset: usize,
+}
+
+/// Issue a `textDocument/definition` request for the symbol under the
+/// focused editor's primary cursor. The async response is stored on
+/// [`Stoat::pending_goto_definition`] and applied by
+/// [`pump_lsp_jumps`] on the next render tick.
+///
+/// No-op when: the focused pane is not an editor; the buffer has no
+/// path; or the server does not advertise
+/// [`LanguageServerFeature::GotoDefinition`]. Replacing the prior
+/// pending task drops it, cancelling its spawned future.
+pub(crate) fn goto_definition(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::GotoDefinition)
+    {
+        return UpdateEffect::None;
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let (cursor_offset, buffer_id, source_rope) = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buf_snap.resolve_anchor(&head);
+        (offset, editor.buffer_id, buf_snap.rope().clone())
+    };
+
+    let Some(source_path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&source_path) else {
+        return UpdateEffect::None;
+    };
+
+    let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, cursor_offset, encoding);
+    let params = GotoDefinitionParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: source_uri },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let fs = stoat.fs_host.clone();
+    let task = stoat.executor.spawn(async move {
+        let response = match lsp.goto_definition(params).await {
+            Ok(Some(resp)) => resp,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "goto_definition request failed");
+                return None;
+            },
+        };
+        resolve_goto_target(response, &source_path, &source_rope, encoding, &*fs)
+    });
+    stoat.pending_goto_definition = Some(task);
+    UpdateEffect::None
+}
+
+/// Translate a `GotoDefinitionResponse` into a [`JumpTarget`]. The
+/// first candidate is taken across all variants; multi-candidate
+/// disambiguation (Helix's picker) is a separate concern. Same-file
+/// targets reuse the supplied source rope; cross-file targets read the
+/// destination through the supplied [`crate::host::FsHost`] so a
+/// closed buffer can still be resolved without round-tripping through
+/// `Stoat`.
+fn resolve_goto_target(
+    response: GotoDefinitionResponse,
+    source_path: &Path,
+    source_rope: &Rope,
+    encoding: OffsetEncoding,
+    fs: &dyn crate::host::FsHost,
+) -> Option<JumpTarget> {
+    let (uri, position) = match response {
+        GotoDefinitionResponse::Scalar(loc) => (loc.uri, loc.range.start),
+        GotoDefinitionResponse::Array(locs) => {
+            let loc = locs.into_iter().next()?;
+            (loc.uri, loc.range.start)
+        },
+        GotoDefinitionResponse::Link(links) => {
+            let link = links.into_iter().next()?;
+            (link.target_uri, link.target_range.start)
+        },
+    };
+
+    let target_path = crate::app::lsp_uri_to_path(&uri)?;
+
+    let offset = if target_path == source_path {
+        crate::lsp::util::lsp_pos_to_byte_offset(source_rope, position, encoding)
+    } else {
+        let text = match super::read_string_via_host(fs, &target_path) {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    path = %target_path.display(),
+                    ?err,
+                    "goto_definition target file unreadable",
+                );
+                return None;
+            },
+        };
+        let target_rope = Rope::from(text.as_str());
+        crate::lsp::util::lsp_pos_to_byte_offset(&target_rope, position, encoding)
+    };
+
+    Some(JumpTarget {
+        path: target_path,
+        offset,
+    })
+}
+
+/// Poll any in-flight LSP jump request (`pending_goto_definition`) and
+/// apply the result. On `Ready(Some)` opens the target file in the
+/// focused pane (no-op when already open) and collapses every selection
+/// onto the resolved offset; on `Ready(None)` silently drops; on
+/// `Pending` puts the task back. Returns true when state changed so
+/// the caller can request a redraw.
+pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_goto_definition.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(target)) => {
+            let focused = stoat.active_workspace().panes.focus();
+            super::file::open_file_in_pane(stoat, focused, &target.path);
+            super::movement::jump_to_offset(stoat, target.offset);
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_goto_definition = Some(task);
+            false
+        },
     }
 }
 
@@ -806,6 +975,112 @@ mod tests {
             .replace_for_path(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
         crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
         h.type_keys("space l shift-w");
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    fn enable_goto_definition(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            definition_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    fn focused_buffer_path(h: &TestHarness) -> PathBuf {
+        let ws = h.stoat.active_workspace();
+        let pane = ws.panes.pane(ws.panes.focus());
+        let crate::pane::View::Editor(eid) = pane.view else {
+            panic!("focused pane is not an editor");
+        };
+        let buffer_id = ws.editors.get(eid).expect("editor").buffer_id;
+        ws.buffers
+            .path_for(buffer_id)
+            .expect("focused buffer has path")
+            .to_path_buf()
+    }
+
+    #[test]
+    fn goto_definition_jumps_within_same_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_definition(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_definition_opens_target_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_definition(&h);
+        let root = seed(
+            &mut h,
+            &[
+                ("main.rs", "abc\n"),
+                ("lib.rs", "fn one() {}\nfn two() {}\n"),
+            ],
+        );
+        let main_path = root.join("main.rs");
+        let lib_path = root.join("lib.rs");
+        open_buffer(&mut h, main_path.clone());
+        h.fake_lsp().set_definition(
+            main_path.to_str().unwrap(),
+            0,
+            0,
+            lib_path.to_str().unwrap(),
+            1,
+            3,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+        assert_eq!(focused_buffer_path(&h), lib_path);
+        assert_eq!(cursor_offset(&mut h), 15);
+    }
+
+    #[test]
+    fn goto_definition_no_result_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_definition(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_definition_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 0, 2);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 0);
+        assert!(h.stoat.pending_goto_definition.is_none());
+    }
+
+    #[test]
+    fn space_l_j_jumps_to_definition() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_definition(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+        h.type_keys("space l j");
+        h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
         assert_eq!(h.stoat.mode, "normal");
     }

@@ -12,22 +12,22 @@ size: 80x24
   [0m[35m┌ command palette (all) ───────────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m NewWorkspace     create a new workspace                                  [0m[35m│[0m
-  [0m[35m│[0m[97m OpenClaude       [0m[90mopen claude chat[0m[97m                                        [0m[35m│[0m
-  [0m[35m│[0m[97m OpenCommits      [0m[90mbrowse commit history[0m[97m                                   [0m[35m│[0m
-  [0m[35m│[0m[97m OpenFile         [0m[90mopen a file[0m[97m                                             [0m[35m│[0m
-  [0m[35m│[0m[97m OpenReview       [0m[90mreview changed files[0m[97m                                    [0m[35m│[0m
-  [0m[35m│[0m[97m OpenRun          [0m[90mopen terminal[0m[97m                                           [0m[35m│[0m
-  [0m[35m│[0m[97m Quit             [0m[90mclose pane or exit[0m[97m                                      [0m[35m│[0m
-  [0m[35m│[0m[97m QuitAll          [0m[90mexit stoat, closing all panes[0m[97m                           [0m[35m│[0m
-  [0m[35m│[0m[97m Redo             [0m[90mredo last undone edit[0m[97m                                   [0m[35m│[0m
-  [0m[35m│[0m[97m RenameWorkspace  [0m[90mrename this workspace[0m[97m                                   [0m[35m│[0m
+  [0m[35m│[0m[30m[46m GotoDefinition  jump to symbol definition                                [0m[35m│[0m
+  [0m[35m│[0m[97m NewWorkspace    [0m[90mcreate a new workspace[0m[97m                                   [0m[35m│[0m
+  [0m[35m│[0m[97m OpenClaude      [0m[90mopen claude chat[0m[97m                                         [0m[35m│[0m
+  [0m[35m│[0m[97m OpenCommits     [0m[90mbrowse commit history[0m[97m                                    [0m[35m│[0m
+  [0m[35m│[0m[97m OpenFile        [0m[90mopen a file[0m[97m                                              [0m[35m│[0m
+  [0m[35m│[0m[97m OpenReview      [0m[90mreview changed files[0m[97m                                     [0m[35m│[0m
+  [0m[35m│[0m[97m OpenRun         [0m[90mopen terminal[0m[97m                                            [0m[35m│[0m
+  [0m[35m│[0m[97m Quit            [0m[90mclose pane or exit[0m[97m                                       [0m[35m│[0m
+  [0m[35m│[0m[97m QuitAll         [0m[90mexit stoat, closing all panes[0m[97m                            [0m[35m│[0m
+  [0m[35m│[0m[97m Redo            [0m[90mredo last undone edit[0m[97m                                    [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mCreate a fresh workspace at the current workspace's git root. The new[0m     [0m[35m│[0m
-  [0m[35m│[0m[37mworkspace has default panes and no inherited buffers, Claude session, or[0m  [0m[35m│[0m
-  [0m[35m│[0m[37mrebase state. The current workspace [0m[33m┌ palette ──────────────────────────────┐[0m
-  [0m[35m│[0m[37mthe new workspace becomes active.[0m   [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
-  [0m[35m└────────────────────────────────────[0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m[35m──┘[0m [0m[33m│[0m
-                                       [0m[33m│[0m[36m  S-Tab[0m[97m   toggle command palette scope[0m [0m[33m│[0m
+  [0m[35m│[0m[37mMove the primary cursor to the definition of the symbol under the cursor[0m  [0m[35m│[0m
+  [0m[35m│[0m[37mby issuing an LSP `textDocument/definition` request. Multi-file targets[0m   [0m[35m│[0m
+  [0m[35m│[0m[37mopen the destination file in the foc[0m[33m┌ palette ──────────────────────────────┐[0m
+  [0m[35m│[0m[37mcandidates jump to the first; no-op [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
+  [0m[35m│[0m[37mdoes not advertise the capability.[0m  [0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m  [0m[35m│[0m [0m[33m│[0m
+  [0m[35m└────────────────────────────────────[0m[33m│[0m[36m  S-Tab[0m[97m   toggle command palette scope[0m [0m[33m│[0m
                                        [0m[33m└───────────────────────────────────────┘[0m
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m
