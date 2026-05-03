@@ -270,7 +270,7 @@ impl Workspace {
                 &mut prior,
                 &mut prior_map,
                 syntax_styles,
-                Some(deadline),
+                Some((deadline, executor)),
             ) {
                 self.buffers.store_syntax(out.buffer_id, out.syntax);
                 self.buffers.store_syntax_map(out.buffer_id, out.syntax_map);

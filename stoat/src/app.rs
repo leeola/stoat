@@ -1718,7 +1718,7 @@ pub(crate) fn parse_buffer_step(
     prior: &mut Option<SyntaxState>,
     prior_syntax_map: &mut Option<stoat_language::SyntaxMap>,
     styles: &SyntaxStyles,
-    deadline: Option<std::time::Instant>,
+    deadline: Option<(std::time::Instant, &Executor)>,
 ) -> Option<ParseJobOutput> {
     let cur_version = snapshot.version;
     let new_rope = snapshot.visible_text.clone();
@@ -1741,11 +1741,13 @@ pub(crate) fn parse_buffer_step(
 
     let tree = match edited_tree.as_ref() {
         Some(old_tree) => match deadline {
-            Some(dl) => language::parse_rope_within(lang, &new_rope, Some(old_tree), dl)?,
+            Some((dl, exec)) => {
+                language::parse_rope_within(lang, &new_rope, Some(old_tree), dl, exec)?
+            },
             None => language::parse_rope(lang, &new_rope, Some(old_tree))?,
         },
         None => match deadline {
-            Some(dl) => language::parse_rope_within(lang, &new_rope, None, dl)?,
+            Some((dl, exec)) => language::parse_rope_within(lang, &new_rope, None, dl, exec)?,
             None => language::parse_rope(lang, &new_rope, None)?,
         },
     };
@@ -1859,6 +1861,8 @@ mod tests {
     /// can hand it to a follow-up parse without losing incrementality.
     #[test]
     fn parse_buffer_step_preserves_prior_on_deadline_abort() {
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let executor = scheduler.executor();
         let lang = LanguageRegistry::standard()
             .for_path(Path::new("a.rs"))
             .unwrap();
@@ -1888,6 +1892,7 @@ mod tests {
         buf.edit(0..0, "// edit\n");
         let snap2 = buf.snapshot.clone();
 
+        let deadline = executor.now();
         let result = parse_buffer_step(
             buffer_id,
             snap2.clone(),
@@ -1895,7 +1900,7 @@ mod tests {
             &mut prior,
             &mut prior_map,
             &styles,
-            Some(std::time::Instant::now()),
+            Some((deadline, &executor)),
         );
         assert!(result.is_none(), "expected deadline abort to return None");
         let prior_state = prior
@@ -1923,6 +1928,76 @@ mod tests {
         assert!(recovery.syntax.version > initial_version);
         assert!(prior.is_none(), "successful parse must consume the prior");
         assert!(prior_map.is_none());
+    }
+
+    /// The deadline check inside `parse_rope_within` reads time from the
+    /// `Executor`, not the wall clock, so `TestScheduler::advance_clock`
+    /// drives the timeout deterministically.
+    #[test]
+    fn parse_buffer_step_deadline_uses_executor_clock() {
+        use std::time::Duration;
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let executor = scheduler.executor();
+        let lang = LanguageRegistry::standard()
+            .for_path(Path::new("a.rs"))
+            .unwrap();
+        let styles = SyntaxStyles::from_theme(&crate::theme::Theme::empty());
+        let buffer_id = BufferId::new(1);
+
+        let text = "fn a() {}\n".repeat(10_000);
+        let mut buf = TextBuffer::with_text(buffer_id, &text);
+        let snap1 = buf.snapshot.clone();
+
+        let mut prior: Option<SyntaxState> = None;
+        let mut prior_map: Option<stoat_language::SyntaxMap> = None;
+        let out = parse_buffer_step(
+            buffer_id,
+            snap1,
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            &styles,
+            None,
+        )
+        .expect("first parse should succeed");
+
+        let mut prior: Option<SyntaxState> = Some(out.syntax);
+        let mut prior_map: Option<stoat_language::SyntaxMap> = Some(out.syntax_map);
+        buf.edit(0..0, "// edit\n");
+        let snap2 = buf.snapshot.clone();
+
+        let deadline = executor.now() + Duration::from_secs(3600);
+        let succeeded = parse_buffer_step(
+            buffer_id,
+            snap2,
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            &styles,
+            Some((deadline, &executor)),
+        )
+        .expect("deadline far in the future should not abort");
+
+        let mut prior: Option<SyntaxState> = Some(succeeded.syntax);
+        let mut prior_map: Option<stoat_language::SyntaxMap> = Some(succeeded.syntax_map);
+        buf.edit(0..0, "// edit2\n");
+        let snap3 = buf.snapshot.clone();
+
+        scheduler.advance_clock(Duration::from_secs(7200));
+
+        let aborted = parse_buffer_step(
+            buffer_id,
+            snap3,
+            &lang,
+            &mut prior,
+            &mut prior_map,
+            &styles,
+            Some((deadline, &executor)),
+        );
+        assert!(
+            aborted.is_none(),
+            "after advance_clock past the deadline, parse must abort",
+        );
     }
 
     #[test]

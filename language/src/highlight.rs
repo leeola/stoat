@@ -9,6 +9,7 @@ use std::{
     thread,
     time::Instant,
 };
+use stoat_scheduler::Executor;
 use stoat_text::{patch::Edit as PatchEdit, ChunksInRange, Point, Rope};
 use tree_sitter::{
     InputEdit, Node, ParseOptions, ParseState, Parser, Point as TsPoint, QueryCursor,
@@ -199,8 +200,9 @@ pub fn parse_rope_within(
     rope: &Rope,
     old_tree: Option<&Tree>,
     deadline: Instant,
+    executor: &Executor,
 ) -> Option<Tree> {
-    parse_rope_inner(language, rope, old_tree, None, Some(deadline))
+    parse_rope_inner(language, rope, old_tree, None, Some((deadline, executor)))
 }
 
 /// Parse `rope` restricted to the given byte range via
@@ -236,7 +238,7 @@ fn parse_rope_inner(
     rope: &Rope,
     old_tree: Option<&Tree>,
     included_ranges: Option<&[tree_sitter::Range]>,
-    deadline: Option<Instant>,
+    deadline: Option<(Instant, &Executor)>,
 ) -> Option<Tree> {
     with_parser(|parser| {
         parser.set_language(&language.grammar).ok()?;
@@ -302,10 +304,10 @@ fn parse_rope_inner(
             }
         };
 
-        if let Some(deadline) = deadline {
+        if let Some((deadline, executor)) = deadline {
             let timed_out = Cell::new(false);
             let mut progress = |_state: &ParseState| -> ControlFlow<()> {
-                if Instant::now() >= deadline {
+                if executor.now() >= deadline {
                     timed_out.set(true);
                     ControlFlow::Break(())
                 } else {
