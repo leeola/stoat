@@ -772,8 +772,10 @@ impl Stoat {
     /// pane. `Down(Left)` collapses the primary selection at the
     /// clicked offset and arms `editor_drag`; `Drag(Left)` extends
     /// the head of the dragged editor's primary selection;
-    /// `Up(Left)` clears `editor_drag`. Clicks outside the pane's
-    /// rendered text area saturate to the nearest valid offset via
+    /// `Up(Left)` writes any non-empty primary-selection text to
+    /// the clipboard (and conditionally OSC 52 emits) before
+    /// clearing `editor_drag`. Clicks outside the pane's rendered
+    /// text area saturate to the nearest valid offset via
     /// `clip_point` (Bias::Left). Returns `true` when the event
     /// mutated state.
     fn handle_editor_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
@@ -801,6 +803,9 @@ impl Stoat {
         let Some((editor_id, area)) = target else {
             return false;
         };
+
+        let clipboard_host = self.clipboard_host.clone();
+        let env_host = self.env_host.clone();
 
         match kind {
             MouseEventKind::Down(MouseButton::Left) => {
@@ -860,7 +865,40 @@ impl Stoat {
                 if self.editor_drag.is_none() {
                     return false;
                 }
+                let text = {
+                    let ws = self.active_workspace_mut();
+                    let editor = ws.editors.get_mut(editor_id).expect("editor exists");
+                    let snapshot = editor.display_map.snapshot();
+                    let buf_snap = snapshot.buffer_snapshot();
+                    let sel = editor.selections.newest_anchor();
+                    let start = buf_snap.resolve_anchor(&sel.start);
+                    let end = buf_snap.resolve_anchor(&sel.end);
+                    if start == end {
+                        String::new()
+                    } else {
+                        buf_snap.rope().slice(start..end).to_string()
+                    }
+                };
                 self.editor_drag = None;
+                if text.is_empty() {
+                    return false;
+                }
+                if let Err(err) = clipboard_host.set(&text) {
+                    tracing::warn!(
+                        target: "stoat::app",
+                        error = %err,
+                        "clipboard write failed"
+                    );
+                }
+                if crate::host::osc52_should_emit(env_host.as_ref()) {
+                    if let Err(err) = clipboard_host.osc52_emit(&text) {
+                        tracing::warn!(
+                            target: "stoat::app",
+                            error = %err,
+                            "OSC 52 emit failed"
+                        );
+                    }
+                }
                 false
             },
             _ => false,
@@ -2809,5 +2847,131 @@ mod tests {
             area.y,
         ));
         assert!(h.stoat.editor_drag.is_none(), "Up clears drag state");
+    }
+
+    #[test]
+    fn editor_mouse_up_after_drag_writes_selection_to_clipboard() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "hello\nworld");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+    }
+
+    #[test]
+    fn editor_mouse_up_without_drag_skips_clipboard() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "hello\nworld");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 2,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 2,
+            area.y,
+        ));
+        assert!(h.fake_clipboard().writes().is_empty());
+    }
+
+    #[test]
+    fn editor_mouse_up_with_no_selection_skips_clipboard() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "hello\nworld");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 2,
+            area.y,
+        ));
+        assert!(h.fake_clipboard().writes().is_empty());
+    }
+
+    #[test]
+    fn editor_mouse_up_multi_line_drag_writes_joined_text() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "hello\nworld");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 2,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 2,
+            area.y + 1,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 2,
+            area.y + 1,
+        ));
+        assert_eq!(h.fake_clipboard().writes(), vec!["llo\nwo"]);
+    }
+
+    #[test]
+    fn editor_osc52_emit_fires_in_ssh_without_mux() {
+        let mut h = Stoat::test();
+        h.fake_env().set("SSH_CONNECTION", "1.2.3.4 22 5.6.7.8 22");
+        let _ = open_scratch_file(&mut h, "hello\nworld");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+        assert_eq!(h.fake_clipboard().osc52_emits(), vec!["ell"]);
+    }
+
+    #[test]
+    fn editor_osc52_emit_skipped_locally() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "hello\nworld");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 4,
+            area.y,
+        ));
+        assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
+        assert!(h.fake_clipboard().osc52_emits().is_empty());
     }
 }
