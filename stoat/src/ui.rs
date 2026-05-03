@@ -11,14 +11,13 @@ use crossterm::{
 };
 use futures::StreamExt;
 use ratatui::buffer::Buffer;
-use std::{env, io, thread};
-use stoat_config::MouseCapturePolicy;
+use std::{io, thread};
 use tokio::sync::mpsc::{Receiver, Sender};
 
 pub fn spawn(
     event_tx: Sender<Event>,
     mut render_rx: Receiver<Buffer>,
-    mouse_capture: MouseCapturePolicy,
+    mouse_captured: bool,
 ) -> thread::JoinHandle<io::Result<()>> {
     thread::spawn(move || {
         let rt = tokio::runtime::Builder::new_current_thread()
@@ -28,27 +27,9 @@ pub fn spawn(
 
         rt.block_on(async move {
             let mut terminal = ratatui::init();
-            let mouse_captured = match mouse_capture {
-                MouseCapturePolicy::Always => {
-                    execute!(io::stdout(), EnableMouseCapture)?;
-                    true
-                },
-                MouseCapturePolicy::Never => false,
-                MouseCapturePolicy::Auto => {
-                    // FIXME: route through EnvHost once it exists. Parent
-                    // multiplexers (tmux, zellij) own the mouse drag-select
-                    // gesture; capturing here would steal their events,
-                    // breaking the user's expected workflow.
-                    let inside_mux =
-                        env::var_os("TMUX").is_some() || env::var_os("ZELLIJ").is_some();
-                    if inside_mux {
-                        false
-                    } else {
-                        execute!(io::stdout(), EnableMouseCapture)?;
-                        true
-                    }
-                },
-            };
+            if mouse_captured {
+                execute!(io::stdout(), EnableMouseCapture)?;
+            }
             let result = run(&event_tx, &mut render_rx, &mut terminal).await;
             if mouse_captured {
                 let _ = execute!(io::stdout(), DisableMouseCapture);

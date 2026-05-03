@@ -77,3 +77,58 @@ pub fn default_mouse_capture_policy() -> MouseCapturePolicy {
         .and_then(|s| s.mouse_capture)
         .unwrap_or(MouseCapturePolicy::Auto)
 }
+
+/// Resolves `policy` to a concrete capture decision. `Auto` consults
+/// `env_host` for `TMUX` / `ZELLIJ` and skips capture when either is
+/// set, since a parent multiplexer owns the mouse drag-select
+/// gesture and stealing its events breaks the user's workflow. The
+/// UI thread starts before [`Stoat`] is constructed, so callers
+/// thread an `EnvHost` from the bin layer instead of reading
+/// [`Stoat::env_host`].
+pub fn resolve_mouse_captured(policy: MouseCapturePolicy, env_host: &dyn host::EnvHost) -> bool {
+    match policy {
+        MouseCapturePolicy::Always => true,
+        MouseCapturePolicy::Never => false,
+        MouseCapturePolicy::Auto => {
+            !(env_host.var("TMUX").is_some() || env_host.var("ZELLIJ").is_some())
+        },
+    }
+}
+
+#[cfg(test)]
+mod resolve_mouse_captured_tests {
+    use super::*;
+    use host::FakeEnv;
+
+    #[test]
+    fn always_returns_true() {
+        let env = FakeEnv::new();
+        assert!(resolve_mouse_captured(MouseCapturePolicy::Always, &env));
+    }
+
+    #[test]
+    fn never_returns_false() {
+        let env = FakeEnv::new();
+        assert!(!resolve_mouse_captured(MouseCapturePolicy::Never, &env));
+    }
+
+    #[test]
+    fn auto_with_no_mux_captures() {
+        let env = FakeEnv::new();
+        assert!(resolve_mouse_captured(MouseCapturePolicy::Auto, &env));
+    }
+
+    #[test]
+    fn auto_with_tmux_skips() {
+        let env = FakeEnv::new();
+        env.set("TMUX", "/tmp/tmux-1000/default,1234,0");
+        assert!(!resolve_mouse_captured(MouseCapturePolicy::Auto, &env));
+    }
+
+    #[test]
+    fn auto_with_zellij_skips() {
+        let env = FakeEnv::new();
+        env.set("ZELLIJ", "1");
+        assert!(!resolve_mouse_captured(MouseCapturePolicy::Auto, &env));
+    }
+}

@@ -102,9 +102,11 @@ fn run_tui(
     // if the UI thread hasn't flushed the previous frame yet
     let (render_tx, render_rx) = tokio::sync::mpsc::channel(1);
 
-    let mouse_capture = stoat::default_mouse_capture_policy();
+    let mouse_capture_policy = stoat::default_mouse_capture_policy();
+    let mouse_captured =
+        stoat::resolve_mouse_captured(mouse_capture_policy, &stoat::host::LocalEnv);
 
-    let ui_handle = stoat::ui::spawn(event_tx, render_rx, mouse_capture);
+    let ui_handle = stoat::ui::spawn(event_tx, render_rx, mouse_captured);
 
     let rt = tokio::runtime::Builder::new_current_thread()
         .enable_all()
