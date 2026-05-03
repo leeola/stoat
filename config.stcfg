@@ -426,6 +426,7 @@ on key {
         c -> SetMode(claude);
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
+        l -> SetMode(space_lsp);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
         s -> [SaveSelection(), SetMode(normal)];
@@ -436,6 +437,12 @@ on key {
     mode == space_buffer {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
+        : -> OpenCommandPalette();
+    }
+    mode == space_lsp {
+        Escape -> SetMode(normal);
+        w -> [GotoNextDiagnostic(), SetMode(normal)];
+        W -> [GotoPrevDiagnostic(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

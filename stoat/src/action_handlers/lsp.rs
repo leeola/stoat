@@ -780,4 +780,33 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
         assert_eq!(cursor_offset(&mut h), 0);
     }
+
+    #[test]
+    fn space_l_w_jumps_to_next_diagnostic() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        h.type_keys("space l w");
+        assert_eq!(cursor_offset(&mut h), 4);
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn space_l_shift_w_jumps_to_prev_diagnostic() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
+        h.type_keys("space l shift-w");
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.stoat.mode, "normal");
+    }
 }
