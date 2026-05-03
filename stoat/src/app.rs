@@ -102,6 +102,10 @@ pub struct Stoat {
     /// mode replaces every character in every non-empty selection
     /// with that char and clears the flag.
     pub(crate) pending_replace: bool,
+    /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
+    /// While `Some`, `Drag(Left)` events extend the matching editor's
+    /// primary selection head; `Up(Left)` clears the field.
+    pub(crate) editor_drag: Option<(EditorId, BufferId)>,
     /// Buffers for which `LspHost::did_open` has been dispatched.
     /// Dedupes re-opens of the same path: [`crate::buffer_registry::BufferRegistry::open`]
     /// returns the existing entry on second open, but the LSP
@@ -290,6 +294,7 @@ impl Stoat {
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
             pending_replace: false,
+            editor_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
@@ -653,6 +658,9 @@ impl Stoat {
         if self.handle_run_pane_mouse(mouse.kind, col, row) {
             return UpdateEffect::Redraw;
         }
+        if self.handle_editor_pane_mouse(mouse.kind, col, row) {
+            return UpdateEffect::Redraw;
+        }
         tracing::trace!(
             target: "stoat::app",
             kind = ?mouse.kind,
@@ -758,6 +766,126 @@ impl Stoat {
             },
             _ => false,
         }
+    }
+
+    /// Handles left-button Down/Drag/Up events on a focused editor
+    /// pane. `Down(Left)` collapses the primary selection at the
+    /// clicked offset and arms `editor_drag`; `Drag(Left)` extends
+    /// the head of the dragged editor's primary selection;
+    /// `Up(Left)` clears `editor_drag`. Clicks outside the pane's
+    /// rendered text area saturate to the nearest valid offset via
+    /// `clip_point` (Bias::Left). Returns `true` when the event
+    /// mutated state.
+    fn handle_editor_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
+        let target = {
+            let ws = self.active_workspace();
+            let area = match ws.focus {
+                FocusTarget::SplitPane(pane_id) => {
+                    let pane = ws.panes.pane(pane_id);
+                    if let View::Editor(id) = pane.view {
+                        Some((id, pane.area))
+                    } else {
+                        None
+                    }
+                },
+                FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).and_then(|dock| {
+                    if let View::Editor(id) = dock.view {
+                        Some((id, dock.area))
+                    } else {
+                        None
+                    }
+                }),
+            };
+            area
+        };
+        let Some((editor_id, area)) = target else {
+            return false;
+        };
+
+        match kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let Some(offset) = self.editor_screen_to_offset(editor_id, area, col, row) else {
+                    return false;
+                };
+                let buffer_id = {
+                    let ws = self.active_workspace_mut();
+                    let editor = ws.editors.get_mut(editor_id).expect("editor exists");
+                    let snapshot = editor.display_map.snapshot();
+                    let buf_snap = snapshot.buffer_snapshot();
+                    let anchor = buf_snap.anchor_at(offset, Bias::Right);
+                    editor.selections.set_single_range(
+                        anchor,
+                        anchor,
+                        stoat_text::SelectionGoal::None,
+                    );
+                    editor.buffer_id
+                };
+                self.editor_drag = Some((editor_id, buffer_id));
+                true
+            },
+            MouseEventKind::Drag(MouseButton::Left) => {
+                let Some((drag_editor, _)) = self.editor_drag else {
+                    return false;
+                };
+                if drag_editor != editor_id {
+                    return false;
+                }
+                let Some(offset) = self.editor_screen_to_offset(editor_id, area, col, row) else {
+                    return false;
+                };
+                let ws = self.active_workspace_mut();
+                let editor = ws.editors.get_mut(editor_id).expect("editor exists");
+                let snapshot = editor.display_map.snapshot();
+                let buf_snap = snapshot.buffer_snapshot();
+                let head_anchor = buf_snap.anchor_at(offset, Bias::Right);
+                editor.selections.transform(buf_snap, |sel| {
+                    let tail_anchor = sel.tail();
+                    let tail_offset = buf_snap.resolve_anchor(&tail_anchor);
+                    let mut new = sel.clone();
+                    new.goal = stoat_text::SelectionGoal::None;
+                    if offset < tail_offset {
+                        new.start = head_anchor;
+                        new.end = tail_anchor;
+                        new.reversed = true;
+                    } else {
+                        new.start = tail_anchor;
+                        new.end = head_anchor;
+                        new.reversed = false;
+                    }
+                    new
+                });
+                true
+            },
+            MouseEventKind::Up(MouseButton::Left) => {
+                if self.editor_drag.is_none() {
+                    return false;
+                }
+                self.editor_drag = None;
+                false
+            },
+            _ => false,
+        }
+    }
+
+    fn editor_screen_to_offset(
+        &mut self,
+        editor_id: EditorId,
+        area: Rect,
+        col: u16,
+        row: u16,
+    ) -> Option<usize> {
+        if col >= area.width || row >= area.height {
+            return None;
+        }
+        let ws = self.active_workspace_mut();
+        let editor = ws.editors.get_mut(editor_id)?;
+        let display_row = editor.scroll_row + row as u32;
+        let display_col = col as u32;
+        let snapshot = editor.display_map.snapshot();
+        let raw = crate::display_map::DisplayPoint::new(display_row, display_col);
+        let clipped = snapshot.clip_point(raw, Bias::Left);
+        let buffer_pt = snapshot.display_to_buffer(clipped)?;
+        Some(snapshot.buffer_snapshot().rope().point_to_offset(buffer_pt))
     }
 
     /// Returns the focused element's area-relative cell for the given
@@ -2278,10 +2406,12 @@ mod tests {
     }
 
     #[test]
-    fn mouse_on_non_run_view_is_noop() {
+    fn mouse_on_view_without_handler_is_noop() {
         let mut h = Stoat::test();
         let pane_id = h.stoat.active_workspace().panes.focus();
-        h.stoat.active_workspace_mut().panes.pane_mut(pane_id).area = Rect::new(0, 0, 40, 10);
+        let pane = h.stoat.active_workspace_mut().panes.pane_mut(pane_id);
+        pane.view = View::Label("dummy".into());
+        pane.area = Rect::new(0, 0, 40, 10);
         let effect = h
             .stoat
             .update(mouse_event(MouseEventKind::Down(MouseButton::Left), 5, 5));
@@ -2573,5 +2703,111 @@ mod tests {
         h.type_keys("l l l i");
         h.type_keys("tab");
         assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    fn focused_editor_pane_area(h: &crate::test_harness::TestHarness) -> Rect {
+        let ws = h.stoat.active_workspace();
+        match ws.focus {
+            FocusTarget::SplitPane(pane_id) => ws.panes.pane(pane_id).area,
+            FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).expect("dock").area,
+        }
+    }
+
+    fn focused_primary_offsets(h: &mut crate::test_harness::TestHarness) -> (usize, usize) {
+        let editor_id = h.stoat.focused_editor_ids().expect("focused editor").0;
+        let ws = h.stoat.active_workspace_mut();
+        let editor = ws.editors.get_mut(editor_id).expect("editor exists");
+        let snap = editor.display_map.snapshot();
+        let buf_snap = snap.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        (
+            buf_snap.resolve_anchor(&sel.start),
+            buf_snap.resolve_anchor(&sel.end),
+        )
+    }
+
+    #[test]
+    fn editor_mouse_down_collapses_cursor_at_clicked_offset() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "abcdef\nghi");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 3,
+            area.y,
+        ));
+        assert_eq!(focused_primary_offsets(&mut h), (3, 3));
+        assert!(h.stoat.editor_drag.is_some(), "drag state armed");
+    }
+
+    #[test]
+    fn editor_mouse_drag_extends_selection_forward() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "abcdef\nghi");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 5,
+            area.y,
+        ));
+        assert_eq!(focused_primary_offsets(&mut h), (1, 5));
+    }
+
+    #[test]
+    fn editor_mouse_drag_extends_selection_backward_reverses() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "abcdef\nghi");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 5,
+            area.y,
+        ));
+        h.stoat.update(mouse_event(
+            MouseEventKind::Drag(MouseButton::Left),
+            area.x + 1,
+            area.y,
+        ));
+        assert_eq!(focused_primary_offsets(&mut h), (1, 5));
+    }
+
+    #[test]
+    fn editor_mouse_click_outside_pane_text_is_noop() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "abc");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + area.width + 4,
+            area.y,
+        ));
+        assert!(
+            h.stoat.editor_drag.is_none(),
+            "click past pane right edge does not arm drag",
+        );
+    }
+
+    #[test]
+    fn editor_mouse_up_clears_drag_state() {
+        let mut h = Stoat::test();
+        let _ = open_scratch_file(&mut h, "abcdef");
+        let area = focused_editor_pane_area(&h);
+        h.stoat.update(mouse_event(
+            MouseEventKind::Down(MouseButton::Left),
+            area.x + 2,
+            area.y,
+        ));
+        assert!(h.stoat.editor_drag.is_some());
+        h.stoat.update(mouse_event(
+            MouseEventKind::Up(MouseButton::Left),
+            area.x + 2,
+            area.y,
+        ));
+        assert!(h.stoat.editor_drag.is_none(), "Up clears drag state");
     }
 }
