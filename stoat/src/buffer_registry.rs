@@ -130,6 +130,25 @@ impl BufferRegistry {
         self.buffers.get(&id).map(|e| e.buffer.clone())
     }
 
+    pub(crate) fn id_for_path(&self, path: &Path) -> Option<BufferId> {
+        self.path_to_id.get(path).copied()
+    }
+
+    /// Updates the path of an open buffer in place. No-op when `old` has no
+    /// open buffer. Returns `true` if a remapping happened. Used by
+    /// `WorkspaceEdit::Rename` so an open buffer for the renamed file
+    /// stays addressable by its new path.
+    pub(crate) fn rename_path(&mut self, old: &Path, new: &Path) -> bool {
+        let Some(id) = self.path_to_id.remove(old) else {
+            return false;
+        };
+        self.path_to_id.insert(new.to_path_buf(), id);
+        if let Some(entry) = self.buffers.get_mut(&id) {
+            entry.path = Some(new.to_path_buf());
+        }
+        true
+    }
+
     #[allow(dead_code)]
     pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
