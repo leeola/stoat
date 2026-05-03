@@ -118,6 +118,12 @@ pub struct Stoat {
     /// mode replaces every character in every non-empty selection
     /// with that char and clears the flag.
     pub(crate) pending_replace: bool,
+    /// Set after a `SurroundAdd` action arms the chord. While true,
+    /// the next printable char keypress in normal/select mode wraps
+    /// every non-empty selection with that char's surround pair via
+    /// [`action_handlers::surround::execute_surround_add`] and clears
+    /// the flag. Non-char keypresses also clear the flag.
+    pub(crate) pending_surround_add: bool,
     /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
@@ -410,6 +416,7 @@ impl Stoat {
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
             pending_replace: false,
+            pending_surround_add: false,
             editor_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
@@ -1337,6 +1344,14 @@ impl Stoat {
                 return action_handlers::movement::execute_replace(self, ch);
             }
             self.pending_replace = false;
+        }
+
+        if (self.mode == "normal" || self.mode == "select") && self.pending_surround_add {
+            if let KeyCode::Char(ch) = key.code {
+                self.pending_surround_add = false;
+                return action_handlers::surround::execute_surround_add(self, ch);
+            }
+            self.pending_surround_add = false;
         }
 
         if (self.mode == "normal" || self.mode == "select") && self.pending_goto_word.is_some() {

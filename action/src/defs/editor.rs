@@ -581,6 +581,16 @@ define_action!(
 );
 
 define_action!(
+    SurroundAddDef,
+    SurroundAdd,
+    "SurroundAdd",
+    ActionKind::SurroundAdd,
+    "surround selection with pair",
+    "Wait for the next char keypress, then wrap every non-empty selection with the matching pair: bracket-like opens/closes (`(`/`)`, `[`/`]`, `{`/`}`, `<`/`>`) wrap with the canonical open and close; quote-like chars (`\"`, `'`, `` ` ``) wrap with the same char on both sides; any other printable char wraps with that char on both sides. Empty (collapsed) selections are skipped.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

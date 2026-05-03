@@ -32,7 +32,7 @@ use crate::{
             PageUp, Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar,
             RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
             SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark,
-            ShrinkSelection, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
+            ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SwitchCase, SwitchToLowercase,
             SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,
             UnindentSelection,
         },
@@ -313,6 +313,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SetMark::DEF, |_| Ok(Box::new(SetMark)));
     add(GotoMark::DEF, |_| Ok(Box::new(GotoMark)));
     add(GotoMarkExact::DEF, |_| Ok(Box::new(GotoMarkExact)));
+    add(SurroundAdd::DEF, |_| Ok(Box::new(SurroundAdd)));
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -588,6 +589,7 @@ mod tests {
         "SetMark",
         "GotoMark",
         "GotoMarkExact",
+        "SurroundAdd",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -815,7 +817,8 @@ mod tests {
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
         // + 3 marks (SetMark, GotoMark, GotoMarkExact).
-        assert_eq!(all().count(), 229);
+        // + 1 SurroundAdd.
+        assert_eq!(all().count(), 230);
     }
 
     #[test]

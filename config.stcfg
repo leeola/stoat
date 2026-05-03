@@ -250,6 +250,7 @@ on key {
     mode == match {
         Escape -> SetMode(normal);
         m -> [MatchBrackets(), SetMode(normal)];
+        s -> [SurroundAdd(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == select {

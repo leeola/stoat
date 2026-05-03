@@ -14,6 +14,7 @@ mod rebase;
 mod review;
 mod reword;
 mod run;
+pub(crate) mod surround;
 mod workspace;
 
 use crate::{
@@ -286,6 +287,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SetMark => marks::set_mark(stoat),
         ActionKind::GotoMark => marks::goto_mark(stoat),
         ActionKind::GotoMarkExact => marks::goto_mark_exact(stoat),
+        ActionKind::SurroundAdd => surround::surround_add(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => {
             movement::goto_window(stoat, movement::WindowAlign::Top, false)
