@@ -447,6 +447,7 @@ on key {
         k -> [GotoTypeDefinition(), SetMode(normal)];
         t -> [GotoImplementation(), SetMode(normal)];
         i -> [Hover(), SetMode(normal)];
+        a -> [CodeAction(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

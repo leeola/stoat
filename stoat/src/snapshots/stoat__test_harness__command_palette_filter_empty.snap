@@ -8,11 +8,11 @@ mode: prompt
 size: 80x24
 ---
 [0m[7m [0m
-
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m GotoDefinition      jump to symbol definition                            [0m[35m│[0m
+  [0m[35m│[0m[30m[46m CodeAction          show code actions for selection                      [0m[35m│[0m
+  [0m[35m│[0m[97m GotoDefinition      [0m[90mjump to symbol definition[0m[97m                            [0m[35m│[0m
   [0m[35m│[0m[97m GotoImplementation  [0m[90mjump to symbol implementation[0m[97m                        [0m[35m│[0m
   [0m[35m│[0m[97m GotoTypeDefinition  [0m[90mjump to type definition[0m[97m                              [0m[35m│[0m
   [0m[35m│[0m[97m Hover               [0m[90mshow hover documentation[0m[97m                             [0m[35m│[0m
@@ -21,13 +21,13 @@ size: 80x24
   [0m[35m│[0m[97m OpenCommits         [0m[90mbrowse commit history[0m[97m                                [0m[35m│[0m
   [0m[35m│[0m[97m OpenFile            [0m[90mopen a file[0m[97m                                          [0m[35m│[0m
   [0m[35m│[0m[97m OpenReview          [0m[90mreview changed files[0m[97m                                 [0m[35m│[0m
-  [0m[35m│[0m[97m OpenRun             [0m[90mopen terminal[0m[97m                                        [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mMove the primary cursor to the definition of the symbol under the cursor[0m  [0m[35m│[0m
-  [0m[35m│[0m[37mby issuing an LSP `textDocument/definition` request. Multi-file targets[0m   [0m[35m│[0m
-  [0m[35m│[0m[37mopen the destination file in the foc[0m[33m┌ palette ──────────────────────────────┐[0m
-  [0m[35m│[0m[37mcandidates jump to the first; no-op [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
-  [0m[35m│[0m[37mdoes not advertise the capability.[0m  [0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m  [0m[35m│[0m [0m[33m│[0m
+  [0m[35m│[0m[37mIssue an LSP `textDocument/codeAction` request for the focused editor's[0m   [0m[35m│[0m
+  [0m[35m│[0m[37mprimary selection and present the response as a numbered popup. Number[0m    [0m[35m│[0m
+  [0m[35m│[0m[37mkeys 1-9 select an action; on select the resulting `WorkspaceEdit` is[0m     [0m[35m│[0m
+  [0m[35m│[0m[37mapplied to the workspace, calling `c[0m[33m┌ palette ──────────────────────────────┐[0m
+  [0m[35m│[0m[37maction's edit is deferred. No-op whe[0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
+  [0m[35m│[0m[37mcapability or returns no actionable [0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m  [0m[35m│[0m [0m[33m│[0m
   [0m[35m└────────────────────────────────────[0m[33m│[0m[36m  S-Tab[0m[97m   toggle command palette scope[0m [0m[33m│[0m
                                        [0m[33m└───────────────────────────────────────┘[0m
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

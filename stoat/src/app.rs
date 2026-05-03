@@ -200,6 +200,26 @@ pub struct Stoat {
     /// cleared by [`Self::dispatch_key`] on any non-Hover action so the
     /// popup vanishes on cursor motion.
     pub(crate) pending_hover: Option<action_handlers::lsp::HoverPopup>,
+
+    /// In-flight `textDocument/codeAction` request. Replacing the
+    /// entry drops the prior task, cancelling its spawned future.
+    /// Polled by [`action_handlers::lsp::pump_lsp_code_actions`] each
+    /// render tick; on `Ready(Some)` populates
+    /// [`Self::pending_code_action_picker`].
+    pub(crate) pending_code_action_request:
+        Option<stoat_scheduler::Task<Option<Vec<lsp_types::CodeActionOrCommand>>>>,
+
+    /// Selectable code-action picker waiting for the user to choose
+    /// (number keys 1-9) or cancel (Escape / any other action).
+    pub(crate) pending_code_action_picker: Option<action_handlers::lsp::CodeActionPicker>,
+
+    /// In-flight `codeAction/resolve` request triggered after the
+    /// user picks an unresolved code action. Polled by
+    /// [`action_handlers::lsp::pump_lsp_code_action_resolve`]; on
+    /// `Ready(Some(edit))` the edit is applied via
+    /// [`crate::lsp::edit_apply::apply_workspace_edit`].
+    pub(crate) pending_code_action_resolve:
+        Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -339,6 +359,9 @@ impl Stoat {
             pending_lsp_jump: None,
             pending_hover_request: None,
             pending_hover: None,
+            pending_code_action_request: None,
+            pending_code_action_picker: None,
+            pending_code_action_resolve: None,
         }
     }
 
@@ -1043,6 +1066,27 @@ impl Stoat {
             }
         }
 
+        if (self.mode == "normal" || self.mode == "select")
+            && self.pending_code_action_picker.is_some()
+        {
+            if let KeyCode::Char(ch) = key.code {
+                if let Some(digit) = ch.to_digit(10) {
+                    if (1..=9).contains(&digit) {
+                        let index = (digit - 1) as usize;
+                        action_handlers::lsp::pick_code_action(self, index);
+                        return UpdateEffect::Redraw;
+                    }
+                }
+            }
+            if matches!(key.code, KeyCode::Esc) {
+                self.pending_code_action_picker = None;
+                self.pending_code_action_request = None;
+                return UpdateEffect::Redraw;
+            }
+            self.pending_code_action_picker = None;
+            self.pending_code_action_request = None;
+        }
+
         if (self.mode == "normal" || self.mode == "select") && self.pending_find.is_some() {
             if let KeyCode::Char(ch) = key.code {
                 let (kind, extend, count) = self.pending_find.take().expect("checked above");
@@ -1117,6 +1161,7 @@ impl Stoat {
         let mut effect = UpdateEffect::None;
         let mut dispatched_action = false;
         let mut dispatched_hover = false;
+        let mut dispatched_code_action = false;
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
@@ -1127,6 +1172,9 @@ impl Stoat {
             }
             if ra.name == "Hover" {
                 dispatched_hover = true;
+            }
+            if ra.name == "CodeAction" {
+                dispatched_code_action = true;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {
                 dispatched_action = true;
@@ -1143,6 +1191,10 @@ impl Stoat {
             if !dispatched_hover {
                 self.pending_hover = None;
                 self.pending_hover_request = None;
+            }
+            if !dispatched_code_action {
+                self.pending_code_action_picker = None;
+                self.pending_code_action_request = None;
             }
         }
         effect
@@ -1867,6 +1919,8 @@ impl Stoat {
         action_handlers::pump_commits(self);
         action_handlers::pump_lsp_jumps(self);
         action_handlers::lsp::pump_lsp_hover(self);
+        action_handlers::lsp::pump_lsp_code_actions(self);
+        action_handlers::lsp::pump_lsp_code_action_resolve(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf

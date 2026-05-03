@@ -49,7 +49,7 @@ pub use defs::{
         HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
     },
     lsp::{
-        GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
+        CodeAction, GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
         GotoTypeDefinition, Hover,
     },
     palette::OpenCommandPalette,

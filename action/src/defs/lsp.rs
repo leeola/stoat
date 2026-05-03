@@ -79,3 +79,19 @@ define_action!(
      returns nothing.",
     ActionPriority::Common
 );
+
+define_action!(
+    CodeActionDef,
+    CodeAction,
+    "CodeAction",
+    ActionKind::CodeAction,
+    "show code actions for selection",
+    "Issue an LSP `textDocument/codeAction` request for the focused \
+     editor's primary selection and present the response as a numbered \
+     popup. Number keys 1-9 select an action; on select the resulting \
+     `WorkspaceEdit` is applied to the workspace, calling \
+     `codeAction/resolve` first when the action's edit is deferred. \
+     No-op when the server does not advertise the capability or returns \
+     no actionable items.",
+    ActionPriority::Common
+);

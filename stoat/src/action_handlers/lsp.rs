@@ -16,11 +16,12 @@ use crate::{
 };
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
-    GotoDefinitionResponse, HoverContents, HoverParams, MarkedString, Position, Range,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
-    VersionedTextDocumentIdentifier,
+    CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
+    DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
+    HoverParams, MarkedString, Position, Range, TextDocumentContentChangeEvent,
+    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
+    TextDocumentSyncCapability, TextDocumentSyncKind, VersionedTextDocumentIdentifier,
+    WorkspaceEdit,
 };
 use std::{
     future::Future,
@@ -723,6 +724,255 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
     }
 }
 
+/// One actionable entry in [`CodeActionPicker`]. Variants reflect
+/// how the entry's [`WorkspaceEdit`] is obtained: directly from the
+/// initial response, or via a follow-up `codeAction/resolve` call.
+/// `Command`-only `CodeActionOrCommand` items are filtered out at
+/// pump time and do not appear here.
+#[derive(Debug, Clone)]
+pub(crate) enum CodeActionEntry {
+    Direct {
+        title: String,
+        edit: Box<WorkspaceEdit>,
+    },
+    NeedsResolve {
+        title: String,
+        action: Box<lsp_types::CodeAction>,
+    },
+}
+
+impl CodeActionEntry {
+    pub(crate) fn title(&self) -> &str {
+        match self {
+            Self::Direct { title, .. } | Self::NeedsResolve { title, .. } => title,
+        }
+    }
+}
+
+/// Cursor-anchored code action picker. Painted as a numbered popup;
+/// the user picks with keys `1`..=`9`, dismisses with Escape or any
+/// other action.
+#[derive(Debug, Clone)]
+pub(crate) struct CodeActionPicker {
+    pub(crate) entries: Vec<CodeActionEntry>,
+    pub(crate) anchor_offset: usize,
+}
+
+/// Issue a `textDocument/codeAction` request for the focused editor's
+/// primary selection range. The async response is stored on
+/// [`Stoat::pending_code_action_request`] and applied by
+/// [`pump_lsp_code_actions`] on the next render tick.
+///
+/// No-op when the focused pane is not an editor, the buffer has no
+/// path, or the server does not advertise
+/// [`LanguageServerFeature::CodeAction`]. Replacing the prior pending
+/// task drops it, cancelling its spawned future -- only one in-flight
+/// code-action request is tracked at a time.
+pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::CodeAction)
+    {
+        return UpdateEffect::None;
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let (range_byte, anchor_offset, buffer_id, source_rope) = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let start = buf_snap.resolve_anchor(&sel.start);
+        let end = buf_snap.resolve_anchor(&sel.end);
+        let head = buf_snap.resolve_anchor(&sel.head());
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        ((lo, hi), head, editor.buffer_id, buf_snap.rope().clone())
+    };
+
+    let Some(source_path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&source_path) else {
+        return UpdateEffect::None;
+    };
+
+    let lsp_range = crate::lsp::util::byte_range_to_lsp_range(
+        &source_rope,
+        range_byte.0..range_byte.1,
+        encoding,
+    );
+
+    let params = CodeActionParams {
+        text_document: TextDocumentIdentifier { uri: source_uri },
+        range: lsp_range,
+        context: CodeActionContext {
+            diagnostics: Vec::new(),
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: Default::default(),
+        partial_result_params: Default::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        match lsp.code_action(params).await {
+            Ok(Some(actions)) => Some(actions),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "code_action request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_code_action_request = Some(task);
+    stoat.pending_code_action_picker = Some(CodeActionPicker {
+        entries: Vec::new(),
+        anchor_offset,
+    });
+    // The picker is reset to an empty list above so a stale popup
+    // from a prior request does not persist while the new one is
+    // in flight; pump_lsp_code_actions overwrites it on response.
+    UpdateEffect::None
+}
+
+/// Poll any in-flight code-action request
+/// ([`Stoat::pending_code_action_request`]) and translate the result
+/// into a [`CodeActionPicker`]. Filters out `Command`-only entries
+/// and `CodeAction` items that have neither a `WorkspaceEdit` nor a
+/// resolve trigger. Clears the picker when no actionable entries
+/// remain.
+pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_code_action_request.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(actions)) => {
+            let entries: Vec<CodeActionEntry> = actions
+                .into_iter()
+                .filter_map(|item| match item {
+                    CodeActionOrCommand::CodeAction(ca) => match (ca.edit.clone(), ca.data.clone())
+                    {
+                        (Some(edit), _) => Some(CodeActionEntry::Direct {
+                            title: ca.title.clone(),
+                            edit: Box::new(edit),
+                        }),
+                        (None, Some(_)) => Some(CodeActionEntry::NeedsResolve {
+                            title: ca.title.clone(),
+                            action: Box::new(ca),
+                        }),
+                        (None, None) => None,
+                    },
+                    CodeActionOrCommand::Command(_) => None,
+                })
+                .collect();
+            if entries.is_empty() {
+                stoat.pending_code_action_picker = None;
+            } else if let Some(picker) = stoat.pending_code_action_picker.as_mut() {
+                picker.entries = entries;
+            }
+            true
+        },
+        Poll::Ready(None) => {
+            stoat.pending_code_action_picker = None;
+            true
+        },
+        Poll::Pending => {
+            stoat.pending_code_action_request = Some(task);
+            false
+        },
+    }
+}
+
+/// Poll any in-flight `codeAction/resolve` task
+/// ([`Stoat::pending_code_action_resolve`]). On `Ready(Some(edit))`
+/// applies the edit via [`crate::lsp::edit_apply::apply_workspace_edit`];
+/// errors are logged and swallowed so a malformed edit does not crash
+/// the app. On `Ready(None)` the resolve produced no edit, which is a
+/// silent no-op.
+pub(crate) fn pump_lsp_code_action_resolve(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_code_action_resolve.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(edit)) => {
+            apply_code_action_edit(stoat, edit);
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_code_action_resolve = Some(task);
+            false
+        },
+    }
+}
+
+/// Apply a code-action [`WorkspaceEdit`] and log+swallow any error.
+/// Code actions arrive from the server and may fail to apply for
+/// reasons orthogonal to user action (URI scheme, missing buffer);
+/// crashing the app on a server-driven failure is the wrong shape.
+fn apply_code_action_edit(stoat: &mut Stoat, edit: WorkspaceEdit) {
+    if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+        tracing::warn!(
+            target: "stoat::lsp",
+            ?err,
+            "code_action workspace edit failed to apply",
+        );
+    }
+}
+
+/// User has picked entry `index` from the open code-action picker.
+/// `Direct` entries apply immediately; `NeedsResolve` entries spawn
+/// a `codeAction/resolve` task whose result is applied by
+/// [`pump_lsp_code_action_resolve`]. Clears the picker either way.
+/// No-op when no picker is open or `index` is out of range.
+pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
+    let Some(picker) = stoat.pending_code_action_picker.take() else {
+        return false;
+    };
+    let Some(entry) = picker.entries.into_iter().nth(index) else {
+        return false;
+    };
+    match entry {
+        CodeActionEntry::Direct { edit, .. } => {
+            apply_code_action_edit(stoat, *edit);
+        },
+        CodeActionEntry::NeedsResolve { action, .. } => {
+            let lsp = stoat.lsp_host.clone();
+            let task = stoat.executor.spawn(async move {
+                match lsp.code_action_resolve(*action).await {
+                    Ok(resolved) => resolved.edit,
+                    Err(err) => {
+                        tracing::warn!(
+                            target: "stoat::lsp",
+                            ?err,
+                            "codeAction/resolve request failed",
+                        );
+                        None
+                    },
+                }
+            });
+            stoat.pending_code_action_resolve = Some(task);
+        },
+    }
+    true
+}
+
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
 /// and apply the result. On `Ready(Some)` opens the target file in
 /// the focused pane (no-op when already open) and collapses every
@@ -763,7 +1013,10 @@ fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use crate::test_harness::TestHarness;
     use lsp_types::TextDocumentSyncKind;
-    use std::{path::PathBuf, time::Duration};
+    use std::{
+        path::{Path, PathBuf},
+        time::Duration,
+    };
     use stoat_action::OpenFile;
 
     fn seed(h: &mut TestHarness, files: &[(&str, &str)]) -> PathBuf {
@@ -1620,5 +1873,264 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
         h.settle();
         h.assert_snapshot("snapshot_hover_popup");
+    }
+
+    fn enable_code_action(h: &TestHarness) {
+        use lsp_types::{CodeActionProviderCapability, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            code_action_provider: Some(CodeActionProviderCapability::Simple(true)),
+            ..Default::default()
+        });
+    }
+
+    #[allow(clippy::mutable_key_type)]
+    fn direct_action(
+        title: &str,
+        file: &str,
+        line: u32,
+        col: u32,
+        text: &str,
+    ) -> lsp_types::CodeActionOrCommand {
+        use lsp_types::{
+            CodeAction, CodeActionOrCommand, Position, Range, TextEdit, Uri, WorkspaceEdit,
+        };
+        use std::{collections::HashMap, str::FromStr};
+        let uri = Uri::from_str(&format!("file://{file}")).expect("uri");
+        let edit = TextEdit {
+            range: Range::new(Position::new(line, col), Position::new(line, col)),
+            new_text: text.to_string(),
+        };
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(uri, vec![edit]);
+        let workspace_edit = WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        };
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: title.to_string(),
+            kind: None,
+            diagnostics: None,
+            edit: Some(workspace_edit),
+            command: None,
+            is_preferred: None,
+            disabled: None,
+            data: None,
+        })
+    }
+
+    fn unresolved_action(title: &str) -> lsp_types::CodeActionOrCommand {
+        use lsp_types::{CodeAction, CodeActionOrCommand};
+        CodeActionOrCommand::CodeAction(CodeAction {
+            title: title.to_string(),
+            kind: None,
+            diagnostics: None,
+            edit: None,
+            command: None,
+            is_preferred: None,
+            disabled: None,
+            data: Some(serde_json::Value::Null),
+        })
+    }
+
+    fn command_only_action(title: &str) -> lsp_types::CodeActionOrCommand {
+        use lsp_types::{CodeActionOrCommand, Command};
+        CodeActionOrCommand::Command(Command {
+            title: title.to_string(),
+            command: "noop".to_string(),
+            arguments: None,
+        })
+    }
+
+    fn buffer_text(h: &TestHarness, path: &Path) -> String {
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .id_for_path(path)
+            .expect("buffer for path");
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        let guard = buffer.read().expect("buffer lock");
+        guard.rope().to_string()
+    }
+
+    #[test]
+    fn code_action_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![direct_action("X", path.to_str().unwrap(), 0, 0, "X")],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_none());
+        assert!(h.stoat.pending_code_action_request.is_none());
+    }
+
+    #[test]
+    fn code_action_no_response_clears_picker() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_none());
+        assert!(h.stoat.pending_code_action_request.is_none());
+    }
+
+    #[test]
+    fn code_action_populates_picker_with_titles() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![
+                direct_action("Add import", path.to_str().unwrap(), 0, 0, "use a;\n"),
+                direct_action("Inline variable", path.to_str().unwrap(), 0, 0, ""),
+            ],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        let picker = h
+            .stoat
+            .pending_code_action_picker
+            .as_ref()
+            .expect("picker open");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title()).collect();
+        assert_eq!(titles, vec!["Add import", "Inline variable"]);
+    }
+
+    #[test]
+    fn code_action_drops_command_only_entries() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![
+                command_only_action("Run command"),
+                direct_action("Real edit", path.to_str().unwrap(), 0, 0, "X"),
+            ],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        let picker = h
+            .stoat
+            .pending_code_action_picker
+            .as_ref()
+            .expect("picker open");
+        let titles: Vec<&str> = picker.entries.iter().map(|e| e.title()).collect();
+        assert_eq!(titles, vec!["Real edit"]);
+    }
+
+    #[test]
+    fn code_action_pick_one_applies_edit() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![direct_action(
+                "Insert prefix",
+                path.to_str().unwrap(),
+                0,
+                0,
+                "// hi\n",
+            )],
+        );
+        h.type_keys("space l a");
+        h.settle();
+        h.type_keys("1");
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_none());
+        assert_eq!(buffer_text(&h, &path), "// hi\nabc\n");
+    }
+
+    #[test]
+    fn code_action_resolve_path_applies_resolved_edit() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_code_actions(path.to_str().unwrap(), vec![unresolved_action("Refactor")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_some());
+        crate::action_handlers::lsp::pick_code_action(&mut h.stoat, 0);
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_none());
+        assert!(h.stoat.pending_code_action_resolve.is_none());
+    }
+
+    #[test]
+    fn code_action_escape_dismisses_picker() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![direct_action("X", path.to_str().unwrap(), 0, 0, "X")],
+        );
+        h.type_keys("space l a");
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_some());
+        h.type_keys("escape");
+        assert!(h.stoat.pending_code_action_picker.is_none());
+    }
+
+    #[test]
+    fn space_l_a_triggers_code_action() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![direct_action("X", path.to_str().unwrap(), 0, 0, "X")],
+        );
+        h.type_keys("space l a");
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_some());
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn snapshot_code_action_picker() {
+        let mut h = TestHarness::with_size(40, 12);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![
+                direct_action("Add import", path.to_str().unwrap(), 0, 0, "X"),
+                direct_action("Inline", path.to_str().unwrap(), 0, 0, "X"),
+            ],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
+        h.settle();
+        h.assert_snapshot("snapshot_code_action_picker");
     }
 }

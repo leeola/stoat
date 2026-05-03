@@ -1,5 +1,6 @@
 pub(crate) mod badges;
 pub(crate) mod claude_pane;
+pub(crate) mod code_action;
 pub(crate) mod command_palette;
 pub(crate) mod commits;
 pub(crate) mod conflict;
@@ -226,6 +227,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         }
     }
     hover::render_hover(stoat, buf);
+    code_action::render_code_action(stoat, buf);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::render_badges(
         &ws.badges,
