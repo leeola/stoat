@@ -9,14 +9,15 @@
 //! still pending; both wait on user-facing buffer-save / buffer-close
 //! actions that do not yet exist.
 
-use crate::{app::Stoat, buffer::BufferId};
+use crate::{app::Stoat, buffer::BufferId, host::OffsetEncoding};
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
-    DidChangeTextDocumentParams, DidOpenTextDocumentParams, TextDocumentContentChangeEvent,
-    TextDocumentItem, TextDocumentSyncCapability, TextDocumentSyncKind,
-    VersionedTextDocumentIdentifier,
+    DidChangeTextDocumentParams, DidOpenTextDocumentParams, Position, Range,
+    TextDocumentContentChangeEvent, TextDocumentItem, TextDocumentSyncCapability,
+    TextDocumentSyncKind, VersionedTextDocumentIdentifier,
 };
-use std::{path::Path, str::FromStr, time::Duration};
+use std::{path::Path, str::FromStr, sync::Arc, time::Duration};
+use stoat_text::{patch::Patch, Rope};
 
 /// Quiet window after the last edit before a buffer's `did_change`
 /// fires. Matches Helix's default and prevents per-keystroke storms
@@ -61,6 +62,16 @@ pub(crate) fn notify_buffer_opened(
         .unwrap_or(0);
     stoat.lsp_buffer_versions.insert(buffer_id, buffer_version);
     stoat.lsp_doc_versions.insert(buffer_id, 0);
+    stoat
+        .lsp_last_delivered_text
+        .lock()
+        .expect("lsp text mutex")
+        .insert(buffer_id, Arc::new(text.to_string()));
+    stoat
+        .lsp_last_delivered_buffer_version
+        .lock()
+        .expect("lsp version mutex")
+        .insert(buffer_id, buffer_version);
     let params = DidOpenTextDocumentParams {
         text_document: TextDocumentItem {
             uri,
@@ -87,84 +98,223 @@ pub(crate) fn notify_buffer_opened(
 /// which cancels its spawned future before its timer fires; only
 /// the most recent edit's snapshot ever reaches the server.
 ///
-/// Capability honouring: dispatch only when the server advertises
-/// [`TextDocumentSyncKind::FULL`]. `INCREMENTAL` logs once and
-/// skips because per-edit range encoding is not yet wired (separate
-/// follow-up). `NONE` skips silently.
+/// Capability honouring: dispatches when the server advertises
+/// [`TextDocumentSyncKind::FULL`] (full document text) or
+/// [`TextDocumentSyncKind::INCREMENTAL`] (per-edit ranges via
+/// [`patch_to_content_changes`]). `NONE` skips silently.
 pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
     let sync_kind = resolve_sync_kind(&stoat.lsp_host.capabilities().text_document_sync);
-    let snapshots: Vec<(BufferId, Uri, String, u64)> = stoat
-        .lsp_opened
-        .iter()
-        .copied()
-        .filter_map(|id| {
-            let workspace = stoat.active_workspace();
-            let buffer = workspace.buffers.get(id)?;
-            let buffer_b = buffer.read().expect("buffer lock");
-            let current_version = buffer_b.version();
-            let last_version = stoat.lsp_buffer_versions.get(&id).copied().unwrap_or(0);
-            if current_version == last_version {
-                return None;
+    if !matches!(
+        sync_kind,
+        TextDocumentSyncKind::FULL | TextDocumentSyncKind::INCREMENTAL
+    ) {
+        for id in stoat.lsp_opened.iter().copied().collect::<Vec<_>>() {
+            if let Some(buffer) = stoat.active_workspace().buffers.get(id) {
+                let v = buffer.read().expect("buffer lock").version();
+                stoat.lsp_buffer_versions.insert(id, v);
             }
-            let path = workspace.buffers.path_for(id)?.to_path_buf();
-            let uri = path_to_uri(&path)?;
-            let text = buffer_b.rope().to_string();
-            Some((id, uri, text, current_version))
-        })
-        .collect();
-
-    if snapshots.is_empty() {
+        }
         return;
     }
 
-    match sync_kind {
-        TextDocumentSyncKind::FULL => {},
-        TextDocumentSyncKind::INCREMENTAL => {
-            tracing::warn!(
-                target: "stoat::lsp",
-                "did_change skipped: server requested Incremental sync, not yet implemented",
-            );
-            for (id, _, _, version) in &snapshots {
-                stoat.lsp_buffer_versions.insert(*id, *version);
-            }
-            return;
-        },
-        _ => {
-            for (id, _, _, version) in &snapshots {
-                stoat.lsp_buffer_versions.insert(*id, *version);
-            }
-            return;
-        },
-    }
+    let encoding = stoat.lsp_host.offset_encoding();
 
-    for (id, uri, text, buffer_version) in snapshots {
-        stoat.lsp_buffer_versions.insert(id, buffer_version);
-        let lsp_version = stoat.lsp_doc_versions.entry(id).or_insert(0);
+    let dispatches: Vec<DispatchPlan> = stoat
+        .lsp_opened
+        .iter()
+        .copied()
+        .filter_map(|id| build_dispatch_plan(stoat, id, sync_kind, encoding))
+        .collect();
+
+    for plan in dispatches {
+        stoat
+            .lsp_buffer_versions
+            .insert(plan.id, plan.target_buffer_version);
+        let lsp_version = stoat.lsp_doc_versions.entry(plan.id).or_insert(0);
         *lsp_version += 1;
         let lsp_version_value = *lsp_version;
 
         let params = DidChangeTextDocumentParams {
             text_document: VersionedTextDocumentIdentifier {
-                uri,
+                uri: plan.uri,
                 version: lsp_version_value,
             },
-            content_changes: vec![TextDocumentContentChangeEvent {
-                range: None,
-                range_length: None,
-                text,
-            }],
+            content_changes: plan.content_changes,
         };
 
         let lsp = stoat.lsp_host.clone();
         let executor = stoat.executor.clone();
+        let last_text = stoat.lsp_last_delivered_text.clone();
+        let last_version = stoat.lsp_last_delivered_buffer_version.clone();
+        let buffer_id = plan.id;
+        let target_text = plan.target_text;
+        let target_version = plan.target_buffer_version;
+
         let task = stoat.executor.spawn(async move {
             executor.timer(LSP_DID_CHANGE_DEBOUNCE).await;
             if let Err(err) = lsp.did_change(params).await {
                 tracing::warn!(target: "stoat::lsp", ?err, "did_change notification failed");
+                return;
             }
+            last_text
+                .lock()
+                .expect("lsp text mutex")
+                .insert(buffer_id, target_text);
+            last_version
+                .lock()
+                .expect("lsp version mutex")
+                .insert(buffer_id, target_version);
         });
-        stoat.lsp_pending_changes.insert(id, task);
+        stoat.lsp_pending_changes.insert(plan.id, task);
     }
+}
+
+struct DispatchPlan {
+    id: BufferId,
+    uri: Uri,
+    content_changes: Vec<TextDocumentContentChangeEvent>,
+    target_text: Arc<String>,
+    target_buffer_version: u64,
+}
+
+fn build_dispatch_plan(
+    stoat: &Stoat,
+    id: BufferId,
+    sync_kind: TextDocumentSyncKind,
+    encoding: OffsetEncoding,
+) -> Option<DispatchPlan> {
+    let workspace = stoat.active_workspace();
+    let buffer = workspace.buffers.get(id)?;
+    let buffer_b = buffer.read().expect("buffer lock");
+    let current_version = buffer_b.version();
+    let last_seen = stoat.lsp_buffer_versions.get(&id).copied().unwrap_or(0);
+    if current_version == last_seen {
+        return None;
+    }
+    let path = workspace.buffers.path_for(id)?.to_path_buf();
+    let uri = path_to_uri(&path)?;
+    let new_text = buffer_b.rope().to_string();
+
+    let content_changes = match sync_kind {
+        TextDocumentSyncKind::FULL => {
+            vec![TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: new_text.clone(),
+            }]
+        },
+        TextDocumentSyncKind::INCREMENTAL => {
+            let last_delivered_version = stoat
+                .lsp_last_delivered_buffer_version
+                .lock()
+                .expect("lsp version mutex")
+                .get(&id)
+                .copied()
+                .unwrap_or(0);
+            let last_delivered_text = stoat
+                .lsp_last_delivered_text
+                .lock()
+                .expect("lsp text mutex")
+                .get(&id)
+                .cloned()
+                .unwrap_or_else(|| Arc::new(String::new()));
+            let patch = buffer_b.snapshot.edits_since(last_delivered_version);
+            patch_to_content_changes(&last_delivered_text, buffer_b.rope(), &patch, encoding)
+        },
+        _ => return None,
+    };
+
+    if content_changes.is_empty() {
+        return None;
+    }
+
+    Some(DispatchPlan {
+        id,
+        uri,
+        content_changes,
+        target_text: Arc::new(new_text),
+        target_buffer_version: current_version,
+    })
+}
+
+/// Translate a [`Patch`] of byte-range edits between `old_text` and
+/// `new_rope` into a sequence of [`TextDocumentContentChangeEvent`]s.
+/// LSP requires positions in the *sequential* state at the moment
+/// each change is applied -- after prior changes in the same call
+/// have been applied -- not in the original or final document. The
+/// walk below tracks `current_lsp` as the LSP position in the seq
+/// state: a retain advances both old and seq; an insertion advances
+/// seq by the inserted text's length; a deletion leaves seq alone
+/// because the deleted bytes are removed from seq before the next
+/// edit applies.
+fn patch_to_content_changes(
+    old_text: &str,
+    new_rope: &Rope,
+    patch: &Patch<usize>,
+    encoding: OffsetEncoding,
+) -> Vec<TextDocumentContentChangeEvent> {
+    let mut changes = Vec::new();
+    let mut old_pos: usize = 0;
+    let mut current_lsp = Position::new(0, 0);
+
+    for edit in patch {
+        if edit.old.start > old_pos {
+            let retain = &old_text[old_pos..edit.old.start];
+            current_lsp = advance_lsp_position(current_lsp, retain, encoding);
+            old_pos = edit.old.start;
+        }
+
+        let start = current_lsp;
+        let old_len = edit.old.end - edit.old.start;
+        let new_len = edit.new.end - edit.new.start;
+
+        if old_len > 0 {
+            let deleted = &old_text[edit.old.start..edit.old.end];
+            let end = advance_lsp_position(start, deleted, encoding);
+            changes.push(TextDocumentContentChangeEvent {
+                range: Some(Range::new(start, end)),
+                range_length: None,
+                text: String::new(),
+            });
+            old_pos = edit.old.end;
+        } else if new_len > 0 {
+            let inserted = new_rope.slice(edit.new.start..edit.new.end).to_string();
+            current_lsp = advance_lsp_position(current_lsp, &inserted, encoding);
+            changes.push(TextDocumentContentChangeEvent {
+                range: Some(Range::new(start, start)),
+                range_length: None,
+                text: inserted,
+            });
+        }
+    }
+
+    changes
+}
+
+/// Walk `text` from `start` and return the LSP position that lands
+/// at the end. Counts `\n`, `\r`, and `\r\n` as line breaks per LSP
+/// spec. Per-character column advance follows the negotiated
+/// encoding so positions match what the server expects.
+fn advance_lsp_position(start: Position, text: &str, encoding: OffsetEncoding) -> Position {
+    let mut line = start.line;
+    let mut character = start.character;
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch == '\n' || ch == '\r' {
+            if ch == '\r' && chars.peek() == Some(&'\n') {
+                chars.next();
+            }
+            line += 1;
+            character = 0;
+        } else {
+            character += match encoding {
+                OffsetEncoding::Utf8 => ch.len_utf8() as u32,
+                OffsetEncoding::Utf16 => ch.len_utf16() as u32,
+                OffsetEncoding::Utf32 => 1,
+            };
+        }
+    }
+    Position::new(line, character)
 }
 
 fn resolve_sync_kind(cap: &Option<TextDocumentSyncCapability>) -> TextDocumentSyncKind {
@@ -364,5 +514,111 @@ mod tests {
         assert_eq!(changes[0].content_changes[0].text, "Ax\n");
         assert!(changes[1].text_document.uri.as_str().ends_with("/b.rs"));
         assert_eq!(changes[1].content_changes[0].text, "By\n");
+    }
+
+    #[test]
+    fn did_change_incremental_single_insertion() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        edit_buffer(&mut h, 0..0, "X");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        let changes = h.fake_lsp().observed_changes();
+        assert_eq!(changes.len(), 1);
+        let cc = &changes[0].content_changes;
+        assert_eq!(cc.len(), 1, "single insertion -> single content_change");
+        assert_eq!(cc[0].text, "X");
+        assert_eq!(
+            cc[0].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 0),
+                lsp_types::Position::new(0, 0),
+            )),
+        );
+    }
+
+    #[test]
+    fn did_change_incremental_single_deletion() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        edit_buffer(&mut h, 1..2, "");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        let changes = h.fake_lsp().observed_changes();
+        assert_eq!(changes.len(), 1);
+        let cc = &changes[0].content_changes;
+        assert_eq!(cc.len(), 1);
+        assert_eq!(cc[0].text, "");
+        assert_eq!(
+            cc[0].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 1),
+                lsp_types::Position::new(0, 2),
+            )),
+        );
+    }
+
+    #[test]
+    fn did_change_incremental_subsequent_dispatch_starts_from_last_delivered() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+
+        edit_buffer(&mut h, 0..0, "X");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        let after_first = h.fake_lsp().observed_changes();
+        assert_eq!(after_first.len(), 1);
+        assert!(after_first[0].content_changes.iter().any(|c| c.text == "X"));
+
+        edit_buffer(&mut h, 4..4, "Z");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        let all = h.fake_lsp().observed_changes();
+        assert_eq!(all.len(), 2);
+        let second = &all[1];
+        for change in &second.content_changes {
+            assert_ne!(
+                change.text, "X",
+                "second dispatch must not redeliver the prior insertion",
+            );
+        }
+        assert_eq!(second.content_changes.len(), 1);
+        assert_eq!(second.content_changes[0].text, "Z");
+        assert_eq!(
+            second.content_changes[0].range,
+            Some(lsp_types::Range::new(
+                lsp_types::Position::new(0, 4),
+                lsp_types::Position::new(0, 4),
+            )),
+        );
+    }
+
+    #[test]
+    fn did_change_incremental_skips_when_buffer_already_at_delivered_state() {
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp()
+            .set_text_document_sync(TextDocumentSyncKind::INCREMENTAL);
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        edit_buffer(&mut h, 0..0, "X");
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        let baseline = h.fake_lsp().observed_changes().len();
+        arm_change(&mut h);
+        h.advance_clock(Duration::from_millis(60));
+        assert_eq!(
+            h.fake_lsp().observed_changes().len(),
+            baseline,
+            "no edit since last delivery -> no new dispatch",
+        );
     }
 }

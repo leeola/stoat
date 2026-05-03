@@ -119,6 +119,21 @@ pub struct Stoat {
     /// (e.g. the prior task was cancelled before fire) are allowed
     /// per LSP spec which only requires monotonicity.
     pub(crate) lsp_doc_versions: std::collections::HashMap<BufferId, i32>,
+    /// Full document text the server most recently received via a
+    /// successful `did_open` or `did_change`. Used by the
+    /// Incremental-mode dispatch path to compute LSP positions for
+    /// the bytes the server is about to delete; cancelled tasks
+    /// never reach the server, so the prior delivered snapshot
+    /// remains the right basis for the next patch. Updated by the
+    /// spawned dispatch task on success.
+    pub(crate) lsp_last_delivered_text:
+        Arc<std::sync::Mutex<std::collections::HashMap<BufferId, Arc<String>>>>,
+    /// Buffer version at the last successful `did_open` /
+    /// `did_change` delivery, paired with `lsp_last_delivered_text`.
+    /// `Buffer::edits_since(this)` produces the patch the next
+    /// dispatch needs to encode.
+    pub(crate) lsp_last_delivered_buffer_version:
+        Arc<std::sync::Mutex<std::collections::HashMap<BufferId, u64>>>,
     /// Most recent `(FindKind, char)` consumed by `execute_find`.
     /// `RepeatLastMotion` (Alt-.) replays this pair without
     /// reading another keypress.
@@ -268,6 +283,12 @@ impl Stoat {
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
             lsp_doc_versions: std::collections::HashMap::new(),
+            lsp_last_delivered_text: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
+            lsp_last_delivered_buffer_version: Arc::new(std::sync::Mutex::new(
+                std::collections::HashMap::new(),
+            )),
             last_find: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
