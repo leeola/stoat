@@ -1262,12 +1262,48 @@ impl Stoat {
             && self.pending_workspace_symbol_picker.is_some()
         {
             if let KeyCode::Char(ch) = key.code {
+                match ch {
+                    'j' => {
+                        if let Some(picker) = self.pending_workspace_symbol_picker.as_mut() {
+                            let max = picker.entries.len().saturating_sub(1);
+                            picker.selected_idx = (picker.selected_idx + 1).min(max);
+                        }
+                        return UpdateEffect::Redraw;
+                    },
+                    'k' => {
+                        if let Some(picker) = self.pending_workspace_symbol_picker.as_mut() {
+                            picker.selected_idx = picker.selected_idx.saturating_sub(1);
+                        }
+                        return UpdateEffect::Redraw;
+                    },
+                    _ => {},
+                }
                 if let Some(digit) = ch.to_digit(10) {
                     if (1..=9).contains(&digit) {
-                        let index = (digit - 1) as usize;
+                        let viewport_top = self
+                            .pending_workspace_symbol_picker
+                            .as_ref()
+                            .map(|p| {
+                                crate::render::symbol_picker::viewport_top_for_picker(
+                                    p.selected_idx,
+                                    p.entries.len(),
+                                )
+                            })
+                            .unwrap_or(0);
+                        let index = viewport_top + (digit as usize - 1);
                         action_handlers::lsp::pick_workspace_symbol(self, index);
                         return UpdateEffect::Redraw;
                     }
+                }
+            }
+            if matches!(key.code, KeyCode::Enter) {
+                let index = self
+                    .pending_workspace_symbol_picker
+                    .as_ref()
+                    .map(|p| p.selected_idx);
+                if let Some(index) = index {
+                    action_handlers::lsp::pick_workspace_symbol(self, index);
+                    return UpdateEffect::Redraw;
                 }
             }
             if matches!(key.code, KeyCode::Esc) {

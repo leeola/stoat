@@ -1493,12 +1493,15 @@ pub(crate) struct WorkspaceSymbolEntry {
 }
 
 /// Cursor-anchored workspace-symbol picker. Painted as a numbered
-/// popup; the user picks with keys `1`..=`9`, dismisses with
-/// Escape or any other action.
+/// popup over a 9-row viewport that follows [`Self::selected_idx`];
+/// the user navigates with `j`/`k`, picks the selected entry with
+/// Enter, picks visible entries 1..=9 with the corresponding digit
+/// keys, and dismisses with Escape or any other action.
 #[derive(Debug, Clone)]
 pub(crate) struct WorkspaceSymbolPicker {
     pub(crate) entries: Vec<WorkspaceSymbolEntry>,
     pub(crate) anchor_offset: usize,
+    pub(crate) selected_idx: usize,
 }
 
 /// Open the workspace-symbol query input modal. Capability-gates on
@@ -1579,6 +1582,7 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
     stoat.pending_workspace_symbol_picker = Some(WorkspaceSymbolPicker {
         entries: Vec::new(),
         anchor_offset,
+        selected_idx: 0,
     });
     true
 }
@@ -1666,7 +1670,6 @@ fn workspace_symbol_entries(response: WorkspaceSymbolResponse) -> Vec<WorkspaceS
             }
         },
     }
-    entries.truncate(9);
     entries
 }
 
@@ -3678,6 +3681,60 @@ mod tests {
             .expect("buffer path")
             .to_path_buf();
         assert_eq!(path, lib);
+        assert_eq!(cursor_offset(&mut h), 3);
+    }
+
+    #[test]
+    fn workspace_symbol_navigates_with_jk_and_picks_with_enter() {
+        use lsp_types::SymbolKind;
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let mut files: Vec<(&str, &str)> = (0..12)
+            .map(|i| {
+                let path = Box::leak(format!("f{i}.rs").into_boxed_str()) as &str;
+                (path, "fn target() {}\n")
+            })
+            .collect();
+        files.push(("anchor.rs", "fn anchor() {}\n"));
+        let root = seed(&mut h, &files);
+        let anchor_path = root.join("anchor.rs");
+        open_buffer(&mut h, anchor_path);
+        for i in 0..12 {
+            let p = root.join(format!("f{i}.rs"));
+            h.fake_lsp().add_workspace_symbol(
+                "t",
+                "target",
+                SymbolKind::FUNCTION,
+                p.to_str().unwrap(),
+                0,
+                3,
+            );
+        }
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        h.type_keys("t");
+        crate::action_handlers::lsp::workspace_symbol_submit(&mut h.stoat);
+        h.settle();
+
+        for _ in 0..11 {
+            h.type_keys("j");
+        }
+        let picker = h
+            .stoat
+            .pending_workspace_symbol_picker
+            .as_ref()
+            .expect("picker");
+        assert_eq!(picker.selected_idx, 11);
+
+        h.type_keys("enter");
+        let ws = h.stoat.active_workspace();
+        let pane = ws.panes.pane(ws.panes.focus());
+        let crate::pane::View::Editor(eid) = pane.view else {
+            panic!("not an editor");
+        };
+        let buffer_id = ws.editors.get(eid).expect("editor").buffer_id;
+        let path = ws.buffers.path_for(buffer_id).expect("path").to_path_buf();
+        assert_eq!(path, root.join("f11.rs"));
         assert_eq!(cursor_offset(&mut h), 3);
     }
 

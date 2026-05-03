@@ -101,15 +101,21 @@ fn render_picker(stoat: &mut Stoat, buf: &mut Buffer) {
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let selected_style = stoat.theme.get(crate::theme::scope::UI_SELECTION);
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
         return;
     }
-    let visible_count = picker.entries.len().min(9);
+    let total = picker.entries.len();
+    let viewport_top =
+        crate::render::symbol_picker::viewport_top_for_picker(picker.selected_idx, total);
+    let window = crate::render::symbol_picker::VISIBLE_WINDOW;
+    let visible_count = total.saturating_sub(viewport_top).min(window);
     let body: Vec<String> = picker
         .entries
         .iter()
+        .skip(viewport_top)
         .take(visible_count)
         .enumerate()
         .map(|(i, e)| {
@@ -117,9 +123,26 @@ fn render_picker(stoat: &mut Stoat, buf: &mut Buffer) {
             truncate_to_width(&raw, interior_width as usize)
         })
         .collect();
-    let max_line_width = body.iter().map(|s| s.chars().count()).max().unwrap_or(0) as u16;
+    let footer = (total > window).then(|| {
+        truncate_to_width(
+            &format!(
+                "{}-{} / {}",
+                viewport_top + 1,
+                viewport_top + visible_count,
+                total
+            ),
+            interior_width as usize,
+        )
+    });
+    let max_line_width = body
+        .iter()
+        .chain(footer.as_ref())
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let total_lines = body.len() as u16 + footer.as_ref().map(|_| 1).unwrap_or(0);
     let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
-    let popup_height = (body.len() as u16 + 2).clamp(3, content_area.height.max(3));
+    let popup_height = (total_lines + 2).clamp(3, content_area.height.max(3));
 
     let popup_x = cursor_screen
         .0
@@ -152,12 +175,30 @@ fn render_picker(stoat: &mut Stoat, buf: &mut Buffer) {
         if row >= inner.y + inner.height {
             break;
         }
+        let style = if viewport_top + row_idx == picker.selected_idx {
+            selected_style
+        } else {
+            modal_style
+        };
         for (col_idx, ch) in line.chars().enumerate() {
             let col = inner.x + col_idx as u16;
             if col >= inner.x + inner.width {
                 break;
             }
-            buf[(col, row)].set_char(ch).set_style(modal_style);
+            buf[(col, row)].set_char(ch).set_style(style);
+        }
+    }
+
+    if let Some(footer) = footer {
+        let row = inner.y + body.len() as u16;
+        if row < inner.y + inner.height {
+            for (col_idx, ch) in footer.chars().enumerate() {
+                let col = inner.x + col_idx as u16;
+                if col >= inner.x + inner.width {
+                    break;
+                }
+                buf[(col, row)].set_char(ch).set_style(modal_style);
+            }
         }
     }
 }
