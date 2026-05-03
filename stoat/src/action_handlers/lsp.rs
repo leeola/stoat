@@ -1338,8 +1338,10 @@ pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
 
 /// Convert a [`DocumentSymbolResponse`] into a flat list of picker
 /// entries, resolving each symbol's LSP position to a byte offset
-/// in the supplied rope. Entries are limited to the first 9 in
-/// document order (number-key cap; v1 limitation).
+/// in the supplied rope. Nested responses are flattened DFS with a
+/// dotted ancestor-path prefix on the title (e.g. `outer.inner`) so
+/// the picker conveys hierarchy. Entries are limited to the first 9
+/// in document order (number-key cap; v1 limitation).
 fn symbol_picker_entries(
     rope: &Rope,
     encoding: OffsetEncoding,
@@ -1362,6 +1364,7 @@ fn symbol_picker_entries(
                 rope: &Rope,
                 encoding: OffsetEncoding,
                 items: Vec<DocumentSymbol>,
+                ancestors: &mut Vec<String>,
                 out: &mut Vec<SymbolEntry>,
             ) {
                 for symbol in items {
@@ -1370,16 +1373,24 @@ fn symbol_picker_entries(
                         symbol.selection_range.start,
                         encoding,
                     );
+                    let title = if ancestors.is_empty() {
+                        symbol.name.clone()
+                    } else {
+                        format!("{}.{}", ancestors.join("."), symbol.name)
+                    };
                     out.push(SymbolEntry {
-                        title: symbol.name,
+                        title,
                         anchor_offset: offset,
                     });
                     if let Some(children) = symbol.children {
-                        walk(rope, encoding, children, out);
+                        ancestors.push(symbol.name);
+                        walk(rope, encoding, children, ancestors, out);
+                        ancestors.pop();
                     }
                 }
             }
-            walk(rope, encoding, items, &mut entries);
+            let mut ancestors: Vec<String> = Vec::new();
+            walk(rope, encoding, items, &mut ancestors, &mut entries);
         },
     }
     entries.truncate(9);
@@ -3228,7 +3239,7 @@ mod tests {
         h.settle();
         let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
         let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
-        assert_eq!(titles, vec!["outer", "inner"]);
+        assert_eq!(titles, vec!["outer", "outer.inner"]);
     }
 
     #[test]
