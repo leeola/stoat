@@ -24,11 +24,11 @@ use lsp_types::{
     SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
     SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
     TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams,
-    TypeHierarchySubtypesParams, TypeHierarchySupertypesParams, Uri,
-    VersionedTextDocumentIdentifier, WorkDoneProgress, WorkDoneProgressBegin,
-    WorkDoneProgressParams, WorkspaceEdit, WorkspaceFolder, WorkspaceFoldersChangeEvent,
-    WorkspaceSymbolParams, WorkspaceSymbolResponse,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
+    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    TypeHierarchySupertypesParams, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
+    WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceFolder,
+    WorkspaceFoldersChangeEvent, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use serde_json::Value;
 use std::{
@@ -505,6 +505,7 @@ struct FakeLspState {
     observed_workspace_folder_changes: Vec<DidChangeWorkspaceFoldersParams>,
     observed_replies: Vec<(NumberOrString, Result<Value, LspResponseError>)>,
     observed_opens: Vec<DidOpenTextDocumentParams>,
+    observed_changes: Vec<DidChangeTextDocumentParams>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
@@ -565,6 +566,7 @@ impl FakeLsp {
                 observed_workspace_folder_changes: Vec::new(),
                 observed_replies: Vec::new(),
                 observed_opens: Vec::new(),
+                observed_changes: Vec::new(),
                 prepare_renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
@@ -605,6 +607,18 @@ impl FakeLsp {
         let mut state = self.state.lock().unwrap();
         let mut caps = (*state.capabilities).clone();
         caps.position_encoding = Some(kind);
+        state.capabilities = Arc::new(caps);
+    }
+
+    /// Convenience setter that swaps just the
+    /// `text_document_sync` field on the stored capabilities so
+    /// the editor's [`LspHost::did_change`] dispatch can find the
+    /// configured `TextDocumentSyncKind`. Other capability fields
+    /// are preserved.
+    pub fn set_text_document_sync(&self, kind: TextDocumentSyncKind) {
+        let mut state = self.state.lock().unwrap();
+        let mut caps = (*state.capabilities).clone();
+        caps.text_document_sync = Some(TextDocumentSyncCapability::Kind(kind));
         state.capabilities = Arc::new(caps);
     }
 
@@ -896,6 +910,14 @@ impl FakeLsp {
     /// was opened, and that re-opens dedupe at the call site.
     pub fn observed_opens(&self) -> Vec<DidOpenTextDocumentParams> {
         self.state.lock().unwrap().observed_opens.clone()
+    }
+
+    /// Snapshot of every [`DidChangeTextDocumentParams`] received
+    /// via [`LspHost::did_change`] in call order. Tests use this to
+    /// assert that the editor's debouncer fired exactly once per
+    /// quiet window with the latest text and a monotonic version.
+    pub fn observed_changes(&self) -> Vec<DidChangeTextDocumentParams> {
+        self.state.lock().unwrap().observed_changes.clone()
     }
 
     /// Snapshot of every [`DidChangeWatchedFilesParams`] received
@@ -1491,6 +1513,7 @@ impl LspHost for FakeLsp {
             {
                 let mut state = self.state.lock().unwrap();
                 let uri = params.text_document.uri.clone();
+                state.observed_changes.push(params.clone());
                 if let Some(change) = params.content_changes.into_iter().last() {
                     state.open_documents.insert(uri.clone(), change.text);
                 }

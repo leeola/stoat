@@ -103,6 +103,22 @@ pub struct Stoat {
     /// notification must fire exactly once per buffer over its
     /// lifetime.
     pub(crate) lsp_opened: std::collections::HashSet<BufferId>,
+    /// Last buffer version a `did_change` debounce has been
+    /// scheduled for. Bumped synchronously on the edit-detection
+    /// tick so a buffer is never enqueued twice for the same
+    /// version. Initialised on `did_open`.
+    pub(crate) lsp_buffer_versions: std::collections::HashMap<BufferId, u64>,
+    /// Pending `did_change` debounce timer per buffer. Replacing
+    /// the entry drops the old [`stoat_scheduler::Task`] which
+    /// cancels the spawned future before its 50ms timer fires;
+    /// only the most recent edit's snapshot ever reaches the
+    /// server.
+    pub(crate) lsp_pending_changes: std::collections::HashMap<BufferId, stoat_scheduler::Task<()>>,
+    /// LSP-protocol document version per buffer. Starts at 0 from
+    /// `did_open` and increments at `did_change` spawn time. Gaps
+    /// (e.g. the prior task was cancelled before fire) are allowed
+    /// per LSP spec which only requires monotonicity.
+    pub(crate) lsp_doc_versions: std::collections::HashMap<BufferId, i32>,
     /// Most recent `(FindKind, char)` consumed by `execute_find`.
     /// `RepeatLastMotion` (Alt-.) replays this pair without
     /// reading another keypress.
@@ -249,6 +265,9 @@ impl Stoat {
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
             lsp_opened: std::collections::HashSet::new(),
+            lsp_buffer_versions: std::collections::HashMap::new(),
+            lsp_pending_changes: std::collections::HashMap::new(),
+            lsp_doc_versions: std::collections::HashMap::new(),
             last_find: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
@@ -528,7 +547,7 @@ impl Stoat {
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         self.drain_lsp_notifications();
-        match event {
+        let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
                 let size = self.size;
@@ -538,7 +557,9 @@ impl Stoat {
             Event::Key(key) if key.kind == KeyEventKind::Press => self.handle_key(key),
             Event::Mouse(mouse) => self.handle_mouse(mouse),
             _ => UpdateEffect::None,
-        }
+        };
+        action_handlers::lsp::notify_buffer_changes_pending(self);
+        effect
     }
 
     /// Drains every notification currently buffered on

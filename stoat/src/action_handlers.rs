@@ -4,7 +4,7 @@ mod conflict;
 mod file;
 mod file_finder;
 mod help;
-mod lsp;
+pub(crate) mod lsp;
 pub(crate) mod movement;
 mod palette;
 mod pane;
