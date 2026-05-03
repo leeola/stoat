@@ -137,3 +137,16 @@ define_action!(
      the server does not advertise the capability.",
     ActionPriority::Common
 );
+
+define_action!(
+    FormatSelectionsDef,
+    FormatSelections,
+    "FormatSelections",
+    ActionKind::FormatSelections,
+    "format selection via LSP",
+    "Issue an LSP `textDocument/rangeFormatting` request for the \
+     focused editor's primary selection and apply the returned text \
+     edits to the buffer. No-op when the server does not advertise \
+     the formatting capability or returns no edits.",
+    ActionPriority::Common
+);

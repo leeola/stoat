@@ -49,8 +49,9 @@ pub use defs::{
         HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
     },
     lsp::{
-        CodeAction, GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
-        GotoTypeDefinition, Hover, OpenSymbolPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
+        CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
+        GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenSymbolPicker, OpenWorkspaceSymbolPicker,
+        RenameSymbol,
     },
     palette::OpenCommandPalette,
     pane::{

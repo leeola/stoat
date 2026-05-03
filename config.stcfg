@@ -204,6 +204,7 @@ on key {
         G -> GotoLineNumber();
         > -> IndentSelection();
         < -> UnindentSelection();
+        = -> FormatSelections();
         g -> SetMode(goto);
         z -> SetMode(z);
         ] -> SetMode(bracket_next);
@@ -283,6 +284,7 @@ on key {
         Alt-; -> FlipSelections();
         > -> IndentSelection();
         < -> UnindentSelection();
+        = -> FormatSelections();
         d -> DeleteSelection();
         c -> [DeleteSelection(), SetMode(insert)];
         r -> ReplaceChar();

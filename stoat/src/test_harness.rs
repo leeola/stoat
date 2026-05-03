@@ -414,6 +414,7 @@ impl TestHarness {
                 crate::action_handlers::lsp::pump_lsp_symbol_picker(&mut self.stoat);
             let lsp_workspace_symbol =
                 crate::action_handlers::lsp::pump_lsp_workspace_symbol(&mut self.stoat);
+            let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
             if !claude
                 && !commits
                 && !lsp_jumps
@@ -424,6 +425,7 @@ impl TestHarness {
                 && !lsp_rename
                 && !lsp_symbol_picker
                 && !lsp_workspace_symbol
+                && !lsp_format
             {
                 break;
             }

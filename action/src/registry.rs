@@ -45,8 +45,9 @@ use crate::{
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
         },
         lsp::{
-            CodeAction, GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
-            GotoTypeDefinition, Hover, OpenSymbolPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
+            CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
+            GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenSymbolPicker,
+            OpenWorkspaceSymbolPicker, RenameSymbol,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -167,6 +168,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenWorkspaceSymbolPicker::DEF, |_| {
         Ok(Box::new(OpenWorkspaceSymbolPicker))
     });
+    add(FormatSelections::DEF, |_| Ok(Box::new(FormatSelections)));
     add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
     add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
     add(ReviewStageChunk::DEF, |_| Ok(Box::new(ReviewStageChunk)));
@@ -578,6 +580,7 @@ mod tests {
         "RenameSymbol",
         "OpenSymbolPicker",
         "OpenWorkspaceSymbolPicker",
+        "FormatSelections",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -803,7 +806,8 @@ mod tests {
         // + 1 RenameSymbol.
         // + 1 OpenSymbolPicker.
         // + 1 OpenWorkspaceSymbolPicker.
-        assert_eq!(all().count(), 225);
+        // + 1 FormatSelections.
+        assert_eq!(all().count(), 226);
     }
 
     #[test]

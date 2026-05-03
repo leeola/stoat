@@ -266,6 +266,14 @@ pub struct Stoat {
     /// from the input modal; this picker shows up to nine matching
     /// symbols. Picking opens the symbol's file at its location.
     pub(crate) pending_workspace_symbol_picker: Option<action_handlers::lsp::WorkspaceSymbolPicker>,
+
+    /// In-flight `textDocument/rangeFormatting` request triggered by
+    /// `FormatSelections`. Polled by
+    /// [`action_handlers::lsp::pump_lsp_format`]; on `Ready(Some)`
+    /// the returned text edits are applied via
+    /// [`crate::lsp::edit_apply::apply_workspace_edit`].
+    pub(crate) pending_format_request:
+        Option<stoat_scheduler::Task<Option<action_handlers::lsp::FormatResponse>>>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -416,6 +424,7 @@ impl Stoat {
             workspace_symbol_input: None,
             pending_workspace_symbol_request: None,
             pending_workspace_symbol_picker: None,
+            pending_format_request: None,
         }
     }
 
@@ -2051,6 +2060,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_rename(self);
         action_handlers::lsp::pump_lsp_symbol_picker(self);
         action_handlers::lsp::pump_lsp_workspace_symbol(self);
+        action_handlers::lsp::pump_lsp_format(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf

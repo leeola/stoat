@@ -11,7 +11,6 @@ size: 80x24
 
 
 
-
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[97mFoc[0m[7m [0m                                                                    [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
@@ -21,6 +20,7 @@ size: 80x24
   [0m[35m│[0m[97m FocusPrev                     [0m[90mfocus previous pane[0m[97m                        [0m[35m│[0m
   [0m[35m│[0m[97m FocusRight                    [0m[90mfocus pane right[0m[97m                           [0m[35m│[0m
   [0m[35m│[0m[97m FocusUp                       [0m[90mfocus pane up[0m[97m                              [0m[35m│[0m
+  [0m[35m│[0m[97m FormatSelections              [0m[90mformat selection via LSP[0m[97m                   [0m[35m│[0m
   [0m[35m│[0m[97m ExtendGotoFirstNonwhitespace  [0m[90mextend to first non-whitespace[0m[97m             [0m[35m│[0m
   [0m[35m│[0m[97m GotoFirstNonwhitespace        [0m[90mgoto first nonwhitespace[0m[97m                   [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m

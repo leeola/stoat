@@ -17,11 +17,11 @@ use crate::{
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
-    DidOpenTextDocumentParams, DocumentSymbol, DocumentSymbolParams, DocumentSymbolResponse,
-    GotoDefinitionParams, GotoDefinitionResponse, HoverContents, HoverParams, MarkedString,
-    Position, PrepareRenameResponse, Range, RenameParams, SymbolInformation,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    DidOpenTextDocumentParams, DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
+    DocumentSymbolResponse, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse,
+    HoverContents, HoverParams, MarkedString, Position, PrepareRenameResponse, Range, RenameParams,
+    SymbolInformation, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
     VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
     WorkspaceSymbolResponse,
 };
@@ -1608,6 +1608,133 @@ pub(crate) fn pick_workspace_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let offset = crate::lsp::util::lsp_pos_to_byte_offset(&rope, entry.position, encoding);
     crate::action_handlers::movement::jump_to_offset(stoat, offset);
     true
+}
+
+/// Format response carried from the spawned task to
+/// [`pump_lsp_format`]. Pairs the target document URI with the
+/// returned text edits so the pump can build a single-document
+/// [`WorkspaceEdit`].
+#[derive(Debug, Clone)]
+pub(crate) struct FormatResponse {
+    pub(crate) uri: Uri,
+    pub(crate) edits: Vec<TextEdit>,
+}
+
+/// Issue a `textDocument/rangeFormatting` request for the focused
+/// editor's primary selection. The async response is stored on
+/// [`Stoat::pending_format_request`] and applied by
+/// [`pump_lsp_format`] on the next render tick.
+///
+/// No-op when the focused pane is not an editor, the buffer has no
+/// path, or the server does not advertise
+/// [`LanguageServerFeature::Format`].
+pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::Format)
+    {
+        return UpdateEffect::None;
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let (range_byte, buffer_id, source_rope) = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let start = buf_snap.resolve_anchor(&sel.start);
+        let end = buf_snap.resolve_anchor(&sel.end);
+        let (lo, hi) = if start <= end {
+            (start, end)
+        } else {
+            (end, start)
+        };
+        ((lo, hi), editor.buffer_id, buf_snap.rope().clone())
+    };
+
+    let Some(source_path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&source_path) else {
+        return UpdateEffect::None;
+    };
+
+    let lsp_range = crate::lsp::util::byte_range_to_lsp_range(
+        &source_rope,
+        range_byte.0..range_byte.1,
+        encoding,
+    );
+
+    let params = DocumentRangeFormattingParams {
+        text_document: TextDocumentIdentifier {
+            uri: source_uri.clone(),
+        },
+        range: lsp_range,
+        options: FormattingOptions::default(),
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        match lsp.range_formatting(params).await {
+            Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {
+                uri: source_uri,
+                edits,
+            }),
+            Ok(_) => None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "range_formatting request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_format_request = Some(task);
+    UpdateEffect::None
+}
+
+/// Poll any in-flight format request and apply the returned text
+/// edits as a single-document [`WorkspaceEdit`]. Errors from
+/// [`crate::lsp::edit_apply::apply_workspace_edit`] are logged and
+/// swallowed so a malformed edit does not crash the app.
+pub(crate) fn pump_lsp_format(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_format_request.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(FormatResponse { uri, edits })) => {
+            #[allow(clippy::mutable_key_type)]
+            let mut changes: std::collections::HashMap<Uri, Vec<TextEdit>> =
+                std::collections::HashMap::new();
+            changes.insert(uri, edits);
+            let edit = WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            };
+            if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    ?err,
+                    "format text edit failed to apply",
+                );
+            }
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_format_request = Some(task);
+            false
+        },
+    }
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
@@ -3347,5 +3474,90 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
         h.settle();
         h.assert_snapshot("snapshot_workspace_symbol_input");
+    }
+
+    fn enable_format(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            document_formatting_provider: Some(OneOf::Left(true)),
+            document_range_formatting_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    fn format_text_edit(
+        line: u32,
+        col: u32,
+        end_line: u32,
+        end_col: u32,
+        new: &str,
+    ) -> lsp_types::TextEdit {
+        use lsp_types::{Position as LspPosition, Range as LspRange, TextEdit};
+        TextEdit {
+            range: LspRange::new(
+                LspPosition::new(line, col),
+                LspPosition::new(end_line, end_col),
+            ),
+            new_text: new.to_string(),
+        }
+    }
+
+    #[test]
+    fn format_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_range_formatting(
+            path.to_str().unwrap(),
+            vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FormatSelections);
+        h.settle();
+        assert_eq!(buffer_text(&h, &path), "fn  foo (){}\n");
+    }
+
+    #[test]
+    fn format_no_response_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_format(&h);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FormatSelections);
+        h.settle();
+        assert_eq!(buffer_text(&h, &path), "fn  foo (){}\n");
+    }
+
+    #[test]
+    fn format_applies_returned_edits() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_format(&h);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_range_formatting(
+            path.to_str().unwrap(),
+            vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::FormatSelections);
+        h.settle();
+        assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+    }
+
+    #[test]
+    fn format_equals_keystroke_triggers() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_format(&h);
+        let root = seed(&mut h, &[("main.rs", "fn  foo (){}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_range_formatting(
+            path.to_str().unwrap(),
+            vec![format_text_edit(0, 0, 1, 0, "fn foo() {}\n")],
+        );
+        h.type_keys("=");
+        h.settle();
+        assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
     }
 }

@@ -395,6 +395,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RenameSymbol => lsp::rename_symbol(stoat),
         ActionKind::OpenSymbolPicker => lsp::open_symbol_picker(stoat),
         ActionKind::OpenWorkspaceSymbolPicker => lsp::open_workspace_symbol_picker(stoat),
+        ActionKind::FormatSelections => lsp::format_selections(stoat),
         ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
         ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
         ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),
