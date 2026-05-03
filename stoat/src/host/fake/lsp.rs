@@ -501,6 +501,7 @@ struct FakeLspState {
     will_renames: BTreeMap<(String, String), WorkspaceEdit>,
     observed_renames: Vec<RenameFilesParams>,
     executed_commands: BTreeMap<String, Value>,
+    observed_executed_commands: Vec<ExecuteCommandParams>,
     observed_watched_file_changes: Vec<DidChangeWatchedFilesParams>,
     observed_configuration_changes: Vec<DidChangeConfigurationParams>,
     observed_workspace_folder_changes: Vec<DidChangeWorkspaceFoldersParams>,
@@ -564,6 +565,7 @@ impl FakeLsp {
                 will_renames: BTreeMap::new(),
                 observed_renames: Vec::new(),
                 executed_commands: BTreeMap::new(),
+                observed_executed_commands: Vec::new(),
                 observed_watched_file_changes: Vec::new(),
                 observed_configuration_changes: Vec::new(),
                 observed_workspace_folder_changes: Vec::new(),
@@ -983,6 +985,17 @@ impl FakeLsp {
             .unwrap()
             .executed_commands
             .insert(command.to_string(), response);
+    }
+
+    /// Snapshot of every `workspace/executeCommand` request the fake
+    /// has received, in dispatch order. Tests assert that command
+    /// dispatch fired with the expected `(command, arguments)` pair.
+    pub fn observed_executed_commands(&self) -> Vec<ExecuteCommandParams> {
+        self.state
+            .lock()
+            .unwrap()
+            .observed_executed_commands
+            .clone()
     }
 
     /// Programs a [`PrepareRenameResponse`] returned for the
@@ -2134,7 +2147,8 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("workspace/executeCommand") {
             return Err(err);
         }
-        let state = self.state.lock().unwrap();
+        let mut state = self.state.lock().unwrap();
+        state.observed_executed_commands.push(params.clone());
         Ok(state.executed_commands.get(&params.command).cloned())
     }
 

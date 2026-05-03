@@ -727,26 +727,33 @@ pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
 }
 
 /// One actionable entry in [`CodeActionPicker`]. Variants reflect
-/// how the entry's [`WorkspaceEdit`] is obtained: directly from the
-/// initial response, or via a follow-up `codeAction/resolve` call.
-/// `Command`-only `CodeActionOrCommand` items are filtered out at
-/// pump time and do not appear here.
+/// how the entry's effect is obtained: applied from a directly
+/// supplied [`WorkspaceEdit`] (with an optional chained command),
+/// resolved via a follow-up `codeAction/resolve` call, or dispatched
+/// as a `workspace/executeCommand`.
 #[derive(Debug, Clone)]
 pub(crate) enum CodeActionEntry {
     Direct {
         title: String,
         edit: Box<WorkspaceEdit>,
+        command: Option<lsp_types::Command>,
     },
     NeedsResolve {
         title: String,
         action: Box<lsp_types::CodeAction>,
+    },
+    Command {
+        title: String,
+        command: lsp_types::Command,
     },
 }
 
 impl CodeActionEntry {
     pub(crate) fn title(&self) -> &str {
         match self {
-            Self::Direct { title, .. } | Self::NeedsResolve { title, .. } => title,
+            Self::Direct { title, .. }
+            | Self::NeedsResolve { title, .. }
+            | Self::Command { title, .. } => title,
         }
     }
 }
@@ -866,19 +873,28 @@ pub(crate) fn pump_lsp_code_actions(stoat: &mut Stoat) -> bool {
             let entries: Vec<CodeActionEntry> = actions
                 .into_iter()
                 .filter_map(|item| match item {
-                    CodeActionOrCommand::CodeAction(ca) => match (ca.edit.clone(), ca.data.clone())
-                    {
-                        (Some(edit), _) => Some(CodeActionEntry::Direct {
-                            title: ca.title.clone(),
-                            edit: Box::new(edit),
-                        }),
-                        (None, Some(_)) => Some(CodeActionEntry::NeedsResolve {
-                            title: ca.title.clone(),
-                            action: Box::new(ca),
-                        }),
-                        (None, None) => None,
+                    CodeActionOrCommand::CodeAction(ca) => {
+                        match (ca.edit.clone(), ca.data.clone(), ca.command.clone()) {
+                            (Some(edit), _, command) => Some(CodeActionEntry::Direct {
+                                title: ca.title.clone(),
+                                edit: Box::new(edit),
+                                command,
+                            }),
+                            (None, Some(_), _) => Some(CodeActionEntry::NeedsResolve {
+                                title: ca.title.clone(),
+                                action: Box::new(ca),
+                            }),
+                            (None, None, Some(command)) => Some(CodeActionEntry::Command {
+                                title: ca.title.clone(),
+                                command,
+                            }),
+                            (None, None, None) => None,
+                        }
                     },
-                    CodeActionOrCommand::Command(_) => None,
+                    CodeActionOrCommand::Command(command) => Some(CodeActionEntry::Command {
+                        title: command.title.clone(),
+                        command,
+                    }),
                 })
                 .collect();
             if entries.is_empty() {
@@ -951,8 +967,11 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
         return false;
     };
     match entry {
-        CodeActionEntry::Direct { edit, .. } => {
+        CodeActionEntry::Direct { edit, command, .. } => {
             apply_code_action_edit(stoat, *edit);
+            if let Some(command) = command {
+                dispatch_execute_command(stoat, command);
+            }
         },
         CodeActionEntry::NeedsResolve { action, .. } => {
             let lsp = stoat.lsp_host.clone();
@@ -971,8 +990,39 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
             });
             stoat.pending_code_action_resolve = Some(task);
         },
+        CodeActionEntry::Command { command, .. } => {
+            dispatch_execute_command(stoat, command);
+        },
     }
     true
+}
+
+/// Spawn a `workspace/executeCommand` request through
+/// [`Stoat::executor`] and detach the task. The result `Option<Value>`
+/// is generally a server-side side-effect (servers that produce edits
+/// reply via the `workspace/applyEdit` request path); errors are
+/// logged and swallowed so a failing command does not crash the app.
+fn dispatch_execute_command(stoat: &Stoat, command: lsp_types::Command) {
+    let lsp = stoat.lsp_host.clone();
+    let label = command.command.clone();
+    let params = lsp_types::ExecuteCommandParams {
+        command: command.command,
+        arguments: command.arguments.unwrap_or_default(),
+        work_done_progress_params: Default::default(),
+    };
+    stoat
+        .executor
+        .spawn(async move {
+            if let Err(err) = lsp.execute_command(params).await {
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    ?err,
+                    command = %label,
+                    "workspace/executeCommand request failed",
+                );
+            }
+        })
+        .detach();
 }
 
 /// Resolved prepare-rename payload carried from the spawned task to
@@ -2804,7 +2854,7 @@ mod tests {
     }
 
     #[test]
-    fn code_action_drops_command_only_entries() {
+    fn code_action_retains_command_only_entries() {
         let mut h = TestHarness::with_size(80, 24);
         enable_code_action(&h);
         let root = seed(&mut h, &[("main.rs", "abc\n")]);
@@ -2825,7 +2875,37 @@ mod tests {
             .as_ref()
             .expect("picker open");
         let titles: Vec<&str> = picker.entries.iter().map(|e| e.title()).collect();
-        assert_eq!(titles, vec!["Real edit"]);
+        assert_eq!(titles, vec!["Run command", "Real edit"]);
+    }
+
+    #[test]
+    fn code_action_pick_command_dispatches_execute_command() {
+        use lsp_types::{CodeActionOrCommand, Command};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_code_actions(
+            path.to_str().unwrap(),
+            vec![CodeActionOrCommand::Command(Command {
+                title: "Apply import".to_string(),
+                command: "rust-analyzer.applyImport".to_string(),
+                arguments: Some(vec![serde_json::json!({"target": "std::io"})]),
+            })],
+        );
+        h.type_keys("space l a");
+        h.settle();
+        h.type_keys("1");
+        h.settle();
+        assert!(h.stoat.pending_code_action_picker.is_none());
+        let observed = h.fake_lsp().observed_executed_commands();
+        assert_eq!(observed.len(), 1);
+        assert_eq!(observed[0].command, "rust-analyzer.applyImport");
+        assert_eq!(
+            observed[0].arguments,
+            vec![serde_json::json!({"target": "std::io"})]
+        );
     }
 
     #[test]
