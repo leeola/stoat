@@ -19,11 +19,11 @@ use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
     DidOpenTextDocumentParams, DocumentRangeFormattingParams, DocumentSymbol, DocumentSymbolParams,
     DocumentSymbolResponse, FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse,
-    HoverContents, HoverParams, MarkedString, Position, PrepareRenameResponse, Range, RenameParams,
-    SymbolInformation, TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit, WorkspaceSymbolParams,
-    WorkspaceSymbolResponse,
+    HoverContents, HoverParams, MarkedString, OneOf, Position, PrepareRenameResponse, Range,
+    RenameParams, SymbolInformation, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit,
+    WorkspaceSymbol, WorkspaceSymbolParams, WorkspaceSymbolResponse,
 };
 use std::{
     future::Future,
@@ -1586,10 +1586,26 @@ fn workspace_symbol_entries(response: WorkspaceSymbolResponse) -> Vec<WorkspaceS
                 });
             }
         },
-        WorkspaceSymbolResponse::Nested(_) => {
-            // v1 limitation: nested results are dropped; recorded as a
-            // follow-up item in the TODO. Servers commonly return Flat
-            // and the fake only emits Flat, so this is the practical path.
+        WorkspaceSymbolResponse::Nested(items) => {
+            for WorkspaceSymbol { name, location, .. } in items {
+                let (uri, position) = match location {
+                    OneOf::Left(loc) => (loc.uri, loc.range.start),
+                    OneOf::Right(workspace_loc) => {
+                        // `WorkspaceLocation` carries no range; fall back to
+                        // the start of file. A future `workspaceSymbol/resolve`
+                        // round-trip would refine this.
+                        (workspace_loc.uri, Position::new(0, 0))
+                    },
+                };
+                let Some(path) = crate::app::lsp_uri_to_path(&uri) else {
+                    continue;
+                };
+                entries.push(WorkspaceSymbolEntry {
+                    title: name,
+                    path,
+                    position,
+                });
+            }
         },
     }
     entries.truncate(9);
@@ -3406,6 +3422,70 @@ mod tests {
             .expect("picker open");
         let titles: Vec<&str> = picker.entries.iter().map(|e| e.title.as_str()).collect();
         assert_eq!(titles, vec!["foo", "bar"]);
+    }
+
+    #[test]
+    fn workspace_symbol_submit_handles_nested_response() {
+        use lsp_types::{
+            Location, OneOf, Position as LspPosition, Range as LspRange, SymbolKind, Uri,
+            WorkspaceLocation, WorkspaceSymbol, WorkspaceSymbolResponse,
+        };
+        use std::str::FromStr;
+        let mut h = TestHarness::with_size(80, 24);
+        enable_workspace_symbols(&h);
+        let root = seed(
+            &mut h,
+            &[("main.rs", "fn foo() {}\n"), ("lib.rs", "fn bar() {}\n")],
+        );
+        let main = root.join("main.rs");
+        let lib = root.join("lib.rs");
+        open_buffer(&mut h, main.clone());
+        let main_uri = Uri::from_str(&format!("file://{}", main.to_str().unwrap())).unwrap();
+        let lib_uri = Uri::from_str(&format!("file://{}", lib.to_str().unwrap())).unwrap();
+        let nested = WorkspaceSymbolResponse::Nested(vec![
+            WorkspaceSymbol {
+                name: "foo".to_string(),
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                container_name: None,
+                location: OneOf::Left(Location::new(
+                    main_uri,
+                    LspRange::new(LspPosition::new(0, 3), LspPosition::new(0, 6)),
+                )),
+                data: None,
+            },
+            WorkspaceSymbol {
+                name: "bar".to_string(),
+                kind: SymbolKind::FUNCTION,
+                tags: None,
+                container_name: None,
+                location: OneOf::Right(WorkspaceLocation { uri: lib_uri }),
+                data: None,
+            },
+        ]);
+        h.fake_lsp().set_workspace_symbol_response("f", nested);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenWorkspaceSymbolPicker);
+        h.settle();
+        h.type_keys("f");
+        crate::action_handlers::lsp::workspace_symbol_submit(&mut h.stoat);
+        h.settle();
+        let picker = h
+            .stoat
+            .pending_workspace_symbol_picker
+            .as_ref()
+            .expect("picker open");
+        let entries: Vec<(&str, &Path, LspPosition)> = picker
+            .entries
+            .iter()
+            .map(|e| (e.title.as_str(), e.path.as_path(), e.position))
+            .collect();
+        assert_eq!(
+            entries,
+            vec![
+                ("foo", main.as_path(), LspPosition::new(0, 3)),
+                ("bar", lib.as_path(), LspPosition::new(0, 0)),
+            ]
+        );
     }
 
     #[test]

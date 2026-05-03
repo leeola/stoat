@@ -479,6 +479,7 @@ struct FakeLspState {
     inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     range_inlay_hints: BTreeMap<Uri, Vec<InlayHint>>,
     workspace_symbols: BTreeMap<String, Vec<SymbolInformation>>,
+    workspace_symbol_responses: BTreeMap<String, WorkspaceSymbolResponse>,
     folding_ranges: BTreeMap<Uri, Vec<FoldingRange>>,
     selection_ranges: BTreeMap<LspKey, SelectionRange>,
     range_formatting: BTreeMap<Uri, Vec<TextEdit>>,
@@ -541,6 +542,7 @@ impl FakeLsp {
                 inlay_hints: BTreeMap::new(),
                 range_inlay_hints: BTreeMap::new(),
                 workspace_symbols: BTreeMap::new(),
+                workspace_symbol_responses: BTreeMap::new(),
                 folding_ranges: BTreeMap::new(),
                 selection_ranges: BTreeMap::new(),
                 range_formatting: BTreeMap::new(),
@@ -1444,6 +1446,19 @@ impl FakeLsp {
             .push(info);
     }
 
+    /// Programs a raw [`WorkspaceSymbolResponse`] for the given
+    /// `workspace/symbol` query. Replaces any previously seeded
+    /// response for the same query and shadows entries seeded via
+    /// [`Self::add_workspace_symbol`]. Lets tests exercise the
+    /// `Nested` shape, which `add_workspace_symbol` cannot produce.
+    pub fn set_workspace_symbol_response(&self, query: &str, response: WorkspaceSymbolResponse) {
+        self.state
+            .lock()
+            .unwrap()
+            .workspace_symbol_responses
+            .insert(query.to_string(), response);
+    }
+
     // --- Assertions ---
 
     pub fn opened_documents(&self) -> Vec<Uri> {
@@ -1992,6 +2007,9 @@ impl LspHost for FakeLsp {
             return Err(err);
         }
         let state = self.state.lock().unwrap();
+        if let Some(response) = state.workspace_symbol_responses.get(&params.query) {
+            return Ok(Some(response.clone()));
+        }
         Ok(state
             .workspace_symbols
             .get(&params.query)
