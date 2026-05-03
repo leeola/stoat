@@ -77,6 +77,8 @@ pub enum ActionKind {
     GotoLineStart,
     GotoLineEnd,
     GotoFirstNonwhitespace,
+    OpenBelow,
+    OpenAbove,
     GotoFileStart,
     GotoLastLine,
     GotoLineNumber,

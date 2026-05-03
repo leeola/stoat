@@ -2343,4 +2343,44 @@ mod tests {
         h.type_text("Z");
         assert_eq!(buffer_text(&h, &path), "abcZ\nxyz\n");
     }
+
+    #[test]
+    fn open_below_inserts_blank_line_after_current_row() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\ndef\n");
+        h.type_keys("o");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "abc\nX\ndef\n");
+    }
+
+    #[test]
+    fn open_above_inserts_blank_line_before_current_row() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\ndef\n");
+        h.type_keys("o");
+        h.type_keys("escape");
+        h.type_keys("O");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("Y");
+        assert_eq!(buffer_text(&h, &path), "abc\nY\n\ndef\n");
+    }
+
+    #[test]
+    fn open_below_at_last_line_appends_at_eof() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("o");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "abc\nX");
+    }
+
+    #[test]
+    fn open_above_at_first_line_inserts_at_offset_zero() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n");
+        h.type_keys("O");
+        h.type_text("Z");
+        assert_eq!(buffer_text(&h, &path), "Z\nabc\n");
+    }
 }

@@ -141,6 +141,8 @@ on key {
         a -> [MoveRight(), SetMode(insert)];
         I -> [GotoFirstNonwhitespace(), SetMode(insert)];
         A -> [GotoLineEnd(), SetMode(insert)];
+        o -> [OpenBelow(), SetMode(insert)];
+        O -> [OpenAbove(), SetMode(insert)];
         v -> SetMode(select);
         C -> AddSelectionBelow();
         Alt-C -> AddSelectionAbove();

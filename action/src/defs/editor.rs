@@ -611,6 +611,26 @@ define_action!(
 );
 
 define_action!(
+    OpenBelowDef,
+    OpenBelow,
+    "OpenBelow",
+    ActionKind::OpenBelow,
+    "open new line below",
+    "Insert a blank line directly below the line containing each primary cursor and place the cursor at column 0 of the new line. Multiple cursors on the same row produce a single newline insertion. Typically chained with `SetMode(insert)` to enter insert mode on the new line.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    OpenAboveDef,
+    OpenAbove,
+    "OpenAbove",
+    ActionKind::OpenAbove,
+    "open new line above",
+    "Insert a blank line directly above the line containing each primary cursor and place the cursor at column 0 of the new line. Multiple cursors on the same row produce a single newline insertion. Typically chained with `SetMode(insert)` to enter insert mode on the new line.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoFileStartDef,
     GotoFileStart,
     "GotoFileStart",

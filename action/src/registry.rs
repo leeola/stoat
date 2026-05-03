@@ -28,9 +28,10 @@ use crate::{
             MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
             MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
             MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, PageDown, PageUp, Redo, RemovePrimarySelection, RepeatLastMotion,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
-            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
+            MoveRight, MoveUp, OpenAbove, OpenBelow, PageDown, PageUp, Redo,
+            RemovePrimarySelection, RepeatLastMotion, RotateSelectionsBackward,
+            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll,
+            SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
             SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
         },
@@ -299,6 +300,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoFirstNonwhitespace::DEF, |_| {
         Ok(Box::new(GotoFirstNonwhitespace))
     });
+    add(OpenBelow::DEF, |_| Ok(Box::new(OpenBelow)));
+    add(OpenAbove::DEF, |_| Ok(Box::new(OpenAbove)));
     add(GotoFileStart::DEF, |_| Ok(Box::new(GotoFileStart)));
     add(GotoLastLine::DEF, |_| Ok(Box::new(GotoLastLine)));
     add(GotoLineNumber::DEF, |_| Ok(Box::new(GotoLineNumber)));
@@ -564,6 +567,8 @@ mod tests {
         "MovePrevWordEnd",
         "GotoLineStart",
         "GotoLineEnd",
+        "OpenBelow",
+        "OpenAbove",
         "CollapseSelection",
         "FlipSelections",
         "SelectAll",
@@ -761,7 +766,8 @@ mod tests {
         // + 1 OpenBufferPicker.
         // + 1 GotoWord.
         // + 2 GotoNextDiagnostic / GotoPrevDiagnostic.
-        assert_eq!(all().count(), 214);
+        // + 2 OpenBelow / OpenAbove.
+        assert_eq!(all().count(), 216);
     }
 
     #[test]
