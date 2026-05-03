@@ -390,6 +390,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoDefinition => lsp::goto_definition(stoat),
         ActionKind::GotoTypeDefinition => lsp::goto_type_definition(stoat),
         ActionKind::GotoImplementation => lsp::goto_implementation(stoat),
+        ActionKind::Hover => lsp::hover(stoat),
         ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
         ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
         ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),

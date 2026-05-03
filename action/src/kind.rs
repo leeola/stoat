@@ -153,6 +153,7 @@ pub enum ActionKind {
     GotoDefinition,
     GotoTypeDefinition,
     GotoImplementation,
+    Hover,
     ReviewNextChunk,
     ReviewPrevChunk,
     ReviewStageChunk,

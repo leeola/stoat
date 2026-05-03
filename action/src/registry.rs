@@ -46,7 +46,7 @@ use crate::{
         },
         lsp::{
             GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
-            GotoTypeDefinition,
+            GotoTypeDefinition, Hover,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -160,6 +160,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoImplementation::DEF, |_| {
         Ok(Box::new(GotoImplementation))
     });
+    add(Hover::DEF, |_| Ok(Box::new(Hover)));
     add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
     add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
     add(ReviewStageChunk::DEF, |_| Ok(Box::new(ReviewStageChunk)));
@@ -566,6 +567,7 @@ mod tests {
         "GotoDefinition",
         "GotoTypeDefinition",
         "GotoImplementation",
+        "Hover",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -786,7 +788,8 @@ mod tests {
         // + 1 GotoDefinition.
         // + 1 GotoTypeDefinition.
         // + 1 GotoImplementation.
-        assert_eq!(all().count(), 220);
+        // + 1 Hover.
+        assert_eq!(all().count(), 221);
     }
 
     #[test]

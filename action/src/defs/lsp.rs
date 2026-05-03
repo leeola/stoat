@@ -65,3 +65,17 @@ define_action!(
      returns nothing or does not advertise the capability.",
     ActionPriority::Common
 );
+
+define_action!(
+    HoverDef,
+    Hover,
+    "Hover",
+    ActionKind::Hover,
+    "show hover documentation",
+    "Issue an LSP `textDocument/hover` request for the symbol under the \
+     focused editor's primary cursor and show the response as a \
+     cursor-anchored popup. The popup persists until the next motion or \
+     action; no-op when the server does not advertise the capability or \
+     returns nothing.",
+    ActionPriority::Common
+);

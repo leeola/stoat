@@ -186,6 +186,20 @@ pub struct Stoat {
     /// cursor; `Ready(None)` silently drops.
     pub(crate) pending_lsp_jump:
         Option<stoat_scheduler::Task<Option<action_handlers::lsp::JumpTarget>>>,
+
+    /// In-flight `textDocument/hover` request. Replacing the entry
+    /// drops the prior task, cancelling its spawned future before the
+    /// response can land. Polled by
+    /// [`action_handlers::pump_lsp_hover`] at the top of each render
+    /// tick; `Ready(Some)` writes the response to [`Self::pending_hover`].
+    pub(crate) pending_hover_request:
+        Option<stoat_scheduler::Task<Option<action_handlers::lsp::HoverResponse>>>,
+
+    /// Hover popup content waiting to be painted. Set by
+    /// [`action_handlers::pump_lsp_hover`] when a hover response lands;
+    /// cleared by [`Self::dispatch_key`] on any non-Hover action so the
+    /// popup vanishes on cursor motion.
+    pub(crate) pending_hover: Option<action_handlers::lsp::HoverPopup>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -323,6 +337,8 @@ impl Stoat {
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
             pending_lsp_jump: None,
+            pending_hover_request: None,
+            pending_hover: None,
         }
     }
 
@@ -1100,6 +1116,7 @@ impl Stoat {
 
         let mut effect = UpdateEffect::None;
         let mut dispatched_action = false;
+        let mut dispatched_hover = false;
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
@@ -1107,6 +1124,9 @@ impl Stoat {
                     effect = UpdateEffect::Redraw;
                 }
                 continue;
+            }
+            if ra.name == "Hover" {
+                dispatched_hover = true;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {
                 dispatched_action = true;
@@ -1120,6 +1140,10 @@ impl Stoat {
         }
         if dispatched_action {
             self.pending_count = None;
+            if !dispatched_hover {
+                self.pending_hover = None;
+                self.pending_hover_request = None;
+            }
         }
         effect
     }
@@ -1842,6 +1866,7 @@ impl Stoat {
         self.drive_parse_jobs();
         action_handlers::pump_commits(self);
         action_handlers::pump_lsp_jumps(self);
+        action_handlers::lsp::pump_lsp_hover(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf

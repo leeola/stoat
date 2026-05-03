@@ -402,7 +402,8 @@ impl TestHarness {
             let claude = self.stoat.drain_claude_notifications();
             let commits = crate::action_handlers::pump_commits(&mut self.stoat);
             let lsp_jumps = crate::action_handlers::pump_lsp_jumps(&mut self.stoat);
-            if !claude && !commits && !lsp_jumps {
+            let lsp_hover = crate::action_handlers::lsp::pump_lsp_hover(&mut self.stoat);
+            if !claude && !commits && !lsp_jumps && !lsp_hover {
                 break;
             }
         }

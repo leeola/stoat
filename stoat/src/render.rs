@@ -8,6 +8,7 @@ pub(crate) mod editor;
 pub(crate) mod file_finder;
 pub(crate) mod help;
 pub(crate) mod hints;
+pub(crate) mod hover;
 pub(crate) mod layout;
 pub(crate) mod pane;
 pub(crate) mod rebase;
@@ -224,6 +225,8 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             );
         }
     }
+    hover::render_hover(stoat, buf);
+    let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::render_badges(
         &ws.badges,
         &stoat.badges,

@@ -50,7 +50,7 @@ pub use defs::{
     },
     lsp::{
         GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
-        GotoTypeDefinition,
+        GotoTypeDefinition, Hover,
     },
     palette::OpenCommandPalette,
     pane::{

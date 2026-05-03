@@ -17,9 +17,10 @@ use crate::{
 pub(crate) use lsp_types::Uri;
 use lsp_types::{
     DidChangeTextDocumentParams, DidOpenTextDocumentParams, GotoDefinitionParams,
-    GotoDefinitionResponse, Position, Range, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, VersionedTextDocumentIdentifier,
+    GotoDefinitionResponse, HoverContents, HoverParams, MarkedString, Position, Range,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    VersionedTextDocumentIdentifier,
 };
 use std::{
     future::Future,
@@ -576,6 +577,150 @@ fn resolve_goto_target(
         path: target_path,
         offset,
     })
+}
+
+/// Hover response carried from the spawned task to
+/// [`pump_lsp_hover`]. `lines` is the flattened text content; the
+/// renderer treats markdown as plain text in v1. `anchor_offset` is
+/// the cursor byte offset captured when the request fired so the
+/// popup can be anchored at the symbol even if the cursor moves
+/// (though [`Stoat::dispatch_key`] clears the popup on motion).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HoverResponse {
+    pub(crate) lines: Vec<String>,
+    pub(crate) anchor_offset: usize,
+}
+
+/// Hover popup state ready to paint. Mirrors [`HoverResponse`] but
+/// lives on [`Stoat::pending_hover`] (separate from the in-flight
+/// task slot) so the renderer can borrow it without polling.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct HoverPopup {
+    pub(crate) lines: Vec<String>,
+    pub(crate) anchor_offset: usize,
+}
+
+/// Issue a `textDocument/hover` request for the symbol under the
+/// focused editor's primary cursor. The async response is stored on
+/// [`Stoat::pending_hover_request`] and applied by [`pump_lsp_hover`]
+/// on the next render tick.
+///
+/// No-op when: the focused pane is not an editor; the buffer has no
+/// path; or the server does not advertise
+/// [`LanguageServerFeature::Hover`]. Replacing the prior pending task
+/// drops it, cancelling its spawned future -- only one in-flight hover
+/// is tracked at a time.
+pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::Hover)
+    {
+        return UpdateEffect::None;
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let (cursor_offset, buffer_id, source_rope) = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buf_snap.resolve_anchor(&head);
+        (offset, editor.buffer_id, buf_snap.rope().clone())
+    };
+
+    let Some(source_path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&source_path) else {
+        return UpdateEffect::None;
+    };
+
+    let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, cursor_offset, encoding);
+    let params = HoverParams {
+        text_document_position_params: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier { uri: source_uri },
+            position,
+        },
+        work_done_progress_params: Default::default(),
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        match lsp.hover(params).await {
+            Ok(Some(hover)) => Some(HoverResponse {
+                lines: flatten_hover_contents(hover.contents),
+                anchor_offset: cursor_offset,
+            }),
+            Ok(None) => None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "hover request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_hover_request = Some(task);
+    UpdateEffect::None
+}
+
+/// Flatten an LSP [`HoverContents`] payload into a list of plain-text
+/// lines. Markdown is intentionally not parsed in v1 -- the markup
+/// text passes through verbatim so callers can read code fences and
+/// signatures as-is.
+fn flatten_hover_contents(contents: HoverContents) -> Vec<String> {
+    fn marked_to_string(m: MarkedString) -> String {
+        match m {
+            MarkedString::String(s) => s,
+            MarkedString::LanguageString(ls) => ls.value,
+        }
+    }
+
+    let raw = match contents {
+        HoverContents::Scalar(m) => marked_to_string(m),
+        HoverContents::Array(items) => items
+            .into_iter()
+            .map(marked_to_string)
+            .collect::<Vec<_>>()
+            .join("\n"),
+        HoverContents::Markup(markup) => markup.value,
+    };
+    raw.lines().map(str::to_string).collect()
+}
+
+/// Poll any in-flight hover request ([`Stoat::pending_hover_request`])
+/// and apply the result. On `Ready(Some)` writes the response to
+/// [`Stoat::pending_hover`]; on `Ready(None)` clears
+/// [`Stoat::pending_hover`]; on `Pending` puts the task back.
+/// Returns true when state changed so the caller can request a redraw.
+pub(crate) fn pump_lsp_hover(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_hover_request.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(response)) => {
+            stoat.pending_hover = Some(HoverPopup {
+                lines: response.lines,
+                anchor_offset: response.anchor_offset,
+            });
+            true
+        },
+        Poll::Ready(None) => {
+            stoat.pending_hover = None;
+            true
+        },
+        Poll::Pending => {
+            stoat.pending_hover_request = Some(task);
+            false
+        },
+    }
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
@@ -1352,5 +1497,128 @@ mod tests {
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
         assert_eq!(h.stoat.mode, "normal");
+    }
+
+    fn enable_hover(h: &TestHarness) {
+        use lsp_types::{HoverProviderCapability, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            hover_provider: Some(HoverProviderCapability::Simple(true)),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn hover_popup_appears_on_response() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "fn foo() -> u32");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        let popup = h.stoat.pending_hover.as_ref().expect("popup");
+        assert_eq!(popup.lines, vec!["fn foo() -> u32".to_string()]);
+        assert_eq!(popup.anchor_offset, 0);
+    }
+
+    #[test]
+    fn hover_no_response_clears_request() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        assert!(h.stoat.pending_hover.is_none());
+        assert!(h.stoat.pending_hover_request.is_none());
+    }
+
+    #[test]
+    fn hover_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "ignored");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        assert!(h.stoat.pending_hover.is_none());
+        assert!(h.stoat.pending_hover_request.is_none());
+    }
+
+    #[test]
+    fn hover_cleared_on_motion() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "details");
+        h.type_keys("space l i");
+        h.settle();
+        assert!(h.stoat.pending_hover.is_some());
+        h.type_keys("j");
+        assert!(h.stoat.pending_hover.is_none());
+    }
+
+    #[test]
+    fn space_l_i_triggers_hover() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "documentation");
+        h.type_keys("space l i");
+        h.settle();
+        let popup = h.stoat.pending_hover.as_ref().expect("popup");
+        assert_eq!(popup.lines, vec!["documentation".to_string()]);
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn hover_multiline_markup_split_by_newline() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_hover(
+            path.to_str().unwrap(),
+            0,
+            0,
+            "```rust\nfn foo()\n```\nDocs here",
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        let popup = h.stoat.pending_hover.as_ref().expect("popup");
+        assert_eq!(
+            popup.lines,
+            vec![
+                "```rust".to_string(),
+                "fn foo()".to_string(),
+                "```".to_string(),
+                "Docs here".to_string(),
+            ]
+        );
+    }
+
+    #[test]
+    fn snapshot_hover_popup_above_cursor() {
+        let mut h = TestHarness::with_size(40, 12);
+        enable_hover(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_hover(path.to_str().unwrap(), 0, 0, "fn foo() -> u32");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::Hover);
+        h.settle();
+        h.assert_snapshot("snapshot_hover_popup");
     }
 }
