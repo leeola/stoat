@@ -2603,6 +2603,59 @@ mod tests {
     }
 
     #[test]
+    fn backspace_in_insert_mode_deletes_previous_char() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("abc");
+        h.type_keys("backspace");
+        assert_eq!(buffer_text(&h, &path), "ab");
+        h.type_keys("backspace");
+        assert_eq!(buffer_text(&h, &path), "a");
+    }
+
+    #[test]
+    fn backspace_at_buffer_start_in_insert_mode_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("backspace");
+        assert_eq!(buffer_text(&h, &path), "");
+    }
+
+    #[test]
+    fn delete_in_insert_mode_deletes_next_char() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        h.type_keys("l l i");
+        h.type_keys("delete");
+        assert_eq!(buffer_text(&h, &path), "abdef");
+        h.type_keys("delete");
+        assert_eq!(buffer_text(&h, &path), "abef");
+    }
+
+    #[test]
+    fn delete_at_buffer_end_in_insert_mode_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("A");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_keys("delete");
+        assert_eq!(buffer_text(&h, &path), "abc");
+    }
+
+    #[test]
+    fn enter_in_insert_mode_inserts_newline_in_file_buffer() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_text("abc");
+        h.type_keys("enter");
+        h.type_text("xyz");
+        assert_eq!(buffer_text(&h, &path), "abc\nxyz");
+    }
+
+    #[test]
     fn append_advances_one_char_then_inserts() {
         let mut h = Stoat::test();
         let path = open_scratch_file(&mut h, "abc\n");
