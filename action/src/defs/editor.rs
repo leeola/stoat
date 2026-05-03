@@ -551,6 +551,36 @@ define_action!(
 );
 
 define_action!(
+    SetMarkDef,
+    SetMark,
+    "SetMark",
+    ActionKind::SetMark,
+    "set mark at cursor",
+    "Wait for the next char keypress, then store the primary cursor's byte offset under that name in the focused buffer's mark table. Subsequent `GotoMark`/`GotoMarkExact` calls with the same char jump back to the stored position. Marks are buffer-local; later edits do not move the stored offset.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoMarkDef,
+    GotoMark,
+    "GotoMark",
+    ActionKind::GotoMark,
+    "goto mark line",
+    "Wait for the next char keypress, then jump the primary cursor to the start of the line containing the named mark in the focused buffer. No-op when no mark with that name has been set in the focused buffer.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoMarkExactDef,
+    GotoMarkExact,
+    "GotoMarkExact",
+    ActionKind::GotoMarkExact,
+    "goto mark exact offset",
+    "Wait for the next char keypress, then jump the primary cursor to the exact byte offset stored under the named mark in the focused buffer. No-op when no mark with that name has been set in the focused buffer.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

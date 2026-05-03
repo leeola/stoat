@@ -22,18 +22,19 @@ use crate::{
             ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
             ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoColumn,
             GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
-            GotoLineStart, GotoNextChange, GotoNextParagraph, GotoPrevChange, GotoPrevParagraph,
-            GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp,
-            Increment, IndentSelection, JumpBackward, JumpForward, KeepPrimarySelection,
-            MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
-            MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
-            MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart,
-            MoveRight, MoveUp, OpenAbove, OpenBelow, PageDown, PageUp, Redo,
-            RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll,
-            SelectLineBelow, SelectNextSibling, SelectPrevSibling, ShrinkSelection,
-            SplitSelectionOnNewline, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
+            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextParagraph,
+            GotoPrevChange, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
+            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward,
+            JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
+            MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
+            MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
+            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, PageDown,
+            PageUp, Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
+            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark,
+            ShrinkSelection, SplitSelectionOnNewline, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,
+            UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -309,6 +310,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ExtendTillPrevChar::DEF, |_| {
         Ok(Box::new(ExtendTillPrevChar))
     });
+    add(SetMark::DEF, |_| Ok(Box::new(SetMark)));
+    add(GotoMark::DEF, |_| Ok(Box::new(GotoMark)));
+    add(GotoMarkExact::DEF, |_| Ok(Box::new(GotoMarkExact)));
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -581,6 +585,9 @@ mod tests {
         "OpenSymbolPicker",
         "OpenWorkspaceSymbolPicker",
         "FormatSelections",
+        "SetMark",
+        "GotoMark",
+        "GotoMarkExact",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -807,7 +814,8 @@ mod tests {
         // + 1 OpenSymbolPicker.
         // + 1 OpenWorkspaceSymbolPicker.
         // + 1 FormatSelections.
-        assert_eq!(all().count(), 226);
+        // + 3 marks (SetMark, GotoMark, GotoMarkExact).
+        assert_eq!(all().count(), 229);
     }
 
     #[test]

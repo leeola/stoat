@@ -5,6 +5,7 @@ mod file;
 mod file_finder;
 mod help;
 pub(crate) mod lsp;
+pub(crate) mod marks;
 pub(crate) mod movement;
 mod palette;
 mod pane;
@@ -282,6 +283,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ExtendTillPrevChar => {
             movement::set_pending_find(stoat, movement::FindKind::TillPrevChar, true)
         },
+        ActionKind::SetMark => marks::set_mark(stoat),
+        ActionKind::GotoMark => marks::goto_mark(stoat),
+        ActionKind::GotoMarkExact => marks::goto_mark_exact(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => {
             movement::goto_window(stoat, movement::WindowAlign::Top, false)

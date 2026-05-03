@@ -88,6 +88,16 @@ pub struct Stoat {
     /// trailing `u32` is the count captured from `pending_count`
     /// at the time the chord was armed; defaults to 1.
     pub(crate) pending_find: Option<(action_handlers::movement::FindKind, bool, u32)>,
+    /// Pending mark chord (`m`/`'`/`` ` ``). When `Some`, the next
+    /// printable char keypress in normal mode either stores or jumps
+    /// to the named mark per [`action_handlers::marks::execute_mark`]
+    /// and clears this field. A non-char keypress also clears it.
+    pub(crate) pending_mark: Option<action_handlers::marks::MarkRequest>,
+    /// Buffer-local marks keyed by `(BufferId, char)` -> byte offset.
+    /// Stored offsets are not anchor-tracked: edits to the buffer do
+    /// not update the offset, so the mark may point to different
+    /// content after edits.
+    pub(crate) marks: std::collections::HashMap<(BufferId, char), usize>,
     /// Active label set for an in-progress `goto_word` jump. `Some`
     /// after `GotoWord` is dispatched until the user types a unique
     /// label or types a non-matching prefix. Renderer overlays the
@@ -388,6 +398,8 @@ impl Stoat {
             render_tick: 0,
             pending_count: None,
             pending_find: None,
+            pending_mark: None,
+            marks: std::collections::HashMap::new(),
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
             pending_replace: false,
@@ -1197,6 +1209,14 @@ impl Stoat {
                 return action_handlers::movement::execute_find(self, kind, ch, extend, count);
             }
             self.pending_find = None;
+        }
+
+        if self.mode == "normal" && self.pending_mark.is_some() {
+            if let KeyCode::Char(ch) = key.code {
+                let request = self.pending_mark.take().expect("checked above");
+                return action_handlers::marks::execute_mark(self, request, ch);
+            }
+            self.pending_mark = None;
         }
 
         if (self.mode == "normal" || self.mode == "select") && self.pending_replace {
