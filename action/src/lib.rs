@@ -48,7 +48,7 @@ pub use defs::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
         HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
     },
-    lsp::{GotoDefinition, GotoNextDiagnostic, GotoPrevDiagnostic},
+    lsp::{GotoDefinition, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition},
     palette::OpenCommandPalette,
     pane::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,

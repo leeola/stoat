@@ -444,6 +444,7 @@ on key {
         w -> [GotoNextDiagnostic(), SetMode(normal)];
         W -> [GotoPrevDiagnostic(), SetMode(normal)];
         j -> [GotoDefinition(), SetMode(normal)];
+        k -> [GotoTypeDefinition(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

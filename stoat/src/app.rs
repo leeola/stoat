@@ -177,14 +177,14 @@ pub struct Stoat {
     /// [`crate::host::LspHost::try_recv_notification`] inside
     /// [`Stoat::update`].
     pub(crate) lsp_progress: crate::lsp::progress::LspProgressMap,
-    /// In-flight `textDocument/definition` request. Replacing the entry
-    /// drops the prior task, cancelling its spawned future before the
-    /// response can land. Polled by
-    /// [`action_handlers::pump_lsp_jumps`] at the top of each render
-    /// tick; `Ready(Some)` opens the target file in the focused pane
-    /// (when cross-file) and jumps the primary cursor; `Ready(None)`
-    /// silently drops.
-    pub(crate) pending_goto_definition:
+    /// In-flight goto-style LSP request (definition / type definition
+    /// / implementation / declaration). Replacing the entry drops the
+    /// prior task, cancelling its spawned future before the response
+    /// can land. Polled by [`action_handlers::pump_lsp_jumps`] at the
+    /// top of each render tick; `Ready(Some)` opens the target file
+    /// in the focused pane (when cross-file) and jumps the primary
+    /// cursor; `Ready(None)` silently drops.
+    pub(crate) pending_lsp_jump:
         Option<stoat_scheduler::Task<Option<action_handlers::lsp::JumpTarget>>>,
 }
 
@@ -322,7 +322,7 @@ impl Stoat {
             lsp_host: Arc::new(NoopLsp),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             lsp_progress: crate::lsp::progress::LspProgressMap::new(),
-            pending_goto_definition: None,
+            pending_lsp_jump: None,
         }
     }
 

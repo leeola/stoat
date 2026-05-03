@@ -37,3 +37,17 @@ define_action!(
      does not advertise the capability.",
     ActionPriority::Common
 );
+
+define_action!(
+    GotoTypeDefinitionDef,
+    GotoTypeDefinition,
+    "GotoTypeDefinition",
+    ActionKind::GotoTypeDefinition,
+    "jump to type definition",
+    "Move the primary cursor to the type definition of the symbol under the \
+     cursor by issuing an LSP `textDocument/typeDefinition` request. \
+     Multi-file targets open the destination file in the focused pane before \
+     jumping. Multiple candidates jump to the first; no-op when the server \
+     returns nothing or does not advertise the capability.",
+    ActionPriority::Common
+);

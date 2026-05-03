@@ -388,6 +388,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Prev)
         },
         ActionKind::GotoDefinition => lsp::goto_definition(stoat),
+        ActionKind::GotoTypeDefinition => lsp::goto_type_definition(stoat),
         ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
         ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
         ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),

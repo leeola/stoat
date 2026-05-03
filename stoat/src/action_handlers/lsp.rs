@@ -402,20 +402,56 @@ pub(crate) struct JumpTarget {
     pub(crate) offset: usize,
 }
 
+/// Discriminator for the goto-style LSP requests that all return
+/// `Option<GotoDefinitionResponse>` (a single Location or list of
+/// candidates) and feed the same `Stoat::pending_lsp_jump` slot.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LspJumpKind {
+    Definition,
+    TypeDefinition,
+}
+
+impl LspJumpKind {
+    fn feature(self) -> LanguageServerFeature {
+        match self {
+            Self::Definition => LanguageServerFeature::GotoDefinition,
+            Self::TypeDefinition => LanguageServerFeature::GotoTypeDefinition,
+        }
+    }
+
+    fn warn_label(self) -> &'static str {
+        match self {
+            Self::Definition => "goto_definition",
+            Self::TypeDefinition => "goto_type_definition",
+        }
+    }
+}
+
 /// Issue a `textDocument/definition` request for the symbol under the
-/// focused editor's primary cursor. The async response is stored on
-/// [`Stoat::pending_goto_definition`] and applied by
-/// [`pump_lsp_jumps`] on the next render tick.
+/// focused editor's primary cursor. Thin wrapper over [`lsp_jump`].
+pub(crate) fn goto_definition(stoat: &mut Stoat) -> UpdateEffect {
+    lsp_jump(stoat, LspJumpKind::Definition)
+}
+
+/// Issue a `textDocument/typeDefinition` request for the symbol under
+/// the focused editor's primary cursor. Thin wrapper over [`lsp_jump`].
+pub(crate) fn goto_type_definition(stoat: &mut Stoat) -> UpdateEffect {
+    lsp_jump(stoat, LspJumpKind::TypeDefinition)
+}
+
+/// Issue an LSP jump-style request (definition / type definition /
+/// implementation / declaration) for the symbol under the focused
+/// editor's primary cursor. The async response is stored on
+/// [`Stoat::pending_lsp_jump`] and applied by [`pump_lsp_jumps`] on
+/// the next render tick.
 ///
 /// No-op when: the focused pane is not an editor; the buffer has no
-/// path; or the server does not advertise
-/// [`LanguageServerFeature::GotoDefinition`]. Replacing the prior
-/// pending task drops it, cancelling its spawned future.
-pub(crate) fn goto_definition(stoat: &mut Stoat) -> UpdateEffect {
-    if !stoat
-        .lsp_host
-        .supports_feature(LanguageServerFeature::GotoDefinition)
-    {
+/// path; or the server does not advertise the matching
+/// [`LanguageServerFeature`]. Replacing the prior pending task drops
+/// it, cancelling its spawned future -- only one in-flight jump is
+/// tracked at a time.
+fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
+    if !stoat.lsp_host.supports_feature(kind.feature()) {
         return UpdateEffect::None;
     }
 
@@ -456,17 +492,26 @@ pub(crate) fn goto_definition(stoat: &mut Stoat) -> UpdateEffect {
     let lsp = stoat.lsp_host.clone();
     let fs = stoat.fs_host.clone();
     let task = stoat.executor.spawn(async move {
-        let response = match lsp.goto_definition(params).await {
+        let result = match kind {
+            LspJumpKind::Definition => lsp.goto_definition(params).await,
+            LspJumpKind::TypeDefinition => lsp.goto_type_definition(params).await,
+        };
+        let response = match result {
             Ok(Some(resp)) => resp,
             Ok(None) => return None,
             Err(err) => {
-                tracing::warn!(target: "stoat::lsp", ?err, "goto_definition request failed");
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    request = kind.warn_label(),
+                    ?err,
+                    "lsp jump request failed",
+                );
                 return None;
             },
         };
         resolve_goto_target(response, &source_path, &source_rope, encoding, &*fs)
     });
-    stoat.pending_goto_definition = Some(task);
+    stoat.pending_lsp_jump = Some(task);
     UpdateEffect::None
 }
 
@@ -523,14 +568,14 @@ fn resolve_goto_target(
     })
 }
 
-/// Poll any in-flight LSP jump request (`pending_goto_definition`) and
-/// apply the result. On `Ready(Some)` opens the target file in the
-/// focused pane (no-op when already open) and collapses every selection
-/// onto the resolved offset; on `Ready(None)` silently drops; on
-/// `Pending` puts the task back. Returns true when state changed so
-/// the caller can request a redraw.
+/// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
+/// and apply the result. On `Ready(Some)` opens the target file in
+/// the focused pane (no-op when already open) and collapses every
+/// selection onto the resolved offset; on `Ready(None)` silently
+/// drops; on `Pending` puts the task back. Returns true when state
+/// changed so the caller can request a redraw.
 pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
-    let Some(mut task) = stoat.pending_goto_definition.take() else {
+    let Some(mut task) = stoat.pending_lsp_jump.take() else {
         return false;
     };
     let waker = futures::task::noop_waker();
@@ -544,7 +589,7 @@ pub(crate) fn pump_lsp_jumps(stoat: &mut Stoat) -> bool {
         },
         Poll::Ready(None) => true,
         Poll::Pending => {
-            stoat.pending_goto_definition = Some(task);
+            stoat.pending_lsp_jump = Some(task);
             false
         },
     }
@@ -1067,7 +1112,7 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoDefinition);
         h.settle();
         assert_eq!(cursor_offset(&mut h), 0);
-        assert!(h.stoat.pending_goto_definition.is_none());
+        assert!(h.stoat.pending_lsp_jump.is_none());
     }
 
     #[test]
@@ -1080,6 +1125,122 @@ mod tests {
         h.fake_lsp()
             .set_definition(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
         h.type_keys("space l j");
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    fn enable_goto_type_definition(h: &TestHarness) {
+        use lsp_types::{ServerCapabilities, TypeDefinitionProviderCapability};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            type_definition_provider: Some(TypeDefinitionProviderCapability::Simple(true)),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn goto_type_definition_jumps_within_same_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_type_definition(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_type_definition(
+            path.to_str().unwrap(),
+            0,
+            0,
+            path.to_str().unwrap(),
+            2,
+            0,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_type_definition_opens_target_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_type_definition(&h);
+        let root = seed(
+            &mut h,
+            &[
+                ("main.rs", "abc\n"),
+                ("types.rs", "struct One;\nstruct Two;\n"),
+            ],
+        );
+        let main_path = root.join("main.rs");
+        let types_path = root.join("types.rs");
+        open_buffer(&mut h, main_path.clone());
+        h.fake_lsp().set_type_definition(
+            main_path.to_str().unwrap(),
+            0,
+            0,
+            types_path.to_str().unwrap(),
+            1,
+            7,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
+        h.settle();
+        assert_eq!(focused_buffer_path(&h), types_path);
+        assert_eq!(cursor_offset(&mut h), 19);
+    }
+
+    #[test]
+    fn goto_type_definition_no_result_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_type_definition(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_type_definition_unsupported_capability_is_noop() {
+        use lsp_types::{OneOf, ServerCapabilities};
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            definition_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_type_definition(
+            path.to_str().unwrap(),
+            0,
+            0,
+            path.to_str().unwrap(),
+            0,
+            2,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoTypeDefinition);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 0);
+        assert!(h.stoat.pending_lsp_jump.is_none());
+    }
+
+    #[test]
+    fn space_l_k_jumps_to_type_definition() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_type_definition(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_type_definition(
+            path.to_str().unwrap(),
+            0,
+            0,
+            path.to_str().unwrap(),
+            2,
+            0,
+        );
+        h.type_keys("space l k");
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
         assert_eq!(h.stoat.mode, "normal");
