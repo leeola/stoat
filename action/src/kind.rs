@@ -79,6 +79,7 @@ pub enum ActionKind {
     GotoFirstNonwhitespace,
     OpenBelow,
     OpenAbove,
+    ReplaceChar,
     GotoFileStart,
     GotoLastLine,
     GotoLineNumber,

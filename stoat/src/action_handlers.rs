@@ -217,6 +217,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoFirstNonwhitespace => movement::goto_first_nonwhitespace(stoat, false),
         ActionKind::OpenBelow => movement::open_line(stoat, movement::OpenDir::Below),
         ActionKind::OpenAbove => movement::open_line(stoat, movement::OpenDir::Above),
+        ActionKind::ReplaceChar => movement::set_pending_replace(stoat),
         ActionKind::GotoFileStart => movement::goto_file_start(stoat, false),
         ActionKind::GotoLastLine => movement::goto_last_line(stoat, false),
         ActionKind::GotoLineNumber => movement::goto_line_number(stoat),

@@ -631,6 +631,16 @@ define_action!(
 );
 
 define_action!(
+    ReplaceCharDef,
+    ReplaceChar,
+    "ReplaceChar",
+    ActionKind::ReplaceChar,
+    "replace selected chars with next typed char",
+    "Arms a one-shot prompt for the next character keypress; once a printable char arrives, every character in every non-empty selection is replaced with that char and the selection is preserved over the replaced text. Empty selections are left untouched. Mirrors Helix's `r` binding.",
+    ActionPriority::Rare
+);
+
+define_action!(
     GotoFileStartDef,
     GotoFileStart,
     "GotoFileStart",

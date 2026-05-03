@@ -33,7 +33,7 @@ pub use defs::{
         KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft, MoveNextWordEnd,
         MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevWordEnd,
         MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, PageDown, PageUp, Redo,
-        RemovePrimarySelection, RepeatLastMotion, RotateSelectionsBackward,
+        RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
         RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll, SelectLineBelow,
         SelectNextSibling, SelectPrevSibling, ShrinkSelection, SwitchCase, SwitchToLowercase,
         SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,

@@ -1185,6 +1185,96 @@ pub(super) fn open_line(stoat: &mut Stoat, dir: OpenDir) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn set_pending_replace(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.pending_replace = true;
+    UpdateEffect::Redraw
+}
+
+pub(crate) fn execute_replace(stoat: &mut Stoat, ch: char) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let (buffer_id, mut entries) = {
+        let editor = ws.editors.get_mut(editor_id).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let display_snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = display_snapshot.buffer_snapshot();
+        let rope = buffer_snapshot.rope();
+        let entries: Vec<(usize, usize, usize, String)> = editor
+            .selections
+            .all_anchors()
+            .iter()
+            .filter_map(|sel| {
+                let s = buffer_snapshot.resolve_anchor(&sel.start);
+                let e = buffer_snapshot.resolve_anchor(&sel.end);
+                if s == e {
+                    return None;
+                }
+                let mut chars = 0usize;
+                let mut byte_pos = s;
+                for c in rope.chars_at(s) {
+                    if byte_pos >= e {
+                        break;
+                    }
+                    byte_pos += c.len_utf8();
+                    chars += 1;
+                }
+                let mut replacement = String::with_capacity(chars * ch.len_utf8());
+                for _ in 0..chars {
+                    replacement.push(ch);
+                }
+                Some((sel.id, s, e, replacement))
+            })
+            .collect();
+        (buffer_id, entries)
+    };
+
+    if entries.is_empty() {
+        return UpdateEffect::None;
+    }
+
+    entries.sort_by_key(|(_, s, _, _)| *s);
+
+    {
+        let buffer = ws.buffers.get(buffer_id).expect("buffer");
+        let mut guard = buffer.write().expect("poisoned");
+        for (_, s, e, text) in entries.iter().rev() {
+            guard.edit(*s..*e, text);
+        }
+    }
+
+    let mut id_to_post: std::collections::HashMap<usize, (usize, usize)> =
+        std::collections::HashMap::with_capacity(entries.len());
+    let mut shift: i64 = 0;
+    for (id, s, e, text) in entries.iter() {
+        let post_start = (*s as i64 + shift) as usize;
+        let post_end = post_start + text.len();
+        id_to_post.insert(*id, (post_start, post_end));
+        shift += text.len() as i64 - (*e as i64 - *s as i64);
+    }
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
+    let new_display = editor.display_map.snapshot();
+    let new_buf = new_display.buffer_snapshot();
+
+    editor.selections.transform(new_buf, |sel| {
+        let mut new = sel.clone();
+        if let Some(&(post_start, post_end)) = id_to_post.get(&sel.id) {
+            let start_anchor = new_buf.anchor_at(post_start, Bias::Left);
+            let end_anchor = new_buf.anchor_at(post_end, Bias::Right);
+            new.start = start_anchor;
+            new.end = end_anchor;
+            new.goal = SelectionGoal::None;
+        }
+        new
+    });
+    UpdateEffect::Redraw
+}
+
 pub(super) fn undo(stoat: &mut Stoat) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1);
     apply_buffer_history(stoat, count, |buf| buf.undo())

@@ -97,6 +97,11 @@ pub struct Stoat {
     /// label. Always paired with [`Self::pending_goto_word`]: when
     /// that field is `None` this is empty.
     pub(crate) pending_goto_word_input: String,
+    /// Set after a `ReplaceChar` action arms the one-shot prompt.
+    /// While true, the next printable char keypress in normal/select
+    /// mode replaces every character in every non-empty selection
+    /// with that char and clears the flag.
+    pub(crate) pending_replace: bool,
     /// Buffers for which `LspHost::did_open` has been dispatched.
     /// Dedupes re-opens of the same path: [`crate::buffer_registry::BufferRegistry::open`]
     /// returns the existing entry on second open, but the LSP
@@ -284,6 +289,7 @@ impl Stoat {
             pending_find: None,
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
+            pending_replace: false,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
             lsp_pending_changes: std::collections::HashMap::new(),
@@ -851,6 +857,14 @@ impl Stoat {
                 return action_handlers::movement::execute_find(self, kind, ch, extend, count);
             }
             self.pending_find = None;
+        }
+
+        if (self.mode == "normal" || self.mode == "select") && self.pending_replace {
+            if let KeyCode::Char(ch) = key.code {
+                self.pending_replace = false;
+                return action_handlers::movement::execute_replace(self, ch);
+            }
+            self.pending_replace = false;
         }
 
         if (self.mode == "normal" || self.mode == "select") && self.pending_goto_word.is_some() {
@@ -2382,5 +2396,48 @@ mod tests {
         h.type_keys("O");
         h.type_text("Z");
         assert_eq!(buffer_text(&h, &path), "Z\nabc\n");
+    }
+
+    #[test]
+    fn change_selection_deletes_then_enters_insert() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        h.type_keys("v l l l");
+        h.type_keys("c");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("XYZ");
+        assert_eq!(buffer_text(&h, &path), "XYZdef");
+    }
+
+    #[test]
+    fn replace_char_replaces_each_char_in_selection() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abcdef");
+        h.type_keys("v l l l");
+        h.type_keys("r");
+        h.type_keys("X");
+        assert_eq!(buffer_text(&h, &path), "XXXdef");
+        assert_eq!(h.stoat.mode, "select");
+    }
+
+    #[test]
+    fn replace_char_on_collapsed_selection_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("r");
+        h.type_keys("X");
+        assert_eq!(buffer_text(&h, &path), "abc");
+        assert_eq!(h.stoat.mode, "normal");
+        assert!(!h.stoat.pending_replace);
+    }
+
+    #[test]
+    fn replace_char_with_multibyte_input_grows_buffer() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc");
+        h.type_keys("v l l");
+        h.type_keys("r");
+        h.type_text("é");
+        assert_eq!(buffer_text(&h, &path), "ééc");
     }
 }
