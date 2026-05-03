@@ -1,5 +1,6 @@
-use crate::host::fs::{FsDirEntry, FsHost, FsMetadata};
+use crate::host::fs::{build_default_ignore, FsDirEntry, FsHost, FsMetadata};
 use compact_str::CompactString;
+use ignore::WalkBuilder;
 use std::{
     io,
     io::Read,
@@ -64,5 +65,27 @@ impl FsHost for LocalFs {
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         std::fs::rename(from, to)
+    }
+
+    fn walk_workspace_files(&self, root: &Path) -> Vec<PathBuf> {
+        let defaults = build_default_ignore(root);
+        let walker = WalkBuilder::new(root)
+            .hidden(false)
+            .require_git(false)
+            .add_custom_ignore_filename(".stoatignore")
+            .filter_entry(move |entry| {
+                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+                !defaults.matched(entry.path(), is_dir).is_ignore()
+            })
+            .build();
+
+        let mut out = Vec::new();
+        for entry in walker.flatten() {
+            if entry.file_type().is_some_and(|t| t.is_file()) {
+                out.push(entry.into_path());
+            }
+        }
+        out.sort();
+        out
     }
 }

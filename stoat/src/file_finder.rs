@@ -6,10 +6,6 @@ use crate::{
     paths,
     workspace::Workspace,
 };
-use ignore::{
-    gitignore::{Gitignore, GitignoreBuilder},
-    Match,
-};
 use nucleo::{
     pattern::{Atom, AtomKind, CaseMatching, Normalization},
     Matcher, Utf32Str,
@@ -24,11 +20,6 @@ use stoat_text::{Bias, SelectionGoal};
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
 /// file never stalls the render thread.
 pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
-
-/// Baked-in default ignore patterns applied to every workspace. Parsed with
-/// gitignore semantics at walker-build time; supplements (but does not
-/// override) any per-repo `.stoatignore` the walker picks up at runtime.
-const DEFAULT_STOATIGNORE: &str = include_str!("../../.stoatignore");
 
 fn fuzzy_matcher() -> &'static Mutex<Matcher> {
     static MATCHER: OnceLock<Mutex<Matcher>> = OnceLock::new();
@@ -312,111 +303,6 @@ fn replace_preview_text(ws: &mut Workspace, editor_id: EditorId, buffer_id: Buff
     }
 }
 
-/// Enumerate every non-ignored file under `git_root`, reading the tree
-/// through `fs` so test runs and remote-FS implementations can plug in
-/// their own backing store. Respects per-directory `.gitignore` and
-/// `.stoatignore` files (gitignore semantics, last-match-wins, inner
-/// negations override outer ignores) plus the baked-in
-/// [`DEFAULT_STOATIGNORE`] patterns, which are an unconditional filter
-/// users cannot negate. Does not require `git_root` to be a git repo,
-/// and does not consult global / `$HOME` ignore files.
-pub(crate) fn walk_workspace_files(fs: &dyn FsHost, git_root: &Path) -> Vec<PathBuf> {
-    let defaults = build_default_ignore(git_root);
-    let mut stack: Vec<Gitignore> = Vec::new();
-    let mut out = Vec::new();
-    walk_dir(fs, git_root, &defaults, &mut stack, &mut out);
-    out.sort();
-    out
-}
-
-fn walk_dir(
-    fs: &dyn FsHost,
-    dir: &Path,
-    defaults: &Gitignore,
-    stack: &mut Vec<Gitignore>,
-    out: &mut Vec<PathBuf>,
-) {
-    let pushed = push_dir_ignores(fs, dir, stack);
-
-    let entries = match fs.list_dir(dir) {
-        Ok(e) => e,
-        Err(_) => {
-            stack.truncate(stack.len() - pushed);
-            return;
-        },
-    };
-
-    for entry in entries {
-        let path = dir.join(entry.name.as_str());
-        if path_is_ignored(defaults, stack, &path, entry.is_dir) {
-            continue;
-        }
-        if entry.is_dir {
-            walk_dir(fs, &path, defaults, stack, out);
-        } else {
-            out.push(path);
-        }
-    }
-
-    stack.truncate(stack.len() - pushed);
-}
-
-/// Read any per-directory ignore files (`.gitignore`, `.stoatignore`) and
-/// push their matchers onto `stack`. Returns the number of matchers pushed
-/// so the caller can pop them on the way back up the tree.
-fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
-    const NAMES: &[&str] = &[".gitignore", ".stoatignore"];
-    let mut pushed = 0;
-    for name in NAMES {
-        if let Some(matcher) = read_ignore_file(fs, dir, name) {
-            stack.push(matcher);
-            pushed += 1;
-        }
-    }
-    pushed
-}
-
-fn read_ignore_file(fs: &dyn FsHost, dir: &Path, name: &str) -> Option<Gitignore> {
-    let path = dir.join(name);
-    let mut buf = Vec::new();
-    fs.read(&path, &mut buf).ok()?;
-    let text = std::str::from_utf8(&buf).ok()?;
-    let mut builder = GitignoreBuilder::new(dir);
-    for line in text.lines() {
-        let _ = builder.add_line(None, line);
-    }
-    builder.build().ok()
-}
-
-/// Combine the baked-in defaults with the stack of per-directory matchers.
-/// Defaults are an unconditional hard filter; the stack uses standard
-/// gitignore precedence (last match wins, inner negations override outer
-/// ignores).
-fn path_is_ignored(defaults: &Gitignore, stack: &[Gitignore], path: &Path, is_dir: bool) -> bool {
-    if defaults.matched(path, is_dir).is_ignore() {
-        return true;
-    }
-    let mut decision: Option<bool> = None;
-    for matcher in stack {
-        match matcher.matched(path, is_dir) {
-            Match::Ignore(_) => decision = Some(true),
-            Match::Whitelist(_) => decision = Some(false),
-            Match::None => {},
-        }
-    }
-    decision.unwrap_or(false)
-}
-
-fn build_default_ignore(git_root: &Path) -> Gitignore {
-    let mut builder = GitignoreBuilder::new(git_root);
-    for line in DEFAULT_STOATIGNORE.lines() {
-        builder
-            .add_line(None, line)
-            .expect("default .stoatignore parses");
-    }
-    builder.build().expect("default .stoatignore builds")
-}
-
 /// Query git for currently-modified files (staged + unstaged), returning
 /// absolute paths. Empty when no repo or no changes.
 pub(crate) fn query_modified(git_host: &dyn GitHost, git_root: &Path) -> Vec<PathBuf> {
@@ -661,7 +547,8 @@ mod tests {
 
     fn walked_rels(fs: &dyn FsHost) -> Vec<String> {
         let root = Path::new(WALK_ROOT);
-        let mut rels: Vec<String> = walk_workspace_files(fs, root)
+        let mut rels: Vec<String> = fs
+            .walk_workspace_files(root)
             .iter()
             .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
             .collect();

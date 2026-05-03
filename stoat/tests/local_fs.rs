@@ -90,3 +90,64 @@ fn exists_true_and_false() {
     assert!(fs.exists(&path));
     assert!(!fs.exists(&dir.path().join("no")));
 }
+
+#[test]
+fn walk_workspace_files_honors_dot_git_info_exclude() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join(".git/info")).unwrap();
+    std::fs::write(root.join(".git/info/exclude"), "excluded.txt\n").unwrap();
+    std::fs::write(root.join("excluded.txt"), b"").unwrap();
+    std::fs::write(root.join("kept.txt"), b"").unwrap();
+
+    let fs = LocalFs;
+    let walked: Vec<_> = fs
+        .walk_workspace_files(root)
+        .into_iter()
+        .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(walked, vec!["kept.txt".to_string()]);
+}
+
+#[test]
+fn walk_workspace_files_honors_gitignore() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::write(root.join(".gitignore"), "ignored.txt\n").unwrap();
+    std::fs::write(root.join("ignored.txt"), b"").unwrap();
+    std::fs::write(root.join("kept.txt"), b"").unwrap();
+
+    let fs = LocalFs;
+    let mut walked: Vec<_> = fs
+        .walk_workspace_files(root)
+        .into_iter()
+        .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+        .collect();
+    walked.sort();
+
+    assert_eq!(
+        walked,
+        vec![".gitignore".to_string(), "kept.txt".to_string()]
+    );
+}
+
+#[test]
+fn walk_workspace_files_excludes_baked_in_defaults() {
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    std::fs::create_dir_all(root.join("target/debug")).unwrap();
+    std::fs::write(root.join("target/debug/bin"), b"").unwrap();
+    std::fs::create_dir_all(root.join("node_modules/pkg")).unwrap();
+    std::fs::write(root.join("node_modules/pkg/index.js"), b"").unwrap();
+    std::fs::write(root.join("src.rs"), b"").unwrap();
+
+    let fs = LocalFs;
+    let walked: Vec<_> = fs
+        .walk_workspace_files(root)
+        .into_iter()
+        .map(|p| p.strip_prefix(root).unwrap().to_string_lossy().into_owned())
+        .collect();
+
+    assert_eq!(walked, vec!["src.rs".to_string()]);
+}

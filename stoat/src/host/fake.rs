@@ -616,6 +616,10 @@ impl FsHost for FakeFs {
         state.entries.insert(to.to_path_buf(), entry);
         Ok(())
     }
+
+    fn walk_workspace_files(&self, root: &Path) -> Vec<PathBuf> {
+        crate::host::fs::manual_walk(self, root)
+    }
 }
 
 #[cfg(test)]
