@@ -9,9 +9,15 @@ use ratatui::{
     widgets::{Block, Borders, Widget},
 };
 
+/// Visible-window size for the symbol picker. The list scrolls so
+/// `selected_idx` stays inside this window; visible rows are
+/// numbered 1..=9 by their position in the window.
+pub(crate) const VISIBLE_WINDOW: usize = 9;
+
 /// Paint the document-symbol picker, if any, anchored to the focused
-/// editor's primary cursor. Each row is `<n>. <title>` for n in 1..=9.
-/// Clamps width and height to the focused pane.
+/// editor's primary cursor. Renders a 9-row viewport over the
+/// picker's `entries` that follows `selected_idx`; visible rows are
+/// numbered 1..=9. Clamps width and height to the focused pane.
 pub(crate) fn render_symbol_picker(stoat: &mut Stoat, buf: &mut Buffer) {
     let picker = match &stoat.pending_symbol_picker {
         Some(p) if !p.entries.is_empty() => p.clone(),
@@ -41,15 +47,19 @@ pub(crate) fn render_symbol_picker(stoat: &mut Stoat, buf: &mut Buffer) {
     };
 
     let modal_style = stoat.theme.get(crate::theme::scope::UI_MODAL_HINTS);
+    let selected_style = stoat.theme.get(crate::theme::scope::UI_SELECTION);
 
     let interior_width = content_area.width.saturating_sub(2);
     if interior_width == 0 {
         return;
     }
-    let visible_count = picker.entries.len().min(9);
+    let total = picker.entries.len();
+    let viewport_top = viewport_top_for(picker.selected_idx, total, VISIBLE_WINDOW);
+    let visible_count = total.saturating_sub(viewport_top).min(VISIBLE_WINDOW);
     let body: Vec<String> = picker
         .entries
         .iter()
+        .skip(viewport_top)
         .take(visible_count)
         .enumerate()
         .map(|(i, e)| {
@@ -57,9 +67,26 @@ pub(crate) fn render_symbol_picker(stoat: &mut Stoat, buf: &mut Buffer) {
             truncate_to_width(&raw, interior_width as usize)
         })
         .collect();
-    let max_line_width = body.iter().map(|s| s.chars().count()).max().unwrap_or(0) as u16;
+    let footer = (total > VISIBLE_WINDOW).then(|| {
+        truncate_to_width(
+            &format!(
+                "{}-{} / {}",
+                viewport_top + 1,
+                viewport_top + visible_count,
+                total
+            ),
+            interior_width as usize,
+        )
+    });
+    let max_line_width = body
+        .iter()
+        .chain(footer.as_ref())
+        .map(|s| s.chars().count())
+        .max()
+        .unwrap_or(0) as u16;
+    let total_lines = body.len() as u16 + footer.as_ref().map(|_| 1).unwrap_or(0);
     let popup_width = (max_line_width + 2).clamp(3, content_area.width.max(3));
-    let popup_height = (body.len() as u16 + 2).clamp(3, content_area.height.max(3));
+    let popup_height = (total_lines + 2).clamp(3, content_area.height.max(3));
 
     let popup_x = cursor_screen
         .0
@@ -92,14 +119,55 @@ pub(crate) fn render_symbol_picker(stoat: &mut Stoat, buf: &mut Buffer) {
         if row >= inner.y + inner.height {
             break;
         }
+        let style = if viewport_top + row_idx == picker.selected_idx {
+            selected_style
+        } else {
+            modal_style
+        };
         for (col_idx, ch) in line.chars().enumerate() {
             let col = inner.x + col_idx as u16;
             if col >= inner.x + inner.width {
                 break;
             }
-            buf[(col, row)].set_char(ch).set_style(modal_style);
+            buf[(col, row)].set_char(ch).set_style(style);
         }
     }
+
+    if let Some(footer) = footer {
+        let row = inner.y + body.len() as u16;
+        if row < inner.y + inner.height {
+            for (col_idx, ch) in footer.chars().enumerate() {
+                let col = inner.x + col_idx as u16;
+                if col >= inner.x + inner.width {
+                    break;
+                }
+                buf[(col, row)].set_char(ch).set_style(modal_style);
+            }
+        }
+    }
+}
+
+/// Return the index of the entry that should appear at the top of
+/// the visible window so `selected` stays inside `[top, top + window)`.
+/// Sticky-scrolls: keeps the prior viewport when possible, only
+/// scrolling when `selected` falls outside the window.
+fn viewport_top_for(selected: usize, total: usize, window: usize) -> usize {
+    if total <= window {
+        return 0;
+    }
+    let max_top = total - window;
+    if selected < window {
+        0
+    } else {
+        (selected + 1).saturating_sub(window).min(max_top)
+    }
+}
+
+/// `viewport_top_for` over the picker's [`VISIBLE_WINDOW`]. Exposed
+/// for the app's key-handler so the digit-key shortcut can rebase
+/// onto the current viewport.
+pub(crate) fn viewport_top_for_picker(selected: usize, total: usize) -> usize {
+    viewport_top_for(selected, total, VISIBLE_WINDOW)
 }
 
 fn cursor_screen_position(

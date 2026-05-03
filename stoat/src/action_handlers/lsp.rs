@@ -1274,12 +1274,16 @@ pub(crate) struct SymbolEntry {
 }
 
 /// Cursor-anchored document-symbol picker. Painted as a numbered
-/// popup; the user picks with keys `1`..=`9`, dismisses with
-/// Escape or any other action.
+/// popup over a viewport of up to 9 visible entries that follows
+/// [`Self::selected_idx`]; the user navigates with `j`/`k`, picks
+/// the selected entry with Enter, picks visible entries 1..=9 with
+/// the corresponding digit keys, and dismisses with Escape or any
+/// other action.
 #[derive(Debug, Clone)]
 pub(crate) struct SymbolPicker {
     pub(crate) entries: Vec<SymbolEntry>,
     pub(crate) anchor_offset: usize,
+    pub(crate) selected_idx: usize,
 }
 
 /// Issue a `textDocument/documentSymbol` request for the focused
@@ -1340,6 +1344,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     stoat.pending_symbol_picker = Some(SymbolPicker {
         entries: Vec::new(),
         anchor_offset,
+        selected_idx: 0,
     });
     UpdateEffect::None
 }
@@ -1390,8 +1395,8 @@ pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
 /// entries, resolving each symbol's LSP position to a byte offset
 /// in the supplied rope. Nested responses are flattened DFS with a
 /// dotted ancestor-path prefix on the title (e.g. `outer.inner`) so
-/// the picker conveys hierarchy. Entries are limited to the first 9
-/// in document order (number-key cap; v1 limitation).
+/// the picker conveys hierarchy. The full list is returned; the
+/// renderer paints a 9-row viewport over `entries`.
 fn symbol_picker_entries(
     rope: &Rope,
     encoding: OffsetEncoding,
@@ -1443,7 +1448,6 @@ fn symbol_picker_entries(
             walk(rope, encoding, items, &mut ancestors, &mut entries);
         },
     }
-    entries.truncate(9);
     entries
 }
 
@@ -3360,7 +3364,7 @@ mod tests {
     }
 
     #[test]
-    fn symbol_picker_caps_at_nine_entries() {
+    fn symbol_picker_keeps_all_entries() {
         let mut h = TestHarness::with_size(80, 24);
         enable_document_symbols(&h);
         let root = seed(&mut h, &[("main.rs", "x\n")]);
@@ -3374,7 +3378,38 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenSymbolPicker);
         h.settle();
         let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker open");
-        assert_eq!(picker.entries.len(), 9);
+        assert_eq!(picker.entries.len(), 15);
+        assert_eq!(picker.selected_idx, 0);
+    }
+
+    #[test]
+    fn symbol_picker_navigates_with_jk_and_picks_with_enter() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_document_symbols(&h);
+        let mut text = String::new();
+        for _ in 0..15 {
+            text.push_str("fn x() {}\n");
+        }
+        let root = seed(&mut h, &[("main.rs", text.as_str())]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let many: Vec<lsp_types::SymbolInformation> = (0..15)
+            .map(|i| flat_symbol(&format!("sym{i}"), path.to_str().unwrap(), i as u32, 3))
+            .collect();
+        h.fake_lsp()
+            .set_document_symbols(path.to_str().unwrap(), DocumentSymbolResponse::Flat(many));
+
+        h.type_keys("space l s");
+        h.settle();
+        for _ in 0..11 {
+            h.type_keys("j");
+        }
+        let picker = h.stoat.pending_symbol_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_idx, 11);
+
+        h.type_keys("enter");
+        assert!(h.stoat.pending_symbol_picker.is_none());
+        assert_eq!(cursor_offset(&mut h), 11 * 10 + 3);
     }
 
     #[test]
