@@ -67,6 +67,10 @@ pub(crate) struct FrameCtx<'a> {
     /// badge table; user-defined modes can supply an entry here so the
     /// status line shows something more meaningful than `---`.
     pub(crate) mode_badges: &'a std::collections::BTreeMap<String, String>,
+    /// Workspace-wide LSP diagnostic store. The status bar reads the
+    /// focused buffer's path and paints a compact severity badge when
+    /// any diagnostics are present.
+    pub(crate) diagnostics: &'a crate::diagnostics::DiagnosticSet,
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -133,6 +137,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         lsp_progress: stoat.lsp_progress.current(),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_badges: &stoat.settings.mode_badges,
+        diagnostics: &stoat.diagnostics,
     };
 
     let split_focused = ws.panes.focus();

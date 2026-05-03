@@ -271,6 +271,21 @@ fn render_pane_status(
                 right_anchor = start;
             }
         }
+        if let Some(text) = focused_diagnostic_label(view, editors, buffers, frame.diagnostics) {
+            let width = text.chars().count() as u16;
+            let start = right_anchor.saturating_sub(width);
+            if start >= cursor {
+                paint_segment(
+                    buf,
+                    y,
+                    start,
+                    right_anchor,
+                    &text,
+                    base_style.add_modifier(Modifier::BOLD),
+                );
+                right_anchor = start;
+            }
+        }
         if let Some(entry) = frame.lsp_progress {
             let text = lsp_progress_label(entry);
             let width = text.chars().count() as u16;
@@ -288,6 +303,42 @@ fn render_pane_status(
         }
     }
     let _ = cursor;
+}
+
+/// Builds the status-bar diagnostic label for the focused pane's
+/// editor, or `None` when the pane is not an editor, has no path,
+/// or has no diagnostics. Format: ` Ee:Ww ` showing error and
+/// warning counts (info / hint are omitted to keep the segment
+/// compact); only the present severities appear.
+fn focused_diagnostic_label(
+    view: &View,
+    editors: &SlotMap<EditorId, EditorState>,
+    buffers: &BufferRegistry,
+    diagnostics: &crate::diagnostics::DiagnosticSet,
+) -> Option<String> {
+    let View::Editor(editor_id) = view else {
+        return None;
+    };
+    let editor = editors.get(*editor_id)?;
+    let path = buffers.path_for(editor.buffer_id)?;
+    let summary = diagnostics.summarize(path);
+    if summary.is_empty() {
+        return None;
+    }
+    let mut parts = Vec::new();
+    if summary.error > 0 {
+        parts.push(format!("E{}", summary.error));
+    }
+    if summary.warning > 0 {
+        parts.push(format!("W{}", summary.warning));
+    }
+    if summary.information > 0 {
+        parts.push(format!("I{}", summary.information));
+    }
+    if summary.hint > 0 {
+        parts.push(format!("H{}", summary.hint));
+    }
+    Some(format!(" {} ", parts.join(" ")))
 }
 
 /// Formats an LSP progress entry for the status bar. Always padded with

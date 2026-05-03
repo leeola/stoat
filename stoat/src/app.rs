@@ -134,6 +134,11 @@ pub struct Stoat {
     /// dispatch needs to encode.
     pub(crate) lsp_last_delivered_buffer_version:
         Arc<std::sync::Mutex<std::collections::HashMap<BufferId, u64>>>,
+    /// LSP diagnostics keyed by file path. Updated as
+    /// `LspNotification::Diagnostics` arrives during
+    /// [`Self::drain_lsp_notifications`]; surfaced by the status bar
+    /// for the focused buffer.
+    pub(crate) diagnostics: crate::diagnostics::DiagnosticSet,
     /// Most recent `(FindKind, char)` consumed by `execute_find`.
     /// `RepeatLastMotion` (Alt-.) replays this pair without
     /// reading another keypress.
@@ -289,6 +294,7 @@ impl Stoat {
             lsp_last_delivered_buffer_version: Arc::new(std::sync::Mutex::new(
                 std::collections::HashMap::new(),
             )),
+            diagnostics: crate::diagnostics::DiagnosticSet::new(),
             last_find: None,
             fs_host: Arc::new(LocalFs),
             git_host: Arc::new(LocalGit::new()),
@@ -591,6 +597,7 @@ impl Stoat {
     /// the event loop on a pathological notification burst; the
     /// remainder drains on the next update.
     pub(crate) fn drain_lsp_notifications(&mut self) {
+        use crate::host::LspNotification;
         use futures::FutureExt;
         let host = self.lsp_host.clone();
         for _ in 0..256 {
@@ -605,12 +612,30 @@ impl Stoat {
             let Some(notification) = slot else {
                 break;
             };
-            if !self.lsp_progress.update(&notification) {
-                tracing::debug!(
-                    target: "stoat::app",
-                    ?notification,
-                    "unhandled LSP notification"
-                );
+            if self.lsp_progress.update(&notification) {
+                continue;
+            }
+            match &notification {
+                LspNotification::Diagnostics {
+                    uri, diagnostics, ..
+                } => {
+                    if let Some(path) = lsp_uri_to_path(uri) {
+                        self.diagnostics.replace_for_path(path, diagnostics.clone());
+                    } else {
+                        tracing::debug!(
+                            target: "stoat::app",
+                            uri = uri.as_str(),
+                            "diagnostics arrived for non-file URI; dropped",
+                        );
+                    }
+                },
+                _ => {
+                    tracing::debug!(
+                        target: "stoat::app",
+                        ?notification,
+                        "unhandled LSP notification"
+                    );
+                },
             }
         }
     }
@@ -1585,6 +1610,16 @@ impl Stoat {
     }
 }
 
+/// Convert an LSP `file:` URI to a [`PathBuf`]. Returns `None` for any
+/// other scheme; non-`file:` diagnostic notifications are silently
+/// dropped because stoat has no concept of remote-path buffers today.
+fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
+    if uri.scheme().map(|s| s.as_str()) != Some("file") {
+        return None;
+    }
+    Some(PathBuf::from(uri.path().as_str()))
+}
+
 /// Synchronous core of the parse pipeline. When `deadline` is `Some`, the
 /// host parse aborts if it would exceed it and the function returns `None`,
 /// signalling that the caller should fall back to the background path.
@@ -1883,6 +1918,69 @@ mod tests {
         });
         h.drain_lsp();
         h.assert_snapshot("lsp_progress_indexing");
+    }
+
+    #[test]
+    fn diagnostics_notification_updates_store() {
+        use crate::host::LspNotification;
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Uri};
+        use std::{path::PathBuf, str::FromStr};
+        let mut h = Stoat::test();
+        let path = PathBuf::from("/ws/a.rs");
+        let uri = Uri::from_str(&format!("file://{}", path.display())).unwrap();
+        let diag = Diagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 5)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: None,
+            message: "boom".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+        h.fake_lsp()
+            .push_notification(LspNotification::Diagnostics {
+                uri,
+                diagnostics: vec![diag],
+                version: None,
+            });
+        h.drain_lsp();
+        let summary = h.stoat.diagnostics.summarize(&path);
+        assert_eq!(summary.error, 1);
+        assert_eq!(summary.worst, Some(DiagnosticSeverity::ERROR));
+    }
+
+    #[test]
+    fn diagnostics_notification_with_non_file_uri_dropped() {
+        use crate::host::LspNotification;
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range, Uri};
+        use std::str::FromStr;
+        let mut h = Stoat::test();
+        let uri = Uri::from_str("https://example.com/a.rs").unwrap();
+        let diag = Diagnostic {
+            range: Range::new(Position::new(0, 0), Position::new(0, 5)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: None,
+            message: "ignored".into(),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+        h.fake_lsp()
+            .push_notification(LspNotification::Diagnostics {
+                uri,
+                diagnostics: vec![diag],
+                version: None,
+            });
+        h.drain_lsp();
+        let summary = h
+            .stoat
+            .diagnostics
+            .summarize(std::path::Path::new("/ws/a.rs"));
+        assert!(summary.is_empty());
     }
 
     fn open_run_with_output(h: &mut crate::test_harness::TestHarness, output: &[u8]) -> RunId {
