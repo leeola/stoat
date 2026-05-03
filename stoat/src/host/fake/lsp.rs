@@ -507,6 +507,7 @@ struct FakeLspState {
     observed_opens: Vec<DidOpenTextDocumentParams>,
     observed_changes: Vec<DidChangeTextDocumentParams>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
+    renames: BTreeMap<LspKey, WorkspaceEdit>,
     open_documents: BTreeMap<Uri, String>,
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
     request_failures_persistent: BTreeMap<String, io::ErrorKind>,
@@ -568,6 +569,7 @@ impl FakeLsp {
                 observed_opens: Vec::new(),
                 observed_changes: Vec::new(),
                 prepare_renames: BTreeMap::new(),
+                renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
                 request_failures_oneshot: BTreeMap::new(),
                 request_failures_persistent: BTreeMap::new(),
@@ -997,6 +999,20 @@ impl FakeLsp {
             .unwrap()
             .prepare_renames
             .insert(LspKey::new(path, line, col), response);
+    }
+
+    /// Programs the [`WorkspaceEdit`] returned for a
+    /// `textDocument/rename` call whose request position matches
+    /// `(path, line, col)`. The fake matches on the request position
+    /// component of [`RenameParams`] only; the new name supplied at
+    /// rename time is ignored, so tests construct an edit that
+    /// references the symbol's range and the new text directly.
+    pub fn set_rename(&self, path: &str, line: u32, col: u32, edit: WorkspaceEdit) {
+        self.state
+            .lock()
+            .unwrap()
+            .renames
+            .insert(LspKey::new(path, line, col), edit);
     }
 
     // --- Hover ---
@@ -2043,12 +2059,17 @@ impl LspHost for FakeLsp {
         Ok(state.prepare_renames.get(&key).cloned())
     }
 
-    async fn rename(&self, _params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {
+    async fn rename(&self, params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {
         self.apply_delay("textDocument/rename").await;
         if let Some(err) = self.take_request_failure("textDocument/rename") {
             return Err(err);
         }
-        Ok(None)
+        let state = self.state.lock().unwrap();
+        let key = LspKey::from_position(
+            &params.text_document_position.text_document.uri,
+            &params.text_document_position.position,
+        );
+        Ok(state.renames.get(&key).cloned())
     }
 
     async fn formatting(

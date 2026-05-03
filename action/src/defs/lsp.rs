@@ -95,3 +95,17 @@ define_action!(
      no actionable items.",
     ActionPriority::Common
 );
+
+define_action!(
+    RenameSymbolDef,
+    RenameSymbol,
+    "RenameSymbol",
+    ActionKind::RenameSymbol,
+    "rename symbol under cursor",
+    "Issue an LSP `textDocument/prepareRename` for the symbol under the \
+     cursor and open a one-line input modal seeded with the symbol's \
+     text. Submitting the input fires `textDocument/rename` and applies \
+     the resulting `WorkspaceEdit`. Escape cancels without applying. \
+     No-op when the server does not advertise the capability.",
+    ActionPriority::Common
+);

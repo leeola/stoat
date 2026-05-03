@@ -54,6 +54,7 @@ pub(crate) enum SubmitTarget {
     Reword,
     ClaudeChat,
     FileFinder,
+    RenameSymbol,
 }
 
 impl InputView {

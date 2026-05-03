@@ -448,6 +448,7 @@ on key {
         t -> [GotoImplementation(), SetMode(normal)];
         i -> [Hover(), SetMode(normal)];
         a -> [CodeAction(), SetMode(normal)];
+        r -> [RenameSymbol(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

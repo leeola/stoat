@@ -220,6 +220,25 @@ pub struct Stoat {
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
     pub(crate) pending_code_action_resolve:
         Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>>,
+
+    /// In-flight `textDocument/prepareRename` request. On response,
+    /// [`action_handlers::lsp::pump_lsp_prepare_rename`] opens
+    /// [`Self::rename_input`] seeded with the symbol placeholder.
+    pub(crate) pending_prepare_rename:
+        Option<stoat_scheduler::Task<Option<action_handlers::lsp::RenamePrep>>>,
+
+    /// One-line input modal for entering a new symbol name. Created
+    /// by the prepare-rename pump after a successful prepare response;
+    /// consumed by `rename_input_submit` (Enter) which fires the
+    /// rename request, or `rename_input_cancel` (Escape) which discards.
+    pub(crate) rename_input: Option<action_handlers::lsp::RenameInputState>,
+
+    /// In-flight `textDocument/rename` request issued after the user
+    /// submits the rename input. Polled by
+    /// [`action_handlers::lsp::pump_lsp_rename`]; on `Ready(Some(edit))`
+    /// the edit is applied via
+    /// [`crate::lsp::edit_apply::apply_workspace_edit`].
+    pub(crate) pending_rename: Option<stoat_scheduler::Task<Option<lsp_types::WorkspaceEdit>>>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -362,6 +381,9 @@ impl Stoat {
             pending_code_action_request: None,
             pending_code_action_picker: None,
             pending_code_action_resolve: None,
+            pending_prepare_rename: None,
+            rename_input: None,
+            pending_rename: None,
         }
     }
 
@@ -1162,6 +1184,7 @@ impl Stoat {
         let mut dispatched_action = false;
         let mut dispatched_hover = false;
         let mut dispatched_code_action = false;
+        let mut dispatched_rename_symbol = false;
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
@@ -1175,6 +1198,9 @@ impl Stoat {
             }
             if ra.name == "CodeAction" {
                 dispatched_code_action = true;
+            }
+            if ra.name == "RenameSymbol" {
+                dispatched_rename_symbol = true;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {
                 dispatched_action = true;
@@ -1195,6 +1221,9 @@ impl Stoat {
             if !dispatched_code_action {
                 self.pending_code_action_picker = None;
                 self.pending_code_action_request = None;
+            }
+            if !dispatched_rename_symbol {
+                self.pending_prepare_rename = None;
             }
         }
         effect
@@ -1921,6 +1950,8 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_hover(self);
         action_handlers::lsp::pump_lsp_code_actions(self);
         action_handlers::lsp::pump_lsp_code_action_resolve(self);
+        action_handlers::lsp::pump_lsp_prepare_rename(self);
+        action_handlers::lsp::pump_lsp_rename(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf

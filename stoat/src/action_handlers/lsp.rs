@@ -18,10 +18,10 @@ pub(crate) use lsp_types::Uri;
 use lsp_types::{
     CodeActionContext, CodeActionOrCommand, CodeActionParams, DidChangeTextDocumentParams,
     DidOpenTextDocumentParams, GotoDefinitionParams, GotoDefinitionResponse, HoverContents,
-    HoverParams, MarkedString, Position, Range, TextDocumentContentChangeEvent,
-    TextDocumentIdentifier, TextDocumentItem, TextDocumentPositionParams,
-    TextDocumentSyncCapability, TextDocumentSyncKind, VersionedTextDocumentIdentifier,
-    WorkspaceEdit,
+    HoverParams, MarkedString, Position, PrepareRenameResponse, Range, RenameParams,
+    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
+    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    VersionedTextDocumentIdentifier, WorkDoneProgressParams, WorkspaceEdit,
 };
 use std::{
     future::Future,
@@ -971,6 +971,243 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
         },
     }
     true
+}
+
+/// Resolved prepare-rename payload carried from the spawned task to
+/// [`pump_lsp_prepare_rename`]. Captures both the symbol byte range
+/// (so submit can build a `RenameParams` with the right position) and
+/// the placeholder text seeded into the input modal.
+#[derive(Debug, Clone)]
+pub(crate) struct RenamePrep {
+    pub(crate) source_uri: Uri,
+    pub(crate) symbol_position: Position,
+    pub(crate) placeholder: String,
+}
+
+/// Open input-modal state for the rename flow. Carries the
+/// [`crate::input_view::InputView`] so render can paint the
+/// embedded editor and submit can read the typed name; carries
+/// the symbol's URI and request position so submit can build the
+/// `RenameParams` without touching the editor again. `previous_mode`
+/// restores the pre-rename mode on cancel.
+#[derive(Debug)]
+pub(crate) struct RenameInputState {
+    pub(crate) input: crate::input_view::InputView,
+    pub(crate) source_uri: Uri,
+    pub(crate) symbol_position: Position,
+    pub(crate) anchor_offset: usize,
+    pub(crate) previous_mode: String,
+}
+
+/// Issue a `textDocument/prepareRename` request for the symbol under
+/// the focused editor's primary cursor. The async response is stored
+/// on [`Stoat::pending_prepare_rename`] and applied by
+/// [`pump_lsp_prepare_rename`] on the next render tick.
+///
+/// No-op when the focused pane is not an editor, the buffer has no
+/// path, or the server does not advertise
+/// [`LanguageServerFeature::RenameSymbol`].
+pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
+    if !stoat
+        .lsp_host
+        .supports_feature(LanguageServerFeature::RenameSymbol)
+    {
+        return UpdateEffect::None;
+    }
+
+    let encoding = stoat.lsp_host.offset_encoding();
+    let (cursor_offset, buffer_id, source_rope) = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buf_snap.resolve_anchor(&head);
+        (offset, editor.buffer_id, buf_snap.rope().clone())
+    };
+
+    let Some(source_path) = stoat
+        .active_workspace()
+        .buffers
+        .path_for(buffer_id)
+        .map(Path::to_path_buf)
+    else {
+        return UpdateEffect::None;
+    };
+    let Some(source_uri) = path_to_uri(&source_path) else {
+        return UpdateEffect::None;
+    };
+
+    let position = crate::lsp::util::byte_offset_to_lsp_pos(&source_rope, cursor_offset, encoding);
+
+    let params = TextDocumentPositionParams {
+        text_document: TextDocumentIdentifier {
+            uri: source_uri.clone(),
+        },
+        position,
+    };
+
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        let response = match lsp.prepare_rename(params).await {
+            Ok(Some(resp)) => resp,
+            Ok(None) => return None,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "prepare_rename request failed");
+                return None;
+            },
+        };
+        let placeholder = match response {
+            PrepareRenameResponse::Range(range) => {
+                let start_off =
+                    crate::lsp::util::lsp_pos_to_byte_offset(&source_rope, range.start, encoding);
+                let end_off =
+                    crate::lsp::util::lsp_pos_to_byte_offset(&source_rope, range.end, encoding);
+                source_rope.slice(start_off..end_off).to_string()
+            },
+            PrepareRenameResponse::RangeWithPlaceholder { placeholder, .. } => placeholder,
+            PrepareRenameResponse::DefaultBehavior { .. } => String::new(),
+        };
+        Some(RenamePrep {
+            source_uri,
+            symbol_position: position,
+            placeholder,
+        })
+    });
+    stoat.pending_prepare_rename = Some(task);
+    UpdateEffect::None
+}
+
+/// Poll any in-flight prepare-rename task and, on `Ready(Some)`, open
+/// the input modal seeded with the placeholder text. Transitions
+/// [`Stoat::mode`] to "prompt" so typing routes through
+/// `handle_insert_key` into the modal's [`crate::input_view::InputView`].
+pub(crate) fn pump_lsp_prepare_rename(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_prepare_rename.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(prep)) => {
+            let anchor_offset = {
+                let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+                    return true;
+                };
+                let snapshot = editor.display_map.snapshot();
+                let buf_snap = snapshot.buffer_snapshot();
+                let head = editor.selections.newest_anchor().head();
+                buf_snap.resolve_anchor(&head)
+            };
+            let previous_mode = stoat.mode.clone();
+            let executor = stoat.executor.clone();
+            let ws = stoat.active_workspace_mut();
+            let input = crate::input_view::InputView::create(
+                ws,
+                executor,
+                crate::input_view::SubmitTarget::RenameSymbol,
+                &prep.placeholder,
+                "prompt",
+                1,
+            );
+            stoat.rename_input = Some(RenameInputState {
+                input,
+                source_uri: prep.source_uri,
+                symbol_position: prep.symbol_position,
+                anchor_offset,
+                previous_mode,
+            });
+            stoat.mode = "prompt".into();
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_prepare_rename = Some(task);
+            false
+        },
+    }
+}
+
+/// Submit the rename input: read the typed text, fire
+/// `textDocument/rename`, and tear down the modal. Returns true when
+/// the modal was open (so the caller can short-circuit other submit
+/// branches).
+pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
+    let Some(rename_state) = stoat.rename_input.take() else {
+        return false;
+    };
+    let new_name = rename_state.input.text(stoat.active_workspace());
+    let previous_mode = rename_state.previous_mode.clone();
+    let ws = stoat.active_workspace_mut();
+    rename_state.input.dispose(ws);
+    stoat.mode = previous_mode;
+
+    if new_name.is_empty() {
+        return true;
+    }
+
+    let params = RenameParams {
+        text_document_position: TextDocumentPositionParams {
+            text_document: TextDocumentIdentifier {
+                uri: rename_state.source_uri,
+            },
+            position: rename_state.symbol_position,
+        },
+        new_name,
+        work_done_progress_params: WorkDoneProgressParams::default(),
+    };
+    let lsp = stoat.lsp_host.clone();
+    let task = stoat.executor.spawn(async move {
+        match lsp.rename(params).await {
+            Ok(edit) => edit,
+            Err(err) => {
+                tracing::warn!(target: "stoat::lsp", ?err, "rename request failed");
+                None
+            },
+        }
+    });
+    stoat.pending_rename = Some(task);
+    true
+}
+
+/// Cancel the rename input modal without firing rename. Restores the
+/// previous mode and disposes the embedded input.
+pub(crate) fn rename_input_cancel(stoat: &mut Stoat) -> bool {
+    let Some(rename_state) = stoat.rename_input.take() else {
+        return false;
+    };
+    let previous_mode = rename_state.previous_mode.clone();
+    let ws = stoat.active_workspace_mut();
+    rename_state.input.dispose(ws);
+    stoat.mode = previous_mode;
+    true
+}
+
+/// Poll any in-flight rename task and apply its [`WorkspaceEdit`].
+pub(crate) fn pump_lsp_rename(stoat: &mut Stoat) -> bool {
+    let Some(mut task) = stoat.pending_rename.take() else {
+        return false;
+    };
+    let waker = futures::task::noop_waker();
+    let mut cx = Context::from_waker(&waker);
+    match Pin::new(&mut task).poll(&mut cx) {
+        Poll::Ready(Some(edit)) => {
+            if let Err(err) = crate::lsp::edit_apply::apply_workspace_edit(stoat, edit) {
+                tracing::warn!(
+                    target: "stoat::lsp",
+                    ?err,
+                    "rename workspace edit failed to apply",
+                );
+            }
+            true
+        },
+        Poll::Ready(None) => true,
+        Poll::Pending => {
+            stoat.pending_rename = Some(task);
+            false
+        },
+    }
 }
 
 /// Poll any in-flight LSP jump request ([`Stoat::pending_lsp_jump`])
@@ -2132,5 +2369,214 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CodeAction);
         h.settle();
         h.assert_snapshot("snapshot_code_action_picker");
+    }
+
+    fn enable_rename(h: &TestHarness) {
+        use lsp_types::{OneOf, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            rename_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+    }
+
+    #[allow(clippy::mutable_key_type)]
+    fn rename_workspace_edit(
+        file: &str,
+        line: u32,
+        col: u32,
+        len: u32,
+        new: &str,
+    ) -> lsp_types::WorkspaceEdit {
+        use lsp_types::{Position as LspPosition, Range as LspRange, TextEdit, Uri, WorkspaceEdit};
+        use std::{collections::HashMap, str::FromStr};
+        let uri = Uri::from_str(&format!("file://{file}")).expect("uri");
+        let edit = TextEdit {
+            range: LspRange::new(
+                LspPosition::new(line, col),
+                LspPosition::new(line, col + len),
+            ),
+            new_text: new.to_string(),
+        };
+        let mut changes: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
+        changes.insert(uri, vec![edit]);
+        WorkspaceEdit {
+            changes: Some(changes),
+            document_changes: None,
+            change_annotations: None,
+        }
+    }
+
+    #[test]
+    fn rename_unsupported_capability_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
+        h.settle();
+        assert!(h.stoat.rename_input.is_none());
+        assert!(h.stoat.pending_prepare_rename.is_none());
+    }
+
+    #[test]
+    fn rename_no_response_does_not_open_modal() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("main.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
+        h.settle();
+        assert!(h.stoat.rename_input.is_none());
+    }
+
+    #[test]
+    fn rename_range_response_seeds_placeholder_from_rope() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::Range(LspRange::new(
+                LspPosition::new(0, 3),
+                LspPosition::new(0, 6),
+            )),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
+        h.settle();
+        let modal = h.stoat.rename_input.as_ref().expect("modal open");
+        assert_eq!(modal.input.text(h.stoat.active_workspace()), "foo");
+        assert_eq!(h.stoat.mode, "prompt");
+    }
+
+    #[test]
+    fn rename_with_placeholder_form() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::RangeWithPlaceholder {
+                range: LspRange::new(LspPosition::new(0, 3), LspPosition::new(0, 6)),
+                placeholder: "Renamed".to_string(),
+            },
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
+        h.settle();
+        let modal = h.stoat.rename_input.as_ref().expect("modal open");
+        assert_eq!(modal.input.text(h.stoat.active_workspace()), "Renamed");
+    }
+
+    #[test]
+    fn rename_submit_applies_workspace_edit() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::Range(LspRange::new(
+                LspPosition::new(0, 3),
+                LspPosition::new(0, 6),
+            )),
+        );
+        h.fake_lsp().set_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            rename_workspace_edit(path.to_str().unwrap(), 0, 3, 3, "bar"),
+        );
+        h.type_keys("space l r");
+        h.settle();
+        assert!(h.stoat.rename_input.is_some());
+        crate::action_handlers::lsp::rename_input_submit(&mut h.stoat);
+        h.settle();
+        assert!(h.stoat.rename_input.is_none());
+        assert_eq!(buffer_text(&h, &path), "fn bar() {}\n");
+    }
+
+    #[test]
+    fn rename_cancel_discards_modal() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::Range(LspRange::new(
+                LspPosition::new(0, 3),
+                LspPosition::new(0, 6),
+            )),
+        );
+        h.type_keys("space l r");
+        h.settle();
+        assert!(h.stoat.rename_input.is_some());
+        let cancelled = crate::action_handlers::lsp::rename_input_cancel(&mut h.stoat);
+        assert!(cancelled);
+        assert!(h.stoat.rename_input.is_none());
+        assert_eq!(buffer_text(&h, &path), "fn foo() {}\n");
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn space_l_r_triggers_rename() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(80, 24);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::Range(LspRange::new(
+                LspPosition::new(0, 3),
+                LspPosition::new(0, 6),
+            )),
+        );
+        h.type_keys("space l r");
+        h.settle();
+        let modal = h.stoat.rename_input.as_ref().expect("modal open");
+        assert_eq!(modal.input.text(h.stoat.active_workspace()), "foo");
+        assert_eq!(h.stoat.mode, "prompt");
+    }
+
+    #[test]
+    fn snapshot_rename_input_modal() {
+        use lsp_types::{Position as LspPosition, PrepareRenameResponse, Range as LspRange};
+        let mut h = TestHarness::with_size(40, 12);
+        enable_rename(&h);
+        let root = seed(&mut h, &[("main.rs", "fn foo() {}\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp().set_prepare_rename(
+            path.to_str().unwrap(),
+            0,
+            0,
+            PrepareRenameResponse::Range(LspRange::new(
+                LspPosition::new(0, 3),
+                LspPosition::new(0, 6),
+            )),
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::RenameSymbol);
+        h.settle();
+        h.assert_snapshot("snapshot_rename_input");
     }
 }

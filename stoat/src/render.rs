@@ -13,6 +13,7 @@ pub(crate) mod hover;
 pub(crate) mod layout;
 pub(crate) mod pane;
 pub(crate) mod rebase;
+pub(crate) mod rename_input;
 pub(crate) mod review;
 pub(crate) mod reword;
 pub(crate) mod run_pane;
@@ -228,6 +229,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
     }
     hover::render_hover(stoat, buf);
     code_action::render_code_action(stoat, buf);
+    rename_input::render_rename_input(stoat, buf);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
     badges::render_badges(
         &ws.badges,

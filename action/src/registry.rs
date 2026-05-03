@@ -46,7 +46,7 @@ use crate::{
         },
         lsp::{
             CodeAction, GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
-            GotoTypeDefinition, Hover,
+            GotoTypeDefinition, Hover, RenameSymbol,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -162,6 +162,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(Hover::DEF, |_| Ok(Box::new(Hover)));
     add(CodeAction::DEF, |_| Ok(Box::new(CodeAction)));
+    add(RenameSymbol::DEF, |_| Ok(Box::new(RenameSymbol)));
     add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
     add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
     add(ReviewStageChunk::DEF, |_| Ok(Box::new(ReviewStageChunk)));
@@ -570,6 +571,7 @@ mod tests {
         "GotoImplementation",
         "Hover",
         "CodeAction",
+        "RenameSymbol",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -792,7 +794,8 @@ mod tests {
         // + 1 GotoImplementation.
         // + 1 Hover.
         // + 1 CodeAction.
-        assert_eq!(all().count(), 222);
+        // + 1 RenameSymbol.
+        assert_eq!(all().count(), 223);
     }
 
     #[test]
