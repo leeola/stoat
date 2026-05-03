@@ -36,12 +36,9 @@ pub(crate) fn execute_mark(stoat: &mut Stoat, request: MarkRequest, ch: char) ->
             let Some(editor) = focused_editor_mut(stoat) else {
                 return UpdateEffect::None;
             };
-            let snapshot = editor.display_map.snapshot();
-            let buf_snap = snapshot.buffer_snapshot();
             let head = editor.selections.newest_anchor().head();
-            let offset = buf_snap.resolve_anchor(&head);
             let buffer_id = editor.buffer_id;
-            stoat.marks.insert((buffer_id, ch), offset);
+            stoat.marks.insert((buffer_id, ch), head);
             UpdateEffect::Redraw
         },
         MarkRequest::GotoLine | MarkRequest::GotoExact => {
@@ -49,16 +46,17 @@ pub(crate) fn execute_mark(stoat: &mut Stoat, request: MarkRequest, ch: char) ->
             let Some(buffer_id) = buffer_id else {
                 return UpdateEffect::None;
             };
-            let Some(&stored_offset) = stoat.marks.get(&(buffer_id, ch)) else {
+            let Some(&stored_anchor) = stoat.marks.get(&(buffer_id, ch)) else {
                 return UpdateEffect::None;
             };
+            let editor = focused_editor_mut(stoat).expect("buffer present above");
+            let snapshot = editor.display_map.snapshot();
+            let buf_snap = snapshot.buffer_snapshot();
+            let rope = buf_snap.rope();
+            let stored_offset = buf_snap.resolve_anchor(&stored_anchor);
             let target = match request {
                 MarkRequest::GotoExact => stored_offset,
                 MarkRequest::GotoLine => {
-                    let editor = focused_editor_mut(stoat).expect("buffer present above");
-                    let snapshot = editor.display_map.snapshot();
-                    let buf_snap = snapshot.buffer_snapshot();
-                    let rope = buf_snap.rope();
                     let clamped = stored_offset.min(rope.len());
                     let row = rope.offset_to_point(clamped).row;
                     rope.point_to_offset(Point::new(row, 0))
@@ -153,5 +151,23 @@ mod tests {
         assert_eq!(h.stoat.pending_mark, Some(MarkRequest::Set));
         h.type_keys("escape");
         assert!(h.stoat.pending_mark.is_none());
+    }
+
+    #[test]
+    fn mark_survives_edit_before_position() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveDown);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::MoveRight);
+        assert_eq!(cursor_offset(&mut h), 5);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SetMark);
+        h.type_keys("a");
+
+        h.edit_focused(0..0, "// ");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action::GotoMarkExact);
+        h.type_keys("a");
+        assert_eq!(cursor_offset(&mut h), 8);
     }
 }

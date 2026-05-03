@@ -93,11 +93,11 @@ pub struct Stoat {
     /// to the named mark per [`action_handlers::marks::execute_mark`]
     /// and clears this field. A non-char keypress also clears it.
     pub(crate) pending_mark: Option<action_handlers::marks::MarkRequest>,
-    /// Buffer-local marks keyed by `(BufferId, char)` -> byte offset.
-    /// Stored offsets are not anchor-tracked: edits to the buffer do
-    /// not update the offset, so the mark may point to different
-    /// content after edits.
-    pub(crate) marks: std::collections::HashMap<(BufferId, char), usize>,
+    /// Buffer-local marks keyed by `(BufferId, char)` -> stable
+    /// [`Anchor`]. Anchors resolve to the current byte offset through
+    /// the fragment tree, so edits before a mark move it with the
+    /// surrounding content.
+    pub(crate) marks: std::collections::HashMap<(BufferId, char), stoat_text::Anchor>,
     /// Active label set for an in-progress `goto_word` jump. `Some`
     /// after `GotoWord` is dispatched until the user types a unique
     /// label or types a non-matching prefix. Renderer overlays the
