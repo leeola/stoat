@@ -53,26 +53,34 @@ impl KeymapState for StoatKeymapState {
     }
 }
 
-/// Collapse Shift+letter events onto the bare uppercase form so keymap bindings
-/// written as `A` or `S-a` both match what terminals emit.
+/// Strip the `SHIFT` modifier from events where it duplicates information
+/// already carried by the keycode, so bindings written without an explicit
+/// `S-` prefix still match what the terminal emits.
 ///
 /// Default crossterm without the kitty keyboard protocol reports Shift+a as
-/// `(Char('A'), SHIFT)`, but a binding written as `A` compiles to
-/// `(Char('A'), NONE)`, and modifier comparison is strict. Normalizing the
-/// event up-front keeps bindings terminal-agnostic.
-pub(crate) fn normalize_shift_letter(key: KeyEvent) -> KeyEvent {
+/// `(Char('A'), SHIFT)` and Shift-Tab (CSI Z) as `(BackTab, SHIFT)`, but
+/// bindings written as `A` or `BackTab` compile to `(_, NONE)` and modifier
+/// comparison in [`crate::keymap::CompiledKey::matches`] is strict. For
+/// `Char(letter)` the uppercase code already encodes Shift; for `BackTab`
+/// the keycode itself is the Shift-Tab variant. In both cases the SHIFT
+/// modifier is redundant, so dropping it up-front keeps bindings
+/// terminal-agnostic.
+pub(crate) fn normalize_shift_event(key: KeyEvent) -> KeyEvent {
     if !key.modifiers.contains(KeyModifiers::SHIFT) {
         return key;
     }
-    let KeyCode::Char(ch) = key.code else {
-        return key;
+    let new_code = match key.code {
+        KeyCode::Char(ch) if ch.is_ascii_alphabetic() => KeyCode::Char(ch.to_ascii_uppercase()),
+        KeyCode::BackTab => KeyCode::BackTab,
+        _ => return key,
     };
-    if !ch.is_ascii_alphabetic() {
-        return key;
-    }
     let mut modifiers = key.modifiers;
     modifiers.remove(KeyModifiers::SHIFT);
-    KeyEvent::new(KeyCode::Char(ch.to_ascii_uppercase()), modifiers)
+    KeyEvent {
+        code: new_code,
+        modifiers,
+        ..key
+    }
 }
 
 pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {

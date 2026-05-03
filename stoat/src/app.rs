@@ -12,7 +12,7 @@ use crate::{
         EnvHost, FsHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopLsp,
     },
     keymap::{Keymap, ResolvedAction},
-    keymap_state::{normalize_shift_letter, resolve_action, StoatKeymapState},
+    keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
     pane::{FocusTarget, View},
     rebase::RebasePause,
     run::{GridSelection, PtyNotification, RunId},
@@ -1109,7 +1109,7 @@ impl Stoat {
             return UpdateEffect::Quit;
         }
 
-        let key = normalize_shift_letter(key);
+        let key = normalize_shift_event(key);
 
         if let Some(run_id) = self.modal_run {
             let finished = self
