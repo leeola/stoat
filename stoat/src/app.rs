@@ -98,6 +98,12 @@ pub struct Stoat {
     /// the fragment tree, so edits before a mark move it with the
     /// surrounding content.
     pub(crate) marks: std::collections::HashMap<(BufferId, char), stoat_text::Anchor>,
+    /// Global marks keyed by uppercase char -> `(path, byte offset)`.
+    /// Cross-buffer: `goto` opens the file in the focused pane and
+    /// seeks to the stored offset. Offsets are not anchor-tracked --
+    /// `Anchor`s tie to a buffer session, while global marks must
+    /// survive buffer close+reopen.
+    pub(crate) global_marks: std::collections::HashMap<char, (PathBuf, usize)>,
     /// Active label set for an in-progress `goto_word` jump. `Some`
     /// after `GotoWord` is dispatched until the user types a unique
     /// label or types a non-matching prefix. Renderer overlays the
@@ -400,6 +406,7 @@ impl Stoat {
             pending_find: None,
             pending_mark: None,
             marks: std::collections::HashMap::new(),
+            global_marks: std::collections::HashMap::new(),
             pending_goto_word: None,
             pending_goto_word_input: String::new(),
             pending_replace: false,
