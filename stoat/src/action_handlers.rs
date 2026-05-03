@@ -377,6 +377,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 UpdateEffect::None
             }
         },
+        ActionKind::GotoNextDiagnostic => {
+            lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Next)
+        },
+        ActionKind::GotoPrevDiagnostic => {
+            lsp::goto_diagnostic(stoat, lsp::DiagnosticDirection::Prev)
+        },
         ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
         ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
         ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),

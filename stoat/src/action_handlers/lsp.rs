@@ -24,6 +24,60 @@ use stoat_text::{patch::Patch, Rope};
 /// of LSP traffic.
 pub(crate) const LSP_DID_CHANGE_DEBOUNCE: Duration = Duration::from_millis(50);
 
+/// Direction for [`goto_diagnostic`]. `Next` searches forward from
+/// the cursor's byte offset; `Prev` searches backward. Neither
+/// wraps when the search exhausts.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum DiagnosticDirection {
+    Next,
+    Prev,
+}
+
+/// Move the focused editor's primary cursor to the next or previous
+/// LSP diagnostic for that buffer. No-op when the focused pane is
+/// not an editor, the buffer has no path, or no diagnostic lies in
+/// the requested direction.
+pub(crate) fn goto_diagnostic(
+    stoat: &mut Stoat,
+    direction: DiagnosticDirection,
+) -> crate::app::UpdateEffect {
+    let encoding = stoat.lsp_host.offset_encoding();
+    let (cursor_offset, buffer_id, rope) = {
+        let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
+            return crate::app::UpdateEffect::None;
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        let offset = buffer_snapshot.resolve_anchor(&head);
+        (offset, editor.buffer_id, buffer_snapshot.rope().clone())
+    };
+
+    let path = match stoat.active_workspace().buffers.path_for(buffer_id) {
+        Some(p) => p.to_path_buf(),
+        None => return crate::app::UpdateEffect::None,
+    };
+
+    let mut offsets: Vec<usize> = stoat
+        .diagnostics
+        .get(&path)
+        .iter()
+        .map(|d| crate::lsp::util::lsp_pos_to_byte_offset(&rope, d.range.start, encoding))
+        .collect();
+    offsets.sort_unstable();
+
+    let target = match direction {
+        DiagnosticDirection::Next => offsets.into_iter().find(|&o| o > cursor_offset),
+        DiagnosticDirection::Prev => offsets.into_iter().rev().find(|&o| o < cursor_offset),
+    };
+
+    let Some(target) = target else {
+        return crate::app::UpdateEffect::None;
+    };
+
+    crate::action_handlers::movement::jump_to_offset(stoat, target)
+}
+
 /// Notify the workspace's LSP host that `buffer_id` was just opened.
 /// No-op when `buffer_id` is already in [`Stoat::lsp_opened`]; that
 /// dedupes the second `OpenFile` of an already-loaded buffer (which
@@ -620,5 +674,110 @@ mod tests {
             baseline,
             "no edit since last delivery -> no new dispatch",
         );
+    }
+
+    fn diag(line: u32, col: u32, message: &str) -> lsp_types::Diagnostic {
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+        Diagnostic {
+            range: Range::new(Position::new(line, col), Position::new(line, col + 1)),
+            severity: Some(DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: None,
+            message: message.to_string(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    fn cursor_offset(h: &mut TestHarness) -> usize {
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buffer_snapshot = snapshot.buffer_snapshot();
+        let head = editor.selections.newest_anchor().head();
+        buffer_snapshot.resolve_anchor(&head)
+    }
+
+    #[test]
+    fn goto_next_diagnostic_jumps_forward() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 4);
+    }
+
+    #[test]
+    fn goto_next_diagnostic_steps_through_each() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(1, 0, "first"), diag(2, 0, "second")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 4);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 8);
+    }
+
+    #[test]
+    fn goto_next_diagnostic_no_op_after_last() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(0, 0, "only")]);
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 11);
+    }
+
+    #[test]
+    fn goto_prev_diagnostic_jumps_backward() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(0, 0, "first"), diag(2, 0, "third")]);
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 11);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 8);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 0);
+    }
+
+    #[test]
+    fn goto_prev_diagnostic_no_op_before_first() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("a.rs");
+        open_buffer(&mut h, path.clone());
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(2, 0, "only")]);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 0);
+    }
+
+    #[test]
+    fn goto_diagnostic_no_op_with_empty_diagnostics() {
+        let mut h = TestHarness::with_size(80, 24);
+        let root = seed(&mut h, &[("a.rs", "abc\n")]);
+        open_buffer(&mut h, root.join("a.rs"));
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 0);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevDiagnostic);
+        assert_eq!(cursor_offset(&mut h), 0);
     }
 }

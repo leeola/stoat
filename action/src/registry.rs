@@ -43,6 +43,7 @@ use crate::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
         },
+        lsp::{GotoNextDiagnostic, GotoPrevDiagnostic},
         palette::OpenCommandPalette,
         pane::{
             CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
@@ -141,6 +142,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(QueryMoveRelationships::DEF, |_| {
         Ok(Box::new(QueryMoveRelationships))
+    });
+    add(GotoNextDiagnostic::DEF, |_| {
+        Ok(Box::new(GotoNextDiagnostic))
+    });
+    add(GotoPrevDiagnostic::DEF, |_| {
+        Ok(Box::new(GotoPrevDiagnostic))
     });
     add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
     add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
@@ -540,6 +547,8 @@ mod tests {
         "JumpToNextMoveSource",
         "JumpToPrevMoveSource",
         "QueryMoveRelationships",
+        "GotoNextDiagnostic",
+        "GotoPrevDiagnostic",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -751,7 +760,8 @@ mod tests {
         // + 1 OpenChangedFilePicker.
         // + 1 OpenBufferPicker.
         // + 1 GotoWord.
-        assert_eq!(all().count(), 212);
+        // + 2 GotoNextDiagnostic / GotoPrevDiagnostic.
+        assert_eq!(all().count(), 214);
     }
 
     #[test]

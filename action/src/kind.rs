@@ -145,6 +145,8 @@ pub enum ActionKind {
     JumpToNextMoveSource,
     JumpToPrevMoveSource,
     QueryMoveRelationships,
+    GotoNextDiagnostic,
+    GotoPrevDiagnostic,
     ReviewNextChunk,
     ReviewPrevChunk,
     ReviewStageChunk,

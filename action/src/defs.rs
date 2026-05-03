@@ -6,6 +6,7 @@ pub mod editor;
 pub mod file;
 pub mod file_finder;
 pub mod help;
+pub mod lsp;
 pub mod palette;
 pub mod pane;
 pub mod prompt;

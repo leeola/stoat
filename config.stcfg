@@ -229,12 +229,14 @@ on key {
         Escape -> SetMode(normal);
         g -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoNextParagraph(), SetMode(normal)];
+        d -> [GotoNextDiagnostic(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == bracket_prev {
         Escape -> SetMode(normal);
         g -> [GotoPrevChange(), SetMode(normal)];
         p -> [GotoPrevParagraph(), SetMode(normal)];
+        d -> [GotoPrevDiagnostic(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == match {
