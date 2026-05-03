@@ -51,3 +51,17 @@ define_action!(
      returns nothing or does not advertise the capability.",
     ActionPriority::Common
 );
+
+define_action!(
+    GotoImplementationDef,
+    GotoImplementation,
+    "GotoImplementation",
+    ActionKind::GotoImplementation,
+    "jump to symbol implementation",
+    "Move the primary cursor to an implementation of the symbol under the \
+     cursor by issuing an LSP `textDocument/implementation` request. \
+     Multi-file targets open the destination file in the focused pane before \
+     jumping. Multiple candidates jump to the first; no-op when the server \
+     returns nothing or does not advertise the capability.",
+    ActionPriority::Common
+);

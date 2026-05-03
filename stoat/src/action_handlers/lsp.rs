@@ -409,6 +409,7 @@ pub(crate) struct JumpTarget {
 pub(crate) enum LspJumpKind {
     Definition,
     TypeDefinition,
+    Implementation,
 }
 
 impl LspJumpKind {
@@ -416,6 +417,7 @@ impl LspJumpKind {
         match self {
             Self::Definition => LanguageServerFeature::GotoDefinition,
             Self::TypeDefinition => LanguageServerFeature::GotoTypeDefinition,
+            Self::Implementation => LanguageServerFeature::GotoImplementation,
         }
     }
 
@@ -423,6 +425,7 @@ impl LspJumpKind {
         match self {
             Self::Definition => "goto_definition",
             Self::TypeDefinition => "goto_type_definition",
+            Self::Implementation => "goto_implementation",
         }
     }
 }
@@ -437,6 +440,12 @@ pub(crate) fn goto_definition(stoat: &mut Stoat) -> UpdateEffect {
 /// the focused editor's primary cursor. Thin wrapper over [`lsp_jump`].
 pub(crate) fn goto_type_definition(stoat: &mut Stoat) -> UpdateEffect {
     lsp_jump(stoat, LspJumpKind::TypeDefinition)
+}
+
+/// Issue a `textDocument/implementation` request for the symbol under
+/// the focused editor's primary cursor. Thin wrapper over [`lsp_jump`].
+pub(crate) fn goto_implementation(stoat: &mut Stoat) -> UpdateEffect {
+    lsp_jump(stoat, LspJumpKind::Implementation)
 }
 
 /// Issue an LSP jump-style request (definition / type definition /
@@ -495,6 +504,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
         let result = match kind {
             LspJumpKind::Definition => lsp.goto_definition(params).await,
             LspJumpKind::TypeDefinition => lsp.goto_type_definition(params).await,
+            LspJumpKind::Implementation => lsp.goto_implementation(params).await,
         };
         let response = match result {
             Ok(Some(resp)) => resp,
@@ -1241,6 +1251,104 @@ mod tests {
             0,
         );
         h.type_keys("space l k");
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
+    fn enable_goto_implementation(h: &TestHarness) {
+        use lsp_types::{ImplementationProviderCapability, ServerCapabilities};
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            implementation_provider: Some(ImplementationProviderCapability::Simple(true)),
+            ..Default::default()
+        });
+    }
+
+    #[test]
+    fn goto_implementation_jumps_within_same_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_implementation(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_implementation_opens_target_file() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_implementation(&h);
+        let root = seed(
+            &mut h,
+            &[
+                ("trait.rs", "trait X {}\n"),
+                ("impl.rs", "impl X for One {}\nimpl X for Two {}\n"),
+            ],
+        );
+        let trait_path = root.join("trait.rs");
+        let impl_path = root.join("impl.rs");
+        open_buffer(&mut h, trait_path.clone());
+        h.fake_lsp().set_implementation(
+            trait_path.to_str().unwrap(),
+            0,
+            0,
+            impl_path.to_str().unwrap(),
+            1,
+            5,
+        );
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
+        h.settle();
+        assert_eq!(focused_buffer_path(&h), impl_path);
+        assert_eq!(cursor_offset(&mut h), 23);
+    }
+
+    #[test]
+    fn goto_implementation_no_result_is_noop() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_implementation(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 0);
+        assert_eq!(focused_buffer_path(&h), path);
+    }
+
+    #[test]
+    fn goto_implementation_unsupported_capability_is_noop() {
+        use lsp_types::{OneOf, ServerCapabilities};
+        let mut h = TestHarness::with_size(80, 24);
+        h.fake_lsp().set_capabilities(ServerCapabilities {
+            definition_provider: Some(OneOf::Left(true)),
+            ..Default::default()
+        });
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 0, 2);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoImplementation);
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 0);
+        assert!(h.stoat.pending_lsp_jump.is_none());
+    }
+
+    #[test]
+    fn space_l_t_jumps_to_implementation() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_implementation(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+        h.type_keys("space l t");
         h.settle();
         assert_eq!(cursor_offset(&mut h), 8);
         assert_eq!(h.stoat.mode, "normal");

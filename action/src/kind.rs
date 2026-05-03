@@ -152,6 +152,7 @@ pub enum ActionKind {
     GotoPrevDiagnostic,
     GotoDefinition,
     GotoTypeDefinition,
+    GotoImplementation,
     ReviewNextChunk,
     ReviewPrevChunk,
     ReviewStageChunk,

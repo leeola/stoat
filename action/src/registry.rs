@@ -44,7 +44,10 @@ use crate::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
         },
-        lsp::{GotoDefinition, GotoNextDiagnostic, GotoPrevDiagnostic, GotoTypeDefinition},
+        lsp::{
+            GotoDefinition, GotoImplementation, GotoNextDiagnostic, GotoPrevDiagnostic,
+            GotoTypeDefinition,
+        },
         palette::OpenCommandPalette,
         pane::{
             CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
@@ -153,6 +156,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoDefinition::DEF, |_| Ok(Box::new(GotoDefinition)));
     add(GotoTypeDefinition::DEF, |_| {
         Ok(Box::new(GotoTypeDefinition))
+    });
+    add(GotoImplementation::DEF, |_| {
+        Ok(Box::new(GotoImplementation))
     });
     add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
     add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
@@ -559,6 +565,7 @@ mod tests {
         "GotoPrevDiagnostic",
         "GotoDefinition",
         "GotoTypeDefinition",
+        "GotoImplementation",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -778,7 +785,8 @@ mod tests {
         // + 1 ReplaceChar.
         // + 1 GotoDefinition.
         // + 1 GotoTypeDefinition.
-        assert_eq!(all().count(), 219);
+        // + 1 GotoImplementation.
+        assert_eq!(all().count(), 220);
     }
 
     #[test]

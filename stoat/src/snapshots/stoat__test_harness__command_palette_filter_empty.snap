@@ -13,6 +13,7 @@ size: 80x24
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[30m[46m GotoDefinition      jump to symbol definition                            [0m[35m│[0m
+  [0m[35m│[0m[97m GotoImplementation  [0m[90mjump to symbol implementation[0m[97m                        [0m[35m│[0m
   [0m[35m│[0m[97m GotoTypeDefinition  [0m[90mjump to type definition[0m[97m                              [0m[35m│[0m
   [0m[35m│[0m[97m NewWorkspace        [0m[90mcreate a new workspace[0m[97m                               [0m[35m│[0m
   [0m[35m│[0m[97m OpenClaude          [0m[90mopen claude chat[0m[97m                                     [0m[35m│[0m
@@ -21,7 +22,6 @@ size: 80x24
   [0m[35m│[0m[97m OpenReview          [0m[90mreview changed files[0m[97m                                 [0m[35m│[0m
   [0m[35m│[0m[97m OpenRun             [0m[90mopen terminal[0m[97m                                        [0m[35m│[0m
   [0m[35m│[0m[97m Quit                [0m[90mclose pane or exit[0m[97m                                   [0m[35m│[0m
-  [0m[35m│[0m[97m QuitAll             [0m[90mexit stoat, closing all panes[0m[97m                        [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[37mMove the primary cursor to the definition of the symbol under the cursor[0m  [0m[35m│[0m
   [0m[35m│[0m[37mby issuing an LSP `textDocument/definition` request. Multi-file targets[0m   [0m[35m│[0m
