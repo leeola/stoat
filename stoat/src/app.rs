@@ -2312,4 +2312,35 @@ mod tests {
         h.type_keys("alt-backspace");
         assert_eq!(buffer_text(&h, &path), "alpha beta ");
     }
+
+    #[test]
+    fn append_advances_one_char_then_inserts() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n");
+        h.type_keys("a");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "aXbc\n");
+    }
+
+    #[test]
+    fn shift_i_jumps_to_first_nonwhitespace_then_inserts() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "    code\n");
+        h.type_keys("l");
+        h.type_keys("I");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("X");
+        assert_eq!(buffer_text(&h, &path), "    Xcode\n");
+    }
+
+    #[test]
+    fn shift_a_jumps_to_line_end_then_inserts() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\nxyz\n");
+        h.type_keys("A");
+        assert_eq!(h.stoat.mode, "insert");
+        h.type_text("Z");
+        assert_eq!(buffer_text(&h, &path), "abcZ\nxyz\n");
+    }
 }

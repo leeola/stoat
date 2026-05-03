@@ -138,6 +138,9 @@ on key {
         Space -> SetMode(space);
         : -> OpenCommandPalette();
         i -> SetMode(insert);
+        a -> [MoveRight(), SetMode(insert)];
+        I -> [GotoFirstNonwhitespace(), SetMode(insert)];
+        A -> [GotoLineEnd(), SetMode(insert)];
         v -> SetMode(select);
         C -> AddSelectionBelow();
         Alt-C -> AddSelectionAbove();
