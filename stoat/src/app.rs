@@ -1031,6 +1031,14 @@ impl Stoat {
                 self.editor_delete_word_backward(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
             },
+            KeyCode::Tab if key.modifiers.is_empty() => {
+                if self.cursor_after_only_whitespace(editor_id, buffer_id) {
+                    self.editor_insert(editor_id, buffer_id, "\t");
+                    Some(UpdateEffect::Redraw)
+                } else {
+                    None
+                }
+            },
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
             {
@@ -1084,6 +1092,30 @@ impl Stoat {
             },
             _ => None,
         }
+    }
+
+    fn cursor_after_only_whitespace(&mut self, editor_id: EditorId, buffer_id: BufferId) -> bool {
+        let ws = self.active_workspace_mut();
+        let Some(editor) = ws.editors.get_mut(editor_id) else {
+            return false;
+        };
+        if ws.buffers.get(buffer_id).is_none() {
+            return false;
+        }
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        let rope = buf_snapshot.rope();
+        for ch in rope.reversed_chars_at(offset) {
+            if ch == '\n' {
+                return true;
+            }
+            if !ch.is_whitespace() {
+                return false;
+            }
+        }
+        true
     }
 
     fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
@@ -2439,5 +2471,32 @@ mod tests {
         h.type_keys("r");
         h.type_text("é");
         assert_eq!(buffer_text(&h, &path), "ééc");
+    }
+
+    #[test]
+    fn tab_at_line_start_inserts_tab() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n");
+        h.type_keys("i");
+        h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "\tabc\n");
+    }
+
+    #[test]
+    fn tab_after_whitespace_inserts_tab() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "  abc\n");
+        h.type_keys("l l i");
+        h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "  \tabc\n");
+    }
+
+    #[test]
+    fn tab_after_nonwhitespace_is_noop() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "abc\n");
+        h.type_keys("l l l i");
+        h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
     }
 }
