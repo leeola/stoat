@@ -758,13 +758,16 @@ impl CodeActionEntry {
     }
 }
 
-/// Cursor-anchored code action picker. Painted as a numbered popup;
-/// the user picks with keys `1`..=`9`, dismisses with Escape or any
-/// other action.
+/// Cursor-anchored code action picker. Painted as a numbered popup
+/// over a 9-row viewport that follows [`Self::selected_idx`]; the
+/// user navigates with `j`/`k`, picks the selected entry with Enter,
+/// picks visible entries 1..=9 with the corresponding digit keys,
+/// and dismisses with Escape or any other action.
 #[derive(Debug, Clone)]
 pub(crate) struct CodeActionPicker {
     pub(crate) entries: Vec<CodeActionEntry>,
     pub(crate) anchor_offset: usize,
+    pub(crate) selected_idx: usize,
 }
 
 /// Issue a `textDocument/codeAction` request for the focused editor's
@@ -849,6 +852,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
     stoat.pending_code_action_picker = Some(CodeActionPicker {
         entries: Vec::new(),
         anchor_offset,
+        selected_idx: 0,
     });
     // The picker is reset to an empty list above so a stale popup
     // from a prior request does not persist while the new one is
@@ -2910,6 +2914,39 @@ mod tests {
             observed[0].arguments,
             vec![serde_json::json!({"target": "std::io"})]
         );
+    }
+
+    #[test]
+    fn code_action_navigates_with_jk_and_picks_with_enter() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_code_action(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        let actions: Vec<lsp_types::CodeActionOrCommand> = (0..12)
+            .map(|i| {
+                direct_action(
+                    &format!("Action {i}"),
+                    path.to_str().unwrap(),
+                    0,
+                    0,
+                    &format!("// {i}\n"),
+                )
+            })
+            .collect();
+        h.fake_lsp()
+            .set_code_actions(path.to_str().unwrap(), actions);
+        h.type_keys("space l a");
+        h.settle();
+        for _ in 0..11 {
+            h.type_keys("j");
+        }
+        let picker = h.stoat.pending_code_action_picker.as_ref().expect("picker");
+        assert_eq!(picker.selected_idx, 11);
+
+        h.type_keys("enter");
+        assert!(h.stoat.pending_code_action_picker.is_none());
+        assert_eq!(buffer_text(&h, &path), "// 11\nabc\n");
     }
 
     #[test]
