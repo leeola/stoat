@@ -17,17 +17,17 @@ size: 80x24
   [0m[36m│[0m[97m [0m[36m  ([0m[97m  RotateSelectionsBackward [0m[90m│[0m [0m[97mselect all[0m                               [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m  )[0m[97m  RotateSelectionsForward  [0m[90m│[0m                                          [0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m  ,[0m[97m  KeepPrimarySelection  [0m[90mkee│[0m [0m[97mReplace every selection with a single[0m    [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  0[0m[97m  GotoLineStart  [0m[90mgoto line │[0m [0m[97mselection spanning the entire focused[0m    [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  :[0m[97m  OpenCommandPalette  [0m[90mopen │[0m [0m[97mbuffer.[0m                                  [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  ;[0m[97m  CollapseSelection  [0m[90mcollap│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  <[0m[97m  UnindentSelection  [0m[90muninde│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  =[0m[97m  FormatSelections  [0m[90mformat │[0m [0m[90m  SelectAll()[0m                            [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  >[0m[97m  IndentSelection  [0m[90mindent s│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenHelp  [0m[90mopen the help m│[0m        [0m[33m┌ help ─────────────────────────────┐[0m
-  [0m[36m│[0m[97m [0m[36m  A[0m[97m  GotoLineEnd  [0m[90mgoto line en│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-,[0m[97m  RemovePrimarySelection  [0m[90mr│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-.[0m[97m  RepeatLastMotion  [0m[90mrepeat │[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36mA-;[0m[97m  FlipSelections  [0m[90mflip sele│[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  /[0m[97m  OpenSearchInput  [0m[90mopen for│[0m [0m[97mselection spanning the entire focused[0m    [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  0[0m[97m  GotoLineStart  [0m[90mgoto line │[0m [0m[97mbuffer.[0m                                  [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  :[0m[97m  OpenCommandPalette  [0m[90mopen │[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  ;[0m[97m  CollapseSelection  [0m[90mcollap│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  <[0m[97m  UnindentSelection  [0m[90muninde│[0m [0m[90m  SelectAll()[0m                            [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  =[0m[97m  FormatSelections  [0m[90mformat │[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m [0m[36m  >[0m[97m  IndentSelection  [0m[90mindent s│[0m        [0m[33m┌ help ─────────────────────────────┐[0m
+  [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenHelp  [0m[90mopen the help m│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  A[0m[97m  GotoLineEnd  [0m[90mgoto line en│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36mA-,[0m[97m  RemovePrimarySelection  [0m[90mr│[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36mA-.[0m[97m  RepeatLastMotion  [0m[90mrepeat │[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
   [0m[36m└────────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m[36m────┘[0m [0m[33m│[0m
                                            [0m[33m└───────────────────────────────────┘[0m
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

@@ -211,6 +211,9 @@ on key {
         [ -> SetMode(bracket_prev);
         m -> SetMode(match);
         R -> OpenReview();
+        / -> OpenSearchInput();
+        n -> SearchNext();
+        N -> SearchPrev();
     }
     mode == goto {
         Escape -> SetMode(normal);

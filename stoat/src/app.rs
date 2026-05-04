@@ -138,6 +138,14 @@ pub struct Stoat {
     /// [`action_handlers::surround::execute_surround_delete`].
     /// Non-char keypresses also clear the flag.
     pub(crate) pending_surround_delete: bool,
+    /// Active search input modal. Some while the user is typing a
+    /// `/` (forward) or `?` (reverse) search query; cleared by
+    /// [`action_handlers::search::search_submit`] or
+    /// [`action_handlers::search::search_cancel`].
+    pub(crate) search_input: Option<action_handlers::search::SearchInputState>,
+    /// Persisted query + direction from the most recent submitted
+    /// search. Drives `SearchNext` / `SearchPrev` repeats.
+    pub(crate) last_search: Option<action_handlers::search::LastSearch>,
     /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
@@ -433,6 +441,8 @@ impl Stoat {
             pending_surround_add: false,
             pending_surround_replace: action_handlers::surround::SurroundReplaceStage::Idle,
             pending_surround_delete: false,
+            search_input: None,
+            last_search: None,
             editor_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
@@ -1548,6 +1558,10 @@ impl Stoat {
 
         if let Some(ws_sym) = &self.workspace_symbol_input {
             return Some((ws_sym.input.editor_id, ws_sym.input.buffer_id));
+        }
+
+        if let Some(search) = &self.search_input {
+            return Some((search.input.editor_id, search.input.buffer_id));
         }
 
         if let Some((editor_id, buffer_id)) = ws

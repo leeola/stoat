@@ -14,6 +14,7 @@ mod rebase;
 mod review;
 mod reword;
 mod run;
+pub(crate) mod search;
 pub(crate) mod surround;
 mod workspace;
 
@@ -290,6 +291,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SurroundAdd => surround::surround_add(stoat),
         ActionKind::SurroundReplace => surround::surround_replace(stoat),
         ActionKind::SurroundDelete => surround::surround_delete(stoat),
+        ActionKind::OpenSearchInput => search::open_search_input(stoat),
+        ActionKind::OpenReverseSearchInput => search::open_reverse_search_input(stoat),
+        ActionKind::SearchNext => search::search_next(stoat),
+        ActionKind::SearchPrev => search::search_prev(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => {
             movement::goto_window(stoat, movement::WindowAlign::Top, false)

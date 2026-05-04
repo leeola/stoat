@@ -611,6 +611,46 @@ define_action!(
 );
 
 define_action!(
+    OpenSearchInputDef,
+    OpenSearchInput,
+    "OpenSearchInput",
+    ActionKind::OpenSearchInput,
+    "open forward search input",
+    "Open a one-line input modal for forward in-buffer search. On submit jumps to the first substring match at or after the cursor, wrapping if no match exists ahead. Stores the query and direction for later `SearchNext` / `SearchPrev` to repeat.",
+    ActionPriority::Common
+);
+
+define_action!(
+    OpenReverseSearchInputDef,
+    OpenReverseSearchInput,
+    "OpenReverseSearchInput",
+    ActionKind::OpenReverseSearchInput,
+    "open reverse search input",
+    "Open a one-line input modal for reverse in-buffer search. On submit jumps to the first substring match before the cursor, wrapping if no match exists behind. Stores the query and direction for later `SearchNext` / `SearchPrev` to repeat.",
+    ActionPriority::Common
+);
+
+define_action!(
+    SearchNextDef,
+    SearchNext,
+    "SearchNext",
+    ActionKind::SearchNext,
+    "jump to next match",
+    "Jump every cursor to the next match of the most recently submitted search query, in the direction that search was opened with (`/` -> forward, `?` -> reverse). Wraps around buffer ends. No-op when no search has been run in this session.",
+    ActionPriority::Common
+);
+
+define_action!(
+    SearchPrevDef,
+    SearchPrev,
+    "SearchPrev",
+    ActionKind::SearchPrev,
+    "jump to previous match",
+    "Jump every cursor to the next match in the direction opposite to the last submitted search (`/` makes `N` go backward; `?` makes `N` go forward). Wraps around buffer ends. No-op when no search has been run in this session.",
+    ActionPriority::Common
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

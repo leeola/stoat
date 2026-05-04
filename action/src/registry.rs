@@ -28,9 +28,10 @@ use crate::{
             JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
-            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, PageDown,
-            PageUp, Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
+            MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
+            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, Redo,
+            RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
+            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
             SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark,
             ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
             SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
@@ -316,6 +317,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SurroundAdd::DEF, |_| Ok(Box::new(SurroundAdd)));
     add(SurroundReplace::DEF, |_| Ok(Box::new(SurroundReplace)));
     add(SurroundDelete::DEF, |_| Ok(Box::new(SurroundDelete)));
+    add(OpenSearchInput::DEF, |_| Ok(Box::new(OpenSearchInput)));
+    add(OpenReverseSearchInput::DEF, |_| {
+        Ok(Box::new(OpenReverseSearchInput))
+    });
+    add(SearchNext::DEF, |_| Ok(Box::new(SearchNext)));
+    add(SearchPrev::DEF, |_| Ok(Box::new(SearchPrev)));
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -594,6 +601,10 @@ mod tests {
         "SurroundAdd",
         "SurroundReplace",
         "SurroundDelete",
+        "OpenSearchInput",
+        "OpenReverseSearchInput",
+        "SearchNext",
+        "SearchPrev",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -823,7 +834,8 @@ mod tests {
         // + 3 marks (SetMark, GotoMark, GotoMarkExact).
         // + 1 SurroundAdd.
         // + 2 SurroundReplace, SurroundDelete.
-        assert_eq!(all().count(), 232);
+        // + 4 OpenSearchInput, OpenReverseSearchInput, SearchNext, SearchPrev.
+        assert_eq!(all().count(), 236);
     }
 
     #[test]
