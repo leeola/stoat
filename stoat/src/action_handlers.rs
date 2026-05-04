@@ -288,6 +288,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::GotoMark => marks::goto_mark(stoat),
         ActionKind::GotoMarkExact => marks::goto_mark_exact(stoat),
         ActionKind::SurroundAdd => surround::surround_add(stoat),
+        ActionKind::SurroundReplace => surround::surround_replace(stoat),
+        ActionKind::SurroundDelete => surround::surround_delete(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => {
             movement::goto_window(stoat, movement::WindowAlign::Top, false)

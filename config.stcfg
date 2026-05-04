@@ -251,6 +251,8 @@ on key {
         Escape -> SetMode(normal);
         m -> [MatchBrackets(), SetMode(normal)];
         s -> [SurroundAdd(), SetMode(normal)];
+        r -> [SurroundReplace(), SetMode(normal)];
+        d -> [SurroundDelete(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == select {

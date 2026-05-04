@@ -75,6 +75,8 @@ pub enum ActionKind {
     GotoMark,
     GotoMarkExact,
     SurroundAdd,
+    SurroundReplace,
+    SurroundDelete,
     RepeatLastMotion,
     ExtendPrevWordStart,
     ExtendPrevWordEnd,

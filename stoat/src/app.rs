@@ -124,6 +124,20 @@ pub struct Stoat {
     /// [`action_handlers::surround::execute_surround_add`] and clears
     /// the flag. Non-char keypresses also clear the flag.
     pub(crate) pending_surround_add: bool,
+    /// Two-step capture state for `SurroundReplace`: the action arms
+    /// `AwaitFrom`; the next char keypress transitions to
+    /// `AwaitTo(from)`; the following char keypress applies the edit
+    /// via [`action_handlers::surround::execute_surround_replace`]
+    /// and clears the state. Non-char keypresses also clear the
+    /// state.
+    pub(crate) pending_surround_replace: action_handlers::surround::SurroundReplaceStage,
+    /// Set after a `SurroundDelete` action arms the chord. While
+    /// true, the next printable char keypress in normal/select mode
+    /// finds the enclosing surround pair for that char around every
+    /// cursor and removes it via
+    /// [`action_handlers::surround::execute_surround_delete`].
+    /// Non-char keypresses also clear the flag.
+    pub(crate) pending_surround_delete: bool,
     /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
@@ -417,6 +431,8 @@ impl Stoat {
             pending_goto_word_input: String::new(),
             pending_replace: false,
             pending_surround_add: false,
+            pending_surround_replace: action_handlers::surround::SurroundReplaceStage::Idle,
+            pending_surround_delete: false,
             editor_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
@@ -1352,6 +1368,37 @@ impl Stoat {
                 return action_handlers::surround::execute_surround_add(self, ch);
             }
             self.pending_surround_add = false;
+        }
+
+        if (self.mode == "normal" || self.mode == "select")
+            && self.pending_surround_replace
+                != action_handlers::surround::SurroundReplaceStage::Idle
+        {
+            if let KeyCode::Char(ch) = key.code {
+                let stage = self.pending_surround_replace;
+                self.pending_surround_replace =
+                    action_handlers::surround::SurroundReplaceStage::Idle;
+                match stage {
+                    action_handlers::surround::SurroundReplaceStage::AwaitFrom => {
+                        self.pending_surround_replace =
+                            action_handlers::surround::SurroundReplaceStage::AwaitTo(ch);
+                        return UpdateEffect::Redraw;
+                    },
+                    action_handlers::surround::SurroundReplaceStage::AwaitTo(from) => {
+                        return action_handlers::surround::execute_surround_replace(self, from, ch);
+                    },
+                    action_handlers::surround::SurroundReplaceStage::Idle => unreachable!(),
+                }
+            }
+            self.pending_surround_replace = action_handlers::surround::SurroundReplaceStage::Idle;
+        }
+
+        if (self.mode == "normal" || self.mode == "select") && self.pending_surround_delete {
+            if let KeyCode::Char(ch) = key.code {
+                self.pending_surround_delete = false;
+                return action_handlers::surround::execute_surround_delete(self, ch);
+            }
+            self.pending_surround_delete = false;
         }
 
         if (self.mode == "normal" || self.mode == "select") && self.pending_goto_word.is_some() {

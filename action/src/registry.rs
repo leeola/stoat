@@ -32,9 +32,9 @@ use crate::{
             PageUp, Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar,
             RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
             SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark,
-            ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,
-            UnindentSelection,
+            ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
+            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
+            ToggleComments, TrimSelections, Undo, UnindentSelection,
         },
         file::OpenFile,
         file_finder::{
@@ -314,6 +314,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoMark::DEF, |_| Ok(Box::new(GotoMark)));
     add(GotoMarkExact::DEF, |_| Ok(Box::new(GotoMarkExact)));
     add(SurroundAdd::DEF, |_| Ok(Box::new(SurroundAdd)));
+    add(SurroundReplace::DEF, |_| Ok(Box::new(SurroundReplace)));
+    add(SurroundDelete::DEF, |_| Ok(Box::new(SurroundDelete)));
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -590,6 +592,8 @@ mod tests {
         "GotoMark",
         "GotoMarkExact",
         "SurroundAdd",
+        "SurroundReplace",
+        "SurroundDelete",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -818,7 +822,8 @@ mod tests {
         // + 1 FormatSelections.
         // + 3 marks (SetMark, GotoMark, GotoMarkExact).
         // + 1 SurroundAdd.
-        assert_eq!(all().count(), 230);
+        // + 2 SurroundReplace, SurroundDelete.
+        assert_eq!(all().count(), 232);
     }
 
     #[test]

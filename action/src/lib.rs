@@ -35,9 +35,9 @@ pub use defs::{
         MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, PageDown, PageUp, Redo,
         RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
         RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SelectAll, SelectLineBelow,
-        SelectNextSibling, SelectPrevSibling, SetMark, ShrinkSelection, SurroundAdd, SwitchCase,
-        SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-        TrimSelections, Undo, UnindentSelection,
+        SelectNextSibling, SelectPrevSibling, SetMark, ShrinkSelection, SurroundAdd,
+        SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+        TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
     },
     file::OpenFile,
     file_finder::{

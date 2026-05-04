@@ -591,6 +591,26 @@ define_action!(
 );
 
 define_action!(
+    SurroundReplaceDef,
+    SurroundReplace,
+    "SurroundReplace",
+    ActionKind::SurroundReplace,
+    "replace surrounding pair",
+    "Wait for two char keypresses (`from` then `to`), then for every selection's cursor find the nearest enclosing `from` pair and replace its open/close with the canonical pair for `to`. Bracket-like chars use canonical opens/closes; symmetric chars (quotes, etc.) use the same char on both sides. No-op when the cursor is not enclosed by a `from` pair.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    SurroundDeleteDef,
+    SurroundDelete,
+    "SurroundDelete",
+    ActionKind::SurroundDelete,
+    "delete surrounding pair",
+    "Wait for the next char keypress, then for every selection's cursor find the nearest enclosing pair for that char and delete the open/close chars, leaving the inner content. No-op when the cursor is not enclosed by such a pair.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",
