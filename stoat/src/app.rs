@@ -15,6 +15,7 @@ use crate::{
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
     pane::{FocusTarget, View},
     rebase::RebasePause,
+    register,
     run::{GridSelection, PtyNotification, RunId},
     workspace::{Workspace, WorkspaceId},
     workspace_picker::{PickerOutcome, WorkspacePicker},
@@ -146,6 +147,11 @@ pub struct Stoat {
     /// Persisted query + direction from the most recent submitted
     /// search. Drives `SearchNext` / `SearchPrev` repeats.
     pub(crate) last_search: Option<action_handlers::search::LastSearch>,
+    /// Process-wide register store for yank, paste, and (later)
+    /// macros and `insert_register`. Unnamed and named registers
+    /// live in-process; system / primary clipboard variants are
+    /// stubbed until the `arboard` backend lands.
+    pub(crate) registers: register::RegisterStore,
     /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
@@ -443,6 +449,7 @@ impl Stoat {
             pending_surround_delete: false,
             search_input: None,
             last_search: None,
+            registers: register::RegisterStore::new(),
             editor_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),

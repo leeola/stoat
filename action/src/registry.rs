@@ -29,13 +29,13 @@ use crate::{
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, Redo,
-            RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
+            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
+            Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
             RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
             SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark,
             ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
             SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
-            ToggleComments, TrimSelections, Undo, UnindentSelection,
+            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
         },
         file::OpenFile,
         file_finder::{
@@ -323,6 +323,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(SearchNext::DEF, |_| Ok(Box::new(SearchNext)));
     add(SearchPrev::DEF, |_| Ok(Box::new(SearchPrev)));
+    add(Yank::DEF, |_| Ok(Box::new(Yank)));
+    add(PasteAfter::DEF, |_| Ok(Box::new(PasteAfter)));
+    add(PasteBefore::DEF, |_| Ok(Box::new(PasteBefore)));
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -605,6 +608,9 @@ mod tests {
         "OpenReverseSearchInput",
         "SearchNext",
         "SearchPrev",
+        "Yank",
+        "PasteAfter",
+        "PasteBefore",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -835,7 +841,8 @@ mod tests {
         // + 1 SurroundAdd.
         // + 2 SurroundReplace, SurroundDelete.
         // + 4 OpenSearchInput, OpenReverseSearchInput, SearchNext, SearchPrev.
-        assert_eq!(all().count(), 236);
+        // + 3 Yank, PasteAfter, PasteBefore.
+        assert_eq!(all().count(), 239);
     }
 
     #[test]

@@ -651,6 +651,36 @@ define_action!(
 );
 
 define_action!(
+    YankDef,
+    Yank,
+    "Yank",
+    ActionKind::Yank,
+    "yank primary selection",
+    "Copy the focused editor's primary selection content into the unnamed register (`\"`). Selections themselves are not changed. Subsequent `PasteAfter` / `PasteBefore` paste the same content.",
+    ActionPriority::Common
+);
+
+define_action!(
+    PasteAfterDef,
+    PasteAfter,
+    "PasteAfter",
+    ActionKind::PasteAfter,
+    "paste register after selection",
+    "Insert the unnamed register's content immediately after every selection's end offset. Each affected selection collapses to a cursor at the end of the inserted text. No-op when the register is empty.",
+    ActionPriority::Common
+);
+
+define_action!(
+    PasteBeforeDef,
+    PasteBefore,
+    "PasteBefore",
+    ActionKind::PasteBefore,
+    "paste register before selection",
+    "Insert the unnamed register's content immediately before every selection's start offset. Each affected selection collapses to a cursor at the end of the inserted text. No-op when the register is empty.",
+    ActionPriority::Common
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

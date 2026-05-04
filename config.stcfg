@@ -214,6 +214,9 @@ on key {
         / -> OpenSearchInput();
         n -> SearchNext();
         N -> SearchPrev();
+        y -> Yank();
+        p -> PasteAfter();
+        P -> PasteBefore();
     }
     mode == goto {
         Escape -> SetMode(normal);
@@ -295,6 +298,7 @@ on key {
         d -> DeleteSelection();
         c -> [DeleteSelection(), SetMode(insert)];
         r -> ReplaceChar();
+        y -> [Yank(), SetMode(normal)];
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
         Alt-` -> SwitchToUppercase();

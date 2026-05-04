@@ -24,6 +24,7 @@ pub mod multi_buffer;
 pub mod pane;
 mod paths;
 mod rebase;
+mod register;
 pub(crate) mod render;
 mod review;
 mod review_apply;

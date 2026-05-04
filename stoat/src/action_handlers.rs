@@ -17,6 +17,7 @@ mod run;
 pub(crate) mod search;
 pub(crate) mod surround;
 mod workspace;
+mod yank;
 
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -295,6 +296,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::OpenReverseSearchInput => search::open_reverse_search_input(stoat),
         ActionKind::SearchNext => search::search_next(stoat),
         ActionKind::SearchPrev => search::search_prev(stoat),
+        ActionKind::Yank => yank::yank(stoat),
+        ActionKind::PasteAfter => yank::paste_after(stoat),
+        ActionKind::PasteBefore => yank::paste_before(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => {
             movement::goto_window(stoat, movement::WindowAlign::Top, false)
