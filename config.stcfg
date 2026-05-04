@@ -215,6 +215,7 @@ on key {
     mode == goto {
         Escape -> SetMode(normal);
         i -> [GotoFirstNonwhitespace(), SetMode(normal)];
+        s -> [GotoImplementation(), SetMode(normal)];
         j -> [GotoLastLine(), SetMode(normal)];
         k -> [GotoFileStart(), SetMode(normal)];
         t -> [GotoWindowTop(), SetMode(normal)];

@@ -2604,6 +2604,21 @@ mod tests {
         assert_eq!(h.stoat.mode, "normal");
     }
 
+    #[test]
+    fn g_s_jumps_to_implementation() {
+        let mut h = TestHarness::with_size(80, 24);
+        enable_goto_implementation(&h);
+        let root = seed(&mut h, &[("main.rs", "abc\ndef\nghi\n")]);
+        let path = root.join("main.rs");
+        open_buffer(&mut h, path.clone());
+        h.fake_lsp()
+            .set_implementation(path.to_str().unwrap(), 0, 0, path.to_str().unwrap(), 2, 0);
+        h.type_keys("g s");
+        h.settle();
+        assert_eq!(cursor_offset(&mut h), 8);
+        assert_eq!(h.stoat.mode, "normal");
+    }
+
     fn enable_hover(h: &TestHarness) {
         use lsp_types::{HoverProviderCapability, ServerCapabilities};
         h.fake_lsp().set_capabilities(ServerCapabilities {
