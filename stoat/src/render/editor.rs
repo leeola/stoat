@@ -14,7 +14,16 @@ pub(crate) fn render_editor(
     buf: &mut Buffer,
     is_focused: bool,
 ) {
-    render_editor_with_overlay(editor, inner, fallback_style, theme, buf, is_focused, None);
+    render_editor_with_overlay(
+        editor,
+        inner,
+        fallback_style,
+        theme,
+        buf,
+        is_focused,
+        None,
+        None,
+    );
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -26,6 +35,7 @@ pub(crate) fn render_editor_with_overlay(
     buf: &mut Buffer,
     is_focused: bool,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
+    search_query: Option<&str>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
 
@@ -72,11 +82,39 @@ pub(crate) fn render_editor_with_overlay(
         }
     }
 
+    let buffer_snapshot = snapshot.buffer_snapshot();
+
+    if let Some(query) = search_query.filter(|q| !q.is_empty()) {
+        let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+        let rope = buffer_snapshot.rope();
+        let query_len = query.len();
+        for match_off in rope.find_all(query) {
+            let mut offset = match_off;
+            let mut chars = rope.chars_at(offset);
+            while offset < match_off + query_len {
+                let Some(ch) = chars.next() else {
+                    break;
+                };
+                if ch != '\n' {
+                    let point = rope.offset_to_point(offset);
+                    let display = snapshot.buffer_to_display(point);
+                    if display.row >= editor.scroll_row && display.row < end_row {
+                        let y = inner.y + (display.row - editor.scroll_row) as u16;
+                        let x = inner.x + display.column as u16;
+                        if x < right && y < bottom {
+                            buf[(x, y)].set_style(match_style);
+                        }
+                    }
+                }
+                offset += ch.len_utf8();
+            }
+        }
+    }
+
     if !is_focused {
         return;
     }
 
-    let buffer_snapshot = snapshot.buffer_snapshot();
     let selection_style = theme.get(crate::theme::scope::UI_SELECTION_EDITOR);
     let cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
     for selection in editor.selections.all_anchors() {

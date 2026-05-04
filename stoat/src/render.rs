@@ -76,6 +76,10 @@ pub(crate) struct FrameCtx<'a> {
     /// focused buffer's path and paints a compact severity badge when
     /// any diagnostics are present.
     pub(crate) diagnostics: &'a crate::diagnostics::DiagnosticSet,
+    /// Most-recently submitted in-buffer search query. When `Some`,
+    /// every editor pane paints visible matches with the
+    /// `ui.search.match` style so users see all hits at once.
+    pub(crate) search_query: Option<&'a str>,
 }
 
 pub(crate) const PRIMARY_MODES: &[&str] = &[
@@ -143,6 +147,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         goto_word_labels: stoat.pending_goto_word.as_ref(),
         mode_badges: &stoat.settings.mode_badges,
         diagnostics: &stoat.diagnostics,
+        search_query: stoat.last_search.as_ref().map(|s| s.query.as_str()),
     };
 
     let split_focused = ws.panes.focus();

@@ -63,6 +63,7 @@ pub(crate) fn render_pane(
                     buf,
                     is_focused,
                     labels,
+                    frame.search_query,
                 );
             }
         },

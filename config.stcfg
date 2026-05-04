@@ -15,6 +15,7 @@ theme default_dark {
     ui.selection = { fg: black, bg: accent };
     ui.selection.editor = { bg: muted };
     ui.selection.reversed = { fg: black, bg: text, modifiers: [reversed] };
+    ui.search.match = { fg: black, bg: warning };
 
     ui.border.focused.fg = accent;
     ui.border.inactive.fg = muted;

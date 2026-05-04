@@ -319,4 +319,14 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::SearchNext);
         assert_eq!(cursor_offset(&mut h), before);
     }
+
+    #[test]
+    fn snapshot_search_match_highlight() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc def abc xyz abc\n");
+        h.type_keys("/");
+        h.type_text("abc");
+        h.type_keys("enter");
+        h.assert_snapshot("search_match_highlight");
+    }
 }
