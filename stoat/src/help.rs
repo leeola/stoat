@@ -727,7 +727,7 @@ mod tests {
     #[test]
     fn help_opens_searches_closes_end_to_end() {
         let mut h = crate::Stoat::test();
-        h.type_keys("?");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.type_text("quit");
         h.type_keys("escape escape");
         let frame = h.snapshot();
@@ -754,14 +754,14 @@ mod tests {
     #[test]
     fn snapshot_help_active_default() {
         let mut h = crate::Stoat::test();
-        h.type_keys("?");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.assert_snapshot("help_active_default");
     }
 
     #[test]
     fn snapshot_help_filter_typing() {
         let mut h = crate::Stoat::test();
-        h.type_keys("?");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.type_text("move");
         h.assert_snapshot("help_filter_typing");
     }
@@ -769,7 +769,7 @@ mod tests {
     #[test]
     fn snapshot_help_all_scope_after_shift_tab() {
         let mut h = crate::Stoat::test();
-        h.type_keys("?");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.type_keys("backtab");
         h.assert_snapshot("help_all_scope_after_shift_tab");
     }
@@ -777,7 +777,7 @@ mod tests {
     #[test]
     fn snapshot_help_normal_mode() {
         let mut h = crate::Stoat::test();
-        h.type_keys("?");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenHelp);
         h.type_keys("escape");
         h.assert_snapshot("help_normal_mode");
     }

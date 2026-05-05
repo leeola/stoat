@@ -116,7 +116,9 @@ on init {
 }
 
 on key {
-    ? -> OpenHelp();
+    mode != normal {
+        ? -> OpenHelp();
+    }
     mode == normal && help_open {
         Escape -> CloseHelp();
         i -> SetMode(prompt);
@@ -213,6 +215,7 @@ on key {
         m -> SetMode(match);
         R -> OpenReview();
         / -> OpenSearchInput();
+        ? -> OpenReverseSearchInput();
         n -> SearchNext();
         N -> SearchPrev();
         y -> Yank();

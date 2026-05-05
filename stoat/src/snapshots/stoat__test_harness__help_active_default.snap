@@ -2,7 +2,7 @@
 source: stoat/src/test_harness.rs
 expression: text
 ---
-actions: ?
+actions: snapshot
 focused: #1 of 1
 mode: prompt
 size: 80x24
@@ -25,7 +25,7 @@ size: 80x24
   [0m[36m│[0m[97m [0m[36m  <[0m[97m  UnindentSelection  [0m[90muninde│[0m [0m[97mthe next yank or paste and reverts to the[0m[36m│[0m
   [0m[36m│[0m[97m [0m[36m  =[0m[97m  FormatSelections  [0m[90mformat │[0m [0m[97munnamed[0m[33m┌ help ─────────────────────────────┐[0m
   [0m[36m│[0m[97m [0m[36m  >[0m[97m  IndentSelection  [0m[90mindent s│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenHelp  [0m[90mopen the help m│[0m [0m[1m[33mExample│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m [0m[36m  ?[0m[97m  OpenReverseSearchInput  [0m[90mo│[0m [0m[1m[33mExample│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
   [0m[36m│[0m[97m [0m[36m  A[0m[97m  GotoLineEnd  [0m[90mgoto line en│[0m [0m[90m  Selec[0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
   [0m[36m│[0m[97m [0m[36mA-,[0m[97m  RemovePrimarySelection  [0m[90mr│[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
   [0m[36m└────────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m[36m────┘[0m [0m[33m│[0m
