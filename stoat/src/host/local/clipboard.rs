@@ -17,6 +17,17 @@ impl ClipboardHost for LocalClipboard {
         clipboard.set_text(text).map_err(io::Error::other)
     }
 
+    fn get(&self) -> io::Result<Option<String>> {
+        let Ok(mut clipboard) = arboard::Clipboard::new() else {
+            return Ok(None);
+        };
+        match clipboard.get_text() {
+            Ok(text) => Ok(Some(text)),
+            Err(arboard::Error::ContentNotAvailable) => Ok(None),
+            Err(err) => Err(io::Error::other(err)),
+        }
+    }
+
     fn osc52_emit(&self, text: &str) -> io::Result<()> {
         let payload = STANDARD.encode(text.as_bytes());
         let mut stdout = io::stdout().lock();

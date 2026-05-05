@@ -28,6 +28,85 @@ pub(super) fn paste_before(stoat: &mut Stoat) -> UpdateEffect {
     paste(stoat, PasteSide::Before)
 }
 
+/// Write every non-collapsed selection's content (joined by
+/// newlines, in start-offset order) to the system clipboard via
+/// the active [`crate::host::ClipboardHost`]. No-op when every
+/// selection is collapsed.
+pub(super) fn yank_to_clipboard(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(content) = selections_joined_text(stoat) else {
+        return UpdateEffect::None;
+    };
+    if content.is_empty() {
+        return UpdateEffect::None;
+    }
+    if let Err(err) = stoat.clipboard_host().set(&content) {
+        tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
+    }
+    UpdateEffect::None
+}
+
+/// Write only the primary selection's content to the system
+/// clipboard. No-op when the primary selection is collapsed.
+pub(super) fn yank_main_to_clipboard(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(content) = primary_selection_text(stoat) else {
+        return UpdateEffect::None;
+    };
+    if content.is_empty() {
+        return UpdateEffect::None;
+    }
+    if let Err(err) = stoat.clipboard_host().set(&content) {
+        tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
+    }
+    UpdateEffect::None
+}
+
+pub(super) fn paste_clipboard_after(stoat: &mut Stoat) -> UpdateEffect {
+    paste_clipboard(stoat, PasteSide::After)
+}
+
+pub(super) fn paste_clipboard_before(stoat: &mut Stoat) -> UpdateEffect {
+    paste_clipboard(stoat, PasteSide::Before)
+}
+
+fn paste_clipboard(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
+    let content = match stoat.clipboard_host().get() {
+        Ok(Some(text)) => text,
+        Ok(None) => return UpdateEffect::None,
+        Err(err) => {
+            tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
+            return UpdateEffect::None;
+        },
+    };
+    paste_text(stoat, &content, side)
+}
+
+/// Extract the focused editor's primary selection content as a
+/// `String`. Returns `None` when the focused pane is not an
+/// editor or the primary selection is collapsed.
+fn primary_selection_text(stoat: &mut Stoat) -> Option<String> {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return None,
+    };
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let snapshot = editor.display_map.snapshot();
+    let buf_snap = snapshot.buffer_snapshot();
+    let primary = editor.selections.newest_anchor();
+    let start = buf_snap.resolve_anchor(&primary.start);
+    let end = buf_snap.resolve_anchor(&primary.end);
+    let (lo, hi) = if start <= end {
+        (start, end)
+    } else {
+        (end, start)
+    };
+    if lo == hi {
+        return None;
+    }
+    Some(buf_snap.rope().slice(lo..hi).to_string())
+}
+
 #[derive(Clone, Copy)]
 enum PasteSide {
     After,
@@ -74,17 +153,22 @@ fn selections_joined_text(stoat: &mut Stoat) -> Option<String> {
 
 /// Insert the unnamed register's content at every selection,
 /// either at each selection's `start` (Before) or `end` (After).
-/// When the register has exactly one line per selection (and
-/// more than one selection), each selection receives the
-/// matching line in start-offset order; otherwise every
-/// selection receives the full register content. After the
-/// edit, every affected selection collapses to a cursor at the
-/// end of its inserted text. No-op when the register is empty
-/// or unset, or when the focused pane is not an editor.
 fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
     let Some(content) = stoat.registers.read(Register::Unnamed).map(str::to_owned) else {
         return UpdateEffect::None;
     };
+    paste_text(stoat, &content, side)
+}
+
+/// Insert `content` at every selection, either at each
+/// selection's `start` (Before) or `end` (After). When `content`
+/// has exactly one line per selection (and more than one
+/// selection), each selection receives the matching line in
+/// start-offset order; otherwise every selection receives the
+/// full content. After the edit, every affected selection
+/// collapses to a cursor at the end of its inserted text. No-op
+/// when `content` is empty or the focused pane is not an editor.
+fn paste_text(stoat: &mut Stoat, content: &str, side: PasteSide) -> UpdateEffect {
     if content.is_empty() {
         return UpdateEffect::None;
     }
@@ -142,7 +226,7 @@ fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
         if line_aware {
             lines[idx]
         } else {
-            content.as_str()
+            content
         }
     };
 
@@ -180,7 +264,7 @@ fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
 
 #[cfg(test)]
 mod tests {
-    use crate::test_harness::TestHarness;
+    use crate::{host::ClipboardHost, test_harness::TestHarness};
     use std::path::PathBuf;
     use stoat_action::{self as action, OpenFile};
 
@@ -363,5 +447,70 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
         crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
         assert_eq!(buffer_text(&h, &path), "abab\ncd\nabef\nab");
+    }
+
+    #[test]
+    fn yank_to_clipboard_writes_joined_selections() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
+        assert_eq!(h.fake_clipboard().writes(), vec!["abc\ndef".to_string()]);
+    }
+
+    #[test]
+    fn yank_main_to_clipboard_writes_only_primary() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::YankMainToClipboard);
+        assert_eq!(h.fake_clipboard().writes(), vec!["def".to_string()]);
+    }
+
+    #[test]
+    fn yank_to_clipboard_with_collapsed_selection_is_noop() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::YankToClipboard);
+        assert_eq!(h.fake_clipboard().writes(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn paste_clipboard_after_inserts_clipboard_content() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.fake_clipboard().set("xyz").unwrap();
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
+        assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+    }
+
+    #[test]
+    fn paste_clipboard_before_inserts_clipboard_content() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.fake_clipboard().set("xyz").unwrap();
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardBefore);
+        assert_eq!(buffer_text(&h, &path), "xyzabc\n");
+    }
+
+    #[test]
+    fn paste_clipboard_with_empty_clipboard_is_noop() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteClipboardAfter);
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn yank_to_clipboard_via_space_dquote_y_binding() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("space \" y");
+        assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
+        assert_eq!(h.stoat.mode, "normal");
     }
 }

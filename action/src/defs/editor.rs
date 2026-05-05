@@ -681,6 +681,46 @@ define_action!(
 );
 
 define_action!(
+    YankToClipboardDef,
+    YankToClipboard,
+    "YankToClipboard",
+    ActionKind::YankToClipboard,
+    "yank selections to system clipboard",
+    "Gather every non-collapsed selection's content (joined by newlines in start-offset order) and write it to the system clipboard via the active `ClipboardHost`. Falls back to a logged warning when the platform clipboard is unavailable.",
+    ActionPriority::Common
+);
+
+define_action!(
+    YankMainToClipboardDef,
+    YankMainToClipboard,
+    "YankMainToClipboard",
+    ActionKind::YankMainToClipboard,
+    "yank primary selection to system clipboard",
+    "Write only the primary selection's content to the system clipboard via the active `ClipboardHost`. Useful when multi-selection yank would join unrelated regions.",
+    ActionPriority::Common
+);
+
+define_action!(
+    PasteClipboardAfterDef,
+    PasteClipboardAfter,
+    "PasteClipboardAfter",
+    ActionKind::PasteClipboardAfter,
+    "paste system clipboard after selection",
+    "Read the current system clipboard contents through the active `ClipboardHost` and insert them at every selection's end offset. Line-aware: when the clipboard has exactly one line per selection, paste line K into selection K.",
+    ActionPriority::Common
+);
+
+define_action!(
+    PasteClipboardBeforeDef,
+    PasteClipboardBefore,
+    "PasteClipboardBefore",
+    ActionKind::PasteClipboardBefore,
+    "paste system clipboard before selection",
+    "Read the current system clipboard contents through the active `ClipboardHost` and insert them at every selection's start offset. Line-aware: when the clipboard has exactly one line per selection, paste line K into selection K.",
+    ActionPriority::Common
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

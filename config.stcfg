@@ -441,11 +441,20 @@ on key {
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
         l -> SetMode(space_lsp);
+        " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == space_clipboard {
+        Escape -> SetMode(normal);
+        y -> [YankToClipboard(), SetMode(normal)];
+        Y -> [YankMainToClipboard(), SetMode(normal)];
+        p -> [PasteClipboardAfter(), SetMode(normal)];
+        P -> [PasteClipboardBefore(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_buffer {

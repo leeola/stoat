@@ -11,6 +11,15 @@ pub trait ClipboardHost: Send + Sync {
     /// Replaces the system clipboard contents with `text`.
     fn set(&self, text: &str) -> io::Result<()>;
 
+    /// Returns the current clipboard contents. `Ok(None)` covers the
+    /// "no clipboard available" case (headless servers, CI without a
+    /// display server) so callers fall back to a no-op rather than
+    /// surface the platform error. The default impl returns
+    /// `Ok(None)` for hosts without a real backing store.
+    fn get(&self) -> io::Result<Option<String>> {
+        Ok(None)
+    }
+
     /// Forwards `text` to the host terminal as an OSC 52 set-clipboard
     /// escape so SSH sessions reach the user's local clipboard. The
     /// default impl is a no-op for hosts without a stdout-bound

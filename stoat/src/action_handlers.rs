@@ -299,6 +299,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::Yank => yank::yank(stoat),
         ActionKind::PasteAfter => yank::paste_after(stoat),
         ActionKind::PasteBefore => yank::paste_before(stoat),
+        ActionKind::YankToClipboard => yank::yank_to_clipboard(stoat),
+        ActionKind::YankMainToClipboard => yank::yank_main_to_clipboard(stoat),
+        ActionKind::PasteClipboardAfter => yank::paste_clipboard_after(stoat),
+        ActionKind::PasteClipboardBefore => yank::paste_clipboard_before(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => {
             movement::goto_window(stoat, movement::WindowAlign::Top, false)

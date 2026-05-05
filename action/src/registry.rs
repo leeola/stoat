@@ -30,12 +30,13 @@ use crate::{
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
             OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
-            Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
-            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark,
-            ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
-            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
-            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
+            PasteClipboardAfter, PasteClipboardBefore, Redo, RemovePrimarySelection,
+            RepeatLastMotion, ReplaceChar, RotateSelectionsBackward, RotateSelectionsForward,
+            SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
+            SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark, ShrinkSelection,
+            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
+            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
+            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -326,6 +327,16 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Yank::DEF, |_| Ok(Box::new(Yank)));
     add(PasteAfter::DEF, |_| Ok(Box::new(PasteAfter)));
     add(PasteBefore::DEF, |_| Ok(Box::new(PasteBefore)));
+    add(YankToClipboard::DEF, |_| Ok(Box::new(YankToClipboard)));
+    add(YankMainToClipboard::DEF, |_| {
+        Ok(Box::new(YankMainToClipboard))
+    });
+    add(PasteClipboardAfter::DEF, |_| {
+        Ok(Box::new(PasteClipboardAfter))
+    });
+    add(PasteClipboardBefore::DEF, |_| {
+        Ok(Box::new(PasteClipboardBefore))
+    });
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -611,6 +622,10 @@ mod tests {
         "Yank",
         "PasteAfter",
         "PasteBefore",
+        "YankToClipboard",
+        "YankMainToClipboard",
+        "PasteClipboardAfter",
+        "PasteClipboardBefore",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -842,7 +857,8 @@ mod tests {
         // + 2 SurroundReplace, SurroundDelete.
         // + 4 OpenSearchInput, OpenReverseSearchInput, SearchNext, SearchPrev.
         // + 3 Yank, PasteAfter, PasteBefore.
-        assert_eq!(all().count(), 239);
+        // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
+        assert_eq!(all().count(), 243);
     }
 
     #[test]

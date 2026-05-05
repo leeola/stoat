@@ -45,6 +45,10 @@ impl ClipboardHost for FakeClipboard {
         Ok(())
     }
 
+    fn get(&self) -> io::Result<Option<String>> {
+        Ok(self.writes.lock().expect("poisoned").last().cloned())
+    }
+
     fn osc52_emit(&self, text: &str) -> io::Result<()> {
         self.osc52_emits
             .lock()
