@@ -123,15 +123,18 @@ pub(super) fn search_prev(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
-/// Find the next match of `query` in the focused editor's buffer,
-/// starting from the primary cursor and walking in `direction` with
-/// wrap-around, then move every selection's primary cursor to the
-/// match. Returns true when a match was found and the cursor
-/// moved.
+/// Find the next regex match of `query` in the focused editor's
+/// buffer, starting from the primary cursor and walking in
+/// `direction` with wrap-around, then move every selection's primary
+/// cursor to the match start. Returns true when a match was found
+/// and the cursor moved. Invalid regex is treated as no match.
 fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> bool {
     use crate::pane::View;
     use stoat_text::{Bias, SelectionGoal};
 
+    let Ok(regex) = compile_search_regex(query) else {
+        return false;
+    };
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -142,12 +145,13 @@ fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> 
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
+    let text = rope.to_string();
     let head = buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head());
-    let len = rope.len();
+    let len = text.len();
 
     let target = match direction {
-        SearchDirection::Forward => find_forward(rope, query, head, len),
-        SearchDirection::Reverse => find_reverse(rope, query, head),
+        SearchDirection::Forward => find_forward(&regex, &text, head, len),
+        SearchDirection::Reverse => find_reverse(&regex, &text, head),
     };
     let Some(target) = target else { return false };
 
@@ -161,21 +165,46 @@ fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> 
     true
 }
 
-fn find_forward(rope: &stoat_text::Rope, query: &str, head: usize, len: usize) -> Option<usize> {
+fn find_forward(regex: &regex::Regex, text: &str, head: usize, len: usize) -> Option<usize> {
     let start = head.saturating_add(1).min(len);
-    rope.find(query, start).or_else(|| rope.find(query, 0))
+    if let Some(m) = next_match_at_or_after(regex, text, start) {
+        return Some(m);
+    }
+    next_match_at_or_after(regex, text, 0)
 }
 
-fn find_reverse(rope: &stoat_text::Rope, query: &str, head: usize) -> Option<usize> {
-    let all = rope.find_all(query);
-    if all.is_empty() {
+fn find_reverse(regex: &regex::Regex, text: &str, head: usize) -> Option<usize> {
+    let starts: Vec<usize> = regex.find_iter(text).map(|m| m.start()).collect();
+    if starts.is_empty() {
         return None;
     }
-    all.iter()
+    starts
+        .iter()
         .rev()
         .find(|&&pos| pos < head)
         .copied()
-        .or_else(|| all.last().copied())
+        .or_else(|| starts.last().copied())
+}
+
+/// Finds the first regex match whose start is at or after `at`.
+/// Walks forward via `find_at` and skips matches that pre-date `at`
+/// (which can happen for zero-width patterns).
+fn next_match_at_or_after(regex: &regex::Regex, text: &str, at: usize) -> Option<usize> {
+    if at > text.len() {
+        return None;
+    }
+    let m = regex.find_at(text, at)?;
+    if m.start() >= at {
+        Some(m.start())
+    } else {
+        None
+    }
+}
+
+/// Compile `pattern` into a [`regex::Regex`] with multiline mode on,
+/// so `^` and `$` match line boundaries inside the buffer text.
+pub(crate) fn compile_search_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+    regex::RegexBuilder::new(pattern).multi_line(true).build()
 }
 
 #[cfg(test)]
@@ -328,5 +357,46 @@ mod tests {
         h.type_text("abc");
         h.type_keys("enter");
         h.assert_snapshot("search_match_highlight");
+    }
+
+    #[test]
+    fn regex_pattern_matches_first_occurrence() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc 123 def 456\n");
+        h.type_keys("/");
+        h.type_text("\\d+");
+        h.type_keys("enter");
+        assert_eq!(cursor_offset(&mut h), 4);
+    }
+
+    #[test]
+    fn regex_anchors_match_only_at_line_start() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "xfoo\nfoo bar\n");
+        h.type_keys("/");
+        h.type_text("^foo");
+        h.type_keys("enter");
+        assert_eq!(cursor_offset(&mut h), 5);
+    }
+
+    #[test]
+    fn invalid_regex_is_noop() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        let before = cursor_offset(&mut h);
+        h.type_keys("/");
+        h.type_text("[unclosed");
+        h.type_keys("enter");
+        assert_eq!(cursor_offset(&mut h), before);
+    }
+
+    #[test]
+    fn snapshot_regex_variable_length_match_highlight() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc 1 22 333 4444 end\n");
+        h.type_keys("/");
+        h.type_text("\\d+");
+        h.type_keys("enter");
+        h.assert_snapshot("regex_variable_length_match_highlight");
     }
 }
