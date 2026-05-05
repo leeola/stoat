@@ -5,12 +5,12 @@ use crate::{
 };
 use stoat_text::{Bias, SelectionGoal};
 
-/// Copy the focused editor's primary selection content into the
-/// unnamed register. Selections are not modified. No-op when the
-/// primary selection is collapsed (empty range) or the focused
-/// pane is not an editor.
+/// Copy every non-collapsed selection's content into the unnamed
+/// register, joined with newlines in start-offset order so a
+/// later paste can split back per-line. No-op when every
+/// selection is collapsed or the focused pane is not an editor.
 pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
-    let Some(content) = primary_selection_text(stoat) else {
+    let Some(content) = selections_joined_text(stoat) else {
         return UpdateEffect::None;
     };
     if content.is_empty() {
@@ -34,10 +34,11 @@ enum PasteSide {
     Before,
 }
 
-/// Extract the focused editor's primary selection content as a
-/// `String`. Returns `None` when the focused pane is not an
-/// editor.
-fn primary_selection_text(stoat: &mut Stoat) -> Option<String> {
+/// Walk every selection in the focused editor in start-offset
+/// order, slice each non-collapsed range out of the rope, and
+/// join with `\n`. Returns `None` when the focused pane is not
+/// an editor.
+fn selections_joined_text(stoat: &mut Stoat) -> Option<String> {
     let ws = stoat.active_workspace_mut();
     let focused = ws.panes.focus();
     let editor_id = match ws.panes.pane(focused).view {
@@ -47,22 +48,39 @@ fn primary_selection_text(stoat: &mut Stoat) -> Option<String> {
     let editor = ws.editors.get_mut(editor_id).expect("editor");
     let snapshot = editor.display_map.snapshot();
     let buf_snap = snapshot.buffer_snapshot();
-    let primary = editor.selections.newest_anchor();
-    let start = buf_snap.resolve_anchor(&primary.start);
-    let end = buf_snap.resolve_anchor(&primary.end);
-    let (lo, hi) = if start <= end {
-        (start, end)
-    } else {
-        (end, start)
-    };
-    Some(buf_snap.rope().slice(lo..hi).to_string())
+    let rope = buf_snap.rope();
+    let mut ranges: Vec<(usize, usize)> = editor
+        .selections
+        .all_anchors()
+        .iter()
+        .filter_map(|sel| {
+            let start = buf_snap.resolve_anchor(&sel.start);
+            let end = buf_snap.resolve_anchor(&sel.end);
+            let (lo, hi) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            (lo != hi).then_some((lo, hi))
+        })
+        .collect();
+    ranges.sort_unstable();
+    let pieces: Vec<String> = ranges
+        .into_iter()
+        .map(|(lo, hi)| rope.slice(lo..hi).to_string())
+        .collect();
+    Some(pieces.join("\n"))
 }
 
 /// Insert the unnamed register's content at every selection,
 /// either at each selection's `start` (Before) or `end` (After).
-/// After the edit, every affected selection collapses to a cursor
-/// at the end of the inserted text. No-op when the register is
-/// empty or unset, or when the focused pane is not an editor.
+/// When the register has exactly one line per selection (and
+/// more than one selection), each selection receives the
+/// matching line in start-offset order; otherwise every
+/// selection receives the full register content. After the
+/// edit, every affected selection collapses to a cursor at the
+/// end of its inserted text. No-op when the register is empty
+/// or unset, or when the focused pane is not an editor.
 fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
     let Some(content) = stoat.registers.read(Register::Unnamed).map(str::to_owned) else {
         return UpdateEffect::None;
@@ -118,22 +136,32 @@ fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
 
     entries.sort_by_key(|(_, off)| *off);
 
+    let lines: Vec<&str> = content.split('\n').collect();
+    let line_aware = entries.len() > 1 && lines.len() == entries.len();
+    let payload_for = |idx: usize| -> &str {
+        if line_aware {
+            lines[idx]
+        } else {
+            content.as_str()
+        }
+    };
+
     {
         let buffer = ws.buffers.get(buffer_id).expect("buffer");
         let mut guard = buffer.write().expect("poisoned");
-        for (_, off) in entries.iter().rev() {
-            guard.edit(*off..*off, &content);
+        for (idx, (_, off)) in entries.iter().enumerate().rev() {
+            guard.edit(*off..*off, payload_for(idx));
         }
     }
 
-    let content_len = content.len();
     let mut id_to_caret: std::collections::HashMap<usize, usize> =
         std::collections::HashMap::with_capacity(entries.len());
     let mut shift: i64 = 0;
-    for (id, off) in entries.iter() {
-        let caret = (*off as i64 + shift) as usize + content_len;
+    for (idx, (id, off)) in entries.iter().enumerate() {
+        let payload_len = payload_for(idx).len();
+        let caret = (*off as i64 + shift) as usize + payload_len;
         id_to_caret.insert(*id, caret);
-        shift += content_len as i64;
+        shift += payload_len as i64;
     }
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");
@@ -289,5 +317,51 @@ mod tests {
         h.type_keys("escape");
         h.type_keys("P");
         assert_eq!(buffer_text(&h, &path), "abcabc\n");
+    }
+
+    fn make_two_selections(h: &mut TestHarness) {
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+        h.stoat.mode = "select".into();
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::ExtendRight);
+        h.stoat.mode = "normal".into();
+    }
+
+    #[test]
+    fn yank_joins_multi_selection_with_newlines() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        assert_eq!(h.selection_spans(), vec![(0, 3, false), (4, 7, false)]);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(str::to_owned);
+        assert_eq!(stored, Some("abc\ndef".to_string()));
+    }
+
+    #[test]
+    fn paste_after_with_line_match_pastes_line_per_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\ndef\n");
+        make_two_selections(&mut h);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abcabc\ndefdef\n");
+    }
+
+    #[test]
+    fn paste_after_with_line_count_mismatch_pastes_full_at_each() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "ab\ncd\nef\n");
+        h.type_keys("v l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abab\ncd\nabef\nab");
     }
 }
