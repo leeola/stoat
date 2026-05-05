@@ -1,0 +1,33 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: snapshot
+focused: #1 of 1
+mode: prompt
+size: 80x24
+---
+[0m[7m [0m
+
+
+
+
+
+
+
+
+
+  [0m[35m┌ search: alpha ───────────────────────────────────────────────────────────┐[0m
+  [0m[35m│[0m[30m[46ma.rs                              1:4       fn alpha() { hello }          [0m[35m│[0m
+  [0m[35m│[0m[97msub/b.rs                          1:4       fn alpha_again() { hello }    [0m[35m│[0m
+  [0m[35m└──────────────────────────────────────────────────────────────────────────┘[0m
+
+
+
+                                                             [0m[33m┌ global-search ──┐[0m
+                                                             [0m[33m│[0m[36m Enter[0m[97m   open[0m    [0m[33m│[0m
+                                                             [0m[33m│[0m[36m   Esc[0m[97m   cancel[0m  [0m[33m│[0m
+                                                             [0m[33m│[0m[36mCtrl-N[0m[97m   next[0m    [0m[33m│[0m
+                                                             [0m[33m│[0m[36mCtrl-P[0m[97m   prev[0m    [0m[33m│[0m
+                                                             [0m[33m└─────────────────┘[0m
+[0m[1m[30m[42m PMT [0m[1m[97m[100m repo [0m[97m[100m[scratch]                                                        1:1 [0m

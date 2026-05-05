@@ -70,6 +70,7 @@ time = { version = "0.3", features = [
 blake3 = "1"
 arboard = "3"
 base64 = "0.22"
+regex = "1"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]

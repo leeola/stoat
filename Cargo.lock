@@ -2425,6 +2425,7 @@ dependencies = [
  "nucleo",
  "portable-pty",
  "ratatui",
+ "regex",
  "ron",
  "serde",
  "serde_json",

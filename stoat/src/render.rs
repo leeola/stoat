@@ -7,6 +7,7 @@ pub(crate) mod conflict;
 pub(crate) mod dock;
 pub(crate) mod editor;
 pub(crate) mod file_finder;
+pub(crate) mod global_search;
 pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
@@ -351,6 +352,18 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "jumplist",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
+    } else if let Some(picker) = &stoat.global_search {
+        let git_root = ws.git_root.clone();
+        global_search::render_global_search(picker, &git_root, &stoat.theme, size, buf);
+        let bindings = picker.hint_bindings();
+        hints::render_hints(
+            "global-search",
             &bindings,
             None,
             &stoat.theme,

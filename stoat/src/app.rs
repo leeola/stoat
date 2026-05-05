@@ -67,6 +67,14 @@ pub struct Stoat {
     /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
     /// cancel.
     pub(crate) jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
+    /// Active input modal for typing a global-search regex pattern.
+    /// `Some` while the user is composing the query; cleared on
+    /// submit (the picker takes over) or cancel.
+    pub(crate) global_search_input: Option<crate::global_search::GlobalSearchInputState>,
+    /// Results modal listing every workspace match for the most-recent
+    /// global-search submit. `Some` until the user picks a match
+    /// (jumps to it) or cancels.
+    pub(crate) global_search: Option<crate::global_search::GlobalSearchPicker>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
@@ -449,6 +457,8 @@ impl Stoat {
             workspace_picker: None,
             quit_all_confirm: None,
             jumplist_picker: None,
+            global_search_input: None,
+            global_search: None,
             persistence_disabled: false,
             language_registry,
             syntax_styles,
@@ -1181,6 +1191,10 @@ impl Stoat {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
             }
+            if let Some(picker) = self.global_search.take() {
+                self.mode = picker.previous_mode;
+                return UpdateEffect::Redraw;
+            }
             if self.mode == "run" {
                 return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
             }
@@ -1213,6 +1227,10 @@ impl Stoat {
 
         if self.jumplist_picker.is_some() {
             return self.dispatch_jumplist_picker_key(key);
+        }
+
+        if self.global_search.is_some() {
+            return self.dispatch_global_search_key(key);
         }
 
         if self.mode == "insert"
@@ -1634,6 +1652,10 @@ impl Stoat {
 
         if let Some(search) = &self.search_input {
             return Some((search.input.editor_id, search.input.buffer_id));
+        }
+
+        if let Some(gs) = &self.global_search_input {
+            return Some((gs.input.editor_id, gs.input.buffer_id));
         }
 
         if let Some((editor_id, buffer_id)) = ws
@@ -2425,6 +2447,59 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
         }
+    }
+
+    fn dispatch_global_search_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        use crate::global_search::PickerOutcome;
+        let outcome = match self.global_search.as_mut() {
+            Some(picker) => picker.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            PickerOutcome::None => UpdateEffect::Redraw,
+            PickerOutcome::Close => {
+                if let Some(picker) = self.global_search.take() {
+                    self.mode = picker.previous_mode;
+                }
+                UpdateEffect::Redraw
+            },
+            PickerOutcome::Select(idx) => {
+                let Some(picker) = self.global_search.take() else {
+                    return UpdateEffect::None;
+                };
+                let target = match picker.matches().get(idx) {
+                    Some(m) => (m.path.clone(), m.offset),
+                    None => return UpdateEffect::Redraw,
+                };
+                self.mode = picker.previous_mode;
+                action_handlers::dispatch(self, &OpenFile { path: target.0 });
+                self.jump_focused_to_match_offset(target.1);
+                UpdateEffect::Redraw
+            },
+        }
+    }
+
+    fn jump_focused_to_match_offset(&mut self, offset: usize) {
+        let ws = self.active_workspace_mut();
+        let editor_id = match ws.focus {
+            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+                View::Editor(id) => id,
+                _ => return,
+            },
+            FocusTarget::Dock(_) => return,
+        };
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let anchor = buf_snap.anchor_at(offset, Bias::Right);
+        editor.selections.transform(buf_snap, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            new
+        });
     }
 
     fn jump_focused_to_offset(&mut self, offset: usize, jumplist_idx: usize) {

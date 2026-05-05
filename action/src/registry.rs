@@ -29,9 +29,9 @@ use crate::{
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenJumplistPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp,
-            PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore, Redo,
-            RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
+            OpenGlobalSearch, OpenJumplistPicker, OpenReverseSearchInput, OpenSearchInput,
+            PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore,
+            Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
             RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
             SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister,
             SetMark, ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete,
@@ -300,6 +300,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenJumplistPicker::DEF, |_| {
         Ok(Box::new(OpenJumplistPicker))
     });
+    add(OpenGlobalSearch::DEF, |_| Ok(Box::new(OpenGlobalSearch)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -832,6 +833,7 @@ mod tests {
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 OpenJumplistPicker.
+        // + 1 OpenGlobalSearch.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -869,7 +871,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 246);
+        assert_eq!(all().count(), 247);
     }
 
     #[test]

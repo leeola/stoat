@@ -64,6 +64,7 @@ pub enum ActionKind {
     JumpBackward,
     JumpForward,
     OpenJumplistPicker,
+    OpenGlobalSearch,
     FindNextChar,
     FindPrevChar,
     TillNextChar,

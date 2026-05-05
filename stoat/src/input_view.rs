@@ -57,6 +57,7 @@ pub(crate) enum SubmitTarget {
     RenameSymbol,
     WorkspaceSymbolPicker,
     Search,
+    GlobalSearch,
 }
 
 impl InputView {

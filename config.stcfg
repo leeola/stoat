@@ -452,6 +452,7 @@ on key {
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
+        / -> OpenGlobalSearch();
         : -> OpenCommandPalette();
     }
     mode == space_clipboard {

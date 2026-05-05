@@ -11,7 +11,6 @@ size: 80x24
 
 
 
-
                                        [0m[33m┌ space ────────────────────────────────┐[0m
                                        [0m[33m│[0m[36m  ?[0m[97m   open the help modal[0m              [0m[33m│[0m
                                        [0m[33m│[0m[36mEsc[0m[97m   normal mode[0m                      [0m[33m│[0m
@@ -28,6 +27,7 @@ size: 80x24
                                        [0m[33m│[0m[36m  s[0m[97m   save current position to jumplist[0m[33m│[0m
                                        [0m[33m│[0m[36m  j[0m[97m   jump backward in jumplist[0m        [0m[33m│[0m
                                        [0m[33m│[0m[36m  k[0m[97m   jump forward in jumplist[0m         [0m[33m│[0m
+                                       [0m[33m│[0m[36m  /[0m[97m   open workspace regex search[0m      [0m[33m│[0m
                                        [0m[33m│[0m[36m  :[0m[97m   open the command palette[0m         [0m[33m│[0m
                                        [0m[33m└───────────────────────────────────────┘[0m
 [0m[1m[30m[100m SPC [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

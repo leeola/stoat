@@ -262,6 +262,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::JumpBackward => movement::jump_backward(stoat),
         ActionKind::JumpForward => movement::jump_forward(stoat),
         ActionKind::OpenJumplistPicker => open_jumplist_picker(stoat),
+        ActionKind::OpenGlobalSearch => open_global_search(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
         },
@@ -581,6 +582,82 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     }
 }
 
+/// Drive [`ActionKind::OpenGlobalSearch`]. Opens the input modal so the
+/// user can type a regex pattern; submission triggers the workspace
+/// scan via [`global_search_submit`].
+fn open_global_search(stoat: &mut Stoat) -> UpdateEffect {
+    if stoat.global_search_input.is_some() {
+        return UpdateEffect::None;
+    }
+    let previous_mode = stoat.mode.clone();
+    let executor = stoat.executor.clone();
+    let ws = stoat.active_workspace_mut();
+    let input = crate::input_view::InputView::create(
+        ws,
+        executor,
+        crate::input_view::SubmitTarget::GlobalSearch,
+        "",
+        "prompt",
+        1,
+    );
+    stoat.global_search_input = Some(crate::global_search::GlobalSearchInputState {
+        input,
+        previous_mode,
+    });
+    stoat.mode = "prompt".into();
+    UpdateEffect::Redraw
+}
+
+/// Submit the global-search query. Reads the typed pattern, runs the
+/// scan via [`crate::global_search::perform_search`], and stores a
+/// [`crate::global_search::GlobalSearchPicker`] on `Stoat`. Empty or
+/// invalid patterns close the input without opening the picker.
+/// Returns `true` when the input modal was open.
+pub(crate) fn global_search_submit(stoat: &mut Stoat) -> bool {
+    let Some(state) = stoat.global_search_input.take() else {
+        return false;
+    };
+    let query = state.input.text(stoat.active_workspace());
+    let previous_mode = state.previous_mode.clone();
+    let ws = stoat.active_workspace_mut();
+    state.input.dispose(ws);
+    if query.is_empty() {
+        stoat.mode = previous_mode;
+        return true;
+    }
+    let git_root = stoat.active_workspace().git_root.clone();
+    let matches = match crate::global_search::perform_search(&*stoat.fs_host, &git_root, &query) {
+        Ok(m) => m,
+        Err(_) => {
+            stoat.mode = previous_mode;
+            return true;
+        },
+    };
+    if matches.is_empty() {
+        stoat.mode = previous_mode;
+        return true;
+    }
+    stoat.global_search = Some(crate::global_search::GlobalSearchPicker::new(
+        matches,
+        query,
+        previous_mode,
+    ));
+    true
+}
+
+/// Cancel the global-search input modal without running the scan.
+/// Returns `true` when the input was open.
+pub(crate) fn global_search_cancel(stoat: &mut Stoat) -> bool {
+    let Some(state) = stoat.global_search_input.take() else {
+        return false;
+    };
+    let previous_mode = state.previous_mode.clone();
+    let ws = stoat.active_workspace_mut();
+    state.input.dispose(ws);
+    stoat.mode = previous_mode;
+    true
+}
+
 /// Drive [`ActionKind::OpenJumplistPicker`]. Builds a snapshot of the
 /// focused editor's jumplist and stores it in
 /// [`Stoat::jumplist_picker`]. No-op when the jumplist is empty.
@@ -830,6 +907,71 @@ mod tests {
         let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert_eq!(h.stoat.update(Event::Key(event)), UpdateEffect::Redraw);
         assert!(h.stoat.jumplist_picker.is_none());
+    }
+
+    #[test]
+    fn open_global_search_opens_input_modal() {
+        let mut stoat = stoat();
+        assert_eq!(
+            dispatch(&mut stoat, &stoat_action::OpenGlobalSearch),
+            UpdateEffect::Redraw
+        );
+        assert!(stoat.global_search_input.is_some());
+        assert_eq!(stoat.mode, "prompt");
+    }
+
+    #[test]
+    fn global_search_submit_with_no_matches_closes_input() {
+        let mut h = Stoat::test();
+        let root = std::path::PathBuf::from("/repo");
+        h.fake_fs().insert_file(root.join("a.rs"), b"hello\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
+        h.type_text("zzz_no_match");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert!(h.stoat.global_search_input.is_none());
+        assert!(h.stoat.global_search.is_none());
+    }
+
+    #[test]
+    fn global_search_submit_with_matches_opens_picker() {
+        let mut h = Stoat::test();
+        let root = std::path::PathBuf::from("/repo");
+        h.fake_fs().insert_file(root.join("a.rs"), b"alpha\nbeta\n");
+        h.fake_fs().insert_file(root.join("b.rs"), b"alpha again\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
+        h.type_text("alpha");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        let picker = h.stoat.global_search.as_ref().expect("picker open");
+        assert_eq!(picker.matches().len(), 2);
+    }
+
+    #[test]
+    fn global_search_picker_esc_closes_without_jumping() {
+        let mut h = Stoat::test();
+        let root = std::path::PathBuf::from("/repo");
+        h.fake_fs().insert_file(root.join("a.rs"), b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
+        h.type_text("alpha");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert!(h.stoat.global_search.is_some());
+        assert_eq!(
+            h.stoat.update(Event::Key(keys::key(KeyCode::Esc))),
+            UpdateEffect::Redraw
+        );
+        assert!(h.stoat.global_search.is_none());
+    }
+
+    #[test]
+    fn global_search_input_esc_cancels() {
+        let mut h = Stoat::test();
+        dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
+        assert!(h.stoat.global_search_input.is_some());
+        h.stoat.update(Event::Key(keys::key(KeyCode::Esc)));
+        assert!(h.stoat.global_search_input.is_none());
+        assert!(h.stoat.global_search.is_none());
     }
 
     #[test]
