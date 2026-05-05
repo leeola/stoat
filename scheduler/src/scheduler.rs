@@ -1,5 +1,6 @@
 mod clock;
 mod executor;
+mod local_scheduler;
 mod test_scheduler;
 #[cfg(test)]
 mod tests;
@@ -8,6 +9,7 @@ mod tokio_scheduler;
 pub use clock::{Clock, LocalClock, TestClock};
 pub use executor::{Executor, Task};
 use futures::channel::oneshot;
+pub use local_scheduler::LocalScheduler;
 use std::{
     future::Future,
     pin::Pin,

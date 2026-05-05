@@ -5,7 +5,7 @@ use stoat::{
     dump::{self, DumpEntry},
     host::LocalFs,
 };
-use stoat_scheduler::TestScheduler;
+use stoat_scheduler::LocalScheduler;
 use tempfile::Builder as TempBuilder;
 
 #[derive(Subcommand, Debug)]
@@ -129,8 +129,7 @@ fn rm(query: &str) -> Result<(), Whatever> {
 }
 
 fn clean(older_than_days: u64) -> Result<(), Whatever> {
-    // FIXME: Replace TestScheduler with a production scheduler
-    let scheduler = Arc::new(TestScheduler::new());
+    let scheduler = Arc::new(LocalScheduler::new());
     let executor = scheduler.executor();
     let removed = dump::clean_older_than(older_than_days, &LocalFs, &executor)
         .whatever_context("clean stale dumps")?;
