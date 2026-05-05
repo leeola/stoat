@@ -2463,6 +2463,7 @@ dependencies = [
  "snafu",
  "stoat",
  "stoat_log",
+ "stoat_scheduler",
  "tempfile",
  "tokio",
  "tokio-stream",

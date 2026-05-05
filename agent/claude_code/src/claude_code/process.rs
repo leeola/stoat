@@ -2,11 +2,11 @@ use crate::messages::{PermissionMode, SdkMessage, SettingSource, SystemSubtype};
 use snafu::{OptionExt, ResultExt, Snafu};
 use std::{path::PathBuf, process::Stdio, sync::Arc, time::Duration};
 use stoat_log::TextProtoLog;
+use stoat_scheduler::{Executor, Task};
 use tokio::{
     io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
     process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
     sync::{mpsc, oneshot},
-    task::JoinHandle,
 };
 use tracing::{debug, error, trace};
 
@@ -85,20 +85,13 @@ pub enum CloseError {
         #[snafu(implicit)]
         location: snafu::Location,
     },
-
-    #[snafu(display("Handler task panicked: {}", task))]
-    HandlerPanicked {
-        task: String,
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
 }
 
 pub struct Process {
     child: Child,
-    stdin_handle: JoinHandle<mpsc::Receiver<String>>,
-    stdout_handle: JoinHandle<mpsc::Sender<SdkMessage>>,
-    stderr_handle: JoinHandle<String>, // Returns last stderr line
+    stdin_handle: Task<mpsc::Receiver<String>>,
+    stdout_handle: Task<mpsc::Sender<SdkMessage>>,
+    stderr_handle: Task<String>, // Returns last stderr line
     /// Oneshot sender that signals the stdin handler to stop its
     /// `select!` loop. Required because the handler reads from an mpsc
     /// channel whose senders live outside of [`Process`], so
@@ -126,6 +119,7 @@ pub struct ProcessBuilder {
     // Required channels (passed in constructor)
     stdin_rx: mpsc::Receiver<String>,
     stdout_tx: mpsc::Sender<SdkMessage>,
+    executor: Executor,
 
     // Optional configuration
     session_id: Option<String>,
@@ -175,10 +169,15 @@ pub struct ProcessBuilder {
 }
 
 impl ProcessBuilder {
-    pub fn new(stdin_rx: mpsc::Receiver<String>, stdout_tx: mpsc::Sender<SdkMessage>) -> Self {
+    pub fn new(
+        stdin_rx: mpsc::Receiver<String>,
+        stdout_tx: mpsc::Sender<SdkMessage>,
+        executor: Executor,
+    ) -> Self {
         Self {
             stdin_rx,
             stdout_tx,
+            executor,
             session_id: None,
             model: None,
             max_turns: None,
@@ -448,6 +447,7 @@ impl ProcessBuilder {
 
         let stdin_rx = self.stdin_rx;
         let stdout_tx = self.stdout_tx;
+        let executor = self.executor;
         let tx_log = self.tx_log;
         let rx_log = self.rx_log;
 
@@ -460,17 +460,20 @@ impl ProcessBuilder {
         };
 
         let (shutdown_tx, shutdown_rx) = oneshot::channel::<()>();
-        let (stdin_handle, stdout_handle, stderr_handle) = Self::setup_handlers(HandlerDeps {
-            stdin,
-            stdout,
-            stderr,
-            stdin_rx,
-            stdout_tx,
-            tx_log: tx_log.clone(),
-            rx_log: rx_log.clone(),
-            init_tx: None,
-            shutdown_rx,
-        });
+        let (stdin_handle, stdout_handle, stderr_handle) = Self::setup_handlers(
+            &executor,
+            HandlerDeps {
+                stdin,
+                stdout,
+                stderr,
+                stdin_rx,
+                stdout_tx,
+                tx_log: tx_log.clone(),
+                rx_log: rx_log.clone(),
+                init_tx: None,
+                shutdown_rx,
+            },
+        );
 
         Ok(Process {
             child,
@@ -695,29 +698,41 @@ impl ProcessBuilder {
 
     // Setup all handlers
     fn setup_handlers(
+        executor: &Executor,
         deps: HandlerDeps,
     ) -> (
-        JoinHandle<mpsc::Receiver<String>>,
-        JoinHandle<mpsc::Sender<SdkMessage>>,
-        JoinHandle<String>,
+        Task<mpsc::Receiver<String>>,
+        Task<mpsc::Sender<SdkMessage>>,
+        Task<String>,
     ) {
-        let stdin_handle =
-            Self::spawn_stdin_handler(deps.stdin, deps.stdin_rx, deps.tx_log, deps.shutdown_rx);
-        let stdout_handle =
-            Self::spawn_stdout_handler(deps.stdout, deps.stdout_tx, deps.rx_log, deps.init_tx);
-        let stderr_handle = Self::spawn_stderr_handler(deps.stderr);
+        let stdin_handle = Self::spawn_stdin_handler(
+            executor,
+            deps.stdin,
+            deps.stdin_rx,
+            deps.tx_log,
+            deps.shutdown_rx,
+        );
+        let stdout_handle = Self::spawn_stdout_handler(
+            executor,
+            deps.stdout,
+            deps.stdout_tx,
+            deps.rx_log,
+            deps.init_tx,
+        );
+        let stderr_handle = Self::spawn_stderr_handler(executor, deps.stderr);
 
         (stdin_handle, stdout_handle, stderr_handle)
     }
 
     // Stdin handler
     fn spawn_stdin_handler(
+        executor: &Executor,
         stdin: ChildStdin,
         mut stdin_rx: mpsc::Receiver<String>,
         tx_log: Option<Arc<TextProtoLog>>,
         mut shutdown_rx: oneshot::Receiver<()>,
-    ) -> JoinHandle<mpsc::Receiver<String>> {
-        tokio::spawn(async move {
+    ) -> Task<mpsc::Receiver<String>> {
+        executor.spawn(async move {
             let mut stdin = stdin;
             loop {
                 tokio::select! {
@@ -754,12 +769,13 @@ impl ProcessBuilder {
 
     // Stdout handler
     fn spawn_stdout_handler(
+        executor: &Executor,
         stdout: ChildStdout,
         stdout_tx: mpsc::Sender<SdkMessage>,
         rx_log: Option<Arc<TextProtoLog>>,
         init_tx: Option<oneshot::Sender<()>>,
-    ) -> JoinHandle<mpsc::Sender<SdkMessage>> {
-        tokio::spawn(async move {
+    ) -> Task<mpsc::Sender<SdkMessage>> {
+        executor.spawn(async move {
             let mut reader = BufReader::new(stdout);
             let mut line = String::new();
             let mut init_tx = init_tx;
@@ -814,8 +830,8 @@ impl ProcessBuilder {
     }
 
     // Stderr handler that maintains a small buffer
-    fn spawn_stderr_handler(stderr: ChildStderr) -> JoinHandle<String> {
-        tokio::spawn(async move {
+    fn spawn_stderr_handler(executor: &Executor, stderr: ChildStderr) -> Task<String> {
+        executor.spawn(async move {
             let mut reader = BufReader::new(stderr);
             let mut line = String::new();
             let mut last_error = String::new();
@@ -847,8 +863,9 @@ impl Process {
     pub fn builder(
         stdin_rx: mpsc::Receiver<String>,
         stdout_tx: mpsc::Sender<SdkMessage>,
+        executor: Executor,
     ) -> ProcessBuilder {
-        ProcessBuilder::new(stdin_rx, stdout_tx)
+        ProcessBuilder::new(stdin_rx, stdout_tx, executor)
     }
 
     /// Close the process and recover the channels.
@@ -866,17 +883,9 @@ impl Process {
             let _ = tx.send(());
         }
 
-        let stdin_rx = self.stdin_handle.await.ok().context(HandlerPanickedSnafu {
-            task: "stdin".to_string(),
-        })?;
-        let stdout_tx = self
-            .stdout_handle
-            .await
-            .ok()
-            .context(HandlerPanickedSnafu {
-                task: "stdout".to_string(),
-            })?;
-        let last_stderr = self.stderr_handle.await.unwrap_or_default();
+        let stdin_rx = self.stdin_handle.await;
+        let stdout_tx = self.stdout_handle.await;
+        let last_stderr = self.stderr_handle.await;
 
         if let Some(log) = &self.tx_log {
             log.flush();
@@ -909,7 +918,8 @@ mod tests {
     fn builder_with_session_id() -> ProcessBuilder {
         let (_stdin_tx, stdin_rx) = mpsc::channel::<String>(1);
         let (stdout_tx, _stdout_rx) = mpsc::channel::<SdkMessage>(1);
-        ProcessBuilder::new(stdin_rx, stdout_tx).session_id("sess-1")
+        let scheduler = Arc::new(stoat_scheduler::LocalScheduler::new());
+        ProcessBuilder::new(stdin_rx, stdout_tx, scheduler.executor()).session_id("sess-1")
     }
 
     fn index_of(args: &[String], needle: &str) -> Option<usize> {
@@ -1152,13 +1162,17 @@ mod tests {
         let (_stdin_tx, stdin_rx) = mpsc::channel::<String>(1);
         let (stdout_tx, _stdout_rx) = mpsc::channel::<SdkMessage>(1);
 
-        let start = std::time::Instant::now();
-        let result = ProcessBuilder::new(stdin_rx, stdout_tx)
+        let scheduler = Arc::new(stoat_scheduler::TokioScheduler::new(
+            tokio::runtime::Handle::current(),
+        ));
+        let executor = scheduler.executor();
+        let start = executor.now();
+        let result = ProcessBuilder::new(stdin_rx, stdout_tx, executor.clone())
             .session_id("sess-race-test")
             .binary(false_bin)
             .new_session()
             .await;
-        let elapsed = start.elapsed();
+        let elapsed = executor.now().duration_since(start);
 
         assert!(result.is_ok(), "launch should succeed immediately");
         assert!(
@@ -1181,13 +1195,17 @@ mod tests {
         let (_stdin_tx, stdin_rx) = mpsc::channel::<String>(1);
         let (stdout_tx, _stdout_rx) = mpsc::channel::<SdkMessage>(1);
 
-        let start = std::time::Instant::now();
-        let result = ProcessBuilder::new(stdin_rx, stdout_tx)
+        let scheduler = Arc::new(stoat_scheduler::TokioScheduler::new(
+            tokio::runtime::Handle::current(),
+        ));
+        let executor = scheduler.executor();
+        let start = executor.now();
+        let result = ProcessBuilder::new(stdin_rx, stdout_tx, executor.clone())
             .session_id("sess-no-wait-test")
             .binary(sleep_bin)
             .new_session()
             .await;
-        let elapsed = start.elapsed();
+        let elapsed = executor.now().duration_since(start);
 
         assert!(result.is_ok(), "launch should succeed without init");
         assert!(

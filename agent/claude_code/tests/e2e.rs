@@ -1,10 +1,16 @@
 #[cfg(feature = "e2e_claude_code")]
 mod e2e_tests {
-    use std::time::Duration;
+    use std::{sync::Arc, time::Duration};
     use stoat::host::{AgentMessage, ClaudeCodeSession};
     use stoat_agent_claude_code::ClaudeCode;
+    use stoat_scheduler::TokioScheduler;
     use tracing::info;
     use tracing_subscriber::EnvFilter;
+
+    fn test_executor() -> stoat_scheduler::Executor {
+        let scheduler = Arc::new(TokioScheduler::new(tokio::runtime::Handle::current()));
+        scheduler.executor()
+    }
 
     fn init_logging() {
         let _ = tracing_subscriber::fmt()
@@ -66,7 +72,7 @@ mod e2e_tests {
         init_logging();
         info!("Starting basic math query e2e test");
 
-        let claude = ClaudeCode::builder()
+        let claude = ClaudeCode::builder(test_executor())
             .model("sonnet")
             .build()
             .await
@@ -98,7 +104,7 @@ mod e2e_tests {
         init_logging();
         info!("Starting is_alive + shutdown e2e test");
 
-        let claude = ClaudeCode::builder()
+        let claude = ClaudeCode::builder(test_executor())
             .model("sonnet")
             .build()
             .await
@@ -133,7 +139,7 @@ mod e2e_tests {
     #[tokio::test]
     async fn test_session_id_accessible() {
         init_logging();
-        let claude = ClaudeCode::builder()
+        let claude = ClaudeCode::builder(test_executor())
             .model("sonnet")
             .build()
             .await

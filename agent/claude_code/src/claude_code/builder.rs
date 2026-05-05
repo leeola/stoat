@@ -10,12 +10,13 @@ use snafu::OptionExt;
 use std::{path::PathBuf, sync::Arc};
 use stoat::host::{HookCallback, PermissionCallback};
 use stoat_log::TextProtoLog;
+use stoat_scheduler::Executor;
 use tokio::sync::mpsc;
 
-#[derive(Default)]
 pub struct ClaudeCodeBuilder {
     config: SessionConfig,
     managed_session_id: Option<uuid::Uuid>,
+    executor: Executor,
     tx_log: Option<Arc<TextProtoLog>>,
     rx_log: Option<Arc<TextProtoLog>>,
     permission_callback: Option<Arc<dyn PermissionCallback>>,
@@ -39,8 +40,16 @@ impl std::fmt::Debug for ClaudeCodeBuilder {
 }
 
 impl ClaudeCodeBuilder {
-    pub fn new() -> Self {
-        Self::default()
+    pub fn new(executor: Executor) -> Self {
+        Self {
+            config: SessionConfig::default(),
+            managed_session_id: None,
+            executor,
+            tx_log: None,
+            rx_log: None,
+            permission_callback: None,
+            hook_callback: None,
+        }
     }
 
     /// Replace the builder's configuration wholesale. Useful for
@@ -370,7 +379,8 @@ impl ClaudeCodeBuilder {
         let (inner_tx, inner_rx) = mpsc::channel::<crate::messages::SdkMessage>(32);
 
         let process_builder = self.configure_process_builder(
-            ProcessBuilderInner::new(stdin_rx, inner_tx).session_id(session_id.to_string()),
+            ProcessBuilderInner::new(stdin_rx, inner_tx, self.executor.clone())
+                .session_id(session_id.to_string()),
         );
 
         let process = match mode {
@@ -416,7 +426,9 @@ impl ClaudeCodeBuilder {
             stdin_tx: stdin_tx.clone(),
             control_waiters: control_waiters.clone(),
         };
-        tokio::spawn(run_dispatcher(inner_rx, outer_tx, deps));
+        self.executor
+            .spawn(run_dispatcher(inner_rx, outer_tx, deps))
+            .detach();
         let stdout_rx = outer_rx;
 
         Ok(ClaudeCode::from_process(

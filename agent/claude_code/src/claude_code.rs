@@ -16,6 +16,7 @@ use std::{
     time::Duration,
 };
 use stoat::host::AgentMessage;
+use stoat_scheduler::Executor;
 use tokio::sync::{Mutex as TokioMutex, mpsc};
 use tracing::info;
 
@@ -254,13 +255,16 @@ pub(crate) struct PromptState {
 
 impl ClaudeCode {
     /// Create a new builder for ClaudeCode
-    pub fn builder() -> ClaudeCodeBuilder {
-        ClaudeCodeBuilder::new()
+    pub fn builder(executor: Executor) -> ClaudeCodeBuilder {
+        ClaudeCodeBuilder::new(executor)
     }
 
     /// Create a new ClaudeCode with the given configuration
-    pub async fn new(config: SessionConfig) -> Result<Self, SessionError> {
-        ClaudeCodeBuilder::new().with_config(config).build().await
+    pub async fn new(executor: Executor, config: SessionConfig) -> Result<Self, SessionError> {
+        ClaudeCodeBuilder::new(executor)
+            .with_config(config)
+            .build()
+            .await
     }
 
     /// Create ClaudeCode from a Process instance with communication

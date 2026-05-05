@@ -8,10 +8,12 @@ use async_trait::async_trait;
 use std::{io, sync::Arc};
 use stoat::host::{ClaudeCodeHost, ClaudeCodeSession, FsHost};
 use stoat_log::TextProtoLog;
+use stoat_scheduler::Executor;
 
 pub struct ClaudeCodeLauncher {
     default_config: SessionConfig,
     fs_host: Arc<dyn FsHost>,
+    executor: Executor,
 }
 
 impl std::fmt::Debug for ClaudeCodeLauncher {
@@ -23,17 +25,23 @@ impl std::fmt::Debug for ClaudeCodeLauncher {
 }
 
 impl ClaudeCodeLauncher {
-    pub fn new(fs_host: Arc<dyn FsHost>) -> Self {
+    pub fn new(fs_host: Arc<dyn FsHost>, executor: Executor) -> Self {
         Self {
             default_config: SessionConfig::default(),
             fs_host,
+            executor,
         }
     }
 
-    pub fn with_config(default_config: SessionConfig, fs_host: Arc<dyn FsHost>) -> Self {
+    pub fn with_config(
+        default_config: SessionConfig,
+        fs_host: Arc<dyn FsHost>,
+        executor: Executor,
+    ) -> Self {
         Self {
             default_config,
             fs_host,
+            executor,
         }
     }
 }
@@ -52,7 +60,7 @@ impl ClaudeCodeHost for ClaudeCodeLauncher {
         let mut config = self.default_config.clone();
         config.session_id = Some(session_id);
 
-        let mut builder = ClaudeCode::builder().with_config(config);
+        let mut builder = ClaudeCode::builder(self.executor.clone()).with_config(config);
         if let (Some(tx), Some(rx)) = (tx_log, rx_log) {
             builder = builder.with_text_proto_logs(tx, rx);
         }

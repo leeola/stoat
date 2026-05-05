@@ -134,11 +134,14 @@ fn run_tui(
     };
 
     rt.block_on(async {
-        let mut stoat = Stoat::new(executor, cli_settings, initial_git_root);
+        let mut stoat = Stoat::new(executor.clone(), cli_settings, initial_git_root);
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
-        stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new(Arc::new(LocalFs))));
+        stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new(
+            Arc::new(LocalFs),
+            executor,
+        )));
 
         match start {
             TuiStart::Review => stoat.open_review(),
