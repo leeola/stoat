@@ -399,6 +399,7 @@ on key {
     mode == insert {
         Escape -> SetMode(normal);
         Enter -> ClaudeSubmit();
+        Ctrl-r -> InsertRegister();
     }
     mode == prompt && finder_open {
         Up -> FileFinderSelectPrev();

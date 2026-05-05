@@ -27,6 +27,11 @@ pub(super) fn select_register(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn insert_register(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.pending_insert_register = true;
+    UpdateEffect::Redraw
+}
+
 /// Apply the consumed-char keypress to the pending
 /// [`crate::app::Stoat::pending_register_select`] chord. ASCII
 /// letters land in [`Register::Named`]; the unnamed-quote char
@@ -39,6 +44,20 @@ pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
         stoat.selected_register = Some(Register::Named(ch));
     } else {
         stoat.selected_register = None;
+    }
+}
+
+/// Resolve [`Register`] from the consumed-char keypress for the
+/// pending [`crate::app::Stoat::pending_insert_register`] chord.
+/// `"` -> `Unnamed`; ASCII letter -> `Named`; any other char
+/// returns `None`.
+pub(crate) fn register_for_char(ch: char) -> Option<Register> {
+    if ch == '"' {
+        Some(Register::Unnamed)
+    } else if ch.is_ascii_alphabetic() {
+        Some(Register::Named(ch))
+    } else {
+        None
     }
 }
 
@@ -609,5 +628,56 @@ mod tests {
             .read(crate::register::Register::Unnamed)
             .map(str::to_owned);
         assert_eq!(stored, Some("abc".to_string()));
+    }
+
+    #[test]
+    fn insert_register_inserts_named_at_cursor() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Named('a'), "xyz".to_string());
+        h.type_keys("a");
+        h.type_keys("Ctrl-r");
+        h.type_keys("a");
+        assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+    }
+
+    #[test]
+    fn insert_register_inserts_unnamed_via_dquote() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Unnamed, "xyz".to_string());
+        h.type_keys("a");
+        h.type_keys("Ctrl-r");
+        h.type_keys("\"");
+        assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+    }
+
+    #[test]
+    fn insert_register_with_empty_register_is_noop() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("a");
+        h.type_keys("Ctrl-r");
+        h.type_keys("a");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert!(!h.stoat.pending_insert_register);
+    }
+
+    #[test]
+    fn insert_register_escape_cancels() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Named('a'), "xyz".to_string());
+        h.type_keys("a");
+        h.type_keys("Ctrl-r");
+        h.type_keys("escape");
+        assert!(!h.stoat.pending_insert_register);
+        assert_eq!(buffer_text(&h, &path), "abc\n");
     }
 }

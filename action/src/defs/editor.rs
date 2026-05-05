@@ -731,6 +731,16 @@ define_action!(
 );
 
 define_action!(
+    InsertRegisterDef,
+    InsertRegister,
+    "InsertRegister",
+    ActionKind::InsertRegister,
+    "insert register at cursor",
+    "Wait for the next char keypress in insert mode; the captured letter (`a-z`) names a register whose contents are inserted at the focused editor's cursor. Typing `\"` reads the unnamed register. No-op when the register is empty or unset.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

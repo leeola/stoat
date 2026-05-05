@@ -162,6 +162,11 @@ pub struct Stoat {
     /// [`Self::consume_selected_register`] which yank/paste call
     /// before reading the chosen register.
     pub(crate) selected_register: Option<register::Register>,
+    /// Set after `InsertRegister` arms the chord in insert mode.
+    /// The next char keypress is captured as the register name;
+    /// that register's content is inserted at the cursor and the
+    /// flag clears. Non-char keypresses also clear the flag.
+    pub(crate) pending_insert_register: bool,
     /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
@@ -462,6 +467,7 @@ impl Stoat {
             registers: register::RegisterStore::new(),
             pending_register_select: false,
             selected_register: None,
+            pending_insert_register: false,
             editor_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
@@ -1658,6 +1664,18 @@ impl Stoat {
 
     fn handle_insert_key(&mut self, key: KeyEvent) -> Option<UpdateEffect> {
         let (editor_id, buffer_id) = self.focused_editor_ids()?;
+
+        if self.pending_insert_register {
+            self.pending_insert_register = false;
+            if let KeyCode::Char(ch) = key.code {
+                if let Some(register) = action_handlers::yank::register_for_char(ch) {
+                    if let Some(content) = self.registers.read(register).map(str::to_owned) {
+                        self.editor_insert(editor_id, buffer_id, &content);
+                    }
+                }
+            }
+            return Some(UpdateEffect::Redraw);
+        }
 
         match key.code {
             KeyCode::Char('w') if key.modifiers == KeyModifiers::CONTROL => {

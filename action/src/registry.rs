@@ -24,8 +24,8 @@ use crate::{
             GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
             GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextParagraph,
             GotoPrevChange, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, JumpBackward,
-            JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
+            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertRegister,
+            JumpBackward, JumpForward, KeepPrimarySelection, MatchBrackets, MoveDown, MoveLeft,
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
@@ -339,6 +339,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(PasteClipboardBefore))
     });
     add(SelectRegister::DEF, |_| Ok(Box::new(SelectRegister)));
+    add(InsertRegister::DEF, |_| Ok(Box::new(InsertRegister)));
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -629,6 +630,7 @@ mod tests {
         "PasteClipboardAfter",
         "PasteClipboardBefore",
         "SelectRegister",
+        "InsertRegister",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -862,7 +864,8 @@ mod tests {
         // + 3 Yank, PasteAfter, PasteBefore.
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
-        assert_eq!(all().count(), 244);
+        // + 1 InsertRegister.
+        assert_eq!(all().count(), 245);
     }
 
     #[test]
