@@ -26,7 +26,12 @@ pub use paths::{data_dir, state_dir, workspace_state_dir};
 use snafu::{ResultExt, Snafu};
 use std::{fs, io, path::PathBuf};
 pub use text_proto::{log_dir, TextProtoLog};
-use tracing_subscriber::{filter::ParseError, fmt, EnvFilter};
+use tracing_subscriber::{
+    filter::ParseError,
+    fmt,
+    util::{SubscriberInitExt, TryInitError},
+    EnvFilter,
+};
 
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub))]
@@ -48,7 +53,7 @@ pub enum LogInitError {
 
     #[snafu(display("Failed to install global tracing subscriber"))]
     SetGlobalSubscriber {
-        source: Box<dyn std::error::Error + Send + Sync>,
+        source: TryInitError,
         #[snafu(implicit)]
         location: snafu::Location,
     },
@@ -79,6 +84,7 @@ pub fn init(
         .with_env_filter(filter)
         .with_writer(file)
         .with_ansi(false)
+        .finish()
         .try_init()
         .context(SetGlobalSubscriberSnafu)?;
     Ok(())
