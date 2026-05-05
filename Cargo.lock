@@ -2432,6 +2432,7 @@ dependencies = [
  "snafu",
  "stoat_action",
  "stoat_config",
+ "stoat_host",
  "stoat_language",
  "stoat_log",
  "stoat_scheduler",
@@ -2493,6 +2494,14 @@ version = "0.1.0"
 dependencies = [
  "ariadne",
  "chumsky",
+]
+
+[[package]]
+name = "stoat_host"
+version = "0.1.0"
+dependencies = [
+ "compact_str 0.8.1",
+ "ignore",
 ]
 
 [[package]]
@@ -3034,6 +3043,7 @@ version = "0.1.0"
 dependencies = [
  "bytes",
  "futures",
+ "stoat_host",
  "tempfile",
  "tokio",
  "tokio-util",

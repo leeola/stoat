@@ -1,9 +1,11 @@
 use compact_str::CompactString;
-use ignore::gitignore::{Gitignore, GitignoreBuilder};
-#[cfg(test)]
-use ignore::Match;
+use ignore::{
+    gitignore::{Gitignore, GitignoreBuilder},
+    Match, WalkBuilder,
+};
 use std::{
     io,
+    io::Read,
     path::{Path, PathBuf},
     time::SystemTime,
 };
@@ -12,7 +14,7 @@ use std::{
 /// finder. Parsed with gitignore semantics; treated as an unconditional
 /// hard filter so per-repo `.stoatignore` negations cannot re-introduce
 /// the listed paths.
-pub(crate) const DEFAULT_STOATIGNORE: &str = include_str!("../../../.stoatignore");
+pub(crate) const DEFAULT_STOATIGNORE: &str = include_str!("../../.stoatignore");
 
 #[derive(Clone, Copy, Debug)]
 pub struct FsMetadata {
@@ -70,7 +72,7 @@ pub trait FsHost: Send + Sync {
     }
 
     /// Enumerates every non-ignored file under `root`. Each implementation
-    /// chooses how to honour the ignore stack: production [`super::LocalFs`]
+    /// chooses how to honour the ignore stack: production [`LocalFs`]
     /// uses [`ignore::WalkBuilder`] so global `core.excludesFile` and
     /// `.git/info/exclude` apply; in-memory fakes walk through their
     /// own state via [`manual_walk`]. Output is sorted lexicographically.
@@ -79,12 +81,11 @@ pub trait FsHost: Send + Sync {
 
 /// Recursive walker driven by [`FsHost::list_dir`] / [`FsHost::read`].
 /// Used by every fake that has no notion of an underlying real filesystem
-/// (notably [`super::FakeFs`]). Honours per-directory `.gitignore` /
+/// (notably [`crate::FakeFs`]). Honours per-directory `.gitignore` /
 /// `.stoatignore` plus the baked-in [`DEFAULT_STOATIGNORE`] hard filter.
 /// Does not consult global / `$HOME` ignore files; that is the
 /// production walker's job.
-#[cfg(test)]
-pub(crate) fn manual_walk(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
+pub fn manual_walk(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
     let defaults = build_default_ignore(root);
     let mut stack: Vec<Gitignore> = Vec::new();
     let mut out = Vec::new();
@@ -106,7 +107,6 @@ pub(crate) fn build_default_ignore(root: &Path) -> Gitignore {
     builder.build().expect("default .stoatignore builds")
 }
 
-#[cfg(test)]
 fn walk_dir(
     fs: &dyn FsHost,
     dir: &Path,
@@ -139,7 +139,6 @@ fn walk_dir(
     stack.truncate(stack.len() - pushed);
 }
 
-#[cfg(test)]
 fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
     const NAMES: &[&str] = &[".gitignore", ".stoatignore"];
     let mut pushed = 0;
@@ -152,7 +151,6 @@ fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> 
     pushed
 }
 
-#[cfg(test)]
 fn read_ignore_file(fs: &dyn FsHost, dir: &Path, name: &str) -> Option<Gitignore> {
     let path = dir.join(name);
     let mut buf = Vec::new();
@@ -165,7 +163,6 @@ fn read_ignore_file(fs: &dyn FsHost, dir: &Path, name: &str) -> Option<Gitignore
     builder.build().ok()
 }
 
-#[cfg(test)]
 fn path_is_ignored(defaults: &Gitignore, stack: &[Gitignore], path: &Path, is_dir: bool) -> bool {
     if defaults.matched(path, is_dir).is_ignore() {
         return true;
@@ -179,4 +176,87 @@ fn path_is_ignored(defaults: &Gitignore, stack: &[Gitignore], path: &Path, is_di
         }
     }
     decision.unwrap_or(false)
+}
+
+pub struct LocalFs;
+
+impl FsHost for LocalFs {
+    fn read(&self, path: &Path, buf: &mut Vec<u8>) -> io::Result<()> {
+        buf.clear();
+        let mut file = std::fs::File::open(path)?;
+        file.read_to_end(buf)?;
+        Ok(())
+    }
+
+    fn write(&self, path: &Path, data: &[u8]) -> io::Result<()> {
+        std::fs::write(path, data)
+    }
+
+    fn metadata(&self, path: &Path) -> io::Result<Option<FsMetadata>> {
+        match std::fs::symlink_metadata(path) {
+            Ok(m) => Ok(Some(FsMetadata {
+                len: m.len(),
+                modified: m.modified()?,
+                is_dir: m.is_dir(),
+                is_symlink: m.file_type().is_symlink(),
+            })),
+            Err(e) if e.kind() == io::ErrorKind::NotFound => Ok(None),
+            Err(e) => Err(e),
+        }
+    }
+
+    fn list_dir(&self, path: &Path) -> io::Result<Vec<FsDirEntry>> {
+        let mut entries = Vec::new();
+        for entry in std::fs::read_dir(path)? {
+            let entry = entry?;
+            let Some(name) = entry.file_name().to_str().map(CompactString::from) else {
+                continue;
+            };
+            let ft = entry.file_type()?;
+            entries.push(FsDirEntry {
+                name,
+                is_dir: ft.is_dir(),
+                is_symlink: ft.is_symlink(),
+            });
+        }
+        Ok(entries)
+    }
+
+    fn create_dir_all(&self, path: &Path) -> io::Result<()> {
+        std::fs::create_dir_all(path)
+    }
+
+    fn canonicalize(&self, path: &Path) -> io::Result<PathBuf> {
+        std::fs::canonicalize(path)
+    }
+
+    fn remove_file(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_file(path)
+    }
+
+    fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
+        std::fs::rename(from, to)
+    }
+
+    fn walk_workspace_files(&self, root: &Path) -> Vec<PathBuf> {
+        let defaults = build_default_ignore(root);
+        let walker = WalkBuilder::new(root)
+            .hidden(false)
+            .require_git(false)
+            .add_custom_ignore_filename(".stoatignore")
+            .filter_entry(move |entry| {
+                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+                !defaults.matched(entry.path(), is_dir).is_ignore()
+            })
+            .build();
+
+        let mut out = Vec::new();
+        for entry in walker.flatten() {
+            if entry.file_type().is_some_and(|t| t.is_file()) {
+                out.push(entry.into_path());
+            }
+        }
+        out.sort();
+        out
+    }
 }

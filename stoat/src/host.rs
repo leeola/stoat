@@ -10,10 +10,8 @@
 
 pub mod claude_code;
 pub mod clipboard;
-pub mod env;
 #[cfg(test)]
 pub mod fake;
-pub mod fs;
 pub mod git;
 pub mod local;
 pub mod lsp;
@@ -28,7 +26,6 @@ pub use claude_code::{
     ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind, ToolPermissionContext,
 };
 pub use clipboard::{osc52_should_emit, ClipboardHost, NoopClipboard};
-pub use env::{EnvHost, LocalEnv};
 #[cfg(test)]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
@@ -37,12 +34,12 @@ pub use fake::{
     workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeClipboard, FakeEnv, FakeFs,
     FakeFsOp, FakeGit, FakeLsp, FakeRepoBuilder,
 };
-pub use fs::{FsDirEntry, FsHost, FsMetadata};
 pub use git::{
     ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
     ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
     RebaseTodoOp, RewriteResult,
 };
-pub use local::{LocalClipboard, LocalFs, LocalGit};
+pub use local::{LocalClipboard, LocalGit};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
+pub use stoat_host::{EnvHost, FsDirEntry, FsHost, FsMetadata, LocalEnv, LocalFs};
 pub use terminal::TerminalHost;

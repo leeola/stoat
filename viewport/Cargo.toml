@@ -8,6 +8,7 @@ publish.workspace = true
 workspace = true
 
 [dependencies]
+stoat_host = { path = "../host" }
 tokio = { workspace = true, features = ["net"] }
 bytes = { workspace = true }
 tokio-util = { workspace = true }

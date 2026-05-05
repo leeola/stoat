@@ -807,7 +807,7 @@ mod tests {
 
     #[test]
     fn with_fs_populates_working_tree() {
-        use crate::host::fs::FsHost;
+        use crate::host::FsHost;
 
         let fs = FakeFs::new();
         let host = FakeGit::new();

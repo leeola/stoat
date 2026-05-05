@@ -1,4 +1,4 @@
-use crate::host::env::EnvHost;
+use crate::env::EnvHost;
 use std::{collections::HashMap, sync::Mutex};
 
 /// Test [`EnvHost`] backed by an in-memory map. Tests `set` /
@@ -22,17 +22,27 @@ impl FakeEnv {
     }
 
     pub fn set(&self, name: impl Into<String>, value: impl Into<String>) {
-        self.vars.lock().unwrap().insert(name.into(), value.into());
+        self.vars
+            .lock()
+            .expect("FakeEnv lock poisoned")
+            .insert(name.into(), value.into());
     }
 
     pub fn unset(&self, name: &str) {
-        self.vars.lock().unwrap().remove(name);
+        self.vars
+            .lock()
+            .expect("FakeEnv lock poisoned")
+            .remove(name);
     }
 }
 
 impl EnvHost for FakeEnv {
     fn var(&self, name: &str) -> Option<String> {
-        self.vars.lock().unwrap().get(name).cloned()
+        self.vars
+            .lock()
+            .expect("FakeEnv lock poisoned")
+            .get(name)
+            .cloned()
     }
 }
 

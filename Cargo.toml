@@ -5,6 +5,7 @@ members = [
   "agent/claude_code",
   "bin",
   "config",
+  "host",
   "language",
   "scheduler",
   "stoat",

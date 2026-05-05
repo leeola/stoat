@@ -1,7 +1,7 @@
 /// Process environment lookup.
 ///
 /// Production code reads env vars through this trait so tests can
-/// install [`crate::host::FakeEnv`] without leaking real environment
+/// install [`crate::FakeEnv`] without leaking real environment
 /// state. UTF-8-only by design: non-UTF-8 values are reported as
 /// absent. Callers needing `OsString` semantics (e.g. exotic paths)
 /// can extend the trait when a real consumer surfaces.

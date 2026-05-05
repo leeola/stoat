@@ -4,19 +4,22 @@ use futures::{SinkExt, StreamExt};
 use std::{
     io,
     path::{Path, PathBuf},
+    sync::Arc,
 };
+use stoat_host::FsHost;
 use tokio::net::{UnixListener, UnixStream};
 use tokio_util::codec::{FramedRead, FramedWrite};
 
 pub struct ViewportListener {
     listener: UnixListener,
     path: PathBuf,
+    fs: Arc<dyn FsHost>,
 }
 
 impl ViewportListener {
-    /// Binds a Unix listener at `path`, cleaning up stale sockets.
-    pub async fn bind(path: &Path) -> io::Result<Self> {
-        if path.exists() {
+    /// Binds a Unix listener at `path`, cleaning up stale sockets via `fs`.
+    pub async fn bind(fs: Arc<dyn FsHost>, path: &Path) -> io::Result<Self> {
+        if fs.exists(path) {
             match UnixStream::connect(path).await {
                 Ok(_) => {
                     return Err(io::Error::new(
@@ -25,7 +28,7 @@ impl ViewportListener {
                     ));
                 },
                 Err(_) => {
-                    std::fs::remove_file(path)?;
+                    fs.remove_file(path)?;
                 },
             }
         }
@@ -33,6 +36,7 @@ impl ViewportListener {
         Ok(Self {
             listener,
             path: path.to_owned(),
+            fs,
         })
     }
 
@@ -48,7 +52,7 @@ impl ViewportListener {
 
 impl Drop for ViewportListener {
     fn drop(&mut self) {
-        let _ = std::fs::remove_file(&self.path);
+        let _ = self.fs.remove_file(&self.path);
     }
 }
 

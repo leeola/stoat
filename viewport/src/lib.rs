@@ -22,6 +22,8 @@ mod tests {
     };
     use bytes::Bytes;
     use futures::{SinkExt, StreamExt};
+    use std::sync::Arc;
+    use stoat_host::LocalFs;
     use tokio::net::UnixStream;
     use tokio_util::codec::{FramedRead, FramedWrite};
 
@@ -80,7 +82,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let sock = dir.path().join("test.sock");
 
-        let listener = ViewportListener::bind(&sock).await.unwrap();
+        let listener = ViewportListener::bind(Arc::new(LocalFs), &sock)
+            .await
+            .unwrap();
 
         let client_handle = tokio::spawn(async move {
             let mut client = crate::ViewportClient::connect(&sock).await.unwrap();
@@ -119,7 +123,9 @@ mod tests {
         let dir = tempfile::TempDir::new().unwrap();
         let sock = dir.path().join("test.sock");
 
-        let listener = ViewportListener::bind(&sock).await.unwrap();
+        let listener = ViewportListener::bind(Arc::new(LocalFs), &sock)
+            .await
+            .unwrap();
 
         let client_handle = tokio::spawn(async move {
             let client = crate::ViewportClient::connect(&sock).await.unwrap();
@@ -170,6 +176,8 @@ mod tests {
         std::fs::write(&sock, b"").unwrap();
 
         // bind should clean up the stale file and succeed
-        let _listener = ViewportListener::bind(&sock).await.unwrap();
+        let _listener = ViewportListener::bind(Arc::new(LocalFs), &sock)
+            .await
+            .unwrap();
     }
 }
