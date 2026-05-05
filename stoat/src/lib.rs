@@ -23,6 +23,7 @@ pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;
 mod paths;
+pub(crate) mod quit_all_confirm;
 mod rebase;
 mod register;
 pub(crate) mod render;

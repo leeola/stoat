@@ -21,6 +21,14 @@ pub(crate) struct CachedDiff {
     pub result: Arc<DiffResult>,
 }
 
+/// One entry surfaced by [`BufferRegistry::dirty_buffers`]. `path` is
+/// `Some` for file-backed buffers and `None` for scratch buffers.
+#[derive(Clone, Debug)]
+pub(crate) struct DirtyBuffer {
+    pub id: BufferId,
+    pub path: Option<PathBuf>,
+}
+
 #[allow(dead_code)]
 struct BufferEntry {
     buffer: SharedBuffer,
@@ -161,6 +169,28 @@ impl BufferRegistry {
         let mut paths: Vec<PathBuf> = self.path_to_id.keys().cloned().collect();
         paths.sort();
         paths
+    }
+
+    /// Every buffer whose `dirty` flag is set: path-bound first sorted by
+    /// path, scratch buffers after sorted by id. Used by `QuitAll` to drive
+    /// the unsaved-buffers confirmation modal.
+    pub(crate) fn dirty_buffers(&self) -> Vec<DirtyBuffer> {
+        let mut out: Vec<DirtyBuffer> = self
+            .buffers
+            .iter()
+            .filter(|(_, entry)| entry.buffer.read().expect("buffer poisoned").dirty)
+            .map(|(id, entry)| DirtyBuffer {
+                id: *id,
+                path: entry.path.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| match (&a.path, &b.path) {
+            (Some(ap), Some(bp)) => ap.cmp(bp),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.id.cmp(&b.id),
+        });
+        out
     }
 
     pub(crate) fn language_for(&self, id: BufferId) -> Option<Arc<Language>> {

@@ -49,8 +49,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 UpdateEffect::Quit
             }
         },
-        // FIXME: prompt on unsaved buffers once dirty tracking exists
-        ActionKind::QuitAll => UpdateEffect::Quit,
+        ActionKind::QuitAll => quit_all(stoat),
         ActionKind::SplitRight => pane::split_pane(stoat, Axis::Vertical),
         ActionKind::SplitDown => pane::split_pane(stoat, Axis::Horizontal),
         ActionKind::SplitNewRight => pane::split_pane_new(stoat, Axis::Vertical),
@@ -581,6 +580,27 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     }
 }
 
+/// Drive [`ActionKind::QuitAll`]. Quits immediately when no buffer is
+/// dirty; otherwise opens the [`crate::quit_all_confirm::QuitAllConfirm`]
+/// modal and waits for the user to confirm or cancel.
+fn quit_all(stoat: &mut Stoat) -> UpdateEffect {
+    let mut dirty: Vec<crate::buffer_registry::DirtyBuffer> = Vec::new();
+    let mut git_root: Option<std::path::PathBuf> = None;
+    for ws in stoat.workspaces.values() {
+        let ws_dirty = ws.buffers.dirty_buffers();
+        if !ws_dirty.is_empty() && git_root.is_none() {
+            git_root = Some(ws.git_root.clone());
+        }
+        dirty.extend(ws_dirty);
+    }
+    if dirty.is_empty() {
+        return UpdateEffect::Quit;
+    }
+    let root = git_root.unwrap_or_else(|| stoat.active_workspace().git_root.clone());
+    stoat.quit_all_confirm = Some(crate::quit_all_confirm::QuitAllConfirm::new(&dirty, &root));
+    UpdateEffect::Redraw
+}
+
 /// Close the help modal, disposing its scratch editor and restoring the
 /// mode that was active before the modal opened. No-op when help is not
 /// open. Shared between `CancelPromptInput`, Ctrl-C cleanup, and the help
@@ -604,6 +624,8 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_harness::{editor, keys};
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::{sync::Arc, time::Duration};
     use stoat_action::{
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
@@ -623,11 +645,9 @@ mod tests {
             stoat_config::Settings::default(),
             std::path::PathBuf::new(),
         );
-        stoat.update(crossterm::event::Event::Resize(80, 24));
+        stoat.update(Event::Resize(80, 24));
         stoat
     }
-
-    use crate::test_harness::editor;
 
     #[test]
     fn dispatch_quit() {
@@ -650,6 +670,60 @@ mod tests {
         dispatch(&mut stoat, &SplitRight);
         assert_eq!(stoat.active_workspace().panes.pane_count(), 3);
         assert_eq!(dispatch(&mut stoat, &QuitAll), UpdateEffect::Quit);
+    }
+
+    #[test]
+    fn dispatch_quit_all_with_dirty_buffer_opens_modal() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "unsaved");
+        assert_eq!(dispatch(&mut stoat, &QuitAll), UpdateEffect::Redraw);
+        assert!(stoat.quit_all_confirm.is_some());
+    }
+
+    #[test]
+    fn quit_all_confirm_y_quits() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("unsaved");
+        dispatch(&mut h.stoat, &QuitAll);
+        assert!(h.stoat.quit_all_confirm.is_some());
+        assert_eq!(
+            h.stoat.update(Event::Key(keys::key(KeyCode::Char('y')))),
+            UpdateEffect::Quit
+        );
+    }
+
+    #[test]
+    fn quit_all_confirm_n_cancels() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("unsaved");
+        dispatch(&mut h.stoat, &QuitAll);
+        assert_eq!(
+            h.stoat.update(Event::Key(keys::key(KeyCode::Char('n')))),
+            UpdateEffect::Redraw
+        );
+        assert!(h.stoat.quit_all_confirm.is_none());
+    }
+
+    #[test]
+    fn quit_all_confirm_esc_cancels() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("unsaved");
+        dispatch(&mut h.stoat, &QuitAll);
+        assert_eq!(
+            h.stoat.update(Event::Key(keys::key(KeyCode::Esc))),
+            UpdateEffect::Redraw
+        );
+        assert!(h.stoat.quit_all_confirm.is_none());
+    }
+
+    #[test]
+    fn quit_all_confirm_ctrl_c_cancels() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("unsaved");
+        dispatch(&mut h.stoat, &QuitAll);
+        let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert_eq!(h.stoat.update(Event::Key(event)), UpdateEffect::Redraw);
+        assert!(h.stoat.quit_all_confirm.is_none());
     }
 
     #[test]
