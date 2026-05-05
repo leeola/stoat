@@ -29,15 +29,15 @@ use crate::{
             MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart,
             MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart,
             MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow,
-            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
-            PasteClipboardAfter, PasteClipboardBefore, Redo, RemovePrimarySelection,
-            RepeatLastMotion, ReplaceChar, RotateSelectionsBackward, RotateSelectionsForward,
-            SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
-            SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister, SetMark,
-            ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
-            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
-            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
-            YankToClipboard,
+            OpenJumplistPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp,
+            PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore, Redo,
+            RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
+            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
+            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister,
+            SetMark, ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete,
+            SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar,
+            TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
+            YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -297,6 +297,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SaveSelection::DEF, |_| Ok(Box::new(SaveSelection)));
     add(JumpBackward::DEF, |_| Ok(Box::new(JumpBackward)));
     add(JumpForward::DEF, |_| Ok(Box::new(JumpForward)));
+    add(OpenJumplistPicker::DEF, |_| {
+        Ok(Box::new(OpenJumplistPicker))
+    });
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -828,6 +831,7 @@ mod tests {
         // + 2 SelectNextSibling/SelectPrevSibling.
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
         // + 3 SaveSelection/JumpBackward/JumpForward.
+        // + 1 OpenJumplistPicker.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -865,7 +869,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 245);
+        assert_eq!(all().count(), 246);
     }
 
     #[test]

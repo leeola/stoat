@@ -63,6 +63,10 @@ pub struct Stoat {
     /// the user is being prompted to discard or cancel; cleared on
     /// cancel and stays `Some` on confirm (the app exits anyway).
     pub(crate) quit_all_confirm: Option<QuitAllConfirm>,
+    /// Modal listing the focused editor's jumplist entries; opened by
+    /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
+    /// cancel.
+    pub(crate) jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
@@ -444,6 +448,7 @@ impl Stoat {
             file_finder: None,
             workspace_picker: None,
             quit_all_confirm: None,
+            jumplist_picker: None,
             persistence_disabled: false,
             language_registry,
             syntax_styles,
@@ -1172,6 +1177,10 @@ impl Stoat {
                 self.quit_all_confirm = None;
                 return UpdateEffect::Redraw;
             }
+            if let Some(picker) = self.jumplist_picker.take() {
+                self.mode = picker.previous_mode;
+                return UpdateEffect::Redraw;
+            }
             if self.mode == "run" {
                 return action_handlers::dispatch(self, &stoat_action::RunInterrupt);
             }
@@ -1200,6 +1209,10 @@ impl Stoat {
 
         if self.quit_all_confirm.is_some() {
             return self.dispatch_quit_all_confirm_key(key);
+        }
+
+        if self.jumplist_picker.is_some() {
+            return self.dispatch_jumplist_picker_key(key);
         }
 
         if self.mode == "insert"
@@ -2383,6 +2396,59 @@ impl Stoat {
             },
             ConfirmOutcome::Confirm => UpdateEffect::Quit,
         }
+    }
+
+    fn dispatch_jumplist_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        use crate::jumplist_picker::PickerOutcome;
+        let outcome = match self.jumplist_picker.as_mut() {
+            Some(picker) => picker.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            PickerOutcome::None => UpdateEffect::Redraw,
+            PickerOutcome::Close => {
+                if let Some(picker) = self.jumplist_picker.take() {
+                    self.mode = picker.previous_mode;
+                }
+                UpdateEffect::Redraw
+            },
+            PickerOutcome::Select(idx) => {
+                let Some(picker) = self.jumplist_picker.take() else {
+                    return UpdateEffect::None;
+                };
+                let target_offset = match picker.entries().get(idx) {
+                    Some(entry) => entry.offset,
+                    None => return UpdateEffect::Redraw,
+                };
+                self.mode = picker.previous_mode;
+                self.jump_focused_to_offset(target_offset, idx);
+                UpdateEffect::Redraw
+            },
+        }
+    }
+
+    fn jump_focused_to_offset(&mut self, offset: usize, jumplist_idx: usize) {
+        let ws = self.active_workspace_mut();
+        let editor_id = match ws.focus {
+            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+                View::Editor(id) => id,
+                _ => return,
+            },
+            FocusTarget::Dock(_) => return,
+        };
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let anchor = buf_snap.anchor_at(offset, Bias::Right);
+        editor.selections.transform(buf_snap, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            new
+        });
+        editor.jumplist.set_cursor(jumplist_idx);
     }
 }
 

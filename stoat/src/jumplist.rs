@@ -35,6 +35,24 @@ impl JumpList {
         self.cursor += 1;
         Some(self.positions[self.cursor])
     }
+
+    pub(crate) fn entries(&self) -> &[usize] {
+        &self.positions
+    }
+
+    pub(crate) fn cursor(&self) -> usize {
+        self.cursor
+    }
+
+    /// Position the navigation cursor as if `idx` had just been jumped to:
+    /// the next [`Self::backward`] walks from `idx`, the next [`Self::forward`]
+    /// walks toward newer entries. Out-of-range `idx` is a no-op.
+    pub(crate) fn set_cursor(&mut self, idx: usize) {
+        if idx >= self.positions.len() {
+            return;
+        }
+        self.cursor = idx + 1;
+    }
 }
 
 #[cfg(test)]

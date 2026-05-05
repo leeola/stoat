@@ -471,6 +471,16 @@ define_action!(
 );
 
 define_action!(
+    OpenJumplistPickerDef,
+    OpenJumplistPicker,
+    "OpenJumplistPicker",
+    ActionKind::OpenJumplistPicker,
+    "open jumplist picker",
+    "Open a modal listing every entry in the focused editor's jumplist with line:column and a snippet of the line content. Enter jumps to the selected entry; Esc cancels. No-op when the jumplist is empty.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",
