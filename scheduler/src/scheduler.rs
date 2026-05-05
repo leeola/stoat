@@ -3,8 +3,9 @@ mod executor;
 mod test_scheduler;
 #[cfg(test)]
 mod tests;
+mod tokio_scheduler;
 
-pub use clock::{Clock, TestClock};
+pub use clock::{Clock, LocalClock, TestClock};
 pub use executor::{Executor, Task};
 use futures::channel::oneshot;
 use std::{
@@ -14,6 +15,7 @@ use std::{
     time::Duration,
 };
 pub use test_scheduler::TestScheduler;
+pub use tokio_scheduler::TokioScheduler;
 
 pub type Runnable = async_task::Runnable;
 

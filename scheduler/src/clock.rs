@@ -11,6 +11,18 @@ pub trait Clock: Send + Sync {
     fn system_now(&self) -> SystemTime;
 }
 
+pub struct LocalClock;
+
+impl Clock for LocalClock {
+    fn now(&self) -> Instant {
+        Instant::now()
+    }
+
+    fn system_now(&self) -> SystemTime {
+        SystemTime::now()
+    }
+}
+
 struct TestClockState {
     instant: Instant,
     system: SystemTime,
