@@ -3,7 +3,7 @@ use snafu::{ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{host::LocalFs, Axis, Settings, Stoat};
 use stoat_agent_claude_code::ClaudeCodeLauncher;
-use stoat_scheduler::TestScheduler;
+use stoat_scheduler::TokioScheduler;
 
 const VERSION_INFO: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -112,8 +112,7 @@ fn run_tui(
         .enable_all()
         .build()
         .whatever_context("build tokio runtime")?;
-    // FIXME: Replace TestScheduler with a production scheduler
-    let scheduler = Arc::new(TestScheduler::new());
+    let scheduler = Arc::new(TokioScheduler::new(rt.handle().clone()));
     let executor = scheduler.executor();
 
     let cli_settings = Settings {
