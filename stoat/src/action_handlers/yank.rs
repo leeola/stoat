@@ -5,19 +5,41 @@ use crate::{
 };
 use stoat_text::{Bias, SelectionGoal};
 
-/// Copy every non-collapsed selection's content into the unnamed
-/// register, joined with newlines in start-offset order so a
-/// later paste can split back per-line. No-op when every
-/// selection is collapsed or the focused pane is not an editor.
+/// Copy every non-collapsed selection's content into the
+/// caller-selected register (or unnamed when none is set),
+/// joined with newlines in start-offset order so a later paste
+/// can split back per-line. No-op when every selection is
+/// collapsed or the focused pane is not an editor.
 pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
+    let target = stoat.consume_selected_register();
     let Some(content) = selections_joined_text(stoat) else {
         return UpdateEffect::None;
     };
     if content.is_empty() {
         return UpdateEffect::None;
     }
-    stoat.registers.write(Register::Unnamed, content);
+    stoat.registers.write(target, content);
     UpdateEffect::None
+}
+
+pub(super) fn select_register(stoat: &mut Stoat) -> UpdateEffect {
+    stoat.pending_register_select = true;
+    UpdateEffect::Redraw
+}
+
+/// Apply the consumed-char keypress to the pending
+/// [`crate::app::Stoat::pending_register_select`] chord. ASCII
+/// letters land in [`Register::Named`]; the unnamed-quote char
+/// `"` selects [`Register::Unnamed`] explicitly. Any other char
+/// clears the pending state without selecting a register.
+pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
+    if ch == '"' {
+        stoat.selected_register = Some(Register::Unnamed);
+    } else if ch.is_ascii_alphabetic() {
+        stoat.selected_register = Some(Register::Named(ch));
+    } else {
+        stoat.selected_register = None;
+    }
 }
 
 pub(super) fn paste_after(stoat: &mut Stoat) -> UpdateEffect {
@@ -151,10 +173,13 @@ fn selections_joined_text(stoat: &mut Stoat) -> Option<String> {
     Some(pieces.join("\n"))
 }
 
-/// Insert the unnamed register's content at every selection,
-/// either at each selection's `start` (Before) or `end` (After).
+/// Insert the caller-selected register's content (or the
+/// unnamed register when no selection is active) at every
+/// selection, either at each selection's `start` (Before) or
+/// `end` (After).
 fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
-    let Some(content) = stoat.registers.read(Register::Unnamed).map(str::to_owned) else {
+    let source = stoat.consume_selected_register();
+    let Some(content) = stoat.registers.read(source).map(str::to_owned) else {
         return UpdateEffect::None;
     };
     paste_text(stoat, &content, side)
@@ -512,5 +537,77 @@ mod tests {
         h.type_keys("space \" y");
         assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
         assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn select_register_then_yank_writes_to_named() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("\" a y");
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Named('a'))
+            .map(str::to_owned);
+        assert_eq!(stored, Some("abc".to_string()));
+        let unnamed = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(str::to_owned);
+        assert_eq!(unnamed, None);
+    }
+
+    #[test]
+    fn select_register_consumed_by_one_op() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("\" a y");
+        assert!(h.stoat.selected_register.is_none());
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        let stored_a = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Named('a'))
+            .map(str::to_owned);
+        assert_eq!(stored_a, Some("abc".to_string()));
+        let unnamed = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(str::to_owned);
+        assert_eq!(unnamed, Some("abc".to_string()));
+    }
+
+    #[test]
+    fn paste_from_named_register() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat
+            .registers
+            .write(crate::register::Register::Named('a'), "xyz".to_string());
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("\" a p");
+        assert_eq!(buffer_text(&h, &path), "abcxyz\n");
+    }
+
+    #[test]
+    fn select_register_dquote_selects_unnamed() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("\" \" y");
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(str::to_owned);
+        assert_eq!(stored, Some("abc".to_string()));
     }
 }

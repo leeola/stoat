@@ -17,7 +17,7 @@ mod run;
 pub(crate) mod search;
 pub(crate) mod surround;
 mod workspace;
-mod yank;
+pub(crate) mod yank;
 
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -303,6 +303,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::YankMainToClipboard => yank::yank_main_to_clipboard(stoat),
         ActionKind::PasteClipboardAfter => yank::paste_clipboard_after(stoat),
         ActionKind::PasteClipboardBefore => yank::paste_clipboard_before(stoat),
+        ActionKind::SelectRegister => yank::select_register(stoat),
         ActionKind::RepeatLastMotion => movement::repeat_last_motion(stoat),
         ActionKind::GotoWindowTop => {
             movement::goto_window(stoat, movement::WindowAlign::Top, false)

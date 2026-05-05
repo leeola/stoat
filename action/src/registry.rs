@@ -33,10 +33,11 @@ use crate::{
             PasteClipboardAfter, PasteClipboardBefore, Redo, RemovePrimarySelection,
             RepeatLastMotion, ReplaceChar, RotateSelectionsBackward, RotateSelectionsForward,
             SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll,
-            SelectLineBelow, SelectNextSibling, SelectPrevSibling, SetMark, ShrinkSelection,
-            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
-            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister, SetMark,
+            ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
+            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
+            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -337,6 +338,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PasteClipboardBefore::DEF, |_| {
         Ok(Box::new(PasteClipboardBefore))
     });
+    add(SelectRegister::DEF, |_| Ok(Box::new(SelectRegister)));
     add(RepeatLastMotion::DEF, |_| Ok(Box::new(RepeatLastMotion)));
     add(ExtendPrevWordStart::DEF, |_| {
         Ok(Box::new(ExtendPrevWordStart))
@@ -626,6 +628,7 @@ mod tests {
         "YankMainToClipboard",
         "PasteClipboardAfter",
         "PasteClipboardBefore",
+        "SelectRegister",
         "AddSelectionBelow",
         "MoveLeft",
         "MoveRight",
@@ -858,7 +861,8 @@ mod tests {
         // + 4 OpenSearchInput, OpenReverseSearchInput, SearchNext, SearchPrev.
         // + 3 Yank, PasteAfter, PasteBefore.
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
-        assert_eq!(all().count(), 243);
+        // + 1 SelectRegister.
+        assert_eq!(all().count(), 244);
     }
 
     #[test]

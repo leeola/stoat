@@ -37,9 +37,10 @@ pub use defs::{
         PasteClipboardBefore, Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar,
         RotateSelectionsBackward, RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp,
         SearchNext, SearchPrev, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
-        SetMark, ShrinkSelection, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
-        SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-        TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+        SelectRegister, SetMark, ShrinkSelection, SurroundAdd, SurroundDelete, SurroundReplace,
+        SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
+        ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
+        YankToClipboard,
     },
     file::OpenFile,
     file_finder::{

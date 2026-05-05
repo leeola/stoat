@@ -218,6 +218,7 @@ on key {
         y -> Yank();
         p -> PasteAfter();
         P -> PasteBefore();
+        " -> SelectRegister();
     }
     mode == goto {
         Escape -> SetMode(normal);

@@ -721,6 +721,16 @@ define_action!(
 );
 
 define_action!(
+    SelectRegisterDef,
+    SelectRegister,
+    "SelectRegister",
+    ActionKind::SelectRegister,
+    "select register for next yank/paste",
+    "Wait for the next char keypress; the captured letter selects a named register (`a-z`) for the next `Yank` / `PasteAfter` / `PasteBefore` operation. Typing `\"` selects the unnamed register explicitly. The selection is consumed by the next yank or paste and reverts to the unnamed register.",
+    ActionPriority::Rare
+);
+
+define_action!(
     RepeatLastMotionDef,
     RepeatLastMotion,
     "RepeatLastMotion",

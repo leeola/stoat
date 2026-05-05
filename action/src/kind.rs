@@ -88,6 +88,7 @@ pub enum ActionKind {
     YankMainToClipboard,
     PasteClipboardAfter,
     PasteClipboardBefore,
+    SelectRegister,
     RepeatLastMotion,
     ExtendPrevWordStart,
     ExtendPrevWordEnd,

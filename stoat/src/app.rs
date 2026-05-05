@@ -152,6 +152,16 @@ pub struct Stoat {
     /// live in-process; system / primary clipboard variants are
     /// stubbed until the `arboard` backend lands.
     pub(crate) registers: register::RegisterStore,
+    /// Set after `SelectRegister` arms the chord. The next
+    /// printable char in normal/select mode is captured as the
+    /// register name and stored in [`Self::selected_register`].
+    pub(crate) pending_register_select: bool,
+    /// Register selected via `SelectRegister` for the next yank
+    /// or paste operation. `None` means the unnamed register is
+    /// the implicit target. Cleared by
+    /// [`Self::consume_selected_register`] which yank/paste call
+    /// before reading the chosen register.
+    pub(crate) selected_register: Option<register::Register>,
     /// Set on `MouseEventKind::Down(Left)` over a focused editor pane.
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
@@ -450,6 +460,8 @@ impl Stoat {
             search_input: None,
             last_search: None,
             registers: register::RegisterStore::new(),
+            pending_register_select: false,
+            selected_register: None,
             editor_drag: None,
             lsp_opened: std::collections::HashSet::new(),
             lsp_buffer_versions: std::collections::HashMap::new(),
@@ -1387,6 +1399,15 @@ impl Stoat {
             self.pending_surround_add = false;
         }
 
+        if (self.mode == "normal" || self.mode == "select") && self.pending_register_select {
+            if let KeyCode::Char(ch) = key.code {
+                self.pending_register_select = false;
+                action_handlers::yank::execute_select_register(self, ch);
+                return UpdateEffect::Redraw;
+            }
+            self.pending_register_select = false;
+        }
+
         if (self.mode == "normal" || self.mode == "select")
             && self.pending_surround_replace
                 != action_handlers::surround::SurroundReplaceStage::Idle
@@ -1540,6 +1561,16 @@ impl Stoat {
 
     pub(crate) fn take_pending_count(&mut self) -> Option<u32> {
         self.pending_count.take()
+    }
+
+    /// Returns the register selected via [`SelectRegister`] and
+    /// clears the field. Yank / paste call this once each so the
+    /// selection is consumed by exactly one operation; subsequent
+    /// ops fall back to the unnamed register.
+    pub(crate) fn consume_selected_register(&mut self) -> register::Register {
+        self.selected_register
+            .take()
+            .unwrap_or(register::Register::Unnamed)
     }
 
     fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
