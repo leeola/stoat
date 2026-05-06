@@ -38,7 +38,7 @@ pub use defs::{
         RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
         RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
         SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister, SetMark,
-        ShrinkSelection, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
+        ShrinkSelection, SplitSelection, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
         SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
         TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
     },

@@ -15,6 +15,7 @@ mod review;
 mod reword;
 mod run;
 pub(crate) mod search;
+pub(crate) mod split_selection;
 pub(crate) mod surround;
 mod workspace;
 pub(crate) mod yank;
@@ -159,6 +160,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::SplitSelectionOnNewline => movement::split_selection_on_newline(stoat),
+        ActionKind::SplitSelection => split_selection::open(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),

@@ -58,6 +58,7 @@ pub(crate) enum SubmitTarget {
     WorkspaceSymbolPicker,
     Search,
     GlobalSearch,
+    SplitSelection,
 }
 
 impl InputView {

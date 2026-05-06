@@ -75,6 +75,11 @@ pub struct Stoat {
     /// global-search submit. `Some` until the user picks a match
     /// (jumps to it) or cancels.
     pub(crate) global_search: Option<crate::global_search::GlobalSearchPicker>,
+    /// Active input modal for typing the regex passed to
+    /// [`stoat_action::SplitSelection`]. `Some` while the user
+    /// composes the pattern; cleared on submit or cancel.
+    pub(crate) split_selection_input:
+        Option<action_handlers::split_selection::SplitSelectionInputState>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
@@ -459,6 +464,7 @@ impl Stoat {
             jumplist_picker: None,
             global_search_input: None,
             global_search: None,
+            split_selection_input: None,
             persistence_disabled: false,
             language_registry,
             syntax_styles,
@@ -1656,6 +1662,10 @@ impl Stoat {
 
         if let Some(gs) = &self.global_search_input {
             return Some((gs.input.editor_id, gs.input.buffer_id));
+        }
+
+        if let Some(ss) = &self.split_selection_input {
+            return Some((ss.input.editor_id, ss.input.buffer_id));
         }
 
         if let Some((editor_id, buffer_id)) = ws

@@ -180,6 +180,7 @@ on key {
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
         Alt-s -> SplitSelectionOnNewline();
+        S -> SplitSelection();
         Alt-o -> ExpandSelection();
         Alt-Up -> ExpandSelection();
         Alt-i -> ShrinkSelection();
@@ -297,6 +298,7 @@ on key {
         g -> SetMode(select_goto);
         ; -> CollapseSelection();
         Alt-; -> FlipSelections();
+        S -> SplitSelection();
         > -> IndentSelection();
         < -> UnindentSelection();
         = -> FormatSelections();

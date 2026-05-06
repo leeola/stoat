@@ -34,10 +34,10 @@ use crate::{
             Redo, RemovePrimarySelection, RepeatLastMotion, ReplaceChar, RotateSelectionsBackward,
             RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
             SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister,
-            SetMark, ShrinkSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete,
-            SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar,
-            TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
-            YankMainToClipboard, YankToClipboard,
+            SetMark, ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
+            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
+            Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -301,6 +301,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenJumplistPicker))
     });
     add(OpenGlobalSearch::DEF, |_| Ok(Box::new(OpenGlobalSearch)));
+    add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -834,6 +835,7 @@ mod tests {
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 OpenJumplistPicker.
         // + 1 OpenGlobalSearch.
+        // + 1 SplitSelection.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -871,7 +873,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 247);
+        assert_eq!(all().count(), 248);
     }
 
     #[test]

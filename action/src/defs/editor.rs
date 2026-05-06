@@ -491,6 +491,16 @@ define_action!(
 );
 
 define_action!(
+    SplitSelectionDef,
+    SplitSelection,
+    "SplitSelection",
+    ActionKind::SplitSelection,
+    "split each selection on regex matches",
+    "Open an input modal for a regex pattern. On submit, split every existing selection at every match of the pattern: matches are removed and the parts between them become new sub-selections. Cursor (zero-width) selections pass through unchanged. Invalid regex is a silent no-op.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",
