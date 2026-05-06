@@ -521,6 +521,26 @@ define_action!(
 );
 
 define_action!(
+    RecordMacroDef,
+    RecordMacro,
+    "RecordMacro",
+    ActionKind::RecordMacro,
+    "toggle macro recording",
+    "First press starts recording every subsequent keypress into a macro register; second press stops and stores the captured keystrokes. The target register is the most recent SelectRegister chord, defaulting to the unnamed register.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ReplayMacroDef,
+    ReplayMacro,
+    "ReplayMacro",
+    ActionKind::ReplayMacro,
+    "replay macro from register",
+    "Arm a chord; the next char keypress names a register and replays the keystroke sequence stored there. No-op when the register has no recorded macro.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",

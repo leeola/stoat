@@ -31,14 +31,14 @@ use crate::{
             MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
             OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker, OpenReverseSearchInput,
             OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
-            PasteClipboardBefore, Redo, RemovePrimarySelection, RemoveSelections, RepeatLastMotion,
-            ReplaceChar, RotateSelectionsBackward, RotateSelectionsForward, SaveSelection,
-            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectLineBelow,
-            SelectNextSibling, SelectPrevSibling, SelectRegister, SetMark, ShrinkSelection,
-            SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
-            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
-            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
-            YankToClipboard,
+            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
+            RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
+            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
+            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister,
+            SetMark, ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
+            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
+            Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -305,6 +305,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(KeepSelections::DEF, |_| Ok(Box::new(KeepSelections)));
     add(RemoveSelections::DEF, |_| Ok(Box::new(RemoveSelections)));
+    add(RecordMacro::DEF, |_| Ok(Box::new(RecordMacro)));
+    add(ReplayMacro::DEF, |_| Ok(Box::new(ReplayMacro)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -840,6 +842,7 @@ mod tests {
         // + 1 OpenGlobalSearch.
         // + 1 SplitSelection.
         // + 2 KeepSelections / RemoveSelections.
+        // + 2 RecordMacro / ReplayMacro.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -877,7 +880,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 250);
+        assert_eq!(all().count(), 252);
     }
 
     #[test]

@@ -6,6 +6,7 @@ mod file_finder;
 pub(crate) mod filter_selections;
 mod help;
 pub(crate) mod lsp;
+pub(crate) mod macro_recording;
 pub(crate) mod marks;
 pub(crate) mod movement;
 mod palette;
@@ -164,6 +165,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SplitSelection => split_selection::open(stoat),
         ActionKind::KeepSelections => filter_selections::open_keep(stoat),
         ActionKind::RemoveSelections => filter_selections::open_remove(stoat),
+        ActionKind::RecordMacro => macro_recording::toggle_record(stoat),
+        ActionKind::ReplayMacro => macro_recording::arm_replay(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),

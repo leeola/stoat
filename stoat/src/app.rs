@@ -85,6 +85,18 @@ pub struct Stoat {
     /// on submit or cancel.
     pub(crate) filter_selections_input:
         Option<action_handlers::filter_selections::FilterSelectionsInputState>,
+    /// Active macro recording. `Some` between two `Q` presses;
+    /// every key dispatched in the meantime is appended via
+    /// [`action_handlers::macro_recording::capture`].
+    pub(crate) macro_recording: Option<action_handlers::macro_recording::MacroRecording>,
+    /// Stored macros keyed by [`crate::register::Register`]. Filled
+    /// when `RecordMacro` toggles off; consumed by [`ReplayMacro`].
+    pub(crate) macros: std::collections::HashMap<register::Register, Vec<KeyEvent>>,
+    /// Set after [`stoat_action::ReplayMacro`] arms the chord. The
+    /// next char keypress in normal/select mode names a register
+    /// and the stored macro is replayed; non-char keypresses also
+    /// clear the flag.
+    pub(crate) pending_macro_replay: bool,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
@@ -471,6 +483,9 @@ impl Stoat {
             global_search: None,
             split_selection_input: None,
             filter_selections_input: None,
+            macro_recording: None,
+            macros: std::collections::HashMap::new(),
+            pending_macro_replay: false,
             persistence_disabled: false,
             language_registry,
             syntax_styles,
@@ -1214,6 +1229,25 @@ impl Stoat {
         }
 
         let key = normalize_shift_event(key);
+
+        if self.pending_macro_replay {
+            self.pending_macro_replay = false;
+            if let KeyCode::Char(ch) = key.code {
+                return action_handlers::macro_recording::execute_replay(self, ch);
+            }
+            return UpdateEffect::Redraw;
+        }
+
+        let is_record_macro_toggle = {
+            let state = StoatKeymapState::from_stoat(self);
+            self.keymap
+                .lookup(&state, &key)
+                .map(|actions| actions.iter().any(|a| a.name == "RecordMacro"))
+                .unwrap_or(false)
+        };
+        if !is_record_macro_toggle {
+            action_handlers::macro_recording::capture(self, &key);
+        }
 
         if let Some(run_id) = self.modal_run {
             let finished = self

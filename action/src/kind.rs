@@ -68,6 +68,8 @@ pub enum ActionKind {
     SplitSelection,
     KeepSelections,
     RemoveSelections,
+    RecordMacro,
+    ReplayMacro,
     FindNextChar,
     FindPrevChar,
     TillNextChar,
