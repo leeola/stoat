@@ -5,7 +5,7 @@ use crate::{
     editor_state::EditorState,
     pane::{PaneId, View},
 };
-use lsp_types::{DidSaveTextDocumentParams, TextDocumentIdentifier};
+use lsp_types::{DidCloseTextDocumentParams, DidSaveTextDocumentParams, TextDocumentIdentifier};
 use std::{path::Path, str::FromStr};
 
 /// Write the focused buffer's rope text to its backing file via
@@ -59,6 +59,78 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
             }
         })
         .detach();
+    UpdateEffect::Redraw
+}
+
+/// Drop the focused buffer from the workspace's
+/// [`crate::buffer_registry::BufferRegistry`] and notify the LSP
+/// server via [`crate::host::LspHost::did_close`]. Editor states
+/// that referenced the buffer are rebound to fresh scratch buffers
+/// so panes stay coherent. Refuses to close when the buffer is
+/// dirty so unsaved edits aren't silently lost.
+pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let buffer_id = editor.buffer_id;
+    let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
+        Some(b) => b,
+        None => return UpdateEffect::None,
+    };
+    if buffer.read().expect("buffer poisoned").dirty {
+        tracing::warn!(target: "stoat::file", ?buffer_id, "refusing close of dirty buffer");
+        return UpdateEffect::None;
+    }
+
+    let executor = stoat.executor.clone();
+    let editor_ids: Vec<crate::editor_state::EditorId> = stoat
+        .active_workspace()
+        .editors
+        .iter()
+        .filter_map(|(id, e)| (e.buffer_id == buffer_id).then_some(id))
+        .collect();
+    for editor_id in &editor_ids {
+        let ws = stoat.active_workspace_mut();
+        let (new_buffer_id, new_buffer) = ws.buffers.new_scratch();
+        if let Some(slot) = ws.editors.get_mut(*editor_id) {
+            *slot = EditorState::new(new_buffer_id, new_buffer, executor.clone());
+        }
+    }
+
+    let path = stoat.active_workspace_mut().buffers.remove(buffer_id);
+    stoat.lsp_opened.remove(&buffer_id);
+    stoat.lsp_buffer_versions.remove(&buffer_id);
+    stoat.lsp_pending_changes.remove(&buffer_id);
+    stoat.lsp_doc_versions.remove(&buffer_id);
+    stoat
+        .lsp_last_delivered_text
+        .lock()
+        .expect("lsp text mutex")
+        .remove(&buffer_id);
+    stoat
+        .lsp_last_delivered_buffer_version
+        .lock()
+        .expect("lsp version mutex")
+        .remove(&buffer_id);
+
+    if let Some(path) = path {
+        if let Some(path_str) = path.to_str() {
+            if let Ok(uri) = lsp_types::Uri::from_str(&format!("file://{path_str}")) {
+                let params = DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri },
+                };
+                let lsp = stoat.lsp_host.clone();
+                stoat
+                    .executor
+                    .spawn(async move {
+                        if let Err(err) = lsp.did_close(params).await {
+                            tracing::warn!(target: "stoat::lsp", ?err, "did_close notification failed");
+                        }
+                    })
+                    .detach();
+            }
+        }
+    }
     UpdateEffect::Redraw
 }
 
@@ -140,7 +212,7 @@ pub(crate) fn open_file_in_pane(
 mod tests {
     use crate::{action_handlers::dispatch, app::UpdateEffect, host::FsHost, Stoat};
     use std::path::PathBuf;
-    use stoat_action::{OpenFile, SaveBuffer};
+    use stoat_action::{CloseBuffer, OpenFile, SaveBuffer};
 
     fn focused_dirty(stoat: &Stoat) -> bool {
         let editor_id = match stoat
@@ -238,5 +310,88 @@ mod tests {
             focused_dirty(&h.stoat),
             "scratch buffer dirty flag preserved when no path",
         );
+    }
+
+    fn open_path(
+        h: &mut crate::test_harness::TestHarness,
+        content: &[u8],
+    ) -> (PathBuf, crate::buffer::BufferId) {
+        let root = PathBuf::from("/close-test");
+        let path = root.join("file.txt");
+        h.fake_fs().insert_file(&path, content);
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        (path, buffer_id)
+    }
+
+    #[test]
+    fn close_buffer_drops_buffer_from_registry() {
+        let mut h = Stoat::test();
+        let (_path, buffer_id) = open_path(&mut h, b"hello\n");
+        assert!(h.stoat.active_workspace().buffers.get(buffer_id).is_some());
+        assert_eq!(dispatch(&mut h.stoat, &CloseBuffer), UpdateEffect::Redraw);
+        assert!(h.stoat.active_workspace().buffers.get(buffer_id).is_none());
+    }
+
+    #[test]
+    fn close_buffer_replaces_editor_with_scratch() {
+        let mut h = Stoat::test();
+        let (_path, original_id) = open_path(&mut h, b"hello\n");
+        dispatch(&mut h.stoat, &CloseBuffer);
+        let new_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        assert_ne!(new_id, original_id);
+        let new_buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(new_id)
+            .expect("scratch buffer exists");
+        assert!(new_buffer.read().expect("poisoned").rope().is_empty());
+    }
+
+    #[test]
+    fn close_buffer_clears_lsp_opened() {
+        let mut h = Stoat::test();
+        let (_path, buffer_id) = open_path(&mut h, b"hello\n");
+        assert!(h.stoat.lsp_opened.contains(&buffer_id));
+        dispatch(&mut h.stoat, &CloseBuffer);
+        assert!(!h.stoat.lsp_opened.contains(&buffer_id));
+    }
+
+    #[test]
+    fn close_buffer_refuses_when_dirty() {
+        let mut h = Stoat::test();
+        let (_path, buffer_id) = open_path(&mut h, b"hello\n");
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(0..0, "x");
+        }
+        assert_eq!(dispatch(&mut h.stoat, &CloseBuffer), UpdateEffect::None);
+        assert!(
+            h.stoat.active_workspace().buffers.get(buffer_id).is_some(),
+            "dirty buffer should not be closed",
+        );
+    }
+
+    #[test]
+    fn close_buffer_on_scratch_buffer_succeeds() {
+        let mut h = Stoat::test();
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let scratch_id = editor.buffer_id;
+        assert!(!focused_dirty(&h.stoat));
+        assert_eq!(dispatch(&mut h.stoat, &CloseBuffer), UpdateEffect::Redraw);
+        assert!(h.stoat.active_workspace().buffers.get(scratch_id).is_none());
     }
 }

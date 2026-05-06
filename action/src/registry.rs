@@ -12,13 +12,13 @@ use crate::{
         dump::Dump,
         editor::{
             AddSelectionAbove, AddSelectionBelow, AlignSelections, AlignViewBottom,
-            AlignViewCenter, AlignViewTop, CollapseSelection, Decrement, DeleteSelection,
-            ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
-            ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
-            ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
-            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
-            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
+            AlignViewCenter, AlignViewTop, CloseBuffer, CollapseSelection, Decrement,
+            DeleteSelection, ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar,
+            ExtendGotoColumn, ExtendGotoFileStart, ExtendGotoFirstNonwhitespace,
+            ExtendGotoLastLine, ExtendGotoWindowBottom, ExtendGotoWindowCenter,
+            ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart,
+            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
+            ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
             ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
             ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoColumn,
             GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
@@ -313,6 +313,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShellInsertOutput::DEF, |_| Ok(Box::new(ShellInsertOutput)));
     add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
+    add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -851,6 +852,7 @@ mod tests {
         // + 2 RecordMacro / ReplayMacro.
         // + 4 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellKeepPipe.
         // + 1 SaveBuffer.
+        // + 1 CloseBuffer.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -888,7 +890,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 257);
+        assert_eq!(all().count(), 258);
     }
 
     #[test]

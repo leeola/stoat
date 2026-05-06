@@ -142,6 +142,17 @@ impl BufferRegistry {
         self.path_to_id.get(path).copied()
     }
 
+    /// Drop `id` from the registry. Removes the path-to-id mapping
+    /// when the entry was path-bound and returns that path so the
+    /// caller can build an LSP URI for `did_close`. Returns `None`
+    /// when the buffer was scratch (or unknown).
+    pub(crate) fn remove(&mut self, id: BufferId) -> Option<PathBuf> {
+        let entry = self.buffers.remove(&id)?;
+        let path = entry.path?;
+        self.path_to_id.remove(&path);
+        Some(path)
+    }
+
     /// Updates the path of an open buffer in place. No-op when `old` has no
     /// open buffer. Returns `true` if a remapping happened. Used by
     /// `WorkspaceEdit::Rename` so an open buffer for the renamed file

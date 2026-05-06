@@ -591,6 +591,16 @@ define_action!(
 );
 
 define_action!(
+    CloseBufferDef,
+    CloseBuffer,
+    "CloseBuffer",
+    ActionKind::CloseBuffer,
+    "close the focused buffer",
+    "Drop the focused buffer from the workspace's BufferRegistry and notify the LSP server via did_close. Editor panes that displayed the closed buffer are rebound to fresh scratch buffers so the pane layout stays coherent. Refuses to close when the buffer is dirty; save first.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",

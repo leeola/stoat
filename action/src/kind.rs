@@ -75,6 +75,7 @@ pub enum ActionKind {
     ShellInsertOutput,
     ShellKeepPipe,
     SaveBuffer,
+    CloseBuffer,
     FindNextChar,
     FindPrevChar,
     TillNextChar,
