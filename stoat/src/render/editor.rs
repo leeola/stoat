@@ -1,10 +1,11 @@
 use crate::{editor_state::EditorState, render::review::render_review};
+use lsp_types::DiagnosticSeverity;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     style::{Modifier, Style},
 };
-use std::collections::BTreeMap;
+use std::{collections::BTreeMap, path::Path};
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -23,6 +24,7 @@ pub(crate) fn render_editor(
         is_focused,
         None,
         None,
+        None,
     );
 }
 
@@ -36,6 +38,7 @@ pub(crate) fn render_editor_with_overlay(
     is_focused: bool,
     goto_word_labels: Option<&BTreeMap<String, usize>>,
     search_query: Option<&str>,
+    diagnostic_info: Option<(&Path, &crate::diagnostics::DiagnosticSet)>,
 ) {
     editor.viewport_rows = Some(inner.height as u32);
 
@@ -50,6 +53,29 @@ pub(crate) fn render_editor_with_overlay(
     let end_row = (editor.scroll_row + visible_rows).min(total_rows);
     if end_row <= editor.scroll_row {
         return;
+    }
+
+    let row_severity = diagnostic_info
+        .map(|(path, set)| compute_row_severity(set, path))
+        .unwrap_or_default();
+    let gutter_w: u16 = if row_severity.is_empty() { 0 } else { 1 };
+    let inner = Rect {
+        x: inner.x + gutter_w,
+        y: inner.y,
+        width: inner.width.saturating_sub(gutter_w),
+        height: inner.height,
+    };
+    if gutter_w > 0 {
+        paint_diagnostic_gutter(
+            &row_severity,
+            inner.x - gutter_w,
+            inner.y,
+            inner.height,
+            editor.scroll_row,
+            end_row,
+            theme,
+            buf,
+        );
     }
 
     let right = inner.x + inner.width;
@@ -196,6 +222,72 @@ pub(crate) fn render_editor_with_overlay(
     }
 }
 
+/// Build a per-buffer-row map from `path`'s diagnostics, picking the
+/// worst severity (lowest LSP code) when multiple diagnostics overlap
+/// the same row.
+fn compute_row_severity(
+    set: &crate::diagnostics::DiagnosticSet,
+    path: &Path,
+) -> BTreeMap<u32, DiagnosticSeverity> {
+    let mut out: BTreeMap<u32, DiagnosticSeverity> = BTreeMap::new();
+    for diag in set.get(path) {
+        let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+        let start_line = diag.range.start.line;
+        let end_line = diag.range.end.line;
+        for row in start_line..=end_line {
+            out.entry(row)
+                .and_modify(|cur| {
+                    if severity_rank(sev) < severity_rank(*cur) {
+                        *cur = sev;
+                    }
+                })
+                .or_insert(sev);
+        }
+    }
+    out
+}
+
+fn severity_rank(sev: DiagnosticSeverity) -> u8 {
+    match sev {
+        DiagnosticSeverity::ERROR => 0,
+        DiagnosticSeverity::WARNING => 1,
+        DiagnosticSeverity::INFORMATION => 2,
+        DiagnosticSeverity::HINT => 3,
+        _ => 0,
+    }
+}
+
+#[allow(clippy::too_many_arguments)]
+fn paint_diagnostic_gutter(
+    row_severity: &BTreeMap<u32, DiagnosticSeverity>,
+    x: u16,
+    y: u16,
+    height: u16,
+    scroll_row: u32,
+    end_row: u32,
+    theme: &crate::theme::Theme,
+    buf: &mut Buffer,
+) {
+    for display_row in scroll_row..end_row {
+        let row_offset = display_row.saturating_sub(scroll_row) as u16;
+        if row_offset >= height {
+            break;
+        }
+        let Some(sev) = row_severity.get(&display_row) else {
+            continue;
+        };
+        let (glyph, scope) = match *sev {
+            DiagnosticSeverity::ERROR => ('E', crate::theme::scope::UI_DIAGNOSTIC_ERROR),
+            DiagnosticSeverity::WARNING => ('W', crate::theme::scope::UI_DIAGNOSTIC_WARNING),
+            DiagnosticSeverity::INFORMATION => ('I', crate::theme::scope::UI_DIAGNOSTIC_INFO),
+            DiagnosticSeverity::HINT => ('H', crate::theme::scope::UI_DIAGNOSTIC_HINT),
+            _ => ('E', crate::theme::scope::UI_DIAGNOSTIC_ERROR),
+        };
+        let style = theme.get(scope);
+        buf[(x, y + row_offset)].set_char(glyph).set_style(style);
+    }
+}
+
 pub(crate) fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u32)> {
     if editor.review_view.is_some() {
         return None;
@@ -205,4 +297,65 @@ pub(crate) fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u
     let sel = editor.selections.newest_anchor();
     let point = buffer_snapshot.point_for_anchor(&sel.head());
     Some((point.row + 1, point.column + 1))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{action_handlers::dispatch, Stoat};
+    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use std::path::PathBuf;
+    use stoat_action::OpenFile;
+
+    fn diag(line: u32, severity: DiagnosticSeverity) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position { line, character: 0 },
+                end: Position { line, character: 1 },
+            },
+            severity: Some(severity),
+            message: String::new(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshot_diagnostic_gutter_renders_severity_glyphs() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-test");
+        let path = root.join("a.txt");
+        h.fake_fs()
+            .insert_file(&path, b"alpha\nbravo\ncharlie\ndelta\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![
+                diag(0, DiagnosticSeverity::ERROR),
+                diag(1, DiagnosticSeverity::WARNING),
+                diag(2, DiagnosticSeverity::INFORMATION),
+                diag(3, DiagnosticSeverity::HINT),
+            ],
+        );
+        h.assert_snapshot("diagnostic_gutter_each_severity");
+    }
+
+    #[test]
+    fn snapshot_diagnostic_gutter_worst_severity_per_row() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-worst");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.stoat.diagnostics.replace_for_path(
+            path,
+            vec![
+                diag(0, DiagnosticSeverity::WARNING),
+                diag(0, DiagnosticSeverity::ERROR),
+            ],
+        );
+        h.assert_snapshot("diagnostic_gutter_worst_severity_wins");
+    }
 }

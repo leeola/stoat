@@ -60,6 +60,11 @@ theme default_dark {
     diff.context.fg      = muted;
     diff.current_hunk    = { fg: info, modifiers: [bold] };
 
+    ui.diagnostic.error.fg   = danger;
+    ui.diagnostic.warning.fg = warning;
+    ui.diagnostic.info.fg    = info;
+    ui.diagnostic.hint.fg    = muted;
+
     vcs.conflict.header  = { fg: danger, modifiers: [bold] };
     vcs.conflict.ours.fg   = success;
     vcs.conflict.theirs.fg = special;

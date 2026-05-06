@@ -442,6 +442,11 @@ pub mod scope {
     pub const DIFF_CONTEXT: &str = "diff.context";
     pub const DIFF_CURRENT_HUNK: &str = "diff.current_hunk";
 
+    pub const UI_DIAGNOSTIC_ERROR: &str = "ui.diagnostic.error";
+    pub const UI_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";
+    pub const UI_DIAGNOSTIC_INFO: &str = "ui.diagnostic.info";
+    pub const UI_DIAGNOSTIC_HINT: &str = "ui.diagnostic.hint";
+
     pub const VCS_CONFLICT_HEADER: &str = "vcs.conflict.header";
     pub const VCS_CONFLICT_OURS: &str = "vcs.conflict.ours";
     pub const VCS_CONFLICT_THEIRS: &str = "vcs.conflict.theirs";

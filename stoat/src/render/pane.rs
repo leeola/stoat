@@ -55,6 +55,9 @@ pub(crate) fn render_pane(
                 } else {
                     None
                 };
+                let diagnostic_info = buffers
+                    .path_for(editor.buffer_id)
+                    .map(|path| (path, frame.diagnostics));
                 render_editor_with_overlay(
                     editor,
                     content_area,
@@ -64,6 +67,7 @@ pub(crate) fn render_pane(
                     is_focused,
                     labels,
                     frame.search_query,
+                    diagnostic_info,
                 );
             }
         },
