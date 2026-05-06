@@ -59,6 +59,7 @@ pub(crate) enum SubmitTarget {
     Search,
     GlobalSearch,
     SplitSelection,
+    KeepRemoveSelections,
 }
 
 impl InputView {

@@ -66,6 +66,8 @@ pub enum ActionKind {
     OpenJumplistPicker,
     OpenGlobalSearch,
     SplitSelection,
+    KeepSelections,
+    RemoveSelections,
     FindNextChar,
     FindPrevChar,
     TillNextChar,

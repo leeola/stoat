@@ -3,6 +3,7 @@ mod commits;
 mod conflict;
 mod file;
 mod file_finder;
+pub(crate) mod filter_selections;
 mod help;
 pub(crate) mod lsp;
 pub(crate) mod marks;
@@ -161,6 +162,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::AddSelectionAbove => movement::add_selection_above(stoat),
         ActionKind::SplitSelectionOnNewline => movement::split_selection_on_newline(stoat),
         ActionKind::SplitSelection => split_selection::open(stoat),
+        ActionKind::KeepSelections => filter_selections::open_keep(stoat),
+        ActionKind::RemoveSelections => filter_selections::open_remove(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),

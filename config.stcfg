@@ -181,6 +181,7 @@ on key {
         Alt-; -> FlipSelections();
         Alt-s -> SplitSelectionOnNewline();
         S -> SplitSelection();
+        Alt-K -> RemoveSelections();
         Alt-o -> ExpandSelection();
         Alt-Up -> ExpandSelection();
         Alt-i -> ShrinkSelection();

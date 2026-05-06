@@ -80,6 +80,11 @@ pub struct Stoat {
     /// composes the pattern; cleared on submit or cancel.
     pub(crate) split_selection_input:
         Option<action_handlers::split_selection::SplitSelectionInputState>,
+    /// Active input modal for typing the keep- / remove-selections
+    /// regex. `Some` while the user composes the pattern; cleared
+    /// on submit or cancel.
+    pub(crate) filter_selections_input:
+        Option<action_handlers::filter_selections::FilterSelectionsInputState>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
@@ -465,6 +470,7 @@ impl Stoat {
             global_search_input: None,
             global_search: None,
             split_selection_input: None,
+            filter_selections_input: None,
             persistence_disabled: false,
             language_registry,
             syntax_styles,
@@ -1666,6 +1672,10 @@ impl Stoat {
 
         if let Some(ss) = &self.split_selection_input {
             return Some((ss.input.editor_id, ss.input.buffer_id));
+        }
+
+        if let Some(fs) = &self.filter_selections_input {
+            return Some((fs.input.editor_id, fs.input.buffer_id));
         }
 
         if let Some((editor_id, buffer_id)) = ws

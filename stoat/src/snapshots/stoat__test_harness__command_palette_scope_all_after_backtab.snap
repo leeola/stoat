@@ -17,10 +17,10 @@ size: 80x24
   [0m[35m│[0m[97m GotoImplementation  [0m[90mjump to symbol implementation[0m[97m                        [0m[35m│[0m
   [0m[35m│[0m[97m GotoTypeDefinition  [0m[90mjump to type definition[0m[97m                              [0m[35m│[0m
   [0m[35m│[0m[97m Hover               [0m[90mshow hover documentation[0m[97m                             [0m[35m│[0m
+  [0m[35m│[0m[97m KeepSelections      [0m[90mkeep selections matching regex[0m[97m                       [0m[35m│[0m
   [0m[35m│[0m[97m NewWorkspace        [0m[90mcreate a new workspace[0m[97m                               [0m[35m│[0m
   [0m[35m│[0m[97m OpenClaude          [0m[90mopen claude chat[0m[97m                                     [0m[35m│[0m
   [0m[35m│[0m[97m OpenCommits         [0m[90mbrowse commit history[0m[97m                                [0m[35m│[0m
-  [0m[35m│[0m[97m OpenFile            [0m[90mopen a file[0m[97m                                          [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[37mIssue an LSP `textDocument/codeAction` request for the focused editor's[0m   [0m[35m│[0m
   [0m[35m│[0m[37mprimary selection and present the response as a numbered popup. Number[0m    [0m[35m│[0m

@@ -501,6 +501,26 @@ define_action!(
 );
 
 define_action!(
+    KeepSelectionsDef,
+    KeepSelections,
+    "KeepSelections",
+    ActionKind::KeepSelections,
+    "keep selections matching regex",
+    "Open an input modal for a regex pattern. On submit, keep only the selections whose contents match the pattern; drop the rest. If the filter would empty the selection set, leave selections unchanged. Invalid regex is a silent no-op.",
+    ActionPriority::Common
+);
+
+define_action!(
+    RemoveSelectionsDef,
+    RemoveSelections,
+    "RemoveSelections",
+    ActionKind::RemoveSelections,
+    "remove selections matching regex",
+    "Open an input modal for a regex pattern. On submit, drop every selection whose contents match the pattern; keep the rest. If the filter would empty the selection set, leave selections unchanged. Invalid regex is a silent no-op.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",
