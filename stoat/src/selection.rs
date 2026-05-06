@@ -2598,6 +2598,27 @@ mod tests {
     }
 
     #[test]
+    fn helix_bracket_c_jumps_to_next_change() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 15);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.open_file(&path);
+        install_diff_hunks(&mut h, &[2, 5, 8]);
+        h.type_keys("] c");
+        assert_eq!(h.primary_head_offset(), 4);
+    }
+
+    #[test]
+    fn helix_bracket_c_jumps_to_prev_change() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 15);
+        let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.open_file(&path);
+        install_diff_hunks(&mut h, &[2, 5, 8]);
+        h.type_keys("g j");
+        h.type_keys("[ c");
+        assert_eq!(h.primary_head_offset(), 16);
+    }
+
+    #[test]
     fn count_prefix_goto_prev_change_jumps_back_n_changes() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 15);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");

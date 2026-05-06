@@ -261,6 +261,7 @@ on key {
     mode == bracket_next {
         Escape -> SetMode(normal);
         g -> [GotoNextChange(), SetMode(normal)];
+        c -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoNextParagraph(), SetMode(normal)];
         d -> [GotoNextDiagnostic(), SetMode(normal)];
         : -> OpenCommandPalette();
@@ -268,6 +269,7 @@ on key {
     mode == bracket_prev {
         Escape -> SetMode(normal);
         g -> [GotoPrevChange(), SetMode(normal)];
+        c -> [GotoPrevChange(), SetMode(normal)];
         p -> [GotoPrevParagraph(), SetMode(normal)];
         d -> [GotoPrevDiagnostic(), SetMode(normal)];
         : -> OpenCommandPalette();
