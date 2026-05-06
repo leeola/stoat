@@ -541,6 +541,46 @@ define_action!(
 );
 
 define_action!(
+    ShellPipeDef,
+    ShellPipe,
+    "ShellPipe",
+    ActionKind::ShellPipe,
+    "pipe selections through a shell command",
+    "Open an input modal for a shell command. On submit, run the command once per selection with the selection's text as stdin and replace each selection with the command's stdout. Empty selections pass through unchanged.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ShellPipeToDef,
+    ShellPipeTo,
+    "ShellPipeTo",
+    ActionKind::ShellPipeTo,
+    "pipe selections through a shell command and discard output",
+    "Open an input modal for a shell command. On submit, run the command once per selection with the selection's text as stdin; ignore the output. Selections are unchanged. Used for side-effect commands.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ShellInsertOutputDef,
+    ShellInsertOutput,
+    "ShellInsertOutput",
+    ActionKind::ShellInsertOutput,
+    "insert shell command output at every cursor",
+    "Open an input modal for a shell command. On submit, run the command once with empty stdin and insert its stdout at every selection's cursor.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ShellKeepPipeDef,
+    ShellKeepPipe,
+    "ShellKeepPipe",
+    ActionKind::ShellKeepPipe,
+    "keep selections whose shell command exits zero",
+    "Open an input modal for a shell command. On submit, run the command once per selection with that selection's text as stdin; keep only selections whose exit code is zero. Empty result leaves selections unchanged.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",

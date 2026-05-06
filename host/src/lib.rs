@@ -11,7 +11,9 @@
 pub mod env;
 pub mod fake;
 pub mod fs;
+pub mod shell;
 
 pub use env::{EnvHost, LocalEnv};
-pub use fake::{FakeEnv, FakeFs, FakeFsOp};
+pub use fake::{FakeEnv, FakeFs, FakeFsOp, FakeShell, FakeShellInvocation};
 pub use fs::{FsDirEntry, FsHost, FsMetadata, LocalFs};
+pub use shell::{LocalShell, ShellHost, ShellOutput};

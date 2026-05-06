@@ -17,6 +17,7 @@ mod review;
 mod reword;
 mod run;
 pub(crate) mod search;
+pub(crate) mod shell;
 pub(crate) mod split_selection;
 pub(crate) mod surround;
 mod workspace;
@@ -167,6 +168,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::RemoveSelections => filter_selections::open_remove(stoat),
         ActionKind::RecordMacro => macro_recording::toggle_record(stoat),
         ActionKind::ReplayMacro => macro_recording::arm_replay(stoat),
+        ActionKind::ShellPipe => shell::open_pipe(stoat),
+        ActionKind::ShellPipeTo => shell::open_pipe_to(stoat),
+        ActionKind::ShellInsertOutput => shell::open_insert_output(stoat),
+        ActionKind::ShellKeepPipe => shell::open_keep_pipe(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),

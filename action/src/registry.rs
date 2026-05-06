@@ -35,10 +35,11 @@ use crate::{
             RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
             RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
             SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister,
-            SetMark, ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
-            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
-            Yank, YankMainToClipboard, YankToClipboard,
+            SetMark, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection,
+            SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
+            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
+            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -307,6 +308,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(RemoveSelections::DEF, |_| Ok(Box::new(RemoveSelections)));
     add(RecordMacro::DEF, |_| Ok(Box::new(RecordMacro)));
     add(ReplayMacro::DEF, |_| Ok(Box::new(ReplayMacro)));
+    add(ShellPipe::DEF, |_| Ok(Box::new(ShellPipe)));
+    add(ShellPipeTo::DEF, |_| Ok(Box::new(ShellPipeTo)));
+    add(ShellInsertOutput::DEF, |_| Ok(Box::new(ShellInsertOutput)));
+    add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -843,6 +848,7 @@ mod tests {
         // + 1 SplitSelection.
         // + 2 KeepSelections / RemoveSelections.
         // + 2 RecordMacro / ReplayMacro.
+        // + 4 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellKeepPipe.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -880,7 +886,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 252);
+        assert_eq!(all().count(), 256);
     }
 
     #[test]

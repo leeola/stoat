@@ -1,0 +1,49 @@
+use std::{
+    io::{self, Write},
+    process::{Command, Stdio},
+};
+
+/// Output captured from a single shell-host invocation.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ShellOutput {
+    pub stdout: Vec<u8>,
+    pub stderr: Vec<u8>,
+    pub exit_code: i32,
+}
+
+/// Run a shell command. Production code routes through this trait so
+/// tests can install [`crate::FakeShell`] instead of spawning real
+/// subprocesses.
+pub trait ShellHost: Send + Sync {
+    /// Run `cmd` (interpreted by `sh -c`), feeding `stdin` to the
+    /// command's stdin. Returns the captured stdout, stderr, and
+    /// exit status. The exit code is `-1` when the process was
+    /// terminated by a signal.
+    fn run(&self, cmd: &str, stdin: &[u8]) -> io::Result<ShellOutput>;
+}
+
+/// Production [`ShellHost`] backed by `std::process::Command` with
+/// `sh -c`. Synchronous; the calling thread blocks until the command
+/// exits.
+pub struct LocalShell;
+
+impl ShellHost for LocalShell {
+    fn run(&self, cmd: &str, stdin: &[u8]) -> io::Result<ShellOutput> {
+        let mut child = Command::new("sh")
+            .arg("-c")
+            .arg(cmd)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()?;
+        if let Some(mut sin) = child.stdin.take() {
+            sin.write_all(stdin)?;
+        }
+        let output = child.wait_with_output()?;
+        Ok(ShellOutput {
+            stdout: output.stdout,
+            stderr: output.stderr,
+            exit_code: output.status.code().unwrap_or(-1),
+        })
+    }
+}

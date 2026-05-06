@@ -41,5 +41,9 @@ pub use git::{
 };
 pub use local::{LocalClipboard, LocalGit};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
-pub use stoat_host::{EnvHost, FsDirEntry, FsHost, FsMetadata, LocalEnv, LocalFs};
+#[cfg(test)]
+pub use stoat_host::FakeShell;
+pub use stoat_host::{
+    EnvHost, FsDirEntry, FsHost, FsMetadata, LocalEnv, LocalFs, LocalShell, ShellHost, ShellOutput,
+};
 pub use terminal::TerminalHost;

@@ -183,6 +183,9 @@ on key {
         S -> SplitSelection();
         Alt-K -> RemoveSelections();
         Q -> RecordMacro();
+        Alt-| -> ShellPipeTo();
+        ! -> ShellInsertOutput();
+        $ -> ShellKeepPipe();
         Alt-o -> ExpandSelection();
         Alt-Up -> ExpandSelection();
         Alt-i -> ShrinkSelection();

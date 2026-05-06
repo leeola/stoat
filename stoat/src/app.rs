@@ -97,6 +97,12 @@ pub struct Stoat {
     /// and the stored macro is replayed; non-char keypresses also
     /// clear the flag.
     pub(crate) pending_macro_replay: bool,
+    /// Active input modal for typing a shell command. `Some` while
+    /// the user composes the command; cleared on submit or cancel.
+    pub(crate) shell_input: Option<action_handlers::shell::ShellInputState>,
+    /// Subprocess executor used by the shell-integration actions.
+    /// Tests install [`crate::host::FakeShell`].
+    pub(crate) shell_host: Arc<dyn crate::host::ShellHost>,
     /// When true, [`Self::save_workspace`] and the startup load path become
     /// no-ops. Set by the test harness so test runs can't read or write the
     /// real `$XDG_STATE_HOME/stoat/workspaces/` directory.
@@ -486,6 +492,8 @@ impl Stoat {
             macro_recording: None,
             macros: std::collections::HashMap::new(),
             pending_macro_replay: false,
+            shell_input: None,
+            shell_host: Arc::new(crate::host::LocalShell),
             persistence_disabled: false,
             language_registry,
             syntax_styles,
@@ -591,6 +599,13 @@ impl Stoat {
     /// Returns the active [`crate::host::ClipboardHost`].
     pub fn clipboard_host(&self) -> &Arc<dyn crate::host::ClipboardHost> {
         &self.clipboard_host
+    }
+
+    /// Swap in an alternative [`crate::host::ShellHost`]. The default
+    /// is [`crate::host::LocalShell`]; the test harness installs
+    /// [`crate::host::FakeShell`].
+    pub fn set_shell_host(&mut self, host: Arc<dyn crate::host::ShellHost>) {
+        self.shell_host = host;
     }
 
     /// Swap in an alternative [`LspHost`]. The default is [`NoopLsp`]
@@ -1710,6 +1725,10 @@ impl Stoat {
 
         if let Some(fs) = &self.filter_selections_input {
             return Some((fs.input.editor_id, fs.input.buffer_id));
+        }
+
+        if let Some(sh) = &self.shell_input {
+            return Some((sh.input.editor_id, sh.input.buffer_id));
         }
 
         if let Some((editor_id, buffer_id)) = ws
