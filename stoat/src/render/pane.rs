@@ -10,6 +10,7 @@ use crate::{
         FrameCtx, PaneCtx,
     },
 };
+use lsp_types::DiagnosticSeverity;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
@@ -276,18 +277,16 @@ fn render_pane_status(
                 right_anchor = start;
             }
         }
-        if let Some(text) = focused_diagnostic_label(view, editors, buffers, frame.diagnostics) {
+        if let Some((text, worst)) =
+            focused_diagnostic_label(view, editors, buffers, frame.diagnostics)
+        {
             let width = text.chars().count() as u16;
             let start = right_anchor.saturating_sub(width);
             if start >= cursor {
-                paint_segment(
-                    buf,
-                    y,
-                    start,
-                    right_anchor,
-                    &text,
-                    base_style.add_modifier(Modifier::BOLD),
-                );
+                let badge_style = base_style
+                    .add_modifier(Modifier::BOLD)
+                    .patch(theme.get(diagnostic_severity_scope(worst)));
+                paint_segment(buf, y, start, right_anchor, &text, badge_style);
                 right_anchor = start;
             }
         }
@@ -311,25 +310,23 @@ fn render_pane_status(
 }
 
 /// Builds the status-bar diagnostic label for the focused pane's
-/// editor, or `None` when the pane is not an editor, has no path,
-/// or has no diagnostics. Format: ` Ee:Ww ` showing error and
-/// warning counts (info / hint are omitted to keep the segment
-/// compact); only the present severities appear.
+/// editor along with its worst severity, or `None` when the pane is
+/// not an editor, has no path, or has no diagnostics. Format:
+/// ` Ee Ww Ii Hh ` showing each present severity's count; the worst
+/// severity drives the badge's foreground color at the call site.
 fn focused_diagnostic_label(
     view: &View,
     editors: &SlotMap<EditorId, EditorState>,
     buffers: &BufferRegistry,
     diagnostics: &crate::diagnostics::DiagnosticSet,
-) -> Option<String> {
+) -> Option<(String, DiagnosticSeverity)> {
     let View::Editor(editor_id) = view else {
         return None;
     };
     let editor = editors.get(*editor_id)?;
     let path = buffers.path_for(editor.buffer_id)?;
     let summary = diagnostics.summarize(path);
-    if summary.is_empty() {
-        return None;
-    }
+    let worst = summary.worst?;
     let mut parts = Vec::new();
     if summary.error > 0 {
         parts.push(format!("E{}", summary.error));
@@ -343,7 +340,18 @@ fn focused_diagnostic_label(
     if summary.hint > 0 {
         parts.push(format!("H{}", summary.hint));
     }
-    Some(format!(" {} ", parts.join(" ")))
+    Some((format!(" {} ", parts.join(" ")), worst))
+}
+
+fn diagnostic_severity_scope(severity: DiagnosticSeverity) -> &'static str {
+    use crate::theme::scope;
+    match severity {
+        DiagnosticSeverity::ERROR => scope::UI_DIAGNOSTIC_ERROR,
+        DiagnosticSeverity::WARNING => scope::UI_DIAGNOSTIC_WARNING,
+        DiagnosticSeverity::INFORMATION => scope::UI_DIAGNOSTIC_INFO,
+        DiagnosticSeverity::HINT => scope::UI_DIAGNOSTIC_HINT,
+        _ => scope::UI_DIAGNOSTIC_ERROR,
+    }
 }
 
 /// Formats an LSP progress entry for the status bar. Always padded with
@@ -456,5 +464,46 @@ fn pane_status_info(
         View::Run(_) => (Some("[run]".to_string()), false, None),
         View::Claude(_) => (Some("[claude]".to_string()), false, None),
         View::Label(label) => (Some(label.clone()), false, None),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{action_handlers::dispatch, Stoat};
+    use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+    use std::path::PathBuf;
+    use stoat_action::OpenFile;
+
+    fn diag(severity: DiagnosticSeverity) -> Diagnostic {
+        Diagnostic {
+            range: Range {
+                start: Position {
+                    line: 0,
+                    character: 0,
+                },
+                end: Position {
+                    line: 0,
+                    character: 1,
+                },
+            },
+            severity: Some(severity),
+            message: String::new(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn snapshot_status_bar_diagnostic_badge_warning_color() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/diag-status");
+        let path = root.join("a.txt");
+        h.fake_fs().insert_file(&path, b"alpha\n");
+        h.stoat.active_workspace_mut().git_root = root;
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+        h.stoat
+            .diagnostics
+            .replace_for_path(path, vec![diag(DiagnosticSeverity::WARNING)]);
+        h.assert_snapshot("status_bar_diagnostic_badge_warning_color");
     }
 }
