@@ -465,6 +465,47 @@ pub struct FakeLsp {
     executor: Mutex<Option<Executor>>,
 }
 
+/// RAII helper that records a request as cancelled when its
+/// future is dropped before completion. Constructed inside
+/// [`FakeLsp::apply_delay`] just before the timer await; if the
+/// future drops while the timer is parked, the guard's `armed`
+/// flag is still set and [`Drop`] pushes the method into
+/// `cancelled_requests`. Calling [`Self::disarm`] after the timer
+/// elapses normally clears the flag so completed requests are
+/// not recorded as cancellations.
+struct CancellationGuard<'a> {
+    state: &'a Mutex<FakeLspState>,
+    method: String,
+    armed: bool,
+}
+
+impl<'a> CancellationGuard<'a> {
+    fn armed(state: &'a Mutex<FakeLspState>, method: String) -> Self {
+        Self {
+            state,
+            method,
+            armed: true,
+        }
+    }
+
+    fn disarm(mut self) {
+        self.armed = false;
+    }
+}
+
+impl Drop for CancellationGuard<'_> {
+    fn drop(&mut self) {
+        if !self.armed {
+            return;
+        }
+        self.state
+            .lock()
+            .unwrap()
+            .cancelled_requests
+            .push(std::mem::take(&mut self.method));
+    }
+}
+
 struct FakeLspState {
     capabilities: Arc<ServerCapabilities>,
     diagnostics: BTreeMap<Uri, Vec<Diagnostic>>,
@@ -514,6 +555,7 @@ struct FakeLspState {
     request_failures_oneshot: BTreeMap<String, io::ErrorKind>,
     request_failures_persistent: BTreeMap<String, io::ErrorKind>,
     request_delays: BTreeMap<String, Duration>,
+    cancelled_requests: Vec<String>,
     initialized: bool,
     shut_down: bool,
 }
@@ -578,6 +620,7 @@ impl FakeLsp {
                 request_failures_oneshot: BTreeMap::new(),
                 request_failures_persistent: BTreeMap::new(),
                 request_delays: BTreeMap::new(),
+                cancelled_requests: Vec::new(),
                 initialized: false,
                 shut_down: false,
             }),
@@ -1213,7 +1256,27 @@ impl FakeLsp {
         let Some(duration) = duration else { return };
         let executor = self.executor.lock().unwrap().clone();
         let Some(executor) = executor else { return };
+        let guard = CancellationGuard::armed(&self.state, method.to_string());
         executor.timer(duration).await;
+        guard.disarm();
+    }
+
+    /// Methods recorded as cancelled because their futures were
+    /// dropped during the delay window armed by
+    /// [`Self::set_request_delay`]. Callers spawning a request via
+    /// [`Executor::spawn`] cancel by dropping the returned `Task`;
+    /// the [`CancellationGuard`] inside [`Self::apply_delay`]
+    /// observes the drop and pushes the method name here. Order
+    /// preserves arrival.
+    pub fn cancelled_requests(&self) -> Vec<String> {
+        self.state.lock().unwrap().cancelled_requests.clone()
+    }
+
+    /// Clear the cancellation log. Tests use this between phases
+    /// when they want the next assertion to start from an empty
+    /// slate.
+    pub fn clear_cancelled_requests(&self) {
+        self.state.lock().unwrap().cancelled_requests.clear();
     }
 
     // --- Completions ---
@@ -3810,6 +3873,61 @@ mod tests {
             scheduler.test_clock().now() - start,
             Duration::ZERO,
             "without an installed executor the delay is recorded but not awaited"
+        );
+    }
+
+    #[test]
+    fn dropped_during_delay_records_cancellation() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let lsp = Arc::new(FakeLsp::new());
+        lsp.set_executor(executor.clone());
+        lsp.set_request_delay("textDocument/hover", Duration::from_millis(500));
+
+        let task = executor.spawn({
+            let lsp = lsp.clone();
+            async move {
+                let _ = lsp.hover(hover_params("/src/main.rs", 0, 0)).await;
+            }
+        });
+        scheduler.run_until_parked();
+        assert!(
+            lsp.cancelled_requests().is_empty(),
+            "no cancellation before the future is dropped"
+        );
+
+        drop(task);
+        scheduler.run_until_parked();
+
+        assert_eq!(
+            lsp.cancelled_requests(),
+            vec!["textDocument/hover".to_string()],
+            "dropping the spawned task during the delay window records cancellation"
+        );
+    }
+
+    #[test]
+    fn completed_delay_does_not_record_cancellation() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let lsp = Arc::new(FakeLsp::new());
+        lsp.set_executor(executor.clone());
+        lsp.set_request_delay("textDocument/hover", Duration::from_millis(100));
+
+        executor
+            .spawn({
+                let lsp = lsp.clone();
+                async move {
+                    let _ = lsp.hover(hover_params("/src/main.rs", 0, 0)).await;
+                }
+            })
+            .detach();
+        scheduler.advance_clock(Duration::from_millis(150));
+        scheduler.run_until_parked();
+
+        assert!(
+            lsp.cancelled_requests().is_empty(),
+            "completed requests must not register as cancelled"
         );
     }
 
