@@ -1,11 +1,66 @@
 use crate::{
     action_handlers::read_string_via_host,
-    app::Stoat,
+    app::{Stoat, UpdateEffect},
     buffer::BufferId,
     editor_state::EditorState,
     pane::{PaneId, View},
 };
-use std::path::Path;
+use lsp_types::{DidSaveTextDocumentParams, TextDocumentIdentifier};
+use std::{path::Path, str::FromStr};
+
+/// Write the focused buffer's rope text to its backing file via
+/// [`crate::host::FsHost::write`], clear the buffer's dirty flag,
+/// and notify the LSP server via [`crate::host::LspHost::did_save`].
+/// No-op for scratch buffers (no path) or when no editor is
+/// focused. Write errors leave the dirty flag set so the user can
+/// retry.
+pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return UpdateEffect::None;
+    };
+    let buffer_id = editor.buffer_id;
+    let path = match stoat.active_workspace().buffers.path_for(buffer_id) {
+        Some(p) => p.to_path_buf(),
+        None => return UpdateEffect::None,
+    };
+    let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
+        Some(b) => b,
+        None => return UpdateEffect::None,
+    };
+    let text = {
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.rope().to_string()
+    };
+    if let Err(err) = stoat.fs_host.write(&path, text.as_bytes()) {
+        tracing::warn!(target: "stoat::file", ?err, ?path, "buffer save failed");
+        return UpdateEffect::None;
+    }
+    {
+        let mut guard = buffer.write().expect("buffer poisoned");
+        guard.dirty = false;
+    }
+    let path_str = match path.to_str() {
+        Some(s) => s,
+        None => return UpdateEffect::Redraw,
+    };
+    let Ok(uri) = lsp_types::Uri::from_str(&format!("file://{path_str}")) else {
+        return UpdateEffect::Redraw;
+    };
+    let params = DidSaveTextDocumentParams {
+        text_document: TextDocumentIdentifier { uri },
+        text: Some(text),
+    };
+    let lsp = stoat.lsp_host.clone();
+    stoat
+        .executor
+        .spawn(async move {
+            if let Err(err) = lsp.did_save(params).await {
+                tracing::warn!(target: "stoat::lsp", ?err, "did_save notification failed");
+            }
+        })
+        .detach();
+    UpdateEffect::Redraw
+}
 
 pub(super) fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
     let target = stoat.active_workspace().panes.focus();
@@ -79,4 +134,109 @@ pub(crate) fn open_file_in_pane(
     }
 
     Some(buffer_id)
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{action_handlers::dispatch, app::UpdateEffect, host::FsHost, Stoat};
+    use std::path::PathBuf;
+    use stoat_action::{OpenFile, SaveBuffer};
+
+    fn focused_dirty(stoat: &Stoat) -> bool {
+        let editor_id = match stoat
+            .active_workspace()
+            .panes
+            .pane(stoat.active_workspace().panes.focus())
+            .view
+        {
+            crate::pane::View::Editor(id) => id,
+            _ => return false,
+        };
+        let buffer_id = stoat.active_workspace().editors[editor_id].buffer_id;
+        let buffer = stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        let guard = buffer.read().expect("buffer poisoned");
+        guard.dirty
+    }
+
+    #[test]
+    fn save_buffer_writes_rope_to_path() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-test");
+        h.fake_fs().insert_file(root.join("a.txt"), b"original\n");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        let path = root.join("a.txt");
+        dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        h.settle();
+
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let buffer_id = editor.buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(0..0, "edited ");
+        }
+        assert!(focused_dirty(&h.stoat));
+
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::Redraw);
+
+        let mut written = Vec::new();
+        h.fake_fs()
+            .read(&path, &mut written)
+            .expect("file readable");
+        assert_eq!(written, b"edited original\n");
+    }
+
+    #[test]
+    fn save_buffer_clears_dirty_flag() {
+        let mut h = Stoat::test();
+        let root = PathBuf::from("/save-dirty");
+        h.fake_fs().insert_file(root.join("a.txt"), b"x");
+        h.stoat.active_workspace_mut().git_root = root.clone();
+        dispatch(
+            &mut h.stoat,
+            &OpenFile {
+                path: root.join("a.txt"),
+            },
+        );
+        h.settle();
+
+        let buffer_id = crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("editor")
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("buffer");
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            guard.edit(1..1, "y");
+        }
+        assert!(focused_dirty(&h.stoat));
+
+        dispatch(&mut h.stoat, &SaveBuffer);
+        assert!(!focused_dirty(&h.stoat));
+    }
+
+    #[test]
+    fn save_buffer_on_scratch_buffer_is_noop() {
+        let mut h = Stoat::test();
+        h.seed_focused_buffer("scratch text");
+        assert!(focused_dirty(&h.stoat));
+        assert_eq!(dispatch(&mut h.stoat, &SaveBuffer), UpdateEffect::None);
+        assert!(
+            focused_dirty(&h.stoat),
+            "scratch buffer dirty flag preserved when no path",
+        );
+    }
 }

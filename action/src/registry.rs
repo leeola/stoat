@@ -33,13 +33,13 @@ use crate::{
             OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
             PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
             RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveSelection, ScrollDown, ScrollUp, SearchNext, SearchPrev,
-            SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling, SelectRegister,
-            SetMark, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection,
-            SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
-            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
-            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
-            YankToClipboard,
+            RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
+            SearchPrev, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
+            SelectRegister, SetMark, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete,
+            SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar,
+            TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
+            YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -312,6 +312,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShellPipeTo::DEF, |_| Ok(Box::new(ShellPipeTo)));
     add(ShellInsertOutput::DEF, |_| Ok(Box::new(ShellInsertOutput)));
     add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
+    add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -849,6 +850,7 @@ mod tests {
         // + 2 KeepSelections / RemoveSelections.
         // + 2 RecordMacro / ReplayMacro.
         // + 4 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellKeepPipe.
+        // + 1 SaveBuffer.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -886,7 +888,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 256);
+        assert_eq!(all().count(), 257);
     }
 
     #[test]

@@ -581,6 +581,16 @@ define_action!(
 );
 
 define_action!(
+    SaveBufferDef,
+    SaveBuffer,
+    "SaveBuffer",
+    ActionKind::SaveBuffer,
+    "save the focused buffer to disk",
+    "Write the focused buffer's rope text to its backing file via FsHost, clear the buffer's dirty flag, and notify the LSP server via did_save. No-op for scratch buffers (no path).",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",

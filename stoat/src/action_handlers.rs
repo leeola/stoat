@@ -172,6 +172,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ShellPipeTo => shell::open_pipe_to(stoat),
         ActionKind::ShellInsertOutput => shell::open_insert_output(stoat),
         ActionKind::ShellKeepPipe => shell::open_keep_pipe(stoat),
+        ActionKind::SaveBuffer => file::save_buffer(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),
