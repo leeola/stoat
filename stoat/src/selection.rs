@@ -831,6 +831,33 @@ mod tests {
     }
 
     #[test]
+    fn goto_h_jumps_to_line_start() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "    abc\n");
+        h.open_file(&path);
+        h.type_keys("l l l l l l");
+        h.type_keys("g h");
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = buf_snap.resolve_anchor(&editor.selections.newest_anchor().head());
+        assert_eq!(head, 0);
+    }
+
+    #[test]
+    fn goto_l_jumps_to_line_end() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 5);
+        let path = h.write_file("s.txt", "abc def\n");
+        h.open_file(&path);
+        h.type_keys("g l");
+        let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let head = buf_snap.resolve_anchor(&editor.selections.newest_anchor().head());
+        assert_eq!(head, 7);
+    }
+
+    #[test]
     fn snapshot_extend_to_line_start() {
         let mut h = crate::test_harness::TestHarness::with_size(30, 5);
         let path = h.write_file("s.txt", "foo bar baz\n");

@@ -235,6 +235,8 @@ on key {
         s -> [GotoImplementation(), SetMode(normal)];
         j -> [GotoLastLine(), SetMode(normal)];
         k -> [GotoFileStart(), SetMode(normal)];
+        h -> [GotoLineStart(), SetMode(normal)];
+        l -> [GotoLineEnd(), SetMode(normal)];
         t -> [GotoWindowTop(), SetMode(normal)];
         c -> [GotoWindowCenter(), SetMode(normal)];
         b -> [GotoWindowBottom(), SetMode(normal)];
@@ -324,6 +326,8 @@ on key {
         i -> [ExtendGotoFirstNonwhitespace(), SetMode(select)];
         j -> [ExtendGotoLastLine(), SetMode(select)];
         k -> [ExtendGotoFileStart(), SetMode(select)];
+        h -> [ExtendToLineStart(), SetMode(select)];
+        l -> [ExtendToLineEnd(), SetMode(select)];
         t -> [ExtendGotoWindowTop(), SetMode(select)];
         c -> [ExtendGotoWindowCenter(), SetMode(select)];
         b -> [ExtendGotoWindowBottom(), SetMode(select)];
