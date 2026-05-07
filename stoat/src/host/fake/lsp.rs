@@ -32,7 +32,8 @@ use lsp_types::{
 };
 use serde_json::Value;
 use std::{
-    collections::BTreeMap,
+    any::Any,
+    collections::{BTreeMap, VecDeque},
     io,
     str::FromStr,
     sync::{Arc, Mutex},
@@ -41,7 +42,7 @@ use std::{
 use stoat_scheduler::Executor;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
-    Mutex as TokioMutex,
+    oneshot, Mutex as TokioMutex,
 };
 
 fn file_uri(path: &str) -> Uri {
@@ -456,6 +457,42 @@ impl LspKey {
     }
 }
 
+/// Short-circuits an `LspHost` request method into the pending
+/// queue when [`FakeLsp::set_pending_mode`] has flagged its
+/// `R::METHOD` as enabled. Expansion enqueues the params plus a
+/// `oneshot::Sender<R::Result>`, then awaits the receiver and
+/// returns its value as the method's response. Place the
+/// invocation after `apply_delay` and any failure-injection
+/// short-circuit so those existing branches still win when
+/// pending mode is off.
+macro_rules! pending_check {
+    ($self:ident, $req:ty, $params:ident) => {
+        if $self.is_pending_mode_for(<$req as lsp_types::request::Request>::METHOD) {
+            let rx = $self.enqueue_pending::<$req>($params);
+            return rx
+                .await
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "pending sender dropped"));
+        }
+    };
+}
+
+/// Variant of [`pending_check`] for trait methods whose return
+/// type wraps the spec-defined `R::Result` in `Option<...>` even
+/// though the LSP spec produces it directly. Wraps the awaited
+/// response in `Some` so the method's `io::Result<Option<...>>`
+/// signature matches.
+macro_rules! pending_check_some {
+    ($self:ident, $req:ty, $params:ident) => {
+        if $self.is_pending_mode_for(<$req as lsp_types::request::Request>::METHOD) {
+            let rx = $self.enqueue_pending::<$req>($params);
+            return rx
+                .await
+                .map(Some)
+                .map_err(|_| io::Error::new(io::ErrorKind::Other, "pending sender dropped"));
+        }
+    };
+}
+
 pub struct FakeLsp {
     state: Mutex<FakeLspState>,
     notif_tx: UnboundedSender<LspNotification>,
@@ -556,8 +593,19 @@ struct FakeLspState {
     request_failures_persistent: BTreeMap<String, io::ErrorKind>,
     request_delays: BTreeMap<String, Duration>,
     cancelled_requests: Vec<String>,
+    pending_modes: BTreeMap<&'static str, bool>,
+    pending_queue: BTreeMap<&'static str, VecDeque<PendingEntry>>,
     initialized: bool,
     shut_down: bool,
+}
+
+/// Type-erased `(Params, oneshot::Sender<Result>)` tuple stored
+/// in [`FakeLspState::pending_queue`]. Downcast back to the
+/// concrete request type at [`FakeLsp::take_pending`] time using
+/// `R::Params` and `R::Result` from the
+/// [`lsp_types::request::Request`] impl.
+struct PendingEntry {
+    inner: Box<dyn Any + Send>,
 }
 
 impl Default for FakeLsp {
@@ -621,6 +669,8 @@ impl FakeLsp {
                 request_failures_persistent: BTreeMap::new(),
                 request_delays: BTreeMap::new(),
                 cancelled_requests: Vec::new(),
+                pending_modes: BTreeMap::new(),
+                pending_queue: BTreeMap::new(),
                 initialized: false,
                 shut_down: false,
             }),
@@ -1279,6 +1329,99 @@ impl FakeLsp {
         self.state.lock().unwrap().cancelled_requests.clear();
     }
 
+    /// Toggle pending mode for the request method `R`. While
+    /// enabled, calls to the matching [`LspHost`] method enqueue
+    /// `(params, oneshot::Sender<R::Result>)` onto an internal
+    /// queue and await the receiver instead of returning the
+    /// programmed response. Tests drain the queue with
+    /// [`Self::take_pending`] and drive the response on the
+    /// bundled sender. Disabling restores the synchronous
+    /// programmed-response path.
+    pub fn set_pending_mode<R: lsp_types::request::Request>(&self, enabled: bool)
+    where
+        R::Params: Send + 'static,
+        R::Result: Send + 'static,
+    {
+        self.state
+            .lock()
+            .unwrap()
+            .pending_modes
+            .insert(R::METHOD, enabled);
+    }
+
+    /// Number of in-flight requests waiting on a test response
+    /// for `method`. Returns 0 when no entry has been queued
+    /// (whether pending mode is disabled or no request fired).
+    pub fn pending_count(&self, method: &str) -> usize {
+        self.state
+            .lock()
+            .unwrap()
+            .pending_queue
+            .get(method)
+            .map(|q| q.len())
+            .unwrap_or(0)
+    }
+
+    /// Pop the oldest pending entry for request type `R`,
+    /// returning the original params alongside the
+    /// `oneshot::Sender` the awaiting future is parked on.
+    /// Returns `None` if the queue is empty or the stored entry
+    /// fails to downcast to `(R::Params, oneshot::Sender<R::Result>)`
+    /// -- the latter indicates a programming error (queue
+    /// poisoned by a different request type).
+    pub fn take_pending<R: lsp_types::request::Request>(
+        &self,
+    ) -> Option<(R::Params, oneshot::Sender<R::Result>)>
+    where
+        R::Params: Send + 'static,
+        R::Result: Send + 'static,
+    {
+        let entry = self
+            .state
+            .lock()
+            .unwrap()
+            .pending_queue
+            .get_mut(R::METHOD)
+            .and_then(|q| q.pop_front())?;
+        entry
+            .inner
+            .downcast::<(R::Params, oneshot::Sender<R::Result>)>()
+            .ok()
+            .map(|b| *b)
+    }
+
+    fn is_pending_mode_for(&self, method: &str) -> bool {
+        self.state
+            .lock()
+            .unwrap()
+            .pending_modes
+            .get(method)
+            .copied()
+            .unwrap_or(false)
+    }
+
+    fn enqueue_pending<R: lsp_types::request::Request>(
+        &self,
+        params: R::Params,
+    ) -> oneshot::Receiver<R::Result>
+    where
+        R::Params: Send + 'static,
+        R::Result: Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        let entry = PendingEntry {
+            inner: Box::new((params, tx)),
+        };
+        self.state
+            .lock()
+            .unwrap()
+            .pending_queue
+            .entry(R::METHOD)
+            .or_default()
+            .push_back(entry);
+        rx
+    }
+
     // --- Completions ---
 
     pub fn set_completions(&self, path: &str, line: u32, col: u32, labels: &[&str]) {
@@ -1697,6 +1840,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/hover") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::HoverRequest, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -1713,6 +1857,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/definition") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::GotoDefinition, params);
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.definitions,
@@ -1729,6 +1874,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/declaration") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::GotoDeclaration, params);
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.declarations,
@@ -1745,6 +1891,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/typeDefinition") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::GotoTypeDefinition, params);
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.type_definitions,
@@ -1761,6 +1908,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/implementation") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::GotoImplementation, params);
         let state = self.state.lock().unwrap();
         Ok(lookup_goto(
             &state.implementations,
@@ -1774,6 +1922,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/references") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::References, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
@@ -1790,6 +1939,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/documentHighlight") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::DocumentHighlightRequest, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -1803,6 +1953,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/completion") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::Completion, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
@@ -1821,6 +1972,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("completionItem/resolve") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::ResolveCompletionItem, item);
         Ok(item)
     }
 
@@ -1832,6 +1984,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/codeAction") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::CodeActionRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state.code_actions.get(&params.text_document.uri).cloned())
     }
@@ -1841,6 +1994,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("codeAction/resolve") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::CodeActionResolveRequest, action);
         Ok(action)
     }
 
@@ -1852,6 +2006,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/documentLink") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::DocumentLinkRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state.document_links.get(&params.text_document.uri).cloned())
     }
@@ -1861,6 +2016,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("documentLink/resolve") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::DocumentLinkResolve, link);
         Ok(link)
     }
 
@@ -1872,6 +2028,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/documentColor") {
             return Err(err);
         }
+        pending_check_some!(self, lsp_types::request::DocumentColor, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .document_colors
@@ -1887,6 +2044,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/colorPresentation") {
             return Err(err);
         }
+        pending_check_some!(self, lsp_types::request::ColorPresentationRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .color_presentations
@@ -1902,6 +2060,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/semanticTokens/full") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::SemanticTokensFullRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .semantic_tokens_full
@@ -1917,6 +2076,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/semanticTokens/range") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::SemanticTokensRangeRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .semantic_tokens_range
@@ -1932,6 +2092,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/prepareCallHierarchy") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::CallHierarchyPrepare, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -1948,6 +2109,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("callHierarchy/incomingCalls") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::CallHierarchyIncomingCalls, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.call_hierarchy_incoming.get(&key).cloned())
@@ -1961,6 +2123,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("callHierarchy/outgoingCalls") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::CallHierarchyOutgoingCalls, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.call_hierarchy_outgoing.get(&key).cloned())
@@ -1974,6 +2137,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/prepareTypeHierarchy") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::TypeHierarchyPrepare, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -1990,6 +2154,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("typeHierarchy/supertypes") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::TypeHierarchySupertypes, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.type_hierarchy_supertypes.get(&key).cloned())
@@ -2003,6 +2168,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("typeHierarchy/subtypes") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::TypeHierarchySubtypes, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(&params.item.uri, &params.item.range.start);
         Ok(state.type_hierarchy_subtypes.get(&key).cloned())
@@ -2016,6 +2182,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/documentSymbol") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::DocumentSymbolRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .document_symbols
@@ -2031,6 +2198,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/diagnostic") {
             return Err(err);
         }
+        pending_check_some!(self, lsp_types::request::DocumentDiagnosticRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .document_diagnostics
@@ -2046,6 +2214,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/foldingRange") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::FoldingRangeRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state.folding_ranges.get(&params.text_document.uri).cloned())
     }
@@ -2058,6 +2227,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/selectionRange") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::SelectionRangeRequest, params);
         let state = self.state.lock().unwrap();
         let uri = &params.text_document.uri;
         let mut chains = Vec::with_capacity(params.positions.len());
@@ -2082,6 +2252,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("workspace/symbol") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::WorkspaceSymbolRequest, params);
         let state = self.state.lock().unwrap();
         if let Some(response) = state.workspace_symbol_responses.get(&params.query) {
             return Ok(Some(response.clone()));
@@ -2100,6 +2271,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/signatureHelp") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::SignatureHelpRequest, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position_params.text_document.uri,
@@ -2113,6 +2285,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/inlayHint") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::InlayHintRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state.inlay_hints.get(&params.text_document.uri).cloned())
     }
@@ -2122,6 +2295,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("inlayHint/resolve") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::InlayHintResolveRequest, hint);
         Ok(hint)
     }
 
@@ -2133,6 +2307,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/inlayHint") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::InlayHintRequest, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .range_inlay_hints
@@ -2148,6 +2323,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/prepareRename") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::PrepareRenameRequest, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(&params.text_document.uri, &params.position);
         Ok(state.prepare_renames.get(&key).cloned())
@@ -2158,6 +2334,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/rename") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::Rename, params);
         let state = self.state.lock().unwrap();
         let key = LspKey::from_position(
             &params.text_document_position.text_document.uri,
@@ -2168,12 +2345,13 @@ impl LspHost for FakeLsp {
 
     async fn formatting(
         &self,
-        _params: DocumentFormattingParams,
+        params: DocumentFormattingParams,
     ) -> io::Result<Option<Vec<TextEdit>>> {
         self.apply_delay("textDocument/formatting").await;
         if let Some(err) = self.take_request_failure("textDocument/formatting") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::Formatting, params);
         Ok(None)
     }
 
@@ -2185,6 +2363,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("textDocument/rangeFormatting") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::RangeFormatting, params);
         let state = self.state.lock().unwrap();
         Ok(state
             .range_formatting
@@ -2197,6 +2376,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("workspace/willRenameFiles") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::WillRenameFiles, params);
         let Some(first) = params.files.first() else {
             return Ok(None);
         };
@@ -2210,6 +2390,7 @@ impl LspHost for FakeLsp {
         if let Some(err) = self.take_request_failure("workspace/executeCommand") {
             return Err(err);
         }
+        pending_check!(self, lsp_types::request::ExecuteCommand, params);
         let mut state = self.state.lock().unwrap();
         state.observed_executed_commands.push(params.clone());
         Ok(state.executed_commands.get(&params.command).cloned())
@@ -3929,6 +4110,71 @@ mod tests {
             lsp.cancelled_requests().is_empty(),
             "completed requests must not register as cancelled"
         );
+    }
+
+    #[test]
+    fn pending_mode_holds_request_until_test_drives_response() {
+        use lsp_types::{request::HoverRequest, MarkedString};
+
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = scheduler.executor();
+        let lsp = Arc::new(FakeLsp::new());
+        lsp.set_executor(executor.clone());
+        lsp.set_pending_mode::<HoverRequest>(true);
+
+        let result = Arc::new(Mutex::new(None));
+        let task = executor.spawn({
+            let lsp = lsp.clone();
+            let result = result.clone();
+            async move {
+                let r = lsp.hover(hover_params("/src/main.rs", 0, 0)).await;
+                *result.lock().unwrap() = Some(r);
+            }
+        });
+        scheduler.run_until_parked();
+        assert_eq!(
+            lsp.pending_count("textDocument/hover"),
+            1,
+            "pending mode must enqueue the request rather than resolve it"
+        );
+        assert!(
+            result.lock().unwrap().is_none(),
+            "spawned future must still be parked on the oneshot receiver"
+        );
+
+        let (_params, sender) = lsp.take_pending::<HoverRequest>().expect("queued entry");
+        assert_eq!(lsp.pending_count("textDocument/hover"), 0);
+        let response = Some(Hover {
+            contents: HoverContents::Scalar(MarkedString::String("driven".into())),
+            range: None,
+        });
+        sender.send(response.clone()).expect("receiver still alive");
+        scheduler.run_until_parked();
+        task.detach();
+
+        let observed = result.lock().unwrap().take().expect("future completed");
+        assert_eq!(observed.expect("hover ok"), response);
+    }
+
+    #[test]
+    fn pending_mode_disabled_falls_through_to_programmed_response() {
+        use lsp_types::request::HoverRequest;
+
+        let scheduler = Arc::new(TestScheduler::new());
+        let lsp = FakeLsp::new();
+        lsp.set_hover("/src/main.rs", 0, 0, "programmed");
+        lsp.set_pending_mode::<HoverRequest>(false);
+
+        let observed = scheduler
+            .block_on(async { lsp.hover(hover_params("/src/main.rs", 0, 0)).await })
+            .expect("hover ok")
+            .expect("programmed hover present");
+
+        match observed.contents {
+            HoverContents::Markup(content) => assert_eq!(content.value, "programmed"),
+            other => panic!("unexpected hover contents: {other:?}"),
+        }
+        assert_eq!(lsp.pending_count("textDocument/hover"), 0);
     }
 
     #[test]
