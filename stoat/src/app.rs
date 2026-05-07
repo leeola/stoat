@@ -391,6 +391,23 @@ pub struct Stoat {
     /// cleared by `Esc` in insert mode, by motion that leaves the
     /// popup's `prefix_range`, or by acceptance.
     pub(crate) pending_completion: Option<crate::completion::CompletionPopup>,
+
+    /// In-flight debounced completion request. Replacing the entry
+    /// drops the prior task, cancelling its spawned future before its
+    /// debounce timer or downstream LSP request can land. Polled by
+    /// [`crate::completion::request::pump`] each render tick; on
+    /// `Ready` writes the resolved popup to [`Self::pending_completion`].
+    pub(crate) pending_completion_request:
+        Option<stoat_scheduler::Task<crate::completion::CompletionPopup>>,
+
+    /// Buffer signature `(BufferId, version)` recorded at the most
+    /// recent completion-trigger call. The trigger pipeline returns
+    /// early when this matches the focused buffer's current
+    /// signature so a no-op event tick (Esc-dismiss, cursor-only
+    /// motion) does not re-arm the request that was just dismissed.
+    /// Cleared whenever insert mode exits, so re-entering insert
+    /// starts from a clean slate.
+    pub(crate) last_completion_signature: Option<(BufferId, u64)>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -566,6 +583,8 @@ impl Stoat {
             pending_workspace_symbol_picker: None,
             pending_format_request: None,
             pending_completion: None,
+            pending_completion_request: None,
+            last_completion_signature: None,
         }
     }
 
@@ -857,6 +876,7 @@ impl Stoat {
             _ => UpdateEffect::None,
         };
         action_handlers::lsp::notify_buffer_changes_pending(self);
+        crate::completion::request::trigger(self);
         effect
     }
 
@@ -1822,6 +1842,8 @@ impl Stoat {
             },
             KeyCode::Esc if self.pending_completion.is_some() => {
                 self.pending_completion = None;
+                self.pending_completion_request = None;
+                crate::completion::request::record_dismiss(self);
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Char(ch)
@@ -2459,6 +2481,7 @@ impl Stoat {
         action_handlers::lsp::pump_lsp_symbol_picker(self);
         action_handlers::lsp::pump_lsp_workspace_symbol(self);
         action_handlers::lsp::pump_lsp_format(self);
+        crate::completion::request::pump(self);
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf

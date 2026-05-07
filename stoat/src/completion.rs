@@ -10,6 +10,7 @@
 
 pub mod lsp;
 pub mod path;
+pub(crate) mod request;
 pub mod word;
 
 use std::ops::Range;
