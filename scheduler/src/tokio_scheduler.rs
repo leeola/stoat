@@ -40,6 +40,10 @@ impl Scheduler for TokioScheduler {
     fn clock(&self) -> &dyn Clock {
         &self.clock
     }
+
+    fn schedule_blocking(&self, work: Box<dyn FnOnce() + Send + 'static>) {
+        self.handle.spawn_blocking(work);
+    }
 }
 
 #[cfg(test)]
@@ -86,5 +90,31 @@ mod tests {
         let from_clock = scheduler.clock().now();
         let after = Instant::now();
         assert!(before <= from_clock && from_clock <= after);
+    }
+
+    #[tokio::test]
+    async fn spawn_blocking_does_not_block_runtime() {
+        let scheduler = Arc::new(TokioScheduler::new(Handle::current()));
+        let executor = scheduler.executor();
+        let started = Arc::new(AtomicBool::new(false));
+        let release = Arc::new(AtomicBool::new(false));
+
+        let blocking_task = {
+            let started = started.clone();
+            let release = release.clone();
+            executor.spawn_blocking(move || {
+                started.store(true, Ordering::SeqCst);
+                while !release.load(Ordering::SeqCst) {
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                123
+            })
+        };
+
+        while !started.load(Ordering::SeqCst) {
+            tokio::task::yield_now().await;
+        }
+        release.store(true, Ordering::SeqCst);
+        assert_eq!(blocking_task.await, 123);
     }
 }

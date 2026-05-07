@@ -1,4 +1,5 @@
 use crate::{Scheduler, Timer};
+use futures::channel::oneshot;
 use std::{
     future::Future,
     pin::Pin,
@@ -28,6 +29,25 @@ impl Executor {
         });
         runnable.schedule();
         Task::Spawned(task)
+    }
+
+    /// Run `f` on a worker that does not block the scheduler. Production
+    /// schedulers route this to a blocking thread pool so the runtime
+    /// stays interactive while `f` executes (e.g. directory walks). The
+    /// returned [`Task`] resolves once `f` has produced its value.
+    pub fn spawn_blocking<F, R>(&self, f: F) -> Task<R>
+    where
+        F: FnOnce() -> R + Send + 'static,
+        R: Send + 'static,
+    {
+        let (tx, rx) = oneshot::channel();
+        self.scheduler.schedule_blocking(Box::new(move || {
+            let _ = tx.send(f());
+        }));
+        self.spawn(async move {
+            rx.await
+                .expect("spawn_blocking sender dropped without sending")
+        })
     }
 
     pub fn timer(&self, duration: Duration) -> Timer {

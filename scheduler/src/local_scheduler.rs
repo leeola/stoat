@@ -37,6 +37,12 @@ impl Scheduler for LocalScheduler {
     fn clock(&self) -> &dyn Clock {
         &self.clock
     }
+
+    fn schedule_blocking(&self, _work: Box<dyn FnOnce() + Send + 'static>) {
+        panic!(
+            "LocalScheduler::schedule_blocking called -- LocalScheduler is for clock-only contexts; use TokioScheduler for blocking work"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -81,5 +87,13 @@ mod tests {
         let scheduler = Arc::new(LocalScheduler::new());
         let executor = scheduler.executor();
         let _timer = executor.timer(Duration::from_secs(1));
+    }
+
+    #[test]
+    #[should_panic(expected = "LocalScheduler::schedule_blocking called")]
+    fn schedule_blocking_panics() {
+        let scheduler = Arc::new(LocalScheduler::new());
+        let executor = scheduler.executor();
+        executor.spawn_blocking(|| ()).detach();
     }
 }

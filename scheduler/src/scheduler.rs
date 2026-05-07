@@ -25,6 +25,13 @@ pub trait Scheduler: Send + Sync {
     fn schedule(&self, runnable: Runnable);
     fn timer(&self, duration: Duration) -> Timer;
     fn clock(&self) -> &dyn Clock;
+
+    /// Submit a synchronous closure to a worker that does not block the
+    /// scheduler's own progress. Production schedulers route this to a
+    /// dedicated blocking pool so the runtime stays interactive while
+    /// `work` runs (e.g. directory walks, large file reads). Test
+    /// schedulers run `work` inline since they have no real concurrency.
+    fn schedule_blocking(&self, work: Box<dyn FnOnce() + Send + 'static>);
 }
 
 pub struct Timer(oneshot::Receiver<()>);

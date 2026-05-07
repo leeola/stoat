@@ -26,7 +26,7 @@ pub(super) fn open_file_finder(
     let walk_task = {
         let fs_host = stoat.fs_host.clone();
         let walk_root = git_root.clone();
-        executor.spawn(async move { fs_host.walk_workspace_files(&walk_root) })
+        executor.spawn_blocking(move || fs_host.walk_workspace_files(&walk_root))
     };
     let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
     let buffer_paths = stoat.active_workspace().buffers.open_paths();

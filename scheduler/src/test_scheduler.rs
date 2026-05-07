@@ -185,4 +185,8 @@ impl Scheduler for TestScheduler {
     fn clock(&self) -> &dyn Clock {
         &self.clock
     }
+
+    fn schedule_blocking(&self, work: Box<dyn FnOnce() + Send + 'static>) {
+        work();
+    }
 }

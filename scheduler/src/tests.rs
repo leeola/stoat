@@ -247,3 +247,27 @@ fn has_pending_work_lifecycle() {
     s.settle();
     assert!(!s.has_pending_work());
 }
+
+#[test]
+fn spawn_blocking_returns_closure_value() {
+    let s = scheduler();
+    let exec = s.executor();
+    let task = exec.spawn_blocking(|| 7 * 6);
+    assert_eq!(s.block_on(task), 42);
+}
+
+#[test]
+fn spawn_blocking_runs_closure_inline_on_test_scheduler() {
+    let s = scheduler();
+    let exec = s.executor();
+    let counter = Arc::new(AtomicUsize::new(0));
+    {
+        let counter = counter.clone();
+        exec.spawn_blocking(move || {
+            counter.fetch_add(1, Ordering::SeqCst);
+        })
+        .detach();
+    }
+    assert_eq!(counter.load(Ordering::SeqCst), 1);
+    s.settle();
+}
