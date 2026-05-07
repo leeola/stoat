@@ -97,6 +97,8 @@ fn run_tui(
     resume: bool,
     start: TuiStart,
 ) -> Result<(), Whatever> {
+    stoat::ui::install_panic_hook();
+
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(64);
     // Capacity 1: natural backpressure -- main thread won't render ahead
     // if the UI thread hasn't flushed the previous frame yet
