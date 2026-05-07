@@ -111,7 +111,7 @@ impl FileFinder {
             "prompt",
             1,
         );
-        let (preview_buffer, shared_buffer) = ws.buffers.new_scratch();
+        let (preview_buffer, shared_buffer) = ws.buffers.new_scratch_preview();
         let preview_editor_state = EditorState::new(preview_buffer, shared_buffer, executor);
         let preview_editor = ws.editors.insert(preview_editor_state);
 
@@ -232,12 +232,25 @@ impl FileFinder {
     /// No-op when the selection already matches [`Self::preview_rendered_for`].
     /// Reads through `fs_host`; errors are swallowed and surfaced as a
     /// placeholder so the preview always renders something.
-    pub(crate) fn sync_preview(&mut self, ws: &mut Workspace, fs_host: &dyn FsHost) {
+    ///
+    /// Assigns the previewed file's language (resolved via
+    /// `language_registry`) so the existing parse pipeline picks the
+    /// preview buffer up and renders syntax highlighting. Stale
+    /// syntax / syntax_map are cleared on path change so the next
+    /// parse runs from scratch instead of merging into the prior
+    /// file's state.
+    pub(crate) fn sync_preview(
+        &mut self,
+        ws: &mut Workspace,
+        fs_host: &dyn FsHost,
+        language_registry: &stoat_language::LanguageRegistry,
+    ) {
         let path = match self.selected_path() {
             Some(p) => p.to_path_buf(),
             None => {
                 if self.preview_rendered_for.is_some() {
                     replace_preview_text(ws, self.preview_editor, self.preview_buffer, "");
+                    ws.buffers.clear_syntax(self.preview_buffer);
                     self.preview_rendered_for = None;
                 }
                 return;
@@ -248,13 +261,22 @@ impl FileFinder {
         }
         let content = read_preview(fs_host, &path);
         replace_preview_text(ws, self.preview_editor, self.preview_buffer, &content);
+        ws.buffers.clear_syntax(self.preview_buffer);
+        if let Some(lang) = language_registry.for_path(&path) {
+            ws.buffers.set_language(self.preview_buffer, lang);
+        }
         self.preview_rendered_for = Some(path);
     }
 
     /// Tear down owned editor slots. Called on every finder-close path.
+    /// Removes the preview buffer from [`crate::buffer_registry::BufferRegistry`]
+    /// so each file finder lifetime returns the registry to its
+    /// pre-open size; without this the preview entry would accumulate
+    /// across opens.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
         self.input.dispose(ws);
         ws.editors.remove(self.preview_editor);
+        ws.buffers.remove(self.preview_buffer);
     }
 }
 
@@ -988,5 +1010,83 @@ mod tests {
         seed_empty_finder_workspace(&mut h);
         h.type_keys("space p");
         h.assert_snapshot("file_finder_tiny_terminal_no_render");
+    }
+
+    #[test]
+    fn preview_buffer_assigned_language_for_selected_path() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("main.rs", "fn main() {}\n")]);
+        h.type_keys("space p");
+        h.snapshot();
+        let finder = h.stoat.file_finder.as_ref().expect("finder open");
+        let preview_id = finder.preview_buffer;
+        let ws = h.stoat.active_workspace();
+        let lang = ws.buffers.language_for(preview_id).expect("language set");
+        assert_eq!(lang.name, "rust");
+    }
+
+    #[test]
+    fn switching_preview_clears_prior_syntax_state() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", "fn a() {}\n"), ("b.toml", "[pkg]\n")]);
+        h.type_keys("space p");
+        h.snapshot();
+
+        let preview_id = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .preview_buffer;
+        let lang_first = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .language_for(preview_id)
+            .expect("first language");
+
+        h.type_keys("down");
+        h.snapshot();
+
+        let lang_second = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .language_for(preview_id)
+            .expect("second language");
+        assert_ne!(
+            lang_first.name, lang_second.name,
+            "language should reflect new path",
+        );
+    }
+
+    #[test]
+    fn preview_buffer_evicted_on_close() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("main.rs", "fn main() {}\n")]);
+        h.type_keys("space p");
+        let preview_id = h
+            .stoat
+            .file_finder
+            .as_ref()
+            .expect("finder open")
+            .preview_buffer;
+        assert!(h.stoat.active_workspace().buffers.get(preview_id).is_some());
+
+        h.type_keys("escape");
+
+        assert!(h.stoat.file_finder.is_none());
+        assert!(
+            h.stoat.active_workspace().buffers.get(preview_id).is_none(),
+            "preview buffer should be evicted on close",
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .buffers
+                .preview_buffer_ids()
+                .is_empty(),
+            "no preview buffers remain after close",
+        );
     }
 }

@@ -17,12 +17,13 @@ pub(crate) fn render_file_finder(
     finder: &mut FileFinder,
     ws: &mut Workspace,
     fs_host: &dyn FsHost,
+    language_registry: &stoat_language::LanguageRegistry,
     theme: &crate::theme::Theme,
     area: Rect,
     buf: &mut Buffer,
 ) {
     finder.refilter_from_input(ws);
-    finder.sync_preview(ws, fs_host);
+    finder.sync_preview(ws, fs_host, language_registry);
 
     if area.width < 40 || area.height < 12 {
         return;

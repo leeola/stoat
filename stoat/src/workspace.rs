@@ -235,6 +235,11 @@ impl Workspace {
                 View::Label(_) | View::Run(_) | View::Claude(_) => {},
             }
         }
+        for id in self.buffers.preview_buffer_ids() {
+            if !visible.contains(&id) {
+                visible.push(id);
+            }
+        }
 
         for buffer_id in visible {
             let Some(lang) = self.buffers.language_for(buffer_id) else {
