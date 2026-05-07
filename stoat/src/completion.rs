@@ -5,9 +5,10 @@
 //!
 //! Per-source fetch routines (path entries via
 //! [`crate::host::FsHost`], LSP completion via
-//! [`crate::host::LspHost`], rope-walk word source) land in their
-//! own files; this module owns only the shared types and the
-//! trigger predicates.
+//! [`crate::host::LspHost`], rope-walk word source) live in
+//! sibling submodules.
+
+pub mod path;
 
 use std::ops::Range;
 
