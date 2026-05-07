@@ -122,6 +122,14 @@ pub struct Stoat {
     claude_rx: Receiver<ClaudeNotification>,
     pub(crate) pty_tx: Sender<PtyNotification>,
     pty_rx: Receiver<PtyNotification>,
+    /// Wake-up signal for [`Self::run`]'s `tokio::select!`. Background
+    /// tasks call `notify_one()` to kick the loop into a fresh
+    /// `UpdateEffect::Redraw` once their result is ready, so the user
+    /// does not have to type a key to see asynchronous output land
+    /// (e.g. the file finder's workspace walk completing on the
+    /// blocking pool). Multiple notifications collapse into one
+    /// pending wake-up.
+    pub(crate) redraw_notify: Arc<tokio::sync::Notify>,
     pub(crate) modal_run: Option<RunId>,
     pub(crate) render_tick: u64,
     /// Accumulated digit prefix for the next motion (Vim-style
@@ -537,6 +545,7 @@ impl Stoat {
             claude_rx,
             pty_tx,
             pty_rx,
+            redraw_notify: Arc::new(tokio::sync::Notify::new()),
             modal_run: None,
             render_tick: 0,
             pending_count: None,
@@ -781,6 +790,7 @@ impl Stoat {
                     let Some(notif) = notif else { continue };
                     self.handle_claude_notification(notif)
                 }
+                _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = async {
                     if active {
                         tokio::time::sleep(std::time::Duration::from_millis(100)).await

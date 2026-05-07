@@ -1001,6 +1001,20 @@ mod tests {
     }
 
     #[test]
+    fn walk_completion_signals_redraw_notify() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(&mut h, &[("a.rs", ""), ("b.rs", "")]);
+        h.type_keys("space p");
+        let notified = h.stoat.redraw_notify.notified();
+        tokio::pin!(notified);
+        assert!(
+            notified.enable(),
+            "walk task should signal redraw_notify on completion so the \
+             main loop wakes up and renders the populated list",
+        );
+    }
+
+    #[test]
     fn typing_narrows_filtered_list() {
         let mut h = crate::Stoat::test();
         seed_finder_workspace(
