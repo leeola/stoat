@@ -42,6 +42,7 @@ pub fn fetch(ctx: &CompletionContext<'_>, rope: &Rope) -> Vec<CompletionItem> {
             detail: None,
             replace_range: ctx.prefix_range.clone(),
             insert_text: label,
+            is_snippet: false,
         })
         .collect()
 }

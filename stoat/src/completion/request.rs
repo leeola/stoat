@@ -137,6 +137,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         stoat.pending_completion_request = None;
         stoat.pending_completion = None;
         stoat.last_completion_signature = None;
+        stoat.active_snippet = None;
         return;
     }
 

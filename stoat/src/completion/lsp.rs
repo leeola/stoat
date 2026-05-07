@@ -71,6 +71,11 @@ fn translate(
         .or_else(|| lsp_item.insert_text.clone())
         .unwrap_or_else(|| lsp_item.label.clone());
 
+    let is_snippet = matches!(
+        lsp_item.insert_text_format,
+        Some(lsp_types::InsertTextFormat::SNIPPET)
+    );
+
     CompletionItem {
         label: lsp_item.label,
         source: CompletionSource::Lsp,
@@ -78,6 +83,7 @@ fn translate(
         detail: lsp_item.detail,
         replace_range,
         insert_text,
+        is_snippet,
     }
 }
 

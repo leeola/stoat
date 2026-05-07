@@ -14,6 +14,7 @@ mod e2e;
 pub mod lsp;
 pub mod path;
 pub(crate) mod request;
+pub(crate) mod snippet;
 pub mod word;
 
 use std::ops::Range;
@@ -81,6 +82,12 @@ pub struct CompletionItem {
     /// Text inserted into the buffer when the user accepts this
     /// row.
     pub insert_text: String,
+    /// `true` when [`Self::insert_text`] uses LSP snippet syntax
+    /// (`$N`, `${N}`, `${N:default}`). Acceptance routes snippets
+    /// through [`crate::completion::snippet::parse`] to expand
+    /// placeholders into multi-cursor selections; non-snippet items
+    /// insert the text verbatim.
+    pub is_snippet: bool,
 }
 
 /// In-flight completion popup. Held on
@@ -323,6 +330,7 @@ mod tests {
             detail: Some("fn open_file(path: &Path)".into()),
             replace_range: 4..12,
             insert_text: "open_file(${1:path})".into(),
+            is_snippet: true,
         };
         assert_eq!(item.clone(), item);
     }
@@ -345,6 +353,7 @@ mod tests {
             detail: None,
             replace_range: 4..7,
             insert_text: "open_file()".into(),
+            is_snippet: false,
         };
         let popup = CompletionPopup {
             items: vec![item.clone()],
@@ -385,6 +394,7 @@ mod tests {
                 detail: None,
                 replace_range: 0..0,
                 insert_text: String::new(),
+                is_snippet: false,
             };
             assert_eq!(item.kind, Some(kind));
         }

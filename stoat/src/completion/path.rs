@@ -68,6 +68,7 @@ pub fn fetch(
             detail: None,
             replace_range: replace_start..cursor,
             insert_text: label,
+            is_snippet: false,
         });
     }
     items

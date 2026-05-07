@@ -264,6 +264,7 @@ mod tests {
             detail: None,
             replace_range: 0..0,
             insert_text: label.into(),
+            is_snippet: false,
         }
     }
 

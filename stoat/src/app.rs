@@ -408,6 +408,14 @@ pub struct Stoat {
     /// Cleared whenever insert mode exits, so re-entering insert
     /// starts from a clean slate.
     pub(crate) last_completion_signature: Option<(BufferId, u64)>,
+
+    /// In-flight snippet expansion. Populated by
+    /// [`crate::completion::accept::execute`] when accepting a
+    /// snippet completion item; consumed by
+    /// [`crate::completion::snippet::advance`] from the Tab
+    /// arbitration arm in `handle_insert_key`. Cleared when insert
+    /// mode exits so re-entering insert is not stuck mid-snippet.
+    pub(crate) active_snippet: Option<crate::completion::snippet::ActiveSnippet>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -585,6 +593,7 @@ impl Stoat {
             pending_completion: None,
             pending_completion_request: None,
             last_completion_signature: None,
+            active_snippet: None,
         }
     }
 
@@ -1833,7 +1842,10 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Tab if key.modifiers.is_empty() => {
-                if self.pending_completion.is_some() {
+                if self.active_snippet.is_some() {
+                    crate::completion::snippet::advance(self);
+                    Some(UpdateEffect::Redraw)
+                } else if self.pending_completion.is_some() {
                     Some(crate::completion::accept::execute(self))
                 } else if self.cursor_after_only_whitespace(editor_id, buffer_id) {
                     self.editor_insert(editor_id, buffer_id, "\t");
@@ -3604,6 +3616,7 @@ mod tests {
                 detail: None,
                 replace_range: 0..0,
                 insert_text: "foo".into(),
+                is_snippet: false,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -3650,6 +3663,7 @@ mod tests {
                 detail: None,
                 replace_range: 0..3,
                 insert_text: "foobar".into(),
+                is_snippet: false,
             }],
             selected_idx: 0,
             anchor_offset: 0,
@@ -3681,6 +3695,7 @@ mod tests {
                     detail: None,
                     replace_range: 0..1,
                     insert_text: "foo".into(),
+                    is_snippet: false,
                 },
                 CompletionItem {
                     label: "foobar".into(),
@@ -3689,6 +3704,7 @@ mod tests {
                     detail: None,
                     replace_range: 0..1,
                     insert_text: "foobar".into(),
+                    is_snippet: false,
                 },
                 CompletionItem {
                     label: "foobaz".into(),
@@ -3697,6 +3713,7 @@ mod tests {
                     detail: None,
                     replace_range: 0..1,
                     insert_text: "foobaz".into(),
+                    is_snippet: false,
                 },
             ],
             selected_idx: 0,
@@ -3735,6 +3752,77 @@ mod tests {
         h.type_keys("down");
         let (after_down, _) = focused_primary_offsets(&mut h);
         assert!(after_down > 0, "down arrow should advance cursor");
+    }
+
+    #[test]
+    fn tab_advances_active_snippet_to_next_tabstop() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("p r i");
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![CompletionItem {
+                label: "fn".into(),
+                source: CompletionSource::Lsp,
+                kind: None,
+                detail: None,
+                replace_range: 0..3,
+                insert_text: "${1:name}(${2:arg})$0".into(),
+                is_snippet: true,
+            }],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..3,
+        });
+        h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "name(arg)");
+        let (start, end) = focused_primary_offsets(&mut h);
+        assert_eq!((start, end), (0, 4), "first tabstop");
+        assert!(h.stoat.active_snippet.is_some());
+
+        h.type_keys("tab");
+        let (start, end) = focused_primary_offsets(&mut h);
+        assert_eq!((start, end), (5, 8), "second tabstop");
+        assert!(h.stoat.active_snippet.is_some());
+
+        h.type_keys("tab");
+        let (start, end) = focused_primary_offsets(&mut h);
+        assert_eq!((start, end), (9, 9), "exit landed at $0");
+        assert!(
+            h.stoat.active_snippet.is_none(),
+            "snippet exits after final tab",
+        );
+    }
+
+    #[test]
+    fn leaving_insert_mode_clears_active_snippet() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        let mut h = Stoat::test();
+        let _path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("f");
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![CompletionItem {
+                label: "snippet".into(),
+                source: CompletionSource::Lsp,
+                kind: None,
+                detail: None,
+                replace_range: 0..1,
+                insert_text: "${1:a} ${2:b}".into(),
+                is_snippet: true,
+            }],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..1,
+        });
+        h.type_keys("tab");
+        assert!(h.stoat.active_snippet.is_some());
+
+        h.type_keys("escape");
+        h.type_keys("escape");
+        assert_eq!(h.stoat.mode, "normal");
+        assert!(h.stoat.active_snippet.is_none());
     }
 
     fn focused_editor_pane_area(h: &crate::test_harness::TestHarness) -> Rect {
