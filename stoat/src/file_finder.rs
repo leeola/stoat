@@ -11,10 +11,13 @@ use nucleo::{
     Matcher, Utf32Str,
 };
 use std::{
+    future::Future,
     path::{Path, PathBuf},
+    pin::Pin,
     sync::{Mutex, OnceLock},
+    task::{Context, Poll},
 };
-use stoat_scheduler::Executor;
+use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
 
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
@@ -64,8 +67,13 @@ pub struct FileFinder {
     pub(crate) open_intent: OpenIntent,
     pub(crate) scope: FinderScope,
     pub(crate) git_root: PathBuf,
-    /// Absolute paths of every tracked file, captured once at open time.
+    /// Absolute paths of every tracked file. Empty until
+    /// [`FileFinder::pump_walk`] drains the in-flight walk task.
     pub(crate) all_paths: Vec<PathBuf>,
+    /// Walk task spawned at open time so the modal renders before
+    /// the workspace enumeration completes. Cleared once
+    /// [`FileFinder::pump_walk`] takes its result.
+    pending_walk: Option<Task<Vec<PathBuf>>>,
     /// Absolute paths of currently-modified files. Re-queried on scope toggle.
     pub(crate) modified_paths: Vec<PathBuf>,
     /// Absolute paths of currently-open buffers. Captured once at open time;
@@ -99,7 +107,7 @@ impl FileFinder {
         open_intent: OpenIntent,
         initial_scope: FinderScope,
         git_root: PathBuf,
-        all_paths: Vec<PathBuf>,
+        walk_task: Task<Vec<PathBuf>>,
         modified_paths: Vec<PathBuf>,
         buffer_paths: Vec<PathBuf>,
     ) -> Self {
@@ -116,6 +124,7 @@ impl FileFinder {
         let preview_editor = ws.editors.insert(preview_editor_state);
 
         let scope = initial_scope;
+        let all_paths: Vec<PathBuf> = Vec::new();
         let mut filtered = Vec::new();
         let mut selected = 0;
         refilter(
@@ -136,6 +145,7 @@ impl FileFinder {
             scope,
             git_root,
             all_paths,
+            pending_walk: Some(walk_task),
             modified_paths,
             buffer_paths,
             filtered,
@@ -203,10 +213,34 @@ impl FileFinder {
         self.filtered.clear();
     }
 
+    /// Poll the in-flight walk task. On `Poll::Ready`, takes the
+    /// populated path list and swaps it into [`Self::all_paths`].
+    /// Pending leaves the task in place. Returns `true` when the
+    /// walk just landed.
+    pub(crate) fn pump_walk(&mut self) -> bool {
+        let Some(mut task) = self.pending_walk.take() else {
+            return false;
+        };
+        let waker = futures::task::noop_waker();
+        let mut cx = Context::from_waker(&waker);
+        match Pin::new(&mut task).poll(&mut cx) {
+            Poll::Ready(paths) => {
+                self.all_paths = paths;
+                true
+            },
+            Poll::Pending => {
+                self.pending_walk = Some(task);
+                false
+            },
+        }
+    }
+
     /// Re-run the matcher if the input text or scope has changed since last
     /// filter. Called from the renderer so typing picks up without a dedicated
-    /// sync hook.
+    /// sync hook. Drains any pending walk result first so freshly arrived
+    /// paths participate in the same render tick.
     pub(crate) fn refilter_from_input(&mut self, ws: &Workspace) {
+        self.pump_walk();
         let text = self.input.text(ws);
         if text == self.last_filter_text
             && self.scope == self.last_filter_scope
