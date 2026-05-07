@@ -3,6 +3,7 @@ pub(crate) mod claude_pane;
 pub(crate) mod code_action;
 pub(crate) mod command_palette;
 pub(crate) mod commits;
+pub(crate) mod completion;
 pub(crate) mod conflict;
 pub(crate) mod dock;
 pub(crate) mod editor;
@@ -238,6 +239,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         }
     }
     hover::render_hover(stoat, buf);
+    completion::render_completion(stoat, buf);
     code_action::render_code_action(stoat, buf);
     rename_input::render_rename_input(stoat, buf);
     symbol_picker::render_symbol_picker(stoat, buf);
