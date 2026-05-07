@@ -1833,7 +1833,9 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Tab if key.modifiers.is_empty() => {
-                if self.cursor_after_only_whitespace(editor_id, buffer_id) {
+                if self.pending_completion.is_some() {
+                    Some(crate::completion::accept::execute(self))
+                } else if self.cursor_after_only_whitespace(editor_id, buffer_id) {
                     self.editor_insert(editor_id, buffer_id, "\t");
                     Some(UpdateEffect::Redraw)
                 } else {
@@ -1887,6 +1889,19 @@ impl Stoat {
             },
             KeyCode::Right => {
                 action_handlers::dispatch(self, &stoat_action::MoveRight);
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Up if self.pending_completion.is_some() => {
+                if let Some(popup) = self.pending_completion.as_mut() {
+                    popup.selected_idx = popup.selected_idx.saturating_sub(1);
+                }
+                Some(UpdateEffect::Redraw)
+            },
+            KeyCode::Down if self.pending_completion.is_some() => {
+                if let Some(popup) = self.pending_completion.as_mut() {
+                    let last = popup.items.len().saturating_sub(1);
+                    popup.selected_idx = (popup.selected_idx + 1).min(last);
+                }
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Up if self.mode != "run" && self.mode != "prompt" => {
@@ -3608,6 +3623,118 @@ mod tests {
         assert_eq!(h.stoat.pending_completion, None);
         h.type_keys("escape");
         assert_eq!(h.stoat.mode, "normal");
+    }
+
+    #[test]
+    fn tab_with_no_popup_smart_indents_after_whitespace() {
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "  abc\n");
+        h.type_keys("l l i");
+        assert!(h.stoat.pending_completion.is_none());
+        h.type_keys("tab");
+        assert_eq!(buffer_text(&h, &path), "  \tabc\n");
+    }
+
+    #[test]
+    fn tab_with_popup_open_invokes_acceptance() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        let mut h = Stoat::test();
+        let path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("f o o");
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![CompletionItem {
+                label: "foobar".into(),
+                source: CompletionSource::Word,
+                kind: None,
+                detail: None,
+                replace_range: 0..3,
+                insert_text: "foobar".into(),
+            }],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..3,
+        });
+
+        h.type_keys("tab");
+
+        assert_eq!(buffer_text(&h, &path), "foobar");
+        assert!(h.stoat.pending_completion.is_none());
+    }
+
+    #[test]
+    fn up_and_down_arrows_navigate_popup_without_moving_cursor() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        let mut h = Stoat::test();
+        let _path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        h.type_keys("f");
+        let cursor_before = focused_primary_offsets(&mut h);
+        assert_eq!(cursor_before.0, 1);
+
+        let popup = || CompletionPopup {
+            items: vec![
+                CompletionItem {
+                    label: "foo".into(),
+                    source: CompletionSource::Word,
+                    kind: None,
+                    detail: None,
+                    replace_range: 0..1,
+                    insert_text: "foo".into(),
+                },
+                CompletionItem {
+                    label: "foobar".into(),
+                    source: CompletionSource::Word,
+                    kind: None,
+                    detail: None,
+                    replace_range: 0..1,
+                    insert_text: "foobar".into(),
+                },
+                CompletionItem {
+                    label: "foobaz".into(),
+                    source: CompletionSource::Word,
+                    kind: None,
+                    detail: None,
+                    replace_range: 0..1,
+                    insert_text: "foobaz".into(),
+                },
+            ],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..1,
+        };
+        h.stoat.pending_completion = Some(popup());
+
+        h.type_keys("down");
+        assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 1,);
+        h.type_keys("down");
+        assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 2,);
+        // Clamps at last index.
+        h.type_keys("down");
+        assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 2,);
+
+        h.type_keys("up");
+        assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 1,);
+        h.type_keys("up");
+        assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 0,);
+        // Saturates at zero.
+        h.type_keys("up");
+        assert_eq!(h.stoat.pending_completion.as_ref().unwrap().selected_idx, 0,);
+
+        let cursor_after = focused_primary_offsets(&mut h);
+        assert_eq!(cursor_before, cursor_after);
+    }
+
+    #[test]
+    fn up_and_down_with_no_popup_move_cursor() {
+        let mut h = Stoat::test();
+        let _path = open_scratch_file(&mut h, "first\nsecond\n");
+        h.type_keys("i");
+        let (start, _) = focused_primary_offsets(&mut h);
+        assert_eq!(start, 0);
+        h.type_keys("down");
+        let (after_down, _) = focused_primary_offsets(&mut h);
+        assert!(after_down > 0, "down arrow should advance cursor");
     }
 
     fn focused_editor_pane_area(h: &crate::test_harness::TestHarness) -> Rect {

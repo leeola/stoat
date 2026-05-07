@@ -8,6 +8,7 @@
 //! [`crate::host::LspHost`], rope-walk word source) live in
 //! sibling submodules.
 
+pub(crate) mod accept;
 pub mod lsp;
 pub mod path;
 pub(crate) mod request;

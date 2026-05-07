@@ -12,7 +12,8 @@ size: 80x24
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
   [0m[35m│[0m[33m:[0m [0m[7m [0m                                                                       [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[30m[46m CloseBuffer         close the focused buffer                             [0m[35m│[0m
+  [0m[35m│[0m[30m[46m AcceptCompletion    accept the highlighted completion popup item         [0m[35m│[0m
+  [0m[35m│[0m[97m CloseBuffer         [0m[90mclose the focused buffer[0m[97m                             [0m[35m│[0m
   [0m[35m│[0m[97m CodeAction          [0m[90mshow code actions for selection[0m[97m                      [0m[35m│[0m
   [0m[35m│[0m[97m FormatSelections    [0m[90mformat selection via LSP[0m[97m                             [0m[35m│[0m
   [0m[35m│[0m[97m GotoDefinition      [0m[90mjump to symbol definition[0m[97m                            [0m[35m│[0m
@@ -21,12 +22,11 @@ size: 80x24
   [0m[35m│[0m[97m Hover               [0m[90mshow hover documentation[0m[97m                             [0m[35m│[0m
   [0m[35m│[0m[97m KeepSelections      [0m[90mkeep selections matching regex[0m[97m                       [0m[35m│[0m
   [0m[35m│[0m[97m NewWorkspace        [0m[90mcreate a new workspace[0m[97m                               [0m[35m│[0m
-  [0m[35m│[0m[97m OpenClaude          [0m[90mopen claude chat[0m[97m                                     [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
-  [0m[35m│[0m[37mDrop the focused buffer from the workspace's BufferRegistry and notify the[0m[35m│[0m
-  [0m[35m│[0m[37mLSP server via did_close. Editor panes that displayed the closed buffer[0m   [0m[35m│[0m
-  [0m[35m│[0m[37mare rebound to fresh scratch buffers[0m[33m┌ palette ──────────────────────────────┐[0m
-  [0m[35m│[0m[37mRefuses to close when the buffer is [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
+  [0m[35m│[0m[37mReplace the highlighted item's replace_range in the focused buffer with[0m   [0m[35m│[0m
+  [0m[35m│[0m[37mits insert_text and place the primary cursor at the inserted end. Clears[0m  [0m[35m│[0m
+  [0m[35m│[0m[37mthe completion popup and the in-flig[0m[33m┌ palette ──────────────────────────────┐[0m
+  [0m[35m│[0m[37mshowing.[0m                            [0m[33m│[0m[36mUp, C-p[0m[97m   select previous palette entry[0m[33m│[0m
   [0m[35m└────────────────────────────────────[0m[33m│[0m[36mDn, C-n[0m[97m   select next palette entry[0m[35m──┘[0m [0m[33m│[0m
                                        [0m[33m│[0m[36m  S-Tab[0m[97m   toggle command palette scope[0m [0m[33m│[0m
                                        [0m[33m└───────────────────────────────────────┘[0m

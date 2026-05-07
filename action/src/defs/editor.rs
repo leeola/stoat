@@ -601,6 +601,16 @@ define_action!(
 );
 
 define_action!(
+    AcceptCompletionDef,
+    AcceptCompletion,
+    "AcceptCompletion",
+    ActionKind::AcceptCompletion,
+    "accept the highlighted completion popup item",
+    "Replace the highlighted item's replace_range in the focused buffer with its insert_text and place the primary cursor at the inserted end. Clears the completion popup and the in-flight request. No-op when no popup is showing.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",

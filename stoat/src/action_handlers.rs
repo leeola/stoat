@@ -174,6 +174,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ShellKeepPipe => shell::open_keep_pipe(stoat),
         ActionKind::SaveBuffer => file::save_buffer(stoat),
         ActionKind::CloseBuffer => file::close_buffer(stoat),
+        ActionKind::AcceptCompletion => crate::completion::accept::execute(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),

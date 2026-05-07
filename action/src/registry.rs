@@ -11,35 +11,35 @@ use crate::{
         },
         dump::Dump,
         editor::{
-            AddSelectionAbove, AddSelectionBelow, AlignSelections, AlignViewBottom,
-            AlignViewCenter, AlignViewTop, CloseBuffer, CollapseSelection, Decrement,
-            DeleteSelection, ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar,
-            ExtendGotoColumn, ExtendGotoFileStart, ExtendGotoFirstNonwhitespace,
-            ExtendGotoLastLine, ExtendGotoWindowBottom, ExtendGotoWindowCenter,
-            ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart,
-            ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart,
-            ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
-            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
-            ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoColumn,
-            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
-            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextParagraph,
-            GotoPrevChange, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
-            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertRegister,
-            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, MatchBrackets,
-            MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
-            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
-            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
-            OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker, OpenReverseSearchInput,
-            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
-            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
-            RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
-            RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
-            SearchPrev, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
-            SelectRegister, SetMark, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
-            ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete,
-            SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar,
-            TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
-            YankMainToClipboard, YankToClipboard,
+            AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
+            AlignViewBottom, AlignViewCenter, AlignViewTop, CloseBuffer, CollapseSelection,
+            Decrement, DeleteSelection, ExpandSelection, ExtendDown, ExtendFindNextChar,
+            ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
+            ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
+            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
+            ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
+            ExtendPrevWordStart, ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling,
+            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
+            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
+            FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
+            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange,
+            GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
+            GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
+            IndentSelection, InsertRegister, JumpBackward, JumpForward, KeepPrimarySelection,
+            KeepSelections, MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd,
+            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
+            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
+            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch,
+            OpenJumplistPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp,
+            PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
+            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro,
+            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
+            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectLineBelow,
+            SelectNextSibling, SelectPrevSibling, SelectRegister, SetMark, ShellInsertOutput,
+            ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection, SplitSelection,
+            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
+            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
+            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -314,6 +314,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
+    add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -853,6 +854,7 @@ mod tests {
         // + 4 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellKeepPipe.
         // + 1 SaveBuffer.
         // + 1 CloseBuffer.
+        // + 1 AcceptCompletion.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -890,7 +892,7 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 258);
+        assert_eq!(all().count(), 259);
     }
 
     #[test]
