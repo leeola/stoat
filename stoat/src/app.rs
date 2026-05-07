@@ -2500,9 +2500,10 @@ impl Stoat {
             active_workspace,
             executor,
             syntax_styles,
+            redraw_notify,
             ..
         } = self;
-        workspaces[*active_workspace].drive_parse_jobs(executor, syntax_styles);
+        workspaces[*active_workspace].drive_parse_jobs(executor, syntax_styles, redraw_notify);
     }
 
     pub(crate) fn render(&mut self) -> Buffer {

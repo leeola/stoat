@@ -26,10 +26,12 @@ use std::{
     future::Future,
     path::PathBuf,
     pin::Pin,
+    sync::Arc,
     task::{Context, Poll},
     time::UNIX_EPOCH,
 };
 use stoat_scheduler::{Executor, Task};
+use tokio::sync::Notify;
 
 new_key_type! {
     pub struct WorkspaceId;
@@ -194,7 +196,12 @@ impl Workspace {
     /// after the old one completes. Anchors in the result are computed using
     /// the parsed snapshot, so they remain valid even if the buffer has been
     /// edited further while the parse was running.
-    pub(crate) fn drive_parse_jobs(&mut self, executor: &Executor, syntax_styles: &SyntaxStyles) {
+    pub(crate) fn drive_parse_jobs(
+        &mut self,
+        executor: &Executor,
+        syntax_styles: &SyntaxStyles,
+        redraw_notify: &Arc<Notify>,
+    ) {
         let waker = futures::task::noop_waker();
         let mut completed: Vec<ParseJobOutput> = Vec::new();
         self.parse_jobs.retain(|_, job| {
@@ -292,9 +299,17 @@ impl Workspace {
             }
 
             let styles = syntax_styles.clone();
-            let task = executor.spawn(parse_buffer_async(
+            let inner = executor.spawn(parse_buffer_async(
                 buffer_id, snapshot, lang, prior, prior_map, styles,
             ));
+            let task = {
+                let redraw_notify = redraw_notify.clone();
+                executor.spawn(async move {
+                    let result = inner.await;
+                    redraw_notify.notify_one();
+                    result
+                })
+            };
             self.parse_jobs.insert(
                 buffer_id,
                 ParseJob {
