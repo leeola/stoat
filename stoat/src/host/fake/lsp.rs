@@ -1439,6 +1439,25 @@ impl FakeLsp {
             .insert(LspKey::new(path, line, col), items);
     }
 
+    /// Like [`Self::set_completions`] but accepts fully-formed
+    /// [`CompletionItem`]s so callers can program `text_edit`,
+    /// `kind`, `detail`, and other fields the label-only setter
+    /// cannot reach. Used by completion-source tests that exercise
+    /// non-default item shapes.
+    pub fn set_completion_items(
+        &self,
+        path: &str,
+        line: u32,
+        col: u32,
+        items: Vec<CompletionItem>,
+    ) {
+        self.state
+            .lock()
+            .unwrap()
+            .completions
+            .insert(LspKey::new(path, line, col), items);
+    }
+
     // --- Navigation (definition, declaration, type definition, implementation) ---
 
     fn set_goto(

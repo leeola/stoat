@@ -8,6 +8,7 @@
 //! [`crate::host::LspHost`], rope-walk word source) live in
 //! sibling submodules.
 
+pub mod lsp;
 pub mod path;
 
 use std::ops::Range;
