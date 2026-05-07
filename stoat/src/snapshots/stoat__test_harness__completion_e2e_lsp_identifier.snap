@@ -1,0 +1,25 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: snapshot
+focused: #1 of 1
+mode: insert
+size: 60x16
+---
+[0m[97mfoo[0m[7m [0m
+[0m[33m┌──────┐[0m
+[0m[33m│[0m[30m[43mfoo[0m[30m[46mbar[0m[33m│[0m
+[0m[33m│[0m[30m[43mfoo[0m[33mbaz│[0m
+[0m[33m│[0m[30m[43mfoo[0m[33mbiz│[0m
+[0m[33m└──────┘[0m
+
+
+
+
+
+
+
+
+
+[0m[1m[30m[42m INS [0m[1m[97m[100m ws [0m[97m[100mbuf.rs [+]                                     1:4 [0m

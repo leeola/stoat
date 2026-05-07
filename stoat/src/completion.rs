@@ -9,6 +9,8 @@
 //! sibling submodules.
 
 pub(crate) mod accept;
+#[cfg(test)]
+mod e2e;
 pub mod lsp;
 pub mod path;
 pub(crate) mod request;
