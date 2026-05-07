@@ -385,6 +385,12 @@ pub struct Stoat {
     /// [`crate::lsp::edit_apply::apply_workspace_edit`].
     pub(crate) pending_format_request:
         Option<stoat_scheduler::Task<Option<action_handlers::lsp::FormatResponse>>>,
+
+    /// Editor autocomplete popup waiting to be painted. Set by the
+    /// trigger pipeline (item 83) when a completion request resolves;
+    /// cleared by `Esc` in insert mode, by motion that leaves the
+    /// popup's `prefix_range`, or by acceptance.
+    pub(crate) pending_completion: Option<crate::completion::CompletionPopup>,
 }
 
 /// Result of a successful background parse, ready to be installed on the
@@ -559,6 +565,7 @@ impl Stoat {
             pending_workspace_symbol_request: None,
             pending_workspace_symbol_picker: None,
             pending_format_request: None,
+            pending_completion: None,
         }
     }
 
@@ -1812,6 +1819,10 @@ impl Stoat {
                 } else {
                     None
                 }
+            },
+            KeyCode::Esc if self.pending_completion.is_some() => {
+                self.pending_completion = None;
+                Some(UpdateEffect::Redraw)
             },
             KeyCode::Char(ch)
                 if key.modifiers.is_empty() || key.modifiers == KeyModifiers::SHIFT =>
@@ -3532,6 +3543,48 @@ mod tests {
         h.type_keys("l l l i");
         h.type_keys("tab");
         assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn pending_completion_defaults_to_none() {
+        let h = Stoat::test();
+        assert_eq!(h.stoat.pending_completion, None);
+    }
+
+    #[test]
+    fn esc_in_insert_with_open_popup_clears_popup_and_keeps_mode() {
+        use crate::completion::{CompletionItem, CompletionPopup, CompletionSource};
+        let mut h = Stoat::test();
+        let _path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        assert_eq!(h.stoat.mode, "insert");
+        h.stoat.pending_completion = Some(CompletionPopup {
+            items: vec![CompletionItem {
+                label: "foo".into(),
+                source: CompletionSource::Lsp,
+                kind: None,
+                detail: None,
+                replace_range: 0..0,
+                insert_text: "foo".into(),
+            }],
+            selected_idx: 0,
+            anchor_offset: 0,
+            prefix_range: 0..0,
+        });
+        h.type_keys("escape");
+        assert_eq!(h.stoat.pending_completion, None);
+        assert_eq!(h.stoat.mode, "insert");
+    }
+
+    #[test]
+    fn esc_in_insert_with_no_popup_exits_to_normal() {
+        let mut h = Stoat::test();
+        let _path = open_scratch_file(&mut h, "");
+        h.type_keys("i");
+        assert_eq!(h.stoat.mode, "insert");
+        assert_eq!(h.stoat.pending_completion, None);
+        h.type_keys("escape");
+        assert_eq!(h.stoat.mode, "normal");
     }
 
     fn focused_editor_pane_area(h: &crate::test_harness::TestHarness) -> Rect {

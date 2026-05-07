@@ -76,6 +76,31 @@ pub struct CompletionItem {
     pub insert_text: String,
 }
 
+/// In-flight completion popup. Held on
+/// [`crate::Stoat::pending_completion`] while the popup is showing;
+/// the trigger pipeline (item 83) replaces the items as the prefix
+/// changes and clears the field when the cursor leaves
+/// [`Self::prefix_range`]; the acceptance handler (item 89)
+/// consumes the entry on `Tab`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CompletionPopup {
+    /// Rows the popup paints, in display order (already filtered
+    /// and ranked by the trigger pipeline).
+    pub items: Vec<CompletionItem>,
+    /// Index of the highlighted row in [`Self::items`]. Tab accepts
+    /// this row; Up / Down adjust it within bounds.
+    pub selected_idx: usize,
+    /// Byte offset in the buffer the popup is anchored to. The
+    /// renderer maps this to a screen cell via the focused editor's
+    /// display map.
+    pub anchor_offset: usize,
+    /// Byte range the popup matches against -- the substring
+    /// acceptance replaces. Defaults to the buffer span the prefix
+    /// at trigger time covers; LSP items may widen via their own
+    /// `text_edit.range`.
+    pub prefix_range: Range<usize>,
+}
+
 /// State the dispatch entry hands to each source so it can decide
 /// whether to fire and what to match against. Borrowed view over
 /// the focused buffer's rope; the caller computes prefix bounds.
@@ -302,6 +327,29 @@ mod tests {
         assert_eq!(c.prefix_range, 4..7);
         assert_eq!(c.prefix, "foo");
         assert_eq!(c.text_before_cursor, "let foo");
+    }
+
+    #[test]
+    fn completion_popup_round_trip() {
+        let item = CompletionItem {
+            label: "open_file".into(),
+            source: CompletionSource::Lsp,
+            kind: Some(CompletionItemKind::Function),
+            detail: None,
+            replace_range: 4..7,
+            insert_text: "open_file()".into(),
+        };
+        let popup = CompletionPopup {
+            items: vec![item.clone()],
+            selected_idx: 0,
+            anchor_offset: 4,
+            prefix_range: 4..7,
+        };
+        assert_eq!(popup.clone(), popup);
+        assert_eq!(popup.items, [item]);
+        assert_eq!(popup.selected_idx, 0);
+        assert_eq!(popup.anchor_offset, 4);
+        assert_eq!(popup.prefix_range, 4..7);
     }
 
     #[test]
