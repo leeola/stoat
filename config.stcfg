@@ -280,6 +280,8 @@ on key {
         s -> [SurroundAdd(), SetMode(normal)];
         r -> [SurroundReplace(), SetMode(normal)];
         d -> [SurroundDelete(), SetMode(normal)];
+        a -> [SelectTextobjectAround(), SetMode(normal)];
+        i -> [SelectTextobjectInner(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == select {

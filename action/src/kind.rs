@@ -91,6 +91,8 @@ pub enum ActionKind {
     SurroundAdd,
     SurroundReplace,
     SurroundDelete,
+    SelectTextobjectAround,
+    SelectTextobjectInner,
     OpenSearchInput,
     OpenReverseSearchInput,
     SearchNext,

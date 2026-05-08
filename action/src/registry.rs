@@ -35,11 +35,12 @@ use crate::{
             RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro,
             RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
             ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectLineBelow,
-            SelectNextSibling, SelectPrevSibling, SelectRegister, SetMark, ShellInsertOutput,
-            ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection, SplitSelection,
-            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
-            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
-            TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
+            SelectTextobjectInner, SetMark, ShellInsertOutput, ShellKeepPipe, ShellPipe,
+            ShellPipeTo, ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
+            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
+            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
+            Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -337,6 +338,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SurroundAdd::DEF, |_| Ok(Box::new(SurroundAdd)));
     add(SurroundReplace::DEF, |_| Ok(Box::new(SurroundReplace)));
     add(SurroundDelete::DEF, |_| Ok(Box::new(SurroundDelete)));
+    add(SelectTextobjectAround::DEF, |_| {
+        Ok(Box::new(SelectTextobjectAround))
+    });
+    add(SelectTextobjectInner::DEF, |_| {
+        Ok(Box::new(SelectTextobjectInner))
+    });
     add(OpenSearchInput::DEF, |_| Ok(Box::new(OpenSearchInput)));
     add(OpenReverseSearchInput::DEF, |_| {
         Ok(Box::new(OpenReverseSearchInput))
@@ -887,12 +894,13 @@ mod tests {
         // + 3 marks (SetMark, GotoMark, GotoMarkExact).
         // + 1 SurroundAdd.
         // + 2 SurroundReplace, SurroundDelete.
+        // + 2 SelectTextobjectAround, SelectTextobjectInner.
         // + 4 OpenSearchInput, OpenReverseSearchInput, SearchNext, SearchPrev.
         // + 3 Yank, PasteAfter, PasteBefore.
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 259);
+        assert_eq!(all().count(), 261);
     }
 
     #[test]

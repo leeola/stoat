@@ -193,6 +193,14 @@ pub struct Stoat {
     /// [`action_handlers::surround::execute_surround_delete`].
     /// Non-char keypresses also clear the flag.
     pub(crate) pending_surround_delete: bool,
+    /// Set after `SelectTextobjectAround` or `SelectTextobjectInner`
+    /// arms the chord. The next printable char keypress in normal /
+    /// select mode names the textobject type (`f` function, `t`
+    /// class, `p` paragraph, `a` parameter, `c` comment) and is
+    /// resolved via
+    /// [`action_handlers::textobject::execute_select_textobject`].
+    /// Non-char keypresses also clear the state.
+    pub(crate) pending_textobject_select: Option<action_handlers::textobject::TextobjectMode>,
     /// Active search input modal. Some while the user is typing a
     /// `/` (forward) or `?` (reverse) search query; cleared by
     /// [`action_handlers::search::search_submit`] or
@@ -559,6 +567,7 @@ impl Stoat {
             pending_surround_add: false,
             pending_surround_replace: action_handlers::surround::SurroundReplaceStage::Idle,
             pending_surround_delete: false,
+            pending_textobject_select: None,
             search_input: None,
             last_search: None,
             registers: register::RegisterStore::new(),
@@ -1596,6 +1605,17 @@ impl Stoat {
                 return action_handlers::surround::execute_surround_delete(self, ch);
             }
             self.pending_surround_delete = false;
+        }
+
+        if (self.mode == "normal" || self.mode == "select")
+            && self.pending_textobject_select.is_some()
+        {
+            if let KeyCode::Char(ch) = key.code {
+                let mode = self.pending_textobject_select.expect("checked above");
+                self.pending_textobject_select = None;
+                return action_handlers::textobject::execute_select_textobject(self, mode, ch);
+            }
+            self.pending_textobject_select = None;
         }
 
         if (self.mode == "normal" || self.mode == "select") && self.pending_goto_word.is_some() {

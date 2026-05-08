@@ -20,6 +20,7 @@ pub(crate) mod search;
 pub(crate) mod shell;
 pub(crate) mod split_selection;
 pub(crate) mod surround;
+pub(crate) mod textobject;
 mod workspace;
 pub(crate) mod yank;
 
@@ -309,6 +310,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SurroundAdd => surround::surround_add(stoat),
         ActionKind::SurroundReplace => surround::surround_replace(stoat),
         ActionKind::SurroundDelete => surround::surround_delete(stoat),
+        ActionKind::SelectTextobjectAround => textobject::select_textobject_around(stoat),
+        ActionKind::SelectTextobjectInner => textobject::select_textobject_inner(stoat),
         ActionKind::OpenSearchInput => search::open_search_input(stoat),
         ActionKind::OpenReverseSearchInput => search::open_reverse_search_input(stoat),
         ActionKind::SearchNext => search::search_next(stoat),

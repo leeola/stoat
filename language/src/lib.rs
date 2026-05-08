@@ -4,6 +4,7 @@ pub mod highlight_map;
 pub mod language;
 pub mod structural_diff;
 pub mod syntax_map;
+pub mod textobject;
 
 pub use highlight::{
     drop_syntax_in_background, edit_tree, extract_highlights, extract_highlights_rope,
@@ -13,4 +14,5 @@ pub use highlight::{
 pub use highlight_map::{HighlightId, HighlightMap};
 pub use language::{Language, LanguageRegistry};
 pub use syntax_map::{LayerKey, SyntaxLayer, SyntaxMap, SyntaxSnapshot};
+pub use textobject::find_smallest_capture_at;
 pub use tree_sitter::{Node, Tree};

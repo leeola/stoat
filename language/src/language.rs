@@ -36,6 +36,14 @@ pub struct Language {
     /// `@end` markers for grammar-driven auto-indentation. Loaded but
     /// not yet wired.
     pub indent_query: Option<Query>,
+    /// Textobjects query loaded from `textobjects.scm`. Captures
+    /// `@function.around` / `@function.inside`, `@class.around` /
+    /// `@class.inside`, `@parameter.around` / `@parameter.inside`,
+    /// `@comment.around` / `@comment.inside`, plus auxiliaries
+    /// (`@entry`, `@test`) used by `select_textobject_around` and
+    /// `select_textobject_inner`. `None` for languages without
+    /// structural textobjects (json, markdown).
+    pub textobjects_query: Option<Query>,
     /// Line-comment marker for languages that have one (e.g. `"//"`
     /// for rust, `"#"` for toml). `None` for languages without line
     /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
@@ -123,6 +131,7 @@ impl LanguageRegistry {
 struct AuxQuerySources {
     brackets: Option<&'static str>,
     indents: Option<&'static str>,
+    textobjects: Option<&'static str>,
     line_comment: Option<&'static str>,
 }
 
@@ -153,6 +162,9 @@ fn make_language_with_injections(
     let indent_query = aux
         .indents
         .and_then(|src| try_compile_query(name, "indents", &grammar, src));
+    let textobjects_query = aux
+        .textobjects
+        .and_then(|src| try_compile_query(name, "textobjects", &grammar, src));
     Language {
         name,
         extensions,
@@ -163,6 +175,7 @@ fn make_language_with_injections(
         injection_query,
         bracket_query,
         indent_query,
+        textobjects_query,
         line_comment: aux.line_comment,
     }
 }
@@ -216,6 +229,9 @@ fn make_rust() -> Language {
             indents: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/rust/indents.scm"
             )),
+            textobjects: Some(include_str!(
+                "../../vendor/helix/runtime/queries/rust/textobjects.scm"
+            )),
             line_comment: Some("//"),
         },
     )
@@ -234,6 +250,7 @@ fn make_json() -> Language {
             indents: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/json/indents.scm"
             )),
+            textobjects: None,
             line_comment: None,
         },
     )
@@ -246,6 +263,9 @@ fn make_toml() -> Language {
         grammar::toml(),
         include_str!("../../vendor/helix/runtime/queries/toml/highlights.scm"),
         AuxQuerySources {
+            textobjects: Some(include_str!(
+                "../../vendor/helix/runtime/queries/toml/textobjects.scm"
+            )),
             line_comment: Some("#"),
             ..Default::default()
         },
@@ -266,6 +286,7 @@ fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language
             indents: Some(include_str!(
                 "../../vendor/zed/crates/languages/src/markdown/indents.scm"
             )),
+            textobjects: None,
             line_comment: None,
         },
     )
@@ -402,6 +423,26 @@ mod tests {
         assert!(
             json.bracket_query.is_some(),
             "json brackets.scm must compile"
+        );
+    }
+
+    #[test]
+    fn textobjects_query_loaded_for_rust_and_toml() {
+        let reg = LanguageRegistry::standard();
+        let rust = reg.languages().iter().find(|l| l.name == "rust").unwrap();
+        assert!(
+            rust.textobjects_query.is_some(),
+            "rust textobjects.scm must compile against the bundled grammar"
+        );
+        let toml = reg.languages().iter().find(|l| l.name == "toml").unwrap();
+        assert!(
+            toml.textobjects_query.is_some(),
+            "toml textobjects.scm must compile against the bundled grammar"
+        );
+        let json = reg.languages().iter().find(|l| l.name == "json").unwrap();
+        assert!(
+            json.textobjects_query.is_none(),
+            "json has no textobjects.scm; query should be None"
         );
     }
 }
