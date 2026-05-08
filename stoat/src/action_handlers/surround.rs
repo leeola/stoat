@@ -126,7 +126,7 @@ fn surround_pair_for(ch: char) -> (char, char) {
 
 /// Apply the consumed-char keypress to the pending surround_delete
 /// chord: for every selection's primary cursor, find the nearest
-/// enclosing surround pair for `ch` via [`find_surround_pair_plain`]
+/// enclosing surround pair for `ch` via [`find_surround_pair`]
 /// and remove its open / close. Selections whose cursor is not
 /// enclosed by a pair are skipped. Pairs are deduped before edits
 /// run, so two cursors inside the same pair produce one edit.
@@ -153,7 +153,7 @@ pub(crate) fn execute_surround_delete(stoat: &mut Stoat, ch: char) -> UpdateEffe
 /// Apply the consumed two-char keypresses to the pending
 /// surround_replace chord: for every selection's primary cursor,
 /// find the nearest enclosing surround pair for `from` via
-/// [`find_surround_pair_plain`] and replace its open / close with
+/// [`find_surround_pair`] and replace its open / close with
 /// the canonical pair for `to`. Selections whose cursor is not
 /// enclosed by a `from` pair are skipped. Pairs are deduped before
 /// edits run.
@@ -183,7 +183,11 @@ pub(crate) fn execute_surround_replace(stoat: &mut Stoat, from: char, to: char) 
 /// Walk every selection's primary cursor in the focused editor and
 /// gather the enclosing surround pair for `(open, close)` per cursor.
 /// Returns the deduped pair offsets sorted ascending by `open_off`,
-/// or `None` when the focused pane is not an editor.
+/// or `None` when the focused pane is not an editor. When the buffer
+/// has a syntax map, the per-cursor pair lookup runs through the
+/// deepest covering layer's tree so brackets inside string / comment
+/// nodes are skipped; buffers without a syntax map fall back to the
+/// plain non-tree-sitter walk.
 fn collect_surround_pairs(
     stoat: &mut Stoat,
     open: char,
@@ -196,16 +200,40 @@ fn collect_surround_pairs(
         _ => return None,
     };
     let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let buffer_id = editor.buffer_id;
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
-    let rope = buffer_snapshot.rope();
-    let mut pairs: Vec<(usize, usize)> = editor
+    let rope = buffer_snapshot.rope().clone();
+    let cursors: Vec<usize> = editor
         .selections
         .all_anchors()
         .iter()
-        .filter_map(|sel| {
-            let head = buffer_snapshot.resolve_anchor(&sel.head());
-            find_surround_pair_plain(rope, head, open, close)
+        .map(|sel| buffer_snapshot.resolve_anchor(&sel.head()))
+        .collect();
+    drop(snapshot);
+
+    let syntax_map = ws.buffers.syntax_map(buffer_id);
+    let snapshot = syntax_map.map(|m| m.snapshot());
+    let mut pairs: Vec<(usize, usize)> = cursors
+        .into_iter()
+        .filter_map(|head| {
+            let tree = snapshot.as_ref().and_then(|s| {
+                s.iter_layers()
+                    .fold(None::<&stoat_language::SyntaxLayer>, |acc, layer| {
+                        let lstart = layer.start_offset as usize;
+                        let lend = layer.end_offset as usize;
+                        if lstart <= head && lend >= head {
+                            match acc {
+                                Some(prev) if prev.depth >= layer.depth => acc,
+                                _ => Some(layer),
+                            }
+                        } else {
+                            acc
+                        }
+                    })
+                    .map(|layer| &layer.tree)
+            });
+            find_surround_pair(&rope, head, open, close, tree)
         })
         .collect();
     pairs.sort_unstable();
@@ -232,73 +260,111 @@ fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
 /// the cursor is the open. Returns `(open_byte, close_byte)` --
 /// each is the byte offset of the corresponding pair char in the
 /// rope -- or `None` when no enclosing pair exists.
-pub(crate) fn find_surround_pair_plain(
+/// When `tree` is `Some`, candidate brackets / quotes whose offset
+/// lies inside a string or comment node are skipped during the walk;
+/// the pair-depth counter does not advance for skipped chars. `None`
+/// keeps the plain non-tree-sitter behaviour for buffers without a
+/// syntax map. Used by `execute_surround_replace` and
+/// `execute_surround_delete` so `m r ( )` and `m d (` ignore
+/// brackets that happen to live inside string literals.
+pub(crate) fn find_surround_pair(
     rope: &Rope,
     cursor: usize,
     open: char,
     close: char,
+    tree: Option<&stoat_language::Tree>,
 ) -> Option<(usize, usize)> {
     if open == close {
         if rope.chars_at(cursor).next() == Some(open) {
             return None;
         }
-        let open_pos = walk_left_for_symmetric(rope, cursor, open)?;
-        let close_pos = walk_right_for_symmetric(rope, cursor, open)?;
+        let open_pos = walk_left_for_symmetric(rope, cursor, open, tree)?;
+        let close_pos = walk_right_for_symmetric(rope, cursor, open, tree)?;
         Some((open_pos, close_pos))
     } else {
-        let open_pos = walk_left_for_open(rope, cursor, open, close)?;
-        let close_pos = walk_right_for_close(rope, cursor, open, close)?;
+        let open_pos = walk_left_for_open(rope, cursor, open, close, tree)?;
+        let close_pos = walk_right_for_close(rope, cursor, open, close, tree)?;
         Some((open_pos, close_pos))
     }
 }
 
-fn walk_right_for_close(rope: &Rope, cursor: usize, open: char, close: char) -> Option<usize> {
+fn in_skip_zone(tree: Option<&stoat_language::Tree>, offset: usize) -> bool {
+    match tree {
+        Some(t) => super::movement::is_in_string_or_comment(t, offset),
+        None => false,
+    }
+}
+
+fn walk_right_for_close(
+    rope: &Rope,
+    cursor: usize,
+    open: char,
+    close: char,
+    tree: Option<&stoat_language::Tree>,
+) -> Option<usize> {
     let mut chars = rope.chars_at(cursor);
     let mut pos = cursor;
     let first = chars.next()?;
-    if first == close {
+    if first == close && !in_skip_zone(tree, pos) {
         return Some(pos);
     }
     pos += first.len_utf8();
     let mut step_over: usize = 0;
     for c in chars {
-        if c == open {
-            step_over += 1;
-        } else if c == close {
-            if step_over == 0 {
-                return Some(pos);
+        let skip = in_skip_zone(tree, pos);
+        if !skip {
+            if c == open {
+                step_over += 1;
+            } else if c == close {
+                if step_over == 0 {
+                    return Some(pos);
+                }
+                step_over -= 1;
             }
-            step_over -= 1;
         }
         pos += c.len_utf8();
     }
     None
 }
 
-fn walk_left_for_open(rope: &Rope, cursor: usize, open: char, close: char) -> Option<usize> {
-    if rope.chars_at(cursor).next() == Some(open) {
+fn walk_left_for_open(
+    rope: &Rope,
+    cursor: usize,
+    open: char,
+    close: char,
+    tree: Option<&stoat_language::Tree>,
+) -> Option<usize> {
+    if rope.chars_at(cursor).next() == Some(open) && !in_skip_zone(tree, cursor) {
         return Some(cursor);
     }
     let mut pos = cursor;
     let mut step_over: usize = 0;
     for c in rope.reversed_chars_at(cursor) {
         pos = pos.checked_sub(c.len_utf8())?;
-        if c == close {
-            step_over += 1;
-        } else if c == open {
-            if step_over == 0 {
-                return Some(pos);
+        let skip = in_skip_zone(tree, pos);
+        if !skip {
+            if c == close {
+                step_over += 1;
+            } else if c == open {
+                if step_over == 0 {
+                    return Some(pos);
+                }
+                step_over -= 1;
             }
-            step_over -= 1;
         }
     }
     None
 }
 
-fn walk_right_for_symmetric(rope: &Rope, cursor: usize, ch: char) -> Option<usize> {
+fn walk_right_for_symmetric(
+    rope: &Rope,
+    cursor: usize,
+    ch: char,
+    tree: Option<&stoat_language::Tree>,
+) -> Option<usize> {
     let mut pos = cursor;
     for c in rope.chars_at(cursor) {
-        if c == ch {
+        if c == ch && !in_skip_zone(tree, pos) {
             return Some(pos);
         }
         pos += c.len_utf8();
@@ -306,11 +372,16 @@ fn walk_right_for_symmetric(rope: &Rope, cursor: usize, ch: char) -> Option<usiz
     None
 }
 
-fn walk_left_for_symmetric(rope: &Rope, cursor: usize, ch: char) -> Option<usize> {
+fn walk_left_for_symmetric(
+    rope: &Rope,
+    cursor: usize,
+    ch: char,
+    tree: Option<&stoat_language::Tree>,
+) -> Option<usize> {
     let mut pos = cursor;
     for c in rope.reversed_chars_at(cursor) {
         pos = pos.checked_sub(c.len_utf8())?;
-        if c == ch {
+        if c == ch && !in_skip_zone(tree, pos) {
             return Some(pos);
         }
     }
@@ -461,56 +532,56 @@ mod tests {
     #[test]
     fn find_pair_paren_cursor_inside() {
         let r = rope("(abc)");
-        assert_eq!(find_surround_pair_plain(&r, 2, '(', ')'), Some((0, 4)));
+        assert_eq!(find_surround_pair(&r, 2, '(', ')', None), Some((0, 4)));
     }
 
     #[test]
     fn find_pair_paren_cursor_on_open() {
         let r = rope("(abc)");
-        assert_eq!(find_surround_pair_plain(&r, 0, '(', ')'), Some((0, 4)));
+        assert_eq!(find_surround_pair(&r, 0, '(', ')', None), Some((0, 4)));
     }
 
     #[test]
     fn find_pair_paren_cursor_on_close() {
         let r = rope("(abc)");
-        assert_eq!(find_surround_pair_plain(&r, 4, '(', ')'), Some((0, 4)));
+        assert_eq!(find_surround_pair(&r, 4, '(', ')', None), Some((0, 4)));
     }
 
     #[test]
     fn find_pair_paren_no_match_returns_none() {
         let r = rope("abc");
-        assert_eq!(find_surround_pair_plain(&r, 1, '(', ')'), None);
+        assert_eq!(find_surround_pair(&r, 1, '(', ')', None), None);
     }
 
     #[test]
     fn find_pair_nested_paren_finds_innermost() {
         let r = rope("((abc))");
-        assert_eq!(find_surround_pair_plain(&r, 3, '(', ')'), Some((1, 5)));
+        assert_eq!(find_surround_pair(&r, 3, '(', ')', None), Some((1, 5)));
     }
 
     #[test]
     fn find_pair_unbalanced_paren_returns_none() {
         let r = rope("(abc");
-        assert_eq!(find_surround_pair_plain(&r, 1, '(', ')'), None);
+        assert_eq!(find_surround_pair(&r, 1, '(', ')', None), None);
     }
 
     #[test]
     fn find_pair_quote_cursor_inside() {
         let r = rope("\"abc\"");
-        assert_eq!(find_surround_pair_plain(&r, 2, '"', '"'), Some((0, 4)));
+        assert_eq!(find_surround_pair(&r, 2, '"', '"', None), Some((0, 4)));
     }
 
     #[test]
     fn find_pair_quote_cursor_on_quote_is_ambiguous() {
         let r = rope("\"abc\"");
-        assert_eq!(find_surround_pair_plain(&r, 0, '"', '"'), None);
-        assert_eq!(find_surround_pair_plain(&r, 4, '"', '"'), None);
+        assert_eq!(find_surround_pair(&r, 0, '"', '"', None), None);
+        assert_eq!(find_surround_pair(&r, 4, '"', '"', None), None);
     }
 
     #[test]
     fn find_pair_quote_no_match_returns_none() {
         let r = rope("abc");
-        assert_eq!(find_surround_pair_plain(&r, 1, '"', '"'), None);
+        assert_eq!(find_surround_pair(&r, 1, '"', '"', None), None);
     }
 
     #[test]
@@ -592,5 +663,44 @@ mod tests {
         h.type_keys("escape");
         assert!(!h.stoat.pending_surround_delete);
         assert_eq!(buffer_text(&h, &path), "(abc)\n");
+    }
+
+    fn seed_rs(h: &mut TestHarness, contents: &str) -> PathBuf {
+        let root = PathBuf::from("/surround-test");
+        let path = root.join("main.rs");
+        h.fake_fs()
+            .insert_files(std::iter::once((path.clone(), contents.as_bytes())));
+        h.stoat.active_workspace_mut().git_root = root;
+        crate::action_handlers::dispatch(&mut h.stoat, &OpenFile { path: path.clone() });
+        let _ = h.stoat.render();
+        h.settle();
+        let _ = h.stoat.render();
+        h.settle();
+        path
+    }
+
+    #[test]
+    fn surround_delete_skips_brackets_inside_string() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let _ = (\"outer (inner)\");\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find("outer").expect("cursor target");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m d (");
+        assert_eq!(buffer_text(&h, &path), "let _ = \"outer (inner)\";\n");
+    }
+
+    #[test]
+    fn surround_replace_skips_brackets_inside_comment() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "fn f() { /* (foo) */ let x = (bar); }\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find("bar").expect("cursor target");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m r ( [");
+        assert_eq!(
+            buffer_text(&h, &path),
+            "fn f() { /* (foo) */ let x = [bar]; }\n",
+        );
     }
 }

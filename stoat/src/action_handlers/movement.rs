@@ -2394,7 +2394,7 @@ fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
     }
 }
 
-fn is_in_string_or_comment(tree: &stoat_language::Tree, offset: usize) -> bool {
+pub(crate) fn is_in_string_or_comment(tree: &stoat_language::Tree, offset: usize) -> bool {
     let Some(mut node) = tree.root_node().descendant_for_byte_range(offset, offset) else {
         return false;
     };
