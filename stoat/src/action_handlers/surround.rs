@@ -789,4 +789,55 @@ mod tests {
         assert_eq!(find_surround_pair(&r, 0, '"', '"', None), None);
         assert_eq!(find_surround_pair(&r, 4, '"', '"', None), None);
     }
+
+    fn primary_range(h: &mut TestHarness) -> (usize, usize) {
+        let editor = focused_editor_mut(&mut h.stoat).expect("editor");
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor();
+        let start = buf_snap.resolve_anchor(&sel.start);
+        let end = buf_snap.resolve_anchor(&sel.end);
+        (start, end)
+    }
+
+    #[test]
+    fn cursor_offset_after_surround_add_collapsed_into_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::SurroundAdd);
+        h.type_keys("(");
+        assert_eq!(buffer_text(&h, &path), "(abc)\n");
+        assert_eq!(primary_range(&mut h), (1, 4));
+    }
+
+    #[test]
+    fn cursor_offset_after_surround_replace_in_paren() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(abc)\n");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
+        h.type_keys("m r ( [");
+        assert_eq!(buffer_text(&h, &path), "[abc]\n");
+        assert_eq!(cursor_offset(&mut h), 2);
+    }
+
+    #[test]
+    fn cursor_offset_after_surround_delete_paren() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "(abc)\n");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
+        h.type_keys("m d (");
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+        assert_eq!(cursor_offset(&mut h), 1);
+    }
+
+    #[test]
+    fn cursor_offset_after_surround_replace_quote() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "\"abc\"\n");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, 2);
+        h.type_keys("m r \" '");
+        assert_eq!(buffer_text(&h, &path), "'abc'\n");
+        assert_eq!(cursor_offset(&mut h), 2);
+    }
 }
