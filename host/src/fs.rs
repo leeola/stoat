@@ -77,7 +77,29 @@ pub trait FsHost: Send + Sync {
     /// `.git/info/exclude` apply; in-memory fakes walk through their
     /// own state via [`manual_walk`]. Output is sorted lexicographically.
     fn walk_workspace_files(&self, root: &Path) -> Vec<PathBuf>;
+
+    /// Streaming counterpart to [`Self::walk_workspace_files`]. Calls
+    /// `on_batch` repeatedly with chunks of paths as the walker discovers
+    /// them, ending when the walk is exhausted. Lets long-running walks
+    /// surface partial results to consumers that re-filter as data
+    /// arrives. Batches arrive in walker order; unlike
+    /// [`Self::walk_workspace_files`] the global output is not sorted,
+    /// so callers must order results themselves if they need a stable
+    /// presentation. The default impl emits the full sorted list as one
+    /// batch so non-streaming hosts still satisfy the contract.
+    fn walk_workspace_files_streaming(&self, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+        let paths = self.walk_workspace_files(root);
+        if !paths.is_empty() {
+            on_batch(paths);
+        }
+    }
 }
+
+/// Batch size used by streaming walkers. Small enough that early
+/// prefixes match against partial results within one or two render
+/// ticks; large enough that channel + notify overhead does not
+/// dominate per-path cost.
+pub const WALK_BATCH_SIZE: usize = 256;
 
 /// Recursive walker driven by [`FsHost::list_dir`] / [`FsHost::read`].
 /// Used by every fake that has no notion of an underlying real filesystem
@@ -92,6 +114,19 @@ pub fn manual_walk(fs: &dyn FsHost, root: &Path) -> Vec<PathBuf> {
     walk_dir(fs, root, &defaults, &mut stack, &mut out);
     out.sort();
     out
+}
+
+/// Streaming counterpart to [`manual_walk`]. Calls `on_batch` whenever
+/// the in-flight buffer reaches [`WALK_BATCH_SIZE`] paths and once more
+/// for any remainder. Does not sort; batches arrive in walker order.
+pub fn manual_walk_streaming(fs: &dyn FsHost, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+    let defaults = build_default_ignore(root);
+    let mut stack: Vec<Gitignore> = Vec::new();
+    let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
+    walk_dir_streaming(fs, root, &defaults, &mut stack, &mut buffer, on_batch);
+    if !buffer.is_empty() {
+        on_batch(buffer);
+    }
 }
 
 /// Build the baked-in ignore matcher from [`DEFAULT_STOATIGNORE`],
@@ -133,6 +168,43 @@ fn walk_dir(
             walk_dir(fs, &path, defaults, stack, out);
         } else {
             out.push(path);
+        }
+    }
+
+    stack.truncate(stack.len() - pushed);
+}
+
+fn walk_dir_streaming(
+    fs: &dyn FsHost,
+    dir: &Path,
+    defaults: &Gitignore,
+    stack: &mut Vec<Gitignore>,
+    buffer: &mut Vec<PathBuf>,
+    on_batch: &mut dyn FnMut(Vec<PathBuf>),
+) {
+    let pushed = push_dir_ignores(fs, dir, stack);
+
+    let entries = match fs.list_dir(dir) {
+        Ok(e) => e,
+        Err(_) => {
+            stack.truncate(stack.len() - pushed);
+            return;
+        },
+    };
+
+    for entry in entries {
+        let path = dir.join(entry.name.as_str());
+        if path_is_ignored(defaults, stack, &path, entry.is_dir) {
+            continue;
+        }
+        if entry.is_dir {
+            walk_dir_streaming(fs, &path, defaults, stack, buffer, on_batch);
+        } else {
+            buffer.push(path);
+            if buffer.len() >= WALK_BATCH_SIZE {
+                let batch = std::mem::replace(buffer, Vec::with_capacity(WALK_BATCH_SIZE));
+                on_batch(batch);
+            }
         }
     }
 
@@ -258,5 +330,32 @@ impl FsHost for LocalFs {
         }
         out.sort();
         out
+    }
+
+    fn walk_workspace_files_streaming(&self, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+        let defaults = build_default_ignore(root);
+        let walker = WalkBuilder::new(root)
+            .hidden(false)
+            .require_git(false)
+            .add_custom_ignore_filename(".stoatignore")
+            .filter_entry(move |entry| {
+                let is_dir = entry.file_type().is_some_and(|t| t.is_dir());
+                !defaults.matched(entry.path(), is_dir).is_ignore()
+            })
+            .build();
+
+        let mut buffer: Vec<PathBuf> = Vec::with_capacity(WALK_BATCH_SIZE);
+        for entry in walker.flatten() {
+            if entry.file_type().is_some_and(|t| t.is_file()) {
+                buffer.push(entry.into_path());
+                if buffer.len() >= WALK_BATCH_SIZE {
+                    let batch = std::mem::replace(&mut buffer, Vec::with_capacity(WALK_BATCH_SIZE));
+                    on_batch(batch);
+                }
+            }
+        }
+        if !buffer.is_empty() {
+            on_batch(buffer);
+        }
     }
 }

@@ -23,15 +23,18 @@ pub(super) fn open_file_finder(
     let previous_mode = "normal".to_string();
     let executor = stoat.executor.clone();
     let git_root = stoat.active_workspace().git_root.clone();
+    let (walk_tx, walk_rx) = tokio::sync::mpsc::unbounded_channel();
     let walk_task = {
         let fs_host = stoat.fs_host.clone();
         let walk_root = git_root.clone();
-        let inner = executor.spawn_blocking(move || fs_host.walk_workspace_files(&walk_root));
         let redraw_notify = stoat.redraw_notify.clone();
-        executor.spawn(async move {
-            let paths = inner.await;
-            redraw_notify.notify_one();
-            paths
+        executor.spawn_blocking(move || {
+            fs_host.walk_workspace_files_streaming(&walk_root, &mut |batch| {
+                if walk_tx.send(batch).is_err() {
+                    return;
+                }
+                redraw_notify.notify_one();
+            });
         })
     };
     let modified_paths = crate::file_finder::query_modified(&*stoat.git_host, &git_root);
@@ -45,6 +48,7 @@ pub(super) fn open_file_finder(
         open_intent,
         initial_scope,
         git_root,
+        walk_rx,
         walk_task,
         modified_paths,
         buffer_paths,

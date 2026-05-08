@@ -602,6 +602,10 @@ impl FsHost for FakeFs {
     fn walk_workspace_files(&self, root: &Path) -> Vec<PathBuf> {
         crate::fs::manual_walk(self, root)
     }
+
+    fn walk_workspace_files_streaming(&self, root: &Path, on_batch: &mut dyn FnMut(Vec<PathBuf>)) {
+        crate::fs::manual_walk_streaming(self, root, on_batch);
+    }
 }
 
 #[cfg(test)]
@@ -1090,5 +1094,32 @@ mod tests {
                 path: PathBuf::from("/x"),
             }]
         );
+    }
+
+    #[test]
+    fn walk_workspace_files_streaming_emits_multiple_batches() {
+        let fs = FakeFs::new();
+        let root = PathBuf::from("/repo");
+        let count = crate::fs::WALK_BATCH_SIZE * 2 + 5;
+        fs.insert_files(
+            (0..count).map(|i| (root.join(format!("file_{i:05}.rs")), b"x".as_slice())),
+        );
+
+        let mut batches: Vec<Vec<PathBuf>> = Vec::new();
+        fs.walk_workspace_files_streaming(&root, &mut |batch| batches.push(batch));
+
+        assert!(
+            batches.len() > 1,
+            "expected multiple batches for {count} files (batch size {}); got {}",
+            crate::fs::WALK_BATCH_SIZE,
+            batches.len(),
+        );
+        let total: usize = batches.iter().map(|b| b.len()).sum();
+        assert_eq!(total, count, "every path should reach a batch exactly once");
+
+        let mut combined: Vec<PathBuf> = batches.into_iter().flatten().collect();
+        combined.sort();
+        let expected = fs.walk_workspace_files(&root);
+        assert_eq!(combined, expected);
     }
 }

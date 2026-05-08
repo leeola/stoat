@@ -11,14 +11,12 @@ use nucleo::{
     Matcher, Utf32Str,
 };
 use std::{
-    future::Future,
     path::{Path, PathBuf},
-    pin::Pin,
     sync::{Mutex, OnceLock},
-    task::{Context, Poll},
 };
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
+use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
 /// file never stalls the render thread.
@@ -67,13 +65,18 @@ pub struct FileFinder {
     pub(crate) open_intent: OpenIntent,
     pub(crate) scope: FinderScope,
     pub(crate) git_root: PathBuf,
-    /// Absolute paths of every tracked file. Empty until
-    /// [`FileFinder::pump_walk`] drains the in-flight walk task.
+    /// Absolute paths of every tracked file. Grows as
+    /// [`FileFinder::pump_walk`] drains batches off [`Self::walk_rx`].
     pub(crate) all_paths: Vec<PathBuf>,
-    /// Walk task spawned at open time so the modal renders before
-    /// the workspace enumeration completes. Cleared once
-    /// [`FileFinder::pump_walk`] takes its result.
-    pending_walk: Option<Task<Vec<PathBuf>>>,
+    /// Streaming receiver fed by the spawned walker; each message is a
+    /// batch of paths discovered since the last batch. Cleared once
+    /// the sender drops, signalling the walk is exhausted.
+    walk_rx: Option<UnboundedReceiver<Vec<PathBuf>>>,
+    /// Walker task held only to keep the spawned worker alive --
+    /// dropping the [`Task`] would cancel the in-flight walk on
+    /// runtimes that propagate cancellation. The walker reports its
+    /// progress through [`Self::walk_rx`], not through the task value.
+    _walk_task: Task<()>,
     /// Absolute paths of currently-modified files. Re-queried on scope toggle.
     pub(crate) modified_paths: Vec<PathBuf>,
     /// Absolute paths of currently-open buffers. Captured once at open time;
@@ -107,7 +110,8 @@ impl FileFinder {
         open_intent: OpenIntent,
         initial_scope: FinderScope,
         git_root: PathBuf,
-        walk_task: Task<Vec<PathBuf>>,
+        walk_rx: UnboundedReceiver<Vec<PathBuf>>,
+        walk_task: Task<()>,
         modified_paths: Vec<PathBuf>,
         buffer_paths: Vec<PathBuf>,
     ) -> Self {
@@ -145,7 +149,8 @@ impl FileFinder {
             scope,
             git_root,
             all_paths,
-            pending_walk: Some(walk_task),
+            walk_rx: Some(walk_rx),
+            _walk_task: walk_task,
             modified_paths,
             buffer_paths,
             filtered,
@@ -213,26 +218,36 @@ impl FileFinder {
         self.filtered.clear();
     }
 
-    /// Poll the in-flight walk task. On `Poll::Ready`, takes the
-    /// populated path list and swaps it into [`Self::all_paths`].
-    /// Pending leaves the task in place. Returns `true` when the
-    /// walk just landed.
+    /// Drain every batch the walker has emitted since the last call,
+    /// extending [`Self::all_paths`]. The receiver closes when the walker
+    /// is exhausted, after which the file finder no longer polls.
+    /// Returns `true` when at least one batch was consumed; the
+    /// caller invalidates filter caches in that case so the next
+    /// [`Self::refilter_from_input`] re-runs the matcher against the
+    /// now-larger base.
     pub(crate) fn pump_walk(&mut self) -> bool {
-        let Some(mut task) = self.pending_walk.take() else {
+        let Some(rx) = self.walk_rx.as_mut() else {
             return false;
         };
-        let waker = futures::task::noop_waker();
-        let mut cx = Context::from_waker(&waker);
-        match Pin::new(&mut task).poll(&mut cx) {
-            Poll::Ready(paths) => {
-                self.all_paths = paths;
-                true
-            },
-            Poll::Pending => {
-                self.pending_walk = Some(task);
-                false
-            },
+        let mut received_any = false;
+        loop {
+            match rx.try_recv() {
+                Ok(batch) => {
+                    self.all_paths.extend(batch);
+                    received_any = true;
+                },
+                Err(TryRecvError::Empty) => break,
+                Err(TryRecvError::Disconnected) => {
+                    self.walk_rx = None;
+                    break;
+                },
+            }
         }
+        if received_any {
+            self.last_filter_text.clear();
+            self.filtered.clear();
+        }
+        received_any
     }
 
     /// Re-run the matcher if the input text or scope has changed since last
