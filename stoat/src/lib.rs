@@ -8,6 +8,7 @@ pub mod command_palette;
 mod commit_list;
 pub mod completion;
 pub mod diagnostics;
+pub mod diff;
 pub mod diff_map;
 pub mod display_map;
 pub mod dump;

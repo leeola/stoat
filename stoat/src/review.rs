@@ -15,7 +15,7 @@ use stoat_language::{
 /// changeset entry point [`extract_review_hunks_changeset`] and as
 /// the input shape for [`crate::review_session::ReviewSession::add_files`].
 #[derive(Clone)]
-pub(crate) struct ReviewFileInput {
+pub struct ReviewFileInput {
     pub path: PathBuf,
     pub rel_path: String,
     pub language: Option<Arc<Language>>,
@@ -30,31 +30,31 @@ pub(crate) struct ReviewFileInput {
 /// keep this as `None`. The renderer paints a chip
 /// `<- {rel_path}:{line+1}` next to the row when set.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct MoveProvenance {
-    pub(crate) rel_path: String,
-    pub(crate) line: u32,
+pub struct MoveProvenance {
+    pub rel_path: String,
+    pub line: u32,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) struct ReviewSide {
-    pub(crate) text: String,
-    pub(crate) line_num: u32,
+pub struct ReviewSide {
+    pub text: String,
+    pub line_num: u32,
     /// Byte ranges (within `text`) that are Novel or Replaced on this
     /// side. Rendered with the side-specific add/delete highlight.
-    pub(crate) change_spans: Vec<Range<usize>>,
+    pub change_spans: Vec<Range<usize>>,
     /// Byte ranges (within `text`) that are tagged as part of a move:
     /// byte-for-byte equal to content elsewhere, just relocated.
     /// Rendered with the central [`crate::display_map::syntax_theme::DiffTheme`]
     /// move color (cyan by default), not red/green, so users see at
     /// a glance that the change is a relocation rather than a gain or
     /// loss.
-    pub(crate) moved_spans: Vec<Range<usize>>,
+    pub moved_spans: Vec<Range<usize>>,
     /// First cross-file move source covering this row, if any.
-    pub(crate) move_provenance: Option<MoveProvenance>,
+    pub move_provenance: Option<MoveProvenance>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(crate) enum ReviewRow {
+pub enum ReviewRow {
     Context {
         left: ReviewSide,
         right: ReviewSide,
@@ -72,8 +72,8 @@ impl ReviewRow {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ReviewHunk {
-    pub(crate) rows: Vec<ReviewRow>,
+pub struct ReviewHunk {
+    pub rows: Vec<ReviewRow>,
 }
 
 /// Multi-file entry point that runs one cross-file
@@ -85,7 +85,7 @@ pub(crate) struct ReviewHunk {
 /// [`stoat_language::structural_diff::DiffChange::move_metadata`] field
 /// and a per-row [`MoveProvenance`] chip that the renderer paints
 /// next to cross-file moved rows.
-pub(crate) fn extract_review_hunks_changeset(
+pub fn extract_review_hunks_changeset(
     files: &[ReviewFileInput],
     context: u32,
 ) -> Vec<Vec<ReviewHunk>> {
