@@ -23,24 +23,25 @@ use crate::{
             ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
             FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
             GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange,
-            GotoNextParagraph, GotoPrevChange, GotoPrevParagraph, GotoWindowBottom,
-            GotoWindowCenter, GotoWindowTop, GotoWord, HalfPageDown, HalfPageUp, Increment,
-            IndentSelection, InsertRegister, JumpBackward, JumpForward, KeepPrimarySelection,
-            KeepSelections, MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd,
-            MoveNextLongWordStart, MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd,
-            MoveParentNodeStart, MovePrevLongWordEnd, MovePrevLongWordStart, MovePrevWordEnd,
-            MovePrevWordStart, MoveRight, MoveUp, OpenAbove, OpenBelow, OpenGlobalSearch,
-            OpenJumplistPicker, OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp,
-            PasteAfter, PasteBefore, PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo,
-            RemovePrimarySelection, RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro,
-            RotateSelectionsBackward, RotateSelectionsForward, SaveBuffer, SaveSelection,
-            ScrollDown, ScrollUp, SearchNext, SearchPrev, SelectAll, SelectLineBelow,
-            SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
-            SelectTextobjectInner, SetMark, ShellInsertOutput, ShellKeepPipe, ShellPipe,
-            ShellPipeTo, ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
-            SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection,
-            Yank, YankMainToClipboard, YankToClipboard,
+            GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange, GotoPrevClass,
+            GotoPrevFunction, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
+            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, InsertRegister,
+            JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections, MatchBrackets,
+            MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
+            MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
+            MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
+            OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker, OpenReverseSearchInput,
+            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
+            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
+            RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
+            RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
+            SearchPrev, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
+            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
+            ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection,
+            SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
+            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
+            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -387,6 +388,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
     add(GotoNextParagraph::DEF, |_| Ok(Box::new(GotoNextParagraph)));
     add(GotoPrevParagraph::DEF, |_| Ok(Box::new(GotoPrevParagraph)));
+    add(GotoNextFunction::DEF, |_| Ok(Box::new(GotoNextFunction)));
+    add(GotoPrevFunction::DEF, |_| Ok(Box::new(GotoPrevFunction)));
+    add(GotoNextClass::DEF, |_| Ok(Box::new(GotoNextClass)));
+    add(GotoPrevClass::DEF, |_| Ok(Box::new(GotoPrevClass)));
     add(MatchBrackets::DEF, |_| Ok(Box::new(MatchBrackets)));
     add(GotoWindowTop::DEF, |_| Ok(Box::new(GotoWindowTop)));
     add(GotoWindowCenter::DEF, |_| Ok(Box::new(GotoWindowCenter)));
@@ -895,12 +900,13 @@ mod tests {
         // + 1 SurroundAdd.
         // + 2 SurroundReplace, SurroundDelete.
         // + 2 SelectTextobjectAround, SelectTextobjectInner.
+        // + 4 GotoNextFunction, GotoPrevFunction, GotoNextClass, GotoPrevClass.
         // + 4 OpenSearchInput, OpenReverseSearchInput, SearchNext, SearchPrev.
         // + 3 Yank, PasteAfter, PasteBefore.
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 261);
+        assert_eq!(all().count(), 265);
     }
 
     #[test]

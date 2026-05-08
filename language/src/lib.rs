@@ -14,5 +14,5 @@ pub use highlight::{
 pub use highlight_map::{HighlightId, HighlightMap};
 pub use language::{Language, LanguageRegistry};
 pub use syntax_map::{LayerKey, SyntaxLayer, SyntaxMap, SyntaxSnapshot};
-pub use textobject::find_smallest_capture_at;
+pub use textobject::{collect_capture_starts, find_smallest_capture_at};
 pub use tree_sitter::{Node, Tree};

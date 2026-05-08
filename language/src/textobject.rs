@@ -22,6 +22,46 @@ use tree_sitter::{Node, Query, StreamingIterator};
 /// Helix's textobject selection picks the innermost match by capture
 /// length; this function follows the same rule. `rope` is needed for
 /// query predicates (`#eq?`, `#match?`) that read node text.
+/// Sorted, deduplicated start byte offsets of every match's
+/// `capture_name` union range. Used by goto-next/prev navigation
+/// (`] f` / `[ f` / `] t` / `[ t`) to land on the keyword that
+/// opens each function or class. Returns an empty vector when
+/// `capture_name` is unknown to `query` or no match yields a
+/// capture under that name.
+pub fn collect_capture_starts(
+    query: &Query,
+    root: Node<'_>,
+    rope: &Rope,
+    capture_name: &str,
+) -> Vec<usize> {
+    let mut out = Vec::new();
+    let Some(cap_idx) = query.capture_index_for_name(capture_name) else {
+        return out;
+    };
+    let provider = RopeTextProvider { rope };
+    let mut cursor_h = QueryCursorHandle::new();
+    let mut matches = cursor_h.matches(query, root, provider);
+    while let Some(m) = matches.next() {
+        let mut union: Option<Range<usize>> = None;
+        for cap in m.captures {
+            if cap.index != cap_idx {
+                continue;
+            }
+            let r = cap.node.byte_range();
+            union = Some(match union {
+                None => r,
+                Some(u) => u.start.min(r.start)..u.end.max(r.end),
+            });
+        }
+        if let Some(u) = union {
+            out.push(u.start);
+        }
+    }
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
 pub fn find_smallest_capture_at(
     query: &Query,
     root: Node<'_>,

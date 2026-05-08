@@ -771,6 +771,46 @@ define_action!(
 );
 
 define_action!(
+    GotoNextFunctionDef,
+    GotoNextFunction,
+    "GotoNextFunction",
+    ActionKind::GotoNextFunction,
+    "goto next function",
+    "Move the primary cursor to the start of the next function definition in the buffer, looking up `function.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no function lies after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevFunctionDef,
+    GotoPrevFunction,
+    "GotoPrevFunction",
+    ActionKind::GotoPrevFunction,
+    "goto previous function",
+    "Move the primary cursor to the start of the previous function definition in the buffer, looking up `function.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no function lies before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoNextClassDef,
+    GotoNextClass,
+    "GotoNextClass",
+    ActionKind::GotoNextClass,
+    "goto next class or type",
+    "Move the primary cursor to the start of the next class / struct / enum / trait / impl definition in the buffer, looking up `class.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no class lies after the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GotoPrevClassDef,
+    GotoPrevClass,
+    "GotoPrevClass",
+    ActionKind::GotoPrevClass,
+    "goto previous class or type",
+    "Move the primary cursor to the start of the previous class / struct / enum / trait / impl definition in the buffer, looking up `class.around` captures via the language's `textobjects.scm`. No-op for languages without a textobjects query (json, markdown) or when no class lies before the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
     OpenSearchInputDef,
     OpenSearchInput,
     "OpenSearchInput",

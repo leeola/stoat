@@ -21,6 +21,7 @@ pub(crate) mod shell;
 pub(crate) mod split_selection;
 pub(crate) mod surround;
 pub(crate) mod textobject;
+pub(crate) mod textobject_nav;
 mod workspace;
 pub(crate) mod yank;
 
@@ -312,6 +313,26 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SurroundDelete => surround::surround_delete(stoat),
         ActionKind::SelectTextobjectAround => textobject::select_textobject_around(stoat),
         ActionKind::SelectTextobjectInner => textobject::select_textobject_inner(stoat),
+        ActionKind::GotoNextFunction => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Function,
+            textobject_nav::NavDirection::Next,
+        ),
+        ActionKind::GotoPrevFunction => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Function,
+            textobject_nav::NavDirection::Prev,
+        ),
+        ActionKind::GotoNextClass => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Class,
+            textobject_nav::NavDirection::Next,
+        ),
+        ActionKind::GotoPrevClass => textobject_nav::goto_textobject(
+            stoat,
+            textobject_nav::NavKind::Class,
+            textobject_nav::NavDirection::Prev,
+        ),
         ActionKind::OpenSearchInput => search::open_search_input(stoat),
         ActionKind::OpenReverseSearchInput => search::open_reverse_search_input(stoat),
         ActionKind::SearchNext => search::search_next(stoat),

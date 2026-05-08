@@ -264,6 +264,8 @@ on key {
         c -> [GotoNextChange(), SetMode(normal)];
         p -> [GotoNextParagraph(), SetMode(normal)];
         d -> [GotoNextDiagnostic(), SetMode(normal)];
+        f -> [GotoNextFunction(), SetMode(normal)];
+        t -> [GotoNextClass(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == bracket_prev {
@@ -272,6 +274,8 @@ on key {
         c -> [GotoPrevChange(), SetMode(normal)];
         p -> [GotoPrevParagraph(), SetMode(normal)];
         d -> [GotoPrevDiagnostic(), SetMode(normal)];
+        f -> [GotoPrevFunction(), SetMode(normal)];
+        t -> [GotoPrevClass(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == match {
