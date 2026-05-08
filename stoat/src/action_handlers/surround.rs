@@ -276,6 +276,9 @@ pub(crate) fn find_surround_pair(
 ) -> Option<(usize, usize)> {
     if open == close {
         if rope.chars_at(cursor).next() == Some(open) {
+            if let Some(pair) = enclosing_string_pair(rope, tree, cursor, open) {
+                return Some(pair);
+            }
             return None;
         }
         let open_pos = walk_left_for_symmetric(rope, cursor, open, tree)?;
@@ -293,6 +296,49 @@ fn in_skip_zone(tree: Option<&stoat_language::Tree>, offset: usize) -> bool {
         Some(t) => super::movement::is_in_string_or_comment(t, offset),
         None => false,
     }
+}
+
+/// Walk the tree-sitter ancestor chain at `offset` looking for the
+/// deepest node whose `kind()` mentions `"string"`. Returns the
+/// node's byte range (half-open: `start..end_byte`). Used to
+/// disambiguate cursor-on-quote surround lookups; the calling site
+/// translates `range.end - 1` into the closing quote's byte offset.
+fn find_enclosing_string_node(
+    tree: &stoat_language::Tree,
+    offset: usize,
+) -> Option<std::ops::Range<usize>> {
+    let mut node = tree.root_node().descendant_for_byte_range(offset, offset)?;
+    loop {
+        if node.kind().contains("string") {
+            return Some(node.byte_range());
+        }
+        match node.parent() {
+            Some(p) => node = p,
+            None => return None,
+        }
+    }
+}
+
+/// Translate `find_enclosing_string_node` into a surround pair when
+/// the located string node opens with `open`. Returns `None` when
+/// the buffer has no tree, no string ancestor exists at the cursor,
+/// or the located node does not start with `open` (e.g. a rust raw
+/// string `r"..."` whose first byte is `r`).
+fn enclosing_string_pair(
+    rope: &Rope,
+    tree: Option<&stoat_language::Tree>,
+    cursor: usize,
+    open: char,
+) -> Option<(usize, usize)> {
+    let tree = tree?;
+    let range = find_enclosing_string_node(tree, cursor)?;
+    if range.start >= range.end {
+        return None;
+    }
+    if rope.chars_at(range.start).next() != Some(open) {
+        return None;
+    }
+    Some((range.start, range.end - open.len_utf8()))
 }
 
 fn walk_right_for_close(
@@ -702,5 +748,45 @@ mod tests {
             buffer_text(&h, &path),
             "fn f() { /* (foo) */ let x = [bar]; }\n",
         );
+    }
+
+    #[test]
+    fn surround_delete_quote_on_open_with_tree() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let s = \"abc\";\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find('"').expect("opening quote present");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m d \"");
+        assert_eq!(buffer_text(&h, &path), "let s = abc;\n");
+    }
+
+    #[test]
+    fn surround_delete_quote_on_close_with_tree() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let s = \"abc\";\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.rfind('"').expect("closing quote present");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m d \"");
+        assert_eq!(buffer_text(&h, &path), "let s = abc;\n");
+    }
+
+    #[test]
+    fn surround_replace_quote_on_quote_with_tree() {
+        let mut h = TestHarness::with_size(60, 10);
+        let src = "let s = \"abc\";\n";
+        let path = seed_rs(&mut h, src);
+        let cursor = src.find('"').expect("opening quote present");
+        crate::action_handlers::movement::jump_to_offset(&mut h.stoat, cursor);
+        h.type_keys("m r \" '");
+        assert_eq!(buffer_text(&h, &path), "let s = 'abc';\n");
+    }
+
+    #[test]
+    fn surround_pair_on_quote_no_tree_returns_none() {
+        let r = rope("\"abc\"");
+        assert_eq!(find_surround_pair(&r, 0, '"', '"', None), None);
+        assert_eq!(find_surround_pair(&r, 4, '"', '"', None), None);
     }
 }
