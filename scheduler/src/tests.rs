@@ -271,3 +271,44 @@ fn spawn_blocking_runs_closure_inline_on_test_scheduler() {
     assert_eq!(counter.load(Ordering::SeqCst), 1);
     s.settle();
 }
+
+#[test]
+fn spawn_with_redraw_notifies_after_future_resolves() {
+    let s = scheduler();
+    let exec = s.executor();
+    let notify = Arc::new(tokio::sync::Notify::new());
+
+    let task = exec.spawn_with_redraw(notify.clone(), async { 17 });
+    let result = s.block_on(task);
+    assert_eq!(result, 17);
+
+    let waiter = notify.notified();
+    tokio::pin!(waiter);
+    assert!(
+        waiter.enable(),
+        "spawn_with_redraw should call notify_one() once the wrapped future resolves",
+    );
+}
+
+#[test]
+fn spawn_with_redraw_no_notify_when_task_dropped_pending() {
+    let s = scheduler();
+    let exec = s.executor();
+    let notify = Arc::new(tokio::sync::Notify::new());
+
+    let (gate_tx, gate_rx) = futures::channel::oneshot::channel::<()>();
+    let task = exec.spawn_with_redraw(notify.clone(), async move {
+        let _ = gate_rx.await;
+    });
+    s.run_until_parked();
+    drop(task);
+    drop(gate_tx);
+    s.run_until_parked();
+
+    let waiter = notify.notified();
+    tokio::pin!(waiter);
+    assert!(
+        !waiter.enable(),
+        "dropping the wrapper task before the future resolves must not fire notify_one",
+    );
+}

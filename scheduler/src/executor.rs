@@ -50,6 +50,29 @@ impl Executor {
         })
     }
 
+    /// Spawn `future` and call `redraw.notify_one()` exactly once when
+    /// it resolves, returning a [`Task`] that yields the future's value.
+    /// Lets async work whose result drives a render kick the main loop
+    /// without each call site re-implementing the inner/outer spawn
+    /// dance. Dropping the returned task before completion cancels both
+    /// the wrapping future and the inner future, so no notify fires.
+    pub fn spawn_with_redraw<F>(
+        &self,
+        redraw: Arc<tokio::sync::Notify>,
+        future: F,
+    ) -> Task<F::Output>
+    where
+        F: Future + Send + 'static,
+        F::Output: Send + 'static,
+    {
+        let inner = self.spawn(future);
+        self.spawn(async move {
+            let result = inner.await;
+            redraw.notify_one();
+            result
+        })
+    }
+
     pub fn timer(&self, duration: Duration) -> Timer {
         self.scheduler.timer(duration)
     }

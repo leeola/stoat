@@ -299,17 +299,10 @@ impl Workspace {
             }
 
             let styles = syntax_styles.clone();
-            let inner = executor.spawn(parse_buffer_async(
-                buffer_id, snapshot, lang, prior, prior_map, styles,
-            ));
-            let task = {
-                let redraw_notify = redraw_notify.clone();
-                executor.spawn(async move {
-                    let result = inner.await;
-                    redraw_notify.notify_one();
-                    result
-                })
-            };
+            let task = executor.spawn_with_redraw(
+                redraw_notify.clone(),
+                parse_buffer_async(buffer_id, snapshot, lang, prior, prior_map, styles),
+            );
             self.parse_jobs.insert(
                 buffer_id,
                 ParseJob {
