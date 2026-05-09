@@ -1,5 +1,4 @@
 use crate::{
-    action_handlers::read_string_via_host,
     app::{Stoat, UpdateEffect},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState},
@@ -582,55 +581,17 @@ pub(super) fn open_review(stoat: &mut Stoat) {
 /// `git_root`. Returns `None` when the root is not a repository or has no
 /// diff hunks. Shared by [`open_review`] and [`review_refresh`].
 fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
-    let repo = match stoat.git_host.discover(git_root) {
-        Some(r) => r,
-        None => {
-            tracing::warn!("open_review: not inside a git repository");
-            return None;
-        },
-    };
-    let workdir = repo.workdir()?;
-
-    let changed = repo.changed_files();
-    if changed.is_empty() {
-        tracing::warn!("open_review: no changed files");
+    let Some((workdir, inputs)) = crate::diff::scan_working_tree(
+        &*stoat.git_host,
+        &*stoat.fs_host,
+        &stoat.language_registry,
+        git_root,
+    ) else {
+        tracing::warn!("open_review: no working-tree changes to review");
         return None;
-    }
+    };
 
-    let mut session = ReviewSession::new(ReviewSource::WorkingTree {
-        workdir: workdir.clone(),
-    });
-
-    let mut inputs: Vec<ReviewFileInput> = Vec::with_capacity(changed.len());
-    for file in &changed {
-        let buffer_text = match read_string_via_host(&*stoat.fs_host, &file.path) {
-            Ok(t) => t,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),
-            Err(e) => {
-                tracing::warn!(
-                    path = %file.path.display(),
-                    error = %e,
-                    "scan_working_tree: skip file",
-                );
-                continue;
-            },
-        };
-        let base_text = repo.head_content(&file.path).unwrap_or_default();
-        let lang = stoat.language_registry.for_path(&file.path);
-        let rel_path = file
-            .path
-            .strip_prefix(&workdir)
-            .unwrap_or(&file.path)
-            .display()
-            .to_string();
-        inputs.push(ReviewFileInput {
-            path: file.path.clone(),
-            rel_path,
-            language: lang,
-            base_text: Arc::new(base_text),
-            buffer_text: Arc::new(buffer_text),
-        });
-    }
+    let mut session = ReviewSession::new(ReviewSource::WorkingTree { workdir });
     session.add_files(inputs);
 
     if session.order.is_empty() {

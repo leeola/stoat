@@ -1,24 +1,17 @@
 use clap::Args;
 use snafu::{whatever, ResultExt, Whatever};
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::sync::Arc;
 use stoat::{
-    diff::{extract_review_hunks_changeset, ReviewFileInput},
+    diff::{extract_review_hunks_changeset, scan_working_tree},
     diff_render_cli::{
         detect_color_enabled, detect_width, render_diff, CliLayout, CliRenderOptions,
     },
-    host::{FsHost, LocalFs},
+    host::{FsHost, GitHost, LocalFs, LocalGit},
 };
+use stoat_language::LanguageRegistry;
 
 #[derive(Args, Debug)]
 pub struct DiffArgs {
-    /// Left side of the diff (the "before" version).
-    pub left: PathBuf,
-    /// Right side of the diff (the "after" version).
-    pub right: PathBuf,
-
     /// Run as a `git diff` external tool, expecting the
     /// `GIT_EXTERNAL_DIFF` calling convention. Not yet implemented.
     #[arg(long)]
@@ -52,26 +45,22 @@ pub struct DiffArgs {
 pub fn run(args: DiffArgs) -> Result<(), Whatever> {
     if args.git {
         // FIXME: --git mode lands with the GIT_EXTERNAL_DIFF child of the
-        // `stoat diff` TODO; it needs language detection via stoat_language.
+        // `stoat diff` TODO.
         whatever!("--git mode is not yet implemented");
     }
 
-    // FIXME: --language is parsed but not threaded; needs `stoat_language`
-    // as a bin dep, landing alongside the --git child of the `stoat diff`
-    // TODO. --no-pager is parsed but not honoured; the pager child handles it.
+    // FIXME: --language is parsed but not threaded; landing alongside the
+    // --git child of the `stoat diff` TODO. --no-pager is parsed but not
+    // honoured; the pager child handles it.
 
+    let cwd = std::env::current_dir().whatever_context("read current directory")?;
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
-    let base_text = read_utf8(&*fs, &args.left)?;
-    let buffer_text = read_utf8(&*fs, &args.right)?;
+    let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
+    let langs = LanguageRegistry::standard();
 
-    let rel_path = path_label(&args.right);
-    let inputs = vec![ReviewFileInput {
-        path: args.right.clone(),
-        rel_path,
-        language: None,
-        base_text: Arc::new(base_text),
-        buffer_text: Arc::new(buffer_text),
-    }];
+    let Some((_workdir, inputs)) = scan_working_tree(&*git, &*fs, &langs, &cwd) else {
+        return Ok(());
+    };
 
     let per_file = extract_review_hunks_changeset(&inputs, 3);
 
@@ -92,17 +81,4 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
             .whatever_context("write diff to stdout")?;
     }
     Ok(())
-}
-
-fn read_utf8(fs: &dyn FsHost, path: &Path) -> Result<String, Whatever> {
-    let mut buf = Vec::new();
-    fs.read(path, &mut buf)
-        .whatever_context(format!("read {}", path.display()))?;
-    String::from_utf8(buf).whatever_context(format!("{} is not valid UTF-8", path.display()))
-}
-
-fn path_label(path: &Path) -> String {
-    path.file_name()
-        .map(|s| s.to_string_lossy().into_owned())
-        .unwrap_or_else(|| path.display().to_string())
 }

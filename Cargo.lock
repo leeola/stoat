@@ -2482,6 +2482,7 @@ dependencies = [
  "snafu",
  "stoat",
  "stoat_agent_claude_code",
+ "stoat_language",
  "stoat_scheduler",
  "tempfile",
  "time",
