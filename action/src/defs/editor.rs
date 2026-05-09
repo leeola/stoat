@@ -651,6 +651,26 @@ define_action!(
 );
 
 define_action!(
+    SmartTabDef,
+    SmartTab,
+    "SmartTab",
+    ActionKind::SmartTab,
+    "smart Tab in insert mode",
+    "Arbitrate the Tab key in insert mode: advance the active snippet placeholder if one is in flight, accept the highlighted completion popup item if the popup is open, otherwise insert a tab character when the cursor follows only whitespace on the current line. No-op when none of those conditions hold.",
+    ActionPriority::Common
+);
+
+define_action!(
+    TriggerCompletionDef,
+    TriggerCompletion,
+    "TriggerCompletion",
+    ActionKind::TriggerCompletion,
+    "manually trigger the completion popup",
+    "Force a completion request even when the buffer signature has not changed since the last fetch. Bypasses the dedup guard that suppresses redundant triggers during typing. No-op outside insert mode in an editor pane.",
+    ActionPriority::Common
+);
+
+define_action!(
     FindNextCharDef,
     FindNextChar,
     "FindNextChar",

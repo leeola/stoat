@@ -39,10 +39,11 @@ use crate::{
             SearchPrev, SelectAll, SelectAllChildren, SelectAllSiblings, SelectLineBelow,
             SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
             SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
-            ShellPipe, ShellPipeTo, ShrinkSelection, SplitSelection, SplitSelectionOnNewline,
-            SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
-            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,
-            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection,
+            SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
+            SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments,
+            TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -321,6 +322,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
     add(AcceptCompletion::DEF, |_| Ok(Box::new(AcceptCompletion)));
+    add(SmartTab::DEF, |_| Ok(Box::new(SmartTab)));
+    add(TriggerCompletion::DEF, |_| Ok(Box::new(TriggerCompletion)));
     add(FindNextChar::DEF, |_| Ok(Box::new(FindNextChar)));
     add(FindPrevChar::DEF, |_| Ok(Box::new(FindPrevChar)));
     add(TillNextChar::DEF, |_| Ok(Box::new(TillNextChar)));
@@ -891,6 +894,7 @@ mod tests {
         // + 1 SaveBuffer.
         // + 1 CloseBuffer.
         // + 1 AcceptCompletion.
+        // + 2 SmartTab/TriggerCompletion.
         // + 1 GotoLineNumber.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
@@ -934,7 +938,7 @@ mod tests {
         // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
         //   ClaudeToggleToolCardExpand).
         // + 1 ClaudeJumpToFocusedCard.
-        assert_eq!(all().count(), 273);
+        assert_eq!(all().count(), 275);
     }
 
     #[test]

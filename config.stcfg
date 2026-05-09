@@ -436,6 +436,8 @@ on key {
     mode == insert {
         Escape -> SetMode(normal);
         Enter -> ClaudeSubmit();
+        Tab -> SmartTab();
+        Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();
     }

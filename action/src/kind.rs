@@ -80,6 +80,8 @@ pub enum ActionKind {
     SaveBuffer,
     CloseBuffer,
     AcceptCompletion,
+    SmartTab,
+    TriggerCompletion,
     FindNextChar,
     FindPrevChar,
     TillNextChar,

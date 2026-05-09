@@ -1,5 +1,6 @@
 mod claude;
 mod commits;
+pub(crate) mod completion;
 mod conflict;
 mod file;
 mod file_finder;
@@ -178,6 +179,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SaveBuffer => file::save_buffer(stoat),
         ActionKind::CloseBuffer => file::close_buffer(stoat),
         ActionKind::AcceptCompletion => crate::completion::accept::execute(stoat),
+        ActionKind::SmartTab => completion::smart_tab(stoat),
+        ActionKind::TriggerCompletion => completion::trigger_completion(stoat),
         ActionKind::AlignSelections => movement::align_selections(stoat),
         ActionKind::Increment => movement::increment(stoat),
         ActionKind::Decrement => movement::decrement(stoat),

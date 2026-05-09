@@ -2033,7 +2033,7 @@ impl Stoat {
             .unwrap_or(register::Register::Unnamed)
     }
 
-    fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
+    pub(crate) fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
         let ws = self.active_workspace();
 
         if let Some(finder) = &self.file_finder {
@@ -2152,19 +2152,6 @@ impl Stoat {
                 self.editor_delete_word_backward(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
             },
-            KeyCode::Tab if key.modifiers.is_empty() => {
-                if self.active_snippet.is_some() {
-                    crate::completion::snippet::advance(self);
-                    Some(UpdateEffect::Redraw)
-                } else if self.pending_completion.is_some() {
-                    Some(crate::completion::accept::execute(self))
-                } else if self.cursor_after_only_whitespace(editor_id, buffer_id) {
-                    self.editor_insert(editor_id, buffer_id, "\t");
-                    Some(UpdateEffect::Redraw)
-                } else {
-                    None
-                }
-            },
             KeyCode::Esc if self.pending_completion.is_some() => {
                 self.pending_completion = None;
                 self.pending_completion_request = None;
@@ -2239,7 +2226,11 @@ impl Stoat {
         }
     }
 
-    fn cursor_after_only_whitespace(&mut self, editor_id: EditorId, buffer_id: BufferId) -> bool {
+    pub(crate) fn cursor_after_only_whitespace(
+        &mut self,
+        editor_id: EditorId,
+        buffer_id: BufferId,
+    ) -> bool {
         let ws = self.active_workspace_mut();
         let Some(editor) = ws.editors.get_mut(editor_id) else {
             return false;
@@ -2263,7 +2254,7 @@ impl Stoat {
         true
     }
 
-    fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
+    pub(crate) fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
         let ws = self.active_workspace_mut();
         let editor = match ws.editors.get_mut(editor_id) {
             Some(e) => e,
