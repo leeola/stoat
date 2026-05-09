@@ -21,6 +21,7 @@ pub(crate) mod rename_input;
 pub(crate) mod review;
 pub(crate) mod reword;
 pub(crate) mod run_pane;
+pub(crate) mod sanitize;
 pub(crate) mod symbol_picker;
 pub(crate) mod text;
 pub(crate) mod workspace_picker;
