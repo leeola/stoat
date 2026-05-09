@@ -76,6 +76,11 @@ pub struct Stoat {
     /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
     /// cancel.
     pub(crate) jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
+    /// Modal listing the active claude chat's per-message checkpoints;
+    /// opened by [`stoat_action::OpenCheckpointPicker`]. Selecting an
+    /// entry routes its sha to [`crate::host::GitRepo::restore_tree`]
+    /// to roll the working tree back to the captured state.
+    pub(crate) pending_checkpoint_picker: Option<crate::claude_checkpoint_picker::CheckpointPicker>,
     /// Active input modal for typing a global-search regex pattern.
     /// `Some` while the user is composing the query; cleared on
     /// submit (the picker takes over) or cancel.
@@ -569,6 +574,7 @@ impl Stoat {
             workspace_picker: None,
             quit_all_confirm: None,
             jumplist_picker: None,
+            pending_checkpoint_picker: None,
             global_search_input: None,
             global_search: None,
             split_selection_input: None,
@@ -1441,6 +1447,9 @@ impl Stoat {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
             }
+            if self.pending_checkpoint_picker.take().is_some() {
+                return UpdateEffect::Redraw;
+            }
             if let Some(picker) = self.global_search.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1496,6 +1505,10 @@ impl Stoat {
 
         if self.jumplist_picker.is_some() {
             return self.dispatch_jumplist_picker_key(key);
+        }
+
+        if self.pending_checkpoint_picker.is_some() {
+            return self.dispatch_checkpoint_picker_key(key);
         }
 
         if self.global_search.is_some() {
@@ -2769,6 +2782,42 @@ impl Stoat {
                 };
                 self.mode = picker.previous_mode;
                 self.jump_focused_to_offset(target_offset, idx);
+                UpdateEffect::Redraw
+            },
+        }
+    }
+
+    fn dispatch_checkpoint_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        use crate::claude_checkpoint_picker::PickerOutcome;
+        let outcome = match self.pending_checkpoint_picker.as_mut() {
+            Some(picker) => picker.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            PickerOutcome::None => UpdateEffect::Redraw,
+            PickerOutcome::Close => {
+                self.pending_checkpoint_picker = None;
+                UpdateEffect::Redraw
+            },
+            PickerOutcome::Select(idx) => {
+                let Some(picker) = self.pending_checkpoint_picker.take() else {
+                    return UpdateEffect::None;
+                };
+                let sha = match picker.entries().get(idx) {
+                    Some(entry) => entry.sha.clone(),
+                    None => return UpdateEffect::Redraw,
+                };
+                let git_root = self.active_workspace().git_root.clone();
+                if let Some(repo) = self.git_host.discover(&git_root) {
+                    if let Err(err) = repo.restore_tree(&sha) {
+                        tracing::warn!(
+                            target: "stoat::claude",
+                            ?err,
+                            sha,
+                            "checkpoint restore failed"
+                        );
+                    }
+                }
                 UpdateEffect::Redraw
             },
         }

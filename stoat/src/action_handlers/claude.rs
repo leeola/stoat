@@ -304,6 +304,28 @@ pub(super) fn toggle_claude_follow(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Open the per-message checkpoint picker over the active claude
+/// chat. Silent no-op when there is no claude chat in the active
+/// workspace, no chat state for the chosen session, or zero
+/// restorable checkpoints among the messages.
+pub(super) fn open_checkpoint_picker(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::claude_checkpoint_picker::CheckpointPicker;
+    let session_id = match stoat.active_workspace().claude_chat {
+        Some(id) => id,
+        None => return UpdateEffect::None,
+    };
+    let messages = match stoat.active_workspace().chats.get(&session_id) {
+        Some(chat) => chat.messages.clone(),
+        None => return UpdateEffect::None,
+    };
+    let picker = CheckpointPicker::new(&messages);
+    if picker.entries().is_empty() {
+        return UpdateEffect::None;
+    }
+    stoat.pending_checkpoint_picker = Some(picker);
+    UpdateEffect::Redraw
+}
+
 /// Acts on a `ToolUse` whose chat has follow enabled: opens the tool's target
 /// file in an editor pane of the chat's workspace and moves the cursor to
 /// `loc.line` when present. Silent no-op when any guard fails (non-file tool
@@ -412,8 +434,9 @@ mod tests {
         claude_chat::{ChatMessageContent, ChatRole},
         test_harness::TestHarness,
     };
+    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
     use std::path::PathBuf;
-    use stoat_action::ClaudeSubmit;
+    use stoat_action::{ClaudeSubmit, OpenCheckpointPicker};
 
     fn write_input(h: &mut TestHarness, text: &str) {
         let session_id = h
@@ -499,5 +522,96 @@ mod tests {
         );
         let msg = last_user_message(&h);
         assert_eq!(msg.checkpoint_sha, None);
+    }
+
+    fn submit_message(h: &mut TestHarness, text: &str) {
+        write_input(h, text);
+        dispatch(&mut h.stoat, &ClaudeSubmit);
+    }
+
+    fn key_event(code: KeyCode) -> Event {
+        Event::Key(KeyEvent::new(code, KeyModifiers::NONE))
+    }
+
+    #[test]
+    fn open_checkpoint_picker_lists_user_messages_with_sha() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/picker-list");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "v1\n", "v2\n");
+        h.claude().open();
+        submit_message(&mut h, "first prompt");
+        submit_message(&mut h, "second prompt");
+
+        dispatch(&mut h.stoat, &OpenCheckpointPicker);
+
+        let picker = h
+            .stoat
+            .pending_checkpoint_picker
+            .as_ref()
+            .expect("picker open");
+        let entries = picker.entries();
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].label, "first prompt");
+        assert_eq!(entries[1].label, "second prompt");
+        assert_eq!(picker.selected(), 1, "default selection is latest entry");
+    }
+
+    #[test]
+    fn open_checkpoint_picker_skips_when_no_checkpoints() {
+        let mut h = TestHarness::with_size(80, 20);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/picker-empty");
+        h.claude().open();
+
+        dispatch(&mut h.stoat, &OpenCheckpointPicker);
+        assert!(h.stoat.pending_checkpoint_picker.is_none());
+    }
+
+    #[test]
+    fn checkpoint_picker_select_restores_via_git_host() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/picker-select");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "v1\n", "v2\n");
+        h.claude().open();
+        submit_message(&mut h, "snapshot one");
+        submit_message(&mut h, "snapshot two");
+
+        dispatch(&mut h.stoat, &OpenCheckpointPicker);
+        let picker = h
+            .stoat
+            .pending_checkpoint_picker
+            .as_ref()
+            .expect("picker open");
+        let expected_sha = picker.entries()[picker.selected()].sha.clone();
+
+        h.stoat.update(key_event(KeyCode::Enter));
+
+        assert!(h.stoat.pending_checkpoint_picker.is_none());
+        assert_eq!(h.fake_git().restored_shas(&workdir), vec![expected_sha]);
+    }
+
+    #[test]
+    fn checkpoint_picker_esc_closes_without_restore() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/picker-esc");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "v1\n", "v2\n");
+        h.claude().open();
+        submit_message(&mut h, "only prompt");
+
+        dispatch(&mut h.stoat, &OpenCheckpointPicker);
+        assert!(h.stoat.pending_checkpoint_picker.is_some());
+
+        h.stoat.update(key_event(KeyCode::Esc));
+
+        assert!(h.stoat.pending_checkpoint_picker.is_none());
+        assert!(h.fake_git().restored_shas(&workdir).is_empty());
     }
 }

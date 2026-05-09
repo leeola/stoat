@@ -181,6 +181,7 @@ pub enum ActionKind {
     ClaudeToDockLeft,
     ClaudeToDockRight,
     ClaudeToggleFollow,
+    OpenCheckpointPicker,
     ToggleDockRight,
     ToggleDockLeft,
     JumpToMoveSource,

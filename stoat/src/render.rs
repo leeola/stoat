@@ -1,4 +1,5 @@
 pub(crate) mod badges;
+pub(crate) mod claude_checkpoint_picker;
 pub(crate) mod claude_pane;
 pub(crate) mod code_action;
 pub(crate) mod command_palette;
@@ -363,6 +364,17 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "jumplist",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
+    } else if let Some(picker) = &stoat.pending_checkpoint_picker {
+        claude_checkpoint_picker::render_claude_checkpoint_picker(picker, &stoat.theme, size, buf);
+        let bindings = picker.hint_bindings();
+        hints::render_hints(
+            "claude-restore",
             &bindings,
             None,
             &stoat.theme,

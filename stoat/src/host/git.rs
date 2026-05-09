@@ -210,6 +210,15 @@ pub trait GitRepo: Send + Sync {
     /// (clean working tree, orphan HEAD, or backend failure); callers
     /// treat the absence as "no checkpoint" rather than a hard error.
     fn stash_create(&self) -> Option<String>;
+
+    /// Overwrite the working tree with the tree at `sha`. Used to
+    /// restore a checkpoint captured by [`Self::stash_create`]: the
+    /// commit's tree is materialised onto disk via a forced checkout,
+    /// so any existing workdir contents at the same paths are
+    /// replaced. The index and HEAD are left untouched. Returns
+    /// `Err(GitApplyError::Backend(..))` when the sha is unknown or
+    /// the checkout fails.
+    fn restore_tree(&self, sha: &str) -> Result<(), GitApplyError>;
 }
 
 /// Result of a [`GitRepo::rewrite_commit`] call.

@@ -374,6 +374,18 @@ impl GitRepo for LocalGitRepo {
         Ok(())
     }
 
+    fn restore_tree(&self, sha: &str) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let oid = git2::Oid::from_str(sha).map_err(err_msg)?;
+        let commit = repo.find_commit(oid).map_err(err_msg)?;
+        let tree = commit.tree().map_err(err_msg)?;
+        let mut opts = git2::build::CheckoutBuilder::new();
+        opts.force();
+        repo.checkout_tree(tree.as_object(), Some(&mut opts))
+            .map_err(err_msg)?;
+        Ok(())
+    }
+
     fn stash_create(&self) -> Option<String> {
         let repo = self.repo.lock().expect("git repo lock");
 

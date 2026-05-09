@@ -61,6 +61,16 @@ define_action!(
 );
 
 define_action!(
+    OpenCheckpointPickerDef,
+    OpenCheckpointPicker,
+    "OpenCheckpointPicker",
+    ActionKind::OpenCheckpointPicker,
+    "claude restore",
+    "Open a picker listing every per-message checkpoint captured for the active Claude chat. Selecting an entry restores the working tree to the state captured when the user submitted that message.",
+    ActionPriority::Common
+);
+
+define_action!(
     ToggleDockRightDef,
     ToggleDockRight,
     "ToggleDockRight",

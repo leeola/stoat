@@ -9,7 +9,7 @@ pub use defs::{
     app::{Quit, QuitAll},
     claude::{
         ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
-        OpenClaude, ToggleDockLeft, ToggleDockRight,
+        OpenCheckpointPicker, OpenClaude, ToggleDockLeft, ToggleDockRight,
     },
     commits::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,

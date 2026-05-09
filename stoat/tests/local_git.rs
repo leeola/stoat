@@ -559,6 +559,36 @@ fn stash_create_returns_none_when_clean() {
 }
 
 #[test]
+fn restore_tree_writes_workdir_files() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1\n");
+    tr.write("a.rs", "v2-uncommitted\n");
+
+    let host = LocalGit::new();
+    let repo = host.discover(tr.path()).unwrap();
+    let stash_sha = repo.stash_create().expect("dirty workdir produces stash");
+
+    std::fs::write(tr.join("a.rs"), "later edit\n").expect("overwrite");
+    repo.restore_tree(&stash_sha).expect("restore ok");
+
+    let on_disk = std::fs::read_to_string(tr.join("a.rs")).expect("read after restore");
+    assert_eq!(on_disk, "v2-uncommitted\n");
+}
+
+#[test]
+fn restore_tree_unknown_sha_returns_err() {
+    let tr = TestRepo::new();
+    tr.commit_file("a.rs", "v1\n");
+    let host = LocalGit::new();
+    let repo = host.discover(tr.path()).unwrap();
+    let err = repo
+        .restore_tree("0000000000000000000000000000000000000000")
+        .expect_err("unknown sha must error");
+    let GitApplyError::Backend { reason, .. } = err;
+    assert!(!reason.is_empty());
+}
+
+#[test]
 fn stash_create_does_not_modify_on_disk_index() {
     let tr = TestRepo::new();
     tr.commit_file("a.rs", "v1\n");

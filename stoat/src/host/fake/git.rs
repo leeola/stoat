@@ -116,6 +116,19 @@ impl FakeGit {
             .unwrap_or_default()
     }
 
+    /// Snapshot the shas passed to [`GitRepo::restore_tree`] against
+    /// `workdir`, in call order. Used by Claude restore-picker tests
+    /// to assert that selecting an entry routed the right sha to the
+    /// host.
+    pub fn restored_shas(&self, workdir: &Path) -> Vec<String> {
+        let state = self.state.lock().unwrap();
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| repo.state.lock().unwrap().restored_shas.clone())
+            .unwrap_or_default()
+    }
+
     /// Snapshot the amend-head calls against `workdir`, in call order.
     pub fn amend_history(&self, workdir: &Path) -> Vec<RecordedAmend> {
         let state = self.state.lock().unwrap();
@@ -464,6 +477,10 @@ struct FakeRepoState {
     /// inspect this via [`FakeGit::stashes`] to assert what was
     /// captured.
     stashes: Vec<String>,
+    /// Shas passed to [`GitRepo::restore_tree`], in call order. The
+    /// fake does not actually mutate any tracked state on restore;
+    /// tests assert on this via [`FakeGit::restored_shas`].
+    restored_shas: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -701,6 +718,18 @@ impl GitRepo for FakeGitRepo {
         let sha = format!("stash{:040}", state.synth_counter);
         state.stashes.push(sha.clone());
         Some(sha)
+    }
+
+    fn restore_tree(&self, sha: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().unwrap();
+        if !state.stashes.iter().any(|s| s == sha) && !state.commits.contains_key(sha) {
+            return BackendSnafu {
+                reason: format!("unknown sha: {sha}"),
+            }
+            .fail();
+        }
+        state.restored_shas.push(sha.to_string());
+        Ok(())
     }
 
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange> {
