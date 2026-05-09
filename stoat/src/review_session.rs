@@ -1004,6 +1004,37 @@ mod tests {
     }
 
     #[test]
+    fn review_refresh_in_memory_carries_status() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        h.settle();
+
+        let first_chunk_id = h.stoat.active_workspace().review.as_ref().unwrap().order[0];
+        h.stoat
+            .active_workspace_mut()
+            .review
+            .as_mut()
+            .unwrap()
+            .set_status(first_chunk_id, ChunkStatus::Staged);
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("session still present");
+        assert_eq!(session.order.len(), 2);
+        let statuses: Vec<_> = session
+            .order
+            .iter()
+            .map(|id| session.chunks.get(id).unwrap().status)
+            .collect();
+        assert_eq!(
+            statuses,
+            vec![ChunkStatus::Staged, ChunkStatus::Pending],
+            "InMemory refresh should re-derive hunks and carry decided statuses, not silently no-op",
+        );
+    }
+
+    #[test]
     fn review_via_git_host_multi_file() {
         let mut h = TestHarness::with_size(80, 20);
         h.stage_review_scenario(

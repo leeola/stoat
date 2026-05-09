@@ -519,7 +519,7 @@ fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> 
             scan_commit_range(stoat, workdir, from, to)
         },
         ReviewSource::AgentEdits { edits } => scan_agent_edits(stoat, edits.as_ref()),
-        ReviewSource::InMemory { .. } => None,
+        ReviewSource::InMemory { files } => scan_in_memory(stoat, files.as_ref()),
     }
 }
 
@@ -644,6 +644,36 @@ fn scan_commit_range(stoat: &Stoat, workdir: &Path, from: &str, to: &str) -> Opt
         &base_tree,
         &new_tree,
     )
+}
+
+/// Build a session from a stored slice of [`crate::review_session::InMemoryFile`].
+/// Mirrors [`scan_agent_edits`] for `ReviewSource::InMemory`-built sessions
+/// so [`review_refresh`] can re-derive hunks instead of being a silent no-op.
+fn scan_in_memory(
+    stoat: &Stoat,
+    files: &[crate::review_session::InMemoryFile],
+) -> Option<ReviewSession> {
+    if files.is_empty() {
+        return None;
+    }
+    let mut session = ReviewSession::new(ReviewSource::InMemory {
+        files: Arc::new(files.to_vec()),
+    });
+    let inputs: Vec<ReviewFileInput> = files
+        .iter()
+        .map(|file| ReviewFileInput {
+            path: file.path.clone(),
+            rel_path: file.path.display().to_string(),
+            language: stoat.language_registry.for_path(&file.path),
+            base_text: file.base_text.clone(),
+            buffer_text: file.buffer_text.clone(),
+        })
+        .collect();
+    session.add_files(inputs);
+    if session.order.is_empty() {
+        return None;
+    }
+    Some(session)
 }
 
 /// Build a session from a list of agent edit proposals. No repo access
