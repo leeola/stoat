@@ -36,13 +36,13 @@ use crate::{
             PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
             RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
             RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
-            SearchPrev, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
-            SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
-            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
-            ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete,
-            SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar,
-            TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
-            YankMainToClipboard, YankToClipboard,
+            SearchPrev, SelectAll, SelectAllChildren, SelectAllSiblings, SelectLineBelow,
+            SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
+            SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
+            ShellPipe, ShellPipeTo, ShrinkSelection, SplitSelection, SplitSelectionOnNewline,
+            SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase,
+            SwitchToUppercase, TillNextChar, TillPrevChar, ToggleComments, TrimSelections, Undo,
+            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -283,6 +283,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShrinkSelection::DEF, |_| Ok(Box::new(ShrinkSelection)));
     add(SelectNextSibling::DEF, |_| Ok(Box::new(SelectNextSibling)));
     add(SelectPrevSibling::DEF, |_| Ok(Box::new(SelectPrevSibling)));
+    add(SelectAllSiblings::DEF, |_| Ok(Box::new(SelectAllSiblings)));
+    add(SelectAllChildren::DEF, |_| Ok(Box::new(SelectAllChildren)));
     add(ExtendSelectNextSibling::DEF, |_| {
         Ok(Box::new(ExtendSelectNextSibling))
     });
@@ -877,6 +879,7 @@ mod tests {
         // + 1 ExpandSelection.
         // + 1 ShrinkSelection.
         // + 2 SelectNextSibling/SelectPrevSibling.
+        // + 2 SelectAllSiblings/SelectAllChildren.
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 OpenJumplistPicker.
@@ -931,7 +934,7 @@ mod tests {
         // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
         //   ClaudeToggleToolCardExpand).
         // + 1 ClaudeJumpToFocusedCard.
-        assert_eq!(all().count(), 271);
+        assert_eq!(all().count(), 273);
     }
 
     #[test]

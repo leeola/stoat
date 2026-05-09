@@ -54,6 +54,8 @@ pub enum ActionKind {
     ShrinkSelection,
     SelectNextSibling,
     SelectPrevSibling,
+    SelectAllSiblings,
+    SelectAllChildren,
     ExtendSelectNextSibling,
     ExtendSelectPrevSibling,
     MoveParentNodeStart,

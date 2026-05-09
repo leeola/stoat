@@ -203,6 +203,8 @@ on key {
         Alt-Down -> ShrinkSelection();
         Alt-n -> SelectNextSibling();
         Alt-p -> SelectPrevSibling();
+        Alt-a -> SelectAllSiblings();
+        Alt-I -> SelectAllChildren();
         Alt-b -> MoveParentNodeStart();
         Alt-e -> MoveParentNodeEnd();
         & -> AlignSelections();

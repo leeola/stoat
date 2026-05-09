@@ -1925,6 +1925,76 @@ pub(super) fn select_sibling(stoat: &mut Stoat, dir: SiblingDir, extend: bool) -
     UpdateEffect::Redraw
 }
 
+pub(super) fn select_all_siblings(stoat: &mut Stoat) -> UpdateEffect {
+    fan_selections_to_children(stoat, true)
+}
+
+pub(super) fn select_all_children(stoat: &mut Stoat) -> UpdateEffect {
+    fan_selections_to_children(stoat, false)
+}
+
+fn fan_selections_to_children(stoat: &mut Stoat, walk_to_multichild_parent: bool) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let buffer_id = editor.buffer_id;
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+
+    let Some(syntax_map) = ws.buffers.syntax_map(buffer_id) else {
+        return UpdateEffect::None;
+    };
+    let snapshot = syntax_map.snapshot();
+
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    editor.selections.split_each(buffer_snapshot, |sel| {
+        let sel_start = buffer_snapshot.resolve_anchor(&sel.start);
+        let sel_end = buffer_snapshot.resolve_anchor(&sel.end);
+        let Some(layer) = deepest_containing_layer(snapshot, sel_start, sel_end) else {
+            return Vec::new();
+        };
+        let root = layer.tree.root_node();
+        let Some(node) = root.descendant_for_byte_range(sel_start, sel_end) else {
+            return Vec::new();
+        };
+        let parent_node = if walk_to_multichild_parent {
+            let mut current = node.parent();
+            while let Some(p) = current {
+                if p.named_child_count() > 1 {
+                    break;
+                }
+                current = p.parent();
+            }
+            current
+        } else {
+            Some(node)
+        };
+        let Some(parent_node) = parent_node else {
+            return Vec::new();
+        };
+        let mut pieces: Vec<Selection<Anchor>> =
+            Vec::with_capacity(parent_node.named_child_count());
+        let mut walker = parent_node.walk();
+        for child in parent_node.named_children(&mut walker) {
+            let range = child.byte_range();
+            pieces.push(Selection {
+                id: 0,
+                start: buffer_snapshot.anchor_at(range.start, Bias::Right),
+                end: buffer_snapshot.anchor_at(range.end, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            });
+        }
+        pieces
+    });
+    UpdateEffect::Redraw
+}
+
 #[derive(Copy, Clone, Debug)]
 pub(super) enum NodeBound {
     Start,

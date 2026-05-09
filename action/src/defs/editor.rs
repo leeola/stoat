@@ -391,6 +391,26 @@ define_action!(
 );
 
 define_action!(
+    SelectAllSiblingsDef,
+    SelectAllSiblings,
+    "SelectAllSiblings",
+    ActionKind::SelectAllSiblings,
+    "select every named sibling of the current node",
+    "Replace each selection with one selection per named tree-sitter sibling under the deepest ancestor that has more than one child. Single-child wrapper nodes are skipped so trivial AST shells do not collapse the result. No-op when the buffer has no syntax tree.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    SelectAllChildrenDef,
+    SelectAllChildren,
+    "SelectAllChildren",
+    ActionKind::SelectAllChildren,
+    "select every named child of the current node",
+    "Replace each selection with one selection per named tree-sitter child of the smallest node containing the selection. Anonymous tokens (punctuation, keywords) are skipped. No-op when the buffer has no syntax tree, and selections over childless nodes are left untouched.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ExtendSelectNextSiblingDef,
     ExtendSelectNextSibling,
     "ExtendSelectNextSibling",

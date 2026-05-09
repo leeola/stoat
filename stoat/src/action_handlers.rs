@@ -260,6 +260,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SelectPrevSibling => {
             movement::select_sibling(stoat, movement::SiblingDir::Prev, false)
         },
+        ActionKind::SelectAllSiblings => movement::select_all_siblings(stoat),
+        ActionKind::SelectAllChildren => movement::select_all_children(stoat),
         ActionKind::ExtendSelectNextSibling => {
             movement::select_sibling(stoat, movement::SiblingDir::Next, true)
         },

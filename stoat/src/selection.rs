@@ -2864,6 +2864,43 @@ mod tests {
     }
 
     #[test]
+    fn select_all_siblings_fans_to_each_named_sibling() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectAllSiblings);
+        let spans = h.selection_spans();
+        assert_eq!(spans, vec![(0, 9, false), (10, 19, false), (20, 29, false)]);
+    }
+
+    #[test]
+    fn select_all_children_fans_to_each_named_child() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.rs", "fn a() {}\nfn b() {}\nfn c() {}\n");
+        h.open_file(&path);
+        h.type_keys("l l l");
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ExpandSelection);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectAllChildren);
+        let spans = h.selection_spans();
+        assert_eq!(spans, vec![(0, 9, false), (10, 19, false), (20, 29, false)]);
+    }
+
+    #[test]
+    fn select_all_siblings_no_op_without_syntax_map() {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 5);
+        let path = h.write_file("s.txt", "alpha beta gamma\n");
+        h.open_file(&path);
+        let before = h.selection_spans();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SelectAllSiblings);
+        assert_eq!(h.selection_spans(), before);
+    }
+
+    #[test]
     fn select_sibling_no_op_without_syntax_map() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 5);
         let path = h.write_file("s.txt", "alpha beta gamma\n");
