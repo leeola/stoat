@@ -31,6 +31,7 @@ pub enum ToolCallStatus {
     InProgress,
     Completed,
     Failed,
+    Cancelled,
 }
 
 /// Display content attached to a tool call. A tool call can carry

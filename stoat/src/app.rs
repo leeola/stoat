@@ -2092,7 +2092,7 @@ impl Stoat {
         }
     }
 
-    fn focused_is_claude(&self) -> bool {
+    pub(crate) fn focused_is_claude(&self) -> bool {
         let ws = self.active_workspace();
         let view = match ws.focus {
             FocusTarget::SplitPane(_) => {

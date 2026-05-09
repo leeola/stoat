@@ -8,8 +8,8 @@ pub use action::{Action, ActionDef, ActionPriority};
 pub use defs::{
     app::{Quit, QuitAll},
     claude::{
-        ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
-        OpenCheckpointPicker, OpenClaude, ToggleDockLeft, ToggleDockRight,
+        ClaudeInterrupt, ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane,
+        ClaudeToggleFollow, OpenCheckpointPicker, OpenClaude, ToggleDockLeft, ToggleDockRight,
     },
     commits::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,

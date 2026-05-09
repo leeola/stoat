@@ -99,6 +99,7 @@ fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
             protocol_session_id: None,
             follow: false,
             usage: crate::host::TokenUsage::default(),
+            cancelled_tool_uses: std::collections::HashSet::new(),
         },
     );
 
@@ -301,6 +302,63 @@ pub(super) fn toggle_claude_follow(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
     chat.follow = !chat.follow;
+    UpdateEffect::Redraw
+}
+
+/// Cancel the in-flight Claude turn. Marks every pending tool-use
+/// (a `ToolUse` without a matching `ToolResult` later in the
+/// transcript) as cancelled in the chat scrollback so the
+/// `(cancelled)` badge renders, then dispatches `interrupt` on the
+/// active session over the control protocol. Silent no-op when no
+/// claude chat is active. Interrupt failures log warn but the chat
+/// state still records the cancellation.
+pub(super) fn claude_interrupt(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::claude_chat::ChatMessageContent;
+
+    let session_id = match stoat.active_workspace().claude_chat {
+        Some(id) => id,
+        None => return UpdateEffect::None,
+    };
+    let in_flight: Vec<String> = {
+        let ws = stoat.active_workspace();
+        let Some(chat) = ws.chats.get(&session_id) else {
+            return UpdateEffect::None;
+        };
+        let mut completed: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        for msg in &chat.messages {
+            if let ChatMessageContent::ToolResult { id, .. } = &msg.content {
+                completed.insert(id.as_str());
+            }
+        }
+        chat.messages
+            .iter()
+            .filter_map(|msg| match &msg.content {
+                ChatMessageContent::ToolUse { id, .. } if !completed.contains(id.as_str()) => {
+                    Some(id.clone())
+                },
+                _ => None,
+            })
+            .collect()
+    };
+    let session = stoat.claude_sessions().get(session_id).cloned();
+    let ws = stoat.active_workspace_mut();
+    let Some(chat) = ws.chats.get_mut(&session_id) else {
+        return UpdateEffect::None;
+    };
+    for id in in_flight {
+        chat.cancelled_tool_uses.insert(id);
+    }
+    chat.active_since = None;
+    if let Some(session) = session {
+        stoat
+            .executor
+            .spawn(async move {
+                if let Err(err) = session.interrupt().await {
+                    tracing::warn!(target: "stoat::claude", ?err, "claude interrupt failed");
+                }
+            })
+            .detach();
+    }
     UpdateEffect::Redraw
 }
 
@@ -747,5 +805,151 @@ mod tests {
             .fake_git()
             .restored_shas(&PathBuf::from("/marker-click-no-checkpoint"))
             .is_empty());
+    }
+
+    fn push_tool_use(h: &mut TestHarness, id: &str, name: &str) {
+        use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
+        let session_id = h
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude chat open");
+        let now = h.stoat.executor.now();
+        let chat = h
+            .stoat
+            .active_workspace_mut()
+            .chats
+            .get_mut(&session_id)
+            .expect("chat state");
+        chat.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: ChatMessageContent::ToolUse {
+                id: id.to_string(),
+                name: name.to_string(),
+                input: "{}".to_string(),
+            },
+            checkpoint_sha: None,
+        });
+        chat.active_since = Some(now);
+    }
+
+    fn push_tool_result(h: &mut TestHarness, id: &str, content: &str) {
+        use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
+        let session_id = h
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude chat open");
+        let chat = h
+            .stoat
+            .active_workspace_mut()
+            .chats
+            .get_mut(&session_id)
+            .expect("chat state");
+        chat.messages.push(ChatMessage {
+            role: ChatRole::Assistant,
+            content: ChatMessageContent::ToolResult {
+                id: id.to_string(),
+                content: content.to_string(),
+            },
+            checkpoint_sha: None,
+        });
+    }
+
+    fn cancelled_tool_uses(h: &TestHarness) -> std::collections::HashSet<String> {
+        let session_id = h
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude chat open");
+        h.stoat
+            .active_workspace()
+            .chats
+            .get(&session_id)
+            .expect("chat state")
+            .cancelled_tool_uses
+            .clone()
+    }
+
+    fn active_since(h: &TestHarness) -> Option<std::time::Instant> {
+        let session_id = h
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude chat open");
+        h.stoat
+            .active_workspace()
+            .chats
+            .get(&session_id)
+            .expect("chat state")
+            .active_since
+    }
+
+    #[test]
+    fn claude_interrupt_marks_in_flight_tool_uses_cancelled() {
+        use stoat_action::ClaudeInterrupt;
+        let mut h = TestHarness::with_size(80, 20);
+        let id = h.claude().open();
+        push_tool_use(&mut h, "tool-1", "Bash");
+
+        dispatch(&mut h.stoat, &ClaudeInterrupt);
+        h.settle();
+
+        let cancelled = cancelled_tool_uses(&h);
+        assert_eq!(cancelled.len(), 1);
+        assert!(cancelled.contains("tool-1"));
+        assert_eq!(h.claude().get_session(id).interrupt_count(), 1);
+    }
+
+    #[test]
+    fn claude_interrupt_skips_completed_tool_uses() {
+        use stoat_action::ClaudeInterrupt;
+        let mut h = TestHarness::with_size(80, 20);
+        let _ = h.claude().open();
+        push_tool_use(&mut h, "tool-done", "Bash");
+        push_tool_result(&mut h, "tool-done", "ok");
+
+        dispatch(&mut h.stoat, &ClaudeInterrupt);
+
+        assert!(cancelled_tool_uses(&h).is_empty());
+    }
+
+    #[test]
+    fn claude_interrupt_clears_active_since() {
+        use stoat_action::ClaudeInterrupt;
+        let mut h = TestHarness::with_size(80, 20);
+        let _ = h.claude().open();
+        push_tool_use(&mut h, "tool-active", "Bash");
+        assert!(active_since(&h).is_some());
+
+        dispatch(&mut h.stoat, &ClaudeInterrupt);
+
+        assert_eq!(active_since(&h), None);
+    }
+
+    #[test]
+    fn claude_interrupt_no_active_session_is_noop() {
+        use stoat_action::ClaudeInterrupt;
+        let mut h = TestHarness::with_size(80, 20);
+
+        let effect = dispatch(&mut h.stoat, &ClaudeInterrupt);
+        assert_eq!(effect, crate::app::UpdateEffect::None);
+    }
+
+    #[test]
+    fn chat_pane_renders_cancelled_marker_for_in_flight_tool_use() {
+        use stoat_action::ClaudeInterrupt;
+        let mut h = TestHarness::with_size(80, 20);
+        let _ = h.claude().open();
+        push_tool_use(&mut h, "tool-cancel", "Bash");
+
+        dispatch(&mut h.stoat, &ClaudeInterrupt);
+
+        let frame = h.snapshot();
+        assert!(
+            frame.content.contains("(cancelled)"),
+            "expected cancelled marker on tool-use row: {}",
+            frame.content,
+        );
     }
 }

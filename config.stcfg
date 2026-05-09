@@ -456,6 +456,9 @@ on key {
         PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
+    mode == prompt && claude_focused {
+        Ctrl-c -> ClaudeInterrupt();
+    }
     mode == prompt {
         Escape -> CancelPromptInput();
         Enter -> SubmitPromptInput();

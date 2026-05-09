@@ -2,7 +2,7 @@ use crate::{
     host::{ClaudeSessionId, TokenUsage},
     input_view::InputView,
 };
-use std::time::Instant;
+use std::{collections::HashSet, time::Instant};
 
 // FIXME: Claude session state not persisted across workspace save/load. On
 // restore, panes that held a Claude view are rewritten to a placeholder Label
@@ -49,6 +49,11 @@ pub struct ClaudeChatState {
     /// [`AgentMessage::Usage`]'s `accumulated` field. Drives the chat
     /// header counter and is zero until the first usage event arrives.
     pub usage: TokenUsage,
+    /// Tool-use ids the user cancelled mid-flight via
+    /// [`stoat_action::ClaudeInterrupt`]. The chat renderer paints a
+    /// `(cancelled)` badge under each matching `ToolUse` whether or
+    /// not a server-side `ToolResult` arrives later.
+    pub cancelled_tool_uses: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

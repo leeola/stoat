@@ -71,6 +71,16 @@ define_action!(
 );
 
 define_action!(
+    ClaudeInterruptDef,
+    ClaudeInterrupt,
+    "ClaudeInterrupt",
+    ActionKind::ClaudeInterrupt,
+    "interrupt claude",
+    "Cancel the in-flight Claude turn. Sends interrupt to the agent over the control protocol and marks any pending tool calls as cancelled in the chat scrollback.",
+    ActionPriority::Common
+);
+
+define_action!(
     ToggleDockRightDef,
     ToggleDockRight,
     "ToggleDockRight",

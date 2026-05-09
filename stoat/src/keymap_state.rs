@@ -10,11 +10,12 @@ pub(crate) struct StoatKeymapState {
     palette_open: StateValue,
     help_open: StateValue,
     finder_open: StateValue,
+    claude_focused: StateValue,
 }
 
 impl StoatKeymapState {
     pub(crate) fn new(mode: &str) -> Self {
-        Self::with_flags(mode, false, false, false)
+        Self::with_flags(mode, false, false, false, false)
     }
 
     pub(crate) fn with_flags(
@@ -22,12 +23,14 @@ impl StoatKeymapState {
         palette_open: bool,
         help_open: bool,
         finder_open: bool,
+        claude_focused: bool,
     ) -> Self {
         Self {
             mode_value: StateValue::String(mode.into()),
             palette_open: StateValue::Bool(palette_open),
             help_open: StateValue::Bool(help_open),
             finder_open: StateValue::Bool(finder_open),
+            claude_focused: StateValue::Bool(claude_focused),
         }
     }
 
@@ -37,6 +40,7 @@ impl StoatKeymapState {
             stoat.command_palette.is_some(),
             stoat.help.is_some(),
             stoat.file_finder.is_some(),
+            stoat.focused_is_claude(),
         )
     }
 }
@@ -48,6 +52,7 @@ impl KeymapState for StoatKeymapState {
             "palette_open" => Some(&self.palette_open),
             "help_open" => Some(&self.help_open),
             "finder_open" => Some(&self.finder_open),
+            "claude_focused" => Some(&self.claude_focused),
             _ => None,
         }
     }

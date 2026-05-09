@@ -365,6 +365,14 @@ impl<'a> ClaudeSessionHandle<'a> {
         self.fake().assert_send_count(n);
     }
 
+    /// Number of times [`crate::host::ClaudeCodeSession::interrupt`]
+    /// has been called against this session's fake. Used by tests
+    /// for `Ctrl-c` cancel-in-flight to assert the interrupt
+    /// reached the host layer.
+    pub fn interrupt_count(&self) -> u32 {
+        self.fake().interrupt_count()
+    }
+
     // ---- Internals ---------------------------------------------------
 
     fn fake(&self) -> &Arc<FakeClaudeCode> {

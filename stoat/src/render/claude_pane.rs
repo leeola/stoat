@@ -228,6 +228,9 @@ pub(crate) fn build_chat_pane_layout(
                     let preview = format_tool_result_preview(content);
                     block.push((tool_body_style, format!("  {TOOL_RESULT_ELBOW} {preview}")));
                 }
+                if chat.cancelled_tool_uses.contains(id) {
+                    block.push((error_style, format!("  {TOOL_RESULT_ELBOW} (cancelled)")));
+                }
                 push_block(&mut lines, block)
             },
             (ChatRole::Assistant, ChatMessageContent::ToolResult { .. }) => None,

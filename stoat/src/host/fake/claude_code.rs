@@ -21,6 +21,7 @@ pub struct FakeClaudeCode {
     sent: Mutex<Vec<String>>,
     next_send_failure: Mutex<Option<io::ErrorKind>>,
     disconnect_on_recv: Mutex<Option<usize>>,
+    interrupts: Mutex<u32>,
 }
 
 impl Default for FakeClaudeCode {
@@ -38,6 +39,7 @@ impl FakeClaudeCode {
             sent: Mutex::new(Vec::new()),
             next_send_failure: Mutex::new(None),
             disconnect_on_recv: Mutex::new(None),
+            interrupts: Mutex::new(0),
         }
     }
 
@@ -261,6 +263,13 @@ impl FakeClaudeCode {
         let sent = self.sent.lock().unwrap();
         assert_eq!(sent.len(), count, "send count mismatch");
     }
+
+    /// Number of times [`ClaudeCodeSession::interrupt`] has been
+    /// called against this fake. Used by tests to assert that user
+    /// `Ctrl-c` actually reached the host layer.
+    pub fn interrupt_count(&self) -> u32 {
+        *self.interrupts.lock().unwrap()
+    }
 }
 
 #[async_trait]
@@ -294,6 +303,11 @@ impl ClaudeCodeSession for FakeClaudeCode {
 
     async fn shutdown(&self) -> io::Result<()> {
         self.tx.lock().unwrap().take();
+        Ok(())
+    }
+
+    async fn interrupt(&self) -> io::Result<()> {
+        *self.interrupts.lock().unwrap() += 1;
         Ok(())
     }
 }
@@ -353,6 +367,10 @@ impl ClaudeCodeSession for ArcSession {
 
     fn is_alive(&self) -> bool {
         self.0.is_alive()
+    }
+
+    async fn interrupt(&self) -> io::Result<()> {
+        self.0.interrupt().await
     }
 
     async fn shutdown(&self) -> io::Result<()> {
