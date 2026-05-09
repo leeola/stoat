@@ -64,6 +64,8 @@ enum Command {
         #[command(subcommand)]
         sub: crate::commands::dump::DumpCommand,
     },
+    /// Render a structural diff of two files to stdout.
+    Diff(crate::commands::diff::DiffArgs),
 }
 
 pub fn run() -> Result<(), Whatever> {
@@ -78,6 +80,7 @@ pub fn run() -> Result<(), Whatever> {
 
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
+        Some(Command::Diff(args)) => crate::commands::diff::run(args),
         Some(Command::Review) => {
             run_tui(text_proto_log, files, continue_, resume, TuiStart::Review)
         },
