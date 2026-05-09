@@ -2387,6 +2387,7 @@ impl Stoat {
                         content: ChatMessageContent::Error(format!(
                             "Failed to start session: {error}"
                         )),
+                        checkpoint_sha: None,
                     });
                 }
                 UpdateEffect::Redraw
@@ -2440,6 +2441,7 @@ impl Stoat {
                             chat.messages.push(ChatMessage {
                                 role: ChatRole::Assistant,
                                 content: ChatMessageContent::Text(trimmed.to_string()),
+                                checkpoint_sha: None,
                             });
                         }
                     },
@@ -2451,6 +2453,7 @@ impl Stoat {
                         chat.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
                             content: ChatMessageContent::Thinking { text: text.clone() },
+                            checkpoint_sha: None,
                         });
                     },
                     AgentMessage::ToolUse {
@@ -2468,6 +2471,7 @@ impl Stoat {
                                 name: name.clone(),
                                 input: input.clone(),
                             },
+                            checkpoint_sha: None,
                         });
                         if chat.follow {
                             follow_action = Some((wid, *kind, locations.clone()));
@@ -2480,6 +2484,7 @@ impl Stoat {
                                 id: id.clone(),
                                 content: content.clone(),
                             },
+                            checkpoint_sha: None,
                         });
                     },
                     AgentMessage::Result {
@@ -2495,6 +2500,7 @@ impl Stoat {
                                 duration_ms: *duration_ms,
                                 num_turns: *num_turns,
                             },
+                            checkpoint_sha: None,
                         });
                     },
                     AgentMessage::Error { message: msg } => {
@@ -2502,6 +2508,7 @@ impl Stoat {
                         chat.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
                             content: ChatMessageContent::Error(msg.clone()),
+                            checkpoint_sha: None,
                         });
                     },
                     AgentMessage::Init {

@@ -243,6 +243,10 @@ pub(super) fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let now = stoat.executor.now();
+    let checkpoint_sha = stoat
+        .git_host
+        .discover(&stoat.active_workspace().git_root)
+        .and_then(|repo| repo.stash_create());
     {
         let ws = stoat.active_workspace_mut();
         let Some(chat) = ws.chats.get_mut(&session_id) else {
@@ -251,6 +255,7 @@ pub(super) fn claude_submit(stoat: &mut Stoat) -> UpdateEffect {
         chat.messages.push(ChatMessage {
             role: ChatRole::User,
             content: ChatMessageContent::Text(text.clone()),
+            checkpoint_sha,
         });
         chat.active_since = Some(now);
 
@@ -398,4 +403,101 @@ fn resolve_follow_target(
     ws.panes.pane_mut(new_pane).view = View::Editor(eid);
     ws.panes.set_focus(prev_focus);
     Some((new_pane, absolute))
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{
+        action_handlers::dispatch,
+        claude_chat::{ChatMessageContent, ChatRole},
+        test_harness::TestHarness,
+    };
+    use std::path::PathBuf;
+    use stoat_action::ClaudeSubmit;
+
+    fn write_input(h: &mut TestHarness, text: &str) {
+        let session_id = h
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude chat open");
+        let ws = h.stoat.active_workspace();
+        let chat = ws.chats.get(&session_id).expect("chat state");
+        let buffer = ws.buffers.get(chat.input.buffer_id).expect("input buffer");
+        let len = buffer.read().expect("poisoned").snapshot.visible_text.len();
+        buffer.write().expect("poisoned").edit(0..len, text);
+    }
+
+    fn last_user_message(h: &TestHarness) -> &crate::claude_chat::ChatMessage {
+        let session_id = h
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude chat open");
+        let chat = h
+            .stoat
+            .active_workspace()
+            .chats
+            .get(&session_id)
+            .expect("chat state");
+        chat.messages
+            .iter()
+            .rev()
+            .find(|m| matches!(m.role, ChatRole::User))
+            .expect("user message")
+    }
+
+    #[test]
+    fn claude_submit_captures_checkpoint_sha_when_workdir_dirty() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/checkpoint-dirty");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "old\n", "new\n");
+        h.claude().open();
+
+        write_input(&mut h, "hello claude");
+        dispatch(&mut h.stoat, &ClaudeSubmit);
+
+        let stashes = h.fake_git().stashes(&workdir);
+        assert_eq!(stashes.len(), 1, "fake git captured exactly one stash");
+        let msg = last_user_message(&h);
+        assert!(matches!(&msg.content, ChatMessageContent::Text(t) if t == "hello claude"));
+        assert_eq!(msg.checkpoint_sha.as_deref(), Some(stashes[0].as_str()));
+    }
+
+    #[test]
+    fn claude_submit_skips_checkpoint_when_no_repo() {
+        let mut h = TestHarness::with_size(80, 20);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/no-repo-here");
+        h.claude().open();
+
+        write_input(&mut h, "hello");
+        dispatch(&mut h.stoat, &ClaudeSubmit);
+
+        let msg = last_user_message(&h);
+        assert!(matches!(&msg.content, ChatMessageContent::Text(t) if t == "hello"));
+        assert_eq!(msg.checkpoint_sha, None);
+    }
+
+    #[test]
+    fn claude_submit_skips_checkpoint_when_workdir_clean() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/checkpoint-clean");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git().add_repo(&workdir);
+        h.claude().open();
+
+        write_input(&mut h, "hello");
+        dispatch(&mut h.stoat, &ClaudeSubmit);
+
+        let stashes = h.fake_git().stashes(&workdir);
+        assert!(
+            stashes.is_empty(),
+            "clean workdir produced no stash: {stashes:?}",
+        );
+        let msg = last_user_message(&h);
+        assert_eq!(msg.checkpoint_sha, None);
+    }
 }
