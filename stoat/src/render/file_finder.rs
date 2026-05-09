@@ -72,7 +72,7 @@ pub(crate) fn render_file_finder(
     let separator_row = inner.y + 1;
     for col in inner.x..inner.x + inner.width {
         buf[(col, separator_row)]
-            .set_char('-')
+            .set_char('─')
             .set_style(muted_style);
     }
 
@@ -102,7 +102,7 @@ pub(crate) fn render_file_finder(
     if let Some(preview_rect) = preview_rect {
         for row in list_rect.y..list_rect.y + list_rect.height {
             buf[(list_rect.x + list_rect.width, row)]
-                .set_char('|')
+                .set_char('│')
                 .set_style(muted_style);
         }
         render_preview(finder, preview_rect, theme, ws, buf);
