@@ -64,8 +64,9 @@ pub struct DiffArgs {
     #[arg(long)]
     pub language: Option<String>,
 
-    /// Positional args. Only meaningful with `--git`, where they
-    /// supply the seven `GIT_EXTERNAL_DIFF` parameters in order.
+    /// Positional args. Required (exactly seven) with `--git`,
+    /// where they supply the `GIT_EXTERNAL_DIFF` parameters in
+    /// order. Rejected in the default (workspace-scan) mode.
     pub git_args: Vec<String>,
 }
 

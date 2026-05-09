@@ -67,7 +67,12 @@ enum Command {
         #[command(subcommand)]
         sub: crate::commands::dump::DumpCommand,
     },
-    /// Render a structural diff of two files to stdout.
+    /// Render a structural diff to stdout. By default, scans the
+    /// current repo for changes against HEAD and renders a diff
+    /// for each changed path. With `--git`, acts as the
+    /// `GIT_EXTERNAL_DIFF` adapter using the seven path arguments
+    /// git supplies; positional args are not accepted in the
+    /// default mode.
     Diff(crate::commands::diff::DiffArgs),
 }
 
