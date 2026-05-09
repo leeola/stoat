@@ -1,18 +1,15 @@
 use crate::{
     app::Stoat,
+    fuzzy,
     pane::{FocusTarget, View},
     render::layout::split_pane_status,
 };
-use nucleo::{
-    pattern::{CaseMatching, Normalization, Pattern},
-    Matcher, Utf32Str,
-};
+use nucleo::Utf32Str;
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
     widgets::{Block, Borders, Widget},
 };
-use std::sync::{Mutex, OnceLock};
 
 /// Maximum number of completion rows visible at once. Larger lists
 /// scroll so the selected row stays in view.
@@ -104,12 +101,10 @@ pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
     let inner = block.inner(popup_area);
     block.render(popup_area, buf);
 
-    let pattern = (!prefix.is_empty())
-        .then(|| Pattern::parse(&prefix, CaseMatching::Smart, Normalization::Smart))
-        .filter(|p| !p.atoms.is_empty());
+    let pattern = fuzzy::parse_query(&prefix);
     let mut matcher_guard = pattern
         .as_ref()
-        .map(|_| fuzzy_matcher().lock().expect("fuzzy matcher poisoned"));
+        .map(|_| fuzzy::matcher().lock().expect("fuzzy matcher poisoned"));
 
     let mut hay_buf: Vec<char> = Vec::new();
     let mut indices_buf: Vec<u32> = Vec::new();
@@ -174,11 +169,6 @@ fn extract_prefix(stoat: &Stoat, popup: &crate::completion::CompletionPopup) -> 
         return String::new();
     }
     rope.slice(start..end).to_string()
-}
-
-fn fuzzy_matcher() -> &'static Mutex<Matcher> {
-    static MATCHER: OnceLock<Mutex<Matcher>> = OnceLock::new();
-    MATCHER.get_or_init(|| Mutex::new(Matcher::default()))
 }
 
 fn viewport_top_for(selected: usize, total: usize, window: usize) -> usize {

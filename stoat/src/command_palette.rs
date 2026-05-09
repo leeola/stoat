@@ -1,22 +1,13 @@
 use crate::{
     app::Stoat,
+    fuzzy,
     input_view::{InputView, SubmitTarget},
     pane::{FocusTarget, View},
     rebase::RebasePause,
     workspace::Workspace,
 };
-use nucleo::{
-    pattern::{CaseMatching, Normalization, Pattern},
-    Matcher, Utf32Str,
-};
-use std::sync::{Mutex, OnceLock};
 use stoat_action::{registry, ActionKind, ParamValue};
 use stoat_scheduler::Executor;
-
-fn fuzzy_matcher() -> &'static Mutex<Matcher> {
-    static MATCHER: OnceLock<Mutex<Matcher>> = OnceLock::new();
-    MATCHER.get_or_init(|| Mutex::new(Matcher::default()))
-}
 
 pub struct CommandPalette {
     pub(crate) phase: PalettePhase,
@@ -385,10 +376,6 @@ pub(crate) fn refilter(
     match_indices: &mut Vec<Vec<u32>>,
     selected: &mut usize,
 ) {
-    let pattern = (!input.is_empty())
-        .then(|| Pattern::parse(input, CaseMatching::Smart, Normalization::Smart))
-        .filter(|p| !p.atoms.is_empty());
-
     let visible: Vec<&'static registry::RegistryEntry> = registry::all()
         .filter(|entry| {
             entry.def.palette_visible()
@@ -400,7 +387,11 @@ pub(crate) fn refilter(
     filtered.clear();
     match_indices.clear();
 
-    let Some(pattern) = pattern else {
+    let items = visible
+        .iter()
+        .copied()
+        .map(|entry| (entry, entry.def.name().to_string()));
+    let Some(mut matches) = fuzzy::match_and_rank(input, items) else {
         let mut all = visible;
         all.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
         for entry in all {
@@ -413,31 +404,19 @@ pub(crate) fn refilter(
         return;
     };
 
-    let mut matcher_guard = fuzzy_matcher().lock().expect("fuzzy matcher poisoned");
-    let mut hay_buf: Vec<char> = Vec::new();
-    let mut matched: Vec<(&'static registry::RegistryEntry, u32, Vec<u32>)> = Vec::new();
-    let mut indices_buf: Vec<u32> = Vec::new();
-    for entry in visible {
-        let hay = Utf32Str::new(entry.def.name(), &mut hay_buf);
-        indices_buf.clear();
-        if let Some(score) = pattern.indices(hay, &mut matcher_guard, &mut indices_buf) {
-            indices_buf.sort_unstable();
-            indices_buf.dedup();
-            matched.push((entry, score, indices_buf.clone()));
-        }
-    }
-    matched.sort_by(|a, b| {
-        b.1.cmp(&a.1).then_with(|| {
-            a.0.def
+    matches.sort_by(|a, b| {
+        b.score.cmp(&a.score).then_with(|| {
+            a.item
+                .def
                 .priority()
                 .ord()
-                .cmp(&b.0.def.priority().ord())
-                .then_with(|| a.0.def.name().cmp(b.0.def.name()))
+                .cmp(&b.item.def.priority().ord())
+                .then_with(|| a.item.def.name().cmp(b.item.def.name()))
         })
     });
-    for (entry, _, indices) in matched {
-        filtered.push(entry);
-        match_indices.push(indices);
+    for m in matches {
+        filtered.push(m.item);
+        match_indices.push(m.matched_indices);
     }
 
     if *selected >= filtered.len() {

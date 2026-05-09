@@ -1,19 +1,13 @@
 use crate::{
     buffer::BufferId,
     editor_state::{EditorId, EditorState},
+    fuzzy,
     host::{FsHost, GitHost},
     input_view::{InputView, SubmitTarget},
     paths,
     workspace::Workspace,
 };
-use nucleo::{
-    pattern::{CaseMatching, Normalization, Pattern},
-    Matcher, Utf32Str,
-};
-use std::{
-    path::{Path, PathBuf},
-    sync::{Mutex, OnceLock},
-};
+use std::path::{Path, PathBuf};
 use stoat_scheduler::{Executor, Task};
 use stoat_text::{Bias, SelectionGoal};
 use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
@@ -21,11 +15,6 @@ use tokio::sync::mpsc::{error::TryRecvError, UnboundedReceiver};
 /// Preview content cap. Keeps preview reads bounded so a stray large or binary
 /// file never stalls the render thread.
 pub(crate) const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
-
-fn fuzzy_matcher() -> &'static Mutex<Matcher> {
-    static MATCHER: OnceLock<Mutex<Matcher>> = OnceLock::new();
-    MATCHER.get_or_init(|| Mutex::new(Matcher::default()))
-}
 
 /// Which subset of files the finder currently lists.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -407,9 +396,11 @@ fn display_for(path: &Path, git_root: &Path) -> String {
 }
 
 /// Core matcher. With a non-empty pattern, scores every candidate
-/// against its repo-relative display form via [`Pattern::score`] and
-/// orders matches by score descending, ties alphabetical. Empty
-/// or whitespace-only input lists every candidate alphabetically.
+/// against its repo-relative display form via
+/// [`crate::fuzzy::match_and_rank`] and orders matches by score
+/// descending, ties alphabetical. Empty or whitespace-only input
+/// lists every candidate alphabetically.
+///
 /// `match_indices` is filled in parallel to `filtered`: each element
 /// is the sorted, deduplicated set of matched character offsets in
 /// that row's display string, or empty when no pattern is active.
@@ -431,14 +422,14 @@ pub(crate) fn refilter(
         FinderScope::Buffers => buffer_paths,
     };
 
-    let pattern = (!text.is_empty())
-        .then(|| Pattern::parse(text, CaseMatching::Smart, Normalization::Smart))
-        .filter(|p| !p.atoms.is_empty());
-
     filtered.clear();
     match_indices.clear();
 
-    let Some(pattern) = pattern else {
+    let items = base
+        .iter()
+        .enumerate()
+        .map(|(idx, path)| (idx, display_for(path, git_root)));
+    let Some(mut matches) = fuzzy::match_and_rank(text, items) else {
         let mut rows: Vec<(usize, String)> = base
             .iter()
             .enumerate()
@@ -453,24 +444,14 @@ pub(crate) fn refilter(
         return;
     };
 
-    let mut matcher_guard = fuzzy_matcher().lock().expect("fuzzy matcher poisoned");
-    let mut hay_buf: Vec<char> = Vec::new();
-    let mut matched: Vec<(usize, String, u32, Vec<u32>)> = Vec::new();
-    let mut indices_buf: Vec<u32> = Vec::new();
-    for (idx, path) in base.iter().enumerate() {
-        let display = display_for(path, git_root);
-        let hay = Utf32Str::new(&display, &mut hay_buf);
-        indices_buf.clear();
-        if let Some(score) = pattern.indices(hay, &mut matcher_guard, &mut indices_buf) {
-            indices_buf.sort_unstable();
-            indices_buf.dedup();
-            matched.push((idx, display, score, indices_buf.clone()));
-        }
-    }
-    matched.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
-    for (idx, _, _, indices) in matched {
-        filtered.push(idx);
-        match_indices.push(indices);
+    matches.sort_by(|a, b| {
+        b.score
+            .cmp(&a.score)
+            .then_with(|| a.haystack.cmp(&b.haystack))
+    });
+    for m in matches {
+        filtered.push(m.item);
+        match_indices.push(m.matched_indices);
     }
     clamp_selected(filtered, selected);
 }
