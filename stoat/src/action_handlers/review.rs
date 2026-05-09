@@ -726,6 +726,8 @@ fn build_session_from_trees(
 /// and swap it into the focused pane. The session is stored on the
 /// workspace; the editor references it indirectly via `review_view`.
 pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSession) {
+    populate_diff_cache(stoat, &session);
+
     let view = ReviewViewState::from_session(&session);
     let blocks = build_review_blocks(&session, &view);
     let row_count = view.rows.len();
@@ -765,6 +767,28 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
     }
 
     stoat.mode = "review".to_string();
+}
+
+/// Mirror this session's freshly-extracted hunks into the diff cache so
+/// a `stoat diff` CLI invocation that hashes the same `(base, buffer,
+/// language)` tuple gets a cache hit instead of recomputing.
+fn populate_diff_cache(stoat: &Stoat, session: &ReviewSession) {
+    use crate::{diff_cache::DiffCacheKey, review::ReviewHunk};
+
+    let mut cache = stoat.diff_cache.lock().expect("diff_cache poisoned");
+    for file in &session.files {
+        let hunks: Vec<ReviewHunk> = file
+            .chunks
+            .iter()
+            .filter_map(|id| session.chunks.get(id).map(|c| c.hunk.clone()))
+            .collect();
+        let key = DiffCacheKey {
+            left_hash: blake3::hash(file.base_text.as_bytes()).into(),
+            right_hash: blake3::hash(file.buffer_text.as_bytes()).into(),
+            language: file.language.as_ref().map(|l| l.name.to_string()),
+        };
+        cache.insert(key, Arc::new(hunks));
+    }
 }
 
 fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<BlockProperties> {
@@ -808,4 +832,27 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
         });
     }
     blocks
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::{diff_cache::DiffCacheKey, test_harness::TestHarness};
+
+    #[test]
+    fn install_review_session_populates_diff_cache() {
+        let mut h = TestHarness::with_size(80, 10);
+        let base = "fn a() { 1 }\n";
+        let buffer = "fn a() { 2 }\n";
+        h.open_review_from_texts(&[("a.rs", base, buffer)]);
+
+        let key = DiffCacheKey {
+            left_hash: blake3::hash(base.as_bytes()).into(),
+            right_hash: blake3::hash(buffer.as_bytes()).into(),
+            language: Some("rust".to_string()),
+        };
+        let cache = h.stoat.diff_cache();
+        let mut guard = cache.lock().expect("diff_cache poisoned");
+        let hunks = guard.lookup(&key).expect("cache hit after install");
+        assert!(!hunks.is_empty(), "cached hunks should not be empty");
+    }
 }
