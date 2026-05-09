@@ -2,6 +2,7 @@ use clap::Args;
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
     io::{self, IsTerminal, Write},
+    path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
 };
@@ -17,7 +18,19 @@ use stoat_language::LanguageRegistry;
 #[derive(Args, Debug)]
 pub struct DiffArgs {
     /// Run as a `git diff` external tool, expecting the
-    /// `GIT_EXTERNAL_DIFF` calling convention. Not yet implemented.
+    /// `GIT_EXTERNAL_DIFF` 7-arg calling convention:
+    /// `path old-file old-hex old-mode new-file new-hex new-mode`.
+    /// Either `old-file` or `new-file` may be `/dev/null` for
+    /// added or deleted files.
+    ///
+    /// Wire it up in `~/.gitconfig`:
+    ///
+    /// ```text
+    /// [diff]
+    ///     external = "stoat diff --git"
+    /// ```
+    ///
+    /// or per-invocation: `GIT_EXTERNAL_DIFF="stoat diff --git" git diff`.
     #[arg(long)]
     pub git: bool,
 
@@ -44,25 +57,34 @@ pub struct DiffArgs {
     /// Force the language used for tokenization.
     #[arg(long)]
     pub language: Option<String>,
+
+    /// Positional args. Only meaningful with `--git`, where they
+    /// supply the seven `GIT_EXTERNAL_DIFF` parameters in order.
+    pub git_args: Vec<String>,
 }
 
 pub fn run(args: DiffArgs) -> Result<(), Whatever> {
-    if args.git {
-        // FIXME: --git mode lands with the GIT_EXTERNAL_DIFF child of the
-        // `stoat diff` TODO.
-        whatever!("--git mode is not yet implemented");
-    }
+    // FIXME: --language is parsed but not threaded; per-file detection
+    // via `LanguageRegistry::for_path` covers default and --git modes.
 
-    // FIXME: --language is parsed but not threaded; landing alongside the
-    // --git child of the `stoat diff` TODO.
-
-    let cwd = std::env::current_dir().whatever_context("read current directory")?;
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
-    let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
     let langs = LanguageRegistry::standard();
 
-    let Some((_workdir, inputs)) = scan_working_tree(&*git, &*fs, &langs, &cwd) else {
-        return Ok(());
+    let inputs = if args.git {
+        vec![read_git_external_inputs(&*fs, &langs, &args.git_args)?]
+    } else {
+        if !args.git_args.is_empty() {
+            whatever!(
+                "positional args are only valid with --git; got {} unexpected arg(s)",
+                args.git_args.len()
+            );
+        }
+        let cwd = std::env::current_dir().whatever_context("read current directory")?;
+        let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
+        let Some((_workdir, inputs)) = scan_working_tree(&*git, &*fs, &langs, &cwd) else {
+            return Ok(());
+        };
+        inputs
     };
 
     let per_file = extract_review_hunks_changeset(&inputs, 3);
@@ -85,6 +107,52 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
             render_all(&mut out, &inputs, &per_file, &opts).whatever_context("write diff to stdout")
         },
     }
+}
+
+/// Parse the seven `GIT_EXTERNAL_DIFF` positional args into a single
+/// [`ReviewFileInput`]. `/dev/null` on either side means create or
+/// delete; that side becomes empty text and the structural-diff
+/// pipeline emits the appropriate one-sided rows.
+fn read_git_external_inputs(
+    fs: &dyn FsHost,
+    langs: &LanguageRegistry,
+    git_args: &[String],
+) -> Result<ReviewFileInput, Whatever> {
+    if git_args.len() != 7 {
+        whatever!(
+            "--git mode requires exactly 7 positional args (path old-file old-hex old-mode \
+             new-file new-hex new-mode); got {}",
+            git_args.len()
+        );
+    }
+    let [path, old_file, _old_hex, _old_mode, new_file, _new_hex, _new_mode]: &[String; 7] =
+        git_args
+            .try_into()
+            .expect("len checked to be 7 immediately above");
+
+    let logical = PathBuf::from(path);
+    let base_text = read_blob_text(fs, old_file)?;
+    let buffer_text = read_blob_text(fs, new_file)?;
+    let language = langs.for_path(&logical);
+
+    Ok(ReviewFileInput {
+        rel_path: path.clone(),
+        path: logical,
+        language,
+        base_text: Arc::new(base_text),
+        buffer_text: Arc::new(buffer_text),
+    })
+}
+
+fn read_blob_text(fs: &dyn FsHost, path: &str) -> Result<String, Whatever> {
+    if path == "/dev/null" {
+        return Ok(String::new());
+    }
+    let p = Path::new(path);
+    let mut buf = Vec::new();
+    fs.read(p, &mut buf)
+        .whatever_context(format!("read {path}"))?;
+    String::from_utf8(buf).whatever_context(format!("{path} is not valid UTF-8"))
 }
 
 fn render_all<W: Write>(
