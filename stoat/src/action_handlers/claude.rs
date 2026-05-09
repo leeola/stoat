@@ -614,4 +614,138 @@ mod tests {
         assert!(h.stoat.pending_checkpoint_picker.is_none());
         assert!(h.fake_git().restored_shas(&workdir).is_empty());
     }
+
+    fn mouse_up_left(col: u16, row: u16) -> Event {
+        use crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        Event::Mouse(MouseEvent {
+            kind: MouseEventKind::Up(MouseButton::Left),
+            column: col,
+            row,
+            modifiers: KeyModifiers::NONE,
+        })
+    }
+
+    fn user_message_screen_row(h: &mut TestHarness, msg_idx: usize) -> u16 {
+        let _ = h.stoat.render();
+        let session_id = h
+            .stoat
+            .active_workspace()
+            .claude_chat
+            .expect("claude chat open");
+        let chat = h
+            .stoat
+            .active_workspace()
+            .chats
+            .get(&session_id)
+            .expect("chat state");
+        let pane_area = {
+            let ws = h.stoat.active_workspace();
+            let pane_id = ws.panes.focus();
+            ws.panes.pane(pane_id).area
+        };
+        let input_lines = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(chat.input.buffer_id)
+            .map(|b| {
+                let guard = b.read().expect("poisoned");
+                guard.snapshot.visible_text.max_point().row as u16 + 1
+            })
+            .unwrap_or(1);
+        let body_area =
+            crate::render::claude_pane::chat_body_area(pane_area, input_lines).expect("body area");
+        let layout = crate::render::claude_pane::build_chat_pane_layout(
+            chat,
+            body_area.width as usize,
+            &h.stoat.theme,
+            h.stoat.render_tick,
+        );
+        let visible_lines = body_area.height as usize;
+        let skip = layout
+            .lines
+            .len()
+            .saturating_sub(visible_lines + chat.scroll_offset);
+        let display_count = layout.lines.len().saturating_sub(skip).min(visible_lines);
+        let start_row = body_area.y + body_area.height.saturating_sub(display_count as u16);
+        let (line_start, _) = layout
+            .message_ranges
+            .get(msg_idx)
+            .expect("message exists")
+            .expect("message renders to lines");
+        let display_idx = line_start - skip;
+        start_row + display_idx as u16
+    }
+
+    #[test]
+    fn claude_pane_click_on_restorable_user_message_restores() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/marker-click-restore");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "v1\n", "v2\n");
+        h.claude().open();
+        submit_message(&mut h, "first prompt");
+        submit_message(&mut h, "second prompt");
+
+        let row = user_message_screen_row(&mut h, 0);
+        let stashes = h.fake_git().stashes(&workdir);
+        let expected_sha = stashes[0].clone();
+
+        h.stoat.update(mouse_up_left(0, row));
+
+        assert_eq!(h.fake_git().restored_shas(&workdir), vec![expected_sha]);
+    }
+
+    #[test]
+    fn claude_pane_click_outside_message_rows_is_noop() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/marker-click-empty");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "v1\n", "v2\n");
+        h.claude().open();
+        submit_message(&mut h, "only prompt");
+
+        let _ = h.stoat.render();
+        h.stoat.update(mouse_up_left(0, 0));
+
+        assert!(h.fake_git().restored_shas(&workdir).is_empty());
+    }
+
+    #[test]
+    fn claude_pane_click_when_no_repo_is_noop() {
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/marker-click-no-repo");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "v1\n", "v2\n");
+        h.claude().open();
+        submit_message(&mut h, "only prompt");
+
+        let row = user_message_screen_row(&mut h, 0);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/no-repo-here");
+        h.stoat.update(mouse_up_left(0, row));
+
+        assert!(h.fake_git().restored_shas(&workdir).is_empty());
+    }
+
+    #[test]
+    fn claude_pane_click_on_user_message_without_checkpoint_is_noop() {
+        let mut h = TestHarness::with_size(80, 20);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/marker-click-no-checkpoint");
+        h.claude().open();
+        submit_message(&mut h, "only prompt");
+
+        let row = user_message_screen_row(&mut h, 0);
+        h.stoat.update(mouse_up_left(0, row));
+
+        assert!(h
+            .fake_git()
+            .restored_shas(&PathBuf::from("/marker-click-no-checkpoint"))
+            .is_empty());
+    }
 }

@@ -141,6 +141,99 @@ mod tests {
     }
 
     #[test]
+    fn user_message_with_checkpoint_uses_restorable_marker_prefix() {
+        use crate::action_handlers::dispatch;
+        use std::path::PathBuf;
+        use stoat_action::ClaudeSubmit;
+
+        let mut h = TestHarness::with_size(80, 20);
+        let workdir = PathBuf::from("/marker-render");
+        h.stoat.active_workspace_mut().git_root = workdir.clone();
+        h.fake_git()
+            .add_repo(&workdir)
+            .modified("foo.rs", "v1\n", "v2\n");
+        let _ = h.claude().open();
+
+        let session_id = h.stoat.active_workspace().claude_chat.expect("chat open");
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .chats
+            .get(&session_id)
+            .expect("chat state")
+            .input
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("input buffer");
+        {
+            let len = buffer.read().expect("poisoned").snapshot.visible_text.len();
+            buffer
+                .write()
+                .expect("poisoned")
+                .edit(0..len, "with checkpoint");
+        }
+        dispatch(&mut h.stoat, &ClaudeSubmit);
+
+        let frame = h.snapshot();
+        assert!(
+            frame.content.contains("o with checkpoint"),
+            "expected restorable-marker prefix on user message: {}",
+            frame.content,
+        );
+        assert!(
+            !frame.content.contains("> with checkpoint"),
+            "non-restorable prefix should not appear: {}",
+            frame.content,
+        );
+    }
+
+    #[test]
+    fn user_message_without_checkpoint_keeps_standard_prefix() {
+        use crate::action_handlers::dispatch;
+        use std::path::PathBuf;
+        use stoat_action::ClaudeSubmit;
+
+        let mut h = TestHarness::with_size(80, 20);
+        h.stoat.active_workspace_mut().git_root = PathBuf::from("/marker-no-checkpoint");
+        let _ = h.claude().open();
+
+        let session_id = h.stoat.active_workspace().claude_chat.expect("chat open");
+        let buffer_id = h
+            .stoat
+            .active_workspace()
+            .chats
+            .get(&session_id)
+            .expect("chat state")
+            .input
+            .buffer_id;
+        let buffer = h
+            .stoat
+            .active_workspace()
+            .buffers
+            .get(buffer_id)
+            .expect("input buffer");
+        {
+            let len = buffer.read().expect("poisoned").snapshot.visible_text.len();
+            buffer
+                .write()
+                .expect("poisoned")
+                .edit(0..len, "no checkpoint");
+        }
+        dispatch(&mut h.stoat, &ClaudeSubmit);
+
+        let frame = h.snapshot();
+        assert!(
+            frame.content.contains("> no checkpoint"),
+            "expected standard prefix on user message: {}",
+            frame.content,
+        );
+    }
+
+    #[test]
     fn claude_panel_pairs_tool_use_and_result() {
         let mut h = TestHarness::with_size(80, 20);
         let id = h.claude().open();

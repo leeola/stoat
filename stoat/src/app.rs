@@ -1128,6 +1128,9 @@ impl Stoat {
         if self.handle_editor_pane_mouse(mouse.kind, col, row) {
             return UpdateEffect::Redraw;
         }
+        if self.handle_claude_pane_mouse(mouse.kind, col, row) {
+            return UpdateEffect::Redraw;
+        }
         tracing::trace!(
             target: "stoat::app",
             kind = ?mouse.kind,
@@ -1136,6 +1139,93 @@ impl Stoat {
             "mouse event routed to focused element"
         );
         UpdateEffect::None
+    }
+
+    /// Handle mouse events on a focused claude pane. On
+    /// `MouseEventKind::Up(Left)` over a row that belongs to a user
+    /// message with a captured checkpoint, restore the working tree
+    /// to that checkpoint via [`crate::host::GitRepo::restore_tree`].
+    /// Returns `true` only when a restore actually fired (a redraw is
+    /// useful afterwards even though the chat content is unchanged,
+    /// to refresh badges and badge counts).
+    fn handle_claude_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
+        let _ = col;
+        if !matches!(kind, MouseEventKind::Up(MouseButton::Left)) {
+            return false;
+        }
+        let pane_area = {
+            let ws = self.active_workspace();
+            match ws.focus {
+                FocusTarget::SplitPane(pane_id) => {
+                    let pane = ws.panes.pane(pane_id);
+                    if !matches!(pane.view, View::Claude(_)) {
+                        return false;
+                    }
+                    pane.area
+                },
+                FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
+                    Some(dock) if matches!(dock.view, View::Claude(_)) => dock.area,
+                    _ => return false,
+                },
+            }
+        };
+        let session_id = match self.active_workspace().claude_chat {
+            Some(id) => id,
+            None => return false,
+        };
+        let chat = match self.active_workspace().chats.get(&session_id) {
+            Some(c) => c,
+            None => return false,
+        };
+        let input_lines = self
+            .active_workspace()
+            .buffers
+            .get(chat.input.buffer_id)
+            .map(|b| {
+                let guard = b.read().expect("poisoned");
+                guard.snapshot.visible_text.max_point().row as u16 + 1
+            })
+            .unwrap_or(1);
+        let body_area = match crate::render::claude_pane::chat_body_area(pane_area, input_lines) {
+            Some(a) => a,
+            None => return false,
+        };
+        let body_width = body_area.width as usize;
+        let theme = &self.theme;
+        let render_tick = self.render_tick;
+        let msg_idx = match crate::render::claude_pane::message_at_screen_row(
+            chat,
+            body_area,
+            body_width,
+            theme,
+            render_tick,
+            row,
+        ) {
+            Some(idx) => idx,
+            None => return false,
+        };
+        let sha = match chat
+            .messages
+            .get(msg_idx)
+            .and_then(|m| m.checkpoint_sha.clone())
+        {
+            Some(s) => s,
+            None => return false,
+        };
+        let git_root = self.active_workspace().git_root.clone();
+        let Some(repo) = self.git_host.discover(&git_root) else {
+            return false;
+        };
+        if let Err(err) = repo.restore_tree(&sha) {
+            tracing::warn!(
+                target: "stoat::claude",
+                ?err,
+                sha,
+                "checkpoint restore via marker click failed"
+            );
+            return false;
+        }
+        true
     }
 
     /// Routes left-button Down/Drag/Up events on a focused run pane into

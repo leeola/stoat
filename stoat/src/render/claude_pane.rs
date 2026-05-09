@@ -5,9 +5,27 @@ use crate::{
         text::{short_path, truncate, wrap_text, write_cell, write_str},
         FrameCtx, PaneCtx,
     },
+    theme::Theme,
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::collections::HashMap;
+
+/// Restorable user-message prefix replaces the standard `"> "`
+/// when [`ChatMessage::checkpoint_sha`] is set. Same width so wrap
+/// math is unchanged, distinct character so the marker is
+/// visually obvious.
+pub(crate) const RESTORABLE_USER_PREFIX: &str = "o ";
+pub(crate) const STANDARD_USER_PREFIX: &str = "> ";
+
+/// Layout produced by [`build_chat_pane_layout`]. `lines` is the
+/// flat list of styled rows that paint into the chat scrollback;
+/// `message_ranges[i]` records the inclusive line-index range that
+/// `chat.messages[i]` occupies, or `None` for messages that produce
+/// no content.
+pub(crate) struct ChatPaneLayout {
+    pub(crate) lines: Vec<(Style, String)>,
+    pub(crate) message_ranges: Vec<Option<(usize, usize)>>,
+}
 
 pub(crate) fn render_claude_pane(
     chat: &ClaudeChatState,
@@ -17,11 +35,6 @@ pub(crate) fn render_claude_pane(
     frame: FrameCtx<'_>,
     buf: &mut Buffer,
 ) {
-    use crate::{
-        badge::THROBBER_FRAMES,
-        claude_chat::{ChatMessageContent, ChatRole},
-    };
-
     if area.height < 4 || area.width < 4 {
         return;
     }
@@ -52,7 +65,6 @@ pub(crate) fn render_claude_pane(
     }
 
     let meta_style = theme.get(s::CHAT_META);
-    let time_style = theme.get(s::CHAT_TIME);
     let mut header_x = msg_area.x;
     write_str(buf, header_x, msg_area.y, "Claude", meta_style);
     header_x += "Claude".chars().count() as u16;
@@ -79,6 +91,54 @@ pub(crate) fn render_claude_pane(
         return;
     }
 
+    let body_width = body_area.width as usize;
+    let layout = build_chat_pane_layout(chat, body_width, theme, render_tick);
+    let lines = &layout.lines;
+
+    let visible_lines = body_area.height as usize;
+    let skip = lines
+        .len()
+        .saturating_sub(visible_lines + chat.scroll_offset);
+    let take = visible_lines;
+    let display: Vec<_> = lines.iter().skip(skip).take(take).collect();
+    let start_row = body_area.y + body_area.height.saturating_sub(display.len() as u16);
+    for (i, (style, text)) in display.iter().enumerate() {
+        let y = start_row + i as u16;
+        let max_w = body_area.width as usize;
+        for (j, ch) in text.chars().take(max_w).enumerate() {
+            let x = body_area.x + j as u16;
+            if let Some(cell) = buf.cell_mut((x, y)) {
+                cell.set_char(ch).set_style(*style);
+            }
+        }
+    }
+
+    if let Some(editor) = editors.get_mut(chat.input.editor_id) {
+        let input_style = if is_focused {
+            theme.get(crate::theme::scope::UI_TEXT)
+        } else {
+            theme.get(crate::theme::scope::UI_TEXT_MUTED)
+        };
+        render_editor(editor, input_area, input_style, theme, buf, is_focused);
+    }
+}
+
+/// Build the chat-pane scrollback layout. Pure function over the
+/// chat state; used both by `render_claude_pane` (for paint) and by
+/// the mouse handler in `app::Stoat::handle_claude_pane_mouse` (for
+/// hit-testing screen rows back to messages).
+pub(crate) fn build_chat_pane_layout(
+    chat: &ClaudeChatState,
+    body_width: usize,
+    theme: &Theme,
+    render_tick: u64,
+) -> ChatPaneLayout {
+    use crate::{
+        badge::THROBBER_FRAMES,
+        claude_chat::{ChatMessageContent, ChatRole},
+        theme::scope as s,
+    };
+
     let user_style = theme.get(s::CHAT_USER);
     let text_style = theme.get(s::CHAT_TEXT);
     let thinking_style = theme.get(s::CHAT_THINKING);
@@ -92,18 +152,22 @@ pub(crate) fn render_claude_pane(
     const TOOL_RESULT_ELBOW: &str = "\u{2514}\u{2500}";
 
     let result_map = build_tool_result_map(&chat.messages);
-    let body_width = body_area.width as usize;
     let mut lines: Vec<(Style, String)> = Vec::new();
+    let mut message_ranges: Vec<Option<(usize, usize)>> = Vec::with_capacity(chat.messages.len());
 
-    let push_block = |lines: &mut Vec<(Style, String)>, block: Vec<(Style, String)>| {
-        if block.is_empty() {
-            return;
-        }
-        if !lines.is_empty() {
-            lines.push((text_style, String::new()));
-        }
-        lines.extend(block);
-    };
+    let push_block =
+        |lines: &mut Vec<(Style, String)>, block: Vec<(Style, String)>| -> Option<(usize, usize)> {
+            if block.is_empty() {
+                return None;
+            }
+            if !lines.is_empty() {
+                lines.push((text_style, String::new()));
+            }
+            let start = lines.len();
+            lines.extend(block);
+            let end = lines.len() - 1;
+            Some((start, end))
+        };
 
     let render_flowing =
         |t: &str, style: Style, width: usize, prefix: &str| -> Vec<(Style, String)> {
@@ -135,19 +199,27 @@ pub(crate) fn render_claude_pane(
         };
 
     for msg in &chat.messages {
-        match (&msg.role, &msg.content) {
+        let range = match (&msg.role, &msg.content) {
             (ChatRole::User, ChatMessageContent::Text(t)) => {
-                push_block(&mut lines, render_flowing(t, user_style, body_width, "> "));
+                let prefix = if msg.checkpoint_sha.is_some() {
+                    RESTORABLE_USER_PREFIX
+                } else {
+                    STANDARD_USER_PREFIX
+                };
+                push_block(
+                    &mut lines,
+                    render_flowing(t, user_style, body_width, prefix),
+                )
             },
             (ChatRole::Assistant, ChatMessageContent::Text(t)) => {
-                push_block(&mut lines, render_flowing(t, text_style, body_width, ""));
+                push_block(&mut lines, render_flowing(t, text_style, body_width, ""))
             },
             (ChatRole::Assistant, ChatMessageContent::Thinking { text }) => {
                 let n = text.lines().count().max(1);
                 push_block(
                     &mut lines,
                     vec![(thinking_style, format!("~ Thinking... ({n} lines)"))],
-                );
+                )
             },
             (ChatRole::Assistant, ChatMessageContent::ToolUse { id, name, input }) => {
                 let header = format_tool_header(name, input);
@@ -156,11 +228,11 @@ pub(crate) fn render_claude_pane(
                     let preview = format_tool_result_preview(content);
                     block.push((tool_body_style, format!("  {TOOL_RESULT_ELBOW} {preview}")));
                 }
-                push_block(&mut lines, block);
+                push_block(&mut lines, block)
             },
-            (ChatRole::Assistant, ChatMessageContent::ToolResult { .. }) => {},
+            (ChatRole::Assistant, ChatMessageContent::ToolResult { .. }) => None,
             (ChatRole::Assistant, ChatMessageContent::Error(m)) => {
-                push_block(&mut lines, vec![(error_style, format!("! {m}"))]);
+                push_block(&mut lines, vec![(error_style, format!("! {m}"))])
             },
             (ChatRole::Assistant, ChatMessageContent::TurnComplete { duration_ms, .. }) => {
                 push_block(
@@ -168,14 +240,15 @@ pub(crate) fn render_claude_pane(
                     vec![
                         (turn_sep_style, "-".repeat(body_width)),
                         (
-                            time_style,
+                            time_style_for(theme),
                             format!("  {:.1}s", *duration_ms as f64 / 1000.0),
                         ),
                     ],
-                );
+                )
             },
-            (ChatRole::User, _) => {},
-        }
+            (ChatRole::User, _) => None,
+        };
+        message_ranges.push(range);
     }
 
     if let Some(partial) = &chat.streaming_text {
@@ -195,32 +268,88 @@ pub(crate) fn render_claude_pane(
         );
     }
 
+    ChatPaneLayout {
+        lines,
+        message_ranges,
+    }
+}
+
+fn time_style_for(theme: &Theme) -> Style {
+    theme.get(crate::theme::scope::CHAT_TIME)
+}
+
+/// Compute the body-only message area inside a claude pane's
+/// rendered region, replicating the same input-height clamping that
+/// [`render_claude_pane`] uses. Returns `None` when the pane is too
+/// short to contain any messages. The returned rect excludes the
+/// header row, the separator row, and the input area.
+pub(crate) fn chat_body_area(pane_area: Rect, input_lines: u16) -> Option<Rect> {
+    if pane_area.height < 4 || pane_area.width < 4 {
+        return None;
+    }
+    let max_input = (pane_area.height / 3).max(1);
+    let input_height = input_lines.clamp(1, max_input);
+    if pane_area.height <= input_height + 2 {
+        return None;
+    }
+    let separator_y = pane_area.y + pane_area.height - input_height - 1;
+    let msg_area = Rect::new(
+        pane_area.x,
+        pane_area.y,
+        pane_area.width,
+        separator_y - pane_area.y,
+    );
+    let body_area = Rect::new(
+        msg_area.x,
+        msg_area.y + 1,
+        msg_area.width,
+        msg_area.height.saturating_sub(1),
+    );
+    if body_area.height == 0 {
+        None
+    } else {
+        Some(body_area)
+    }
+}
+
+/// Map a body-area screen row back to an index into `chat.messages`,
+/// or `None` when the row is outside the body, on a separator
+/// inserted by `push_block`, on the throbber / streaming-text
+/// overlay, or simply blank. Replays the same skip / take pagination
+/// `render_claude_pane` uses so the result tracks what the user
+/// most recently saw.
+pub(crate) fn message_at_screen_row(
+    chat: &ClaudeChatState,
+    body_area: Rect,
+    body_width: usize,
+    theme: &Theme,
+    render_tick: u64,
+    screen_row: u16,
+) -> Option<usize> {
+    if screen_row < body_area.y || screen_row >= body_area.y + body_area.height {
+        return None;
+    }
+    let layout = build_chat_pane_layout(chat, body_width, theme, render_tick);
     let visible_lines = body_area.height as usize;
-    let skip = lines
+    let skip = layout
+        .lines
         .len()
         .saturating_sub(visible_lines + chat.scroll_offset);
     let take = visible_lines;
-    let display: Vec<_> = lines.iter().skip(skip).take(take).collect();
-    let start_row = body_area.y + body_area.height.saturating_sub(display.len() as u16);
-    for (i, (style, text)) in display.iter().enumerate() {
-        let y = start_row + i as u16;
-        let max_w = body_area.width as usize;
-        for (j, ch) in text.chars().take(max_w).enumerate() {
-            let x = body_area.x + j as u16;
-            if let Some(cell) = buf.cell_mut((x, y)) {
-                cell.set_char(ch).set_style(*style);
-            }
-        }
+    let display_count = layout.lines.len().saturating_sub(skip).min(take);
+    let start_row = body_area.y + body_area.height.saturating_sub(display_count as u16);
+    if screen_row < start_row {
+        return None;
     }
-
-    if let Some(editor) = editors.get_mut(chat.input.editor_id) {
-        let input_style = if is_focused {
-            theme.get(crate::theme::scope::UI_TEXT)
-        } else {
-            theme.get(crate::theme::scope::UI_TEXT_MUTED)
-        };
-        render_editor(editor, input_area, input_style, theme, buf, is_focused);
+    let display_idx = (screen_row - start_row) as usize;
+    if display_idx >= display_count {
+        return None;
     }
+    let line_idx = skip + display_idx;
+    layout
+        .message_ranges
+        .iter()
+        .position(|range| matches!(range, Some((s, e)) if line_idx >= *s && line_idx <= *e))
 }
 
 fn format_tool_header(name: &str, input_json: &str) -> String {
