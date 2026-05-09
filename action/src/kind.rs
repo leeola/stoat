@@ -73,6 +73,7 @@ pub enum ActionKind {
     ShellPipe,
     ShellPipeTo,
     ShellInsertOutput,
+    ShellAppendOutput,
     ShellKeepPipe,
     SaveBuffer,
     CloseBuffer,

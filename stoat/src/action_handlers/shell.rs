@@ -11,6 +11,7 @@ pub(crate) enum ShellAction {
     Pipe,
     PipeTo,
     InsertOutput,
+    AppendOutput,
     KeepPipe,
 }
 
@@ -31,6 +32,10 @@ pub(super) fn open_pipe_to(stoat: &mut Stoat) -> UpdateEffect {
 
 pub(super) fn open_insert_output(stoat: &mut Stoat) -> UpdateEffect {
     open_with(stoat, ShellAction::InsertOutput)
+}
+
+pub(super) fn open_append_output(stoat: &mut Stoat) -> UpdateEffect {
+    open_with(stoat, ShellAction::AppendOutput)
 }
 
 pub(super) fn open_keep_pipe(stoat: &mut Stoat) -> UpdateEffect {
@@ -76,6 +81,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
         ShellAction::Pipe => apply_pipe(stoat, &*shell_host, &cmd),
         ShellAction::PipeTo => apply_pipe_to(stoat, &*shell_host, &cmd),
         ShellAction::InsertOutput => apply_insert_output(stoat, &*shell_host, &cmd),
+        ShellAction::AppendOutput => apply_append_output(stoat, &*shell_host, &cmd),
         ShellAction::KeepPipe => apply_keep_pipe(stoat, &*shell_host, &cmd),
     }
     true
@@ -220,6 +226,39 @@ fn apply_insert_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHos
     }
 }
 
+fn apply_append_output(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
+    let output = match shell_host.run(cmd, b"") {
+        Ok(out) => String::from_utf8_lossy(&out.stdout).into_owned(),
+        Err(_) => return,
+    };
+    if output.is_empty() {
+        return;
+    }
+    let Some(editor) = super::focused_editor_mut(stoat) else {
+        return;
+    };
+    let buffer_id = editor.buffer_id;
+    let display_snapshot = editor.display_map.snapshot();
+    let buffer_snapshot = display_snapshot.buffer_snapshot();
+    let mut ends: Vec<usize> = editor
+        .selections
+        .all_anchors()
+        .iter()
+        .map(|sel| buffer_snapshot.resolve_anchor(&sel.end))
+        .collect();
+    ends.sort_unstable();
+    ends.dedup();
+    ends.reverse();
+    let buffer = match stoat.active_workspace().buffers.get(buffer_id) {
+        Some(b) => b,
+        None => return,
+    };
+    let mut guard = buffer.write().expect("buffer poisoned");
+    for end in &ends {
+        guard.edit(*end..*end, &output);
+    }
+}
+
 fn apply_keep_pipe(stoat: &mut Stoat, shell_host: &dyn crate::host::ShellHost, cmd: &str) {
     let Some(editor) = super::focused_editor_mut(stoat) else {
         return;
@@ -341,6 +380,26 @@ mod tests {
         h.type_text("date");
         h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
         assert_eq!(buffer_text(&mut h), "xMon Jan 1y");
+    }
+
+    #[test]
+    fn shell_append_output_appends_after_selection() {
+        let mut h = Stoat::test();
+        let fake = install_fake(&mut h);
+        fake.set_response(
+            "date",
+            ShellOutput {
+                stdout: b"Mon Jan 1".to_vec(),
+                stderr: Vec::new(),
+                exit_code: 0,
+            },
+        );
+        h.seed_focused_buffer("hello world");
+        select_range(&mut h, 0, 5);
+        dispatch(&mut h.stoat, &action::ShellAppendOutput);
+        h.type_text("date");
+        h.stoat.update(Event::Key(keys::key(KeyCode::Enter)));
+        assert_eq!(buffer_text(&mut h), "helloMon Jan 1 world");
     }
 
     #[test]

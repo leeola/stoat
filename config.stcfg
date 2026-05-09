@@ -195,6 +195,7 @@ on key {
         Q -> RecordMacro();
         Alt-| -> ShellPipeTo();
         ! -> ShellInsertOutput();
+        Alt-! -> ShellAppendOutput();
         $ -> ShellKeepPipe();
         Alt-o -> ExpandSelection();
         Alt-Up -> ExpandSelection();

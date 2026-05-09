@@ -581,6 +581,16 @@ define_action!(
 );
 
 define_action!(
+    ShellAppendOutputDef,
+    ShellAppendOutput,
+    "ShellAppendOutput",
+    ActionKind::ShellAppendOutput,
+    "append shell command output after every selection",
+    "Open an input modal for a shell command. On submit, run the command once with empty stdin and append its stdout after the end of every selection.",
+    ActionPriority::Common
+);
+
+define_action!(
     ShellKeepPipeDef,
     ShellKeepPipe,
     "ShellKeepPipe",

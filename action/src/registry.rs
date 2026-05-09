@@ -38,11 +38,11 @@ use crate::{
             RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
             SearchPrev, SelectAll, SelectLineBelow, SelectNextSibling, SelectPrevSibling,
             SelectRegister, SelectTextobjectAround, SelectTextobjectInner, SetMark,
-            ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo, ShrinkSelection,
-            SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace,
-            SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar,
-            ToggleComments, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
-            YankToClipboard,
+            ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
+            ShrinkSelection, SplitSelection, SplitSelectionOnNewline, SurroundAdd, SurroundDelete,
+            SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase, TillNextChar,
+            TillPrevChar, ToggleComments, TrimSelections, Undo, UnindentSelection, Yank,
+            YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -314,6 +314,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ShellPipe::DEF, |_| Ok(Box::new(ShellPipe)));
     add(ShellPipeTo::DEF, |_| Ok(Box::new(ShellPipeTo)));
     add(ShellInsertOutput::DEF, |_| Ok(Box::new(ShellInsertOutput)));
+    add(ShellAppendOutput::DEF, |_| Ok(Box::new(ShellAppendOutput)));
     add(ShellKeepPipe::DEF, |_| Ok(Box::new(ShellKeepPipe)));
     add(SaveBuffer::DEF, |_| Ok(Box::new(SaveBuffer)));
     add(CloseBuffer::DEF, |_| Ok(Box::new(CloseBuffer)));
@@ -883,7 +884,7 @@ mod tests {
         // + 1 SplitSelection.
         // + 2 KeepSelections / RemoveSelections.
         // + 2 RecordMacro / ReplayMacro.
-        // + 4 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellKeepPipe.
+        // + 5 ShellPipe / ShellPipeTo / ShellInsertOutput / ShellAppendOutput / ShellKeepPipe.
         // + 1 SaveBuffer.
         // + 1 CloseBuffer.
         // + 1 AcceptCompletion.
@@ -930,7 +931,7 @@ mod tests {
         // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
         //   ClaudeToggleToolCardExpand).
         // + 1 ClaudeJumpToFocusedCard.
-        assert_eq!(all().count(), 270);
+        assert_eq!(all().count(), 271);
     }
 
     #[test]
