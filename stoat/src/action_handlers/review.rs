@@ -5,7 +5,7 @@ use crate::{
     host::WatchToken,
     pane::View,
     review::ReviewFileInput,
-    review_session::{ReviewSession, ReviewSource, ReviewViewState},
+    review_session::{ReviewProgress, ReviewSession, ReviewSource, ReviewViewState},
     workspace::Workspace,
 };
 use ratatui::{
@@ -283,10 +283,7 @@ pub(super) fn review_step(stoat: &mut Stoat, step: ReviewStep) -> UpdateEffect {
 }
 
 pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
-    use crate::{
-        badge::{Anchor, Badge, BadgeSource, BadgeState},
-        review_session::ChunkStatus,
-    };
+    use crate::review_session::ChunkStatus;
 
     let ws = stoat.active_workspace_mut();
     let Some(session) = ws.review.as_mut() else {
@@ -302,40 +299,53 @@ pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
         ReviewMark::Skip => session.set_status(id, ChunkStatus::Skipped),
     }
     let editor_id = session.view_editor;
-    let complete = session.is_complete();
     let progress = session.progress();
     sync_review_view_and_scroll(ws, editor_id, None);
-
-    let existing = ws.badges.find_by_source(BadgeSource::Review);
-    if complete {
-        let label = format!("review complete: {} chunks", progress.total);
-        let detail = format!(
-            "{} staged · {} unstaged · {} skipped",
-            progress.staged, progress.unstaged, progress.skipped
-        );
-        match existing {
-            Some(bid) => {
-                if let Some(badge) = ws.badges.get_mut(bid) {
-                    badge.state = BadgeState::Complete;
-                    badge.label = label;
-                    badge.detail = Some(detail);
-                }
-            },
-            None => {
-                ws.badges.insert(Badge {
-                    source: BadgeSource::Review,
-                    anchor: Anchor::BottomRight,
-                    state: BadgeState::Complete,
-                    label,
-                    detail: Some(detail),
-                });
-            },
-        }
-    } else if let Some(bid) = existing {
-        ws.badges.remove(bid);
-    }
+    emit_review_progress_badge(ws, &progress);
 
     UpdateEffect::Redraw
+}
+
+/// Insert or update the [`crate::badge::BadgeSource::Review`] badge to
+/// match `progress`. Inserts a [`crate::badge::BadgeState::Complete`]
+/// badge with running counters when the review is complete; removes any
+/// existing review badge otherwise. Idempotent: callers run this on
+/// every progress-affecting transition, including external-edit
+/// refreshes, so the badge tracks the latest counters.
+fn emit_review_progress_badge(ws: &mut Workspace, progress: &ReviewProgress) {
+    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
+
+    let existing = ws.badges.find_by_source(BadgeSource::Review);
+    if !progress.is_complete() {
+        if let Some(bid) = existing {
+            ws.badges.remove(bid);
+        }
+        return;
+    }
+
+    let label = format!("review complete: {} chunks", progress.total);
+    let detail = format!(
+        "{} staged · {} unstaged · {} skipped",
+        progress.staged, progress.unstaged, progress.skipped
+    );
+    match existing {
+        Some(bid) => {
+            if let Some(badge) = ws.badges.get_mut(bid) {
+                badge.state = BadgeState::Complete;
+                badge.label = label;
+                badge.detail = Some(detail);
+            }
+        },
+        None => {
+            ws.badges.insert(Badge {
+                source: BadgeSource::Review,
+                anchor: Anchor::BottomRight,
+                state: BadgeState::Complete,
+                label,
+                detail: Some(detail),
+            });
+        },
+    }
 }
 
 /// Refresh the editor's review view cache from the session and, if a chunk
@@ -478,13 +488,14 @@ pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffe
         return effect;
     };
     let editor_id = session.view_editor;
-    let Some(file_index) = session.files.iter().position(|f| f.path == path) else {
-        return effect;
-    };
-    let Some(chunk_id) = session.chunk_containing_buffer_byte(file_index, 0) else {
-        return effect;
-    };
-    sync_review_view_and_scroll(ws, editor_id, Some(chunk_id));
+    let progress = session.progress();
+    let chunk_id = session
+        .files
+        .iter()
+        .position(|f| f.path == path)
+        .and_then(|file_index| session.chunk_containing_buffer_byte(file_index, 0));
+    sync_review_view_and_scroll(ws, editor_id, chunk_id);
+    emit_review_progress_badge(ws, &progress);
     UpdateEffect::Redraw
 }
 

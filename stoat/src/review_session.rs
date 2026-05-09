@@ -131,6 +131,14 @@ pub(crate) struct ReviewProgress {
     pub current_index: Option<usize>,
 }
 
+impl ReviewProgress {
+    /// True when the session has at least one chunk and every chunk
+    /// has been decided (staged, unstaged, or skipped).
+    pub(crate) fn is_complete(&self) -> bool {
+        self.total > 0 && self.pending == 0
+    }
+}
+
 /// UI-facing cache derived from a [`ReviewSession`]. Attached to an editor
 /// so `render_review` can paint without walking the session on every frame,
 /// and so navigation handlers can map a chunk id to a display row.
