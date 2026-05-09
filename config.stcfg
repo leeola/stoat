@@ -215,6 +215,7 @@ on key {
         d -> DeleteSelection();
         u -> Undo();
         U -> Redo();
+        Ctrl-s -> CommitUndoCheckpoint();
         G -> GotoLineNumber();
         > -> IndentSelection();
         < -> UnindentSelection();
@@ -428,6 +429,7 @@ on key {
         Escape -> SetMode(normal);
         Enter -> ClaudeSubmit();
         Ctrl-r -> InsertRegister();
+        Ctrl-s -> CommitUndoCheckpoint();
     }
     mode == prompt && finder_open {
         Up -> FileFinderSelectPrev();

@@ -183,6 +183,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::DeleteSelection => movement::delete_selection(stoat),
         ActionKind::Undo => movement::undo(stoat),
         ActionKind::Redo => movement::redo(stoat),
+        ActionKind::CommitUndoCheckpoint => movement::commit_undo_checkpoint(stoat),
         ActionKind::IndentSelection => movement::indent_selection(stoat),
         ActionKind::UnindentSelection => movement::unindent_selection(stoat),
         ActionKind::ToggleComments => movement::toggle_comments(stoat),

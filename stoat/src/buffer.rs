@@ -27,6 +27,10 @@ pub struct TextBuffer {
     /// undo map, which is how workspace save/restore preserves selections and
     /// undo stack across sessions.
     ops: Vec<BufferOp>,
+    next_checkpoint_id: u32,
+    /// Named markers on the op log placed by `commit_undo_checkpoint`. Read by
+    /// checkpoint-navigation actions; never mutated by `edit` / `undo` / `redo`.
+    checkpoints: Vec<Checkpoint>,
 }
 
 /// A single replayable mutation on a [`TextBuffer`]. Edits record the `(range,
@@ -45,6 +49,21 @@ pub enum BufferOp {
 pub struct BufferHistory {
     pub ops: Vec<BufferOp>,
     pub dirty: bool,
+}
+
+/// Stable identifier for a [`Checkpoint`] within a single [`TextBuffer`].
+/// Monotonically increasing per buffer; not unique across buffers.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct CheckpointId(pub u32);
+
+/// Named marker on a [`TextBuffer`]'s op log. `op_index` is the value of
+/// `ops.len()` at the time the checkpoint was placed, so checkpoints partition
+/// the linear undo timeline into reachable navigation targets.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Checkpoint {
+    pub id: CheckpointId,
+    pub op_index: usize,
+    pub label: Option<String>,
 }
 
 #[derive(Clone)]
@@ -93,6 +112,8 @@ impl TextBuffer {
             edit_history: Vec::new(),
             redo_history: Vec::new(),
             ops: Vec::new(),
+            next_checkpoint_id: 0,
+            checkpoints: Vec::new(),
         }
     }
 
@@ -357,6 +378,25 @@ impl TextBuffer {
         self.apply_undo_toggle(edit_timestamp, BufferOp::Redo);
         self.edit_history.push(edit_timestamp);
         true
+    }
+
+    /// Place a named marker at the current op-log position. The returned
+    /// [`CheckpointId`] is the navigation target consumed by checkpoint
+    /// navigation actions; pass [`None`] for `label` for unlabeled markers
+    /// (the default `commit_undo_checkpoint` behavior).
+    pub fn checkpoint(&mut self, label: Option<String>) -> CheckpointId {
+        let id = CheckpointId(self.next_checkpoint_id);
+        self.next_checkpoint_id += 1;
+        self.checkpoints.push(Checkpoint {
+            id,
+            op_index: self.ops.len(),
+            label,
+        });
+        id
+    }
+
+    pub fn checkpoints(&self) -> &[Checkpoint] {
+        &self.checkpoints
     }
 
     fn apply_undo_toggle(&mut self, edit_timestamp: u64, op: BufferOp) {
@@ -1001,5 +1041,48 @@ mod tests {
         assert_eq!(b.snapshot.visible_text.to_string(), "aX");
         assert!(!b.redo(), "redo stack cleared by new edit");
         assert_eq!(b.snapshot.visible_text.to_string(), "aX");
+    }
+
+    #[test]
+    fn checkpoint_records_initial_op_index() {
+        let mut b = TextBuffer::new(BufferId::new(0));
+        let id = b.checkpoint(None);
+        let cps = b.checkpoints();
+        assert_eq!(cps.len(), 1);
+        assert_eq!(cps[0].id, id);
+        assert_eq!(cps[0].op_index, 0);
+        assert_eq!(cps[0].label, None);
+    }
+
+    #[test]
+    fn checkpoint_records_op_index_after_edits() {
+        let mut b = buf("hi");
+        b.edit(2..2, "!");
+        b.edit(0..0, "X");
+        b.checkpoint(None);
+        assert_eq!(b.checkpoints()[0].op_index, 3);
+    }
+
+    #[test]
+    fn checkpoint_ids_are_monotonic() {
+        let mut b = buf("hello");
+        let a = b.checkpoint(None);
+        b.edit(0..0, "X");
+        let c = b.checkpoint(None);
+        b.edit(0..0, "Y");
+        let d = b.checkpoint(None);
+        let ids: Vec<_> = b.checkpoints().iter().map(|cp| cp.id).collect();
+        assert_eq!(ids, vec![a, c, d]);
+        assert!(a.0 < c.0 && c.0 < d.0);
+    }
+
+    #[test]
+    fn checkpoint_preserves_label() {
+        let mut b = buf("hello");
+        b.checkpoint(Some("before refactor".to_string()));
+        b.checkpoint(None);
+        let cps = b.checkpoints();
+        assert_eq!(cps[0].label.as_deref(), Some("before refactor"));
+        assert_eq!(cps[1].label, None);
     }
 }

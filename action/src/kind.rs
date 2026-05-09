@@ -152,6 +152,7 @@ pub enum ActionKind {
     DeleteSelection,
     Undo,
     Redo,
+    CommitUndoCheckpoint,
     IndentSelection,
     UnindentSelection,
     ToggleComments,

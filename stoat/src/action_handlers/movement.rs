@@ -1285,6 +1285,20 @@ pub(super) fn redo(stoat: &mut Stoat) -> UpdateEffect {
     apply_buffer_history(stoat, count, |buf| buf.redo())
 }
 
+pub(super) fn commit_undo_checkpoint(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return UpdateEffect::None,
+    };
+    let buffer_id = ws.editors.get(editor_id).expect("editor").buffer_id;
+    let buffer = ws.buffers.get(buffer_id).expect("buffer");
+    let mut guard = buffer.write().expect("poisoned");
+    guard.checkpoint(None);
+    UpdateEffect::None
+}
+
 fn apply_buffer_history<F>(stoat: &mut Stoat, count: u32, op: F) -> UpdateEffect
 where
     F: Fn(&mut crate::buffer::TextBuffer) -> bool,

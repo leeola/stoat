@@ -13,8 +13,8 @@ use crate::{
         editor::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
             AlignViewBottom, AlignViewCenter, AlignViewTop, CloseBuffer, CollapseSelection,
-            Decrement, DeleteSelection, ExpandSelection, ExtendDown, ExtendFindNextChar,
-            ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
+            CommitUndoCheckpoint, Decrement, DeleteSelection, ExpandSelection, ExtendDown,
+            ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
             ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
             ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
             ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
@@ -428,6 +428,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DeleteSelection::DEF, |_| Ok(Box::new(DeleteSelection)));
     add(Undo::DEF, |_| Ok(Box::new(Undo)));
     add(Redo::DEF, |_| Ok(Box::new(Redo)));
+    add(CommitUndoCheckpoint::DEF, |_| {
+        Ok(Box::new(CommitUndoCheckpoint))
+    });
     add(IndentSelection::DEF, |_| Ok(Box::new(IndentSelection)));
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
@@ -906,7 +909,8 @@ mod tests {
         // + 4 YankToClipboard, YankMainToClipboard, PasteClipboardAfter, PasteClipboardBefore.
         // + 1 SelectRegister.
         // + 1 InsertRegister.
-        assert_eq!(all().count(), 265);
+        // + 1 CommitUndoCheckpoint.
+        assert_eq!(all().count(), 266);
     }
 
     #[test]

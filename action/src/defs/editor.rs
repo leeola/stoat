@@ -91,6 +91,16 @@ define_action!(
 );
 
 define_action!(
+    CommitUndoCheckpointDef,
+    CommitUndoCheckpoint,
+    "CommitUndoCheckpoint",
+    ActionKind::CommitUndoCheckpoint,
+    "place undo checkpoint",
+    "Place a named checkpoint marker at the current position on the focused buffer's op log. Subsequent checkpoint-navigation actions can target this marker. Stoat treats every edit as its own undo unit, so this records a label rather than committing in-progress changes.",
+    ActionPriority::Rare
+);
+
+define_action!(
     IndentSelectionDef,
     IndentSelection,
     "IndentSelection",
