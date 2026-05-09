@@ -6,7 +6,7 @@ use crate::{
     workspace::Workspace,
 };
 use nucleo::{
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
+    pattern::{CaseMatching, Normalization, Pattern},
     Matcher, Utf32Str,
 };
 use std::sync::{Mutex, OnceLock};
@@ -370,18 +370,12 @@ pub(crate) fn refilter(
     let mut substring: Vec<&'static registry::RegistryEntry> = Vec::new();
     let mut fuzzy: Vec<&'static registry::RegistryEntry> = Vec::new();
 
-    let fuzzy_atom = (!needle.is_empty()).then(|| {
-        Atom::new(
-            input,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-            false,
-        )
-    });
+    let pattern = (!input.is_empty())
+        .then(|| Pattern::parse(input, CaseMatching::Smart, Normalization::Smart))
+        .filter(|p| !p.atoms.is_empty());
 
     let mut hay_buf: Vec<char> = Vec::new();
-    let mut matcher_guard = fuzzy_atom
+    let mut matcher_guard = pattern
         .as_ref()
         .map(|_| fuzzy_matcher().lock().expect("fuzzy matcher poisoned"));
 
@@ -392,7 +386,7 @@ pub(crate) fn refilter(
         if scope == PaletteScope::Active && !action_is_available(entry.def.kind(), availability) {
             continue;
         }
-        if needle.is_empty() {
+        if pattern.is_none() {
             prefix.push(entry);
             continue;
         }
@@ -401,9 +395,9 @@ pub(crate) fn refilter(
             prefix.push(entry);
         } else if name_lc.contains(&needle) {
             substring.push(entry);
-        } else if let (Some(atom), Some(matcher)) = (&fuzzy_atom, matcher_guard.as_deref_mut()) {
+        } else if let (Some(p), Some(matcher)) = (&pattern, matcher_guard.as_deref_mut()) {
             let hay = Utf32Str::new(entry.def.name(), &mut hay_buf);
-            if atom.score(hay, matcher).is_some() {
+            if p.score(hay, matcher).is_some() {
                 fuzzy.push(entry);
             }
         }
@@ -516,6 +510,26 @@ mod tests {
         let fuzzy = pos_in(&listed, "RunInterrupt");
         assert!(prefix < substring, "prefix ranks above substring");
         assert!(substring < fuzzy, "substring ranks above fuzzy");
+    }
+
+    #[test]
+    fn multi_token_query_matches_in_either_order() {
+        // `OpenFile` contains both `open` and `file` tokens. Pattern
+        // splits on whitespace, so the order of tokens does not change
+        // the hit set.
+        let forward = names_for("open file");
+        let reverse = names_for("file open");
+        assert!(forward.contains(&"OpenFile"));
+        assert!(reverse.contains(&"OpenFile"));
+    }
+
+    #[test]
+    fn whitespace_only_query_lists_all_actions() {
+        // Whitespace-only query has no atoms; falls through to the
+        // empty-needle path that lists everything.
+        let blank = names_for("   ");
+        let empty = names_for("");
+        assert_eq!(blank, empty);
     }
 
     #[test]

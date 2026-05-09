@@ -4,7 +4,7 @@ use crate::{
     render::layout::split_pane_status,
 };
 use nucleo::{
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
+    pattern::{CaseMatching, Normalization, Pattern},
     Matcher, Utf32Str,
 };
 use ratatui::{
@@ -104,16 +104,10 @@ pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
     let inner = block.inner(popup_area);
     block.render(popup_area, buf);
 
-    let fuzzy_atom = (!prefix.is_empty()).then(|| {
-        Atom::new(
-            &prefix,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-            false,
-        )
-    });
-    let mut matcher_guard = fuzzy_atom
+    let pattern = (!prefix.is_empty())
+        .then(|| Pattern::parse(&prefix, CaseMatching::Smart, Normalization::Smart))
+        .filter(|p| !p.atoms.is_empty());
+    let mut matcher_guard = pattern
         .as_ref()
         .map(|_| fuzzy_matcher().lock().expect("fuzzy matcher poisoned"));
 
@@ -133,9 +127,9 @@ pub(crate) fn render_completion(stoat: &mut Stoat, buf: &mut Buffer) {
         };
 
         indices_buf.clear();
-        if let (Some(atom), Some(matcher)) = (&fuzzy_atom, matcher_guard.as_deref_mut()) {
+        if let (Some(p), Some(matcher)) = (&pattern, matcher_guard.as_deref_mut()) {
             let hay = Utf32Str::new(label, &mut hay_buf);
-            atom.indices(hay, matcher, &mut indices_buf);
+            p.indices(hay, matcher, &mut indices_buf);
         }
 
         for (col_idx, ch) in label.chars().enumerate() {

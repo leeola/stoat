@@ -7,7 +7,7 @@ use crate::{
     workspace::Workspace,
 };
 use nucleo::{
-    pattern::{Atom, AtomKind, CaseMatching, Normalization},
+    pattern::{CaseMatching, Normalization, Pattern},
     Matcher, Utf32Str,
 };
 use std::{
@@ -421,23 +421,17 @@ pub(crate) fn refilter(
     let mut substring: Vec<(usize, String)> = Vec::new();
     let mut fuzzy: Vec<(usize, String)> = Vec::new();
 
-    let fuzzy_atom = (!needle.is_empty()).then(|| {
-        Atom::new(
-            text,
-            CaseMatching::Smart,
-            Normalization::Smart,
-            AtomKind::Fuzzy,
-            false,
-        )
-    });
+    let pattern = (!text.is_empty())
+        .then(|| Pattern::parse(text, CaseMatching::Smart, Normalization::Smart))
+        .filter(|p| !p.atoms.is_empty());
     let mut hay_buf: Vec<char> = Vec::new();
-    let mut matcher_guard = fuzzy_atom
+    let mut matcher_guard = pattern
         .as_ref()
         .map(|_| fuzzy_matcher().lock().expect("fuzzy matcher poisoned"));
 
     for (idx, path) in base.iter().enumerate() {
         let display = display_for(path, git_root);
-        if needle.is_empty() {
+        if pattern.is_none() {
             prefix.push((idx, display));
             continue;
         }
@@ -446,9 +440,9 @@ pub(crate) fn refilter(
             prefix.push((idx, display));
         } else if display_lc.contains(&needle) {
             substring.push((idx, display));
-        } else if let (Some(atom), Some(matcher)) = (&fuzzy_atom, matcher_guard.as_deref_mut()) {
+        } else if let (Some(p), Some(matcher)) = (&pattern, matcher_guard.as_deref_mut()) {
             let hay = Utf32Str::new(&display, &mut hay_buf);
-            if atom.score(hay, matcher).is_some() {
+            if p.score(hay, matcher).is_some() {
                 fuzzy.push((idx, display));
             }
         }
@@ -544,6 +538,32 @@ mod tests {
         let all = vec![p("/r/Foo.rs"), p("/r/bar.rs")];
         let listed = names("foo", FinderScope::All, &all, &[], &[], &git_root);
         assert_eq!(listed, vec!["Foo.rs"]);
+    }
+
+    #[test]
+    fn trailing_space_does_not_eliminate_matches() {
+        let git_root = p("/r");
+        let all = vec![p("/r/foo.rs"), p("/r/bar.rs")];
+        let listed = names(".rs ", FinderScope::All, &all, &[], &[], &git_root);
+        assert_eq!(listed, vec!["bar.rs", "foo.rs"]);
+    }
+
+    #[test]
+    fn multi_token_query_matches_in_either_order() {
+        let git_root = p("/r");
+        let all = vec![p("/r/src/foo.rs"), p("/r/src/bar.rs")];
+        let forward = names(".rs foo", FinderScope::All, &all, &[], &[], &git_root);
+        let reverse = names("foo .rs", FinderScope::All, &all, &[], &[], &git_root);
+        assert_eq!(forward, vec!["src/foo.rs"]);
+        assert_eq!(forward, reverse);
+    }
+
+    #[test]
+    fn whitespace_only_query_lists_all_paths() {
+        let git_root = p("/r");
+        let all = vec![p("/r/b.rs"), p("/r/a.rs")];
+        let listed = names("   ", FinderScope::All, &all, &[], &[], &git_root);
+        assert_eq!(listed, vec!["a.rs", "b.rs"]);
     }
 
     #[test]
