@@ -934,7 +934,11 @@ fn build_review_blocks(session: &ReviewSession, view: &ReviewViewState) -> Vec<B
 
 #[cfg(test)]
 mod tests {
-    use crate::{diff_cache::DiffCacheKey, test_harness::TestHarness};
+    use crate::{
+        app::REVIEW_EXTERNAL_EDIT_DEBOUNCE, diff_cache::DiffCacheKey, host::FsEventKind,
+        review_session::ChunkStatus, test_harness::TestHarness,
+    };
+    use std::path::PathBuf;
 
     #[test]
     fn install_review_session_populates_diff_cache() {
@@ -952,5 +956,181 @@ mod tests {
         let mut guard = cache.lock().expect("diff_cache poisoned");
         let hunks = guard.lookup(&key).expect("cache hit after install");
         assert!(!hunks.is_empty(), "cached hunks should not be empty");
+    }
+
+    /// (a) An external edit that introduces a second hunk grows
+    /// `ReviewProgress.total` from 1 to 2 and parks the chunk
+    /// cursor on the chunk that contains the smallest changed
+    /// buffer offset.
+    #[test]
+    fn external_edit_adds_new_chunk_grows_progress() {
+        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
+        h.stoat.open_review();
+        h.settle();
+
+        assert_review_total(&h, 1);
+
+        h.external_edit("a.rs", "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n");
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert_review_total(&h, 2);
+        let chunk_id = h.current_review_chunk_id();
+        assert_eq!(
+            h.with_review(|s| s.chunk(chunk_id).unwrap().file_index),
+            0,
+            "cursor parks on the chunk in the touched file",
+        );
+    }
+
+    /// (b) An external edit that shifts a previously-staged chunk
+    /// to a different `base_line_range` produces a new chunk whose
+    /// `ChunkIdentity` does not match the carried key, so the
+    /// status defaults to `Pending` rather than carrying.
+    #[test]
+    fn external_edit_drops_staged_status_on_identity_mismatch() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\n", "Y\n")]);
+        h.stoat.open_review();
+        h.settle();
+        h.set_review_status(0, ChunkStatus::Staged);
+
+        h.external_edit("a.rs", "x\nZ\n");
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        let surviving = h.current_review_chunk_id();
+        assert_eq!(
+            h.chunk_status(surviving),
+            ChunkStatus::Pending,
+            "identity mismatch must drop the carried Staged status",
+        );
+    }
+
+    /// (c) A watcher event for a path that is not in the session
+    /// is a no-op: chunks, cursor, and review badges all stay put.
+    #[test]
+    fn external_edit_off_session_path_is_noop() {
+        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
+        h.stoat.open_review();
+        h.settle();
+
+        let before_total = h.with_review(|s| s.progress().total);
+        let before_cursor = h.current_review_chunk_id();
+        let before_version = h.with_review(|s| s.version);
+
+        h.fake_fs_watcher()
+            .inject(PathBuf::from("/work/b.rs"), FsEventKind::Modified);
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert_eq!(h.with_review(|s| s.progress().total), before_total);
+        assert_eq!(h.current_review_chunk_id(), before_cursor);
+        assert_eq!(
+            h.with_review(|s| s.version),
+            before_version,
+            "off-session path must not bump the session version",
+        );
+        assert!(
+            h.stoat
+                .active_workspace()
+                .badges
+                .find_by_source(crate::badge::BadgeSource::Review)
+                .is_none(),
+            "no badge for a no-op event",
+        );
+    }
+
+    /// (d) Working-tree review opens register one watch token per
+    /// file in the session, and `CloseReview` releases them all.
+    #[test]
+    fn working_tree_watch_tokens_lifecycle() {
+        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n";
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
+        h.stoat.open_review();
+        h.settle();
+
+        assert_eq!(
+            h.fake_fs_watcher().watched_paths(),
+            vec![PathBuf::from("/work/a.rs")],
+            "watch token registered for the session file",
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::CloseReview);
+
+        assert!(
+            h.fake_fs_watcher().watched_paths().is_empty(),
+            "CloseReview must release every watch token",
+        );
+    }
+
+    /// (e) `InMemory`-source sessions never start the watcher, so
+    /// fake-fs writes do not flow into them.
+    #[test]
+    fn in_memory_session_does_not_watch() {
+        use crate::host::FsHost;
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.open_review_from_texts(&[("a.txt", "x\n", "Y\n")]);
+        h.settle();
+
+        assert!(
+            h.fake_fs_watcher().watched_paths().is_empty(),
+            "InMemory source must not register watches",
+        );
+
+        let before_version = h.with_review(|s| s.version);
+        h.fake_fs()
+            .write(std::path::Path::new("a.txt"), b"Z\n")
+            .expect("FakeFs::write");
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert_eq!(
+            h.with_review(|s| s.version),
+            before_version,
+            "unwatched write must not refresh the session",
+        );
+    }
+
+    /// (f) Three rapid writes within the debounce window collapse
+    /// into one refresh; the resulting session reflects the
+    /// most-recent write only.
+    #[test]
+    fn external_edit_burst_dispatches_once() {
+        let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        let buffer = "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
+        h.stoat.open_review();
+        h.settle();
+
+        h.external_edit("a.rs", "A1\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.external_edit("a.rs", "A2\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.external_edit("a.rs", "A3\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        let buffer_text = h.with_review(|s| s.files[0].buffer_text.as_str().to_string());
+        assert_eq!(
+            buffer_text, "A3\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "post-burst session must reflect the latest write only",
+        );
+        assert_eq!(
+            h.with_review(|s| s.order.len()),
+            1,
+            "single coalesced refresh produces one chunk, not three",
+        );
+    }
+
+    fn assert_review_total(h: &TestHarness, expected: usize) {
+        let progress = h.with_review(|s| s.progress());
+        assert_eq!(
+            progress.total, expected,
+            "progress mismatch: {progress:?} expected total {expected}",
+        );
     }
 }
