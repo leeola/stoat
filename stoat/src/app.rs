@@ -88,6 +88,10 @@ pub struct Stoat {
     /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
     /// cancel.
     pub(crate) jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
+    /// Active diagnostics picker modal (`space l d`). `Some` while
+    /// the modal is open; cleared on Esc, on selection (after
+    /// jumping the focused editor's cursor), and on Ctrl-C.
+    pub(crate) diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
     /// Modal listing the active claude chat's per-message checkpoints;
     /// opened by [`stoat_action::OpenCheckpointPicker`]. Selecting an
     /// entry routes its sha to [`crate::host::GitRepo::restore_tree`]
@@ -602,6 +606,7 @@ impl Stoat {
             permission_prompt_tx,
             permission_prompt_rx,
             jumplist_picker: None,
+            diagnostics_picker: None,
             pending_checkpoint_picker: None,
             global_search_input: None,
             global_search: None,
@@ -1571,6 +1576,10 @@ impl Stoat {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
             }
+            if let Some(picker) = self.diagnostics_picker.take() {
+                self.mode = picker.previous_mode;
+                return UpdateEffect::Redraw;
+            }
             if self.pending_checkpoint_picker.take().is_some() {
                 return UpdateEffect::Redraw;
             }
@@ -1633,6 +1642,10 @@ impl Stoat {
 
         if self.jumplist_picker.is_some() {
             return self.dispatch_jumplist_picker_key(key);
+        }
+
+        if self.diagnostics_picker.is_some() {
+            return self.dispatch_diagnostics_picker_key(key);
         }
 
         if self.pending_checkpoint_picker.is_some() {
@@ -2970,6 +2983,62 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
         }
+    }
+
+    fn dispatch_diagnostics_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        use crate::diagnostics_picker::PickerOutcome;
+        let outcome = match self.diagnostics_picker.as_mut() {
+            Some(picker) => picker.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            PickerOutcome::None => UpdateEffect::Redraw,
+            PickerOutcome::Close => {
+                if let Some(picker) = self.diagnostics_picker.take() {
+                    self.mode = picker.previous_mode;
+                }
+                UpdateEffect::Redraw
+            },
+            PickerOutcome::Select(idx) => {
+                let Some(picker) = self.diagnostics_picker.take() else {
+                    return UpdateEffect::None;
+                };
+                let target_offset = match picker.entries().get(idx) {
+                    Some(entry) => entry.offset,
+                    None => return UpdateEffect::Redraw,
+                };
+                self.mode = picker.previous_mode;
+                self.collapse_focused_cursor_to(target_offset);
+                UpdateEffect::Redraw
+            },
+        }
+    }
+
+    /// Collapse the focused editor's primary selection at
+    /// `offset`. Used by non-jumplist navigation flows (e.g. the
+    /// diagnostics picker) that need to move the cursor without
+    /// touching jumplist state.
+    fn collapse_focused_cursor_to(&mut self, offset: usize) {
+        let ws = self.active_workspace_mut();
+        let editor_id = match ws.focus {
+            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+                View::Editor(id) => id,
+                _ => return,
+            },
+            FocusTarget::Dock(_) => return,
+        };
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let anchor = buf_snap.anchor_at(offset, Bias::Right);
+        editor.selections.transform(buf_snap, |s| {
+            let mut new = s.clone();
+            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            new
+        });
     }
 
     fn dispatch_checkpoint_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {

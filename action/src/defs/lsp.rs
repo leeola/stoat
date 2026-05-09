@@ -25,6 +25,19 @@ define_action!(
 );
 
 define_action!(
+    OpenDiagnosticsPickerDef,
+    OpenDiagnosticsPicker,
+    "OpenDiagnosticsPicker",
+    ActionKind::OpenDiagnosticsPicker,
+    "open the diagnostics picker for the focused buffer",
+    "Open a modal listing every diagnostic in the focused buffer's diagnostic set. \
+     Each row shows the diagnostic's line:column, severity glyph, and a message snippet; \
+     selecting an entry collapses the cursor at that diagnostic's range start. \
+     No-op when the focused pane is not an editor or the buffer has no diagnostics.",
+    ActionPriority::Common
+);
+
+define_action!(
     GotoDefinitionDef,
     GotoDefinition,
     "GotoDefinition",

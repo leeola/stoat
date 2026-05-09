@@ -6,6 +6,7 @@ pub(crate) mod command_palette;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
+pub(crate) mod diagnostics_picker;
 pub(crate) mod dock;
 pub(crate) mod editor;
 pub(crate) mod file_finder;
@@ -381,6 +382,17 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "jumplist",
+            &bindings,
+            None,
+            &stoat.theme,
+            hints_overlay_area(size),
+            buf,
+        );
+    } else if let Some(picker) = &stoat.diagnostics_picker {
+        diagnostics_picker::render_diagnostics_picker(picker, &stoat.theme, size, buf);
+        let bindings = picker.hint_bindings();
+        hints::render_hints(
+            "diagnostics",
             &bindings,
             None,
             &stoat.theme,

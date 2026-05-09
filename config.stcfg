@@ -522,6 +522,7 @@ on key {
         r -> [RenameSymbol(), SetMode(normal)];
         s -> [OpenSymbolPicker(), SetMode(normal)];
         S -> OpenWorkspaceSymbolPicker();
+        d -> [OpenDiagnosticsPicker(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

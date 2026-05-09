@@ -9,6 +9,7 @@ pub mod command_palette;
 mod commit_list;
 pub mod completion;
 pub mod diagnostics;
+pub(crate) mod diagnostics_picker;
 pub mod diff;
 pub mod diff_cache;
 pub mod diff_map;
