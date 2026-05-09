@@ -14,7 +14,11 @@ use std::{
 /// finder. Parsed with gitignore semantics; treated as an unconditional
 /// hard filter so per-repo `.stoatignore` negations cannot re-introduce
 /// the listed paths.
-pub(crate) const DEFAULT_STOATIGNORE: &str = include_str!("../../.stoatignore");
+///
+/// Sourced from `stoatignore` at the repo root (no leading dot) so the
+/// developer can keep a personal `.stoatignore` in this checkout
+/// without colliding with the build artifact.
+pub(crate) const DEFAULT_STOATIGNORE: &str = include_str!("../../stoatignore");
 
 #[derive(Clone, Copy, Debug)]
 pub struct FsMetadata {
@@ -137,9 +141,9 @@ pub(crate) fn build_default_ignore(root: &Path) -> Gitignore {
     for line in DEFAULT_STOATIGNORE.lines() {
         builder
             .add_line(None, line)
-            .expect("default .stoatignore parses");
+            .expect("default stoatignore parses");
     }
-    builder.build().expect("default .stoatignore builds")
+    builder.build().expect("default stoatignore builds")
 }
 
 fn walk_dir(
