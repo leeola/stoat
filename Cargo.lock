@@ -2479,15 +2479,21 @@ name = "stoat_bin"
 version = "0.1.0"
 dependencies = [
  "blake3",
+ "bytes",
  "clap",
+ "futures",
+ "git2",
+ "insta",
  "snafu",
  "stoat",
  "stoat_agent_claude_code",
+ "stoat_host",
  "stoat_language",
  "stoat_scheduler",
  "tempfile",
  "time",
  "tokio",
+ "tokio-util",
  "tracing",
  "viewport",
 ]

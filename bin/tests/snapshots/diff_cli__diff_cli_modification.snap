@@ -1,0 +1,8 @@
+---
+source: bin/tests/diff_cli.rs
+expression: "String::from_utf8(out).unwrap()"
+---
+--- a.rs
+@@
+-fn a() { 1 }
++fn a() { 2 }

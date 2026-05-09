@@ -1,5 +1,5 @@
 use clap::Args;
-use snafu::{whatever, ResultExt, Whatever};
+use snafu::{whatever, FromString, ResultExt, Whatever};
 use std::{
     io::{self, IsTerminal, Write},
     path::{Path, PathBuf},
@@ -74,27 +74,9 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
     // via `LanguageRegistry::for_path` covers default and --git modes.
 
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
-    let langs = LanguageRegistry::standard();
-
-    let inputs = if args.git {
-        vec![read_git_external_inputs(&*fs, &langs, &args.git_args)?]
-    } else {
-        if !args.git_args.is_empty() {
-            whatever!(
-                "positional args are only valid with --git; got {} unexpected arg(s)",
-                args.git_args.len()
-            );
-        }
-        let cwd = std::env::current_dir().whatever_context("read current directory")?;
-        let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
-        let Some((_workdir, inputs)) = scan_working_tree(&*git, &*fs, &langs, &cwd) else {
-            return Ok(());
-        };
-        inputs
-    };
-
-    let per_file = cached_hunks_via_socket(&inputs)
-        .unwrap_or_else(|| extract_review_hunks_changeset(&inputs, 3));
+    let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
+    let cwd = std::env::current_dir().whatever_context("read current directory")?;
+    let socket_dir = runtime_socket_dir();
 
     let opts = CliRenderOptions {
         layout: if args.unified {
@@ -107,12 +89,115 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
     };
 
     match select_pager(args.no_pager) {
-        Some(argv) => render_via_pager(&argv, &inputs, &per_file, &opts),
+        Some(argv) => {
+            let mut child = Command::new(&argv[0])
+                .args(&argv[1..])
+                .stdin(Stdio::piped())
+                .spawn()
+                .whatever_context(format!("spawn pager `{}`", argv.join(" ")))?;
+            let mut stdin = child.stdin.take().expect("stdin set to piped above");
+            let render_result = run_with_io(
+                &args,
+                &*fs,
+                &*git,
+                &cwd,
+                Some(&socket_dir),
+                &opts,
+                &mut stdin,
+            );
+            drop(stdin);
+            let _ = child.wait();
+            match render_result {
+                Ok(()) => Ok(()),
+                Err(WriteError::BrokenPipe) => Ok(()),
+                Err(WriteError::Other(e)) => Err(e),
+            }
+        },
         None => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            render_all(&mut out, &inputs, &per_file, &opts).whatever_context("write diff to stdout")
+            run_with_io(&args, &*fs, &*git, &cwd, Some(&socket_dir), &opts, &mut out)
+                .map_err(WriteError::into_whatever)
         },
+    }
+}
+
+/// Testable core of [`run`]. Caller resolves environment-driven
+/// inputs (cwd, color/width, pager wrapping) and supplies the
+/// renderer sink.
+pub fn run_with_io<W: Write>(
+    args: &DiffArgs,
+    fs: &dyn FsHost,
+    git: &dyn GitHost,
+    cwd: &Path,
+    socket_dir: Option<&Path>,
+    opts: &CliRenderOptions,
+    out: &mut W,
+) -> Result<(), WriteError> {
+    let langs = LanguageRegistry::standard();
+
+    let inputs = if args.git {
+        match read_git_external_inputs(fs, &langs, &args.git_args) {
+            Ok(input) => vec![input],
+            Err(e) => return Err(WriteError::Other(e)),
+        }
+    } else {
+        if !args.git_args.is_empty() {
+            return Err(WriteError::Other(FromString::without_source(format!(
+                "positional args are only valid with --git; got {} unexpected arg(s)",
+                args.git_args.len()
+            ))));
+        }
+        let Some((_workdir, inputs)) = scan_working_tree(git, fs, &langs, cwd) else {
+            return Ok(());
+        };
+        inputs
+    };
+
+    let per_file = cached_hunks_via_socket(socket_dir, &inputs)
+        .unwrap_or_else(|| extract_review_hunks_changeset(&inputs, 3));
+
+    render_all(out, &inputs, &per_file, opts).map_err(|e| {
+        if e.kind() == io::ErrorKind::BrokenPipe {
+            WriteError::BrokenPipe
+        } else {
+            WriteError::Other(FromString::without_source(format!("write diff: {e}")))
+        }
+    })
+}
+
+/// Distinguishes a benign broken-pipe write (pager quit early)
+/// from any other failure.
+#[derive(Debug)]
+pub enum WriteError {
+    BrokenPipe,
+    Other(Whatever),
+}
+
+impl WriteError {
+    fn into_whatever(self) -> Whatever {
+        match self {
+            WriteError::BrokenPipe => FromString::without_source(
+                "diff write closed early before output completed".to_string(),
+            ),
+            WriteError::Other(e) => e,
+        }
+    }
+}
+
+/// Runtime directory the editor's viewport socket lives in.
+/// Production reads `$TMPDIR` on macOS and `$XDG_RUNTIME_DIR`
+/// elsewhere with a `/tmp` fallback; tests pass an explicit
+/// `socket_dir` to [`run_with_io`].
+fn runtime_socket_dir() -> PathBuf {
+    if cfg!(target_os = "macos") {
+        std::env::var_os("TMPDIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
+    } else {
+        std::env::var_os("XDG_RUNTIME_DIR")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| PathBuf::from("/tmp"))
     }
 }
 
@@ -174,37 +259,20 @@ fn render_all<W: Write>(
     Ok(())
 }
 
-fn render_via_pager(
-    argv: &[String],
-    inputs: &[ReviewFileInput],
-    per_file: &[Vec<ReviewHunk>],
-    opts: &CliRenderOptions,
-) -> Result<(), Whatever> {
-    let mut child = Command::new(&argv[0])
-        .args(&argv[1..])
-        .stdin(Stdio::piped())
-        .spawn()
-        .whatever_context(format!("spawn pager `{}`", argv.join(" ")))?;
-    let mut stdin = child.stdin.take().expect("stdin set to piped above");
-
-    let render_result = render_all(&mut stdin, inputs, per_file, opts);
-    drop(stdin);
-    let _ = child.wait();
-
-    match render_result {
-        Ok(()) => Ok(()),
-        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
-        Err(e) => Err(e).whatever_context("write diff to pager"),
-    }
-}
-
 /// Probe a running editor's diff cache before computing the
 /// structural diff inline. Returns `Some(per_file_hunks)` only
 /// when every input is a cache hit; any miss / connect failure /
 /// timeout returns `None` so the caller falls back silently to
 /// inline computation.
-fn cached_hunks_via_socket(inputs: &[ReviewFileInput]) -> Option<Vec<Vec<ReviewHunk>>> {
-    let candidates = discover_sockets();
+///
+/// `socket_dir` is the directory to scan for `stoat-*.sock` files.
+/// `None` skips cache discovery entirely (used in tests that don't
+/// want to touch the filesystem).
+fn cached_hunks_via_socket(
+    socket_dir: Option<&Path>,
+    inputs: &[ReviewFileInput],
+) -> Option<Vec<Vec<ReviewHunk>>> {
+    let candidates = discover_sockets(socket_dir?);
     if candidates.is_empty() {
         return None;
     }
@@ -251,20 +319,10 @@ async fn fetch_all_from_socket(
     Some(results)
 }
 
-/// List Unix-socket files in the runtime dir that look like
-/// stoat editor sessions. Empty when the runtime dir is missing
-/// or unreadable.
-fn discover_sockets() -> Vec<PathBuf> {
-    let dir = if cfg!(target_os = "macos") {
-        std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-    } else {
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-    };
-    let entries = match std::fs::read_dir(&dir) {
+/// List Unix-socket files in `dir` that look like stoat editor
+/// sessions. Empty when `dir` is missing or unreadable.
+fn discover_sockets(dir: &Path) -> Vec<PathBuf> {
+    let entries = match std::fs::read_dir(dir) {
         Ok(it) => it,
         Err(_) => return Vec::new(),
     };
