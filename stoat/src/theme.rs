@@ -469,6 +469,11 @@ pub mod scope {
     pub const CHAT_THINKING: &str = "chat.thinking";
     pub const CHAT_TOOL_HEADER: &str = "chat.tool.header";
     pub const CHAT_TOOL_BODY: &str = "chat.tool.body";
+    pub const CHAT_TOOL_FOCUSED: &str = "chat.tool.focused";
+    pub const CHAT_TOOL_STATUS_RUNNING: &str = "chat.tool.status.running";
+    pub const CHAT_TOOL_STATUS_DONE: &str = "chat.tool.status.done";
+    pub const CHAT_TOOL_STATUS_FAILED: &str = "chat.tool.status.failed";
+    pub const CHAT_TOOL_STATUS_CANCELLED: &str = "chat.tool.status.cancelled";
     pub const CHAT_ERROR: &str = "chat.error";
     pub const CHAT_SEPARATOR: &str = "chat.separator";
     pub const CHAT_THROBBER: &str = "chat.throbber";

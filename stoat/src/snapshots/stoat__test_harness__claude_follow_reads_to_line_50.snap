@@ -26,8 +26,8 @@ size: 80x24
 [0m[90mline 064[0m                               [0m[36m│[0m
 [0m[90mline 065[0m                               [0m[36m│[0m
 [0m[90mline 066[0m                               [0m[36m│[0m
-[0m[90mline 067[0m                               [0m[36m│[0m
-[0m[90mline 068[0m                               [0m[36m│[0m[34m⏺ Read(test/long.txt)[0m
+[0m[90mline 067[0m                               [0m[36m│[0m[34m⏺ Read(test/long.txt:50)[0m
+[0m[90mline 068[0m                               [0m[36m│[0m[35m  running[0m
 [0m[90mline 069[0m                               [0m[36m│[0m[90m----------------------------------------[0m
 [0m[90mline 070[0m                               [0m[36m│[0m[7m [0m
 [0m[90m[40m long.txt                         50:1 [0m[36m│[0m[1m[30m[42m PMT [0m[1m[97m[100m test [0m[97m[100m[claude]                     [0m

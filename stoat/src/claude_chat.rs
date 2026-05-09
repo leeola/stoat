@@ -1,5 +1,5 @@
 use crate::{
-    host::{ClaudeSessionId, TokenUsage},
+    host::{ClaudeSessionId, TokenUsage, ToolCallStatus},
     input_view::InputView,
 };
 use std::{collections::HashSet, time::Instant};
@@ -50,10 +50,18 @@ pub struct ClaudeChatState {
     /// header counter and is zero until the first usage event arrives.
     pub usage: TokenUsage,
     /// Tool-use ids the user cancelled mid-flight via
-    /// [`stoat_action::ClaudeInterrupt`]. The chat renderer paints a
-    /// `(cancelled)` badge under each matching `ToolUse` whether or
-    /// not a server-side `ToolResult` arrives later.
+    /// [`stoat_action::ClaudeInterrupt`]. Drives the `cancelled` badge
+    /// painted on each matching `ToolUse`, regardless of whether a
+    /// server-side `ToolResult` arrives later.
     pub cancelled_tool_uses: HashSet<String>,
+    /// `ToolUse.id` of the tool card currently focused for keyboard
+    /// navigation. `Tab`/`BackTab` move focus across cards within the
+    /// active chat; `Enter` toggles `expanded_tool_ids` membership for
+    /// the focused id.
+    pub focused_tool_id: Option<String>,
+    /// `ToolUse.id`s whose card is rendered in expanded form (raw input
+    /// + full result body) instead of the collapsed header + preview.
+    pub expanded_tool_ids: HashSet<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -76,6 +84,7 @@ pub enum ChatMessageContent {
     ToolResult {
         id: String,
         content: String,
+        status: ToolCallStatus,
     },
     Error(String),
     TurnComplete {
@@ -83,6 +92,37 @@ pub enum ChatMessageContent {
         duration_ms: u64,
         num_turns: u32,
     },
+}
+
+/// Render-time classification of a tool card. Collapses the
+/// protocol-level `Pending` and `InProgress` to a single `Running`
+/// label since the chat surface does not distinguish them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ToolCardStatus {
+    Running,
+    Done,
+    Failed,
+    Cancelled,
+}
+
+/// Derive the card status for `tool_id` from the chat state. The
+/// cancelled set takes precedence over server status; absent results
+/// imply the tool is still running.
+pub(crate) fn tool_card_status(chat: &ClaudeChatState, tool_id: &str) -> ToolCardStatus {
+    if chat.cancelled_tool_uses.contains(tool_id) {
+        return ToolCardStatus::Cancelled;
+    }
+    for msg in &chat.messages {
+        if let ChatMessageContent::ToolResult { id, status, .. } = &msg.content {
+            if id == tool_id {
+                return match status {
+                    ToolCallStatus::Failed => ToolCardStatus::Failed,
+                    _ => ToolCardStatus::Done,
+                };
+            }
+        }
+    }
+    ToolCardStatus::Running
 }
 
 #[derive(Debug, Clone)]
@@ -699,6 +739,168 @@ mod tests {
         let mut h = TestHarness::with_size(60, 10);
         let _ = h.claude().open();
         h.assert_snapshot("claude_as_pane");
+    }
+
+    #[test]
+    fn snapshot_tool_card_running_status_badge() {
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("ls").pending();
+        h.assert_snapshot("tool_card_status_badge_running");
+    }
+
+    #[test]
+    fn snapshot_tool_card_done_status_badge() {
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("ls").result("a\nb\n");
+        h.assert_snapshot("tool_card_status_badge_done");
+    }
+
+    #[test]
+    fn snapshot_tool_card_failed_status_badge() {
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude()
+            .get_session(id)
+            .bash("nope")
+            .failed("permission denied");
+        h.assert_snapshot("tool_card_status_badge_failed");
+    }
+
+    #[test]
+    fn snapshot_tool_card_cancelled_status_badge() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::ClaudeInterrupt;
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("sleep 60").pending();
+        dispatch(&mut h.stoat, &ClaudeInterrupt);
+        h.assert_snapshot("tool_card_status_badge_cancelled");
+    }
+
+    #[test]
+    fn snapshot_tool_card_expanded_shows_input_and_output() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::{ClaudeFocusNextToolCard, ClaudeToggleToolCardExpand};
+        let mut h = TestHarness::with_size(60, 12);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("ls").result("a\nb\nc\n");
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        dispatch(&mut h.stoat, &ClaudeToggleToolCardExpand);
+        h.assert_snapshot("tool_card_expanded");
+    }
+
+    #[test]
+    fn tool_card_focus_engages_on_first_tab() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::ClaudeFocusNextToolCard;
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("first").pending();
+        h.claude().get_session(id).bash("second").pending();
+        let chat_before = h
+            .stoat
+            .active_workspace()
+            .chats
+            .get(&id)
+            .expect("chat state");
+        assert_eq!(chat_before.focused_tool_id, None);
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        let chat_after = h
+            .stoat
+            .active_workspace()
+            .chats
+            .get(&id)
+            .expect("chat state");
+        let tool_ids: Vec<&str> = chat_after
+            .messages
+            .iter()
+            .filter_map(|m| match &m.content {
+                crate::claude_chat::ChatMessageContent::ToolUse { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            chat_after.focused_tool_id.as_deref(),
+            Some(tool_ids[tool_ids.len() - 1]),
+            "first Tab focuses the most recent tool card"
+        );
+    }
+
+    #[test]
+    fn tool_card_tab_cycles_to_older_then_wraps() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::ClaudeFocusNextToolCard;
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("first").pending();
+        h.claude().get_session(id).bash("second").pending();
+        let tool_ids: Vec<String> = {
+            let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+            chat.messages
+                .iter()
+                .filter_map(|m| match &m.content {
+                    crate::claude_chat::ChatMessageContent::ToolUse { id, .. } => Some(id.clone()),
+                    _ => None,
+                })
+                .collect()
+        };
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+        assert_eq!(
+            chat.focused_tool_id.as_deref(),
+            Some(tool_ids[0].as_str()),
+            "second Tab moves to the older card",
+        );
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+        assert_eq!(
+            chat.focused_tool_id.as_deref(),
+            Some(tool_ids[1].as_str()),
+            "third Tab wraps back to the most recent card",
+        );
+    }
+
+    #[test]
+    fn tool_card_enter_toggles_expansion_via_prompt_submit() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::{ClaudeFocusNextToolCard, SubmitPromptInput};
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("ls").result("a");
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        dispatch(&mut h.stoat, &SubmitPromptInput);
+        let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+        assert_eq!(
+            chat.expanded_tool_ids.len(),
+            1,
+            "Enter expands focused card"
+        );
+        dispatch(&mut h.stoat, &SubmitPromptInput);
+        let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+        assert!(chat.expanded_tool_ids.is_empty(), "second Enter collapses");
+    }
+
+    #[test]
+    fn tool_card_escape_clears_card_focus_without_exiting_prompt() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::{CancelPromptInput, ClaudeFocusNextToolCard};
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("ls").result("a");
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+        assert!(chat.focused_tool_id.is_some());
+        let mode_before = h.stoat.mode.clone();
+        dispatch(&mut h.stoat, &CancelPromptInput);
+        let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+        assert_eq!(
+            chat.focused_tool_id, None,
+            "Escape clears focus without exiting prompt mode"
+        );
+        assert_eq!(h.stoat.mode, mode_before, "prompt mode preserved");
     }
 
     #[test]

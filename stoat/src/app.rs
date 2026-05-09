@@ -2580,12 +2580,18 @@ impl Stoat {
                             follow_action = Some((wid, *kind, locations.clone()));
                         }
                     },
-                    AgentMessage::ToolResult { id, content, .. } => {
+                    AgentMessage::ToolResult {
+                        id,
+                        content,
+                        status,
+                        ..
+                    } => {
                         chat.messages.push(ChatMessage {
                             role: ChatRole::Assistant,
                             content: ChatMessageContent::ToolResult {
                                 id: id.clone(),
                                 content: content.clone(),
+                                status: *status,
                             },
                             checkpoint_sha: None,
                         });

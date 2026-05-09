@@ -1583,7 +1583,7 @@ mod tests {
             .messages
             .iter()
             .find_map(|m| match &m.content {
-                crate::claude_chat::ChatMessageContent::ToolResult { id, content } => {
+                crate::claude_chat::ChatMessageContent::ToolResult { id, content, .. } => {
                     Some((id.clone(), content.clone()))
                 },
                 _ => None,

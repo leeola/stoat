@@ -1,11 +1,11 @@
 use crate::{
-    claude_chat::{ChatMessage, ClaudeChatState},
+    claude_chat::{tool_card_status, ChatMessage, ClaudeChatState, ToolCardStatus},
     render::{
         editor::render_editor,
         text::{short_path, truncate, wrap_text, write_cell, write_str},
         FrameCtx, PaneCtx,
     },
-    theme::Theme,
+    theme::{scope as theme_scope, Theme},
 };
 use ratatui::{buffer::Buffer, layout::Rect, style::Style};
 use std::collections::HashMap;
@@ -143,6 +143,7 @@ pub(crate) fn build_chat_pane_layout(
     let text_style = theme.get(s::CHAT_TEXT);
     let thinking_style = theme.get(s::CHAT_THINKING);
     let tool_header_style = theme.get(s::CHAT_TOOL_HEADER);
+    let tool_focused_style = theme.get(s::CHAT_TOOL_FOCUSED);
     let tool_body_style = theme.get(s::CHAT_TOOL_BODY);
     let error_style = theme.get(s::CHAT_ERROR);
     let turn_sep_style = theme.get(s::CHAT_SEPARATOR);
@@ -150,6 +151,7 @@ pub(crate) fn build_chat_pane_layout(
 
     const TOOL_MARK: &str = "\u{23fa}";
     const TOOL_RESULT_ELBOW: &str = "\u{2514}\u{2500}";
+    const TOOL_RESULT_TEE: &str = "\u{251c}\u{2500}";
 
     let result_map = build_tool_result_map(&chat.messages);
     let mut lines: Vec<(Style, String)> = Vec::new();
@@ -223,13 +225,40 @@ pub(crate) fn build_chat_pane_layout(
             },
             (ChatRole::Assistant, ChatMessageContent::ToolUse { id, name, input }) => {
                 let header = format_tool_header(name, input);
-                let mut block = vec![(tool_header_style, format!("{TOOL_MARK} {header}"))];
-                if let Some(content) = result_map.get(id.as_str()) {
+                let status = tool_card_status(chat, id);
+                let is_focused = chat.focused_tool_id.as_deref() == Some(id.as_str());
+                let is_expanded = chat.expanded_tool_ids.contains(id);
+
+                let header_style = if is_focused {
+                    tool_focused_style
+                } else {
+                    tool_header_style
+                };
+                let mut block = vec![
+                    (header_style, format!("{TOOL_MARK} {header}")),
+                    (
+                        status_style_for(status, theme),
+                        format!("  {}", status_label(status)),
+                    ),
+                ];
+
+                let result_content = result_map.get(id.as_str()).copied();
+                if is_expanded {
+                    block.push((
+                        tool_body_style,
+                        format!("  {TOOL_RESULT_TEE} input: {}", format_tool_input(input)),
+                    ));
+                    if let Some(content) = result_content {
+                        block.push((tool_body_style, format!("  {TOOL_RESULT_ELBOW} output:")));
+                        for raw_line in content.lines() {
+                            for wrapped in wrap_text(raw_line, body_width.saturating_sub(5)) {
+                                block.push((tool_body_style, format!("     {wrapped}")));
+                            }
+                        }
+                    }
+                } else if let Some(content) = result_content {
                     let preview = format_tool_result_preview(content);
                     block.push((tool_body_style, format!("  {TOOL_RESULT_ELBOW} {preview}")));
-                }
-                if chat.cancelled_tool_uses.contains(id) {
-                    block.push((error_style, format!("  {TOOL_RESULT_ELBOW} (cancelled)")));
                 }
                 push_block(&mut lines, block)
             },
@@ -373,7 +402,15 @@ fn format_tool_header(name: &str, input_json: &str) -> String {
                 .and_then(|o| o.get("file_path"))
                 .and_then(|v| v.as_str())
             {
-                return format!("Read({})", short_path(p));
+                let offset = obj.and_then(|o| o.get("offset")).and_then(|v| v.as_u64());
+                let limit = obj.and_then(|o| o.get("limit")).and_then(|v| v.as_u64());
+                return match (offset, limit) {
+                    (Some(start), Some(len)) if len > 0 => {
+                        format!("Read({}:{}-{})", short_path(p), start, start + len - 1)
+                    },
+                    (Some(start), _) => format!("Read({}:{})", short_path(p), start),
+                    _ => format!("Read({})", short_path(p)),
+                };
             }
         },
         "Edit" | "Write" | "NotebookEdit" => {
@@ -407,6 +444,35 @@ fn format_tool_header(name: &str, input_json: &str) -> String {
         }
     }
     format!("{name}(...)")
+}
+
+fn status_label(status: ToolCardStatus) -> &'static str {
+    match status {
+        ToolCardStatus::Running => "running",
+        ToolCardStatus::Done => "done",
+        ToolCardStatus::Failed => "failed",
+        ToolCardStatus::Cancelled => "cancelled",
+    }
+}
+
+fn status_style_for(status: ToolCardStatus, theme: &Theme) -> Style {
+    let scope = match status {
+        ToolCardStatus::Running => theme_scope::CHAT_TOOL_STATUS_RUNNING,
+        ToolCardStatus::Done => theme_scope::CHAT_TOOL_STATUS_DONE,
+        ToolCardStatus::Failed => theme_scope::CHAT_TOOL_STATUS_FAILED,
+        ToolCardStatus::Cancelled => theme_scope::CHAT_TOOL_STATUS_CANCELLED,
+    };
+    theme.get(scope)
+}
+
+/// Compact rendering of a tool's JSON input for the expanded card body.
+/// Falls back to the raw string when the input is not parseable JSON.
+fn format_tool_input(input_json: &str) -> String {
+    let parsed: Result<serde_json::Value, _> = serde_json::from_str(input_json);
+    match parsed {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| input_json.to_string()),
+        Err(_) => input_json.to_string(),
+    }
 }
 
 fn format_tool_result_preview(content: &str) -> String {
@@ -452,7 +518,7 @@ fn build_tool_result_map(messages: &[ChatMessage]) -> HashMap<&str, &str> {
     use crate::claude_chat::ChatMessageContent;
     let mut m = HashMap::new();
     for msg in messages {
-        if let ChatMessageContent::ToolResult { id, content } = &msg.content {
+        if let ChatMessageContent::ToolResult { id, content, .. } = &msg.content {
             m.insert(id.as_str(), content.as_str());
         }
     }

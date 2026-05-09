@@ -111,6 +111,11 @@ theme default_dark {
     chat.thinking        = { fg: muted, modifiers: [italic] };
     chat.tool.header.fg  = primary;
     chat.tool.body.fg    = muted;
+    chat.tool.focused           = { fg: primary, modifiers: [bold] };
+    chat.tool.status.running.fg   = special;
+    chat.tool.status.done.fg      = success;
+    chat.tool.status.failed.fg    = danger;
+    chat.tool.status.cancelled.fg = muted;
     chat.error.fg        = danger;
     chat.separator.fg    = muted;
     chat.throbber        = { fg: special, modifiers: [bold] };
@@ -458,6 +463,8 @@ on key {
     }
     mode == prompt && claude_focused {
         Ctrl-c -> ClaudeInterrupt();
+        Tab -> ClaudeFocusNextToolCard();
+        BackTab -> ClaudeFocusPrevToolCard();
     }
     mode == prompt {
         Escape -> CancelPromptInput();

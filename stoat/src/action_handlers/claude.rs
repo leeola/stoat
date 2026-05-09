@@ -100,6 +100,8 @@ fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
             follow: false,
             usage: crate::host::TokenUsage::default(),
             cancelled_tool_uses: std::collections::HashSet::new(),
+            focused_tool_id: None,
+            expanded_tool_ids: std::collections::HashSet::new(),
         },
     );
 
@@ -359,6 +361,88 @@ pub(super) fn claude_interrupt(stoat: &mut Stoat) -> UpdateEffect {
             })
             .detach();
     }
+    UpdateEffect::Redraw
+}
+
+/// Move card focus to the next-older tool call in the chat scrollback.
+/// Engages focus on the most-recent card when none is set; wraps to
+/// the most recent after the oldest. Silent no-op when no chat is
+/// active or no tool calls exist.
+pub(super) fn claude_focus_next_tool_card(stoat: &mut Stoat) -> UpdateEffect {
+    move_tool_card_focus(stoat, FocusMove::Older)
+}
+
+/// Mirror of [`claude_focus_next_tool_card`] that walks toward the
+/// most-recent card.
+pub(super) fn claude_focus_prev_tool_card(stoat: &mut Stoat) -> UpdateEffect {
+    move_tool_card_focus(stoat, FocusMove::Newer)
+}
+
+/// Toggle expansion of the focused tool card. Silent no-op when no
+/// chat is active or no card is focused.
+pub(super) fn claude_toggle_tool_card_expand(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(session_id) = stoat.active_workspace().claude_chat else {
+        return UpdateEffect::None;
+    };
+    let ws = stoat.active_workspace_mut();
+    let Some(chat) = ws.chats.get_mut(&session_id) else {
+        return UpdateEffect::None;
+    };
+    let Some(focused) = chat.focused_tool_id.clone() else {
+        return UpdateEffect::None;
+    };
+    if !chat.expanded_tool_ids.remove(&focused) {
+        chat.expanded_tool_ids.insert(focused);
+    }
+    UpdateEffect::Redraw
+}
+
+#[derive(Copy, Clone)]
+enum FocusMove {
+    /// Toward older messages (Tab).
+    Older,
+    /// Toward newer messages (Shift-Tab).
+    Newer,
+}
+
+fn move_tool_card_focus(stoat: &mut Stoat, dir: FocusMove) -> UpdateEffect {
+    use crate::claude_chat::ChatMessageContent;
+    let Some(session_id) = stoat.active_workspace().claude_chat else {
+        return UpdateEffect::None;
+    };
+    let ws = stoat.active_workspace_mut();
+    let Some(chat) = ws.chats.get_mut(&session_id) else {
+        return UpdateEffect::None;
+    };
+    let tool_ids: Vec<String> = chat
+        .messages
+        .iter()
+        .filter_map(|msg| match &msg.content {
+            ChatMessageContent::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect();
+    if tool_ids.is_empty() {
+        return UpdateEffect::None;
+    }
+    let next = match (chat.focused_tool_id.as_deref(), dir) {
+        (None, FocusMove::Older) => Some(tool_ids[tool_ids.len() - 1].clone()),
+        (None, FocusMove::Newer) => Some(tool_ids[0].clone()),
+        (Some(current), dir) => {
+            let pos = tool_ids.iter().position(|id| id == current);
+            match (pos, dir) {
+                (Some(0), FocusMove::Older) => Some(tool_ids[tool_ids.len() - 1].clone()),
+                (Some(idx), FocusMove::Older) => Some(tool_ids[idx - 1].clone()),
+                (Some(idx), FocusMove::Newer) if idx + 1 == tool_ids.len() => {
+                    Some(tool_ids[0].clone())
+                },
+                (Some(idx), FocusMove::Newer) => Some(tool_ids[idx + 1].clone()),
+                (None, FocusMove::Older) => Some(tool_ids[tool_ids.len() - 1].clone()),
+                (None, FocusMove::Newer) => Some(tool_ids[0].clone()),
+            }
+        },
+    };
+    chat.focused_tool_id = next;
     UpdateEffect::Redraw
 }
 
@@ -851,6 +935,7 @@ mod tests {
             content: ChatMessageContent::ToolResult {
                 id: id.to_string(),
                 content: content.to_string(),
+                status: crate::host::ToolCallStatus::Completed,
             },
             checkpoint_sha: None,
         });
@@ -937,7 +1022,7 @@ mod tests {
     }
 
     #[test]
-    fn chat_pane_renders_cancelled_marker_for_in_flight_tool_use() {
+    fn chat_pane_renders_cancelled_badge_for_in_flight_tool_use() {
         use stoat_action::ClaudeInterrupt;
         let mut h = TestHarness::with_size(80, 20);
         let _ = h.claude().open();
@@ -947,8 +1032,8 @@ mod tests {
 
         let frame = h.snapshot();
         assert!(
-            frame.content.contains("(cancelled)"),
-            "expected cancelled marker on tool-use row: {}",
+            frame.content.contains("cancelled"),
+            "expected cancelled status badge on tool-use row: {}",
             frame.content,
         );
     }

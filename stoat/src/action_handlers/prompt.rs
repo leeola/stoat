@@ -39,12 +39,23 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
         match target {
             crate::input_view::SubmitTarget::Run => return super::run::run_submit(stoat),
             crate::input_view::SubmitTarget::ClaudeChat => {
+                if focused_chat_has_card_focus(stoat) {
+                    return super::claude::claude_toggle_tool_card_expand(stoat);
+                }
                 return super::claude::claude_submit(stoat);
             },
             _ => {},
         }
     }
     UpdateEffect::None
+}
+
+fn focused_chat_has_card_focus(stoat: &Stoat) -> bool {
+    let ws = stoat.active_workspace();
+    ws.claude_chat
+        .and_then(|id| ws.chats.get(&id))
+        .map(|chat| chat.focused_tool_id.is_some())
+        .unwrap_or(false)
 }
 
 fn focused_target(stoat: &Stoat) -> Option<crate::input_view::SubmitTarget> {
@@ -89,6 +100,17 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     }
     if let Some(effect) = super::palette::palette_cancel(stoat) {
         return effect;
+    }
+    if focused_chat_has_card_focus(stoat) {
+        let session_id = stoat
+            .active_workspace()
+            .claude_chat
+            .expect("focused_chat_has_card_focus implies an active chat");
+        let ws = stoat.active_workspace_mut();
+        if let Some(chat) = ws.chats.get_mut(&session_id) {
+            chat.focused_tool_id = None;
+        }
+        return UpdateEffect::Redraw;
     }
     // For pane-tied or modal inputs (help, Claude chat), Escape in prompt
     // leaves the user in normal sub-mode so they can navigate with hjkl /

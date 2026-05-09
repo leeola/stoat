@@ -2,7 +2,8 @@ use crate::{
     defs::{
         app::{Quit, QuitAll},
         claude::{
-            ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
+            ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeSubmit, ClaudeToDockLeft,
+            ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow, ClaudeToggleToolCardExpand,
             OpenClaude, ToggleDockLeft, ToggleDockRight,
         },
         commits::{
@@ -497,6 +498,15 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ClaudeToggleFollow::DEF, |_| {
         Ok(Box::new(ClaudeToggleFollow))
     });
+    add(ClaudeFocusNextToolCard::DEF, |_| {
+        Ok(Box::new(ClaudeFocusNextToolCard))
+    });
+    add(ClaudeFocusPrevToolCard::DEF, |_| {
+        Ok(Box::new(ClaudeFocusPrevToolCard))
+    });
+    add(ClaudeToggleToolCardExpand::DEF, |_| {
+        Ok(Box::new(ClaudeToggleToolCardExpand))
+    });
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
     add(OpenCommits::DEF, |_| Ok(Box::new(OpenCommits)));
@@ -745,6 +755,9 @@ mod tests {
         "ClaudeToDockLeft",
         "ClaudeToDockRight",
         "ClaudeToggleFollow",
+        "ClaudeFocusNextToolCard",
+        "ClaudeFocusPrevToolCard",
+        "ClaudeToggleToolCardExpand",
         "ToggleDockRight",
         "ToggleDockLeft",
         "NewWorkspace",
@@ -910,7 +923,9 @@ mod tests {
         // + 1 SelectRegister.
         // + 1 InsertRegister.
         // + 1 CommitUndoCheckpoint.
-        assert_eq!(all().count(), 266);
+        // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
+        //   ClaudeToggleToolCardExpand).
+        assert_eq!(all().count(), 269);
     }
 
     #[test]

@@ -81,6 +81,36 @@ define_action!(
 );
 
 define_action!(
+    ClaudeFocusNextToolCardDef,
+    ClaudeFocusNextToolCard,
+    "ClaudeFocusNextToolCard",
+    ActionKind::ClaudeFocusNextToolCard,
+    "focus next tool card",
+    "Move keyboard focus to the next tool-call card in the chat scrollback (older direction). Engages card focus when none is set.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ClaudeFocusPrevToolCardDef,
+    ClaudeFocusPrevToolCard,
+    "ClaudeFocusPrevToolCard",
+    ActionKind::ClaudeFocusPrevToolCard,
+    "focus previous tool card",
+    "Move keyboard focus to the previous tool-call card in the chat scrollback (newer direction).",
+    ActionPriority::Common
+);
+
+define_action!(
+    ClaudeToggleToolCardExpandDef,
+    ClaudeToggleToolCardExpand,
+    "ClaudeToggleToolCardExpand",
+    ActionKind::ClaudeToggleToolCardExpand,
+    "toggle tool card",
+    "Expand or collapse the tool-call card currently focused for keyboard navigation.",
+    ActionPriority::Common
+);
+
+define_action!(
     ToggleDockRightDef,
     ToggleDockRight,
     "ToggleDockRight",
