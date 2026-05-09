@@ -54,7 +54,8 @@ pub(crate) fn render_help(
 
     let prompt_style = theme.get(crate::theme::scope::UI_PROMPT);
     let input_style = theme.get(crate::theme::scope::UI_TEXT);
-    let cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
+    let insert_cursor_style = theme.get(crate::theme::scope::UI_CURSOR_INPUT);
+    let normal_cursor_style = theme.get(crate::theme::scope::UI_CURSOR);
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let muted = theme.get(crate::theme::scope::UI_TEXT_MUTED);
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
@@ -69,13 +70,21 @@ pub(crate) fn render_help(
     write_str(buf, inner.x, search_row, prompt, prompt_style);
     let input_text = help.input_text(ws);
     write_str(buf, inner.x + 2, search_row, &input_text, input_style);
-    if matches!(input_mode, HelpInput::Insert) {
-        let cursor_col = inner.x + 2 + help.input_cursor_column(ws) as u16;
-        if cursor_col < inner.x + inner.width {
-            buf[(cursor_col, search_row)]
-                .set_char(' ')
-                .set_style(cursor_style);
-        }
+    let cursor_col = inner.x + 2 + help.input_cursor_column(ws) as u16;
+    if cursor_col < inner.x + inner.width {
+        let cursor_style = match input_mode {
+            HelpInput::Insert => insert_cursor_style,
+            HelpInput::Normal => normal_cursor_style,
+        };
+        let cursor_char = buf[(cursor_col, search_row)].symbol().to_string();
+        let glyph = if cursor_char.is_empty() {
+            " "
+        } else {
+            cursor_char.as_str()
+        };
+        buf[(cursor_col, search_row)]
+            .set_symbol(glyph)
+            .set_style(cursor_style);
     }
     let status_row = search_row + 1;
     let status_base = theme.get(crate::theme::scope::UI_STATUSBAR_FOCUSED);
