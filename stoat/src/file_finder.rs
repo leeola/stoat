@@ -84,6 +84,11 @@ pub struct FileFinder {
     pub(crate) buffer_paths: Vec<PathBuf>,
     /// Indices into the currently active scope's `Vec`, after filtering.
     pub(crate) filtered: Vec<usize>,
+    /// Per-row matched character offsets into the row's display string,
+    /// parallel to [`Self::filtered`]. Empty for empty/whitespace-only
+    /// queries (no highlighting). Indices are sorted and deduplicated so
+    /// the renderer can do `contains` lookups without further work.
+    pub(crate) match_indices: Vec<Vec<u32>>,
     pub(crate) selected: usize,
     /// Last input text that was run through the matcher. Lets
     /// [`FileFinder::refilter_from_input`] short-circuit when the
@@ -130,6 +135,7 @@ impl FileFinder {
         let scope = initial_scope;
         let all_paths: Vec<PathBuf> = Vec::new();
         let mut filtered = Vec::new();
+        let mut match_indices = Vec::new();
         let mut selected = 0;
         refilter(
             "",
@@ -139,6 +145,7 @@ impl FileFinder {
             &buffer_paths,
             &git_root,
             &mut filtered,
+            &mut match_indices,
             &mut selected,
         );
 
@@ -154,6 +161,7 @@ impl FileFinder {
             modified_paths,
             buffer_paths,
             filtered,
+            match_indices,
             selected,
             last_filter_text: String::new(),
             last_filter_scope: scope,
@@ -216,6 +224,7 @@ impl FileFinder {
         self.last_filter_text = String::new();
         // Force refilter + preview resync on next render.
         self.filtered.clear();
+        self.match_indices.clear();
     }
 
     /// Drain every batch the walker has emitted since the last call,
@@ -246,6 +255,7 @@ impl FileFinder {
         if received_any {
             self.last_filter_text.clear();
             self.filtered.clear();
+            self.match_indices.clear();
         }
         received_any
     }
@@ -271,6 +281,7 @@ impl FileFinder {
             &self.buffer_paths,
             &self.git_root,
             &mut self.filtered,
+            &mut self.match_indices,
             &mut self.selected,
         );
         self.last_filter_text = text;
@@ -399,6 +410,9 @@ fn display_for(path: &Path, git_root: &Path) -> String {
 /// against its repo-relative display form via [`Pattern::score`] and
 /// orders matches by score descending, ties alphabetical. Empty
 /// or whitespace-only input lists every candidate alphabetically.
+/// `match_indices` is filled in parallel to `filtered`: each element
+/// is the sorted, deduplicated set of matched character offsets in
+/// that row's display string, or empty when no pattern is active.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     text: &str,
@@ -408,6 +422,7 @@ pub(crate) fn refilter(
     buffer_paths: &[PathBuf],
     git_root: &Path,
     filtered: &mut Vec<usize>,
+    match_indices: &mut Vec<Vec<u32>>,
     selected: &mut usize,
 ) {
     let base: &[PathBuf] = match scope {
@@ -421,6 +436,7 @@ pub(crate) fn refilter(
         .filter(|p| !p.atoms.is_empty());
 
     filtered.clear();
+    match_indices.clear();
 
     let Some(pattern) = pattern else {
         let mut rows: Vec<(usize, String)> = base
@@ -429,23 +445,33 @@ pub(crate) fn refilter(
             .map(|(idx, path)| (idx, display_for(path, git_root)))
             .collect();
         rows.sort_by(|a, b| a.1.cmp(&b.1));
-        filtered.extend(rows.into_iter().map(|(idx, _)| idx));
+        for (idx, _) in &rows {
+            filtered.push(*idx);
+            match_indices.push(Vec::new());
+        }
         clamp_selected(filtered, selected);
         return;
     };
 
     let mut matcher_guard = fuzzy_matcher().lock().expect("fuzzy matcher poisoned");
     let mut hay_buf: Vec<char> = Vec::new();
-    let mut matched: Vec<(usize, String, u32)> = Vec::new();
+    let mut matched: Vec<(usize, String, u32, Vec<u32>)> = Vec::new();
+    let mut indices_buf: Vec<u32> = Vec::new();
     for (idx, path) in base.iter().enumerate() {
         let display = display_for(path, git_root);
         let hay = Utf32Str::new(&display, &mut hay_buf);
-        if let Some(score) = pattern.score(hay, &mut matcher_guard) {
-            matched.push((idx, display, score));
+        indices_buf.clear();
+        if let Some(score) = pattern.indices(hay, &mut matcher_guard, &mut indices_buf) {
+            indices_buf.sort_unstable();
+            indices_buf.dedup();
+            matched.push((idx, display, score, indices_buf.clone()));
         }
     }
     matched.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
-    filtered.extend(matched.into_iter().map(|(idx, _, _)| idx));
+    for (idx, _, _, indices) in matched {
+        filtered.push(idx);
+        match_indices.push(indices);
+    }
     clamp_selected(filtered, selected);
 }
 
@@ -480,6 +506,7 @@ mod tests {
         git_root: &Path,
     ) -> Vec<String> {
         let mut filtered = Vec::new();
+        let mut match_indices = Vec::new();
         let mut selected = 0;
         refilter(
             text,
@@ -489,6 +516,7 @@ mod tests {
             buffers,
             git_root,
             &mut filtered,
+            &mut match_indices,
             &mut selected,
         );
         let base: &[PathBuf] = match scope {
@@ -599,6 +627,7 @@ mod tests {
         let git_root = p("/r");
         let all = vec![p("/r/a.rs"), p("/r/b.rs"), p("/r/c.rs")];
         let mut filtered = Vec::new();
+        let mut match_indices = Vec::new();
         let mut selected = 2;
         refilter(
             "b",
@@ -608,6 +637,7 @@ mod tests {
             &[],
             &git_root,
             &mut filtered,
+            &mut match_indices,
             &mut selected,
         );
         assert_eq!(filtered.len(), 1);
@@ -1051,6 +1081,22 @@ mod tests {
         seed_empty_finder_workspace(&mut h);
         h.type_keys("space p");
         h.assert_snapshot("file_finder_tiny_terminal_no_render");
+    }
+
+    #[test]
+    fn snapshot_file_finder_multi_token_highlight() {
+        let mut h = crate::Stoat::test();
+        seed_finder_workspace(
+            &mut h,
+            &[
+                ("src/foo.rs", "fn foo() {}"),
+                ("src/bar.rs", "fn bar() {}"),
+                ("docs/foo.md", "foo"),
+            ],
+        );
+        h.type_keys("space p");
+        h.type_text(".rs foo");
+        h.assert_snapshot("file_finder_multi_token_highlight");
     }
 
     #[test]

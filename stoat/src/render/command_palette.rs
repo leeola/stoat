@@ -24,8 +24,19 @@ pub(crate) fn render_command_palette(
         PalettePhase::Filter {
             input,
             filtered,
+            match_indices,
             selected,
-        } => render_palette_filter(input, filtered, *selected, scope, ws, theme, area, buf),
+        } => render_palette_filter(
+            input,
+            filtered,
+            match_indices,
+            *selected,
+            scope,
+            ws,
+            theme,
+            area,
+            buf,
+        ),
         PalettePhase::CollectArgs {
             entry,
             collected,
@@ -52,6 +63,7 @@ pub(crate) fn render_command_palette(
 fn render_palette_filter(
     input: &InputView,
     filtered: &[&'static stoat_action::registry::RegistryEntry],
+    match_indices: &[Vec<u32>],
     selected: usize,
     scope: PaletteScope,
     ws: &mut Workspace,
@@ -104,6 +116,7 @@ fn render_palette_filter(
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
     let desc_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
     let input_row = inner.y;
     write_str(buf, inner.x, input_row, ":", prompt_style);
@@ -135,6 +148,7 @@ fn render_palette_filter(
         .max()
         .unwrap_or(0);
 
+    let empty_indices: Vec<u32> = Vec::new();
     for (i, entry) in filtered.iter().take(max_rows as usize).enumerate() {
         let row = list_top + i as u16;
         let is_selected = i == selected;
@@ -149,7 +163,18 @@ fn render_palette_filter(
         }
 
         let name = entry.def.name();
-        write_str(buf, inner.x + 1, row, name, style);
+        let name_x = inner.x + 1;
+        write_str(buf, name_x, row, name, style);
+        let indices = match_indices.get(i).unwrap_or(&empty_indices);
+        for (name_col, _) in name.chars().enumerate() {
+            let col = name_x + name_col as u16;
+            if col >= inner.x + inner.width {
+                break;
+            }
+            if indices.binary_search(&(name_col as u32)).is_ok() {
+                buf[(col, row)].set_style(match_style);
+            }
+        }
         let desc_col = inner.x + 1 + name_col_width as u16 + 2;
         if desc_col < inner.x + inner.width {
             let desc_style = if is_selected { style } else { desc_style };

@@ -151,10 +151,15 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
 pub(crate) enum PalettePhase {
     /// Filtering the action list. The user is typing to narrow candidates and
-    /// using Up/Down (or Ctrl-P/N) to navigate.
+    /// using Up/Down (or Ctrl-P/N) to navigate. `match_indices` is parallel
+    /// to `filtered`: each element is the sorted, deduplicated character
+    /// offsets of the query match within the entry's name, used by the
+    /// renderer to highlight matched cells. Empty when no pattern is
+    /// active.
     Filter {
         input: InputView,
         filtered: Vec<&'static registry::RegistryEntry>,
+        match_indices: Vec<Vec<u32>>,
         selected: usize,
     },
     /// A param-taking action has been chosen and the palette is walking the
@@ -195,13 +200,17 @@ impl CommandPalette {
         let mut phase = PalettePhase::Filter {
             input,
             filtered: Vec::new(),
+            match_indices: Vec::new(),
             selected: 0,
         };
         if let PalettePhase::Filter {
-            filtered, selected, ..
+            filtered,
+            match_indices,
+            selected,
+            ..
         } = &mut phase
         {
-            refilter("", scope, &availability, filtered, selected);
+            refilter("", scope, &availability, filtered, match_indices, selected);
         }
         Self {
             phase,
@@ -262,11 +271,19 @@ impl CommandPalette {
         if let PalettePhase::Filter {
             input,
             filtered,
+            match_indices,
             selected,
         } = &mut self.phase
         {
             let text = input.text(ws);
-            refilter(&text, self.scope, &self.availability, filtered, selected);
+            refilter(
+                &text,
+                self.scope,
+                &self.availability,
+                filtered,
+                match_indices,
+                selected,
+            );
         }
     }
 
@@ -286,6 +303,7 @@ impl CommandPalette {
             PalettePhase::Filter {
                 input,
                 filtered,
+                match_indices: _,
                 selected,
             } => {
                 let picked = filtered.get(*selected).copied();
@@ -358,11 +376,13 @@ impl CommandPalette {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     input: &str,
     scope: PaletteScope,
     availability: &Availability,
     filtered: &mut Vec<&'static registry::RegistryEntry>,
+    match_indices: &mut Vec<Vec<u32>>,
     selected: &mut usize,
 ) {
     let pattern = (!input.is_empty())
@@ -377,10 +397,16 @@ pub(crate) fn refilter(
         })
         .collect();
 
+    filtered.clear();
+    match_indices.clear();
+
     let Some(pattern) = pattern else {
         let mut all = visible;
         all.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
-        *filtered = all;
+        for entry in all {
+            filtered.push(entry);
+            match_indices.push(Vec::new());
+        }
         if *selected >= filtered.len() {
             *selected = filtered.len().saturating_sub(1);
         }
@@ -389,11 +415,15 @@ pub(crate) fn refilter(
 
     let mut matcher_guard = fuzzy_matcher().lock().expect("fuzzy matcher poisoned");
     let mut hay_buf: Vec<char> = Vec::new();
-    let mut matched: Vec<(&'static registry::RegistryEntry, u32)> = Vec::new();
+    let mut matched: Vec<(&'static registry::RegistryEntry, u32, Vec<u32>)> = Vec::new();
+    let mut indices_buf: Vec<u32> = Vec::new();
     for entry in visible {
         let hay = Utf32Str::new(entry.def.name(), &mut hay_buf);
-        if let Some(score) = pattern.score(hay, &mut matcher_guard) {
-            matched.push((entry, score));
+        indices_buf.clear();
+        if let Some(score) = pattern.indices(hay, &mut matcher_guard, &mut indices_buf) {
+            indices_buf.sort_unstable();
+            indices_buf.dedup();
+            matched.push((entry, score, indices_buf.clone()));
         }
     }
     matched.sort_by(|a, b| {
@@ -405,7 +435,10 @@ pub(crate) fn refilter(
                 .then_with(|| a.0.def.name().cmp(b.0.def.name()))
         })
     });
-    *filtered = matched.into_iter().map(|(entry, _)| entry).collect();
+    for (entry, _, indices) in matched {
+        filtered.push(entry);
+        match_indices.push(indices);
+    }
 
     if *selected >= filtered.len() {
         *selected = filtered.len().saturating_sub(1);
@@ -426,8 +459,16 @@ mod tests {
         availability: &Availability,
     ) -> Vec<&'static str> {
         let mut filtered = Vec::new();
+        let mut match_indices = Vec::new();
         let mut selected = 0;
-        refilter(text, scope, availability, &mut filtered, &mut selected);
+        refilter(
+            text,
+            scope,
+            availability,
+            &mut filtered,
+            &mut match_indices,
+            &mut selected,
+        );
         filtered.iter().map(|e| e.def.name()).collect()
     }
 
@@ -564,12 +605,14 @@ mod tests {
     #[test]
     fn refilter_clamps_selected_when_results_shrink() {
         let mut filtered = Vec::new();
+        let mut match_indices = Vec::new();
         let mut selected = 7;
         refilter(
             "quit",
             PaletteScope::All,
             &Availability::default(),
             &mut filtered,
+            &mut match_indices,
             &mut selected,
         );
         assert_eq!(filtered.len(), 2);
@@ -876,5 +919,12 @@ mod tests {
         h.type_keys("enter");
         h.type_text("/tmp/example.rs");
         h.assert_snapshot("command_palette_collect_args_typing");
+    }
+
+    #[test]
+    fn snapshot_command_palette_multi_token_highlight() {
+        let mut h = Stoat::test();
+        h.type_text(":open file");
+        h.assert_snapshot("command_palette_multi_token_highlight");
     }
 }

@@ -114,6 +114,7 @@ pub(crate) fn render_file_finder(
 fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf: &mut Buffer) {
     let row_style = theme.get(crate::theme::scope::UI_TEXT);
     let selected_style = theme.get(crate::theme::scope::UI_SELECTION);
+    let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
 
     let rows = area.height as usize;
     if rows == 0 {
@@ -122,8 +123,16 @@ fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf
     let scroll = finder.selected.saturating_sub(rows.saturating_sub(1));
     let base = finder.base_paths();
     let end_x = area.x + area.width;
+    let label_x = area.x + 1;
 
-    for (row_idx, &idx) in finder.filtered.iter().skip(scroll).take(rows).enumerate() {
+    for (row_idx, (&idx, indices)) in finder
+        .filtered
+        .iter()
+        .zip(finder.match_indices.iter())
+        .skip(scroll)
+        .take(rows)
+        .enumerate()
+    {
         let row = area.y + row_idx as u16;
         let is_selected = scroll + row_idx == finder.selected;
         let style = if is_selected {
@@ -136,7 +145,16 @@ fn render_list(finder: &FileFinder, area: Rect, theme: &crate::theme::Theme, buf
         }
         let path = &base[idx];
         let label = display_row(path, &finder.git_root);
-        write_str_clipped(buf, area.x + 1, row, &label, style, end_x);
+        write_str_clipped(buf, label_x, row, &label, style, end_x);
+        for (label_col, _) in label.chars().enumerate() {
+            let col = label_x + label_col as u16;
+            if col >= end_x {
+                break;
+            }
+            if indices.binary_search(&(label_col as u32)).is_ok() {
+                buf[(col, row)].set_style(match_style);
+            }
+        }
     }
 }
 
