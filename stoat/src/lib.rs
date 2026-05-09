@@ -10,6 +10,7 @@ pub mod completion;
 pub mod diagnostics;
 pub mod diff;
 pub mod diff_map;
+pub mod diff_render_cli;
 pub mod display_map;
 pub mod dump;
 mod editor_state;

@@ -1,12 +1,14 @@
 use clap::Args;
 use snafu::{whatever, ResultExt, Whatever};
 use std::{
-    io::Write,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use stoat::{
-    diff::{extract_review_hunks_changeset, ReviewFileInput, ReviewHunk, ReviewRow},
+    diff::{extract_review_hunks_changeset, ReviewFileInput},
+    diff_render_cli::{
+        detect_color_enabled, detect_width, render_diff, CliLayout, CliRenderOptions,
+    },
     host::{FsHost, LocalFs},
 };
 
@@ -54,9 +56,9 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
         whatever!("--git mode is not yet implemented");
     }
 
-    // FIXME: --side-by-side / --unified / --no-color / --no-pager / --width /
-    // --language are parsed but not yet threaded; the renderer + pager
-    // children of the `stoat diff` TODO consume them.
+    // FIXME: --language is parsed but not threaded; needs `stoat_language`
+    // as a bin dep, landing alongside the --git child of the `stoat diff`
+    // TODO. --no-pager is parsed but not honoured; the pager child handles it.
 
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
     let base_text = read_utf8(&*fs, &args.left)?;
@@ -73,10 +75,20 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
 
     let per_file = extract_review_hunks_changeset(&inputs, 3);
 
+    let opts = CliRenderOptions {
+        layout: if args.unified {
+            CliLayout::Unified
+        } else {
+            CliLayout::SideBySide
+        },
+        width: args.width.unwrap_or_else(detect_width),
+        color: detect_color_enabled(args.no_color),
+    };
+
     let stdout = std::io::stdout();
     let mut out = stdout.lock();
     for (input, hunks) in inputs.iter().zip(per_file.iter()) {
-        write_file_dump(&mut out, &input.rel_path, hunks)
+        render_diff(&mut out, &input.rel_path, hunks, &opts)
             .whatever_context("write diff to stdout")?;
     }
     Ok(())
@@ -93,32 +105,4 @@ fn path_label(path: &Path) -> String {
     path.file_name()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| path.display().to_string())
-}
-
-fn write_file_dump(
-    out: &mut dyn Write,
-    rel_path: &str,
-    hunks: &[ReviewHunk],
-) -> std::io::Result<()> {
-    if hunks.is_empty() {
-        return Ok(());
-    }
-    writeln!(out, "--- {rel_path}")?;
-    for hunk in hunks {
-        writeln!(out, "@@")?;
-        for row in &hunk.rows {
-            match row {
-                ReviewRow::Context { left, .. } => writeln!(out, " {}", left.text)?,
-                ReviewRow::Changed { left, right } => {
-                    if let Some(l) = left {
-                        writeln!(out, "-{}", l.text)?;
-                    }
-                    if let Some(r) = right {
-                        writeln!(out, "+{}", r.text)?;
-                    }
-                },
-            }
-        }
-    }
-    Ok(())
 }
