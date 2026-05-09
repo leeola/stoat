@@ -16,6 +16,7 @@ mod events;
 mod hooks;
 mod message;
 mod permission;
+mod permission_prompt;
 mod rule_policy;
 mod shell_chain;
 mod types;
@@ -30,6 +31,7 @@ pub use permission::{
     PermissionBehavior, PermissionCallback, PermissionDestination, PermissionResult,
     PermissionRule, PermissionScope, PermissionSuggestion, ToolPermissionContext,
 };
+pub use permission_prompt::{ApprovalDecision, PermissionPrompt};
 pub use rule_policy::RuleBasedPolicy;
 use slotmap::{new_key_type, SlotMap};
 use std::{io, sync::Arc};

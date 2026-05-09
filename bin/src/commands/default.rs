@@ -149,8 +149,9 @@ fn run_tui(
         }
         let permission_policy = ChainedPermissionPolicy::new(vec![
             Arc::new(BashDenialPolicy::new()),
-            Arc::new(RuleBasedPolicy::from_settings(
+            Arc::new(RuleBasedPolicy::with_prompt_channel(
                 &stoat.settings.claude_permissions,
+                stoat.permission_prompt_tx.clone(),
             )),
         ]);
         stoat.set_claude_code_host(Arc::new(

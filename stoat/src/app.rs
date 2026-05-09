@@ -72,6 +72,18 @@ pub struct Stoat {
     /// the user is being prompted to discard or cancel; cleared on
     /// cancel and stays `Some` on confirm (the app exits anyway).
     pub(crate) quit_all_confirm: Option<QuitAllConfirm>,
+    /// Active Claude Code permission-approval modal. `Some` while a
+    /// tool call is awaiting user input; cleared when the user picks
+    /// a button. Subsequent prompts queue in
+    /// [`Self::permission_prompt_queue`] until the active modal
+    /// completes.
+    pub(crate) permission_prompt: Option<crate::permission_prompt::ApprovalModal>,
+    /// Pending permission prompts waiting for the active modal to
+    /// close. FIFO so prompts surface in the order the policy sent
+    /// them.
+    pub(crate) permission_prompt_queue: std::collections::VecDeque<crate::host::PermissionPrompt>,
+    pub permission_prompt_tx: Sender<crate::host::PermissionPrompt>,
+    permission_prompt_rx: Receiver<crate::host::PermissionPrompt>,
     /// Modal listing the focused editor's jumplist entries; opened by
     /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
     /// cancel.
@@ -560,6 +572,7 @@ impl Stoat {
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
         let (claude_tx, claude_rx) = tokio::sync::mpsc::channel(256);
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
+        let (permission_prompt_tx, permission_prompt_rx) = tokio::sync::mpsc::channel(64);
 
         Self {
             size: Rect::default(),
@@ -573,6 +586,10 @@ impl Stoat {
             file_finder: None,
             workspace_picker: None,
             quit_all_confirm: None,
+            permission_prompt: None,
+            permission_prompt_queue: std::collections::VecDeque::new(),
+            permission_prompt_tx,
+            permission_prompt_rx,
             jumplist_picker: None,
             pending_checkpoint_picker: None,
             global_search_input: None,
@@ -879,6 +896,10 @@ impl Stoat {
                 notif = self.claude_rx.recv() => {
                     let Some(notif) = notif else { continue };
                     self.handle_claude_notification(notif)
+                }
+                prompt = self.permission_prompt_rx.recv() => {
+                    let Some(prompt) = prompt else { continue };
+                    self.enqueue_permission_prompt(prompt)
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
                 _ = async {
@@ -1591,6 +1612,10 @@ impl Stoat {
 
         if self.quit_all_confirm.is_some() {
             return self.dispatch_quit_all_confirm_key(key);
+        }
+
+        if self.permission_prompt.is_some() {
+            return self.dispatch_permission_prompt_key(key);
         }
 
         if self.jumplist_picker.is_some() {
@@ -2851,6 +2876,37 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
             ConfirmOutcome::Confirm => UpdateEffect::Quit,
+        }
+    }
+
+    pub(crate) fn enqueue_permission_prompt(
+        &mut self,
+        prompt: crate::host::PermissionPrompt,
+    ) -> UpdateEffect {
+        if self.permission_prompt.is_none() {
+            self.permission_prompt = Some(crate::permission_prompt::ApprovalModal::new(prompt));
+        } else {
+            self.permission_prompt_queue.push_back(prompt);
+        }
+        UpdateEffect::Redraw
+    }
+
+    fn dispatch_permission_prompt_key(&mut self, key: KeyEvent) -> UpdateEffect {
+        use crate::permission_prompt::ModalOutcome;
+        let outcome = match self.permission_prompt.as_mut() {
+            Some(modal) => modal.handle_key(key),
+            None => return UpdateEffect::None,
+        };
+        match outcome {
+            ModalOutcome::None => UpdateEffect::Redraw,
+            ModalOutcome::Decided(_) => {
+                self.permission_prompt = None;
+                if let Some(next) = self.permission_prompt_queue.pop_front() {
+                    self.permission_prompt =
+                        Some(crate::permission_prompt::ApprovalModal::new(next));
+                }
+                UpdateEffect::Redraw
+            },
         }
     }
 
