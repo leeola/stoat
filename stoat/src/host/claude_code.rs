@@ -10,15 +10,18 @@
 //! - [`permission`]: permission-callback interface and outcome types.
 //! - [`denial`]: hardcoded denial policy installed at the launcher.
 
+mod chain;
 mod denial;
 mod events;
 mod hooks;
 mod message;
 mod permission;
+mod rule_policy;
 mod shell_chain;
 mod types;
 
 use async_trait::async_trait;
+pub use chain::ChainedPermissionPolicy;
 pub use denial::BashDenialPolicy;
 pub use events::{HookLifecycleEvent, SessionStateEvent, TaskEvent};
 pub use hooks::{HookCallback, HookDecision, HookEvent, HookKind, HookResponse};
@@ -27,6 +30,7 @@ pub use permission::{
     PermissionBehavior, PermissionCallback, PermissionDestination, PermissionResult,
     PermissionRule, PermissionScope, PermissionSuggestion, ToolPermissionContext,
 };
+pub use rule_policy::RuleBasedPolicy;
 use slotmap::{new_key_type, SlotMap};
 use std::{io, sync::Arc};
 pub use types::{

@@ -2,7 +2,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use snafu::{ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
-    host::{BashDenialPolicy, LocalFs, LocalFsWatcher},
+    host::{BashDenialPolicy, ChainedPermissionPolicy, LocalFs, LocalFsWatcher, RuleBasedPolicy},
     Axis, Settings, Stoat,
 };
 use stoat_agent_claude_code::ClaudeCodeLauncher;
@@ -129,6 +129,7 @@ fn run_tui(
         theme: None,
         mouse_capture: None,
         mode_badges: std::collections::BTreeMap::new(),
+        claude_permissions: std::collections::BTreeMap::new(),
     };
 
     let cwd = std::env::current_dir().unwrap_or_default();
@@ -146,9 +147,15 @@ fn run_tui(
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
+        let permission_policy = ChainedPermissionPolicy::new(vec![
+            Arc::new(BashDenialPolicy::new()),
+            Arc::new(RuleBasedPolicy::from_settings(
+                &stoat.settings.claude_permissions,
+            )),
+        ]);
         stoat.set_claude_code_host(Arc::new(
             ClaudeCodeLauncher::new(Arc::new(LocalFs), executor)
-                .with_permission_callback(Arc::new(BashDenialPolicy::new())),
+                .with_permission_callback(Arc::new(permission_policy)),
         ));
         match LocalFsWatcher::new() {
             Ok(watcher) => stoat.set_fs_watch_host(Arc::new(watcher)),

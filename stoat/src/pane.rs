@@ -1004,6 +1004,7 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: std::collections::BTreeMap::new(),
+                claude_permissions: std::collections::BTreeMap::new(),
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
