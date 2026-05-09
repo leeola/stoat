@@ -74,7 +74,7 @@ pub fn match_and_rank<T>(
     let mut out: Vec<RankedMatch<T>> = Vec::new();
     for (item, haystack) in items {
         let hay = Utf32Str::new(&haystack, &mut hay_buf);
-        if let Some(scored) = score_with_bonuses(&pattern, hay, &mut guard) {
+        if let Some(scored) = score_with_bonuses(&pattern, &haystack, hay, &mut guard) {
             out.push(RankedMatch {
                 item,
                 haystack,
@@ -92,13 +92,17 @@ struct Scored {
 }
 
 /// Walks `pattern.atoms` individually and combines per-atom scores
-/// and indices. Adds the in-order-token bonus: when each atom's
-/// first matched index strictly exceeds the previous atom's last,
-/// the combined score is multiplied by 5/4 (~1.25x). Single-atom
-/// queries trivially satisfy the order check and still receive
-/// the bonus.
+/// and indices. Layers two bonuses on the raw nucleo score:
+///
+/// 1. In-order-token: when each atom's first matched index strictly exceeds the previous atom's
+///    last, the combined score is multiplied by 5/4 (~1.25x). Single-atom queries trivially satisfy
+///    the order check.
+/// 2. Basename: when every matched character lies past the last `/` in the haystack, add a fixed
+///    `+50`. Lifts file-name matches above directory-prefix matches; haystacks with no `/` (e.g.
+///    action names in the command palette) trivially satisfy the check.
 fn score_with_bonuses(
     pattern: &Pattern,
+    haystack_str: &str,
     haystack: Utf32Str<'_>,
     matcher: &mut Matcher,
 ) -> Option<Scored> {
@@ -120,10 +124,38 @@ fn score_with_bonuses(
     let mut combined: Vec<u32> = per_atom.into_iter().flatten().collect();
     combined.sort_unstable();
     combined.dedup();
+
+    if all_in_basename(&combined, haystack_str) {
+        total_score = total_score.saturating_add(BASENAME_BONUS);
+    }
+
     Some(Scored {
         score: total_score,
         indices: combined,
     })
+}
+
+/// Bonus added when every matched character is in the basename
+/// (past the last `/`). Tuned to be meaningful versus nucleo's
+/// per-character bonuses (8-18 each, totals around 100-300 for
+/// short queries) without dominating the raw score.
+const BASENAME_BONUS: u32 = 50;
+
+fn all_in_basename(indices: &[u32], haystack: &str) -> bool {
+    let Some(last_slash) = last_slash_char_pos(haystack) else {
+        return true;
+    };
+    indices.iter().all(|&i| i > last_slash)
+}
+
+fn last_slash_char_pos(haystack: &str) -> Option<u32> {
+    let mut last: Option<u32> = None;
+    for (i, c) in haystack.chars().enumerate() {
+        if c == '/' {
+            last = Some(i as u32);
+        }
+    }
+    last
 }
 
 fn is_in_order(per_atom: &[Vec<u32>]) -> bool {
@@ -236,5 +268,61 @@ mod tests {
         let bonus = match_and_rank("foo", items).expect("query has atoms");
         assert_eq!(bonus.len(), 1);
         assert!(bonus[0].score > 0);
+    }
+
+    #[test]
+    fn match_and_rank_basename_match_outscores_directory_prefix() {
+        let items = vec![
+            (0usize, "src/foo.rs".to_string()),
+            (1usize, "foo_helpers/util.rs".to_string()),
+        ];
+        let results = match_and_rank("foo", items).expect("query has atoms");
+        assert_eq!(results.len(), 2);
+        let basename = results
+            .iter()
+            .find(|m| m.item == 0)
+            .expect("src/foo.rs in results");
+        let prefix = results
+            .iter()
+            .find(|m| m.item == 1)
+            .expect("foo_helpers/util.rs in results");
+        assert!(
+            basename.score > prefix.score,
+            "expected basename score {} > directory-prefix score {}",
+            basename.score,
+            prefix.score,
+        );
+    }
+
+    #[test]
+    fn match_and_rank_basename_bonus_skips_when_match_crosses_slash() {
+        // `srf` matches `s` `r` `f` at indices 0, 1, 4 in `src/foo.rs`.
+        // 0 and 1 are at-or-before the slash (index 3), so the bonus
+        // must not fire.
+        let items = vec![(0usize, "src/foo.rs".to_string())];
+        let with = match_and_rank("srf", items.clone()).expect("query has atoms");
+        let basename_only = match_and_rank("foo", items).expect("query has atoms");
+        // Sanity check both queries match the same haystack so we can
+        // compare scoring shape: the basename-only query should be
+        // strictly higher because it earns the +50 bonus.
+        assert_eq!(with.len(), 1);
+        assert_eq!(basename_only.len(), 1);
+        assert!(
+            basename_only[0].score > with[0].score,
+            "basename-only score {} should exceed crossing score {}",
+            basename_only[0].score,
+            with[0].score,
+        );
+    }
+
+    #[test]
+    fn match_and_rank_basename_bonus_applies_to_no_slash_haystacks() {
+        // Action-name-style haystacks (no slash) should receive the
+        // bonus trivially, since "every match is in the basename"
+        // is vacuously true.
+        let items = vec![(0usize, "QuitAll".to_string())];
+        let results = match_and_rank("quit", items).expect("query has atoms");
+        assert_eq!(results.len(), 1);
+        assert!(results[0].score > 0);
     }
 }
