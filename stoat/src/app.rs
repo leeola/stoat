@@ -92,6 +92,12 @@ pub struct Stoat {
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
     pub(crate) diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
+    /// Name of the action that most recently opened a picker
+    /// successfully. Used by `OpenLastPicker` (`space '`) to
+    /// re-fire the same action and rebuild the picker fresh.
+    /// Only set when an opening dispatch returned `Redraw`;
+    /// no-op opens do not overwrite the prior recall target.
+    pub(crate) last_picker_action: Option<&'static str>,
     /// Modal listing the active claude chat's per-message checkpoints;
     /// opened by [`stoat_action::OpenCheckpointPicker`]. Selecting an
     /// entry routes its sha to [`crate::host::GitRepo::restore_tree`]
@@ -607,6 +613,7 @@ impl Stoat {
             permission_prompt_rx,
             jumplist_picker: None,
             diagnostics_picker: None,
+            last_picker_action: None,
             pending_checkpoint_picker: None,
             global_search_input: None,
             global_search: None,

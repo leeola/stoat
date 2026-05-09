@@ -10,24 +10,24 @@ size: 80x24
 [0m[7m [0m
 
 
-
-                                       [0m[33m┌ space ────────────────────────────────┐[0m
-                                       [0m[33m│[0m[36m  ?[0m[97m   open the help modal[0m              [0m[33m│[0m
-                                       [0m[33m│[0m[36mEsc[0m[97m   normal mode[0m                      [0m[33m│[0m
-                                       [0m[33m│[0m[36m  q[0m[97m   close pane or exit[0m               [0m[33m│[0m
-                                       [0m[33m│[0m[36m  a[0m[97m   space_pane_nav mode[0m              [0m[33m│[0m
-                                       [0m[33m│[0m[36m  t[0m[97m   open terminal[0m                    [0m[33m│[0m
-                                       [0m[33m│[0m[36m  c[0m[97m   claude mode[0m                      [0m[33m│[0m
-                                       [0m[33m│[0m[36m  w[0m[97m   space_workspace mode[0m             [0m[33m│[0m
-                                       [0m[33m│[0m[36m  b[0m[97m   space_buffer mode[0m                [0m[33m│[0m
-                                       [0m[33m│[0m[36m  l[0m[97m   space_lsp mode[0m                   [0m[33m│[0m
-                                       [0m[33m│[0m[36m  "[0m[97m   space_clipboard mode[0m             [0m[33m│[0m
-                                       [0m[33m│[0m[36m  p[0m[97m   open the file finder[0m             [0m[33m│[0m
-                                       [0m[33m│[0m[36m  g[0m[97m   open the changed-file picker[0m     [0m[33m│[0m
-                                       [0m[33m│[0m[36m  s[0m[97m   save current position to jumplist[0m[33m│[0m
-                                       [0m[33m│[0m[36m  j[0m[97m   jump backward in jumplist[0m        [0m[33m│[0m
-                                       [0m[33m│[0m[36m  k[0m[97m   jump forward in jumplist[0m         [0m[33m│[0m
-                                       [0m[33m│[0m[36m  /[0m[97m   open workspace regex search[0m      [0m[33m│[0m
-                                       [0m[33m│[0m[36m  :[0m[97m   open the command palette[0m         [0m[33m│[0m
-                                       [0m[33m└───────────────────────────────────────┘[0m
+                                  [0m[33m┌ space ─────────────────────────────────────┐[0m
+                                  [0m[33m│[0m[36m  ?[0m[97m   open the help modal[0m                   [0m[33m│[0m
+                                  [0m[33m│[0m[36mEsc[0m[97m   normal mode[0m                           [0m[33m│[0m
+                                  [0m[33m│[0m[36m  q[0m[97m   close pane or exit[0m                    [0m[33m│[0m
+                                  [0m[33m│[0m[36m  a[0m[97m   space_pane_nav mode[0m                   [0m[33m│[0m
+                                  [0m[33m│[0m[36m  t[0m[97m   open terminal[0m                         [0m[33m│[0m
+                                  [0m[33m│[0m[36m  c[0m[97m   claude mode[0m                           [0m[33m│[0m
+                                  [0m[33m│[0m[36m  w[0m[97m   space_workspace mode[0m                  [0m[33m│[0m
+                                  [0m[33m│[0m[36m  b[0m[97m   space_buffer mode[0m                     [0m[33m│[0m
+                                  [0m[33m│[0m[36m  l[0m[97m   space_lsp mode[0m                        [0m[33m│[0m
+                                  [0m[33m│[0m[36m  "[0m[97m   space_clipboard mode[0m                  [0m[33m│[0m
+                                  [0m[33m│[0m[36m  p[0m[97m   open the file finder[0m                  [0m[33m│[0m
+                                  [0m[33m│[0m[36m  g[0m[97m   open the changed-file picker[0m          [0m[33m│[0m
+                                  [0m[33m│[0m[36m  s[0m[97m   save current position to jumplist[0m     [0m[33m│[0m
+                                  [0m[33m│[0m[36m  j[0m[97m   jump backward in jumplist[0m             [0m[33m│[0m
+                                  [0m[33m│[0m[36m  k[0m[97m   jump forward in jumplist[0m              [0m[33m│[0m
+                                  [0m[33m│[0m[36m  /[0m[97m   open workspace regex search[0m           [0m[33m│[0m
+                                  [0m[33m│[0m[36m  '[0m[97m   reopen the most recently opened picker[0m[33m│[0m
+                                  [0m[33m│[0m[36m  :[0m[97m   open the command palette[0m              [0m[33m│[0m
+                                  [0m[33m└────────────────────────────────────────────┘[0m
 [0m[1m[30m[100m SPC [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

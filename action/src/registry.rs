@@ -31,10 +31,10 @@ use crate::{
             MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart, MoveNextWordEnd,
             MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart, MovePrevLongWordEnd,
             MovePrevLongWordStart, MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp,
-            OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker, OpenReverseSearchInput,
-            OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore, PasteClipboardAfter,
-            PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection, RemoveSelections,
-            RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
+            OpenAbove, OpenBelow, OpenGlobalSearch, OpenJumplistPicker, OpenLastPicker,
+            OpenReverseSearchInput, OpenSearchInput, PageDown, PageUp, PasteAfter, PasteBefore,
+            PasteClipboardAfter, PasteClipboardBefore, RecordMacro, Redo, RemovePrimarySelection,
+            RemoveSelections, RepeatLastMotion, ReplaceChar, ReplayMacro, RotateSelectionsBackward,
             RotateSelectionsForward, SaveBuffer, SaveSelection, ScrollDown, ScrollUp, SearchNext,
             SearchPrev, SelectAll, SelectAllChildren, SelectAllSiblings, SelectLineBelow,
             SelectNextSibling, SelectPrevSibling, SelectRegister, SelectTextobjectAround,
@@ -308,6 +308,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenJumplistPicker::DEF, |_| {
         Ok(Box::new(OpenJumplistPicker))
     });
+    add(OpenLastPicker::DEF, |_| Ok(Box::new(OpenLastPicker)));
     add(OpenDiagnosticsPicker::DEF, |_| {
         Ok(Box::new(OpenDiagnosticsPicker))
     });
@@ -892,6 +893,7 @@ mod tests {
         // + 2 MoveParentNodeStart/MoveParentNodeEnd.
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 OpenJumplistPicker.
+        // + 1 OpenLastPicker.
         // + 1 OpenDiagnosticsPicker.
         // + 1 OpenWorkspaceDiagnosticsPicker.
         // + 1 OpenGlobalSearch.
@@ -946,7 +948,7 @@ mod tests {
         // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
         //   ClaudeToggleToolCardExpand).
         // + 1 ClaudeJumpToFocusedCard.
-        assert_eq!(all().count(), 277);
+        assert_eq!(all().count(), 278);
     }
 
     #[test]

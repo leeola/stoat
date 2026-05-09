@@ -597,9 +597,51 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PaletteSelectPrev => prompt::palette_select_prev(stoat),
         ActionKind::PaletteSelectNext => prompt::palette_select_next(stoat),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
+        ActionKind::OpenLastPicker => open_last_picker(stoat),
     };
+    if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
+        stoat.last_picker_action = Some(action.def().name());
+    }
     stoat.sync_claude_badges();
     effect
+}
+
+/// Action kinds whose handlers open a top-level picker modal.
+/// Used by the `dispatch` post-hook that records the most
+/// recently opened picker for [`OpenLastPicker`] recall.
+fn is_picker_open_kind(kind: ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::OpenFileFinder
+            | ActionKind::OpenFileFinderHSplit
+            | ActionKind::OpenFileFinderVSplit
+            | ActionKind::OpenBufferPicker
+            | ActionKind::OpenChangedFilePicker
+            | ActionKind::OpenCommandPalette
+            | ActionKind::OpenJumplistPicker
+            | ActionKind::OpenGlobalSearch
+            | ActionKind::OpenDiagnosticsPicker
+            | ActionKind::OpenWorkspaceDiagnosticsPicker
+    )
+}
+
+/// Drive [`ActionKind::OpenLastPicker`]. Re-fires the action
+/// recorded on `Stoat::last_picker_action` so the user can
+/// resume the most recently opened picker without remembering
+/// the original chord. The picker rebuilds fresh from current
+/// state -- prior query and selection are not restored. No-op
+/// when nothing is recorded or the registry lookup fails.
+fn open_last_picker(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(name) = stoat.last_picker_action else {
+        return UpdateEffect::None;
+    };
+    let Some(entry) = stoat_action::registry::lookup(name) else {
+        return UpdateEffect::None;
+    };
+    let Ok(action) = (entry.create)(&[]) else {
+        return UpdateEffect::None;
+    };
+    dispatch(stoat, &*action)
 }
 
 /// Return a mutable reference to the effective focused editor, respecting
@@ -2104,5 +2146,52 @@ mod tests {
             vec![(30, 0)],
             "huge count should clamp at last content row"
         );
+    }
+
+    #[test]
+    fn last_picker_action_records_command_palette() {
+        let mut stoat = stoat();
+        dispatch(&mut stoat, &stoat_action::OpenCommandPalette);
+        assert_eq!(stoat.last_picker_action, Some("OpenCommandPalette"));
+    }
+
+    #[test]
+    fn last_picker_recall_no_op_with_no_history() {
+        let mut stoat = stoat();
+        assert_eq!(
+            dispatch(&mut stoat, &stoat_action::OpenLastPicker),
+            UpdateEffect::None
+        );
+        assert!(stoat.command_palette.is_none());
+        assert!(stoat.jumplist_picker.is_none());
+        assert!(stoat.diagnostics_picker.is_none());
+    }
+
+    #[test]
+    fn last_picker_recall_reopens_jumplist_after_close() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "alpha\nbeta\ngamma\n");
+        dispatch(&mut stoat, &SaveSelection);
+        dispatch(&mut stoat, &MoveDown);
+        dispatch(&mut stoat, &SaveSelection);
+        dispatch(&mut stoat, &stoat_action::OpenJumplistPicker);
+        assert_eq!(
+            stoat.last_picker_action,
+            Some("OpenJumplistPicker"),
+            "open should record the recall target"
+        );
+        let previous_mode = stoat
+            .jumplist_picker
+            .as_ref()
+            .expect("modal open")
+            .previous_mode
+            .clone();
+        stoat.jumplist_picker = None;
+        stoat.mode = previous_mode;
+        assert_eq!(
+            dispatch(&mut stoat, &stoat_action::OpenLastPicker),
+            UpdateEffect::Redraw
+        );
+        assert!(stoat.jumplist_picker.is_some(), "recall should reopen");
     }
 }

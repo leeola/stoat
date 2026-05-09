@@ -511,6 +511,16 @@ define_action!(
 );
 
 define_action!(
+    OpenLastPickerDef,
+    OpenLastPicker,
+    "OpenLastPicker",
+    ActionKind::OpenLastPicker,
+    "reopen the most recently opened picker",
+    "Re-fire the action that last opened a picker (file finder, command palette, jumplist, diagnostics, etc.) so the user can resume browsing without remembering the original chord. The picker rebuilds fresh from current state -- prior query and selection are not restored. No-op when no picker has been opened in this session.",
+    ActionPriority::Common
+);
+
+define_action!(
     OpenGlobalSearchDef,
     OpenGlobalSearch,
     "OpenGlobalSearch",
