@@ -50,6 +50,7 @@ pub struct TestHarness {
     scheduler: Arc<TestScheduler>,
     pub(crate) fake_claude_host: Arc<crate::host::FakeClaudeCodeHost>,
     pub(crate) fake_fs: Arc<crate::host::FakeFs>,
+    pub(crate) fake_fs_watcher: Arc<crate::host::FakeFsWatcher>,
     pub(crate) fake_git: Arc<crate::host::FakeGit>,
     pub(crate) fake_env: Arc<crate::host::FakeEnv>,
     pub(crate) fake_lsp: Arc<crate::host::FakeLsp>,
@@ -72,6 +73,8 @@ impl TestHarness {
         let executor = scheduler.executor();
         let fake_claude_host = Arc::new(crate::host::FakeClaudeCodeHost::new());
         let fake_fs = Arc::new(crate::host::FakeFs::new());
+        let fake_fs_watcher = Arc::new(crate::host::FakeFsWatcher::new());
+        fake_fs_watcher.install_on(&fake_fs);
         let fake_git = Arc::new(crate::host::FakeGit::new());
         let fake_env = Arc::new(crate::host::FakeEnv::new());
         let fake_lsp = Arc::new(crate::host::FakeLsp::new());
@@ -82,6 +85,7 @@ impl TestHarness {
         stoat.active_workspace_mut().name = String::new();
         stoat.set_claude_code_host(fake_claude_host.clone());
         stoat.set_fs_host(fake_fs.clone());
+        stoat.set_fs_watch_host(fake_fs_watcher.clone());
         stoat.set_git_host(fake_git.clone());
         stoat.set_env_host(fake_env.clone());
         stoat.set_lsp_host(fake_lsp.clone());
@@ -93,6 +97,7 @@ impl TestHarness {
             scheduler,
             fake_claude_host,
             fake_fs,
+            fake_fs_watcher,
             fake_git,
             fake_env,
             fake_lsp,
@@ -113,6 +118,16 @@ impl TestHarness {
     /// [`Stoat`] route through this handle.
     pub fn fake_fs(&self) -> &Arc<crate::host::FakeFs> {
         &self.fake_fs
+    }
+
+    /// Expose the [`crate::host::FakeFsWatcher`] backing this
+    /// harness. Already paired with `fake_fs()` via
+    /// [`crate::host::FakeFsWatcher::install_on`], so writes through
+    /// the fake fs auto-emit `Modified` events on watched paths;
+    /// tests can also call `inject` directly for create/remove/rename
+    /// scenarios.
+    pub fn fake_fs_watcher(&self) -> &Arc<crate::host::FakeFsWatcher> {
+        &self.fake_fs_watcher
     }
 
     /// Seed a fixture file into the fake filesystem at `path` with the
@@ -177,6 +192,11 @@ impl TestHarness {
             alloc_ptr(&self.stoat.fs_host),
             alloc_ptr(&self.fake_fs),
             "FsHost was replaced during the test; real filesystem IO may have escaped"
+        );
+        assert_eq!(
+            alloc_ptr(&self.stoat.fs_watch_host),
+            alloc_ptr(&self.fake_fs_watcher),
+            "FsWatchHost was replaced during the test; real filesystem watches may have escaped"
         );
         assert_eq!(
             alloc_ptr(&self.stoat.env_host),

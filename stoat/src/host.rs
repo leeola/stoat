@@ -45,6 +45,6 @@ pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEn
 pub use stoat_host::FakeShell;
 pub use stoat_host::{
     EnvHost, FsDirEntry, FsEventKind, FsHost, FsMetadata, FsWatchEvent, FsWatchHost, LocalEnv,
-    LocalFs, LocalFsWatcher, LocalShell, ShellHost, ShellOutput, WatchToken,
+    LocalFs, LocalFsWatcher, LocalShell, NoopFsWatcher, ShellHost, ShellOutput, WatchToken,
 };
 pub use terminal::TerminalHost;

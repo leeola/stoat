@@ -144,6 +144,44 @@ impl FsWatchHost for LocalFsWatcher {
     }
 }
 
+/// Zero-event [`FsWatchHost`]. `watch` and `unwatch` are silent; `try_recv`
+/// always returns `None`. Used as the default registered on
+/// `Stoat::new` so the editor constructs without fallible IO; the
+/// bin layer swaps in [`LocalFsWatcher`] and tests swap in
+/// [`crate::FakeFsWatcher`].
+pub struct NoopFsWatcher {
+    next_id: Mutex<u64>,
+}
+
+impl Default for NoopFsWatcher {
+    fn default() -> Self {
+        Self {
+            next_id: Mutex::new(0),
+        }
+    }
+}
+
+impl NoopFsWatcher {
+    pub fn new() -> Self {
+        Self::default()
+    }
+}
+
+impl FsWatchHost for NoopFsWatcher {
+    fn watch(&self, _path: &Path) -> io::Result<WatchToken> {
+        let mut next = self.next_id.lock().expect("NoopFsWatcher poisoned");
+        let token = WatchToken(*next);
+        *next += 1;
+        Ok(token)
+    }
+
+    fn unwatch(&self, _token: WatchToken) {}
+
+    fn try_recv(&self) -> Option<FsWatchEvent> {
+        None
+    }
+}
+
 /// Map a [`notify::Event`] kind onto the smaller [`FsEventKind`] surface.
 /// Returns `None` for events we don't propagate (`Access`, `Any`,
 /// `Other`); access events especially are noise on Linux.

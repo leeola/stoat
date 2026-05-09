@@ -9,7 +9,8 @@ use crate::{
     help::Help,
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
-        EnvHost, FsHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopLsp,
+        EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopFsWatcher,
+        NoopLsp,
     },
     keymap::{Keymap, ResolvedAction},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
@@ -283,6 +284,13 @@ pub struct Stoat {
     /// [`crate::host::FakeFs`] in tests; all IO outside the host module
     /// itself must route through this field.
     pub(crate) fs_host: Arc<dyn FsHost>,
+    /// Filesystem-change subscription host. Defaults to
+    /// [`NoopFsWatcher`]; the bin layer installs
+    /// [`crate::host::LocalFsWatcher`] and tests install
+    /// [`crate::host::FakeFsWatcher`]. Drained per-tick by
+    /// [`Self::drain_fs_watch_events`] so external edits can flow
+    /// into the active review session.
+    pub(crate) fs_watch_host: Arc<dyn FsWatchHost>,
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
@@ -595,6 +603,7 @@ impl Stoat {
             diagnostics: crate::diagnostics::DiagnosticSet::new(),
             last_find: None,
             fs_host: Arc::new(LocalFs),
+            fs_watch_host: Arc::new(NoopFsWatcher::new()),
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
             lsp_host: Arc::new(NoopLsp),
@@ -648,6 +657,19 @@ impl Stoat {
     /// and other IO paths run in-memory.
     pub fn set_fs_host(&mut self, host: Arc<dyn FsHost>) {
         self.fs_host = host;
+    }
+
+    /// Swap in an alternative [`FsWatchHost`]. The default is
+    /// [`NoopFsWatcher`] (no events ever fire); the bin layer
+    /// installs [`crate::host::LocalFsWatcher`] and tests install
+    /// [`crate::host::FakeFsWatcher`].
+    pub fn set_fs_watch_host(&mut self, host: Arc<dyn FsWatchHost>) {
+        self.fs_watch_host = host;
+    }
+
+    /// Returns the active [`FsWatchHost`].
+    pub fn fs_watch_host(&self) -> &Arc<dyn FsWatchHost> {
+        &self.fs_watch_host
     }
 
     /// Swap in an alternative [`GitHost`]. The default is [`LocalGit`];
@@ -920,6 +942,7 @@ impl Stoat {
 
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         self.drain_lsp_notifications();
+        self.drain_fs_watch_events();
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -934,6 +957,29 @@ impl Stoat {
         action_handlers::lsp::notify_buffer_changes_pending(self);
         crate::completion::request::trigger(self);
         effect
+    }
+
+    /// Drain queued [`crate::host::FsWatchEvent`]s from the active
+    /// [`FsWatchHost`]. v1 traces each event; the
+    /// `ReviewExternalEdit` dispatch lands with that action's
+    /// handler. Cap matches [`Self::drain_lsp_notifications`] so a
+    /// pathological burst can't starve the event loop.
+    pub(crate) fn drain_fs_watch_events(&mut self) {
+        let host = self.fs_watch_host.clone();
+        for _ in 0..256 {
+            let Some(event) = host.try_recv() else {
+                break;
+            };
+            tracing::trace!(
+                target: "stoat::app",
+                path = %event.path.display(),
+                kind = ?event.kind,
+                "fs watch event observed",
+            );
+            // FIXME: dispatch ReviewExternalEdit when a review
+            // session is active; lands with the action def + handler
+            // child of the review modification tracker feature.
+        }
     }
 
     /// Drains every notification currently buffered on

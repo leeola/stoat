@@ -18,4 +18,6 @@ pub use env::{EnvHost, LocalEnv};
 pub use fake::{FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeShell, FakeShellInvocation};
 pub use fs::{FsDirEntry, FsHost, FsMetadata, LocalFs};
 pub use shell::{LocalShell, ShellHost, ShellOutput};
-pub use watch::{FsEventKind, FsWatchEvent, FsWatchHost, LocalFsWatcher, WatchToken};
+pub use watch::{
+    FsEventKind, FsWatchEvent, FsWatchHost, LocalFsWatcher, NoopFsWatcher, WatchToken,
+};

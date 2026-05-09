@@ -1,7 +1,10 @@
 use clap::{ArgAction, Parser, Subcommand};
 use snafu::{ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc};
-use stoat::{host::LocalFs, Axis, Settings, Stoat};
+use stoat::{
+    host::{LocalFs, LocalFsWatcher},
+    Axis, Settings, Stoat,
+};
 use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_scheduler::TokioScheduler;
 
@@ -147,6 +150,14 @@ fn run_tui(
             Arc::new(LocalFs),
             executor,
         )));
+        match LocalFsWatcher::new() {
+            Ok(watcher) => stoat.set_fs_watch_host(Arc::new(watcher)),
+            Err(err) => tracing::warn!(
+                target: "stoat::bin",
+                %err,
+                "LocalFsWatcher init failed; review modification tracker disabled this session",
+            ),
+        }
 
         match start {
             TuiStart::Review => stoat.open_review(),
