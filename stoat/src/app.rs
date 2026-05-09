@@ -3003,15 +3003,47 @@ impl Stoat {
                 let Some(picker) = self.diagnostics_picker.take() else {
                     return UpdateEffect::None;
                 };
-                let target_offset = match picker.entries().get(idx) {
-                    Some(entry) => entry.offset,
+                let entry = match picker.entries().get(idx) {
+                    Some(entry) => entry,
                     None => return UpdateEffect::Redraw,
                 };
+                let path = entry.path.clone();
+                let zero_based_line = entry.line.saturating_sub(1);
+                let zero_based_column = entry.column.saturating_sub(1);
+                let local_offset = entry.offset;
                 self.mode = picker.previous_mode;
-                self.collapse_focused_cursor_to(target_offset);
+                let offset = match path {
+                    Some(path) => {
+                        action_handlers::file::open_file(self, &path);
+                        self.offset_for_focused_point(zero_based_line, zero_based_column)
+                            .unwrap_or(0)
+                    },
+                    None => local_offset,
+                };
+                self.collapse_focused_cursor_to(offset);
                 UpdateEffect::Redraw
             },
         }
+    }
+
+    /// Resolve a `(line, column)` 0-based point to a byte
+    /// offset in the focused editor's rope. Returns `None`
+    /// when the focused pane is not an editor.
+    fn offset_for_focused_point(&mut self, line: u32, column: u32) -> Option<usize> {
+        let ws = self.active_workspace_mut();
+        let editor_id = match ws.focus {
+            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
+                View::Editor(id) => id,
+                _ => return None,
+            },
+            FocusTarget::Dock(_) => return None,
+        };
+        let editor = ws.editors.get_mut(editor_id)?;
+        let snapshot = editor.display_map.snapshot();
+        let buf_snap = snapshot.buffer_snapshot();
+        let rope = buf_snap.rope();
+        let point = stoat_text::Point::new(line, column);
+        Some(rope.point_to_offset(point).min(rope.len()))
     }
 
     /// Collapse the focused editor's primary selection at

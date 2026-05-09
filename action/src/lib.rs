@@ -61,7 +61,7 @@ pub use defs::{
     lsp::{
         CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
         GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker, OpenSymbolPicker,
-        OpenWorkspaceSymbolPicker, RenameSymbol,
+        OpenWorkspaceDiagnosticsPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
     },
     palette::OpenCommandPalette,
     pane::{

@@ -63,6 +63,14 @@ impl DiagnosticSet {
         self.by_path.get(path).map(|v| v.as_slice()).unwrap_or(&[])
     }
 
+    /// Iterate every `(path, diagnostics)` pair currently in the set.
+    /// Used by the workspace-scope diagnostics picker.
+    pub fn iter(&self) -> impl Iterator<Item = (&Path, &[Diagnostic])> {
+        self.by_path
+            .iter()
+            .map(|(path, diags)| (path.as_path(), diags.as_slice()))
+    }
+
     /// Returns severity counts plus the worst severity for `path`.
     pub fn summarize(&self, path: &Path) -> DiagnosticSummary {
         let mut summary = DiagnosticSummary::default();

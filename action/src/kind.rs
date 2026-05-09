@@ -67,6 +67,7 @@ pub enum ActionKind {
     JumpForward,
     OpenJumplistPicker,
     OpenDiagnosticsPicker,
+    OpenWorkspaceDiagnosticsPicker,
     OpenGlobalSearch,
     SplitSelection,
     KeepSelections,

@@ -2,7 +2,7 @@ mod claude;
 mod commits;
 pub(crate) mod completion;
 mod conflict;
-mod file;
+pub(crate) mod file;
 mod file_finder;
 pub(crate) mod filter_selections;
 mod help;
@@ -288,6 +288,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::JumpForward => movement::jump_forward(stoat),
         ActionKind::OpenJumplistPicker => open_jumplist_picker(stoat),
         ActionKind::OpenDiagnosticsPicker => open_diagnostics_picker(stoat),
+        ActionKind::OpenWorkspaceDiagnosticsPicker => open_workspace_diagnostics_picker(stoat),
         ActionKind::OpenGlobalSearch => open_global_search(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
@@ -750,6 +751,25 @@ fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
         crate::jumplist_picker::JumplistPicker::new(&jumplist, &guard, previous_mode)
     };
     stoat.jumplist_picker = Some(picker);
+    UpdateEffect::Redraw
+}
+
+/// Drive [`ActionKind::OpenWorkspaceDiagnosticsPicker`].
+/// Snapshots every `(path, diagnostic)` pair currently in
+/// `Stoat::diagnostics` and stores the workspace-scope picker
+/// on `Stoat::diagnostics_picker`. No-op when the workspace
+/// has no diagnostics loaded.
+fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
+    let previous_mode = stoat.mode.clone();
+    if stoat.diagnostics.iter().next().is_none() {
+        return UpdateEffect::None;
+    }
+    let picker =
+        crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics, previous_mode);
+    if picker.entries().is_empty() {
+        return UpdateEffect::None;
+    }
+    stoat.diagnostics_picker = Some(picker);
     UpdateEffect::Redraw
 }
 

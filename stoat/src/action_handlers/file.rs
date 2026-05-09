@@ -134,7 +134,7 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-pub(super) fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
+pub(crate) fn open_file(stoat: &mut Stoat, path: &Path) -> Option<BufferId> {
     let target = stoat.active_workspace().panes.focus();
     open_file_in_pane(stoat, target, path)
 }

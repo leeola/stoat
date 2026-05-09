@@ -38,6 +38,19 @@ define_action!(
 );
 
 define_action!(
+    OpenWorkspaceDiagnosticsPickerDef,
+    OpenWorkspaceDiagnosticsPicker,
+    "OpenWorkspaceDiagnosticsPicker",
+    ActionKind::OpenWorkspaceDiagnosticsPicker,
+    "open the diagnostics picker for the entire workspace",
+    "Open a modal listing every (path, diagnostic) pair currently known to the workspace. \
+     Each row shows the path, line:column, severity glyph, and a message snippet; \
+     selecting an entry opens the target file in the focused pane and collapses the cursor \
+     at the diagnostic's range start. No-op when no diagnostics are loaded.",
+    ActionPriority::Common
+);
+
+define_action!(
     GotoDefinitionDef,
     GotoDefinition,
     "GotoDefinition",

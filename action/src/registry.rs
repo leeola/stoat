@@ -57,7 +57,7 @@ use crate::{
         lsp::{
             CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
             GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker, OpenSymbolPicker,
-            OpenWorkspaceSymbolPicker, RenameSymbol,
+            OpenWorkspaceDiagnosticsPicker, OpenWorkspaceSymbolPicker, RenameSymbol,
         },
         palette::OpenCommandPalette,
         pane::{
@@ -310,6 +310,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(OpenDiagnosticsPicker::DEF, |_| {
         Ok(Box::new(OpenDiagnosticsPicker))
+    });
+    add(OpenWorkspaceDiagnosticsPicker::DEF, |_| {
+        Ok(Box::new(OpenWorkspaceDiagnosticsPicker))
     });
     add(OpenGlobalSearch::DEF, |_| Ok(Box::new(OpenGlobalSearch)));
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
@@ -890,6 +893,7 @@ mod tests {
         // + 3 SaveSelection/JumpBackward/JumpForward.
         // + 1 OpenJumplistPicker.
         // + 1 OpenDiagnosticsPicker.
+        // + 1 OpenWorkspaceDiagnosticsPicker.
         // + 1 OpenGlobalSearch.
         // + 1 SplitSelection.
         // + 2 KeepSelections / RemoveSelections.
@@ -942,7 +946,7 @@ mod tests {
         // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
         //   ClaudeToggleToolCardExpand).
         // + 1 ClaudeJumpToFocusedCard.
-        assert_eq!(all().count(), 276);
+        assert_eq!(all().count(), 277);
     }
 
     #[test]

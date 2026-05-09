@@ -389,7 +389,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             buf,
         );
     } else if let Some(picker) = &stoat.diagnostics_picker {
-        diagnostics_picker::render_diagnostics_picker(picker, &stoat.theme, size, buf);
+        diagnostics_picker::render_diagnostics_picker(
+            picker,
+            &ws.git_root,
+            &stoat.theme,
+            size,
+            buf,
+        );
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "diagnostics",
