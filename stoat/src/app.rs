@@ -235,6 +235,17 @@ pub struct Stoat {
     /// Persisted query + direction from the most recent submitted
     /// search. Drives `SearchNext` / `SearchPrev` repeats.
     pub(crate) last_search: Option<action_handlers::search::LastSearch>,
+    /// Most recent text inserted during a complete insert-mode
+    /// session, accumulated across every [`Self::editor_insert`]
+    /// call between entering and leaving insert mode. Backs the
+    /// `.` special register so paste/insert-register can surface
+    /// the last typed run.
+    pub(crate) last_insert_text: Option<String>,
+    /// Buffer accumulating text typed during the current
+    /// insert-mode session. `Some` while `mode == "insert"` (or
+    /// equivalent), `None` outside. Committed to
+    /// [`Self::last_insert_text`] on insert-mode exit.
+    pub(crate) current_insert_run: Option<String>,
     /// Process-wide register store for yank, paste, and (later)
     /// macros and `insert_register`. Unnamed and named registers
     /// live in-process; system / primary clipboard variants are
@@ -630,6 +641,8 @@ impl Stoat {
             pending_textobject_select: None,
             search_input: None,
             last_search: None,
+            last_insert_text: None,
+            current_insert_run: None,
             registers: register::RegisterStore::new(),
             pending_register_select: false,
             selected_register: None,
@@ -1964,7 +1977,7 @@ impl Stoat {
         for ra in &actions {
             if ra.name == "SetMode" {
                 if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
-                    self.mode = mode_name;
+                    self.transition_mode(mode_name);
                     effect = UpdateEffect::Redraw;
                 }
                 continue;
@@ -2139,7 +2152,9 @@ impl Stoat {
             self.pending_insert_register = false;
             if let KeyCode::Char(ch) = key.code {
                 if let Some(register) = action_handlers::yank::register_for_char(ch) {
-                    if let Some(content) = self.registers.read(register).map(str::to_owned) {
+                    if let Some(content) =
+                        action_handlers::yank::read_register_content(self, register)
+                    {
                         self.editor_insert(editor_id, buffer_id, &content);
                     }
                 }
@@ -2254,7 +2269,34 @@ impl Stoat {
         true
     }
 
+    /// Switch [`Self::mode`] to `next`, opening or closing the
+    /// insert-run buffer that backs the `.` register. Entering
+    /// any insert-like mode (`insert`, `reword_insert`) starts a
+    /// fresh run; leaving commits the run's text into
+    /// [`Self::last_insert_text`] (when non-empty) and clears the
+    /// scratch buffer.
+    pub(crate) fn transition_mode(&mut self, next: String) {
+        let was_insert = is_insert_run_mode(&self.mode);
+        let now_insert = is_insert_run_mode(&next);
+        if was_insert && !now_insert {
+            if let Some(run) = self.current_insert_run.take() {
+                if !run.is_empty() {
+                    self.last_insert_text = Some(run);
+                }
+            }
+        }
+        if !was_insert && now_insert {
+            self.current_insert_run = Some(String::new());
+        }
+        self.mode = next;
+    }
+
     pub(crate) fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
+        if !text.is_empty() {
+            if let Some(run) = self.current_insert_run.as_mut() {
+                run.push_str(text);
+            }
+        }
         let ws = self.active_workspace_mut();
         let editor = match ws.editors.get_mut(editor_id) {
             Some(e) => e,
@@ -3047,6 +3089,14 @@ impl Stoat {
 /// Convert an LSP `file:` URI to a [`PathBuf`]. Returns `None` for any
 /// other scheme; non-`file:` diagnostic notifications are silently
 /// dropped because stoat has no concept of remote-path buffers today.
+/// Modes whose `editor_insert` calls accumulate into the `.`
+/// register's insert run. Helix tracks this for `insert` and
+/// `reword_insert` only; `prompt` and `run` write to scratch
+/// inputs that should not surface in the dot register.
+fn is_insert_run_mode(mode: &str) -> bool {
+    mode == "insert" || mode == "reword_insert"
+}
+
 pub(crate) fn lsp_uri_to_path(uri: &lsp_types::Uri) -> Option<PathBuf> {
     if uri.scheme().map(|s| s.as_str()) != Some("file") {
         return None;

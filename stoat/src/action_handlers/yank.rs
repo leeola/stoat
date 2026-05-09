@@ -8,17 +8,44 @@ use stoat_text::{Bias, SelectionGoal};
 /// Copy every non-collapsed selection's content into the
 /// caller-selected register (or unnamed when none is set),
 /// joined with newlines in start-offset order so a later paste
-/// can split back per-line. No-op when every selection is
+/// can split back per-line.
+///
+/// Routes by register variant: `Clipboard` writes to
+/// [`crate::host::ClipboardHost::set`]; `Blackhole` swallows the
+/// content silently; `Search`, `SelectionIndex`, and `LastInsert`
+/// are read-only and short-circuit; named/unnamed registers go
+/// through the in-memory store. No-op when every selection is
 /// collapsed or the focused pane is not an editor.
 pub(super) fn yank(stoat: &mut Stoat) -> UpdateEffect {
     let target = stoat.consume_selected_register();
+    if matches!(
+        target,
+        Register::Search | Register::SelectionIndex | Register::LastInsert
+    ) {
+        return UpdateEffect::None;
+    }
     let Some(content) = selections_joined_text(stoat) else {
         return UpdateEffect::None;
     };
     if content.is_empty() {
         return UpdateEffect::None;
     }
-    stoat.registers.write(target, content);
+    match target {
+        Register::Clipboard => {
+            if let Err(err) = stoat.clipboard_host().set(&content) {
+                tracing::warn!(target: "stoat::yank", ?err, "clipboard set failed");
+            }
+        },
+        Register::Blackhole => {},
+        Register::Unnamed | Register::Named(_) => {
+            stoat.registers.write(target, content);
+        },
+        Register::Search | Register::SelectionIndex | Register::LastInsert => {
+            // Short-circuited above. Branch retained so the match
+            // stays exhaustive without a wildcard arm that would
+            // hide future variants.
+        },
+    }
     UpdateEffect::None
 }
 
@@ -33,31 +60,31 @@ pub(super) fn insert_register(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 /// Apply the consumed-char keypress to the pending
-/// [`crate::app::Stoat::pending_register_select`] chord. ASCII
-/// letters land in [`Register::Named`]; the unnamed-quote char
-/// `"` selects [`Register::Unnamed`] explicitly. Any other char
-/// clears the pending state without selecting a register.
+/// [`crate::app::Stoat::pending_register_select`] chord. Maps the
+/// char through [`register_for_char`] -- ASCII letters select a
+/// named register, `"` selects the unnamed register, and the
+/// helix special chars (`*`/`+`/`/`/`_`/`#`/`.`) select the
+/// matching special register variant. Any other char clears the
+/// pending state without selecting a register.
 pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
-    if ch == '"' {
-        stoat.selected_register = Some(Register::Unnamed);
-    } else if ch.is_ascii_alphabetic() {
-        stoat.selected_register = Some(Register::Named(ch));
-    } else {
-        stoat.selected_register = None;
-    }
+    stoat.selected_register = register_for_char(ch);
 }
 
 /// Resolve [`Register`] from the consumed-char keypress for the
-/// pending [`crate::app::Stoat::pending_insert_register`] chord.
-/// `"` -> `Unnamed`; ASCII letter -> `Named`; any other char
-/// returns `None`.
+/// pending [`crate::app::Stoat::pending_insert_register`] chord
+/// and the `SelectRegister` chord. `"` -> `Unnamed`; ASCII
+/// letter -> `Named`; helix special chars route to the matching
+/// special variant; any other char returns `None`.
 pub(crate) fn register_for_char(ch: char) -> Option<Register> {
-    if ch == '"' {
-        Some(Register::Unnamed)
-    } else if ch.is_ascii_alphabetic() {
-        Some(Register::Named(ch))
-    } else {
-        None
+    match ch {
+        '"' => Some(Register::Unnamed),
+        '*' | '+' => Some(Register::Clipboard),
+        '/' => Some(Register::Search),
+        '_' => Some(Register::Blackhole),
+        '#' => Some(Register::SelectionIndex),
+        '.' => Some(Register::LastInsert),
+        _ if ch.is_ascii_alphabetic() => Some(Register::Named(ch)),
+        _ => None,
     }
 }
 
@@ -198,10 +225,54 @@ fn selections_joined_text(stoat: &mut Stoat) -> Option<String> {
 /// `end` (After).
 fn paste(stoat: &mut Stoat, side: PasteSide) -> UpdateEffect {
     let source = stoat.consume_selected_register();
-    let Some(content) = stoat.registers.read(source).map(str::to_owned) else {
+    let Some(content) = read_register_content(stoat, source) else {
         return UpdateEffect::None;
     };
     paste_text(stoat, &content, side)
+}
+
+/// Resolve the textual content of `register` from its backing
+/// store: in-memory for named/unnamed, host services for
+/// clipboard/search/last-insert, the active selection set for
+/// `SelectionIndex`. Returns `None` for blackhole, for read-only
+/// registers whose backing is empty, and for `SelectionIndex`
+/// when the focused pane has no selections.
+pub(crate) fn read_register_content(stoat: &mut Stoat, register: Register) -> Option<String> {
+    match register {
+        Register::Unnamed | Register::Named(_) => stoat.registers.read(register).map(str::to_owned),
+        Register::Clipboard => match stoat.clipboard_host().get() {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::warn!(target: "stoat::yank", ?err, "clipboard read failed");
+                None
+            },
+        },
+        Register::Search => stoat.last_search.as_ref().map(|s| s.query.clone()),
+        Register::Blackhole => None,
+        Register::LastInsert => stoat.last_insert_text.clone(),
+        Register::SelectionIndex => selection_index_content(stoat),
+    }
+}
+
+/// Build a newline-joined "1\n2\n...\nN" for the focused
+/// editor's selection count. The string drops into
+/// [`paste_text`]'s `line_aware` branch so each selection
+/// receives its own index. Returns `None` when the focused pane
+/// is not an editor or has no selections.
+fn selection_index_content(stoat: &mut Stoat) -> Option<String> {
+    let ws = stoat.active_workspace_mut();
+    let focused = ws.panes.focus();
+    let editor_id = match ws.panes.pane(focused).view {
+        View::Editor(id) => id,
+        _ => return None,
+    };
+    let editor = ws.editors.get_mut(editor_id).expect("editor");
+    let count = editor.selections.all_anchors().len();
+    if count == 0 {
+        return None;
+    }
+    let pieces: Vec<String> = (1..=count).map(|i| i.to_string()).collect();
+    Some(pieces.join("\n"))
 }
 
 /// Insert `content` at every selection, either at each
@@ -679,5 +750,98 @@ mod tests {
         h.type_keys("escape");
         assert!(!h.stoat.pending_insert_register);
         assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn yank_clipboard_register_writes_to_clipboard_host() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("\" * y");
+        assert_eq!(h.fake_clipboard().writes(), vec!["abc".to_string()]);
+        let unnamed = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(str::to_owned);
+        assert_eq!(unnamed, None);
+    }
+
+    #[test]
+    fn paste_clipboard_register_reads_from_clipboard_host() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.fake_clipboard().set("xyz").unwrap();
+        h.type_keys("escape");
+        h.type_keys("\" * p");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "axyzbc\n");
+    }
+
+    #[test]
+    fn yank_blackhole_register_swallows_content() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "abc\n");
+        h.type_keys("v l l l");
+        h.type_keys("escape");
+        h.type_keys("\" _ y");
+        let unnamed = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(str::to_owned);
+        assert_eq!(unnamed, None);
+        assert_eq!(h.fake_clipboard().writes(), Vec::<String>::new());
+    }
+
+    #[test]
+    fn paste_search_register_pastes_last_search_query() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat.last_search = Some(crate::action_handlers::search::LastSearch {
+            query: "needle".into(),
+            direction: crate::action_handlers::search::SearchDirection::Forward,
+        });
+        h.type_keys("escape");
+        h.type_keys("\" / p");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "aneedlebc\n");
+    }
+
+    #[test]
+    fn paste_search_register_no_op_when_no_search() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.stoat.last_search = None;
+        h.type_keys("escape");
+        h.type_keys("\" / p");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert_eq!(buffer_text(&h, &path), "abc\n");
+    }
+
+    #[test]
+    fn paste_last_insert_register_pastes_recent_insert() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "abc\n");
+        h.type_keys("a");
+        h.type_text("hi");
+        h.type_keys("escape");
+        h.type_keys("\" . p");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        assert!(buffer_text(&h, &path).contains("hi"));
+        assert_eq!(h.stoat.last_insert_text.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn paste_selection_index_pastes_one_per_selection() {
+        let mut h = TestHarness::with_size(40, 10);
+        let path = seed(&mut h, "ab\ncd\n");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::AddSelectionBelow);
+        h.type_keys("\" # p");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::PasteAfter);
+        let text = buffer_text(&h, &path);
+        assert!(text.contains('1'), "expected '1' in {text:?}");
+        assert!(text.contains('2'), "expected '2' in {text:?}");
     }
 }
