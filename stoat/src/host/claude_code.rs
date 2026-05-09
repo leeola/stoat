@@ -15,6 +15,7 @@ mod events;
 mod hooks;
 mod message;
 mod permission;
+mod shell_chain;
 mod types;
 
 use async_trait::async_trait;

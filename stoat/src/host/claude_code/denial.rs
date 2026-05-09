@@ -7,7 +7,10 @@
 //! to add or remove. User-configurable allow/deny rules layer above
 //! this gate; nothing can re-enable a denial issued here.
 
-use super::permission::{PermissionCallback, PermissionResult, ToolPermissionContext};
+use super::{
+    permission::{PermissionCallback, PermissionResult, ToolPermissionContext},
+    shell_chain,
+};
 use async_trait::async_trait;
 
 /// [`PermissionCallback`] that refuses unconditionally-dangerous Bash
@@ -48,13 +51,17 @@ impl PermissionCallback for BashDenialPolicy {
         let Some(command) = value.get("command").and_then(|v| v.as_str()) else {
             return PermissionResult::allow();
         };
-        match denial_reason(command) {
-            Some(reason) => PermissionResult::Deny {
-                message: reason.to_string(),
-                interrupt: true,
-            },
-            None => PermissionResult::allow(),
+        let chains = shell_chain::extract_simple_commands(command)
+            .unwrap_or_else(|| vec![command.to_string()]);
+        for chain in &chains {
+            if let Some(reason) = denial_reason(chain) {
+                return PermissionResult::Deny {
+                    message: reason.to_string(),
+                    interrupt: true,
+                };
+            }
         }
+        PermissionResult::allow()
     }
 }
 
@@ -271,5 +278,79 @@ mod tests {
             .can_use_tool("Bash", "not json", ToolPermissionContext::bare())
             .await;
         assert!(matches!(result, PermissionResult::Allow { .. }));
+    }
+
+    async fn run_bash(command: &str) -> PermissionResult {
+        let policy = BashDenialPolicy::new();
+        let json = serde_json::json!({ "command": command }).to_string();
+        policy
+            .can_use_tool("Bash", &json, ToolPermissionContext::bare())
+            .await
+    }
+
+    fn assert_denied(result: PermissionResult) {
+        match result {
+            PermissionResult::Deny { interrupt, .. } => assert!(interrupt),
+            other => panic!("expected Deny, got {other:?}"),
+        }
+    }
+
+    fn assert_allowed(result: PermissionResult) {
+        assert!(matches!(result, PermissionResult::Allow { .. }));
+    }
+
+    #[tokio::test]
+    async fn callback_denies_and_chain_bypass() {
+        assert_denied(run_bash("cd /tmp && rm -rf /").await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_or_chain_bypass() {
+        assert_denied(run_bash("echo hi || rm -rf $HOME").await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_pipe_chain_bypass() {
+        assert_denied(run_bash("ls | grep foo; rm -rf /").await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_force_push_in_chain() {
+        assert_denied(run_bash("git push origin main && git push --force origin master").await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_subshell_bypass() {
+        assert_denied(run_bash("(cd /tmp; rm -rf /)").await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_if_clause_bypass() {
+        assert_denied(run_bash("if true; then rm -rf /; fi").await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_single_quoted_root() {
+        assert_denied(run_bash("rm -rf '/'").await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_double_quoted_root() {
+        assert_denied(run_bash(r#"rm -rf "/""#).await);
+    }
+
+    #[tokio::test]
+    async fn callback_denies_double_quoted_home() {
+        assert_denied(run_bash(r#"rm -rf "$HOME""#).await);
+    }
+
+    #[tokio::test]
+    async fn callback_allows_quoted_chain_operator() {
+        assert_allowed(run_bash(r#"echo "&& rm -rf /""#).await);
+    }
+
+    #[tokio::test]
+    async fn callback_allows_nested_shell_invocation() {
+        assert_allowed(run_bash(r#"bash -c 'rm -rf /'"#).await);
     }
 }
