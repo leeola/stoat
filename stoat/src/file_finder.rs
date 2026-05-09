@@ -395,10 +395,10 @@ fn display_for(path: &Path, git_root: &Path) -> String {
     paths::display_relative(path, git_root)
 }
 
-/// Core matcher. Splits candidates into three tiers -- prefix / substring /
-/// fuzzy -- matched against the repo-relative display form. Each tier is
-/// lexicographically sorted. Mirrors the palette's three-tier layout so
-/// users feel the same ranking behavior across modals.
+/// Core matcher. With a non-empty pattern, scores every candidate
+/// against its repo-relative display form via [`Pattern::score`] and
+/// orders matches by score descending, ties alphabetical. Empty
+/// or whitespace-only input lists every candidate alphabetically.
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn refilter(
     text: &str,
@@ -416,47 +416,40 @@ pub(crate) fn refilter(
         FinderScope::Buffers => buffer_paths,
     };
 
-    let needle = text.to_lowercase();
-    let mut prefix: Vec<(usize, String)> = Vec::new();
-    let mut substring: Vec<(usize, String)> = Vec::new();
-    let mut fuzzy: Vec<(usize, String)> = Vec::new();
-
     let pattern = (!text.is_empty())
         .then(|| Pattern::parse(text, CaseMatching::Smart, Normalization::Smart))
         .filter(|p| !p.atoms.is_empty());
-    let mut hay_buf: Vec<char> = Vec::new();
-    let mut matcher_guard = pattern
-        .as_ref()
-        .map(|_| fuzzy_matcher().lock().expect("fuzzy matcher poisoned"));
-
-    for (idx, path) in base.iter().enumerate() {
-        let display = display_for(path, git_root);
-        if pattern.is_none() {
-            prefix.push((idx, display));
-            continue;
-        }
-        let display_lc = display.to_lowercase();
-        if display_lc.starts_with(&needle) {
-            prefix.push((idx, display));
-        } else if display_lc.contains(&needle) {
-            substring.push((idx, display));
-        } else if let (Some(p), Some(matcher)) = (&pattern, matcher_guard.as_deref_mut()) {
-            let hay = Utf32Str::new(&display, &mut hay_buf);
-            if p.score(hay, matcher).is_some() {
-                fuzzy.push((idx, display));
-            }
-        }
-    }
-
-    prefix.sort_by(|a, b| a.1.cmp(&b.1));
-    substring.sort_by(|a, b| a.1.cmp(&b.1));
-    fuzzy.sort_by(|a, b| a.1.cmp(&b.1));
 
     filtered.clear();
-    filtered.extend(prefix.into_iter().map(|(i, _)| i));
-    filtered.extend(substring.into_iter().map(|(i, _)| i));
-    filtered.extend(fuzzy.into_iter().map(|(i, _)| i));
 
+    let Some(pattern) = pattern else {
+        let mut rows: Vec<(usize, String)> = base
+            .iter()
+            .enumerate()
+            .map(|(idx, path)| (idx, display_for(path, git_root)))
+            .collect();
+        rows.sort_by(|a, b| a.1.cmp(&b.1));
+        filtered.extend(rows.into_iter().map(|(idx, _)| idx));
+        clamp_selected(filtered, selected);
+        return;
+    };
+
+    let mut matcher_guard = fuzzy_matcher().lock().expect("fuzzy matcher poisoned");
+    let mut hay_buf: Vec<char> = Vec::new();
+    let mut matched: Vec<(usize, String, u32)> = Vec::new();
+    for (idx, path) in base.iter().enumerate() {
+        let display = display_for(path, git_root);
+        let hay = Utf32Str::new(&display, &mut hay_buf);
+        if let Some(score) = pattern.score(hay, &mut matcher_guard) {
+            matched.push((idx, display, score));
+        }
+    }
+    matched.sort_by(|a, b| b.2.cmp(&a.2).then_with(|| a.1.cmp(&b.1)));
+    filtered.extend(matched.into_iter().map(|(idx, _, _)| idx));
+    clamp_selected(filtered, selected);
+}
+
+fn clamp_selected(filtered: &[usize], selected: &mut usize) {
     if filtered.is_empty() {
         *selected = 0;
     } else if *selected >= filtered.len() {
@@ -564,6 +557,14 @@ mod tests {
         let all = vec![p("/r/b.rs"), p("/r/a.rs")];
         let listed = names("   ", FinderScope::All, &all, &[], &[], &git_root);
         assert_eq!(listed, vec!["a.rs", "b.rs"]);
+    }
+
+    #[test]
+    fn exact_basename_match_outranks_longer_prefix_match() {
+        let git_root = p("/r");
+        let all = vec![p("/r/food_handler.rs"), p("/r/foo.rs")];
+        let listed = names("foo", FinderScope::All, &all, &[], &[], &git_root);
+        assert_eq!(listed, vec!["foo.rs", "food_handler.rs"]);
     }
 
     #[test]

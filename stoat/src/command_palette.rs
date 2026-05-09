@@ -365,50 +365,47 @@ pub(crate) fn refilter(
     filtered: &mut Vec<&'static registry::RegistryEntry>,
     selected: &mut usize,
 ) {
-    let needle = input.to_lowercase();
-    let mut prefix: Vec<&'static registry::RegistryEntry> = Vec::new();
-    let mut substring: Vec<&'static registry::RegistryEntry> = Vec::new();
-    let mut fuzzy: Vec<&'static registry::RegistryEntry> = Vec::new();
-
     let pattern = (!input.is_empty())
         .then(|| Pattern::parse(input, CaseMatching::Smart, Normalization::Smart))
         .filter(|p| !p.atoms.is_empty());
 
-    let mut hay_buf: Vec<char> = Vec::new();
-    let mut matcher_guard = pattern
-        .as_ref()
-        .map(|_| fuzzy_matcher().lock().expect("fuzzy matcher poisoned"));
+    let visible: Vec<&'static registry::RegistryEntry> = registry::all()
+        .filter(|entry| {
+            entry.def.palette_visible()
+                && (scope != PaletteScope::Active
+                    || action_is_available(entry.def.kind(), availability))
+        })
+        .collect();
 
-    for entry in registry::all() {
-        if !entry.def.palette_visible() {
-            continue;
+    let Some(pattern) = pattern else {
+        let mut all = visible;
+        all.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
+        *filtered = all;
+        if *selected >= filtered.len() {
+            *selected = filtered.len().saturating_sub(1);
         }
-        if scope == PaletteScope::Active && !action_is_available(entry.def.kind(), availability) {
-            continue;
-        }
-        if pattern.is_none() {
-            prefix.push(entry);
-            continue;
-        }
-        let name_lc = entry.def.name().to_lowercase();
-        if name_lc.starts_with(&needle) {
-            prefix.push(entry);
-        } else if name_lc.contains(&needle) {
-            substring.push(entry);
-        } else if let (Some(p), Some(matcher)) = (&pattern, matcher_guard.as_deref_mut()) {
-            let hay = Utf32Str::new(entry.def.name(), &mut hay_buf);
-            if p.score(hay, matcher).is_some() {
-                fuzzy.push(entry);
-            }
+        return;
+    };
+
+    let mut matcher_guard = fuzzy_matcher().lock().expect("fuzzy matcher poisoned");
+    let mut hay_buf: Vec<char> = Vec::new();
+    let mut matched: Vec<(&'static registry::RegistryEntry, u32)> = Vec::new();
+    for entry in visible {
+        let hay = Utf32Str::new(entry.def.name(), &mut hay_buf);
+        if let Some(score) = pattern.score(hay, &mut matcher_guard) {
+            matched.push((entry, score));
         }
     }
-
-    prefix.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
-    substring.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
-    fuzzy.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
-    prefix.extend(substring);
-    prefix.extend(fuzzy);
-    *filtered = prefix;
+    matched.sort_by(|a, b| {
+        b.1.cmp(&a.1).then_with(|| {
+            a.0.def
+                .priority()
+                .ord()
+                .cmp(&b.0.def.priority().ord())
+                .then_with(|| a.0.def.name().cmp(b.0.def.name()))
+        })
+    });
+    *filtered = matched.into_iter().map(|(entry, _)| entry).collect();
 
     if *selected >= filtered.len() {
         *selected = filtered.len().saturating_sub(1);
@@ -860,7 +857,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_filter_narrows_to_one() {
         let mut h = Stoat::test();
-        h.type_text(":quitA");
+        h.type_text(":quitall");
         h.assert_snapshot("command_palette_filter_narrows_to_one");
     }
 

@@ -2,7 +2,7 @@
 source: stoat/src/test_harness.rs
 expression: text
 ---
-actions: A
+actions: l
 focused: #1 of 1
 mode: prompt
 size: 80x24
@@ -15,7 +15,7 @@ size: 80x24
 
 
   [0m[35m┌ command palette (applicable) ────────────────────────────────────────────┐[0m
-  [0m[35m│[0m[33m:[0m [0m[97mquitA[0m[7m [0m                                                                  [0m[35m│[0m
+  [0m[35m│[0m[33m:[0m [0m[97mquitall[0m[7m [0m                                                                [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
   [0m[35m│[0m[30m[46m QuitAll  exit stoat, closing all panes                                   [0m[35m│[0m
   [0m[35m│[0m[90m──────────────────────────────────────────────────────────────────────────[0m[35m│[0m
