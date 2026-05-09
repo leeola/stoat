@@ -364,6 +364,33 @@ impl ReviewSession {
         self.chunks.get(&id)
     }
 
+    /// Resolve an in-buffer byte offset to the chunk that should
+    /// receive cursor focus. A chunk whose `buffer_byte_range` covers
+    /// the byte wins outright; otherwise the first chunk starting at
+    /// or after the byte; otherwise the file's last chunk so callers
+    /// past every existing hunk still get a navigation target.
+    /// Returns `None` only when `file_index` is out of range or the
+    /// file has no chunks.
+    pub(crate) fn chunk_containing_buffer_byte(
+        &self,
+        file_index: usize,
+        buffer_byte: usize,
+    ) -> Option<ReviewChunkId> {
+        let file = self.files.get(file_index)?;
+        let mut last: Option<ReviewChunkId> = None;
+        for id in &file.chunks {
+            let chunk = self.chunks.get(id)?;
+            if chunk.buffer_byte_range.contains(&buffer_byte) {
+                return Some(*id);
+            }
+            if chunk.buffer_byte_range.start >= buffer_byte {
+                return Some(*id);
+            }
+            last = Some(*id);
+        }
+        last
+    }
+
     #[allow(dead_code)]
     pub(crate) fn current(&self) -> Option<&ReviewChunk> {
         self.cursor.current.and_then(|id| self.chunks.get(&id))

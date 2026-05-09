@@ -460,6 +460,33 @@ fn plural(n: usize) -> &'static str {
     }
 }
 
+pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
+    let in_session = stoat
+        .active_workspace()
+        .review
+        .as_ref()
+        .is_some_and(|s| s.files.iter().any(|f| f.path == path));
+    if !in_session {
+        return UpdateEffect::None;
+    }
+
+    let effect = review_refresh(stoat);
+
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_ref() else {
+        return effect;
+    };
+    let editor_id = session.view_editor;
+    let Some(file_index) = session.files.iter().position(|f| f.path == path) else {
+        return effect;
+    };
+    let Some(chunk_id) = session.chunk_containing_buffer_byte(file_index, 0) else {
+        return effect;
+    };
+    sync_review_view_and_scroll(ws, editor_id, Some(chunk_id));
+    UpdateEffect::Redraw
+}
+
 pub(super) fn review_refresh(stoat: &mut Stoat) -> UpdateEffect {
     use crate::review_session::ChunkIdentity;
     use std::collections::HashMap;

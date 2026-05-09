@@ -32,7 +32,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_action::{OpenFile, OpenReview};
+use stoat_action::{OpenFile, OpenReview, ReviewExternalEdit};
 use stoat_config::Settings;
 use stoat_language::{self as language, Language, LanguageRegistry, SyntaxState};
 use stoat_scheduler::Executor;
@@ -960,12 +960,14 @@ impl Stoat {
     }
 
     /// Drain queued [`crate::host::FsWatchEvent`]s from the active
-    /// [`FsWatchHost`]. v1 traces each event; the
-    /// `ReviewExternalEdit` dispatch lands with that action's
-    /// handler. Cap matches [`Self::drain_lsp_notifications`] so a
-    /// pathological burst can't starve the event loop.
+    /// [`FsWatchHost`]. Each event becomes one
+    /// [`ReviewExternalEdit`] dispatch when a review session is
+    /// active; otherwise the event is logged and discarded. Cap
+    /// matches [`Self::drain_lsp_notifications`] so a pathological
+    /// burst can't starve the event loop.
     pub(crate) fn drain_fs_watch_events(&mut self) {
         let host = self.fs_watch_host.clone();
+        let mut paths: Vec<PathBuf> = Vec::new();
         for _ in 0..256 {
             let Some(event) = host.try_recv() else {
                 break;
@@ -976,9 +978,14 @@ impl Stoat {
                 kind = ?event.kind,
                 "fs watch event observed",
             );
-            // FIXME: dispatch ReviewExternalEdit when a review
-            // session is active; lands with the action def + handler
-            // child of the review modification tracker feature.
+            paths.push(event.path);
+        }
+
+        if paths.is_empty() || self.active_workspace().review.is_none() {
+            return;
+        }
+        for path in paths {
+            action_handlers::dispatch(self, &ReviewExternalEdit { path });
         }
     }
 

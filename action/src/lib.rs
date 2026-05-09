@@ -78,9 +78,9 @@ pub use defs::{
     review::{
         AgentEdit, CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
         JumpToPrevMoveSource, OpenReview, OpenReviewAgentEdits, OpenReviewCommit,
-        OpenReviewCommitRange, QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk,
-        ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
-        ReviewToggleStage, ReviewUnstageChunk,
+        OpenReviewCommitRange, QueryMoveRelationships, ReviewApplyStaged, ReviewExternalEdit,
+        ReviewNextChunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk,
+        ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace},

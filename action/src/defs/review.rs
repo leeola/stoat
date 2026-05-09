@@ -314,6 +314,60 @@ impl Action for OpenReviewCommitRange {
     }
 }
 
+/// Palette-invisible because the path is supplied by the filesystem
+/// watcher dispatch, not user input. Triggers a session rescan and
+/// jumps the cursor to the first chunk in the affected file.
+#[derive(Debug)]
+pub struct ReviewExternalEditDef;
+
+impl ActionDef for ReviewExternalEditDef {
+    fn name(&self) -> &'static str {
+        "ReviewExternalEdit"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ReviewExternalEdit
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "react to an external edit on a reviewed file"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Refresh the active review session because the named file \
+         changed on disk, then jump the cursor to the first chunk in \
+         that file. Dispatched by the filesystem-watch drain when the \
+         path is one of the session's reviewed files."
+    }
+}
+
+#[derive(Debug)]
+pub struct ReviewExternalEdit {
+    pub path: PathBuf,
+}
+
+impl ReviewExternalEdit {
+    pub const DEF: &ReviewExternalEditDef = &ReviewExternalEditDef;
+}
+
+impl Action for ReviewExternalEdit {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// Palette-invisible because the edits payload cannot be constructed from
 /// a string. Dispatched programmatically by agent-bridge code.
 #[derive(Debug)]

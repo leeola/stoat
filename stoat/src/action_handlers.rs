@@ -43,7 +43,7 @@ pub(crate) use review::install_review_session;
 use std::path::Path;
 use stoat_action::{
     Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
-    OpenReviewCommitRange, RenameWorkspace, Run,
+    OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run,
 };
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
@@ -468,6 +468,13 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewToggleStage => review::review_mark(stoat, review::ReviewMark::Toggle),
         ActionKind::ReviewSkipChunk => review::review_mark(stoat, review::ReviewMark::Skip),
         ActionKind::ReviewRefresh => review::review_refresh(stoat),
+        ActionKind::ReviewExternalEdit => {
+            let a = action
+                .as_any()
+                .downcast_ref::<ReviewExternalEdit>()
+                .expect("ReviewExternalEdit action downcast");
+            review::review_external_edit(stoat, &a.path)
+        },
         ActionKind::ReviewApplyStaged => review::review_apply_staged(stoat),
         ActionKind::CloseReview => review::close_review(stoat),
         ActionKind::OpenReviewCommit => {
