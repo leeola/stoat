@@ -1,4 +1,5 @@
 use crate::buffer_registry::fingerprint_bytes;
+use serde::{Deserialize, Serialize};
 use std::{
     ops::Range,
     path::{Path, PathBuf},
@@ -29,18 +30,19 @@ pub struct ReviewFileInput {
 /// at a *different* file in the same review session. Intra-file moves
 /// keep this as `None`. The renderer paints a chip
 /// `<- {rel_path}:{line+1}` next to the row when set.
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveProvenance {
     pub rel_path: String,
     pub line: u32,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReviewSide {
     pub text: String,
     pub line_num: u32,
     /// Byte ranges (within `text`) that are Novel or Replaced on this
     /// side. Rendered with the side-specific add/delete highlight.
+    #[serde(with = "range_vec_codec")]
     pub change_spans: Vec<Range<usize>>,
     /// Byte ranges (within `text`) that are tagged as part of a move:
     /// byte-for-byte equal to content elsewhere, just relocated.
@@ -48,12 +50,13 @@ pub struct ReviewSide {
     /// move color (cyan by default), not red/green, so users see at
     /// a glance that the change is a relocation rather than a gain or
     /// loss.
+    #[serde(with = "range_vec_codec")]
     pub moved_spans: Vec<Range<usize>>,
     /// First cross-file move source covering this row, if any.
     pub move_provenance: Option<MoveProvenance>,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ReviewRow {
     Context {
         left: ReviewSide,
@@ -71,9 +74,24 @@ impl ReviewRow {
     }
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct ReviewHunk {
     pub rows: Vec<ReviewRow>,
+}
+
+mod range_vec_codec {
+    use serde::{Deserialize, Deserializer, Serialize, Serializer};
+    use std::ops::Range;
+
+    pub fn serialize<S: Serializer>(v: &[Range<usize>], s: S) -> Result<S::Ok, S::Error> {
+        let pairs: Vec<(usize, usize)> = v.iter().map(|r| (r.start, r.end)).collect();
+        pairs.serialize(s)
+    }
+
+    pub fn deserialize<'de, D: Deserializer<'de>>(d: D) -> Result<Vec<Range<usize>>, D::Error> {
+        let pairs: Vec<(usize, usize)> = Vec::deserialize(d)?;
+        Ok(pairs.into_iter().map(|(a, b)| a..b).collect())
+    }
 }
 
 /// Multi-file entry point that runs one cross-file

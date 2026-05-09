@@ -25,8 +25,23 @@ impl ViewportClient {
     }
 
     pub async fn recv_frame(&mut self) -> io::Result<Option<Bytes>> {
+        loop {
+            match self.reader.next().await {
+                Some(Ok(ToViewport::Frame(data))) => return Ok(Some(data)),
+                Some(Ok(ToViewport::DiffResponse { .. })) => continue,
+                Some(Err(e)) => return Err(e),
+                None => return Ok(None),
+            }
+        }
+    }
+
+    /// Read the next message of any kind, including
+    /// [`ToViewport::DiffResponse`]. Used by callers (e.g. the
+    /// `stoat diff` cache client) that want to consume non-frame
+    /// messages.
+    pub async fn recv(&mut self) -> io::Result<Option<ToViewport>> {
         match self.reader.next().await {
-            Some(Ok(ToViewport::Frame(data))) => Ok(Some(data)),
+            Some(Ok(msg)) => Ok(Some(msg)),
             Some(Err(e)) => Err(e),
             None => Ok(None),
         }

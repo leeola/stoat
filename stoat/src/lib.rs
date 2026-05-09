@@ -9,6 +9,7 @@ mod commit_list;
 pub mod completion;
 pub mod diagnostics;
 pub mod diff;
+pub mod diff_cache;
 pub mod diff_map;
 pub mod diff_render_cli;
 pub mod display_map;
