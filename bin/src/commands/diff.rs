@@ -1,8 +1,12 @@
 use clap::Args;
 use snafu::{whatever, ResultExt, Whatever};
-use std::sync::Arc;
+use std::{
+    io::{self, IsTerminal, Write},
+    process::{Command, Stdio},
+    sync::Arc,
+};
 use stoat::{
-    diff::{extract_review_hunks_changeset, scan_working_tree},
+    diff::{extract_review_hunks_changeset, scan_working_tree, ReviewFileInput, ReviewHunk},
     diff_render_cli::{
         detect_color_enabled, detect_width, render_diff, CliLayout, CliRenderOptions,
     },
@@ -50,8 +54,7 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
     }
 
     // FIXME: --language is parsed but not threaded; landing alongside the
-    // --git child of the `stoat diff` TODO. --no-pager is parsed but not
-    // honoured; the pager child handles it.
+    // --git child of the `stoat diff` TODO.
 
     let cwd = std::env::current_dir().whatever_context("read current directory")?;
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
@@ -74,11 +77,69 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
         color: detect_color_enabled(args.no_color),
     };
 
-    let stdout = std::io::stdout();
-    let mut out = stdout.lock();
+    match select_pager(args.no_pager) {
+        Some(argv) => render_via_pager(&argv, &inputs, &per_file, &opts),
+        None => {
+            let stdout = io::stdout();
+            let mut out = stdout.lock();
+            render_all(&mut out, &inputs, &per_file, &opts).whatever_context("write diff to stdout")
+        },
+    }
+}
+
+fn render_all<W: Write>(
+    out: &mut W,
+    inputs: &[ReviewFileInput],
+    per_file: &[Vec<ReviewHunk>],
+    opts: &CliRenderOptions,
+) -> io::Result<()> {
     for (input, hunks) in inputs.iter().zip(per_file.iter()) {
-        render_diff(&mut out, &input.rel_path, hunks, &opts)
-            .whatever_context("write diff to stdout")?;
+        render_diff(out, &input.rel_path, hunks, opts)?;
     }
     Ok(())
+}
+
+fn render_via_pager(
+    argv: &[String],
+    inputs: &[ReviewFileInput],
+    per_file: &[Vec<ReviewHunk>],
+    opts: &CliRenderOptions,
+) -> Result<(), Whatever> {
+    let mut child = Command::new(&argv[0])
+        .args(&argv[1..])
+        .stdin(Stdio::piped())
+        .spawn()
+        .whatever_context(format!("spawn pager `{}`", argv.join(" ")))?;
+    let mut stdin = child.stdin.take().expect("stdin set to piped above");
+
+    let render_result = render_all(&mut stdin, inputs, per_file, opts);
+    drop(stdin);
+    let _ = child.wait();
+
+    match render_result {
+        Ok(()) => Ok(()),
+        Err(e) if e.kind() == io::ErrorKind::BrokenPipe => Ok(()),
+        Err(e) => Err(e).whatever_context("write diff to pager"),
+    }
+}
+
+/// Resolve which pager (if any) should consume stdout. `None` means
+/// write directly to stdout.
+fn select_pager(no_pager_flag: bool) -> Option<Vec<String>> {
+    if no_pager_flag {
+        return None;
+    }
+    if !io::stdout().is_terminal() {
+        return None;
+    }
+    let cmd = match std::env::var("STOAT_PAGER") {
+        Ok(v) if v.is_empty() => return None,
+        Ok(v) => v,
+        Err(_) => "less -RFX".to_string(),
+    };
+    let argv: Vec<String> = cmd.split_whitespace().map(str::to_string).collect();
+    if argv.is_empty() {
+        return None;
+    }
+    Some(argv)
 }
