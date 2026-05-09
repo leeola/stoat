@@ -1,5 +1,6 @@
 use crate::{
     editor_state::EditorId,
+    host::WatchToken,
     review::{
         extract_review_hunks_changeset, line_byte_offsets, split_lines, ReviewFileInput,
         ReviewHunk, ReviewRow,
@@ -258,6 +259,11 @@ pub(crate) struct ReviewSession {
     pub version: u64,
     /// Where the user launched this review from; consulted on close.
     pub origin: ReviewOrigin,
+    /// Filesystem-watch tokens covering each path in [`Self::files`].
+    /// Populated only when [`Self::source`] is
+    /// [`ReviewSource::WorkingTree`]; other sources skip watching
+    /// because their content is not on disk.
+    pub watch_tokens: Vec<WatchToken>,
     next_id: u32,
 }
 
@@ -272,6 +278,7 @@ impl ReviewSession {
             view_editor: None,
             version: 0,
             origin: ReviewOrigin::Standalone,
+            watch_tokens: Vec::new(),
             next_id: 0,
         }
     }

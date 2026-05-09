@@ -2,6 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState},
+    host::WatchToken,
     pane::View,
     review::ReviewFileInput,
     review_session::{ReviewSession, ReviewSource, ReviewViewState},
@@ -554,10 +555,14 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
     use crate::{badge::BadgeSource, review_session::ReviewOrigin};
 
     let executor = stoat.executor.clone();
+    let fs_watch_host = stoat.fs_watch_host.clone();
     let ws = stoat.active_workspace_mut();
-    let Some(session) = ws.review.take() else {
+    let Some(mut session) = ws.review.take() else {
         return UpdateEffect::None;
     };
+    for token in std::mem::take(&mut session.watch_tokens) {
+        fs_watch_host.unwatch(token);
+    }
     let origin = session.origin;
     ws.badges.remove_by_source(BadgeSource::Review);
     let next_mode = match origin {
@@ -784,6 +789,31 @@ fn build_session_from_trees(
 /// workspace; the editor references it indirectly via `review_view`.
 pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSession) {
     populate_diff_cache(stoat, &session);
+
+    let fs_watch_host = stoat.fs_watch_host.clone();
+    let stale_tokens: Vec<WatchToken> = stoat
+        .active_workspace_mut()
+        .review
+        .as_mut()
+        .map(|old| std::mem::take(&mut old.watch_tokens))
+        .unwrap_or_default();
+    for token in stale_tokens {
+        fs_watch_host.unwatch(token);
+    }
+
+    if matches!(session.source, ReviewSource::WorkingTree { .. }) {
+        for file in &session.files {
+            match fs_watch_host.watch(&file.path) {
+                Ok(token) => session.watch_tokens.push(token),
+                Err(err) => tracing::warn!(
+                    target: "stoat::review",
+                    path = %file.path.display(),
+                    error = %err,
+                    "fs watch failed; external edits won't refresh this file",
+                ),
+            }
+        }
+    }
 
     let view = ReviewViewState::from_session(&session);
     let blocks = build_review_blocks(&session, &view);
