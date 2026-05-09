@@ -884,6 +884,67 @@ mod tests {
     }
 
     #[test]
+    fn enter_on_focused_read_card_jumps_to_file_line() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::{ClaudeFocusNextToolCard, SubmitPromptInput};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let (id, path) = seed_follow_scenario(&mut h);
+        h.claude().get_session(id).read_at(&path, 50).pending();
+
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        dispatch(&mut h.stoat, &SubmitPromptInput);
+
+        let editor_pane = h.editor_pane();
+        let editor = h.editor_id_in_pane(editor_pane);
+        assert_eq!(
+            h.editor_scroll_row(editor),
+            47,
+            "focused Read card + Enter should jump the editor to line 50",
+        );
+    }
+
+    #[test]
+    fn enter_on_focused_bash_card_still_toggles_expansion() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::{ClaudeFocusNextToolCard, SubmitPromptInput};
+
+        let mut h = TestHarness::with_size(60, 10);
+        let id = h.claude().open();
+        h.claude().get_session(id).bash("ls").result("a");
+
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        dispatch(&mut h.stoat, &SubmitPromptInput);
+
+        let chat = h.stoat.active_workspace().chats.get(&id).unwrap();
+        assert_eq!(
+            chat.expanded_tool_ids.len(),
+            1,
+            "Bash card has no file_path; Enter should still toggle expansion",
+        );
+    }
+
+    #[test]
+    fn enter_on_focused_read_card_outside_workspace_is_noop() {
+        use crate::action_handlers::dispatch;
+        use stoat_action::{ClaudeFocusNextToolCard, SubmitPromptInput};
+
+        let mut h = TestHarness::with_size(80, 24);
+        let (id, _path) = seed_follow_scenario(&mut h);
+        let outside = std::path::PathBuf::from("/etc/passwd");
+        h.claude().get_session(id).read_at(&outside, 10).pending();
+
+        dispatch(&mut h.stoat, &ClaudeFocusNextToolCard);
+        dispatch(&mut h.stoat, &SubmitPromptInput);
+
+        let editor_rows = h.editor_scroll_rows();
+        assert!(
+            editor_rows.iter().all(|&r| r == 0),
+            "out-of-workspace path must not scroll any editor: {editor_rows:?}",
+        );
+    }
+
+    #[test]
     fn tool_card_escape_clears_card_focus_without_exiting_prompt() {
         use crate::action_handlers::dispatch;
         use stoat_action::{CancelPromptInput, ClaudeFocusNextToolCard};

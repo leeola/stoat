@@ -40,6 +40,9 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
             crate::input_view::SubmitTarget::Run => return super::run::run_submit(stoat),
             crate::input_view::SubmitTarget::ClaudeChat => {
                 if focused_chat_has_card_focus(stoat) {
+                    if super::claude::focused_tool_card_location(stoat).is_some() {
+                        return super::claude::claude_jump_to_focused_card(stoat);
+                    }
                     return super::claude::claude_toggle_tool_card_expand(stoat);
                 }
                 return super::claude::claude_submit(stoat);

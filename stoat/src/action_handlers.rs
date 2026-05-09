@@ -421,6 +421,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ClaudeFocusNextToolCard => claude::claude_focus_next_tool_card(stoat),
         ActionKind::ClaudeFocusPrevToolCard => claude::claude_focus_prev_tool_card(stoat),
         ActionKind::ClaudeToggleToolCardExpand => claude::claude_toggle_tool_card_expand(stoat),
+        ActionKind::ClaudeJumpToFocusedCard => claude::claude_jump_to_focused_card(stoat),
         ActionKind::OpenCheckpointPicker => claude::open_checkpoint_picker(stoat),
         ActionKind::ToggleDockRight => pane::toggle_dock(stoat, DockSide::Right),
         ActionKind::ToggleDockLeft => pane::toggle_dock(stoat, DockSide::Left),

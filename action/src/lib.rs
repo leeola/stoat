@@ -8,8 +8,8 @@ pub use action::{Action, ActionDef, ActionPriority};
 pub use defs::{
     app::{Quit, QuitAll},
     claude::{
-        ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeInterrupt, ClaudeSubmit,
-        ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
+        ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeInterrupt, ClaudeJumpToFocusedCard,
+        ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
         ClaudeToggleToolCardExpand, OpenCheckpointPicker, OpenClaude, ToggleDockLeft,
         ToggleDockRight,
     },

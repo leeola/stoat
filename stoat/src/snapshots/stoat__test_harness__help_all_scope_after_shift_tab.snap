@@ -22,12 +22,12 @@ size: 80x24
   [0m[36m│[0m[97m   AlignViewTop  [0m[90malign view top│[0m                                          [0m[36m│[0m
   [0m[36m│[0m[97m   ClaudeFocusNextToolCard  [0m[90mfoc│[0m [0m[1m[33mExample:[0m                                 [0m[36m│[0m
   [0m[36m│[0m[97m   ClaudeFocusPrevToolCard  [0m[90mfoc│[0m [0m[90m  AbortRebase()[0m                          [0m[36m│[0m
-  [0m[36m│[0m[97m   ClaudeSubmit  [0m[90msend to claude│[0m                                          [0m[36m│[0m
-  [0m[36m│[0m[97m   ClaudeToDockLeft  [0m[90mmove claud│[0m        [0m[33m┌ help ─────────────────────────────┐[0m
-  [0m[36m│[0m[97m   ClaudeToDockRight  [0m[90mmove clau│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m   ClaudeToPane  [0m[90mmove claude to│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m   ClaudeToggleFollow  [0m[90mtoggle c│[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
-  [0m[36m│[0m[97m   ClaudeToggleToolCardExpand  [0m[90m│[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
+  [0m[36m│[0m[97m   ClaudeJumpToFocusedCard  [0m[90mjum│[0m                                          [0m[36m│[0m
+  [0m[36m│[0m[97m   ClaudeSubmit  [0m[90msend to claude│[0m        [0m[33m┌ help ─────────────────────────────┐[0m
+  [0m[36m│[0m[97m   ClaudeToDockLeft  [0m[90mmove claud│[0m        [0m[33m│[0m[36m  Up, C-p[0m[97m   previous help entry[0m  [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m   ClaudeToDockRight  [0m[90mmove clau│[0m        [0m[33m│[0m[36m  Dn, C-n[0m[97m   next help entry[0m      [0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m   ClaudeToPane  [0m[90mmove claude to│[0m        [0m[33m│[0m[36mC-u, PgUp[0m[97m   scroll help detail up[0m[36m│[0m [0m[33m│[0m
+  [0m[36m│[0m[97m   ClaudeToggleFollow  [0m[90mtoggle c│[0m        [0m[33m│[0m[36mC-d, PgDn[0m[97m   scroll help detail down[0m[33m│[0m
   [0m[36m└────────────────────────────────────────[0m[33m│[0m[36m    S-Tab[0m[97m   toggle help scope[0m[36m────┘[0m [0m[33m│[0m
                                            [0m[33m└───────────────────────────────────┘[0m
 [0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[scratch]                                                   1:1 [0m

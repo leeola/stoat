@@ -111,6 +111,16 @@ define_action!(
 );
 
 define_action!(
+    ClaudeJumpToFocusedCardDef,
+    ClaudeJumpToFocusedCard,
+    "ClaudeJumpToFocusedCard",
+    ActionKind::ClaudeJumpToFocusedCard,
+    "jump to focused tool card",
+    "Open the file referenced by the focused tool-call card in an editor pane and move the cursor to the referenced line. No-op when the focused card has no file path in its tool input.",
+    ActionPriority::Common
+);
+
+define_action!(
     ToggleDockRightDef,
     ToggleDockRight,
     "ToggleDockRight",

@@ -185,6 +185,7 @@ pub enum ActionKind {
     ClaudeFocusNextToolCard,
     ClaudeFocusPrevToolCard,
     ClaudeToggleToolCardExpand,
+    ClaudeJumpToFocusedCard,
     OpenCheckpointPicker,
     ToggleDockRight,
     ToggleDockLeft,

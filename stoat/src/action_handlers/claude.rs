@@ -378,6 +378,46 @@ pub(super) fn claude_focus_prev_tool_card(stoat: &mut Stoat) -> UpdateEffect {
     move_tool_card_focus(stoat, FocusMove::Newer)
 }
 
+/// Inspect the focused tool card and return the file path it
+/// references, plus the 1-based line number to jump to when one is
+/// encoded in the input. Returns `None` when no chat is active, no
+/// card is focused, the focused message is not a `ToolUse`, the
+/// input is not parseable JSON, or no `file_path` field is present.
+pub(crate) fn focused_tool_card_location(stoat: &Stoat) -> Option<(PathBuf, Option<u32>)> {
+    use crate::claude_chat::ChatMessageContent;
+    let session_id = stoat.active_workspace().claude_chat?;
+    let chat = stoat.active_workspace().chats.get(&session_id)?;
+    let focused = chat.focused_tool_id.as_deref()?;
+    let input = chat.messages.iter().find_map(|msg| match &msg.content {
+        ChatMessageContent::ToolUse { id, input, .. } if id == focused => Some(input.as_str()),
+        _ => None,
+    })?;
+    let value: serde_json::Value = serde_json::from_str(input).ok()?;
+    let obj = value.as_object()?;
+    let path = obj.get("file_path").and_then(|v| v.as_str())?;
+    let line = obj
+        .get("offset")
+        .and_then(|v| v.as_u64())
+        .and_then(|n| u32::try_from(n).ok());
+    Some((PathBuf::from(path), line))
+}
+
+/// Open the file referenced by the focused tool card in an editor
+/// pane and move the cursor to the referenced line. Silent no-op
+/// when the focused card has no `file_path` in its tool input or
+/// when the path resolves outside the active workspace's git root.
+pub(super) fn claude_jump_to_focused_card(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::host::ToolKind;
+    let (path, line) = match focused_tool_card_location(stoat) {
+        Some(loc) => loc,
+        None => return UpdateEffect::None,
+    };
+    let wid = stoat.active_workspace;
+    let location = ToolCallLocation { path, line };
+    handle_follow_tool_use(stoat, wid, ToolKind::Read, std::slice::from_ref(&location));
+    UpdateEffect::Redraw
+}
+
 /// Toggle expansion of the focused tool card. Silent no-op when no
 /// chat is active or no card is focused.
 pub(super) fn claude_toggle_tool_card_expand(stoat: &mut Stoat) -> UpdateEffect {
