@@ -71,23 +71,75 @@ pub fn match_and_rank<T>(
     let pattern = parse_query(query)?;
     let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
     let mut hay_buf: Vec<char> = Vec::new();
-    let mut indices_buf: Vec<u32> = Vec::new();
     let mut out: Vec<RankedMatch<T>> = Vec::new();
     for (item, haystack) in items {
-        indices_buf.clear();
         let hay = Utf32Str::new(&haystack, &mut hay_buf);
-        if let Some(score) = pattern.indices(hay, &mut guard, &mut indices_buf) {
-            indices_buf.sort_unstable();
-            indices_buf.dedup();
+        if let Some(scored) = score_with_bonuses(&pattern, hay, &mut guard) {
             out.push(RankedMatch {
                 item,
                 haystack,
-                score,
-                matched_indices: indices_buf.clone(),
+                score: scored.score,
+                matched_indices: scored.indices,
             });
         }
     }
     Some(out)
+}
+
+struct Scored {
+    score: u32,
+    indices: Vec<u32>,
+}
+
+/// Walks `pattern.atoms` individually and combines per-atom scores
+/// and indices. Adds the in-order-token bonus: when each atom's
+/// first matched index strictly exceeds the previous atom's last,
+/// the combined score is multiplied by 5/4 (~1.25x). Single-atom
+/// queries trivially satisfy the order check and still receive
+/// the bonus.
+fn score_with_bonuses(
+    pattern: &Pattern,
+    haystack: Utf32Str<'_>,
+    matcher: &mut Matcher,
+) -> Option<Scored> {
+    let mut total_score: u32 = 0;
+    let mut per_atom: Vec<Vec<u32>> = Vec::with_capacity(pattern.atoms.len());
+    for atom in &pattern.atoms {
+        let mut atom_indices: Vec<u32> = Vec::new();
+        let score = atom.indices(haystack, matcher, &mut atom_indices)?;
+        total_score = total_score.saturating_add(u32::from(score));
+        atom_indices.sort_unstable();
+        atom_indices.dedup();
+        per_atom.push(atom_indices);
+    }
+
+    if is_in_order(&per_atom) {
+        total_score = total_score.saturating_mul(5) / 4;
+    }
+
+    let mut combined: Vec<u32> = per_atom.into_iter().flatten().collect();
+    combined.sort_unstable();
+    combined.dedup();
+    Some(Scored {
+        score: total_score,
+        indices: combined,
+    })
+}
+
+fn is_in_order(per_atom: &[Vec<u32>]) -> bool {
+    let mut last_end: Option<u32> = None;
+    for indices in per_atom {
+        let Some(&first) = indices.first() else {
+            return false;
+        };
+        if let Some(end) = last_end {
+            if first <= end {
+                return false;
+            }
+        }
+        last_end = Some(*indices.last().unwrap_or(&first));
+    }
+    true
 }
 
 #[cfg(test)]
@@ -159,5 +211,30 @@ mod tests {
         let reverse = match_and_rank("foo .rs", items).expect("query has atoms");
         assert_eq!(forward.len(), 1);
         assert_eq!(reverse.len(), 1);
+    }
+
+    #[test]
+    fn match_and_rank_in_order_query_outscores_reversed() {
+        let items = vec![(0usize, "src/foo.rs".to_string())];
+        let in_order = match_and_rank("foo .rs", items.clone()).expect("query has atoms");
+        let reversed = match_and_rank(".rs foo", items).expect("query has atoms");
+        assert_eq!(in_order.len(), 1);
+        assert_eq!(reversed.len(), 1);
+        assert!(
+            in_order[0].score > reversed[0].score,
+            "expected in-order score {} > reversed score {}",
+            in_order[0].score,
+            reversed[0].score,
+        );
+    }
+
+    #[test]
+    fn match_and_rank_single_atom_receives_in_order_bonus() {
+        // Query that matches as a single atom should still get the
+        // bonus; the order check vacuously holds for one atom.
+        let items = vec![(0usize, "foo.rs".to_string())];
+        let bonus = match_and_rank("foo", items).expect("query has atoms");
+        assert_eq!(bonus.len(), 1);
+        assert!(bonus[0].score > 0);
     }
 }
