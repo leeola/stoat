@@ -18,12 +18,12 @@ pub mod lsp;
 pub mod terminal;
 
 pub use claude_code::{
-    AgentMessage, ClaudeCodeHost, ClaudeCodeSession, ClaudeCodeSessions, ClaudeNotification,
-    ClaudeSessionId, ClaudeSessionSummary, HookCallback, HookDecision, HookEvent, HookKind,
-    HookLifecycleEvent, HookResponse, ModeInfo, ModelInfo, PermissionBehavior, PermissionCallback,
-    PermissionDestination, PermissionResult, PermissionRule, PermissionScope, PermissionSuggestion,
-    PlanEntry, PlanEntryStatus, SessionStateEvent, TaskEvent, TerminalMeta, TokenUsage,
-    ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind, ToolPermissionContext,
+    AgentMessage, BashDenialPolicy, ClaudeCodeHost, ClaudeCodeSession, ClaudeCodeSessions,
+    ClaudeNotification, ClaudeSessionId, ClaudeSessionSummary, HookCallback, HookDecision,
+    HookEvent, HookKind, HookLifecycleEvent, HookResponse, ModeInfo, ModelInfo, PermissionBehavior,
+    PermissionCallback, PermissionDestination, PermissionResult, PermissionRule, PermissionScope,
+    PermissionSuggestion, PlanEntry, PlanEntryStatus, SessionStateEvent, TaskEvent, TerminalMeta,
+    TokenUsage, ToolCallContent, ToolCallLocation, ToolCallStatus, ToolKind, ToolPermissionContext,
 };
 pub use clipboard::{osc52_should_emit, ClipboardHost, NoopClipboard};
 #[cfg(test)]

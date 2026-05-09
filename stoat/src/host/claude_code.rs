@@ -8,7 +8,9 @@
 //! - [`message`]: the [`AgentMessage`] union.
 //! - [`hooks`]: hook-callback interface.
 //! - [`permission`]: permission-callback interface and outcome types.
+//! - [`denial`]: hardcoded denial policy installed at the launcher.
 
+mod denial;
 mod events;
 mod hooks;
 mod message;
@@ -16,6 +18,7 @@ mod permission;
 mod types;
 
 use async_trait::async_trait;
+pub use denial::BashDenialPolicy;
 pub use events::{HookLifecycleEvent, SessionStateEvent, TaskEvent};
 pub use hooks::{HookCallback, HookDecision, HookEvent, HookKind, HookResponse};
 pub use message::AgentMessage;

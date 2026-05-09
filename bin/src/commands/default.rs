@@ -2,7 +2,7 @@ use clap::{ArgAction, Parser, Subcommand};
 use snafu::{ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
-    host::{LocalFs, LocalFsWatcher},
+    host::{BashDenialPolicy, LocalFs, LocalFsWatcher},
     Axis, Settings, Stoat,
 };
 use stoat_agent_claude_code::ClaudeCodeLauncher;
@@ -146,10 +146,10 @@ fn run_tui(
         if continue_ || resume {
             stoat.load_active_workspace_state();
         }
-        stoat.set_claude_code_host(Arc::new(ClaudeCodeLauncher::new(
-            Arc::new(LocalFs),
-            executor,
-        )));
+        stoat.set_claude_code_host(Arc::new(
+            ClaudeCodeLauncher::new(Arc::new(LocalFs), executor)
+                .with_permission_callback(Arc::new(BashDenialPolicy::new())),
+        ));
         match LocalFsWatcher::new() {
             Ok(watcher) => stoat.set_fs_watch_host(Arc::new(watcher)),
             Err(err) => tracing::warn!(

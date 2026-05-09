@@ -6,7 +6,7 @@
 use crate::{ClaudeCode, SessionConfig};
 use async_trait::async_trait;
 use std::{io, sync::Arc};
-use stoat::host::{ClaudeCodeHost, ClaudeCodeSession, FsHost};
+use stoat::host::{ClaudeCodeHost, ClaudeCodeSession, FsHost, PermissionCallback};
 use stoat_log::TextProtoLog;
 use stoat_scheduler::Executor;
 
@@ -14,12 +14,17 @@ pub struct ClaudeCodeLauncher {
     default_config: SessionConfig,
     fs_host: Arc<dyn FsHost>,
     executor: Executor,
+    permission_callback: Option<Arc<dyn PermissionCallback>>,
 }
 
 impl std::fmt::Debug for ClaudeCodeLauncher {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("ClaudeCodeLauncher")
             .field("default_config", &self.default_config)
+            .field(
+                "has_permission_callback",
+                &self.permission_callback.is_some(),
+            )
             .finish_non_exhaustive()
     }
 }
@@ -30,6 +35,7 @@ impl ClaudeCodeLauncher {
             default_config: SessionConfig::default(),
             fs_host,
             executor,
+            permission_callback: None,
         }
     }
 
@@ -42,7 +48,17 @@ impl ClaudeCodeLauncher {
             default_config,
             fs_host,
             executor,
+            permission_callback: None,
         }
+    }
+
+    /// Install a permission callback that gates every spawned session.
+    /// When set, sessions are launched with the control protocol's
+    /// permission-prompt routing and each tool invocation flows
+    /// through `callback.can_use_tool` before execution.
+    pub fn with_permission_callback(mut self, callback: Arc<dyn PermissionCallback>) -> Self {
+        self.permission_callback = Some(callback);
+        self
     }
 }
 
@@ -63,6 +79,9 @@ impl ClaudeCodeHost for ClaudeCodeLauncher {
         let mut builder = ClaudeCode::builder(self.executor.clone()).with_config(config);
         if let (Some(tx), Some(rx)) = (tx_log, rx_log) {
             builder = builder.with_text_proto_logs(tx, rx);
+        }
+        if let Some(callback) = self.permission_callback.clone() {
+            builder = builder.permission_callback(callback);
         }
         let claude_code = if resume_existing {
             builder.resume().await
