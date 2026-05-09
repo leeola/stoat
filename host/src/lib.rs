@@ -12,8 +12,10 @@ pub mod env;
 pub mod fake;
 pub mod fs;
 pub mod shell;
+pub mod watch;
 
 pub use env::{EnvHost, LocalEnv};
-pub use fake::{FakeEnv, FakeFs, FakeFsOp, FakeShell, FakeShellInvocation};
+pub use fake::{FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeShell, FakeShellInvocation};
 pub use fs::{FsDirEntry, FsHost, FsMetadata, LocalFs};
 pub use shell::{LocalShell, ShellHost, ShellOutput};
+pub use watch::{FsEventKind, FsWatchEvent, FsWatchHost, LocalFsWatcher, WatchToken};

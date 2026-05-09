@@ -32,7 +32,7 @@ pub use fake::{
     inlay_hint_params, open_params, reference_params,
     terminal::{inject_done, inject_output, FakeTerminal},
     workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeClipboard, FakeEnv, FakeFs,
-    FakeFsOp, FakeGit, FakeLsp, FakeRepoBuilder,
+    FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp, FakeRepoBuilder,
 };
 pub use git::{
     ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
@@ -44,6 +44,7 @@ pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEn
 #[cfg(test)]
 pub use stoat_host::FakeShell;
 pub use stoat_host::{
-    EnvHost, FsDirEntry, FsHost, FsMetadata, LocalEnv, LocalFs, LocalShell, ShellHost, ShellOutput,
+    EnvHost, FsDirEntry, FsEventKind, FsHost, FsMetadata, FsWatchEvent, FsWatchHost, LocalEnv,
+    LocalFs, LocalFsWatcher, LocalShell, ShellHost, ShellOutput, WatchToken,
 };
 pub use terminal::TerminalHost;

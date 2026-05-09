@@ -62,8 +62,16 @@ fn resolve_symlink(state: &FakeState, path: &Path) -> io::Result<PathBuf> {
     )))
 }
 
+/// Notification callback fired after a successful [`FsHost::write`]
+/// against a [`FakeFs`]. Tests pair a [`FakeFs`] with a
+/// [`crate::FakeFsWatcher`] by registering a hook that injects a
+/// `Modified` event for watched paths; see
+/// [`crate::FakeFsWatcher::install_on`].
+pub type WriteHook = Box<dyn Fn(&Path) + Send + Sync>;
+
 pub struct FakeFs {
     state: Mutex<FakeState>,
+    write_hook: Mutex<Option<WriteHook>>,
 }
 
 struct FakeState {
@@ -150,7 +158,19 @@ impl FakeFs {
                 rename_failures: HashMap::new(),
                 ops: Vec::new(),
             }),
+            write_hook: Mutex::new(None),
         }
+    }
+
+    /// Install a callback fired after every successful
+    /// [`FsHost::write`] against this fake. The hook runs after the
+    /// entry mutation but before the [`FsHost::write`] return; sticky
+    /// write failures skip both the mutation and the hook. Replaces
+    /// any previously-installed hook. Decouples [`FakeFs`] from
+    /// [`crate::FakeFsWatcher`] so the `fs` module does not depend on
+    /// the watcher type.
+    pub fn set_write_hook(&self, hook: WriteHook) {
+        *self.write_hook.lock().expect("FakeFs lock poisoned") = Some(hook);
     }
 
     pub fn insert_file(&self, path: impl AsRef<Path>, content: impl AsRef<[u8]>) {
@@ -404,6 +424,15 @@ impl FsHost for FakeFs {
                 mtime,
             },
         );
+        drop(state);
+        if let Some(hook) = self
+            .write_hook
+            .lock()
+            .expect("FakeFs lock poisoned")
+            .as_ref()
+        {
+            hook(path);
+        }
         Ok(())
     }
 

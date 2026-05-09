@@ -14,4 +14,4 @@ pub use self::{
         FakeLsp,
     },
 };
-pub use stoat_host::{FakeEnv, FakeFs, FakeFsOp};
+pub use stoat_host::{FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher};
