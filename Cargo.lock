@@ -2478,6 +2478,7 @@ dependencies = [
 name = "stoat_bin"
 version = "0.1.0"
 dependencies = [
+ "blake3",
  "clap",
  "snafu",
  "stoat",
@@ -2488,6 +2489,7 @@ dependencies = [
  "time",
  "tokio",
  "tracing",
+ "viewport",
 ]
 
 [[package]]

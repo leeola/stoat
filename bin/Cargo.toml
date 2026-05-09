@@ -23,9 +23,11 @@ stoat = { path = "../stoat" }
 stoat_agent_claude_code = { path = "../agent/claude_code" }
 stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
+viewport = { path = "../viewport" }
+blake3 = { workspace = true }
 clap.workspace = true
 snafu.workspace = true
 tracing.workspace = true
-tokio.workspace = true
+tokio = { workspace = true, features = ["time"] }
 tempfile.workspace = true
 time.workspace = true
