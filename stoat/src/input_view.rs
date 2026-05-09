@@ -264,21 +264,6 @@ impl InputView {
         });
     }
 
-    /// Cursor column in the rope (0-indexed, counted in bytes). For a
-    /// single-line buffer this is the visual cursor column - used by
-    /// render paths that draw a custom cursor glyph (help search) rather
-    /// than relying on [`Self::render`]'s editor-style cursor.
-    pub(crate) fn cursor_column(&self, ws: &mut Workspace) -> usize {
-        let Some(editor) = ws.editors.get_mut(self.editor_id) else {
-            return 0;
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor();
-        let point = buf_snapshot.point_for_anchor(&sel.head());
-        point.column as usize
-    }
-
     /// Replace the entire buffer text and move the cursor to the end. Used by
     /// consumers like the run pane where history navigation swaps the whole
     /// line, or when the consumer needs to clear the input after submission.

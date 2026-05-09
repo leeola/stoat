@@ -130,10 +130,6 @@ impl Help {
         self.input.text(ws)
     }
 
-    pub fn input_cursor_column(&self, ws: &mut Workspace) -> usize {
-        self.input.cursor_column(ws)
-    }
-
     /// Remove the underlying scratch editor. Called when the help modal is
     /// closed so the slot does not linger in the workspace.
     pub(crate) fn dispose(&self, ws: &mut Workspace) {
