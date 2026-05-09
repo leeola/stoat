@@ -902,19 +902,15 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("Space");
-        {
-            let ws = h.stoat.active_workspace();
-            let session = ws.review.as_ref().expect("session");
-            let id = session.cursor.current.expect("current chunk");
-            assert_eq!(session.chunk(id).unwrap().status, ChunkStatus::Staged);
-        }
+        assert_eq!(
+            h.chunk_status(h.current_review_chunk_id()),
+            ChunkStatus::Staged
+        );
         h.type_keys("Space");
-        {
-            let ws = h.stoat.active_workspace();
-            let session = ws.review.as_ref().expect("session");
-            let id = session.cursor.current.expect("current chunk");
-            assert_eq!(session.chunk(id).unwrap().status, ChunkStatus::Unstaged);
-        }
+        assert_eq!(
+            h.chunk_status(h.current_review_chunk_id()),
+            ChunkStatus::Unstaged
+        );
     }
 
     #[test]
@@ -939,16 +935,14 @@ mod tests {
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.type_keys("s n s");
         h.assert_snapshot("review_complete_state");
-        {
-            let ws = h.stoat.active_workspace();
-            let session = ws.review.as_ref().expect("session");
-            assert!(session.is_complete());
-            let has_badge = ws
-                .badges
-                .find_by_source(crate::badge::BadgeSource::Review)
-                .is_some();
-            assert!(has_badge, "complete review should surface a badge");
-        }
+        assert!(h.with_review(|s| s.is_complete()));
+        let has_badge = h
+            .stoat
+            .active_workspace()
+            .badges
+            .find_by_source(crate::badge::BadgeSource::Review)
+            .is_some();
+        assert!(has_badge, "complete review should surface a badge");
     }
 
     #[test]
@@ -1019,25 +1013,16 @@ mod tests {
         );
         h.stoat.open_review();
         h.settle();
-
-        let first_chunk_id = h.stoat.active_workspace().review.as_ref().unwrap().order[0];
-        h.stoat
-            .active_workspace_mut()
-            .review
-            .as_mut()
-            .unwrap()
-            .set_status(first_chunk_id, ChunkStatus::Staged);
+        h.set_review_status(0, ChunkStatus::Staged);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
 
-        let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session still present");
-        assert_eq!(session.order.len(), 2);
-        let statuses: Vec<_> = session
-            .order
-            .iter()
-            .map(|id| session.chunks.get(id).unwrap().status)
-            .collect();
+        let statuses = h.with_review(|s| {
+            s.order
+                .iter()
+                .map(|id| s.chunks.get(id).unwrap().status)
+                .collect::<Vec<_>>()
+        });
         assert_eq!(
             statuses,
             vec![ChunkStatus::Staged, ChunkStatus::Pending],
@@ -1050,25 +1035,16 @@ mod tests {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
         h.settle();
-
-        let first_chunk_id = h.stoat.active_workspace().review.as_ref().unwrap().order[0];
-        h.stoat
-            .active_workspace_mut()
-            .review
-            .as_mut()
-            .unwrap()
-            .set_status(first_chunk_id, ChunkStatus::Staged);
+        h.set_review_status(0, ChunkStatus::Staged);
 
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRefresh);
 
-        let ws = h.stoat.active_workspace();
-        let session = ws.review.as_ref().expect("session still present");
-        assert_eq!(session.order.len(), 2);
-        let statuses: Vec<_> = session
-            .order
-            .iter()
-            .map(|id| session.chunks.get(id).unwrap().status)
-            .collect();
+        let statuses = h.with_review(|s| {
+            s.order
+                .iter()
+                .map(|id| s.chunks.get(id).unwrap().status)
+                .collect::<Vec<_>>()
+        });
         assert_eq!(
             statuses,
             vec![ChunkStatus::Staged, ChunkStatus::Pending],

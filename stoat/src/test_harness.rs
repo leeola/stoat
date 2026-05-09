@@ -358,6 +358,108 @@ impl TestHarness {
         self.capture("open_commits");
     }
 
+    /// Write `new_text` to the active review session's file matching
+    /// `rel`, then drain watcher events and settle. The
+    /// [`crate::host::FakeFsWatcher`] hook installed in
+    /// [`Self::new_with_settings`] auto-emits a [`crate::host::FsEventKind::Modified`]
+    /// event on every watched path; this helper turns the event into a
+    /// [`stoat_action::ReviewExternalEdit`] dispatch so the next
+    /// snapshot reflects the post-refresh state.
+    pub(crate) fn external_edit(&mut self, rel: &str, new_text: &str) {
+        use crate::host::FsHost;
+        let path = {
+            let session = self
+                .stoat
+                .active_workspace()
+                .review
+                .as_ref()
+                .expect("no review session");
+            session
+                .files
+                .iter()
+                .find(|f| f.rel_path == rel)
+                .unwrap_or_else(|| panic!("review file {rel:?} not found in session"))
+                .path
+                .clone()
+        };
+        self.fake_fs
+            .write(&path, new_text.as_bytes())
+            .expect("FakeFs::write");
+        self.stoat.drain_fs_watch_events();
+        self.settle();
+        self.capture("external_edit");
+    }
+
+    /// Inject a [`crate::host::FsEventKind::Created`] event for `rel`
+    /// after writing `text`. Models an external tool creating a new
+    /// file inside the active review session's `workdir`. Panics for
+    /// non-`WorkingTree` sources because their content is not on disk.
+    pub(crate) fn inject_external_create(&mut self, rel: &str, text: &str) {
+        use crate::{
+            host::{FsEventKind, FsHost},
+            review_session::ReviewSource,
+        };
+        let workdir = {
+            let session = self
+                .stoat
+                .active_workspace()
+                .review
+                .as_ref()
+                .expect("no review session");
+            match &session.source {
+                ReviewSource::WorkingTree { workdir } => workdir.clone(),
+                other => {
+                    panic!("inject_external_create requires a WorkingTree source, got {other:?}")
+                },
+            }
+        };
+        let path = workdir.join(rel);
+        self.fake_fs
+            .write(&path, text.as_bytes())
+            .expect("FakeFs::write");
+        self.fake_fs_watcher.inject(&path, FsEventKind::Created);
+        self.stoat.drain_fs_watch_events();
+        self.settle();
+        self.capture("inject_external_create");
+    }
+
+    /// Read-only access to the active review session via a closure.
+    /// Panics when no session is open.
+    pub(crate) fn with_review<R>(
+        &self,
+        f: impl FnOnce(&crate::review_session::ReviewSession) -> R,
+    ) -> R {
+        let session = self
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .expect("no review session");
+        f(session)
+    }
+
+    /// Assert the active session's progress matches `expected`. Failure
+    /// includes both sides for diff context.
+    pub(crate) fn assert_review_progress(&self, expected: crate::review_session::ReviewProgress) {
+        let actual = self.with_review(|s| s.progress());
+        assert_eq!(actual, expected, "review progress mismatch");
+    }
+
+    /// The current review-cursor chunk id. Panics when no session is
+    /// open or the cursor has not settled on a chunk yet.
+    pub(crate) fn current_review_chunk_id(&self) -> crate::review_session::ReviewChunkId {
+        self.with_review(|s| s.cursor.current.expect("no current chunk"))
+    }
+
+    /// Status of the chunk identified by `id`. Panics when the chunk
+    /// is not in the active session.
+    pub(crate) fn chunk_status(
+        &self,
+        id: crate::review_session::ReviewChunkId,
+    ) -> crate::review_session::ChunkStatus {
+        self.with_review(|s| s.chunk(id).expect("chunk not found").status)
+    }
+
     pub fn with_size(width: u16, height: u16) -> Self {
         Self::new(width, height)
     }
