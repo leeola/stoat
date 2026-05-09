@@ -24,8 +24,8 @@ size: 80x24
      [0m[35m│[0m                                                                    [0m[35m│[0m
      [0m[35m│[0m[90m--------------------------------------------------------------------[0m[35m│[0m
      [0m[35m│[0m[97m Allow [0m [0m[30m[46m Allow-once [0m [0m[97m Always-allow [0m [0m[97m Deny [0m                          [0m[35m│[0m
-     [0m[35m│[0m[90mTab/Shift-Tab move, Enter selects, Esc denies[0m    [0m[33m┌ permission ───────────┐[0m
-     [0m[35m└─────────────────────────────────────────────────[0m[33m│[0m[36m      Tab[0m[97m   next button[0m[33m│[0m
+     [0m[35m└─────────────────────────────────────────────────[0m[33m┌ permission ───────────┐[0m
+                                                       [0m[33m│[0m[36m      Tab[0m[97m   next button[0m[33m│[0m
                                                        [0m[33m│[0m[36mShift-Tab[0m[97m   prev button[0m[33m│[0m
                                                        [0m[33m│[0m[36m    Enter[0m[97m   select[0m     [0m[33m│[0m
                                                        [0m[33m│[0m[36m      Esc[0m[97m   deny[0m       [0m[33m│[0m

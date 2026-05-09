@@ -6,7 +6,7 @@ use ratatui::{
 };
 
 const BOX_WIDTH: u16 = 70;
-const BOX_HEIGHT: u16 = 14;
+const BOX_HEIGHT: u16 = 13;
 const MIN_WIDTH: u16 = 50;
 const MIN_HEIGHT: u16 = 8;
 const INPUT_ROWS: u16 = 6;
@@ -96,17 +96,6 @@ pub(crate) fn render_permission_prompt(
             write_str(buf, x_cursor, button_y, &label, style);
             x_cursor += label_w + 1;
         }
-    }
-
-    let hint_y = inner.y + inner.height.saturating_sub(1);
-    if hint_y > button_y {
-        write_str(
-            buf,
-            inner.x,
-            hint_y,
-            &truncate("Tab/Shift-Tab move, Enter selects, Esc denies", max_w),
-            muted_style,
-        );
     }
 }
 
