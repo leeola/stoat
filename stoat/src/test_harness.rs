@@ -359,12 +359,18 @@ impl TestHarness {
     }
 
     /// Write `new_text` to the active review session's file matching
-    /// `rel`, then drain watcher events and settle. The
+    /// `rel`, then drain watcher events into a debounce timer. The
     /// [`crate::host::FakeFsWatcher`] hook installed in
-    /// [`Self::new_with_settings`] auto-emits a [`crate::host::FsEventKind::Modified`]
-    /// event on every watched path; this helper turns the event into a
-    /// [`stoat_action::ReviewExternalEdit`] dispatch so the next
-    /// snapshot reflects the post-refresh state.
+    /// [`Self::new_with_settings`] auto-emits a
+    /// [`crate::host::FsEventKind::Modified`] event on every watched
+    /// path; [`crate::app::Stoat::drain_fs_watch_events`] consumes
+    /// it and arms a 50ms debounce keyed on the path. Callers must
+    /// follow up with [`Self::advance_clock`] past
+    /// [`crate::app::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] to fire the
+    /// timer and land the [`stoat_action::ReviewExternalEdit`]
+    /// dispatch; calling `external_edit` repeatedly within the
+    /// window coalesces the bursts into one dispatch, matching the
+    /// production formatter-on-save behaviour.
     pub(crate) fn external_edit(&mut self, rel: &str, new_text: &str) {
         use crate::host::FsHost;
         let path = {
@@ -394,6 +400,10 @@ impl TestHarness {
     /// after writing `text`. Models an external tool creating a new
     /// file inside the active review session's `workdir`. Panics for
     /// non-`WorkingTree` sources because their content is not on disk.
+    /// The created event arms the same debounce as
+    /// [`Self::external_edit`]; callers advance the clock past
+    /// [`crate::app::REVIEW_EXTERNAL_EDIT_DEBOUNCE`] to fire the
+    /// dispatch.
     pub(crate) fn inject_external_create(&mut self, rel: &str, text: &str) {
         use crate::{
             host::{FsEventKind, FsHost},
@@ -538,6 +548,7 @@ impl TestHarness {
                 crate::action_handlers::lsp::pump_lsp_workspace_symbol(&mut self.stoat);
             let lsp_format = crate::action_handlers::lsp::pump_lsp_format(&mut self.stoat);
             let completion = crate::completion::request::pump(&mut self.stoat);
+            let external_edits = self.stoat.drain_pending_external_edits();
             if !claude
                 && !commits
                 && !lsp_jumps
@@ -550,6 +561,7 @@ impl TestHarness {
                 && !lsp_workspace_symbol
                 && !lsp_format
                 && !completion
+                && !external_edits
             {
                 break;
             }

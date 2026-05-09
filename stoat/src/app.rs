@@ -41,6 +41,14 @@ use tokio::sync::mpsc::{Receiver, Sender};
 
 pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
 
+/// Quiet window after the last filesystem-watch event for a path
+/// before [`ReviewExternalEdit`] dispatches. Mirrors
+/// [`crate::action_handlers::lsp::LSP_DID_CHANGE_DEBOUNCE`] so a
+/// formatter-on-save burst (or an agent edit chain) collapses
+/// into one diff rebuild rather than three.
+pub(crate) const REVIEW_EXTERNAL_EDIT_DEBOUNCE: std::time::Duration =
+    std::time::Duration::from_millis(50);
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UpdateEffect {
     Redraw,
@@ -291,6 +299,19 @@ pub struct Stoat {
     /// [`Self::drain_fs_watch_events`] so external edits can flow
     /// into the active review session.
     pub(crate) fs_watch_host: Arc<dyn FsWatchHost>,
+    /// Pending [`ReviewExternalEdit`] debounce timer per path. Each
+    /// [`Self::arm_review_external_edit_debounce`] call replaces the
+    /// entry, dropping the prior [`stoat_scheduler::Task`] which
+    /// cancels its spawned future before the timer fires; only the
+    /// most recent burst-event for a path proceeds to dispatch.
+    pub(crate) review_pending_external_edits:
+        std::collections::HashMap<PathBuf, stoat_scheduler::Task<()>>,
+    /// Channel the per-path debounce tasks push onto once their
+    /// 50ms timer fires. Decouples the spawned async work from the
+    /// main-thread action dispatch in
+    /// [`Self::drain_pending_external_edits`].
+    pub(crate) review_external_edit_tx: Sender<PathBuf>,
+    review_external_edit_rx: Receiver<PathBuf>,
     /// Git operations flow through this trait so tests can use
     /// [`crate::host::FakeGit`] without a real repository.
     pub(crate) git_host: Arc<dyn GitHost>,
@@ -533,6 +554,7 @@ impl Stoat {
 
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
         let (claude_tx, claude_rx) = tokio::sync::mpsc::channel(256);
+        let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
 
         Self {
             size: Rect::default(),
@@ -604,6 +626,9 @@ impl Stoat {
             last_find: None,
             fs_host: Arc::new(LocalFs),
             fs_watch_host: Arc::new(NoopFsWatcher::new()),
+            review_pending_external_edits: std::collections::HashMap::new(),
+            review_external_edit_tx,
+            review_external_edit_rx,
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
             lsp_host: Arc::new(NoopLsp),
@@ -943,6 +968,7 @@ impl Stoat {
     pub(crate) fn update(&mut self, event: Event) -> UpdateEffect {
         self.drain_lsp_notifications();
         self.drain_fs_watch_events();
+        self.drain_pending_external_edits();
         let effect = match event {
             Event::Resize(w, h) => {
                 self.size = Rect::new(0, 0, w, h);
@@ -960,11 +986,13 @@ impl Stoat {
     }
 
     /// Drain queued [`crate::host::FsWatchEvent`]s from the active
-    /// [`FsWatchHost`]. Each event becomes one
-    /// [`ReviewExternalEdit`] dispatch when a review session is
-    /// active; otherwise the event is logged and discarded. Cap
-    /// matches [`Self::drain_lsp_notifications`] so a pathological
-    /// burst can't starve the event loop.
+    /// [`FsWatchHost`]. Each event arms (or resets) a 50ms
+    /// per-path debounce via
+    /// [`Self::arm_review_external_edit_debounce`] when a review
+    /// session is active; the dispatch itself lands later from
+    /// [`Self::drain_pending_external_edits`] once the timer
+    /// fires. Cap matches [`Self::drain_lsp_notifications`] so a
+    /// pathological burst can't starve the event loop.
     pub(crate) fn drain_fs_watch_events(&mut self) {
         let host = self.fs_watch_host.clone();
         let mut paths: Vec<PathBuf> = Vec::new();
@@ -985,8 +1013,52 @@ impl Stoat {
             return;
         }
         for path in paths {
-            action_handlers::dispatch(self, &ReviewExternalEdit { path });
+            self.arm_review_external_edit_debounce(path);
         }
+    }
+
+    /// Schedule a debounced [`ReviewExternalEdit`] dispatch for
+    /// `path`. Inserting into [`Self::review_pending_external_edits`]
+    /// drops any prior task for the same path, which cancels the
+    /// spawned future at its [`Executor::timer`] await; only the
+    /// most recent burst event proceeds. The spawned task forwards
+    /// `path` on [`Self::review_external_edit_tx`] when its
+    /// [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`] window elapses; the main
+    /// loop drains the channel via
+    /// [`Self::drain_pending_external_edits`] and dispatches the
+    /// action there because async tasks cannot mutate `Stoat`.
+    fn arm_review_external_edit_debounce(&mut self, path: PathBuf) {
+        let executor = self.executor.clone();
+        let tx = self.review_external_edit_tx.clone();
+        let redraw = self.redraw_notify.clone();
+        let path_for_send = path.clone();
+        let task = self.executor.spawn_with_redraw(redraw, async move {
+            executor.timer(REVIEW_EXTERNAL_EDIT_DEBOUNCE).await;
+            let _ = tx.send(path_for_send).await;
+        });
+        self.review_pending_external_edits.insert(path, task);
+    }
+
+    /// Drain every path the per-path debounce tasks have pushed onto
+    /// [`Self::review_external_edit_tx`] since the last call. Each
+    /// path becomes one [`ReviewExternalEdit`] dispatch when a review
+    /// session is active; otherwise the path is dropped. Returns
+    /// `true` if any dispatch fired so the test harness's settle
+    /// loop can re-iterate. Cap matches
+    /// [`Self::drain_fs_watch_events`].
+    pub(crate) fn drain_pending_external_edits(&mut self) -> bool {
+        let mut progressed = false;
+        for _ in 0..256 {
+            let Ok(path) = self.review_external_edit_rx.try_recv() else {
+                break;
+            };
+            self.review_pending_external_edits.remove(&path);
+            if self.active_workspace().review.is_some() {
+                action_handlers::dispatch(self, &ReviewExternalEdit { path });
+                progressed = true;
+            }
+        }
+        progressed
     }
 
     /// Drains every notification currently buffered on
@@ -4167,5 +4239,43 @@ mod tests {
         ));
         assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
         assert!(h.fake_clipboard().osc52_emits().is_empty());
+    }
+
+    /// Three writes inside the [`REVIEW_EXTERNAL_EDIT_DEBOUNCE`]
+    /// window must collapse into a single pending dispatch task,
+    /// matching the formatter-on-save burst the production
+    /// watcher receives. A separate
+    /// [`crate::test_harness::TestHarness::advance_clock`] then
+    /// fires the surviving timer; the channel drains and the
+    /// pending map empties.
+    #[test]
+    fn review_external_edit_burst_within_debounce_coalesces() {
+        use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario(
+            "/work",
+            &[("a.rs", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)],
+        );
+        h.stoat.open_review();
+        h.settle();
+
+        h.external_edit("a.rs", "burst1\n");
+        h.external_edit("a.rs", "burst2\n");
+        h.external_edit("a.rs", "burst3\n");
+
+        assert_eq!(
+            h.stoat.review_pending_external_edits.len(),
+            1,
+            "three writes within the debounce window must coalesce to one task",
+        );
+
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+
+        assert_eq!(
+            h.stoat.review_pending_external_edits.len(),
+            0,
+            "the surviving task fires once advance_clock crosses the debounce window",
+        );
     }
 }
