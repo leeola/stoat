@@ -1,3 +1,5 @@
+#![deny(clippy::disallowed_types, clippy::disallowed_methods)]
+
 mod globals;
 mod panic_hook;
 mod stoat_app;
