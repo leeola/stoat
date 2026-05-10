@@ -68,6 +68,8 @@ enum Command {
     /// git supplies; positional args are not accepted in the
     /// default mode.
     Diff(crate::commands::diff::DiffArgs),
+    /// Open the GPUI editor window.
+    Gui,
 }
 
 pub fn run() -> Result<(), Whatever> {
@@ -76,6 +78,7 @@ pub fn run() -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
+        Some(Command::Gui) => crate::commands::gui::run(),
         Some(Command::Review) | None => print_gui_hint(),
     }
 }

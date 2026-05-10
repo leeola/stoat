@@ -6275,6 +6275,7 @@ dependencies = [
  "snafu",
  "stoat",
  "stoat_agent_claude_code",
+ "stoat_gui",
  "stoat_host",
  "stoat_language",
  "stoat_log",
