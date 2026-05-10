@@ -1,5 +1,7 @@
 mod panic_hook;
 mod stoat_app;
+#[cfg(any(test, feature = "test-support"))]
+pub mod test;
 
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,

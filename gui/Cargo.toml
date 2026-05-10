@@ -10,6 +10,9 @@ workspace = true
 [lib]
 path = "src/stoat_gui.rs"
 
+[features]
+test-support = ["gpui/test-support"]
+
 [dependencies]
 gpui.workspace = true
 tracing.workspace = true
