@@ -1,3 +1,13 @@
+//! Bridge between gpui's main thread and stoat's async runtime.
+//!
+//! The GUI window runs on gpui's main thread. Async work spawned by
+//! gui entities goes through [`stoat_scheduler::Executor`] (the
+//! canonical async runtime; see `scheduler/src/executor.rs` module
+//! docs). The production binary backs that executor with
+//! [`stoat_scheduler::TokioScheduler`] so Tokio-bound hosts (LSP,
+//! Claude Code, fs watcher) share the same runtime. Completion hops
+//! back to gpui's foreground via [`spawn_with_entity`].
+
 use gpui::{AsyncApp, Context, Task, WeakEntity};
 use std::future::Future;
 use stoat_scheduler::Executor;

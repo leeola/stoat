@@ -1,3 +1,9 @@
+//! Production [`Scheduler`] impl backing
+//! [`Executor`](crate::Executor) in the binary so Tokio-bound hosts
+//! (LSP, Claude Code, fs watcher) share the same runtime as every
+//! other async path routed through `stoat_scheduler::Executor`.
+//! Tests substitute [`TestScheduler`](crate::TestScheduler).
+
 use crate::{Clock, Executor, LocalClock, Runnable, Scheduler, Timer};
 use futures::channel::oneshot;
 use std::{sync::Arc, time::Duration};
