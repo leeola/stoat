@@ -6343,6 +6343,7 @@ dependencies = [
  "serde",
  "serde_json",
  "stoat",
+ "stoat_config",
  "stoat_host",
  "stoat_scheduler",
  "tracing",
