@@ -6339,6 +6339,9 @@ name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
  "gpui",
+ "insta",
+ "serde",
+ "serde_json",
  "tracing",
 ]
 
