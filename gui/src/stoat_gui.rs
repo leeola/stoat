@@ -28,6 +28,12 @@ pub fn run() {
             |_window, cx| cx.new(StoatApp::new),
         )
         .expect("open root window");
+        cx.on_window_closed(|cx| {
+            if cx.windows().is_empty() {
+                cx.quit();
+            }
+        })
+        .detach();
         cx.activate(true);
     });
 }
