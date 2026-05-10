@@ -128,6 +128,8 @@ macro_rules! define_action {
                 Ok(Box::new(Self))
             }
         }
+
+        gpui::register_action!($action);
     };
 }
 
@@ -165,6 +167,8 @@ macro_rules! impl_gpui_action {
                 Ok(Box::new(inner))
             }
         }
+
+        gpui::register_action!($t);
     };
 }
 
