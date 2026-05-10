@@ -64,6 +64,7 @@ impl TestHarness {
 
     pub fn advance_clock(&self, duration: Duration) {
         self.cx.executor().advance_clock(duration);
+        self.scheduler.advance_clock(duration);
     }
 
     pub fn read_entity<T: 'static, R>(

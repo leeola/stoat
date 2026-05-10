@@ -28,6 +28,11 @@ struct TestClockState {
     system: SystemTime,
 }
 
+/// Deterministic [`Clock`] used by [`TestScheduler`](crate::TestScheduler).
+/// The gui test harness (`stoat_gui::test::TestHarness::advance_clock`)
+/// advances this clock in lock-step with gpui's test dispatcher clock so
+/// handlers reading [`crate::Executor::now`] see the same advance as
+/// gpui-driven tasks.
 pub struct TestClock {
     state: Mutex<TestClockState>,
 }
