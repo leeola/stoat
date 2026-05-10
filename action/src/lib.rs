@@ -91,3 +91,5 @@ pub use defs::{
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue};
+#[doc(hidden)]
+pub use serde_json;

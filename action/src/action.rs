@@ -106,6 +106,28 @@ macro_rules! define_action {
                 self
             }
         }
+
+        impl gpui::Action for $action {
+            fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+                Box::new(Self)
+            }
+
+            fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
+                action.as_any().downcast_ref::<Self>().is_some()
+            }
+
+            fn name(&self) -> &'static str {
+                $name
+            }
+
+            fn name_for_type() -> &'static str {
+                $name
+            }
+
+            fn build(_value: $crate::serde_json::Value) -> gpui::Result<Box<dyn gpui::Action>> {
+                Ok(Box::new(Self))
+            }
+        }
     };
 }
 
