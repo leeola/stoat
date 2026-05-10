@@ -1,5 +1,6 @@
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
 
+mod executor;
 mod globals;
 mod panic_hook;
 mod settings;
@@ -8,6 +9,7 @@ mod stoat_app;
 pub mod test;
 mod theme;
 
+pub use executor::spawn_with_entity;
 pub use globals::{install_production_globals, Globals, LanguageRegistry};
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
