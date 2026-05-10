@@ -6293,6 +6293,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_gui"
+version = "0.1.0"
+dependencies = [
+ "gpui",
+]
+
+[[package]]
 name = "stoat_host"
 version = "0.1.0"
 dependencies = [

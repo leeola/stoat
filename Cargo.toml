@@ -5,6 +5,7 @@ members = [
   "agent/claude_code",
   "bin",
   "config",
+  "gui",
   "host",
   "language",
   "scheduler",
@@ -72,6 +73,7 @@ arboard = "3"
 base64 = "0.22"
 regex = "1"
 brush-parser = "0.4"
+gpui = "0.2.2"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
