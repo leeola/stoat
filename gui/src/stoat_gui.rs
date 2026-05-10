@@ -1,7 +1,10 @@
+mod stoat_app;
+
 use gpui::{
-    div, px, size, App, AppContext, Application, Bounds, Context, IntoElement, Render,
-    SharedString, TitlebarOptions, Window, WindowBounds, WindowOptions,
+    px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
+    WindowOptions,
 };
+use stoat_app::StoatApp;
 
 pub fn run() {
     Application::new().run(|cx: &mut App| {
@@ -15,17 +18,9 @@ pub fn run() {
                 }),
                 ..Default::default()
             },
-            |_window, cx| cx.new(|_cx| EmptyRoot),
+            |_window, cx| cx.new(StoatApp::new),
         )
         .expect("open root window");
         cx.activate(true);
     });
-}
-
-struct EmptyRoot;
-
-impl Render for EmptyRoot {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
-        div()
-    }
 }
