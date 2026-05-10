@@ -132,3 +132,40 @@ macro_rules! define_action {
 }
 
 pub(crate) use define_action;
+
+/// Generate `impl gpui::Action` for a parameterized action struct.
+/// Requires the struct to derive `Clone`, `PartialEq`, and
+/// `serde::Deserialize` so the trait methods can be expressed
+/// generically. `$name` is the static action name (matches the
+/// struct's `ActionDef::name`).
+macro_rules! impl_gpui_action {
+    ($t:ident, $name:expr) => {
+        impl gpui::Action for $t {
+            fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+                Box::new(self.clone())
+            }
+
+            fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
+                action
+                    .as_any()
+                    .downcast_ref::<Self>()
+                    .is_some_and(|other| self == other)
+            }
+
+            fn name(&self) -> &'static str {
+                $name
+            }
+
+            fn name_for_type() -> &'static str {
+                $name
+            }
+
+            fn build(value: $crate::serde_json::Value) -> gpui::Result<Box<dyn gpui::Action>> {
+                let inner: Self = $crate::serde_json::from_value(value)?;
+                Ok(Box::new(inner))
+            }
+        }
+    };
+}
+
+pub(crate) use impl_gpui_action;

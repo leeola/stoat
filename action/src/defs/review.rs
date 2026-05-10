@@ -182,7 +182,8 @@ define_action!(
     ActionPriority::Rare
 );
 
-use crate::{Action, ActionDef, ParamDef, ParamKind};
+use crate::{action::impl_gpui_action, Action, ActionDef, ParamDef, ParamKind};
+use serde::Deserialize;
 use std::{any::Any, path::PathBuf};
 
 const OPEN_REVIEW_COMMIT_PARAMS: &[ParamDef] = &[
@@ -226,7 +227,7 @@ impl ActionDef for OpenReviewCommitDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OpenReviewCommit {
     pub workdir: PathBuf,
     pub sha: String,
@@ -245,6 +246,8 @@ impl Action for OpenReviewCommit {
         self
     }
 }
+
+impl_gpui_action!(OpenReviewCommit, "OpenReviewCommit");
 
 const OPEN_REVIEW_COMMIT_RANGE_PARAMS: &[ParamDef] = &[
     ParamDef {
@@ -293,7 +296,7 @@ impl ActionDef for OpenReviewCommitRangeDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OpenReviewCommitRange {
     pub workdir: PathBuf,
     pub from: String,
@@ -313,6 +316,8 @@ impl Action for OpenReviewCommitRange {
         self
     }
 }
+
+impl_gpui_action!(OpenReviewCommitRange, "OpenReviewCommitRange");
 
 /// Palette-invisible because the path is supplied by the filesystem
 /// watcher dispatch, not user input. Triggers a session rescan and
@@ -349,7 +354,7 @@ impl ActionDef for ReviewExternalEditDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct ReviewExternalEdit {
     pub path: PathBuf,
 }
@@ -367,6 +372,8 @@ impl Action for ReviewExternalEdit {
         self
     }
 }
+
+impl_gpui_action!(ReviewExternalEdit, "ReviewExternalEdit");
 
 /// Palette-invisible because the edits payload cannot be constructed from
 /// a string. Dispatched programmatically by agent-bridge code.
@@ -401,14 +408,14 @@ impl ActionDef for OpenReviewAgentEditsDef {
     }
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct AgentEdit {
     pub path: PathBuf,
     pub base_text: std::sync::Arc<String>,
     pub proposed_text: std::sync::Arc<String>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OpenReviewAgentEdits {
     pub edits: Vec<AgentEdit>,
 }
@@ -426,6 +433,8 @@ impl Action for OpenReviewAgentEdits {
         self
     }
 }
+
+impl_gpui_action!(OpenReviewAgentEdits, "OpenReviewAgentEdits");
 
 #[cfg(test)]
 mod tests {

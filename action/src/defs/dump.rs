@@ -1,4 +1,7 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
+use crate::{
+    action::impl_gpui_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+};
+use serde::Deserialize;
 use std::any::Any;
 
 const PARAMS: &[ParamDef] = &[ParamDef {
@@ -37,7 +40,7 @@ impl ActionDef for DumpDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Dump {
     pub name: String,
 }
@@ -55,6 +58,8 @@ impl Action for Dump {
         self
     }
 }
+
+impl_gpui_action!(Dump, "Dump");
 
 #[cfg(test)]
 mod tests {

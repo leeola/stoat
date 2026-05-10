@@ -1,4 +1,7 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
+use crate::{
+    action::impl_gpui_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+};
+use serde::Deserialize;
 use std::{any::Any, path::PathBuf};
 
 const PARAMS: &[ParamDef] = &[ParamDef {
@@ -37,7 +40,7 @@ impl ActionDef for OpenFileDef {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct OpenFile {
     pub path: PathBuf,
 }
@@ -55,6 +58,8 @@ impl Action for OpenFile {
         self
     }
 }
+
+impl_gpui_action!(OpenFile, "OpenFile");
 
 #[cfg(test)]
 mod tests {
