@@ -11,11 +11,22 @@ workspace = true
 path = "src/stoat_gui.rs"
 
 [features]
-test-support = ["gpui/test-support", "dep:insta", "dep:serde", "dep:serde_json"]
+test-support = [
+  "gpui/test-support",
+  "dep:insta",
+  "dep:serde",
+  "dep:serde_json",
+  "dep:stoat",
+  "dep:stoat_host",
+  "dep:stoat_scheduler",
+]
 
 [dependencies]
 gpui.workspace = true
 insta = { version = "1", features = ["json"], optional = true }
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
+stoat = { path = "../stoat", features = ["test-support"], optional = true }
+stoat_host = { path = "../host", optional = true }
+stoat_scheduler = { path = "../scheduler", optional = true }
 tracing.workspace = true

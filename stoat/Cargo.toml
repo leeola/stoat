@@ -7,6 +7,9 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[features]
+test-support = []
+
 [dependencies]
 stoat_action = { path = "../action" }
 stoat_config = { path = "../config" }

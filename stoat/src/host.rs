@@ -10,7 +10,11 @@
 
 pub mod claude_code;
 pub mod clipboard;
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(
+    all(feature = "test-support", not(test)),
+    allow(dead_code, unused_imports, clippy::unwrap_used)
+)]
 pub mod fake;
 pub mod git;
 pub mod local;
@@ -28,7 +32,7 @@ pub use claude_code::{
     ToolKind, ToolPermissionContext,
 };
 pub use clipboard::{osc52_should_emit, ClipboardHost, NoopClipboard};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
@@ -43,7 +47,7 @@ pub use git::{
 };
 pub use local::{LocalClipboard, LocalGit};
 pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
-#[cfg(test)]
+#[cfg(any(test, feature = "test-support"))]
 pub use stoat_host::FakeShell;
 pub use stoat_host::{
     EnvHost, FsDirEntry, FsEventKind, FsHost, FsMetadata, FsWatchEvent, FsWatchHost, LocalEnv,
