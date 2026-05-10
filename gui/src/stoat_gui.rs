@@ -1,9 +1,11 @@
+mod panic_hook;
 mod stoat_app;
 
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
+pub use panic_hook::install_panic_hook;
 use stoat_app::StoatApp;
 
 pub fn run() {
