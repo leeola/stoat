@@ -1,8 +1,10 @@
+mod globals;
 mod panic_hook;
 mod stoat_app;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 
+pub use globals::install_production_globals;
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,

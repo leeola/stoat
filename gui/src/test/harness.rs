@@ -1,5 +1,5 @@
 use gpui::{
-    AnyWindowHandle, App, AppContext, Bounds, Empty, Entity, TestAppContext, WindowBounds,
+    AnyWindowHandle, App, AppContext, Bounds, Empty, Entity, Global, TestAppContext, WindowBounds,
     WindowHandle, WindowOptions,
 };
 use std::{sync::Arc, time::Duration};
@@ -72,6 +72,10 @@ impl TestHarness {
         f: impl FnOnce(&T, &App) -> R,
     ) -> R {
         self.cx.read_entity(entity, f)
+    }
+
+    pub fn set_global<T: Global>(&mut self, global: T) {
+        self.cx.update(|cx| cx.set_global(global));
     }
 
     pub fn fs(&self) -> &Arc<FakeFs> {
