@@ -10,6 +10,7 @@ use stoat_app::StoatApp;
 
 pub fn run() {
     Application::new().run(|cx: &mut App| {
+        tracing::info!("stoat gui starting");
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {

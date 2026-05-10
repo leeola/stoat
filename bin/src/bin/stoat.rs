@@ -8,7 +8,7 @@ fn main() {
             std::process::exit(1);
         },
     };
-    if let Err(e) = stoat::log::init(stoat_log, rust_log, log_path) {
+    if let Err(e) = stoat_log::init(stoat_log, rust_log, log_path) {
         eprintln!("Failed to initialize logging: {e}");
         std::process::exit(1);
     }
@@ -22,7 +22,7 @@ fn main() {
 }
 
 fn resolve_log_path() -> std::io::Result<std::path::PathBuf> {
-    let dir = stoat::log::log_dir()?;
+    let dir = stoat_log::log_dir()?;
     std::fs::create_dir_all(&dir)?;
     Ok(dir.join(format!("stoat-{}.log", std::process::id())))
 }

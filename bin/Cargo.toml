@@ -22,6 +22,7 @@ workspace = true
 stoat = { path = "../stoat" }
 stoat_agent_claude_code = { path = "../agent/claude_code" }
 stoat_language = { path = "../language" }
+stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 blake3 = { workspace = true }
 clap.workspace = true
