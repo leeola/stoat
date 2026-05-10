@@ -6,6 +6,7 @@ mod settings;
 mod stoat_app;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
+mod theme;
 
 pub use globals::{install_production_globals, Globals};
 use gpui::{
@@ -15,6 +16,7 @@ use gpui::{
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;
 use stoat_app::StoatApp;
+pub use theme::Theme;
 
 pub fn run() {
     Application::new().run(|cx: &mut App| {

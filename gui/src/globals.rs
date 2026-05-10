@@ -9,17 +9,19 @@
 //! [`crate::test::TestHarness::set_global`] or directly through
 //! `cx.set_global(...)`.
 
-use crate::settings::Settings;
+use crate::{settings::Settings, theme::Theme};
 use gpui::App;
 
 /// All app globals registered at startup. Grows additively as new
 /// global types are introduced; new fields are added by sibling
-/// items in this parent (theme, language registry).
+/// items in this parent (language registry, host-trait globals).
 pub struct Globals {
     pub settings: Settings,
+    pub theme: Theme,
 }
 
 /// Register the production set of app globals on `cx`.
 pub fn install_production_globals(cx: &mut App, globals: Globals) {
     cx.set_global(globals.settings);
+    cx.set_global(globals.theme);
 }
