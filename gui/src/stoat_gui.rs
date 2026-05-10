@@ -2,6 +2,7 @@
 
 mod executor;
 mod globals;
+mod keymap_compiler;
 mod panic_hook;
 mod settings;
 mod stoat_app;
@@ -15,6 +16,7 @@ use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
+pub use keymap_compiler::{compile_predicate, CompilePredicateError};
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;
 use stoat_app::StoatApp;

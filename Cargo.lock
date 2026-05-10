@@ -6345,6 +6345,7 @@ dependencies = [
  "insta",
  "serde",
  "serde_json",
+ "snafu",
  "stoat",
  "stoat_config",
  "stoat_host",
