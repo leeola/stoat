@@ -1,13 +1,60 @@
 use crate::{
     render::text::write_str,
-    run::{GridSelection, RunState},
+    run::{GridSelection, RunState, TermColor, TermModifier},
 };
 use ratatui::{
     buffer::Buffer,
     layout::Rect,
-    style::{Modifier, Style},
+    style::{Color, Modifier, Style},
     widgets::{Block, Borders, Widget},
 };
+
+fn term_color_to_ratatui(c: TermColor) -> Color {
+    match c {
+        TermColor::Reset => Color::Reset,
+        TermColor::Black => Color::Black,
+        TermColor::Red => Color::Red,
+        TermColor::Green => Color::Green,
+        TermColor::Yellow => Color::Yellow,
+        TermColor::Blue => Color::Blue,
+        TermColor::Magenta => Color::Magenta,
+        TermColor::Cyan => Color::Cyan,
+        TermColor::Gray => Color::Gray,
+        TermColor::DarkGray => Color::DarkGray,
+        TermColor::LightRed => Color::LightRed,
+        TermColor::LightGreen => Color::LightGreen,
+        TermColor::LightYellow => Color::LightYellow,
+        TermColor::LightBlue => Color::LightBlue,
+        TermColor::LightMagenta => Color::LightMagenta,
+        TermColor::LightCyan => Color::LightCyan,
+        TermColor::White => Color::White,
+        TermColor::Indexed(i) => Color::Indexed(i),
+        TermColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
+    }
+}
+
+fn term_modifier_to_ratatui(m: TermModifier) -> Modifier {
+    let mut out = Modifier::empty();
+    if m.contains(TermModifier::BOLD) {
+        out |= Modifier::BOLD;
+    }
+    if m.contains(TermModifier::DIM) {
+        out |= Modifier::DIM;
+    }
+    if m.contains(TermModifier::ITALIC) {
+        out |= Modifier::ITALIC;
+    }
+    if m.contains(TermModifier::UNDERLINED) {
+        out |= Modifier::UNDERLINED;
+    }
+    if m.contains(TermModifier::REVERSED) {
+        out |= Modifier::REVERSED;
+    }
+    if m.contains(TermModifier::CROSSED_OUT) {
+        out |= Modifier::CROSSED_OUT;
+    }
+    out
+}
 
 pub(crate) fn render_run_pane(
     run_state: &RunState,
@@ -73,12 +120,12 @@ pub(crate) fn render_run_pane(
                     }
                     let mut style = Style::default();
                     if let Some(fg) = cell.fg {
-                        style = style.fg(fg);
+                        style = style.fg(term_color_to_ratatui(fg));
                     }
                     if let Some(bg) = cell.bg {
-                        style = style.bg(bg);
+                        style = style.bg(term_color_to_ratatui(bg));
                     }
-                    style = style.add_modifier(cell.modifiers);
+                    style = style.add_modifier(term_modifier_to_ratatui(cell.modifiers));
                     if selected {
                         style = style.add_modifier(Modifier::REVERSED);
                     }
@@ -197,12 +244,12 @@ pub(crate) fn render_modal_run(
             }
             let mut style = Style::default();
             if let Some(fg) = cell.fg {
-                style = style.fg(fg);
+                style = style.fg(term_color_to_ratatui(fg));
             }
             if let Some(bg) = cell.bg {
-                style = style.bg(bg);
+                style = style.bg(term_color_to_ratatui(bg));
             }
-            style = style.add_modifier(cell.modifiers);
+            style = style.add_modifier(term_modifier_to_ratatui(cell.modifiers));
             let cx = inner.x + col as u16;
             if cx < inner.x + inner.width {
                 buf[(cx, y)].set_char(cell.ch).set_style(style);

@@ -1,13 +1,82 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use ratatui::style::{Color, Modifier};
-use std::ops::Range;
+use std::ops::{BitOrAssign, Range, SubAssign};
+
+/// SGR foreground / background color stored per [`StyledCell`].
+/// Variants mirror the standard ANSI SGR color set (8 base colors,
+/// 8 bright variants, 256-color indexed, and 24-bit RGB) so the SGR
+/// parser in [`VtermGrid`] can map raw codes 1-to-1.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TermColor {
+    Reset,
+    Black,
+    Red,
+    Green,
+    Yellow,
+    Blue,
+    Magenta,
+    Cyan,
+    Gray,
+    DarkGray,
+    LightRed,
+    LightGreen,
+    LightYellow,
+    LightBlue,
+    LightMagenta,
+    LightCyan,
+    White,
+    Indexed(u8),
+    Rgb(u8, u8, u8),
+}
+
+/// SGR text-attribute bit-flag set. Each `BOLD` / `DIM` / ... constant
+/// is a single bit; flags compose with `|=` and clear with `-=` to
+/// mirror the SGR parser's incremental state updates.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct TermModifier(u16);
+
+impl TermModifier {
+    pub const BOLD: Self = Self(1 << 0);
+    pub const DIM: Self = Self(1 << 1);
+    pub const ITALIC: Self = Self(1 << 2);
+    pub const UNDERLINED: Self = Self(1 << 3);
+    pub const REVERSED: Self = Self(1 << 4);
+    pub const CROSSED_OUT: Self = Self(1 << 5);
+
+    pub const fn empty() -> Self {
+        Self(0)
+    }
+
+    pub const fn is_empty(self) -> bool {
+        self.0 == 0
+    }
+
+    pub const fn contains(self, other: Self) -> bool {
+        (self.0 & other.0) == other.0
+    }
+
+    pub const fn bits(self) -> u16 {
+        self.0
+    }
+}
+
+impl BitOrAssign for TermModifier {
+    fn bitor_assign(&mut self, other: Self) {
+        self.0 |= other.0;
+    }
+}
+
+impl SubAssign for TermModifier {
+    fn sub_assign(&mut self, other: Self) {
+        self.0 &= !other.0;
+    }
+}
 
 #[derive(Clone)]
 pub struct StyledCell {
     pub ch: char,
-    pub fg: Option<Color>,
-    pub bg: Option<Color>,
-    pub modifiers: Modifier,
+    pub fg: Option<TermColor>,
+    pub bg: Option<TermColor>,
+    pub modifiers: TermModifier,
 }
 
 impl Default for StyledCell {
@@ -16,7 +85,7 @@ impl Default for StyledCell {
             ch: ' ',
             fg: None,
             bg: None,
-            modifiers: Modifier::empty(),
+            modifiers: TermModifier::empty(),
         }
     }
 }
@@ -26,9 +95,9 @@ pub struct VtermGrid {
     cursor_row: usize,
     cursor_col: usize,
     width: u16,
-    pen_fg: Option<Color>,
-    pen_bg: Option<Color>,
-    pen_modifiers: Modifier,
+    pen_fg: Option<TermColor>,
+    pen_bg: Option<TermColor>,
+    pen_modifiers: TermModifier,
     pub alt_screen_detected: bool,
     /// Persisted across `feed` calls so escape sequences whose bytes
     /// straddle two PTY reads finish parsing on the second call instead
@@ -49,7 +118,7 @@ impl VtermGrid {
             width,
             pen_fg: None,
             pen_bg: None,
-            pen_modifiers: Modifier::empty(),
+            pen_modifiers: TermModifier::empty(),
             alt_screen_detected: false,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
@@ -160,7 +229,7 @@ impl VtermGrid {
     fn reset_pen(&mut self) {
         self.pen_fg = None;
         self.pen_bg = None;
-        self.pen_modifiers = Modifier::empty();
+        self.pen_modifiers = TermModifier::empty();
     }
 }
 
@@ -260,34 +329,34 @@ impl vte::Perform for VtermGrid {
                 while i < params_vec.len() {
                     match params_vec[i] {
                         0 => self.reset_pen(),
-                        1 => self.pen_modifiers |= Modifier::BOLD,
-                        2 => self.pen_modifiers |= Modifier::DIM,
-                        3 => self.pen_modifiers |= Modifier::ITALIC,
-                        4 => self.pen_modifiers |= Modifier::UNDERLINED,
-                        7 => self.pen_modifiers |= Modifier::REVERSED,
-                        9 => self.pen_modifiers |= Modifier::CROSSED_OUT,
+                        1 => self.pen_modifiers |= TermModifier::BOLD,
+                        2 => self.pen_modifiers |= TermModifier::DIM,
+                        3 => self.pen_modifiers |= TermModifier::ITALIC,
+                        4 => self.pen_modifiers |= TermModifier::UNDERLINED,
+                        7 => self.pen_modifiers |= TermModifier::REVERSED,
+                        9 => self.pen_modifiers |= TermModifier::CROSSED_OUT,
                         22 => {
-                            self.pen_modifiers -= Modifier::BOLD;
-                            self.pen_modifiers -= Modifier::DIM;
+                            self.pen_modifiers -= TermModifier::BOLD;
+                            self.pen_modifiers -= TermModifier::DIM;
                         },
-                        23 => self.pen_modifiers -= Modifier::ITALIC,
-                        24 => self.pen_modifiers -= Modifier::UNDERLINED,
-                        27 => self.pen_modifiers -= Modifier::REVERSED,
-                        29 => self.pen_modifiers -= Modifier::CROSSED_OUT,
-                        30 => self.pen_fg = Some(Color::Black),
-                        31 => self.pen_fg = Some(Color::Red),
-                        32 => self.pen_fg = Some(Color::Green),
-                        33 => self.pen_fg = Some(Color::Yellow),
-                        34 => self.pen_fg = Some(Color::Blue),
-                        35 => self.pen_fg = Some(Color::Magenta),
-                        36 => self.pen_fg = Some(Color::Cyan),
-                        37 => self.pen_fg = Some(Color::White),
+                        23 => self.pen_modifiers -= TermModifier::ITALIC,
+                        24 => self.pen_modifiers -= TermModifier::UNDERLINED,
+                        27 => self.pen_modifiers -= TermModifier::REVERSED,
+                        29 => self.pen_modifiers -= TermModifier::CROSSED_OUT,
+                        30 => self.pen_fg = Some(TermColor::Black),
+                        31 => self.pen_fg = Some(TermColor::Red),
+                        32 => self.pen_fg = Some(TermColor::Green),
+                        33 => self.pen_fg = Some(TermColor::Yellow),
+                        34 => self.pen_fg = Some(TermColor::Blue),
+                        35 => self.pen_fg = Some(TermColor::Magenta),
+                        36 => self.pen_fg = Some(TermColor::Cyan),
+                        37 => self.pen_fg = Some(TermColor::White),
                         38 if i + 2 < params_vec.len() && params_vec[i + 1] == 5 => {
-                            self.pen_fg = Some(Color::Indexed(params_vec[i + 2] as u8));
+                            self.pen_fg = Some(TermColor::Indexed(params_vec[i + 2] as u8));
                             i += 2;
                         },
                         38 if i + 4 < params_vec.len() && params_vec[i + 1] == 2 => {
-                            self.pen_fg = Some(Color::Rgb(
+                            self.pen_fg = Some(TermColor::Rgb(
                                 params_vec[i + 2] as u8,
                                 params_vec[i + 3] as u8,
                                 params_vec[i + 4] as u8,
@@ -295,20 +364,20 @@ impl vte::Perform for VtermGrid {
                             i += 4;
                         },
                         39 => self.pen_fg = None,
-                        40 => self.pen_bg = Some(Color::Black),
-                        41 => self.pen_bg = Some(Color::Red),
-                        42 => self.pen_bg = Some(Color::Green),
-                        43 => self.pen_bg = Some(Color::Yellow),
-                        44 => self.pen_bg = Some(Color::Blue),
-                        45 => self.pen_bg = Some(Color::Magenta),
-                        46 => self.pen_bg = Some(Color::Cyan),
-                        47 => self.pen_bg = Some(Color::White),
+                        40 => self.pen_bg = Some(TermColor::Black),
+                        41 => self.pen_bg = Some(TermColor::Red),
+                        42 => self.pen_bg = Some(TermColor::Green),
+                        43 => self.pen_bg = Some(TermColor::Yellow),
+                        44 => self.pen_bg = Some(TermColor::Blue),
+                        45 => self.pen_bg = Some(TermColor::Magenta),
+                        46 => self.pen_bg = Some(TermColor::Cyan),
+                        47 => self.pen_bg = Some(TermColor::White),
                         48 if i + 2 < params_vec.len() && params_vec[i + 1] == 5 => {
-                            self.pen_bg = Some(Color::Indexed(params_vec[i + 2] as u8));
+                            self.pen_bg = Some(TermColor::Indexed(params_vec[i + 2] as u8));
                             i += 2;
                         },
                         48 if i + 4 < params_vec.len() && params_vec[i + 1] == 2 => {
-                            self.pen_bg = Some(Color::Rgb(
+                            self.pen_bg = Some(TermColor::Rgb(
                                 params_vec[i + 2] as u8,
                                 params_vec[i + 3] as u8,
                                 params_vec[i + 4] as u8,
@@ -316,22 +385,22 @@ impl vte::Perform for VtermGrid {
                             i += 4;
                         },
                         49 => self.pen_bg = None,
-                        90 => self.pen_fg = Some(Color::DarkGray),
-                        91 => self.pen_fg = Some(Color::LightRed),
-                        92 => self.pen_fg = Some(Color::LightGreen),
-                        93 => self.pen_fg = Some(Color::LightYellow),
-                        94 => self.pen_fg = Some(Color::LightBlue),
-                        95 => self.pen_fg = Some(Color::LightMagenta),
-                        96 => self.pen_fg = Some(Color::LightCyan),
-                        97 => self.pen_fg = Some(Color::White),
-                        100 => self.pen_bg = Some(Color::DarkGray),
-                        101 => self.pen_bg = Some(Color::LightRed),
-                        102 => self.pen_bg = Some(Color::LightGreen),
-                        103 => self.pen_bg = Some(Color::LightYellow),
-                        104 => self.pen_bg = Some(Color::LightBlue),
-                        105 => self.pen_bg = Some(Color::LightMagenta),
-                        106 => self.pen_bg = Some(Color::LightCyan),
-                        107 => self.pen_bg = Some(Color::White),
+                        90 => self.pen_fg = Some(TermColor::DarkGray),
+                        91 => self.pen_fg = Some(TermColor::LightRed),
+                        92 => self.pen_fg = Some(TermColor::LightGreen),
+                        93 => self.pen_fg = Some(TermColor::LightYellow),
+                        94 => self.pen_fg = Some(TermColor::LightBlue),
+                        95 => self.pen_fg = Some(TermColor::LightMagenta),
+                        96 => self.pen_fg = Some(TermColor::LightCyan),
+                        97 => self.pen_fg = Some(TermColor::White),
+                        100 => self.pen_bg = Some(TermColor::DarkGray),
+                        101 => self.pen_bg = Some(TermColor::LightRed),
+                        102 => self.pen_bg = Some(TermColor::LightGreen),
+                        103 => self.pen_bg = Some(TermColor::LightYellow),
+                        104 => self.pen_bg = Some(TermColor::LightBlue),
+                        105 => self.pen_bg = Some(TermColor::LightMagenta),
+                        106 => self.pen_bg = Some(TermColor::LightCyan),
+                        107 => self.pen_bg = Some(TermColor::White),
                         _ => {},
                     }
                     i += 1;

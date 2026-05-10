@@ -6,11 +6,10 @@ use crate::{
     workspace::Workspace,
 };
 pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
-use ratatui::layout::Rect;
 use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
-pub use vterm::{GridSelection, OutputBlock, StyledCell, VtermGrid};
+pub use vterm::{GridSelection, OutputBlock, StyledCell, TermColor, TermModifier, VtermGrid};
 
 new_key_type! {
     pub struct RunId;
@@ -97,14 +96,20 @@ impl RunState {
     /// / blank line, on a row scrolled off-screen, or past the active grid's
     /// width. Mirrors the layout that
     /// [`crate::render::run_pane::render_run_pane`] builds.
-    pub fn active_block_grid_pos(&self, area: Rect, col: u16, row: u16) -> Option<(u16, u16)> {
-        if area.height < 2 || area.width < 4 {
+    pub fn active_block_grid_pos(
+        &self,
+        area_width: u16,
+        area_height: u16,
+        col: u16,
+        row: u16,
+    ) -> Option<(u16, u16)> {
+        if area_height < 2 || area_width < 4 {
             return None;
         }
-        if col >= area.width || row >= area.height {
+        if col >= area_width || row >= area_height {
             return None;
         }
-        let output_height = area.height.saturating_sub(1) as usize;
+        let output_height = area_height.saturating_sub(1) as usize;
         if (row as usize) >= output_height {
             return None;
         }
@@ -153,7 +158,6 @@ impl RunState {
 mod tests {
     use super::*;
     use pty::parse_sentinel_line;
-    use ratatui::style::Color;
 
     #[test]
     fn parse_sentinel_valid() {
@@ -202,7 +206,7 @@ mod tests {
         grid.feed(b"\x1b[31mR\x1b[0mN");
         let row = grid.row(0);
         assert_eq!(row[0].ch, 'R');
-        assert_eq!(row[0].fg, Some(Color::Red));
+        assert_eq!(row[0].fg, Some(TermColor::Red));
         assert_eq!(row[1].ch, 'N');
         assert_eq!(row[1].fg, None);
     }
@@ -214,7 +218,7 @@ mod tests {
         grid.feed(b"mR");
         let row = grid.row(0);
         assert_eq!(row[0].ch, 'R');
-        assert_eq!(row[0].fg, Some(Color::Red));
+        assert_eq!(row[0].fg, Some(TermColor::Red));
     }
 
     #[test]

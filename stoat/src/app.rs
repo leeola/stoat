@@ -1308,7 +1308,7 @@ impl Stoat {
         let Some(run_state) = ws.runs.get_mut(run_id) else {
             return false;
         };
-        let pos = run_state.active_block_grid_pos(area, col, row);
+        let pos = run_state.active_block_grid_pos(area.width, area.height, col, row);
         let Some(block) = run_state.active_block_mut() else {
             return false;
         };
