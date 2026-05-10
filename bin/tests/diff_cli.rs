@@ -7,23 +7,13 @@
 //! git2 repo is the only realistic way to exercise `LocalGit`'s
 //! discovery and head-content paths.
 
-use bytes::Bytes;
-use futures::{SinkExt, StreamExt};
 use git2::Repository;
-use std::{
-    path::{Path, PathBuf},
-    sync::Arc,
-};
+use std::path::Path;
 use stoat::{
-    diff::{extract_review_hunks_changeset, ReviewFileInput},
-    diff_cache::serialize_hunks,
     diff_render_cli::{CliLayout, CliRenderOptions},
     host::{LocalFs, LocalGit},
 };
 use stoat_bin::commands::diff::{run_with_io, DiffArgs, WriteError};
-use tokio::net::UnixListener;
-use tokio_util::codec::{FramedRead, FramedWrite};
-use viewport::protocol::{ToMain, ToMainCodec, ToViewport, ToViewportCodec};
 
 struct TestRepo {
     repo: Repository,
@@ -97,19 +87,10 @@ fn default_args() -> DiffArgs {
 }
 
 fn run_capture(args: &DiffArgs, cwd: &Path, opts: &CliRenderOptions) -> Vec<u8> {
-    run_capture_with_socket_dir(args, cwd, None, opts)
-}
-
-fn run_capture_with_socket_dir(
-    args: &DiffArgs,
-    cwd: &Path,
-    socket_dir: Option<&Path>,
-    opts: &CliRenderOptions,
-) -> Vec<u8> {
     let fs = LocalFs;
     let git = LocalGit::new();
     let mut buf = Vec::new();
-    match run_with_io(args, &fs, &git, cwd, socket_dir, opts, &mut buf) {
+    match run_with_io(args, &fs, &git, cwd, opts, &mut buf) {
         Ok(()) => buf,
         Err(WriteError::BrokenPipe) => buf,
         Err(WriteError::Other(e)) => panic!("run_with_io failed: {e}"),
@@ -265,76 +246,4 @@ fn git_mode_delete_via_dev_null() {
 
     let out = run_capture(&args, dir.path(), &opts_with(CliLayout::Unified, false));
     insta::assert_snapshot!("diff_cli_git_delete", String::from_utf8(out).unwrap());
-}
-
-#[tokio::test(flavor = "current_thread")]
-async fn cache_rpc_hit_uses_cached_hunks() {
-    let socket_dir = tempfile::tempdir().expect("tempdir");
-    let socket_path = socket_dir.path().join("stoat-test.sock");
-    let listener = UnixListener::bind(&socket_path).expect("bind socket");
-
-    let repo = TestRepo::new();
-    repo.commit_initial(&[("a.rs", "fn a() { 1 }\n")]);
-    repo.write("a.rs", "fn a() { 2 }\n");
-
-    let synthetic_input = ReviewFileInput {
-        path: PathBuf::from("synthetic.rs"),
-        rel_path: "synthetic.rs".to_string(),
-        language: None,
-        base_text: Arc::new("synthetic_left".to_string()),
-        buffer_text: Arc::new("synthetic_right".to_string()),
-    };
-    let synthetic_hunks = extract_review_hunks_changeset(std::slice::from_ref(&synthetic_input), 3)
-        .into_iter()
-        .next()
-        .expect("synthetic hunks");
-    let synthetic_payload = serialize_hunks(&synthetic_hunks);
-
-    let payload_for_listener = synthetic_payload.clone();
-    let listener_handle = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await.expect("accept");
-        let (read_half, write_half) = stream.into_split();
-        let mut reader = FramedRead::new(read_half, ToMainCodec::new());
-        let mut writer = FramedWrite::new(write_half, ToViewportCodec::new());
-        while let Some(msg) = reader.next().await {
-            match msg.expect("decode") {
-                ToMain::DiffRequest { .. } => {
-                    writer
-                        .send(ToViewport::DiffResponse {
-                            result: Some(Bytes::from(payload_for_listener.clone())),
-                        })
-                        .await
-                        .expect("send response");
-                },
-                _ => break,
-            }
-        }
-    });
-
-    let cwd = repo.path().to_path_buf();
-    let socket_dir_path = socket_dir.path().to_path_buf();
-    let listener_done = tokio::task::spawn_blocking(move || {
-        let fs = LocalFs;
-        let git = LocalGit::new();
-        let mut buf = Vec::new();
-        run_with_io(
-            &default_args(),
-            &fs,
-            &git,
-            &cwd,
-            Some(&socket_dir_path),
-            &opts_with(CliLayout::Unified, false),
-            &mut buf,
-        )
-        .expect("run_with_io ok");
-        buf
-    });
-    let out = listener_done.await.expect("blocking task");
-    listener_handle.abort();
-
-    let text = String::from_utf8(out).expect("utf8");
-    assert!(
-        text.contains("synthetic_right") || text.contains("synthetic_left"),
-        "expected cached hunks (synthetic) in output, got: {text}"
-    );
 }

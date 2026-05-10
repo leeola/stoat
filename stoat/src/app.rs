@@ -368,10 +368,9 @@ pub struct Stoat {
     pub(crate) clipboard_host: Arc<dyn crate::host::ClipboardHost>,
     /// Cache of pre-computed review hunks keyed by content hash plus
     /// language. Populated when the editor itself runs
-    /// [`crate::review::extract_review_hunks_changeset`]; consulted by
-    /// the viewport-socket diff RPC handler so a `stoat diff` CLI
-    /// invocation can reuse already-computed work instead of running
-    /// the structural diff twice.
+    /// [`crate::review::extract_review_hunks_changeset`] so subsequent
+    /// lookups against the same content can skip the structural-diff
+    /// pass.
     pub(crate) diff_cache: Arc<std::sync::Mutex<crate::diff_cache::DiffCache>>,
     /// Tracks `$/progress` notifications so the status bar can show
     /// the freshest in-progress operation. Drained from
@@ -709,8 +708,7 @@ impl Stoat {
 
     /// Look up a previously-cached diff by content hashes plus
     /// language. Returns the serialized hunk payload on cache hit, or
-    /// `None` on miss. Called by the viewport-socket diff RPC handler
-    /// to translate `ToMain::DiffRequest` into `ToViewport::DiffResponse`.
+    /// `None` on miss.
     pub fn handle_diff_lookup(&self, key: &crate::diff_cache::DiffCacheKey) -> Option<Vec<u8>> {
         let mut cache = self.diff_cache.lock().expect("diff_cache poisoned");
         let hunks = cache.lookup(key)?;

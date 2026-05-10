@@ -1,5 +1,5 @@
-//! Foundational `*Host` traits + production / fake impls shared by
-//! `stoat` and `viewport`. Crates that need to route IO through a
+//! Foundational `*Host` traits + production / fake impls shared
+//! across stoat crates. Crates that need to route IO through a
 //! host abstraction (instead of calling `std::env` / `std::fs`
 //! directly) depend on this crate.
 //!

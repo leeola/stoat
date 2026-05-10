@@ -23,7 +23,6 @@ stoat = { path = "../stoat" }
 stoat_agent_claude_code = { path = "../agent/claude_code" }
 stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
-viewport = { path = "../viewport" }
 blake3 = { workspace = true }
 clap.workspace = true
 snafu.workspace = true
@@ -36,6 +35,3 @@ time.workspace = true
 git2 = { version = "0.20", default-features = false }
 insta = "1"
 stoat_host = { path = "../host" }
-tokio-util.workspace = true
-bytes.workspace = true
-futures.workspace = true

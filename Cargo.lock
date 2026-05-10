@@ -6269,9 +6269,7 @@ name = "stoat_bin"
 version = "0.1.0"
 dependencies = [
  "blake3",
- "bytes",
  "clap",
- "futures",
  "git2",
  "insta",
  "snafu",
@@ -6283,9 +6281,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
- "tokio-util",
  "tracing",
- "viewport",
 ]
 
 [[package]]
@@ -7475,18 +7471,6 @@ name = "version_check"
 version = "0.9.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
-
-[[package]]
-name = "viewport"
-version = "0.1.0"
-dependencies = [
- "bytes",
- "futures",
- "stoat_host",
- "tempfile",
- "tokio",
- "tokio-util",
-]
 
 [[package]]
 name = "vswhom"

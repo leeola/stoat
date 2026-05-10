@@ -5,21 +5,15 @@ use std::{
     path::{Path, PathBuf},
     process::{Command, Stdio},
     sync::Arc,
-    time::Duration,
 };
 use stoat::{
     diff::{extract_review_hunks_changeset, scan_working_tree, ReviewFileInput, ReviewHunk},
-    diff_cache::deserialize_hunks,
     diff_render_cli::{
         detect_color_enabled, detect_width, render_diff, CliLayout, CliRenderOptions,
     },
     host::{FsHost, GitHost, LocalFs, LocalGit},
 };
 use stoat_language::LanguageRegistry;
-use viewport::{
-    protocol::{ToMain, ToViewport},
-    ViewportClient,
-};
 
 #[derive(Args, Debug)]
 pub struct DiffArgs {
@@ -77,7 +71,6 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
     let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
     let cwd = std::env::current_dir().whatever_context("read current directory")?;
-    let socket_dir = runtime_socket_dir();
 
     let opts = CliRenderOptions {
         layout: if args.unified {
@@ -97,15 +90,7 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
                 .spawn()
                 .whatever_context(format!("spawn pager `{}`", argv.join(" ")))?;
             let mut stdin = child.stdin.take().expect("stdin set to piped above");
-            let render_result = run_with_io(
-                &args,
-                &*fs,
-                &*git,
-                &cwd,
-                Some(&socket_dir),
-                &opts,
-                &mut stdin,
-            );
+            let render_result = run_with_io(&args, &*fs, &*git, &cwd, &opts, &mut stdin);
             drop(stdin);
             let _ = child.wait();
             match render_result {
@@ -117,7 +102,7 @@ pub fn run(args: DiffArgs) -> Result<(), Whatever> {
         None => {
             let stdout = io::stdout();
             let mut out = stdout.lock();
-            run_with_io(&args, &*fs, &*git, &cwd, Some(&socket_dir), &opts, &mut out)
+            run_with_io(&args, &*fs, &*git, &cwd, &opts, &mut out)
                 .map_err(WriteError::into_whatever)
         },
     }
@@ -131,7 +116,6 @@ pub fn run_with_io<W: Write>(
     fs: &dyn FsHost,
     git: &dyn GitHost,
     cwd: &Path,
-    socket_dir: Option<&Path>,
     opts: &CliRenderOptions,
     out: &mut W,
 ) -> Result<(), WriteError> {
@@ -155,8 +139,7 @@ pub fn run_with_io<W: Write>(
         inputs
     };
 
-    let per_file = cached_hunks_via_socket(socket_dir, &inputs)
-        .unwrap_or_else(|| extract_review_hunks_changeset(&inputs, 3));
+    let per_file = extract_review_hunks_changeset(&inputs, 3);
 
     render_all(out, &inputs, &per_file, opts).map_err(|e| {
         if e.kind() == io::ErrorKind::BrokenPipe {
@@ -183,22 +166,6 @@ impl WriteError {
             ),
             WriteError::Other(e) => e,
         }
-    }
-}
-
-/// Runtime directory the editor's viewport socket lives in.
-/// Production reads `$TMPDIR` on macOS and `$XDG_RUNTIME_DIR`
-/// elsewhere with a `/tmp` fallback; tests pass an explicit
-/// `socket_dir` to [`run_with_io`].
-fn runtime_socket_dir() -> PathBuf {
-    if cfg!(target_os = "macos") {
-        std::env::var_os("TMPDIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
-    } else {
-        std::env::var_os("XDG_RUNTIME_DIR")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| PathBuf::from("/tmp"))
     }
 }
 
@@ -258,84 +225,6 @@ fn render_all<W: Write>(
         render_diff(out, &input.rel_path, hunks, opts)?;
     }
     Ok(())
-}
-
-/// Probe a running editor's diff cache before computing the
-/// structural diff inline. Returns `Some(per_file_hunks)` only
-/// when every input is a cache hit; any miss / connect failure /
-/// timeout returns `None` so the caller falls back silently to
-/// inline computation.
-///
-/// `socket_dir` is the directory to scan for `stoat-*.sock` files.
-/// `None` skips cache discovery entirely (used in tests that don't
-/// want to touch the filesystem).
-fn cached_hunks_via_socket(
-    socket_dir: Option<&Path>,
-    inputs: &[ReviewFileInput],
-) -> Option<Vec<Vec<ReviewHunk>>> {
-    let candidates = discover_sockets(socket_dir?);
-    if candidates.is_empty() {
-        return None;
-    }
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .ok()?;
-    runtime.block_on(async {
-        for sock in candidates {
-            let attempt = tokio::time::timeout(
-                Duration::from_millis(250),
-                fetch_all_from_socket(&sock, inputs),
-            )
-            .await;
-            if let Ok(Some(hunks)) = attempt {
-                return Some(hunks);
-            }
-        }
-        None
-    })
-}
-
-async fn fetch_all_from_socket(
-    sock: &Path,
-    inputs: &[ReviewFileInput],
-) -> Option<Vec<Vec<ReviewHunk>>> {
-    let mut client = ViewportClient::connect(sock).await.ok()?;
-    let mut results = Vec::with_capacity(inputs.len());
-    for input in inputs {
-        let req = ToMain::DiffRequest {
-            left_hash: blake3::hash(input.base_text.as_bytes()).into(),
-            right_hash: blake3::hash(input.buffer_text.as_bytes()).into(),
-            language: input.language.as_ref().map(|l| l.name.to_string()),
-        };
-        client.send(req).await.ok()?;
-        let bytes = match client.recv().await.ok()?? {
-            ToViewport::DiffResponse {
-                result: Some(bytes),
-            } => bytes,
-            _ => return None,
-        };
-        results.push(deserialize_hunks(&bytes).ok()?);
-    }
-    Some(results)
-}
-
-/// List Unix-socket files in `dir` that look like stoat editor
-/// sessions. Empty when `dir` is missing or unreadable.
-fn discover_sockets(dir: &Path) -> Vec<PathBuf> {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(it) => it,
-        Err(_) => return Vec::new(),
-    };
-    entries
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| {
-            p.file_name()
-                .and_then(|n| n.to_str())
-                .is_some_and(|n| n.starts_with("stoat-") && n.ends_with(".sock"))
-        })
-        .collect()
 }
 
 /// Resolve which pager (if any) should consume stdout. `None` means

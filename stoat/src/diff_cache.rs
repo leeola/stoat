@@ -1,11 +1,10 @@
 //! Content-hash-keyed cache of pre-computed review hunks.
 //!
-//! The TUI review pane and the `stoat diff` CLI both feed file
-//! contents through [`crate::review::extract_review_hunks_changeset`].
-//! When a `stoat diff` invocation hits a running editor over the
-//! viewport socket, the editor consults this cache first so the CLI
-//! can skip the structural-diff pass for content the editor has
-//! already diffed.
+//! The review pane feeds file contents through
+//! [`crate::review::extract_review_hunks_changeset`] and stores the
+//! resulting hunks here so subsequent lookups against the same
+//! content (left hash, right hash, language) can skip the
+//! structural-diff pass.
 //!
 //! The cache is bounded by entry count (default 256) with a simple
 //! counter-based LRU eviction. Hits and inserts both bump the
@@ -91,10 +90,8 @@ impl DiffCache {
     }
 }
 
-/// Serialize hunks for transmission over the viewport socket. The
-/// exact byte format is internal to the editor/client pair and may
-/// change between versions; the editor and the `stoat diff` client
-/// always run from the same binary so version skew does not occur.
+/// Serialize hunks to a byte payload. The exact byte format is
+/// internal and may change between versions.
 pub fn serialize_hunks(hunks: &[ReviewHunk]) -> Vec<u8> {
     serde_json::to_vec(hunks).expect("review hunk types are serde-serializable")
 }
