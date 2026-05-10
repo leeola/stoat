@@ -1,3 +1,13 @@
+//! [`Executor`] is the canonical async runtime across the Stoat stack.
+//! The gpui crate ships its own `BackgroundExecutor`, but it is
+//! intentionally not introduced as a parallel runtime in stoat_gui --
+//! running two schedulers in parallel creates non-determinism for
+//! tests ([`crate::TestScheduler`] would only see half the work) and
+//! forces every async API to choose a side. Entity-bound async work
+//! integrates with gpui by spawning on [`Executor`] and posting the
+//! result to the gpui foreground; see `gui::spawn_with_entity` for
+//! the bridge.
+
 use crate::{Scheduler, Timer};
 use futures::channel::oneshot;
 use std::{
