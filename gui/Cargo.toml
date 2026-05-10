@@ -29,5 +29,6 @@ serde_json = { workspace = true, optional = true }
 stoat = { path = "../stoat" }
 stoat_config = { path = "../config" }
 stoat_host = { path = "../host", optional = true }
+stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler", optional = true }
 tracing.workspace = true

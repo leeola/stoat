@@ -8,7 +8,7 @@ mod stoat_app;
 pub mod test;
 mod theme;
 
-pub use globals::{install_production_globals, Globals};
+pub use globals::{install_production_globals, Globals, LanguageRegistry};
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
