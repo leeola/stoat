@@ -6348,6 +6348,7 @@ dependencies = [
  "serde_json",
  "snafu",
  "stoat",
+ "stoat_action",
  "stoat_config",
  "stoat_host",
  "stoat_language",

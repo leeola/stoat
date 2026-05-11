@@ -26,6 +26,7 @@ serde.workspace = true
 serde_json.workspace = true
 snafu = { workspace = true }
 stoat = { path = "../stoat" }
+stoat_action = { path = "../action" }
 stoat_config = { path = "../config" }
 stoat_host = { path = "../host", optional = true }
 stoat_language = { path = "../language" }
