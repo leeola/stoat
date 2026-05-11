@@ -23,7 +23,6 @@ mod editor;
 mod executor;
 mod globals;
 mod item;
-mod keymap_compiler;
 mod lsp_state;
 mod modal_layer;
 mod multi_buffer;
@@ -53,7 +52,6 @@ use gpui::{
     WindowOptions,
 };
 pub use item::{DeserializeSnafu, ItemError, ItemHandle, ItemView, SaveSnafu};
-pub use keymap_compiler::{compile_predicate, CompilePredicateError};
 pub use lsp_state::{LspState, LspStateEvent};
 pub use modal_layer::ModalLayer;
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
