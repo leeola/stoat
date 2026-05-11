@@ -23,6 +23,7 @@ test-support = [
 [dependencies]
 gpui.workspace = true
 insta = { version = "1", features = ["json"], optional = true }
+lsp-types.workspace = true
 serde = { workspace = true, optional = true }
 serde_json = { workspace = true, optional = true }
 snafu = { workspace = true }
