@@ -2,6 +2,7 @@
 
 mod buffer;
 mod buffer_registry;
+mod diff_map;
 mod display_map;
 mod executor;
 mod globals;
@@ -16,6 +17,7 @@ mod theme;
 
 pub use buffer::{Buffer, BufferEvent};
 pub use buffer_registry::{BufferRegistry, BufferRegistryEvent};
+pub use diff_map::{DiffMap, DiffMapEvent};
 pub use display_map::{DisplayMap, DisplayMapEvent};
 pub use executor::spawn_with_entity;
 pub use globals::{install_production_globals, Globals, LanguageRegistry};
