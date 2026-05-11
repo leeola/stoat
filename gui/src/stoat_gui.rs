@@ -22,6 +22,7 @@ mod dock;
 mod editor;
 mod executor;
 mod globals;
+mod input_state_machine;
 mod item;
 mod lsp_state;
 mod modal_layer;
@@ -51,6 +52,7 @@ use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
+pub use input_state_machine::{InputStateMachine, Operator};
 pub use item::{DeserializeSnafu, ItemError, ItemHandle, ItemView, SaveSnafu};
 pub use lsp_state::{LspState, LspStateEvent};
 pub use modal_layer::ModalLayer;

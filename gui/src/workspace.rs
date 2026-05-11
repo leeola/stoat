@@ -1,5 +1,6 @@
 use crate::{
     dock::{Dock, DockSide},
+    input_state_machine::InputStateMachine,
     item::ItemHandle,
     modal_layer::{ModalLayer, ModalView},
     pane_tree::PaneTree,
@@ -10,6 +11,8 @@ use gpui::{
     IntoElement, KeyContext, Render, SharedString, Styled, Window,
 };
 use std::path::PathBuf;
+use stoat::keymap::Keymap;
+use stoat_config::Config;
 
 /// Top-level workspace entity. Composes the structural pieces of
 /// a single Stoat window: the git root, the pane tree, any docks
@@ -26,6 +29,7 @@ pub struct Workspace {
     docks: Vec<Entity<Dock>>,
     modal_layer: Entity<ModalLayer>,
     status_bar: Entity<StatusBar>,
+    input_state_machine: Entity<InputStateMachine>,
     focus_handle: FocusHandle,
 }
 
@@ -47,6 +51,15 @@ impl Workspace {
         let pane_tree = cx.new(|_| PaneTree::new());
         let modal_layer = cx.new(ModalLayer::new);
         let status_bar = cx.new(StatusBar::new);
+        let workspace_handle = cx.weak_entity();
+        // FIXME: replace the empty Keymap placeholder with a real
+        // compile of the loaded config once the keymap loader
+        // (`.todo-plans/TODO.md` "Stoat-native keymap loader") lands.
+        let keymap = Keymap::compile(&Config {
+            blocks: Vec::new(),
+            themes: Vec::new(),
+        });
+        let input_state_machine = cx.new(|_| InputStateMachine::new(workspace_handle, keymap));
         Self {
             name: name.into(),
             git_root,
@@ -54,6 +67,7 @@ impl Workspace {
             docks: Vec::new(),
             modal_layer,
             status_bar,
+            input_state_machine,
             focus_handle: cx.focus_handle(),
         }
     }
@@ -100,6 +114,10 @@ impl Workspace {
 
     pub fn status_bar(&self) -> &Entity<StatusBar> {
         &self.status_bar
+    }
+
+    pub fn input_state_machine(&self) -> &Entity<InputStateMachine> {
+        &self.input_state_machine
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -334,6 +352,21 @@ mod tests {
 
         let context = ws.read_with(&cx, |w, _| w.build_key_context());
         assert!(context.contains("Workspace"));
+    }
+
+    #[test]
+    fn fresh_workspace_exposes_input_state_machine_with_defaults() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let sm = ws.read_with(&cx, |w, _| w.input_state_machine().clone());
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.mode(), "normal");
+            assert!(!sm.palette_open());
+            assert!(!sm.finder_open());
+            assert!(!sm.help_open());
+            assert!(!sm.claude_focused());
+            assert_eq!(sm.pending_count(), None);
+        });
     }
 
     #[test]
