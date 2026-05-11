@@ -1,4 +1,4 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ActionTarget, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -28,6 +28,10 @@ impl ActionDef for OpenCommandPaletteDef {
 
     fn palette_visible(&self) -> bool {
         false
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Root
     }
 }
 

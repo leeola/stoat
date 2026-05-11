@@ -1,6 +1,6 @@
 use crate::{
     action::{define_action, impl_gpui_action},
-    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    Action, ActionDef, ActionKind, ActionPriority, ActionTarget, ParamDef, ParamKind,
 };
 use serde::Deserialize;
 use std::any::Any;
@@ -12,7 +12,8 @@ define_action!(
     ActionKind::NewWorkspace,
     "create a new workspace",
     "Create a fresh workspace at the current workspace's git root. The new workspace has default panes and no inherited buffers, Claude session, or rebase state. The current workspace is saved and kept in the background; the new workspace becomes active.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Workspace
 );
 
 define_action!(
@@ -21,7 +22,9 @@ define_action!(
     "CopyWorkspace",
     ActionKind::CopyWorkspace,
     "duplicate this workspace",
-    "Create a new workspace that clones the current workspace's panes, editors, buffers, and layout. The copy sits at the same git root as the source but does not inherit live Claude session or in-flight rebase state. The current workspace is saved; the copy becomes active."
+    "Create a new workspace that clones the current workspace's panes, editors, buffers, and layout. The copy sits at the same git root as the source but does not inherit live Claude session or in-flight rebase state. The current workspace is saved; the copy becomes active.",
+    ActionPriority::Normal,
+    ActionTarget::Workspace
 );
 
 define_action!(
@@ -31,7 +34,8 @@ define_action!(
     ActionKind::SwitchWorkspace,
     "switch workspaces",
     "Open the workspace picker to choose another open workspace to switch to. The current workspace is saved before the switch; its panes, buffers, and selections are preserved for the return trip.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Workspace
 );
 
 define_action!(
@@ -40,7 +44,9 @@ define_action!(
     "CloseWorkspace",
     ActionKind::CloseWorkspace,
     "close this workspace",
-    "Close the active workspace, delete its persisted state, and switch to a sibling workspace. Refuses when only one workspace is open."
+    "Close the active workspace, delete its persisted state, and switch to a sibling workspace. Refuses when only one workspace is open.",
+    ActionPriority::Normal,
+    ActionTarget::Workspace
 );
 
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
@@ -76,6 +82,10 @@ impl ActionDef for RenameWorkspaceDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Common
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Workspace
     }
 }
 

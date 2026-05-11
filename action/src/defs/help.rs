@@ -1,4 +1,4 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ActionTarget, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -31,6 +31,10 @@ impl ActionDef for OpenHelpDef {
 
     fn palette_visible(&self) -> bool {
         false
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Root
     }
 }
 
@@ -79,6 +83,10 @@ macro_rules! plumbing_action {
 
             fn palette_visible(&self) -> bool {
                 false
+            }
+
+            fn target(&self) -> ActionTarget {
+                ActionTarget::Modal
             }
         }
 

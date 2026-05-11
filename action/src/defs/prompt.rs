@@ -1,4 +1,4 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ActionTarget, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -28,6 +28,10 @@ impl ActionDef for SubmitPromptInputDef {
 
     fn palette_visible(&self) -> bool {
         false
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Modal
     }
 }
 
@@ -75,6 +79,10 @@ impl ActionDef for CancelPromptInputDef {
 
     fn palette_visible(&self) -> bool {
         false
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Modal
     }
 }
 
@@ -124,6 +132,10 @@ impl ActionDef for PromptInsertNewlineDef {
     fn palette_visible(&self) -> bool {
         false
     }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Modal
+    }
 }
 
 #[derive(Debug)]
@@ -171,6 +183,10 @@ impl ActionDef for PaletteSelectPrevDef {
     fn palette_visible(&self) -> bool {
         false
     }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Modal
+    }
 }
 
 #[derive(Debug)]
@@ -217,6 +233,10 @@ impl ActionDef for PaletteSelectNextDef {
 
     fn palette_visible(&self) -> bool {
         false
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Modal
     }
 }
 
@@ -266,6 +286,10 @@ impl ActionDef for PaletteScopeToggleDef {
 
     fn palette_visible(&self) -> bool {
         false
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Modal
     }
 }
 

@@ -958,4 +958,42 @@ mod tests {
             assert!(!entry.def.long_desc().is_empty(), "{}", entry.def.name());
         }
     }
+
+    #[test]
+    fn targets_route_to_expected_entities() {
+        use crate::ActionTarget;
+
+        let cases: &[(&str, ActionTarget)] = &[
+            ("Quit", ActionTarget::Root),
+            ("OpenFileFinder", ActionTarget::Root),
+            ("OpenCommandPalette", ActionTarget::Root),
+            ("OpenClaude", ActionTarget::Root),
+            ("OpenRun", ActionTarget::Root),
+            ("Dump", ActionTarget::Root),
+            ("OpenHelp", ActionTarget::Root),
+            ("OpenReviewCommit", ActionTarget::Root),
+            ("EnterRebase", ActionTarget::Root),
+            ("NewWorkspace", ActionTarget::Workspace),
+            ("RenameWorkspace", ActionTarget::Workspace),
+            ("SplitRight", ActionTarget::Pane),
+            ("FocusLeft", ActionTarget::Pane),
+            ("ClosePane", ActionTarget::Pane),
+            ("MoveLeft", ActionTarget::Editor),
+            ("Hover", ActionTarget::Editor),
+            ("OpenFile", ActionTarget::Editor),
+            ("FileFinderSelectNext", ActionTarget::Modal),
+            ("PaletteSelectNext", ActionTarget::Modal),
+            ("HelpSelectNext", ActionTarget::Modal),
+            ("CommitsNext", ActionTarget::Modal),
+            ("ReviewNextChunk", ActionTarget::Modal),
+            ("RebaseNext", ActionTarget::Modal),
+            ("RunSubmit", ActionTarget::Modal),
+            ("ClaudeSubmit", ActionTarget::Modal),
+            ("SubmitPromptInput", ActionTarget::Modal),
+        ];
+        for (name, expected) in cases {
+            let entry = lookup(name).unwrap_or_else(|| panic!("no entry for {name}"));
+            assert_eq!(entry.def.target(), *expected, "{name}");
+        }
+    }
 }

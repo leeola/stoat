@@ -1,5 +1,6 @@
 use crate::{
-    action::impl_gpui_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    action::impl_gpui_action, Action, ActionDef, ActionKind, ActionPriority, ActionTarget,
+    ParamDef, ParamKind,
 };
 use serde::Deserialize;
 use std::any::Any;
@@ -37,6 +38,10 @@ impl ActionDef for DumpDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Rare
+    }
+
+    fn target(&self) -> ActionTarget {
+        ActionTarget::Root
     }
 }
 

@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{action::define_action, ActionKind, ActionPriority, ActionTarget};
 
 define_action!(
     SplitRightDef,
@@ -7,7 +7,8 @@ define_action!(
     ActionKind::SplitRight,
     "split pane right",
     "Split the focused pane vertically, creating a new pane to the right.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Pane
 );
 define_action!(
     SplitDownDef,
@@ -16,7 +17,8 @@ define_action!(
     ActionKind::SplitDown,
     "split pane down",
     "Split the focused pane horizontally, creating a new pane below.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Pane
 );
 define_action!(
     SplitNewRightDef,
@@ -25,7 +27,8 @@ define_action!(
     ActionKind::SplitNewRight,
     "split pane right with new buffer",
     "Split the focused pane vertically, opening a new empty scratch buffer in the new pane.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Pane
 );
 define_action!(
     SplitNewDownDef,
@@ -34,7 +37,8 @@ define_action!(
     ActionKind::SplitNewDown,
     "split pane down with new buffer",
     "Split the focused pane horizontally, opening a new empty scratch buffer in the new pane.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Pane
 );
 define_action!(
     FocusLeftDef,
@@ -42,7 +46,9 @@ define_action!(
     "FocusLeft",
     ActionKind::FocusLeft,
     "focus pane left",
-    "Move focus to the pane to the left of the current pane."
+    "Move focus to the pane to the left of the current pane.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 define_action!(
     FocusRightDef,
@@ -50,7 +56,9 @@ define_action!(
     "FocusRight",
     ActionKind::FocusRight,
     "focus pane right",
-    "Move focus to the pane to the right of the current pane."
+    "Move focus to the pane to the right of the current pane.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 define_action!(
     FocusUpDef,
@@ -58,7 +66,9 @@ define_action!(
     "FocusUp",
     ActionKind::FocusUp,
     "focus pane up",
-    "Move focus to the pane above the current pane."
+    "Move focus to the pane above the current pane.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 define_action!(
     FocusDownDef,
@@ -66,7 +76,9 @@ define_action!(
     "FocusDown",
     ActionKind::FocusDown,
     "focus pane down",
-    "Move focus to the pane below the current pane."
+    "Move focus to the pane below the current pane.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 define_action!(
     FocusNextDef,
@@ -74,7 +86,9 @@ define_action!(
     "FocusNext",
     ActionKind::FocusNext,
     "focus next pane",
-    "Move focus to the next pane in traversal order, wrapping around."
+    "Move focus to the next pane in traversal order, wrapping around.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 define_action!(
     FocusPrevDef,
@@ -82,7 +96,9 @@ define_action!(
     "FocusPrev",
     ActionKind::FocusPrev,
     "focus previous pane",
-    "Move focus to the previous pane in traversal order, wrapping around."
+    "Move focus to the previous pane in traversal order, wrapping around.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 define_action!(
     ClosePaneDef,
@@ -90,7 +106,9 @@ define_action!(
     "ClosePane",
     ActionKind::ClosePane,
     "close pane",
-    "Close the focused pane. Refuses if it is the last remaining pane."
+    "Close the focused pane. Refuses if it is the last remaining pane.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 define_action!(
     CloseOtherPanesDef,
@@ -98,7 +116,9 @@ define_action!(
     "CloseOtherPanes",
     ActionKind::CloseOtherPanes,
     "close other panes",
-    "Close every split pane except the focused one. No-op when the focused pane is the only one."
+    "Close every split pane except the focused one. No-op when the focused pane is the only one.",
+    ActionPriority::Normal,
+    ActionTarget::Pane
 );
 
 #[cfg(test)]

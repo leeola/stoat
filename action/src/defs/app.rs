@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind, ActionPriority};
+use crate::{action::define_action, ActionKind, ActionPriority, ActionTarget};
 
 define_action!(
     QuitDef,
@@ -7,7 +7,8 @@ define_action!(
     ActionKind::Quit,
     "close pane or exit",
     "Close the focused pane. Exit the application when closing the last remaining pane.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Root
 );
 
 define_action!(
@@ -17,7 +18,8 @@ define_action!(
     ActionKind::QuitAll,
     "exit stoat, closing all panes",
     "Exit the application immediately, closing every pane and viewport. See also Quit, which closes the current pane and only exits when it is the last.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    ActionTarget::Root
 );
 
 #[cfg(test)]
