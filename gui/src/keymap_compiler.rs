@@ -1,3 +1,66 @@
+//! Compile Stoat keymap predicates into the gpui keymap context
+//! language, and document the canonical context stack that those
+//! predicates target.
+//!
+//! # Canonical context stack
+//!
+//! gpui dispatches actions by walking from the focused element up
+//! to the window root, collecting each ancestor's
+//! [`gpui::KeyContext`] entries. A predicate matches when every
+//! clause holds across the accumulated stack. Stoat pushes
+//! contexts at a fixed set of entity layers; this doc block is
+//! the single source of truth that the predicate language and
+//! keymap authors target.
+//!
+//! Outer to inner, the layers are:
+//!
+//! 1. **Workspace** -- `gui/src/workspace.rs`. Always pushes the `"Workspace"` tag via
+//!    [`crate::Workspace::build_key_context`]. Future per-workspace flags fold in as their owning
+//!    features add fields to `Workspace`:
+//!    - `mode == normal | insert | select | ...` -- workspace modal mode (depends on the future
+//!      mode field).
+//!    - `palette_open`, `finder_open` -- a modal of the named kind is open (depends on the
+//!      "Foundation: ModalLayer" parent).
+//!    - `claude_focused` -- the claude chat pane is focused (depends on the future claude chat
+//!      entity).
+//!
+//! 2. **Pane** -- `gui/src/pane.rs`. Pushes the `"Pane"` tag via
+//!    [`crate::Pane::build_key_context`], plus the active item's `key_context_name(cx)` when
+//!    [`crate::ItemView`] returns `Some` -- e.g. `"Editor"`, `"Run"`, `"Claude"`.
+//!
+//! 3. **Item-specific** -- each concrete item entity pushes its own tag plus any dynamic flags,
+//!    additive to the Pane layer. These items are tracked under "Foundation: Editor entity" and the
+//!    corresponding feature parents:
+//!    - `Editor` adds `"Editor"` plus dynamic flags `showing_completions`, `showing_hover`, and
+//!      `mode == insert` while the cursor is in insert mode.
+//!    - `Run` adds `"Run"`.
+//!    - `ClaudeChat` adds `"Claude"`.
+//!
+//! 4. **Modal** -- when a modal is active, the `ModalLayer` overlay pushes a tag naming the modal
+//!    type (`"FileFinder"`, `"CommandPalette"`, `"DiagnosticsPicker"`, `"Help"`, `"Rebase"`, ...).
+//!    Modal contexts overlay the pane/item context rather than nesting under it: while the modal
+//!    owns focus, dispatch begins inside the modal subtree and the pane/item layers are not in
+//!    scope. Tracked under "Foundation: ModalLayer".
+//!
+//! # Predicate language
+//!
+//! [`compile_predicate`] translates [`stoat_config::Predicate`]
+//! into the string form that gpui parses for `KeyBinding`
+//! contexts. The surface supported by gpui (and therefore by
+//! Stoat keymaps) is:
+//!
+//! - Bare identifier matches the presence of a tag pushed at any layer in the stack: `Editor`,
+//!   `Pane`, `palette_open`.
+//! - Key-value comparison matches when the named entry equals the given value: `mode == normal`,
+//!   `mode != insert`.
+//! - Boolean negation: `!palette_open`.
+//! - Logical combinators: `(Pane && Editor && mode == normal)`, `(palette_open || finder_open)`.
+//!
+//! Numeric, enum, array, map, and state-reference values are
+//! rejected with [`CompilePredicateError::UnsupportedValue`]; the
+//! comparison operators `>`, `<`, `>=`, `<=`, and `matches` are
+//! rejected with [`CompilePredicateError::UnsupportedOperator`].
+
 use snafu::Snafu;
 use stoat_config::{Predicate, Value};
 
