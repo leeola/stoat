@@ -96,7 +96,7 @@ pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
     }
 }
 
-fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
+pub fn arg_to_param_value(arg: &ResolvedArg) -> Option<stoat_action::ParamValue> {
     match &arg.value {
         stoat_config::Value::String(s) => Some(stoat_action::ParamValue::String(s.clone())),
         stoat_config::Value::Ident(s) => Some(stoat_action::ParamValue::String(s.clone())),
@@ -116,7 +116,7 @@ pub(crate) fn action_display_desc(action: &ResolvedAction) -> String {
         .unwrap_or_else(|| action.name.clone())
 }
 
-pub(crate) fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
+pub fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
     let entry = stoat_action::registry::lookup(name)?;
     let mut params = Vec::with_capacity(args.len());
     for arg in args {

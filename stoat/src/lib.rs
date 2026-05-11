@@ -27,7 +27,7 @@ mod input_view;
 pub mod jumplist;
 pub(crate) mod jumplist_picker;
 pub mod keymap;
-mod keymap_state;
+pub mod keymap_state;
 pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;
