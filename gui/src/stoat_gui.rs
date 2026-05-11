@@ -5,6 +5,7 @@ mod buffer_registry;
 mod executor;
 mod globals;
 mod keymap_compiler;
+mod multi_buffer;
 mod panic_hook;
 mod settings;
 mod stoat_app;
@@ -21,6 +22,7 @@ use gpui::{
     WindowOptions,
 };
 pub use keymap_compiler::{compile_predicate, CompilePredicateError};
+pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;
 use stoat_app::StoatApp;
