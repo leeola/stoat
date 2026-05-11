@@ -2,7 +2,7 @@ pub mod action_handlers;
 pub mod app;
 pub mod badge;
 pub mod buffer;
-mod buffer_registry;
+pub mod buffer_registry;
 pub mod claude_chat;
 pub(crate) mod claude_checkpoint_picker;
 pub mod command_palette;
@@ -52,6 +52,7 @@ pub use app::{Stoat, UpdateEffect};
 mod test_harness;
 pub use badge::{Anchor, BadgeId, BadgeSource, BadgeState};
 pub use buffer::{BufferId, SharedBuffer, TextBuffer, TextBufferSnapshot};
+pub use buffer_registry::BufferRegistry;
 pub use diff_map::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
 pub use display_map::{
     BlockMap, BlockPoint, BlockRow, BlockRowKind, BlockSnapshot, Chunk, ChunkRenderer,

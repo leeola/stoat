@@ -50,14 +50,14 @@ struct BufferEntry {
     preview: bool,
 }
 
-pub(crate) struct BufferRegistry {
+pub struct BufferRegistry {
     buffers: HashMap<BufferId, BufferEntry>,
     path_to_id: HashMap<PathBuf, BufferId>,
     next_id: u64,
 }
 
 impl BufferRegistry {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             buffers: HashMap::new(),
             path_to_id: HashMap::new(),
@@ -65,8 +65,12 @@ impl BufferRegistry {
         }
     }
 
-    pub(crate) fn len(&self) -> usize {
+    pub fn len(&self) -> usize {
         self.buffers.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.buffers.is_empty()
     }
 
     /// True when the registry holds exactly one buffer, that buffer has no
@@ -98,7 +102,7 @@ impl BufferRegistry {
         id
     }
 
-    pub(crate) fn new_scratch(&mut self) -> (BufferId, SharedBuffer) {
+    pub fn new_scratch(&mut self) -> (BufferId, SharedBuffer) {
         self.new_scratch_inner(false)
     }
 
@@ -131,7 +135,7 @@ impl BufferRegistry {
 
     /// Returns the existing buffer for `path`, or creates one with `text`.
     /// If the buffer already exists, `text` is ignored.
-    pub(crate) fn open(&mut self, path: &Path, text: &str) -> (BufferId, SharedBuffer) {
+    pub fn open(&mut self, path: &Path, text: &str) -> (BufferId, SharedBuffer) {
         if let Some(&id) = self.path_to_id.get(path) {
             let entry = &self.buffers[&id];
             return (id, entry.buffer.clone());
@@ -156,11 +160,11 @@ impl BufferRegistry {
         (id, buffer)
     }
 
-    pub(crate) fn get(&self, id: BufferId) -> Option<SharedBuffer> {
+    pub fn get(&self, id: BufferId) -> Option<SharedBuffer> {
         self.buffers.get(&id).map(|e| e.buffer.clone())
     }
 
-    pub(crate) fn id_for_path(&self, path: &Path) -> Option<BufferId> {
+    pub fn id_for_path(&self, path: &Path) -> Option<BufferId> {
         self.path_to_id.get(path).copied()
     }
 
@@ -168,7 +172,7 @@ impl BufferRegistry {
     /// when the entry was path-bound and returns that path so the
     /// caller can build an LSP URI for `did_close`. Returns `None`
     /// when the buffer was scratch (or unknown).
-    pub(crate) fn remove(&mut self, id: BufferId) -> Option<PathBuf> {
+    pub fn remove(&mut self, id: BufferId) -> Option<PathBuf> {
         let entry = self.buffers.remove(&id)?;
         let path = entry.path?;
         self.path_to_id.remove(&path);
@@ -413,6 +417,12 @@ impl BufferRegistry {
                 },
             );
         }
+    }
+}
+
+impl Default for BufferRegistry {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
