@@ -1,13 +1,13 @@
 use crate::{
     dock::{Dock, DockSide},
     item::ItemHandle,
-    modal_layer::ModalLayer,
+    modal_layer::{ModalLayer, ModalView},
     pane_tree::PaneTree,
     status_bar::StatusBar,
 };
 use gpui::{
-    div, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
-    KeyContext, Render, SharedString, Styled, Window,
+    div, App, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
+    IntoElement, KeyContext, Render, SharedString, Styled, Window,
 };
 use std::path::PathBuf;
 
@@ -76,6 +76,26 @@ impl Workspace {
 
     pub fn modal_layer(&self) -> &Entity<ModalLayer> {
         &self.modal_layer
+    }
+
+    /// Open a modal of type `V` over the workspace, or close it if a
+    /// modal of the same type is already active. A different active
+    /// modal is replaced. Delegates to [`ModalLayer::toggle_modal`].
+    pub fn toggle_modal<V, B>(&mut self, window: &mut Window, cx: &mut App, build: B)
+    where
+        V: ModalView,
+        B: FnOnce(&mut Window, &mut Context<'_, V>) -> V,
+    {
+        self.modal_layer
+            .update(cx, |layer, cx| layer.toggle_modal(window, cx, build));
+    }
+
+    /// Close the currently active modal if any. Returns `false` when
+    /// no modal is active or the modal's `on_before_dismiss` vetoes.
+    /// Delegates to [`ModalLayer::hide_modal`].
+    pub fn dismiss_modal(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.modal_layer
+            .update(cx, |layer, cx| layer.hide_modal(window, cx))
     }
 
     pub fn status_bar(&self) -> &Entity<StatusBar> {
@@ -156,7 +176,10 @@ impl Render for Workspace {
 mod tests {
     use super::*;
     use crate::item::{DeserializeSnafu, ItemError, ItemView};
-    use gpui::{div, IntoElement, Render, Styled, Subscription, TestAppContext, Window};
+    use gpui::{
+        div, DismissEvent, Focusable, IntoElement, Render, Styled, Subscription, TestAppContext,
+        VisualTestContext, Window,
+    };
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
 
@@ -175,7 +198,7 @@ mod tests {
     }
 
     impl ItemView for WorkspaceItem {
-        fn tab_label(&self, _cx: &gpui::App) -> SharedString {
+        fn tab_label(&self, _cx: &App) -> SharedString {
             self.label.clone()
         }
 
@@ -222,6 +245,61 @@ mod tests {
         let name = name.to_string();
         let root = PathBuf::from(root);
         cx.update(|cx| cx.new(|cx| Workspace::new(name, root, cx)))
+    }
+
+    fn new_workspace_in_window<'a>(
+        cx: &'a mut TestAppContext,
+        name: &str,
+        root: &str,
+    ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        let name = name.to_string();
+        let root = PathBuf::from(root);
+        cx.add_window_view(|_window, cx| Workspace::new(name, root, cx))
+    }
+
+    struct TestModal {
+        focus_handle: FocusHandle,
+        veto_dismiss: bool,
+    }
+
+    impl TestModal {
+        fn new(cx: &mut Context<'_, Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+                veto_dismiss: false,
+            }
+        }
+
+        fn vetoing(cx: &mut Context<'_, Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+                veto_dismiss: true,
+            }
+        }
+    }
+
+    impl Render for TestModal {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    impl Focusable for TestModal {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl EventEmitter<DismissEvent> for TestModal {}
+
+    impl ModalView for TestModal {
+        fn on_before_dismiss(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
+            !self.veto_dismiss
+        }
     }
 
     fn new_item(cx: &mut TestAppContext, label: &str) -> Box<dyn ItemHandle> {
@@ -322,5 +400,66 @@ mod tests {
             vec![WorkspaceEvent::DockRemoved { index: 0 }]
         );
         assert_eq!(ws.read_with(&cx, |w, _| w.docks().len()), 0);
+    }
+
+    #[test]
+    fn workspace_toggle_modal_opens_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.toggle_modal::<TestModal, _>(window, cx, |_, cx| TestModal::new(cx));
+        });
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer().read(cx).active_modal::<TestModal>()
+        });
+        assert!(active.is_some());
+    }
+
+    #[test]
+    fn workspace_dismiss_modal_closes_active_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update_in(vcx, |w, window, cx| {
+            w.toggle_modal::<TestModal, _>(window, cx, |_, cx| TestModal::new(cx));
+        });
+        vcx.run_until_parked();
+
+        let dismissed = ws.update_in(vcx, |w, window, cx| w.dismiss_modal(window, cx));
+        vcx.run_until_parked();
+
+        assert!(dismissed);
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer().read(cx).active_modal::<TestModal>()
+        });
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn workspace_dismiss_modal_empty_returns_false() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let dismissed = ws.update_in(vcx, |w, window, cx| w.dismiss_modal(window, cx));
+        assert!(!dismissed);
+    }
+
+    #[test]
+    fn workspace_dismiss_modal_respects_veto() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update_in(vcx, |w, window, cx| {
+            w.toggle_modal::<TestModal, _>(window, cx, |_, cx| TestModal::vetoing(cx));
+        });
+        vcx.run_until_parked();
+
+        let dismissed = ws.update_in(vcx, |w, window, cx| w.dismiss_modal(window, cx));
+        assert!(!dismissed);
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer().read(cx).active_modal::<TestModal>()
+        });
+        assert!(active.is_some());
     }
 }
