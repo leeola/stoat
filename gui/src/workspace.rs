@@ -10,6 +10,13 @@ use gpui::{
     IntoElement, KeyContext, Render, SharedString, Styled, Window,
 };
 use std::path::PathBuf;
+use stoat_action::{
+    CloseWorkspace, CopyWorkspace, Dump, EnterRebase, NewWorkspace, OpenBufferPicker,
+    OpenChangedFilePicker, OpenCheckpointPicker, OpenClaude, OpenCommandPalette, OpenCommits,
+    OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit, OpenHelp, OpenReview,
+    OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange, OpenRun, Quit, QuitAll,
+    RenameWorkspace, ReviewExternalEdit, Run, SwitchWorkspace, ToggleDockLeft, ToggleDockRight,
+};
 
 /// Top-level workspace entity. Composes the structural pieces of
 /// a single Stoat window: the git root, the pane tree, any docks
@@ -160,15 +167,69 @@ impl Workspace {
         cx.notify();
         Some(removed)
     }
+
+    /// Handle the [`Quit`] action: close the focused pane, then
+    /// exit the application when that pane was the last remaining
+    /// one. [`PaneTree::close`] returns `false` for the last-pane
+    /// case, which is how this distinguishes "closed a pane" from
+    /// "refused to close the last pane".
+    pub fn handle_quit(&self, cx: &mut Context<'_, Self>) {
+        let closed = self.pane_tree.update(cx, |tree, cx| {
+            let focus = tree.focus();
+            tree.close(focus, cx)
+        });
+        if !closed {
+            cx.quit();
+        }
+    }
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         // FIXME: replace with the real composition (pane area +
         // docks + status bar + modal overlay) once those pieces
         // are rendered. The body here is a placeholder; the
         // key_context wiring is the load-bearing part.
-        div().size_full().key_context(self.build_key_context())
+        div()
+            .size_full()
+            .track_focus(&self.focus_handle)
+            .key_context(self.build_key_context())
+            .on_action(cx.listener(|this, _: &Quit, _, cx| this.handle_quit(cx)))
+            .on_action(cx.listener(|_, _: &QuitAll, _, cx| cx.quit()))
+            .on_action(cx.listener(|this, action: &RenameWorkspace, _, cx| {
+                this.set_name(action.name.clone(), cx);
+            }))
+            // FIXME: the handlers below are no-op stubs that exist
+            // so the Workspace dispatch tree owns each action today.
+            // Each becomes a real implementation as its dependency
+            // lands (multi-workspace state, modal entities, dock
+            // content); the matching feature-reactivation parents in
+            // `.todo-plans/TODO.md` track the follow-ups.
+            .on_action(cx.listener(|_, _: &NewWorkspace, _, _| {}))
+            .on_action(cx.listener(|_, _: &CopyWorkspace, _, _| {}))
+            .on_action(cx.listener(|_, _: &SwitchWorkspace, _, _| {}))
+            .on_action(cx.listener(|_, _: &CloseWorkspace, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenClaude, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenCheckpointPicker, _, _| {}))
+            .on_action(cx.listener(|_, _: &ToggleDockLeft, _, _| {}))
+            .on_action(cx.listener(|_, _: &ToggleDockRight, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenRun, _, _| {}))
+            .on_action(cx.listener(|_, _: &Run, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenCommits, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenReview, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenReviewCommit, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenReviewCommitRange, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewExternalEdit, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenReviewAgentEdits, _, _| {}))
+            .on_action(cx.listener(|_, _: &EnterRebase, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenFileFinder, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenFileFinderHSplit, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenFileFinderVSplit, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenChangedFilePicker, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenBufferPicker, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenCommandPalette, _, _| {}))
+            .on_action(cx.listener(|_, _: &OpenHelp, _, _| {}))
+            .on_action(cx.listener(|_, _: &Dump, _, _| {}))
     }
 }
 
@@ -461,5 +522,87 @@ mod tests {
             w.modal_layer().read(cx).active_modal::<TestModal>()
         });
         assert!(active.is_some());
+    }
+
+    fn focus_workspace(ws: &Entity<Workspace>, vcx: &mut VisualTestContext) {
+        ws.update_in(vcx, |w, window, _cx| {
+            window.focus(w.focus_handle());
+        });
+        vcx.run_until_parked();
+    }
+
+    #[test]
+    fn workspace_handle_quit_closes_focused_pane_when_multiple_exist() {
+        use stoat::pane::Axis;
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(&cx, |w, _| w.pane_tree().clone());
+        pane_tree.update(&mut cx, |t, cx| {
+            t.split(Axis::Vertical, cx);
+        });
+        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 2);
+
+        ws.update(&mut cx, |w, cx| w.handle_quit(cx));
+        cx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn workspace_handle_quit_keeps_last_pane() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(&cx, |w, _| w.pane_tree().clone());
+        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+
+        ws.update(&mut cx, |w, cx| w.handle_quit(cx));
+        cx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn workspace_dispatch_rename_updates_name() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        focus_workspace(&ws, vcx);
+
+        vcx.dispatch_action(RenameWorkspace {
+            name: "renamed".to_string(),
+        });
+
+        assert_eq!(
+            ws.read_with(vcx, |w, _| w.name().clone()),
+            SharedString::from("renamed")
+        );
+    }
+
+    #[test]
+    fn workspace_dispatch_quit_closes_focused_pane() {
+        use stoat::pane::Axis;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        pane_tree.update(vcx, |t, cx| {
+            t.split(Axis::Vertical, cx);
+        });
+        focus_workspace(&ws, vcx);
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+
+        vcx.dispatch_action(Quit);
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn workspace_dispatch_stub_actions_do_not_panic() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        focus_workspace(&ws, vcx);
+
+        vcx.dispatch_action(NewWorkspace);
+        vcx.dispatch_action(OpenFileFinder);
+        vcx.dispatch_action(OpenCommandPalette);
+        vcx.dispatch_action(OpenHelp);
     }
 }
