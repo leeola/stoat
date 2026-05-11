@@ -1,3 +1,16 @@
+//! Stoat's gpui-backed GUI crate.
+//!
+//! ## Entity-bound async work
+//!
+//! Wrappers in this crate must not capture strong [`gpui::Entity`]
+//! handles into futures spawned via `cx.spawn`. A strong capture
+//! pins its target alive for the lifetime of the future, which
+//! combines with the subscription / executor wiring to produce
+//! reference cycles that outlive their owning entity. Route async
+//! work through [`spawn_with_entity`], which takes
+//! [`gpui::WeakEntity`] by signature; the helper upgrades the weak
+//! handle on the completion hop and silently drops the callback
+//! when the entity has already been released.
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
 
 mod buffer;
