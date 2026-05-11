@@ -3,6 +3,24 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyContext, ManagedView,
     ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
+use stoat_action::{
+    AbortRebase, CancelPromptInput, ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
+    ClaudeInterrupt, ClaudeJumpToFocusedCard, ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight,
+    ClaudeToPane, ClaudeToggleFollow, ClaudeToggleToolCardExpand, CloseCommits, CloseHelp,
+    CloseReview, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
+    CommitsPageUp, CommitsPrev, CommitsRefresh, ConflictAbort, ConflictApply, ConflictNextFile,
+    ConflictPrevFile, ConflictSkipEntry, ConflictTakeOurs, ConflictTakeTheirs, ExecuteRebase,
+    FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, HelpJumpFirst, HelpJumpLast,
+    HelpScopeToggle, HelpScrollDetailDown, HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev,
+    JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource,
+    PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev, PromptInsertNewline,
+    QueryMoveRelationships, RebaseContinue, RebaseMoveDown, RebaseMoveUp, RebaseNext, RebasePrev,
+    ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected,
+    ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk, RewordAbort,
+    RewordConfirm, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit, SetRebaseOpDrop,
+    SetRebaseOpEdit, SetRebaseOpFixup, SetRebaseOpPick, SetRebaseOpReword, SetRebaseOpSquash,
+    SubmitPromptInput,
+};
 
 /// Modal entity hosted by a [`ModalLayer`]. Builds on gpui's
 /// [`ManagedView`] (focus handle + dismiss event + render) and adds a
@@ -238,6 +256,15 @@ impl Render for ModalLayer {
             return div();
         };
         let key_context = self.build_key_context(cx);
+        // FIXME: the listeners below are no-op stubs that exist
+        // only while a modal is active (`Render::render` returns a
+        // bare `div()` otherwise). They own the dispatch slot at
+        // the layer; each modal entity registers its real
+        // `on_action` handlers on its own render element, which
+        // takes precedence because the modal element is the
+        // focused descendant of this wrapper. The stubs are listed
+        // by source crate to keep modal-specific groupings legible
+        // for the feature-reactivation work.
         div()
             .absolute()
             .size_full()
@@ -245,6 +272,91 @@ impl Render for ModalLayer {
             .key_context(key_context)
             .track_focus(&top.focus_handle)
             .child(top.modal.view())
+            // file_finder
+            .on_action(cx.listener(|_, _: &FileFinderSelectNext, _, _| {}))
+            .on_action(cx.listener(|_, _: &FileFinderSelectPrev, _, _| {}))
+            .on_action(cx.listener(|_, _: &FileFinderScopeToggle, _, _| {}))
+            // prompt / palette input
+            .on_action(cx.listener(|_, _: &SubmitPromptInput, _, _| {}))
+            .on_action(cx.listener(|_, _: &CancelPromptInput, _, _| {}))
+            .on_action(cx.listener(|_, _: &PromptInsertNewline, _, _| {}))
+            .on_action(cx.listener(|_, _: &PaletteSelectNext, _, _| {}))
+            .on_action(cx.listener(|_, _: &PaletteSelectPrev, _, _| {}))
+            .on_action(cx.listener(|_, _: &PaletteScopeToggle, _, _| {}))
+            // help
+            .on_action(cx.listener(|_, _: &CloseHelp, _, _| {}))
+            .on_action(cx.listener(|_, _: &HelpSelectNext, _, _| {}))
+            .on_action(cx.listener(|_, _: &HelpSelectPrev, _, _| {}))
+            .on_action(cx.listener(|_, _: &HelpScopeToggle, _, _| {}))
+            .on_action(cx.listener(|_, _: &HelpScrollDetailUp, _, _| {}))
+            .on_action(cx.listener(|_, _: &HelpScrollDetailDown, _, _| {}))
+            .on_action(cx.listener(|_, _: &HelpJumpFirst, _, _| {}))
+            .on_action(cx.listener(|_, _: &HelpJumpLast, _, _| {}))
+            // claude
+            .on_action(cx.listener(|_, _: &ClaudeSubmit, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeInterrupt, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeToggleFollow, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeToPane, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeToDockLeft, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeToDockRight, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeFocusNextToolCard, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeFocusPrevToolCard, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeToggleToolCardExpand, _, _| {}))
+            .on_action(cx.listener(|_, _: &ClaudeJumpToFocusedCard, _, _| {}))
+            // run
+            .on_action(cx.listener(|_, _: &RunSubmit, _, _| {}))
+            .on_action(cx.listener(|_, _: &RunInterrupt, _, _| {}))
+            .on_action(cx.listener(|_, _: &RunHistoryNext, _, _| {}))
+            .on_action(cx.listener(|_, _: &RunHistoryPrev, _, _| {}))
+            // commits
+            .on_action(cx.listener(|_, _: &CloseCommits, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsNext, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsPrev, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsFirst, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsLast, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsPageDown, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsPageUp, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsRefresh, _, _| {}))
+            .on_action(cx.listener(|_, _: &CommitsOpenReview, _, _| {}))
+            // review
+            .on_action(cx.listener(|_, _: &CloseReview, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewNextChunk, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewPrevChunk, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewStageChunk, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewUnstageChunk, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewToggleStage, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewSkipChunk, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewApplyStaged, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewRefresh, _, _| {}))
+            .on_action(cx.listener(|_, _: &ReviewRemoveSelected, _, _| {}))
+            .on_action(cx.listener(|_, _: &JumpToMoveSource, _, _| {}))
+            .on_action(cx.listener(|_, _: &JumpToMoveTarget, _, _| {}))
+            .on_action(cx.listener(|_, _: &JumpToNextMoveSource, _, _| {}))
+            .on_action(cx.listener(|_, _: &JumpToPrevMoveSource, _, _| {}))
+            .on_action(cx.listener(|_, _: &QueryMoveRelationships, _, _| {}))
+            // rebase
+            .on_action(cx.listener(|_, _: &AbortRebase, _, _| {}))
+            .on_action(cx.listener(|_, _: &ExecuteRebase, _, _| {}))
+            .on_action(cx.listener(|_, _: &RebaseNext, _, _| {}))
+            .on_action(cx.listener(|_, _: &RebasePrev, _, _| {}))
+            .on_action(cx.listener(|_, _: &RebaseMoveUp, _, _| {}))
+            .on_action(cx.listener(|_, _: &RebaseMoveDown, _, _| {}))
+            .on_action(cx.listener(|_, _: &RebaseContinue, _, _| {}))
+            .on_action(cx.listener(|_, _: &SetRebaseOpPick, _, _| {}))
+            .on_action(cx.listener(|_, _: &SetRebaseOpSquash, _, _| {}))
+            .on_action(cx.listener(|_, _: &SetRebaseOpFixup, _, _| {}))
+            .on_action(cx.listener(|_, _: &SetRebaseOpDrop, _, _| {}))
+            .on_action(cx.listener(|_, _: &SetRebaseOpReword, _, _| {}))
+            .on_action(cx.listener(|_, _: &SetRebaseOpEdit, _, _| {}))
+            .on_action(cx.listener(|_, _: &RewordConfirm, _, _| {}))
+            .on_action(cx.listener(|_, _: &RewordAbort, _, _| {}))
+            .on_action(cx.listener(|_, _: &ConflictTakeOurs, _, _| {}))
+            .on_action(cx.listener(|_, _: &ConflictTakeTheirs, _, _| {}))
+            .on_action(cx.listener(|_, _: &ConflictSkipEntry, _, _| {}))
+            .on_action(cx.listener(|_, _: &ConflictNextFile, _, _| {}))
+            .on_action(cx.listener(|_, _: &ConflictPrevFile, _, _| {}))
+            .on_action(cx.listener(|_, _: &ConflictApply, _, _| {}))
+            .on_action(cx.listener(|_, _: &ConflictAbort, _, _| {}))
     }
 }
 
@@ -660,5 +772,27 @@ mod tests {
         assert!(!context.contains("TestModal"));
         assert!(!context.contains("OtherModal"));
         assert!(!context.contains("AnonymousModal"));
+    }
+
+    #[test]
+    fn dispatch_modal_stub_actions_do_not_panic() {
+        use stoat_action::{
+            ClaudeSubmit, CommitsNext, FileFinderSelectNext, HelpSelectNext, PaletteSelectNext,
+            RebaseNext, ReviewNextChunk, RunSubmit, SubmitPromptInput,
+        };
+        let mut cx = TestAppContext::single();
+        let (layer, vcx) = new_layer(&mut cx);
+        push_modal::<TestModal>(&layer, vcx, TestModal::new);
+        vcx.run_until_parked();
+
+        vcx.dispatch_action(FileFinderSelectNext);
+        vcx.dispatch_action(PaletteSelectNext);
+        vcx.dispatch_action(HelpSelectNext);
+        vcx.dispatch_action(ClaudeSubmit);
+        vcx.dispatch_action(RunSubmit);
+        vcx.dispatch_action(CommitsNext);
+        vcx.dispatch_action(ReviewNextChunk);
+        vcx.dispatch_action(RebaseNext);
+        vcx.dispatch_action(SubmitPromptInput);
     }
 }
