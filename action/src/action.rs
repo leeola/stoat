@@ -21,27 +21,6 @@ impl ActionPriority {
     }
 }
 
-/// Routing target for an action: which entity in the GUI tree
-/// should receive it. Used by the keymap dispatcher to attach
-/// each action handler to the right entity element rather than
-/// dispatching everything from the root.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum ActionTarget {
-    /// Editor pane actions (most movement, edit, and selection
-    /// commands).
-    Editor,
-    /// Pane-tree commands: split, focus, close pane.
-    Pane,
-    /// Workspace-level commands: new/rename/close workspace.
-    Workspace,
-    /// Modal commands (palette, picker, help, prompt, rebase,
-    /// review, run pane, commits view, claude chat).
-    Modal,
-    /// Global / root-level commands: quit, open palette, open
-    /// claude, open file finder, etc.
-    Root,
-}
-
 pub trait ActionDef: Debug + Send + Sync + 'static {
     fn name(&self) -> &'static str;
     fn kind(&self) -> ActionKind;
@@ -59,22 +38,12 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
     fn priority(&self) -> ActionPriority {
         ActionPriority::Normal
     }
-
-    /// Which entity in the GUI tree should receive this action.
-    /// Defaults to [`ActionTarget::Editor`] because the majority of
-    /// actions are editor-scoped; non-editor actions override.
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Editor
-    }
 }
 
 pub trait Action: Debug + Send + 'static {
     fn def(&self) -> &'static dyn ActionDef;
     fn kind(&self) -> ActionKind {
         self.def().kind()
-    }
-    fn target(&self) -> ActionTarget {
-        self.def().target()
     }
     fn as_any(&self) -> &dyn Any;
 }
@@ -88,23 +57,10 @@ macro_rules! define_action {
             $kind,
             $short,
             $long,
-            $crate::ActionPriority::Normal,
-            $crate::ActionTarget::Editor
+            $crate::ActionPriority::Normal
         );
     };
     ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr) => {
-        $crate::action::define_action!(
-            $def,
-            $action,
-            $name,
-            $kind,
-            $short,
-            $long,
-            $priority,
-            $crate::ActionTarget::Editor
-        );
-    };
-    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr, $target:expr) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -131,10 +87,6 @@ macro_rules! define_action {
 
             fn priority(&self) -> $crate::ActionPriority {
                 $priority
-            }
-
-            fn target(&self) -> $crate::ActionTarget {
-                $target
             }
         }
 

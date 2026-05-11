@@ -1,4 +1,4 @@
-use crate::{action::impl_gpui_action_unit, Action, ActionDef, ActionKind, ActionTarget, ParamDef};
+use crate::{action::impl_gpui_action_unit, Action, ActionDef, ActionKind, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -29,10 +29,6 @@ impl ActionDef for OpenFileFinderDef {
 
     fn palette_visible(&self) -> bool {
         true
-    }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Root
     }
 }
 
@@ -82,10 +78,6 @@ impl ActionDef for OpenFileFinderHSplitDef {
     fn palette_visible(&self) -> bool {
         true
     }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Root
-    }
 }
 
 #[derive(Debug)]
@@ -133,10 +125,6 @@ impl ActionDef for OpenFileFinderVSplitDef {
 
     fn palette_visible(&self) -> bool {
         true
-    }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Root
     }
 }
 
@@ -186,10 +174,6 @@ impl ActionDef for OpenChangedFilePickerDef {
     fn palette_visible(&self) -> bool {
         true
     }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Root
-    }
 }
 
 #[derive(Debug)]
@@ -238,10 +222,6 @@ impl ActionDef for OpenBufferPickerDef {
     fn palette_visible(&self) -> bool {
         true
     }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Root
-    }
 }
 
 #[derive(Debug)]
@@ -288,10 +268,6 @@ impl ActionDef for FileFinderSelectPrevDef {
 
     fn palette_visible(&self) -> bool {
         false
-    }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Modal
     }
 }
 
@@ -340,10 +316,6 @@ impl ActionDef for FileFinderSelectNextDef {
     fn palette_visible(&self) -> bool {
         false
     }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Modal
-    }
 }
 
 #[derive(Debug)]
@@ -391,10 +363,6 @@ impl ActionDef for FileFinderScopeToggleDef {
 
     fn palette_visible(&self) -> bool {
         false
-    }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Modal
     }
 }
 

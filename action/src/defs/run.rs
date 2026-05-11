@@ -1,6 +1,6 @@
 use crate::{
     action::{define_action, impl_gpui_action},
-    Action, ActionDef, ActionKind, ActionPriority, ActionTarget, ParamDef, ParamKind,
+    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
 };
 use serde::Deserialize;
 use std::any::Any;
@@ -12,8 +12,7 @@ define_action!(
     ActionKind::OpenRun,
     "open terminal",
     "Open a terminal pane for running commands.",
-    ActionPriority::Common,
-    ActionTarget::Root
+    ActionPriority::Common
 );
 
 define_action!(
@@ -23,8 +22,7 @@ define_action!(
     ActionKind::RunSubmit,
     "submit command",
     "Submit the current command line to the shell.",
-    ActionPriority::Normal,
-    ActionTarget::Modal
+    ActionPriority::Normal
 );
 
 define_action!(
@@ -34,8 +32,7 @@ define_action!(
     ActionKind::RunInterrupt,
     "interrupt command",
     "Send SIGINT to the running shell command.",
-    ActionPriority::Normal,
-    ActionTarget::Modal
+    ActionPriority::Normal
 );
 
 define_action!(
@@ -45,8 +42,7 @@ define_action!(
     ActionKind::RunHistoryPrev,
     "previous command in history",
     "Replace the run input with the previous entry in command history.",
-    ActionPriority::Normal,
-    ActionTarget::Modal
+    ActionPriority::Normal
 );
 
 define_action!(
@@ -56,8 +52,7 @@ define_action!(
     ActionKind::RunHistoryNext,
     "next command in history",
     "Replace the run input with the next entry in command history, or clear the input when past the end.",
-    ActionPriority::Normal,
-    ActionTarget::Modal
+    ActionPriority::Normal
 );
 
 const RUN_PARAMS: &[ParamDef] = &[ParamDef {
@@ -93,10 +88,6 @@ impl ActionDef for RunDef {
 
     fn priority(&self) -> ActionPriority {
         ActionPriority::Common
-    }
-
-    fn target(&self) -> ActionTarget {
-        ActionTarget::Root
     }
 }
 

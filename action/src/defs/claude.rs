@@ -1,4 +1,4 @@
-use crate::{action::define_action, ActionKind, ActionPriority, ActionTarget};
+use crate::{action::define_action, ActionKind, ActionPriority};
 
 define_action!(
     OpenClaudeDef,
@@ -7,8 +7,7 @@ define_action!(
     ActionKind::OpenClaude,
     "open claude chat",
     "Open a Claude Code chat panel. Placement is controlled by the `claude.default_placement` setting (defaults to a split pane).",
-    ActionPriority::Common,
-    ActionTarget::Root
+    ActionPriority::Common
 );
 
 define_action!(
@@ -18,8 +17,7 @@ define_action!(
     ActionKind::ClaudeToPane,
     "move claude to pane",
     "Move the active Claude chat into a new split pane. Reuses the existing session.",
-    ActionPriority::Rare,
-    ActionTarget::Modal
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -29,8 +27,7 @@ define_action!(
     ActionKind::ClaudeToDockLeft,
     "move claude to left dock",
     "Move the active Claude chat to the left dock. Reuses the existing session.",
-    ActionPriority::Rare,
-    ActionTarget::Modal
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -40,8 +37,7 @@ define_action!(
     ActionKind::ClaudeToDockRight,
     "move claude to right dock",
     "Move the active Claude chat to the right dock. Reuses the existing session.",
-    ActionPriority::Rare,
-    ActionTarget::Modal
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -51,8 +47,7 @@ define_action!(
     ActionKind::ClaudeSubmit,
     "send to claude",
     "Send the current input to Claude.",
-    ActionPriority::Rare,
-    ActionTarget::Modal
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -62,8 +57,7 @@ define_action!(
     ActionKind::ClaudeToggleFollow,
     "toggle claude follow",
     "Toggle Claude follow mode. When on, file-oriented tool calls open their target file in an editor pane and move the cursor to the line Claude is touching.",
-    ActionPriority::Rare,
-    ActionTarget::Modal
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -73,8 +67,7 @@ define_action!(
     ActionKind::OpenCheckpointPicker,
     "claude restore",
     "Open a picker listing every per-message checkpoint captured for the active Claude chat. Selecting an entry restores the working tree to the state captured when the user submitted that message.",
-    ActionPriority::Common,
-    ActionTarget::Root
+    ActionPriority::Common
 );
 
 define_action!(
@@ -84,8 +77,7 @@ define_action!(
     ActionKind::ClaudeInterrupt,
     "interrupt claude",
     "Cancel the in-flight Claude turn. Sends interrupt to the agent over the control protocol and marks any pending tool calls as cancelled in the chat scrollback.",
-    ActionPriority::Common,
-    ActionTarget::Modal
+    ActionPriority::Common
 );
 
 define_action!(
@@ -95,8 +87,7 @@ define_action!(
     ActionKind::ClaudeFocusNextToolCard,
     "focus next tool card",
     "Move keyboard focus to the next tool-call card in the chat scrollback (older direction). Engages card focus when none is set.",
-    ActionPriority::Common,
-    ActionTarget::Modal
+    ActionPriority::Common
 );
 
 define_action!(
@@ -106,8 +97,7 @@ define_action!(
     ActionKind::ClaudeFocusPrevToolCard,
     "focus previous tool card",
     "Move keyboard focus to the previous tool-call card in the chat scrollback (newer direction).",
-    ActionPriority::Common,
-    ActionTarget::Modal
+    ActionPriority::Common
 );
 
 define_action!(
@@ -117,8 +107,7 @@ define_action!(
     ActionKind::ClaudeToggleToolCardExpand,
     "toggle tool card",
     "Expand or collapse the tool-call card currently focused for keyboard navigation.",
-    ActionPriority::Common,
-    ActionTarget::Modal
+    ActionPriority::Common
 );
 
 define_action!(
@@ -128,8 +117,7 @@ define_action!(
     ActionKind::ClaudeJumpToFocusedCard,
     "jump to focused tool card",
     "Open the file referenced by the focused tool-call card in an editor pane and move the cursor to the referenced line. No-op when the focused card has no file path in its tool input.",
-    ActionPriority::Common,
-    ActionTarget::Modal
+    ActionPriority::Common
 );
 
 define_action!(
@@ -139,8 +127,7 @@ define_action!(
     ActionKind::ToggleDockRight,
     "toggle right dock",
     "Cycle the right dock panel through visible, minimized, and hidden states.",
-    ActionPriority::Rare,
-    ActionTarget::Root
+    ActionPriority::Rare
 );
 
 define_action!(
@@ -150,6 +137,5 @@ define_action!(
     ActionKind::ToggleDockLeft,
     "toggle left dock",
     "Cycle the left dock panel through visible, minimized, and hidden states.",
-    ActionPriority::Rare,
-    ActionTarget::Root
+    ActionPriority::Rare
 );
