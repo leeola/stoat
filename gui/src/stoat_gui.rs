@@ -1,5 +1,6 @@
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
 
+mod buffer;
 mod executor;
 mod globals;
 mod keymap_compiler;
@@ -10,6 +11,7 @@ mod stoat_app;
 pub mod test;
 mod theme;
 
+pub use buffer::{Buffer, BufferEvent};
 pub use executor::spawn_with_entity;
 pub use globals::{install_production_globals, Globals, LanguageRegistry};
 use gpui::{
