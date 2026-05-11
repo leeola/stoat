@@ -1,7 +1,7 @@
 use gpui::{
     div, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView, ParentElement, Render,
-    Styled, Subscription, Window,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyContext, ManagedView,
+    ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 
 /// Modal entity hosted by a [`ModalLayer`]. Builds on gpui's
@@ -21,11 +21,22 @@ pub trait ModalView: ManagedView {
     fn on_before_dismiss(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
         true
     }
+
+    /// Identifier pushed into the [`ModalLayer`]'s `KeyContext` while
+    /// this modal sits on top of the stack. Concrete modal entities
+    /// return their type name (`"FileFinder"`, `"CommandPalette"`,
+    /// `"DiagnosticsPicker"`, ...) so keymap predicates can target the
+    /// active modal. Defaults to `None`, which adds no modal-specific
+    /// context.
+    fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
+        None
+    }
 }
 
 trait ModalViewHandle {
     fn view(&self) -> AnyView;
     fn on_before_dismiss(&mut self, window: &mut Window, cx: &mut App) -> bool;
+    fn key_context_name(&self, cx: &App) -> Option<SharedString>;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -35,6 +46,10 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
 
     fn on_before_dismiss(&mut self, window: &mut Window, cx: &mut App) -> bool {
         self.update(cx, |modal, cx| modal.on_before_dismiss(window, cx))
+    }
+
+    fn key_context_name(&self, cx: &App) -> Option<SharedString> {
+        self.read(cx).key_context_name(cx)
     }
 }
 
@@ -200,17 +215,34 @@ impl ModalLayer {
         let new_modal = cx.new(|cx| build(window, cx));
         self.show_modal(new_modal, window, cx);
     }
+
+    /// Compose the `KeyContext` pushed by the layer's wrapping
+    /// element. While a modal sits on top of the stack, its
+    /// [`ModalView::key_context_name`] is added so keymap predicates
+    /// can target the active modal type; with no active modal, or
+    /// when the top modal returns `None`, the context is empty.
+    pub fn build_key_context(&self, cx: &App) -> KeyContext {
+        let mut context = KeyContext::default();
+        if let Some(top) = self.active_modals.last() {
+            if let Some(name) = top.modal.key_context_name(cx) {
+                context.add(name);
+            }
+        }
+        context
+    }
 }
 
 impl Render for ModalLayer {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let Some(top) = self.active_modals.last() else {
             return div();
         };
+        let key_context = self.build_key_context(cx);
         div()
             .absolute()
             .size_full()
             .inset_0()
+            .key_context(key_context)
             .track_focus(&top.focus_handle)
             .child(top.modal.view())
     }
@@ -265,6 +297,10 @@ mod tests {
         fn on_before_dismiss(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
             !self.veto_dismiss
         }
+
+        fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
+            Some("TestModal".into())
+        }
     }
 
     struct OtherModal {
@@ -297,7 +333,43 @@ mod tests {
 
     impl EventEmitter<DismissEvent> for OtherModal {}
 
-    impl ModalView for OtherModal {}
+    impl ModalView for OtherModal {
+        fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
+            Some("OtherModal".into())
+        }
+    }
+
+    struct AnonymousModal {
+        focus_handle: FocusHandle,
+    }
+
+    impl AnonymousModal {
+        fn new(cx: &mut Context<'_, Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+            }
+        }
+    }
+
+    impl Render for AnonymousModal {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    impl Focusable for AnonymousModal {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl EventEmitter<DismissEvent> for AnonymousModal {}
+
+    impl ModalView for AnonymousModal {}
 
     fn new_layer(cx: &mut TestAppContext) -> (Entity<ModalLayer>, &mut VisualTestContext) {
         cx.add_window_view(|_window, cx| ModalLayer::new(cx))
@@ -539,5 +611,54 @@ mod tests {
             assert!(l.has_active_modal());
             assert!(l.active_modal::<TestModal>().is_some());
         });
+    }
+
+    #[test]
+    fn key_context_empty_when_no_modal() {
+        let mut cx = TestAppContext::single();
+        let (layer, vcx) = new_layer(&mut cx);
+
+        let context = layer.read_with(vcx, |l, cx| l.build_key_context(cx));
+        assert!(!context.contains("TestModal"));
+        assert!(!context.contains("OtherModal"));
+    }
+
+    #[test]
+    fn key_context_includes_top_modal_name() {
+        let mut cx = TestAppContext::single();
+        let (layer, vcx) = new_layer(&mut cx);
+        push_modal::<TestModal>(&layer, vcx, TestModal::new);
+        vcx.run_until_parked();
+
+        let context = layer.read_with(vcx, |l, cx| l.build_key_context(cx));
+        assert!(context.contains("TestModal"));
+        assert!(!context.contains("OtherModal"));
+    }
+
+    #[test]
+    fn key_context_uses_top_of_stack() {
+        let mut cx = TestAppContext::single();
+        let (layer, vcx) = new_layer(&mut cx);
+        push_modal::<TestModal>(&layer, vcx, TestModal::new);
+        vcx.run_until_parked();
+        push_modal::<OtherModal>(&layer, vcx, OtherModal::new);
+        vcx.run_until_parked();
+
+        let context = layer.read_with(vcx, |l, cx| l.build_key_context(cx));
+        assert!(context.contains("OtherModal"));
+        assert!(!context.contains("TestModal"));
+    }
+
+    #[test]
+    fn key_context_omits_name_when_modal_returns_none() {
+        let mut cx = TestAppContext::single();
+        let (layer, vcx) = new_layer(&mut cx);
+        push_modal::<AnonymousModal>(&layer, vcx, AnonymousModal::new);
+        vcx.run_until_parked();
+
+        let context = layer.read_with(vcx, |l, cx| l.build_key_context(cx));
+        assert!(!context.contains("TestModal"));
+        assert!(!context.contains("OtherModal"));
+        assert!(!context.contains("AnonymousModal"));
     }
 }
