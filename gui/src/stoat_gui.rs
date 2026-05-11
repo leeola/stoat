@@ -24,6 +24,7 @@ mod item;
 mod keymap_compiler;
 mod lsp_state;
 mod multi_buffer;
+mod pane;
 mod pane_tree;
 mod panic_hook;
 mod settings;
@@ -43,10 +44,11 @@ use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
-pub use item::{DeserializeSnafu, ItemError, ItemView, SaveSnafu};
+pub use item::{DeserializeSnafu, ItemError, ItemHandle, ItemView, SaveSnafu};
 pub use keymap_compiler::{compile_predicate, CompilePredicateError};
 pub use lsp_state::{LspState, LspStateEvent};
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
+pub use pane::{Pane, PaneEvent};
 pub use pane_tree::{PaneTree, PaneTreeEvent};
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;

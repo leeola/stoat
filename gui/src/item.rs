@@ -1,4 +1,4 @@
-use gpui::{App, Context, Render, SharedString, Task};
+use gpui::{AnyView, App, Context, Entity, EntityId, Render, SharedString, Task};
 use snafu::Snafu;
 
 /// Contract every pane-hosted item satisfies. Concrete impls
@@ -56,6 +56,52 @@ pub trait ItemView: Render + 'static {
     fn deserialize(value: serde_json::Value, cx: &mut Context<'_, Self>) -> Result<Self, ItemError>
     where
         Self: Sized;
+}
+
+/// Object-safe wrapper over an `Entity<T: ItemView>` so a pane's
+/// tab list can hold heterogeneous items as `Box<dyn ItemHandle>`.
+/// Exposes only the call-the-inner-method surface; `deserialize`
+/// stays on [`ItemView`] because it returns `Self` and is not
+/// object-safe. A blanket impl below makes any `Entity<T: ItemView>`
+/// usable as a handle.
+pub trait ItemHandle: Send + 'static {
+    fn item_id(&self) -> EntityId;
+    fn to_any_view(&self) -> AnyView;
+    fn tab_label(&self, cx: &App) -> SharedString;
+    fn tab_icon(&self, cx: &App) -> Option<SharedString>;
+    fn is_dirty(&self, cx: &App) -> bool;
+    fn serialize(&self, cx: &App) -> serde_json::Value;
+    fn save(&self, cx: &mut App) -> Task<Result<(), ItemError>>;
+}
+
+impl<T: ItemView> ItemHandle for Entity<T> {
+    fn item_id(&self) -> EntityId {
+        self.entity_id()
+    }
+
+    fn to_any_view(&self) -> AnyView {
+        AnyView::from(self.clone())
+    }
+
+    fn tab_label(&self, cx: &App) -> SharedString {
+        self.read(cx).tab_label(cx)
+    }
+
+    fn tab_icon(&self, cx: &App) -> Option<SharedString> {
+        self.read(cx).tab_icon(cx)
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.read(cx).is_dirty(cx)
+    }
+
+    fn serialize(&self, cx: &App) -> serde_json::Value {
+        self.read(cx).serialize(cx)
+    }
+
+    fn save(&self, cx: &mut App) -> Task<Result<(), ItemError>> {
+        self.update(cx, |item, ctx| item.save(ctx))
+    }
 }
 
 #[derive(Debug, Snafu)]
