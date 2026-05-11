@@ -183,7 +183,7 @@ define_action!(
     ActionPriority::Rare
 );
 
-use crate::{action::impl_gpui_action, Action, ActionDef, ParamDef, ParamKind};
+use crate::{Action, ActionDef, ParamDef, ParamKind};
 use serde::Deserialize;
 use std::{any::Any, path::PathBuf};
 
@@ -247,8 +247,6 @@ impl Action for OpenReviewCommit {
         self
     }
 }
-
-impl_gpui_action!(OpenReviewCommit, "OpenReviewCommit");
 
 const OPEN_REVIEW_COMMIT_RANGE_PARAMS: &[ParamDef] = &[
     ParamDef {
@@ -318,8 +316,6 @@ impl Action for OpenReviewCommitRange {
     }
 }
 
-impl_gpui_action!(OpenReviewCommitRange, "OpenReviewCommitRange");
-
 /// Palette-invisible because the path is supplied by the filesystem
 /// watcher dispatch, not user input. Triggers a session rescan and
 /// jumps the cursor to the first chunk in the affected file.
@@ -373,8 +369,6 @@ impl Action for ReviewExternalEdit {
         self
     }
 }
-
-impl_gpui_action!(ReviewExternalEdit, "ReviewExternalEdit");
 
 /// Palette-invisible because the edits payload cannot be constructed from
 /// a string. Dispatched programmatically by agent-bridge code.
@@ -434,8 +428,6 @@ impl Action for OpenReviewAgentEdits {
         self
     }
 }
-
-impl_gpui_action!(OpenReviewAgentEdits, "OpenReviewAgentEdits");
 
 #[cfg(test)]
 mod tests {

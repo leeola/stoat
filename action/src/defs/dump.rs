@@ -1,6 +1,4 @@
-use crate::{
-    action::impl_gpui_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
-};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
 use serde::Deserialize;
 use std::any::Any;
 
@@ -58,8 +56,6 @@ impl Action for Dump {
         self
     }
 }
-
-impl_gpui_action!(Dump, "Dump");
 
 #[cfg(test)]
 mod tests {

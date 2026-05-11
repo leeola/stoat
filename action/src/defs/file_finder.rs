@@ -1,4 +1,4 @@
-use crate::{action::impl_gpui_action_unit, Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -382,15 +382,6 @@ impl Action for FileFinderScopeToggle {
         self
     }
 }
-
-impl_gpui_action_unit!(OpenFileFinder, "OpenFileFinder");
-impl_gpui_action_unit!(OpenFileFinderHSplit, "OpenFileFinderHSplit");
-impl_gpui_action_unit!(OpenFileFinderVSplit, "OpenFileFinderVSplit");
-impl_gpui_action_unit!(OpenChangedFilePicker, "OpenChangedFilePicker");
-impl_gpui_action_unit!(OpenBufferPicker, "OpenBufferPicker");
-impl_gpui_action_unit!(FileFinderSelectPrev, "FileFinderSelectPrev");
-impl_gpui_action_unit!(FileFinderSelectNext, "FileFinderSelectNext");
-impl_gpui_action_unit!(FileFinderScopeToggle, "FileFinderScopeToggle");
 
 #[cfg(test)]
 mod tests {

@@ -1,4 +1,4 @@
-use crate::{action::impl_gpui_action_unit, Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -285,10 +285,3 @@ impl Action for PaletteScopeToggle {
         self
     }
 }
-
-impl_gpui_action_unit!(SubmitPromptInput, "SubmitPromptInput");
-impl_gpui_action_unit!(CancelPromptInput, "CancelPromptInput");
-impl_gpui_action_unit!(PromptInsertNewline, "PromptInsertNewline");
-impl_gpui_action_unit!(PaletteSelectPrev, "PaletteSelectPrev");
-impl_gpui_action_unit!(PaletteSelectNext, "PaletteSelectNext");
-impl_gpui_action_unit!(PaletteScopeToggle, "PaletteScopeToggle");

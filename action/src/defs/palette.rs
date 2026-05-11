@@ -1,4 +1,4 @@
-use crate::{action::impl_gpui_action_unit, Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -47,8 +47,6 @@ impl Action for OpenCommandPalette {
         self
     }
 }
-
-impl_gpui_action_unit!(OpenCommandPalette, "OpenCommandPalette");
 
 #[cfg(test)]
 mod tests {

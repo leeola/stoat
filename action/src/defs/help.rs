@@ -1,4 +1,4 @@
-use crate::{action::impl_gpui_action_unit, Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -51,8 +51,6 @@ impl Action for OpenHelp {
     }
 }
 
-impl_gpui_action_unit!(OpenHelp, "OpenHelp");
-
 macro_rules! plumbing_action {
     ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr) => {
         #[derive(Debug)]
@@ -100,8 +98,6 @@ macro_rules! plumbing_action {
                 self
             }
         }
-
-        impl_gpui_action_unit!($action, $name);
     };
 }
 

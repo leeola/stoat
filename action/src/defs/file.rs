@@ -1,6 +1,4 @@
-use crate::{
-    action::impl_gpui_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
-};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
 use serde::Deserialize;
 use std::{any::Any, path::PathBuf};
 
@@ -58,8 +56,6 @@ impl Action for OpenFile {
         self
     }
 }
-
-impl_gpui_action!(OpenFile, "OpenFile");
 
 #[cfg(test)]
 mod tests {

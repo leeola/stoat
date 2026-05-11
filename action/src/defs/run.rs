@@ -1,6 +1,5 @@
 use crate::{
-    action::{define_action, impl_gpui_action},
-    Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
 };
 use serde::Deserialize;
 use std::any::Any;
@@ -109,5 +108,3 @@ impl Action for Run {
         self
     }
 }
-
-impl_gpui_action!(Run, "Run");

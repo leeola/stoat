@@ -1,9 +1,5 @@
-use gpui::{div, Context, EventEmitter, InteractiveElement, IntoElement, Render, Styled, Window};
+use gpui::{div, Context, EventEmitter, IntoElement, Render, Styled, Window};
 use stoat::pane::{Axis, Direction, PaneId, PaneTree as InnerTree};
-use stoat_action::{
-    defs::pane::CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
-    FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight,
-};
 
 /// Entity-shaped wrapper around [`stoat::pane::PaneTree`]. Carries the
 /// existing split-tree algorithms forward verbatim while exposing only
@@ -128,55 +124,13 @@ impl Default for PaneTree {
 }
 
 impl Render for PaneTree {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
         // FIXME: replace with the real per-pane render (split-tree
         // subdivision, dividers) once the workspace render
-        // composes the pane area. The body here is a placeholder
-        // that exists so action handlers have an element to
-        // attach to.
-        div()
-            .size_full()
-            .on_action(cx.listener(|this, _: &SplitRight, _, cx| {
-                this.split(Axis::Vertical, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SplitDown, _, cx| {
-                this.split(Axis::Horizontal, cx);
-            }))
-            // FIXME: SplitNew* should open a fresh scratch buffer
-            // in the new pane; that requires Buffer/Pane wiring
-            // into the tree, deferred to the feature-reactivation
-            // file-open item.
-            .on_action(cx.listener(|this, _: &SplitNewRight, _, cx| {
-                this.split(Axis::Vertical, cx);
-            }))
-            .on_action(cx.listener(|this, _: &SplitNewDown, _, cx| {
-                this.split(Axis::Horizontal, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusLeft, _, cx| {
-                this.focus_direction(Direction::Left, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusRight, _, cx| {
-                this.focus_direction(Direction::Right, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusUp, _, cx| {
-                this.focus_direction(Direction::Up, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusDown, _, cx| {
-                this.focus_direction(Direction::Down, cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusNext, _, cx| {
-                this.focus_next(cx);
-            }))
-            .on_action(cx.listener(|this, _: &FocusPrev, _, cx| {
-                this.focus_prev(cx);
-            }))
-            .on_action(cx.listener(|this, _: &ClosePane, _, cx| {
-                let focus = this.focus();
-                this.close(focus, cx);
-            }))
-            .on_action(cx.listener(|this, _: &CloseOtherPanes, _, cx| {
-                this.close_others(cx);
-            }))
+        // composes the pane area. Dispatch lands here from the
+        // workspace-hosted input state machine via direct
+        // entity.update, not from per-element on_action listeners.
+        div().size_full()
     }
 }
 
