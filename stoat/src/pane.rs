@@ -156,6 +156,18 @@ pub struct PaneTree {
 }
 
 impl PaneTree {
+    /// Convenience for callers that have no ratatui area at hand
+    /// (the gpui-backed renderer computes pane geometry from
+    /// flex layout rather than reading the stored `Rect`). Equivalent
+    /// to `Self::new(Rect::default())`.
+    pub fn new_default() -> Self {
+        // Pick a non-zero area large enough that `split`'s recalculate
+        // pass cannot underflow when partitioning across child gaps.
+        // The renderer ignores this value (it computes per-pane
+        // geometry from flex layout); only the inner algorithm reads it.
+        Self::new(Rect::new(0, 0, 4096, 4096))
+    }
+
     pub fn new(area: Rect) -> Self {
         let mut panes = SlotMap::with_key();
         let mut nodes = SlotMap::with_key();

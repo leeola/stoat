@@ -23,6 +23,7 @@ mod globals;
 mod keymap_compiler;
 mod lsp_state;
 mod multi_buffer;
+mod pane_tree;
 mod panic_hook;
 mod settings;
 mod stoat_app;
@@ -44,6 +45,7 @@ use gpui::{
 pub use keymap_compiler::{compile_predicate, CompilePredicateError};
 pub use lsp_state::{LspState, LspStateEvent};
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
+pub use pane_tree::{PaneTree, PaneTreeEvent};
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;
 use stoat_app::StoatApp;
