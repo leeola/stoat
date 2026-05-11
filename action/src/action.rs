@@ -221,3 +221,39 @@ macro_rules! impl_gpui_action {
 }
 
 pub(crate) use impl_gpui_action;
+
+/// Generate `impl gpui::Action` for a unit-struct action defined
+/// outside [`define_action`] (i.e. with a hand-written `ActionDef`
+/// and `Action` impl). Emits the same trait body that
+/// [`define_action`] uses for its unit struct: type-only equality
+/// and a `build` that ignores its argument. `$name` is the static
+/// action name (matches the struct's `ActionDef::name`).
+macro_rules! impl_gpui_action_unit {
+    ($t:ident, $name:expr) => {
+        impl gpui::Action for $t {
+            fn boxed_clone(&self) -> Box<dyn gpui::Action> {
+                Box::new(Self)
+            }
+
+            fn partial_eq(&self, action: &dyn gpui::Action) -> bool {
+                action.as_any().downcast_ref::<Self>().is_some()
+            }
+
+            fn name(&self) -> &'static str {
+                $name
+            }
+
+            fn name_for_type() -> &'static str {
+                $name
+            }
+
+            fn build(_value: $crate::serde_json::Value) -> gpui::Result<Box<dyn gpui::Action>> {
+                Ok(Box::new(Self))
+            }
+        }
+
+        gpui::register_action!($t);
+    };
+}
+
+pub(crate) use impl_gpui_action_unit;
