@@ -14,8 +14,6 @@ path = "src/stoat_gui.rs"
 test-support = [
   "gpui/test-support",
   "dep:insta",
-  "dep:serde",
-  "dep:serde_json",
   "stoat/test-support",
   "dep:stoat_host",
 ]
@@ -24,8 +22,8 @@ test-support = [
 gpui.workspace = true
 insta = { version = "1", features = ["json"], optional = true }
 lsp-types.workspace = true
-serde = { workspace = true, optional = true }
-serde_json = { workspace = true, optional = true }
+serde.workspace = true
+serde_json.workspace = true
 snafu = { workspace = true }
 stoat = { path = "../stoat" }
 stoat_config = { path = "../config" }

@@ -20,6 +20,7 @@ mod diff_map;
 mod display_map;
 mod executor;
 mod globals;
+mod item;
 mod keymap_compiler;
 mod lsp_state;
 mod multi_buffer;
@@ -42,6 +43,7 @@ use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
+pub use item::{DeserializeSnafu, ItemError, ItemView, SaveSnafu};
 pub use keymap_compiler::{compile_predicate, CompilePredicateError};
 pub use lsp_state::{LspState, LspStateEvent};
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
