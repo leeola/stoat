@@ -6340,6 +6340,7 @@ dependencies = [
 name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
+ "crossterm",
  "gpui",
  "insta",
  "lsp-types",

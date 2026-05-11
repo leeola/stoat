@@ -70,7 +70,7 @@ impl KeymapState for StoatKeymapState {
 /// the keycode itself is the Shift-Tab variant. In both cases the SHIFT
 /// modifier is redundant, so dropping it up-front keeps bindings
 /// terminal-agnostic.
-pub(crate) fn normalize_shift_event(key: KeyEvent) -> KeyEvent {
+pub fn normalize_shift_event(key: KeyEvent) -> KeyEvent {
     if !key.modifiers.contains(KeyModifiers::SHIFT) {
         return key;
     }

@@ -19,6 +19,7 @@ test-support = [
 ]
 
 [dependencies]
+crossterm.workspace = true
 gpui.workspace = true
 insta = { version = "1", features = ["json"], optional = true }
 lsp-types.workspace = true

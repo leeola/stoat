@@ -8,7 +8,7 @@ use crate::{
 };
 use gpui::{
     div, App, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
-    IntoElement, KeyContext, Render, SharedString, Styled, Window,
+    IntoElement, KeyContext, Render, SharedString, Styled, Subscription, Window,
 };
 use std::path::PathBuf;
 use stoat::keymap::Keymap;
@@ -31,6 +31,7 @@ pub struct Workspace {
     status_bar: Entity<StatusBar>,
     input_state_machine: Entity<InputStateMachine>,
     focus_handle: FocusHandle,
+    _subscriptions: Vec<Subscription>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -60,6 +61,11 @@ impl Workspace {
             themes: Vec::new(),
         });
         let input_state_machine = cx.new(|_| InputStateMachine::new(workspace_handle, keymap));
+        let keystroke_subscription = cx.observe_keystrokes(|workspace, event, window, cx| {
+            let sm = workspace.input_state_machine.clone();
+            let keystroke = event.keystroke.clone();
+            sm.update(cx, |sm, cx| sm.feed(&keystroke, window, cx));
+        });
         Self {
             name: name.into(),
             git_root,
@@ -69,6 +75,7 @@ impl Workspace {
             status_bar,
             input_state_machine,
             focus_handle: cx.focus_handle(),
+            _subscriptions: vec![keystroke_subscription],
         }
     }
 
@@ -193,6 +200,21 @@ impl Workspace {
             cx.quit();
         }
     }
+
+    /// Dispatch a Stoat action resolved by the input state machine.
+    /// The routing body lands in the `Workspace::dispatch_action`
+    /// item of `.todo-plans/TODO.md`; this slice only provides the
+    /// entry point so the keystroke pipeline has a fixed call site.
+    pub fn dispatch_action(
+        &mut self,
+        _action: Box<dyn stoat_action::Action>,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Self>,
+    ) {
+        // FIXME: route the action to the right entity (active pane
+        // item / pane tree / active modal / workspace itself) per
+        // the `Workspace::dispatch_action` TODO item.
+    }
 }
 
 impl Render for Workspace {
@@ -215,7 +237,7 @@ mod tests {
     use crate::item::{DeserializeSnafu, ItemError, ItemView};
     use gpui::{
         div, DismissEvent, Focusable, IntoElement, Render, Styled, Subscription, TestAppContext,
-        VisualTestContext, Window,
+        VisualContext, VisualTestContext, Window,
     };
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -543,5 +565,17 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn workspace_observe_keystrokes_forwards_to_state_machine() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let window = vcx.window_handle();
+        cx.simulate_keystrokes(window, "5");
+        cx.run_until_parked();
+
+        let sm = ws.read_with(&cx, |w, _| w.input_state_machine().clone());
+        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), Some(5)));
     }
 }
