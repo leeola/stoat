@@ -108,6 +108,8 @@ macro_rules! plumbing_action {
                 self
             }
         }
+
+        impl_gpui_action_unit!($action, $name);
     };
 }
 
