@@ -14,11 +14,11 @@ use std::collections::HashMap;
 /// recently touched entry surfaces in the status bar without a real
 /// clock dependency.
 #[derive(Debug, Clone)]
-pub(crate) struct LspProgressEntry {
-    pub(crate) title: String,
-    pub(crate) message: Option<String>,
-    pub(crate) percentage: Option<u32>,
-    pub(crate) sequence: u64,
+pub struct LspProgressEntry {
+    pub title: String,
+    pub message: Option<String>,
+    pub percentage: Option<u32>,
+    pub sequence: u64,
 }
 
 /// Per-server work-done progress state. Today there is a single
@@ -27,20 +27,20 @@ pub(crate) struct LspProgressEntry {
 /// `(LanguageServerId, ProgressToken)` once `LspHost` is wrapped by
 /// the planned `LspManager`.
 #[derive(Debug, Default)]
-pub(crate) struct LspProgressMap {
+pub struct LspProgressMap {
     entries: HashMap<ProgressToken, LspProgressEntry>,
     next_sequence: u64,
 }
 
 impl LspProgressMap {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
     /// Filters and dispatches a single notification. Returns `true`
     /// when the call mutated state (a `Progress` notification was
     /// recognised); other variants are no-ops at this layer.
-    pub(crate) fn update(&mut self, notification: &LspNotification) -> bool {
+    pub fn update(&mut self, notification: &LspNotification) -> bool {
         let LspNotification::Progress { token, value } = notification else {
             return false;
         };
@@ -93,7 +93,7 @@ impl LspProgressMap {
 
     /// Returns the most recently updated in-progress entry, or `None`
     /// when the map is empty.
-    pub(crate) fn current(&self) -> Option<&LspProgressEntry> {
+    pub fn current(&self) -> Option<&LspProgressEntry> {
         self.entries.values().max_by_key(|e| e.sequence)
     }
 

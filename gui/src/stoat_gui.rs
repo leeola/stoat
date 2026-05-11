@@ -8,6 +8,7 @@ mod display_map;
 mod executor;
 mod globals;
 mod keymap_compiler;
+mod lsp_state;
 mod multi_buffer;
 mod panic_hook;
 mod settings;
@@ -28,6 +29,7 @@ use gpui::{
     WindowOptions,
 };
 pub use keymap_compiler::{compile_predicate, CompilePredicateError};
+pub use lsp_state::{LspState, LspStateEvent};
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;
