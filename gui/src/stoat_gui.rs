@@ -29,6 +29,7 @@ mod pane_tree;
 mod panic_hook;
 mod settings;
 mod stoat_app;
+mod tab_bar;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 mod theme;
@@ -53,6 +54,7 @@ pub use pane_tree::{PaneTree, PaneTreeEvent};
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;
 use stoat_app::StoatApp;
+pub use tab_bar::{render_tab_bar, DraggedTab};
 pub use theme::Theme;
 
 pub fn run() {

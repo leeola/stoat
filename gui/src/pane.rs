@@ -78,6 +78,43 @@ impl Pane {
         true
     }
 
+    /// Move the item at `from` to position `to`, shifting other
+    /// items between the two indices as needed. Adjusts
+    /// `active_index` so it continues to point at the same item
+    /// after the move, and emits [`PaneEvent::ActiveItemChanged`]
+    /// when the active index shifts (matching the convention used
+    /// by [`Pane::remove_item`]). Returns false without side
+    /// effects when either index is out of range or when `from`
+    /// equals `to`.
+    pub fn reorder(&mut self, from: usize, to: usize, cx: &mut Context<'_, Self>) -> bool {
+        if from >= self.items.len() || to >= self.items.len() {
+            return false;
+        }
+        if from == to {
+            return false;
+        }
+        let item = self.items.remove(from);
+        self.items.insert(to, item);
+
+        let old_active = self.active_index;
+        let new_active = if old_active == from {
+            to
+        } else if from < old_active && to >= old_active {
+            old_active - 1
+        } else if from > old_active && to <= old_active {
+            old_active + 1
+        } else {
+            old_active
+        };
+
+        self.active_index = new_active;
+        if new_active != old_active {
+            cx.emit(PaneEvent::ActiveItemChanged);
+        }
+        cx.notify();
+        true
+    }
+
     /// Remove and return the item at `index`. Clamps the active
     /// index to stay in bounds and emits
     /// [`PaneEvent::ActiveItemChanged`] when the active index
@@ -376,5 +413,125 @@ mod tests {
 
         assert!(removed.is_none());
         assert_eq!(drain(&events), Vec::<PaneEvent>::new());
+    }
+
+    fn populated_pane(cx: &mut TestAppContext, labels: &[&str]) -> Entity<Pane> {
+        let pane = new_pane(cx);
+        for label in labels {
+            let item = new_item(cx, label);
+            pane.update(cx, |p, cx| {
+                p.add_item(item, cx);
+            });
+        }
+        pane
+    }
+
+    fn item_labels(pane: &Entity<Pane>, cx: &TestAppContext) -> Vec<String> {
+        pane.read_with(cx, |p, app| {
+            p.items()
+                .iter()
+                .map(|h| h.tab_label(app).to_string())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn reorder_out_of_range_returns_false() {
+        let mut cx = TestAppContext::single();
+        let pane = populated_pane(&mut cx, &["a", "b"]);
+        let (_recorder, events) = Recorder::install(&mut cx, &pane);
+
+        let moved = pane.update(&mut cx, |p, cx| p.reorder(0, 7, cx));
+        cx.run_until_parked();
+
+        assert!(!moved);
+        assert_eq!(drain(&events), Vec::<PaneEvent>::new());
+        assert_eq!(item_labels(&pane, &cx), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn reorder_same_index_returns_false() {
+        let mut cx = TestAppContext::single();
+        let pane = populated_pane(&mut cx, &["a", "b"]);
+        let (_recorder, events) = Recorder::install(&mut cx, &pane);
+
+        let moved = pane.update(&mut cx, |p, cx| p.reorder(1, 1, cx));
+        cx.run_until_parked();
+
+        assert!(!moved);
+        assert_eq!(drain(&events), Vec::<PaneEvent>::new());
+        assert_eq!(item_labels(&pane, &cx), vec!["a", "b"]);
+    }
+
+    #[test]
+    fn reorder_active_item_updates_active_index() {
+        let mut cx = TestAppContext::single();
+        let pane = populated_pane(&mut cx, &["a", "b", "c", "d"]);
+        pane.update(&mut cx, |p, cx| {
+            p.activate(2, cx);
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &pane);
+
+        let moved = pane.update(&mut cx, |p, cx| p.reorder(2, 0, cx));
+        cx.run_until_parked();
+
+        assert!(moved);
+        assert_eq!(drain(&events), vec![PaneEvent::ActiveItemChanged]);
+        assert_eq!(item_labels(&pane, &cx), vec!["c", "a", "b", "d"]);
+        assert_eq!(pane.read_with(&cx, |p, _| p.active_index()), 0);
+    }
+
+    #[test]
+    fn reorder_moving_item_past_active_shifts_active_index_back() {
+        let mut cx = TestAppContext::single();
+        let pane = populated_pane(&mut cx, &["a", "b", "c", "d"]);
+        pane.update(&mut cx, |p, cx| {
+            p.activate(2, cx);
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &pane);
+
+        let moved = pane.update(&mut cx, |p, cx| p.reorder(0, 3, cx));
+        cx.run_until_parked();
+
+        assert!(moved);
+        assert_eq!(drain(&events), vec![PaneEvent::ActiveItemChanged]);
+        assert_eq!(item_labels(&pane, &cx), vec!["b", "c", "d", "a"]);
+        assert_eq!(pane.read_with(&cx, |p, _| p.active_index()), 1);
+    }
+
+    #[test]
+    fn reorder_moving_item_back_across_active_shifts_active_index_forward() {
+        let mut cx = TestAppContext::single();
+        let pane = populated_pane(&mut cx, &["a", "b", "c", "d"]);
+        pane.update(&mut cx, |p, cx| {
+            p.activate(2, cx);
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &pane);
+
+        let moved = pane.update(&mut cx, |p, cx| p.reorder(3, 1, cx));
+        cx.run_until_parked();
+
+        assert!(moved);
+        assert_eq!(drain(&events), vec![PaneEvent::ActiveItemChanged]);
+        assert_eq!(item_labels(&pane, &cx), vec!["a", "d", "b", "c"]);
+        assert_eq!(pane.read_with(&cx, |p, _| p.active_index()), 3);
+    }
+
+    #[test]
+    fn reorder_outside_active_range_keeps_active_index() {
+        let mut cx = TestAppContext::single();
+        let pane = populated_pane(&mut cx, &["a", "b", "c", "d"]);
+        pane.update(&mut cx, |p, cx| {
+            p.activate(2, cx);
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &pane);
+
+        let moved = pane.update(&mut cx, |p, cx| p.reorder(0, 1, cx));
+        cx.run_until_parked();
+
+        assert!(moved);
+        assert_eq!(drain(&events), Vec::<PaneEvent>::new());
+        assert_eq!(item_labels(&pane, &cx), vec!["b", "a", "c", "d"]);
+        assert_eq!(pane.read_with(&cx, |p, _| p.active_index()), 2);
     }
 }
