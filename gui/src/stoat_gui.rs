@@ -24,16 +24,19 @@ mod globals;
 mod item;
 mod keymap_compiler;
 mod lsp_state;
+mod modal_layer;
 mod multi_buffer;
 mod pane;
 mod pane_tree;
 mod panic_hook;
 mod settings;
+mod status_bar;
 mod stoat_app;
 mod tab_bar;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 mod theme;
+mod workspace;
 
 pub use buffer::{Buffer, BufferEvent};
 pub use buffer_registry::{BufferRegistry, BufferRegistryEvent};
@@ -50,14 +53,17 @@ use gpui::{
 pub use item::{DeserializeSnafu, ItemError, ItemHandle, ItemView, SaveSnafu};
 pub use keymap_compiler::{compile_predicate, CompilePredicateError};
 pub use lsp_state::{LspState, LspStateEvent};
+pub use modal_layer::ModalLayer;
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
 pub use pane::{Pane, PaneEvent};
 pub use pane_tree::{PaneTree, PaneTreeEvent};
 pub use panic_hook::install_panic_hook;
 pub use settings::Settings;
+pub use status_bar::StatusBar;
 use stoat_app::StoatApp;
 pub use tab_bar::{render_tab_bar, DraggedTab};
 pub use theme::Theme;
+pub use workspace::{Workspace, WorkspaceEvent};
 
 pub fn run() {
     Application::new().run(|cx: &mut App| {
