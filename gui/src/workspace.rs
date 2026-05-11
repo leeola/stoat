@@ -5,7 +5,10 @@ use crate::{
     pane_tree::PaneTree,
     status_bar::StatusBar,
 };
-use gpui::{AppContext, Context, Entity, EventEmitter, FocusHandle, SharedString};
+use gpui::{
+    div, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
+    KeyContext, Render, SharedString, Styled, Window,
+};
 use std::path::PathBuf;
 
 /// Top-level workspace entity. Composes the structural pieces of
@@ -109,6 +112,19 @@ impl Workspace {
         index
     }
 
+    /// Compose the `KeyContext` pushed by this workspace's
+    /// rendered element. Today only the "Workspace" tag is
+    /// added; per-workspace flags (`mode`, `palette_open`,
+    /// `finder_open`, `claude_focused`) fold in as their owning
+    /// features add the corresponding state to `Workspace`.
+    pub fn build_key_context(&self) -> KeyContext {
+        let mut context = KeyContext::default();
+        context.add("Workspace");
+        // FIXME: per-workspace flags land as their owning features
+        // (mode, ModalLayer, claude chat) add fields to Workspace.
+        context
+    }
+
     /// Remove and return the dock at `index`. Out-of-range indices
     /// return None without side effects.
     pub fn remove_dock(
@@ -123,6 +139,16 @@ impl Workspace {
         cx.emit(WorkspaceEvent::DockRemoved { index });
         cx.notify();
         Some(removed)
+    }
+}
+
+impl Render for Workspace {
+    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+        // FIXME: replace with the real composition (pane area +
+        // docks + status bar + modal overlay) once those pieces
+        // are rendered. The body here is a placeholder; the
+        // key_context wiring is the load-bearing part.
+        div().size_full().key_context(self.build_key_context())
     }
 }
 
@@ -202,6 +228,15 @@ mod tests {
         let label = SharedString::from(label.to_string());
         let entity = cx.update(|cx| cx.new(|_| WorkspaceItem { label }));
         Box::new(entity)
+    }
+
+    #[test]
+    fn build_key_context_includes_workspace_tag() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+
+        let context = ws.read_with(&cx, |w, _| w.build_key_context());
+        assert!(context.contains("Workspace"));
     }
 
     #[test]
