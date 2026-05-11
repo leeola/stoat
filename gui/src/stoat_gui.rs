@@ -19,6 +19,7 @@ mod diagnostics;
 mod diff_map;
 mod display_map;
 mod dock;
+mod editor;
 mod executor;
 mod globals;
 mod item;
@@ -44,6 +45,7 @@ pub use diagnostics::{DiagnosticSet, DiagnosticSetEvent};
 pub use diff_map::{DiffMap, DiffMapEvent};
 pub use display_map::{DisplayMap, DisplayMapEvent};
 pub use dock::{Dock, DockEvent, DockSide, DockVisibility};
+pub use editor::{Editor, EditorEvent};
 pub use executor::spawn_with_entity;
 pub use globals::{install_production_globals, Globals, LanguageRegistry};
 use gpui::{

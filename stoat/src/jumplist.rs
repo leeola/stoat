@@ -4,13 +4,13 @@
 //! truncates anything ahead of the current cursor.
 
 #[derive(Debug, Default, Clone)]
-pub(crate) struct JumpList {
+pub struct JumpList {
     positions: Vec<usize>,
     cursor: usize,
 }
 
 impl JumpList {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -36,11 +36,11 @@ impl JumpList {
         Some(self.positions[self.cursor])
     }
 
-    pub(crate) fn entries(&self) -> &[usize] {
+    pub fn entries(&self) -> &[usize] {
         &self.positions
     }
 
-    pub(crate) fn cursor(&self) -> usize {
+    pub fn cursor(&self) -> usize {
         self.cursor
     }
 

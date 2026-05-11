@@ -3,13 +3,19 @@ use serde::{Deserialize, Serialize};
 use stoat_text::{Anchor, Selection, SelectionGoal};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct SelectionsCollection {
+pub struct SelectionsCollection {
     next_selection_id: usize,
     disjoint: Vec<Selection<Anchor>>,
 }
 
+impl Default for SelectionsCollection {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SelectionsCollection {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         let default = Selection {
             id: 0,
             start: Anchor::min(),
@@ -23,7 +29,7 @@ impl SelectionsCollection {
         }
     }
 
-    pub(crate) fn all_anchors(&self) -> &[Selection<Anchor>] {
+    pub fn all_anchors(&self) -> &[Selection<Anchor>] {
         &self.disjoint
     }
 
