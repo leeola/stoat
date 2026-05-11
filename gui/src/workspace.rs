@@ -783,4 +783,22 @@ mod tests {
 
         assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 2);
     }
+
+    #[test]
+    fn keystroke_sequence_dispatches_each_action_in_order() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (config, errors) = stoat_config::parse("on key { s -> [SplitRight(), SplitRight()]; }");
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let keymap = Keymap::compile(&config.expect("config"));
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_keymap(keymap));
+
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let window = vcx.window_handle();
+        cx.simulate_keystrokes(window, "s");
+        cx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 3);
+    }
 }

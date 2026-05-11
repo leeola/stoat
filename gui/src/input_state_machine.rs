@@ -121,6 +121,11 @@ impl InputStateMachine {
     /// match into a [`stoat_action::Action`] via [`resolve_action`].
     /// Returns the resolved actions for the caller to dispatch.
     ///
+    /// A sequence binding (e.g. `C-k -> [SelectLine(), Comment()];`)
+    /// surfaces as one entry per child in source order; there is no
+    /// composite Action type, so the caller dispatches each child
+    /// individually via `Workspace::dispatch_action`.
+    ///
     /// Returning the action list rather than dispatching inline
     /// keeps this method off the workspace's update path; the
     /// `cx.observe_keystrokes` callback already holds a `&mut
@@ -450,6 +455,27 @@ mod tests {
             sm.feed(&stroke, cx);
         });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
+    }
+
+    #[test]
+    fn feed_lowers_sequence_binding_in_order() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { s -> [SplitRight(), Quit()]; }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        let stroke = key("s");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx)
+                .iter()
+                .map(|a| a.kind())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            kinds,
+            vec![
+                stoat_action::ActionKind::SplitRight,
+                stoat_action::ActionKind::Quit,
+            ]
+        );
     }
 
     #[test]
