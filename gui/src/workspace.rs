@@ -11,7 +11,11 @@ use gpui::{
     IntoElement, KeyContext, Render, SharedString, Styled, Subscription, Window,
 };
 use std::path::PathBuf;
-use stoat::keymap::Keymap;
+use stoat::{
+    keymap::Keymap,
+    pane::{Axis, Direction},
+};
+use stoat_action::ActionKind;
 use stoat_config::Config;
 
 /// Top-level workspace entity. Composes the structural pieces of
@@ -64,7 +68,10 @@ impl Workspace {
         let keystroke_subscription = cx.observe_keystrokes(|workspace, event, window, cx| {
             let sm = workspace.input_state_machine.clone();
             let keystroke = event.keystroke.clone();
-            sm.update(cx, |sm, cx| sm.feed(&keystroke, window, cx));
+            let actions = sm.update(cx, |sm, cx| sm.feed(&keystroke, cx));
+            for action in actions {
+                workspace.dispatch_action(action, window, cx);
+            }
         });
         Self {
             name: name.into(),
@@ -202,18 +209,72 @@ impl Workspace {
     }
 
     /// Dispatch a Stoat action resolved by the input state machine.
-    /// The routing body lands in the `Workspace::dispatch_action`
-    /// item of `.todo-plans/TODO.md`; this slice only provides the
-    /// entry point so the keystroke pipeline has a fixed call site.
+    /// Routes by [`ActionKind`]: pane-targeted variants update
+    /// [`Entity<PaneTree>`], root-targeted variants mutate the
+    /// workspace itself. Editor- and modal-targeted variants fall
+    /// through to a `tracing::trace` and are wired by the items
+    /// that build their target entities (editor render, review
+    /// item, modals, etc.).
     pub fn dispatch_action(
         &mut self,
-        _action: Box<dyn stoat_action::Action>,
+        action: Box<dyn stoat_action::Action>,
         _window: &mut Window,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) {
-        // FIXME: route the action to the right entity (active pane
-        // item / pane tree / active modal / workspace itself) per
-        // the `Workspace::dispatch_action` TODO item.
+        match action.kind() {
+            ActionKind::Quit => self.handle_quit(cx),
+            ActionKind::QuitAll => cx.quit(),
+            ActionKind::SplitRight => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    tree.split(Axis::Vertical, cx);
+                });
+            },
+            ActionKind::SplitDown => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    tree.split(Axis::Horizontal, cx);
+                });
+            },
+            ActionKind::FocusLeft => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    tree.focus_direction(Direction::Left, cx);
+                });
+            },
+            ActionKind::FocusRight => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    tree.focus_direction(Direction::Right, cx);
+                });
+            },
+            ActionKind::FocusUp => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    tree.focus_direction(Direction::Up, cx);
+                });
+            },
+            ActionKind::FocusDown => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    tree.focus_direction(Direction::Down, cx);
+                });
+            },
+            ActionKind::FocusNext => {
+                self.pane_tree.update(cx, |tree, cx| tree.focus_next(cx));
+            },
+            ActionKind::FocusPrev => {
+                self.pane_tree.update(cx, |tree, cx| tree.focus_prev(cx));
+            },
+            ActionKind::ClosePane => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    let focus = tree.focus();
+                    tree.close(focus, cx);
+                });
+            },
+            ActionKind::CloseOtherPanes => {
+                self.pane_tree.update(cx, |tree, cx| {
+                    tree.close_others(cx);
+                });
+            },
+            other => {
+                tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
+            },
+        }
     }
 }
 
@@ -577,5 +638,149 @@ mod tests {
 
         let sm = ws.read_with(&cx, |w, _| w.input_state_machine().clone());
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), Some(5)));
+    }
+
+    fn dispatch<A: stoat_action::Action>(
+        ws: &Entity<Workspace>,
+        vcx: &mut VisualTestContext,
+        action: A,
+    ) {
+        ws.update_in(vcx, |w, window, cx| {
+            w.dispatch_action(Box::new(action), window, cx);
+        });
+    }
+
+    #[test]
+    fn dispatch_split_right_grows_pane_tree() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+    }
+
+    #[test]
+    fn dispatch_split_down_grows_pane_tree() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitDown);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+    }
+
+    #[test]
+    fn dispatch_close_pane_after_split_returns_to_single() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        dispatch(&ws, vcx, stoat_action::ClosePane);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn dispatch_close_other_panes_collapses_to_focused() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        dispatch(&ws, vcx, stoat_action::SplitDown);
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        dispatch(&ws, vcx, stoat_action::defs::pane::CloseOtherPanes);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn dispatch_focus_direction_changes_focused_pane() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        let after_split = pane_tree.read_with(vcx, |t, _| t.focus());
+
+        dispatch(&ws, vcx, stoat_action::FocusLeft);
+        vcx.run_until_parked();
+
+        let after_focus_left = pane_tree.read_with(vcx, |t, _| t.focus());
+        assert_ne!(after_focus_left, after_split);
+    }
+
+    #[test]
+    fn dispatch_focus_next_cycles_through_panes() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        let after_split = pane_tree.read_with(vcx, |t, _| t.focus());
+
+        dispatch(&ws, vcx, stoat_action::FocusNext);
+        vcx.run_until_parked();
+        let after_next = pane_tree.read_with(vcx, |t, _| t.focus());
+        assert_ne!(after_next, after_split);
+
+        dispatch(&ws, vcx, stoat_action::FocusNext);
+        vcx.run_until_parked();
+        let after_wrap = pane_tree.read_with(vcx, |t, _| t.focus());
+        assert_eq!(after_wrap, after_split);
+    }
+
+    #[test]
+    fn dispatch_quit_closes_focused_pane_when_multiple_exist() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+
+        dispatch(&ws, vcx, stoat_action::Quit);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn dispatch_unknown_action_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let before = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+
+        dispatch(&ws, vcx, stoat_action::MoveLeft);
+        vcx.run_until_parked();
+
+        let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn keystroke_routes_split_right_through_state_machine() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (config, errors) = stoat_config::parse("on key { s -> SplitRight(); }");
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let keymap = Keymap::compile(&config.expect("config"));
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_keymap(keymap));
+
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let window = vcx.window_handle();
+        cx.simulate_keystrokes(window, "s");
+        cx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 2);
     }
 }

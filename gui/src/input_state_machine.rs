@@ -1,6 +1,6 @@
 use crate::workspace::Workspace;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gpui::{Context, FocusHandle, Keystroke, WeakEntity, Window};
+use gpui::{Context, FocusHandle, Keystroke, WeakEntity};
 use stoat::{
     keymap::{Keymap, KeymapState, StateValue},
     keymap_state::{normalize_shift_event, resolve_action},
@@ -105,21 +105,39 @@ impl InputStateMachine {
         &self.keymap
     }
 
+    /// Replace the active keymap. Used by the keymap-loader item to
+    /// hot-reload bindings when settings change, and by tests to
+    /// stage a known binding before driving keystrokes through the
+    /// pipeline.
+    pub fn set_keymap(&mut self, keymap: Keymap) {
+        self.keymap = keymap;
+    }
+
     /// Drive one platform keystroke through the input pipeline:
     /// translate it to the crossterm shape the keymap engine matches
     /// against, fold an ASCII digit into the pending count when one
     /// is in flight (normal/select modes only), look up bindings
-    /// against `self` as the [`KeymapState`], resolve each match into
-    /// a [`stoat_action::Action`] via [`resolve_action`], and forward
-    /// the resolved actions to [`Workspace::dispatch_action`].
+    /// against `self` as the [`KeymapState`], and resolve each
+    /// match into a [`stoat_action::Action`] via [`resolve_action`].
+    /// Returns the resolved actions for the caller to dispatch.
+    ///
+    /// Returning the action list rather than dispatching inline
+    /// keeps this method off the workspace's update path; the
+    /// `cx.observe_keystrokes` callback already holds a `&mut
+    /// Workspace`, and re-entering [`Entity::update`] from
+    /// underneath that borrow would panic.
     ///
     /// Keystrokes the crossterm shape cannot represent (modifier-only
     /// events, unknown named keys) are silently dropped. Unknown
     /// action names and bad arg shapes are dropped after a
     /// `tracing::warn` inside [`resolve_action`].
-    pub fn feed(&mut self, keystroke: &Keystroke, window: &mut Window, cx: &mut Context<'_, Self>) {
+    pub fn feed(
+        &mut self,
+        keystroke: &Keystroke,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<Box<dyn stoat_action::Action>> {
         let Some(event) = keystroke_to_key_event(keystroke) else {
-            return;
+            return Vec::new();
         };
         let event = normalize_shift_event(event);
 
@@ -135,39 +153,37 @@ impl InputStateMachine {
                     .saturating_add(d);
                 self.pending_count = Some(new_count);
                 cx.notify();
-                return;
+                return Vec::new();
             }
         }
 
-        let actions = self
+        let resolved = self
             .keymap
             .lookup(self, &event)
             .map(<[_]>::to_vec)
             .unwrap_or_default();
 
-        if actions.is_empty() {
+        if resolved.is_empty() {
             if count_active_mode {
                 if let Some(d) = digit {
                     self.pending_count = Some(d);
                     cx.notify();
                 }
             }
-            return;
+            return Vec::new();
         }
 
-        let workspace = self.workspace.clone();
-        let mut dispatched = false;
-        for ra in &actions {
-            if let Some(action) = resolve_action(&ra.name, &ra.args) {
-                dispatched = true;
-                let _ = workspace.update(cx, |ws, cx| ws.dispatch_action(action, window, cx));
-            }
-        }
+        let actions: Vec<Box<dyn stoat_action::Action>> = resolved
+            .iter()
+            .filter_map(|ra| resolve_action(&ra.name, &ra.args))
+            .collect();
 
-        if dispatched && self.pending_count.is_some() {
+        if !actions.is_empty() && self.pending_count.is_some() {
             self.pending_count = None;
             cx.notify();
         }
+
+        actions
     }
 }
 
@@ -299,13 +315,12 @@ mod tests {
         }
     }
 
-    fn feed_in_window<R>(
+    fn feed_in_app<R>(
         cx: &mut TestAppContext,
         sm: &Entity<InputStateMachine>,
-        f: impl FnOnce(&mut InputStateMachine, &mut Window, &mut Context<'_, InputStateMachine>) -> R,
+        f: impl FnOnce(&mut InputStateMachine, &mut Context<'_, InputStateMachine>) -> R,
     ) -> R {
-        let (_, vcx) = cx.add_window_view(|_window, _cx| gpui::Empty);
-        sm.update_in(vcx, f)
+        sm.update(cx, f)
     }
 
     #[test]
@@ -344,7 +359,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         let sm = new_state_machine(&mut cx);
         let stroke = key("5");
-        feed_in_window(&mut cx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx);
+        });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), Some(5)));
     }
 
@@ -354,9 +371,9 @@ mod tests {
         let sm = new_state_machine(&mut cx);
         let first = key("5");
         let second = key("2");
-        feed_in_window(&mut cx, &sm, |sm, window, cx| {
-            sm.feed(&first, window, cx);
-            sm.feed(&second, window, cx);
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&first, cx);
+            sm.feed(&second, cx);
         });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), Some(52)));
     }
@@ -369,7 +386,9 @@ mod tests {
             sm.mode = StateValue::String("insert".into());
         });
         let stroke = key("5");
-        feed_in_window(&mut cx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx);
+        });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
@@ -384,7 +403,9 @@ mod tests {
                 ..Modifiers::default()
             },
         );
-        feed_in_window(&mut cx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx);
+        });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
@@ -393,7 +414,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         let sm = new_state_machine(&mut cx);
         let stroke = key("q");
-        feed_in_window(&mut cx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx);
+        });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
@@ -404,7 +427,9 @@ mod tests {
         let sm = new_state_machine_with_keymap(&mut cx, keymap);
         sm.update(&mut cx, |sm, _| sm.pending_count = Some(3));
         let stroke = key("q");
-        feed_in_window(&mut cx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx);
+        });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
@@ -421,7 +446,9 @@ mod tests {
                 ..Modifiers::default()
             },
         );
-        feed_in_window(&mut cx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx);
+        });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
