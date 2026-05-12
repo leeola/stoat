@@ -52,7 +52,11 @@ pub use dock::{Dock, DockEvent, DockSide, DockVisibility};
 pub use editor::{Editor, EditorEvent};
 pub use editor_input::EditorInput;
 pub use executor::spawn_with_entity;
-pub use globals::{install_production_globals, Globals, LanguageRegistry};
+pub use globals::{
+    install_production_globals, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal,
+    ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry,
+    LspHostGlobal, ShellHostGlobal, TerminalHostGlobal,
+};
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
@@ -75,9 +79,10 @@ pub use tab_bar::{render_tab_bar, DraggedTab};
 pub use theme::Theme;
 pub use workspace::{Workspace, WorkspaceEvent};
 
-pub fn run() {
-    Application::new().run(|cx: &mut App| {
+pub fn run(globals: Globals) {
+    Application::new().run(move |cx: &mut App| {
         tracing::info!("stoat gui starting");
+        install_production_globals(cx, globals);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
         cx.open_window(
             WindowOptions {
