@@ -1,12 +1,12 @@
 use crate::{
-    host::terminal::TerminalHost,
+    host::terminal::TerminalSession,
     run::{pty::PtyNotification, RunId},
 };
 use async_trait::async_trait;
 use std::{io, sync::Mutex};
 use tokio::sync::mpsc;
 
-pub struct FakeTerminal {
+pub struct FakeTerminalSession {
     state: Mutex<FakeTerminalState>,
     read_tx: mpsc::Sender<Vec<u8>>,
     read_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
@@ -17,13 +17,13 @@ struct FakeTerminalState {
     killed: bool,
 }
 
-impl Default for FakeTerminal {
+impl Default for FakeTerminalSession {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl FakeTerminal {
+impl FakeTerminalSession {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(256);
         Self {
@@ -74,7 +74,7 @@ impl FakeTerminal {
 }
 
 #[async_trait]
-impl TerminalHost for FakeTerminal {
+impl TerminalSession for FakeTerminalSession {
     async fn write(&self, data: &[u8]) -> io::Result<()> {
         self.state.lock().unwrap().sent.push(data.to_vec());
         Ok(())
@@ -128,7 +128,7 @@ mod tests {
     #[test]
     fn captures_writes() {
         rt().block_on(async {
-            let fake = FakeTerminal::new();
+            let fake = FakeTerminalSession::new();
             fake.write(b"hello").await.unwrap();
             fake.write(b"world").await.unwrap();
             assert_eq!(fake.sent_strings(), ["hello", "world"]);
@@ -140,7 +140,7 @@ mod tests {
     #[test]
     fn tracks_kill() {
         rt().block_on(async {
-            let fake = FakeTerminal::new();
+            let fake = FakeTerminalSession::new();
             assert!(!fake.was_killed());
             fake.kill().await.unwrap();
             assert!(fake.was_killed());
@@ -150,7 +150,7 @@ mod tests {
     #[test]
     fn read_returns_pushed_data() {
         rt().block_on(async {
-            let fake = FakeTerminal::new();
+            let fake = FakeTerminalSession::new();
             fake.push_output(b"hello");
             let mut buf = [0u8; 64];
             let n = fake.read(&mut buf).await.unwrap();

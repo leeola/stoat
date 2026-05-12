@@ -5,7 +5,7 @@ use gpui::{
 };
 use std::{sync::Arc, time::Duration};
 use stoat::host::fake::{
-    terminal::FakeTerminal, FakeClaudeCodeHost, FakeClipboard, FakeGit, FakeLsp,
+    terminal::FakeTerminalSession, FakeClaudeCodeHost, FakeClipboard, FakeGit, FakeLsp,
 };
 use stoat_host::{FakeEnv, FakeFs, FakeFsWatcher, FakeShell};
 use stoat_scheduler::TestScheduler;
@@ -22,7 +22,7 @@ pub struct TestHarness {
     git: Arc<FakeGit>,
     claude: Arc<FakeClaudeCodeHost>,
     clipboard: Arc<FakeClipboard>,
-    terminal: Arc<FakeTerminal>,
+    terminal: Arc<FakeTerminalSession>,
     scheduler: Arc<TestScheduler>,
 }
 
@@ -52,7 +52,7 @@ impl TestHarness {
             git: Arc::new(FakeGit::new()),
             claude: Arc::new(FakeClaudeCodeHost::new()),
             clipboard: Arc::new(FakeClipboard::new()),
-            terminal: Arc::new(FakeTerminal::new()),
+            terminal: Arc::new(FakeTerminalSession::new()),
             scheduler: Arc::new(TestScheduler::new()),
         }
     }
@@ -162,7 +162,7 @@ impl TestHarness {
         &self.clipboard
     }
 
-    pub fn terminal(&self) -> &Arc<FakeTerminal> {
+    pub fn terminal(&self) -> &Arc<FakeTerminalSession> {
         &self.terminal
     }
 

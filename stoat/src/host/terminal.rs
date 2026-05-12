@@ -1,22 +1,78 @@
 use async_trait::async_trait;
-use std::{io, sync::Mutex};
+use portable_pty::CommandBuilder;
+use std::{io, path::PathBuf, sync::Mutex};
 use tokio::sync::mpsc;
 
+/// Process-spawn parameters for [`TerminalHost::spawn`]. Carries
+/// the data both [`crate::run::spawn_shell`] (the persistent
+/// shell variant) and [`crate::run::spawn_oneshot`] (the single
+/// command variant) need to build a [`portable_pty::CommandBuilder`].
+#[derive(Debug, Clone)]
+pub struct SpawnArgs {
+    pub program: String,
+    pub args: Vec<String>,
+    pub env: Vec<(String, String)>,
+    pub cwd: PathBuf,
+    pub width: u16,
+}
+
+/// Per-PTY I/O handle returned by [`TerminalHost::spawn`].
+/// Implementors expose write/read against the PTY plus a
+/// best-effort kill of the spawned child.
 #[async_trait]
-pub trait TerminalHost: Send + Sync {
+pub trait TerminalSession: Send + Sync {
     async fn write(&self, data: &[u8]) -> io::Result<()>;
     async fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
     async fn kill(&self) -> io::Result<()>;
 }
 
-pub(crate) struct PtyTerminal {
+/// Factory that opens new PTY-backed terminal sessions.
+/// Production wires [`crate::host::local::LocalTerminalHost`];
+/// tests wire a fake that returns a pre-configured
+/// [`crate::host::fake::terminal::FakeTerminalSession`].
+#[async_trait]
+pub trait TerminalHost: Send + Sync {
+    async fn spawn(&self, args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>>;
+}
+
+/// Synchronous PTY-open helper shared between
+/// [`LocalTerminalHost::spawn`] and the legacy
+/// [`crate::run::spawn_shell`] / [`crate::run::spawn_oneshot`]
+/// entry points. Lives here so both call sites use the same
+/// portable-pty boilerplate without an async detour.
+pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(portable_pty::PtySize {
+            rows: 24,
+            cols: args.width,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(io::Error::other)?;
+
+    let mut cmd = CommandBuilder::new(args.program);
+    cmd.args(&args.args);
+    for (k, v) in &args.env {
+        cmd.env(k, v);
+    }
+    cmd.cwd(&args.cwd);
+
+    let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
+    let writer = pair.master.take_writer().map_err(io::Error::other)?;
+    let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+
+    Ok(PtyTerminalSession::new(writer, child, reader))
+}
+
+pub struct PtyTerminalSession {
     writer: Mutex<Box<dyn io::Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     read_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
     leftover: tokio::sync::Mutex<Vec<u8>>,
 }
 
-impl PtyTerminal {
+impl PtyTerminalSession {
     pub(crate) fn new(
         writer: Box<dyn io::Write + Send>,
         child: Box<dyn portable_pty::Child + Send + Sync>,
@@ -51,7 +107,7 @@ fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec
 }
 
 #[async_trait]
-impl TerminalHost for PtyTerminal {
+impl TerminalSession for PtyTerminalSession {
     async fn write(&self, data: &[u8]) -> io::Result<()> {
         let mut writer = self
             .writer
@@ -92,5 +148,48 @@ impl TerminalHost for PtyTerminal {
             .lock()
             .map_err(|e| io::Error::other(e.to_string()))?;
         child.kill().map_err(io::Error::other)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::host::local::LocalTerminalHost;
+
+    fn rt() -> tokio::runtime::Runtime {
+        tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap()
+    }
+
+    #[test]
+    fn local_host_spawns_and_reads_output() {
+        rt().block_on(async {
+            let host = LocalTerminalHost;
+            let args = SpawnArgs {
+                program: "bash".into(),
+                args: vec!["-c".into(), "printf hello".into()],
+                env: vec![("TERM".into(), "dumb".into())],
+                cwd: std::env::temp_dir(),
+                width: 80,
+            };
+            let session = host.spawn(args).await.expect("spawn");
+            let mut collected = Vec::new();
+            let mut buf = [0u8; 64];
+            while let Ok(n) = session.read(&mut buf).await {
+                if n == 0 {
+                    break;
+                }
+                collected.extend_from_slice(&buf[..n]);
+                if collected.windows(5).any(|w| w == b"hello") {
+                    break;
+                }
+            }
+            assert!(
+                collected.windows(5).any(|w| w == b"hello"),
+                "expected hello in output, got {collected:?}",
+            );
+        });
     }
 }
