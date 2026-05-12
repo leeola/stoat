@@ -11,6 +11,10 @@ use gpui::{Pixels, Point, Size};
 /// 0)` -- the surrounding handler is responsible for filtering
 /// pixel events that fell outside the text region before calling
 /// in.
+#[allow(
+    dead_code,
+    reason = "production caller lands with the editor render item"
+)]
 pub fn point_to_grid(point: Point<Pixels>, cell_size: Size<Pixels>) -> (u32, u32) {
     let cell_w: f32 = cell_size.width.into();
     let cell_h: f32 = cell_size.height.into();
