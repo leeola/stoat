@@ -2,8 +2,10 @@ use crate::{
     dock::{Dock, DockSide},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
+    keymap_loader::{compile_default_keymap, compile_from_settings},
     modal_layer::{ModalLayer, ModalView},
     pane_tree::PaneTree,
+    settings::Settings,
     status_bar::StatusBar,
 };
 use gpui::{
@@ -11,12 +13,8 @@ use gpui::{
     IntoElement, KeyContext, Render, SharedString, Styled, Subscription, Window,
 };
 use std::path::PathBuf;
-use stoat::{
-    keymap::Keymap,
-    pane::{Axis, Direction},
-};
+use stoat::pane::{Axis, Direction};
 use stoat_action::ActionKind;
-use stoat_config::Config;
 
 /// Top-level workspace entity. Composes the structural pieces of
 /// a single Stoat window: the git root, the pane tree, any docks
@@ -60,13 +58,9 @@ impl Workspace {
             cx.new(|cx| ModalLayer::new(Some(weak), cx))
         };
         let status_bar = cx.new(StatusBar::new);
-        // FIXME: replace the empty Keymap placeholder with a real
-        // compile of the loaded config once the keymap loader
-        // (`.todo-plans/TODO.md` "Stoat-native keymap loader") lands.
-        let keymap = Keymap::compile(&Config {
-            blocks: Vec::new(),
-            themes: Vec::new(),
-        });
+        let keymap = cx
+            .try_global::<Settings>()
+            .map_or_else(compile_default_keymap, compile_from_settings);
         let input_state_machine = cx.new(|_| InputStateMachine::new(workspace_handle, keymap));
         let keystroke_subscription = cx.observe_keystrokes(|workspace, event, window, cx| {
             let sm = workspace.input_state_machine.clone();
@@ -75,6 +69,12 @@ impl Workspace {
             for action in actions {
                 workspace.dispatch_action(action, window, cx);
             }
+        });
+        let settings_subscription = cx.observe_global::<Settings>(|workspace, cx| {
+            let keymap = compile_from_settings(cx.global::<Settings>());
+            workspace
+                .input_state_machine
+                .update(cx, |sm, _| sm.set_keymap(keymap));
         });
         Self {
             name: name.into(),
@@ -85,7 +85,7 @@ impl Workspace {
             status_bar,
             input_state_machine,
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![keystroke_subscription],
+            _subscriptions: vec![keystroke_subscription, settings_subscription],
         }
     }
 
@@ -323,6 +323,7 @@ mod tests {
     };
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
+    use stoat::keymap::Keymap;
 
     struct WorkspaceItem {
         label: SharedString,
@@ -471,6 +472,84 @@ mod tests {
             assert!(!sm.claude_focused());
             assert_eq!(sm.pending_count(), None);
         });
+    }
+
+    #[test]
+    fn fresh_workspace_has_default_keymap() {
+        use stoat::keymap::{KeymapState, StateValue};
+
+        struct NormalState;
+        impl KeymapState for NormalState {
+            fn get(&self, field: &str) -> Option<&StateValue> {
+                static MODE: std::sync::OnceLock<StateValue> = std::sync::OnceLock::new();
+                if field == "mode" {
+                    Some(MODE.get_or_init(|| StateValue::String("normal".into())))
+                } else {
+                    None
+                }
+            }
+        }
+
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let sm = ws.read_with(&cx, |w, _| w.input_state_machine().clone());
+        let count = sm.read_with(&cx, |sm, _| sm.keymap().active_bindings(&NormalState).len());
+        assert!(
+            count > 0,
+            "fresh workspace should have the default keymap installed"
+        );
+    }
+
+    #[test]
+    fn settings_change_swaps_keymap() {
+        use std::collections::HashMap;
+        use stoat::keymap::{KeymapState, StateValue};
+
+        struct NormalState {
+            values: HashMap<String, StateValue>,
+        }
+
+        impl KeymapState for NormalState {
+            fn get(&self, field: &str) -> Option<&StateValue> {
+                self.values.get(field)
+            }
+        }
+
+        fn normal() -> NormalState {
+            let mut values = HashMap::new();
+            values.insert("mode".into(), StateValue::String("normal".into()));
+            NormalState { values }
+        }
+
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.set_global(Settings::load_from_source("on key { x -> Quit(); }"));
+        });
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let sm = ws.read_with(&cx, |w, _| w.input_state_machine().clone());
+
+        let before = sm.read_with(&cx, |sm, _| {
+            sm.keymap()
+                .active_bindings(&normal())
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(before, vec!["x".to_string()]);
+
+        cx.update(|cx| {
+            cx.set_global(Settings::load_from_source("on key { y -> Quit(); }"));
+        });
+        cx.run_until_parked();
+
+        let after = sm.read_with(&cx, |sm, _| {
+            sm.keymap()
+                .active_bindings(&normal())
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(after, vec!["y".to_string()]);
     }
 
     #[test]

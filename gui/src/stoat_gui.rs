@@ -26,6 +26,7 @@ mod executor;
 mod globals;
 mod input_state_machine;
 mod item;
+mod keymap_loader;
 mod lsp_state;
 mod modal_layer;
 mod multi_buffer;
@@ -58,6 +59,9 @@ use gpui::{
 };
 pub use input_state_machine::{InputStateMachine, Operator};
 pub use item::{DeserializeSnafu, ItemError, ItemHandle, ItemView, SaveSnafu};
+pub use keymap_loader::{
+    compile_default_keymap, compile_from_settings, compile_from_source, DEFAULT_KEYMAP,
+};
 pub use lsp_state::{LspState, LspStateEvent};
 pub use modal_layer::ModalLayer;
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
