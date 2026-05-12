@@ -91,56 +91,7 @@ impl RuleBasedPolicy {
             prompt_tx: Some(prompt_tx),
         }
     }
-}
 
-#[async_trait]
-impl PermissionCallback for RuleBasedPolicy {
-    async fn can_use_tool(
-        &self,
-        tool_name: &str,
-        input_json: &str,
-        _context: ToolPermissionContext<'_>,
-    ) -> PermissionResult {
-        let target = extract_primary_input(tool_name, input_json);
-
-        if let Some(compiled) = self.rules.get(tool_name) {
-            if any_match(&compiled.always_deny, &target) {
-                return PermissionResult::Deny {
-                    message: format!("denied by always_deny rule on {tool_name}"),
-                    interrupt: false,
-                };
-            }
-        }
-
-        {
-            let runtime = self.runtime.lock().expect("runtime mutex poisoned");
-            if runtime
-                .session_allowed
-                .contains(&(tool_name.to_string(), target.clone()))
-            {
-                return PermissionResult::allow();
-            }
-            if let Some(patterns) = runtime.runtime_allow.get(tool_name) {
-                if any_match(patterns, &target) {
-                    return PermissionResult::allow();
-                }
-            }
-        }
-
-        let Some(compiled) = self.rules.get(tool_name) else {
-            return PermissionResult::allow();
-        };
-        if any_match(&compiled.always_confirm, &target) {
-            return self.prompt_or_deny(tool_name, &target, input_json).await;
-        }
-        if any_match(&compiled.always_allow, &target) {
-            return PermissionResult::allow();
-        }
-        PermissionResult::allow()
-    }
-}
-
-impl RuleBasedPolicy {
     async fn prompt_or_deny(
         &self,
         tool_name: &str,
@@ -224,6 +175,53 @@ impl RuleBasedPolicy {
                 interrupt: false,
             },
         }
+    }
+}
+
+#[async_trait]
+impl PermissionCallback for RuleBasedPolicy {
+    async fn can_use_tool(
+        &self,
+        tool_name: &str,
+        input_json: &str,
+        _context: ToolPermissionContext<'_>,
+    ) -> PermissionResult {
+        let target = extract_primary_input(tool_name, input_json);
+
+        if let Some(compiled) = self.rules.get(tool_name) {
+            if any_match(&compiled.always_deny, &target) {
+                return PermissionResult::Deny {
+                    message: format!("denied by always_deny rule on {tool_name}"),
+                    interrupt: false,
+                };
+            }
+        }
+
+        {
+            let runtime = self.runtime.lock().expect("runtime mutex poisoned");
+            if runtime
+                .session_allowed
+                .contains(&(tool_name.to_string(), target.clone()))
+            {
+                return PermissionResult::allow();
+            }
+            if let Some(patterns) = runtime.runtime_allow.get(tool_name) {
+                if any_match(patterns, &target) {
+                    return PermissionResult::allow();
+                }
+            }
+        }
+
+        let Some(compiled) = self.rules.get(tool_name) else {
+            return PermissionResult::allow();
+        };
+        if any_match(&compiled.always_confirm, &target) {
+            return self.prompt_or_deny(tool_name, &target, input_json).await;
+        }
+        if any_match(&compiled.always_allow, &target) {
+            return PermissionResult::allow();
+        }
+        PermissionResult::allow()
     }
 }
 
