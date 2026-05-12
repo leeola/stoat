@@ -88,7 +88,7 @@ impl TestHarness {
         stoat.set_fs_watch_host(fake_fs_watcher.clone());
         stoat.set_git_host(fake_git.clone());
         stoat.set_env_host(fake_env.clone());
-        stoat.set_lsp_host(fake_lsp.clone());
+        stoat.set_lsp_server(fake_lsp.clone());
         stoat.set_clipboard_host(fake_clipboard.clone());
         stoat.update(Event::Resize(width, height));
 
@@ -156,7 +156,7 @@ impl TestHarness {
     /// Expose the [`crate::host::FakeLsp`] backing this harness so
     /// tests can seed hovers, completions, definitions, diagnostics,
     /// etc. before driving code that reads them through
-    /// `stoat.lsp_host()`.
+    /// `stoat.lsp_server()`.
     pub fn fake_lsp(&self) -> &Arc<crate::host::FakeLsp> {
         &self.fake_lsp
     }
@@ -209,9 +209,9 @@ impl TestHarness {
             "GitHost was replaced during the test; real git operations may have escaped"
         );
         assert_eq!(
-            alloc_ptr(&self.stoat.lsp_host),
+            alloc_ptr(&self.stoat.lsp_server),
             alloc_ptr(&self.fake_lsp),
-            "LspHost was replaced during the test; real LSP traffic may have escaped"
+            "LspServer was replaced during the test; real LSP traffic may have escaped"
         );
         assert_eq!(
             alloc_ptr(&self.stoat.clipboard_host),
@@ -1690,10 +1690,10 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "LspHost was replaced")]
-    fn assert_no_real_io_panics_when_lsp_host_swapped() {
+    #[should_panic(expected = "LspServer was replaced")]
+    fn assert_no_real_io_panics_when_lsp_server_swapped() {
         let mut h = TestHarness::with_size(80, 24);
-        h.stoat.set_lsp_host(Arc::new(crate::host::NoopLsp));
+        h.stoat.set_lsp_server(Arc::new(crate::host::NoopLspServer));
         h.assert_no_real_io();
     }
 

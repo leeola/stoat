@@ -31,7 +31,7 @@ use crate::{
     completion::{
         applicable_sources, CompletionContext, CompletionItem, CompletionPopup, CompletionSource,
     },
-    host::{FsHost, LanguageServerFeature, LspHost, OffsetEncoding},
+    host::{FsHost, LanguageServerFeature, LspServer, OffsetEncoding},
     lsp::util,
     pane::{FocusTarget, View},
 };
@@ -168,16 +168,16 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         return;
     }
 
-    let lsp_host = stoat.lsp_host.clone();
+    let lsp_server = stoat.lsp_server.clone();
     let fs_host = stoat.fs_host.clone();
     let executor = stoat.executor.clone();
     let home_dir = stoat.env_host.var("HOME").map(PathBuf::from);
-    let encoding = lsp_host.offset_encoding();
+    let encoding = lsp_server.offset_encoding();
 
     let base_dir = base_dir_for(snapshot.source_path.as_deref(), &snapshot.git_root);
 
     let lsp_params = if sources.contains(&CompletionSource::Lsp)
-        && lsp_host.supports_feature(LanguageServerFeature::Completion)
+        && lsp_server.supports_feature(LanguageServerFeature::Completion)
     {
         build_lsp_params(
             snapshot.source_path.as_deref(),
@@ -193,7 +193,7 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         executor,
         owned,
         sources,
-        lsp_host,
+        lsp_server,
         fs_host,
         snapshot.rope,
         encoding,
@@ -316,7 +316,7 @@ async fn run_request(
     executor: stoat_scheduler::Executor,
     owned: ContextOwned,
     sources: Vec<CompletionSource>,
-    lsp_host: Arc<dyn LspHost>,
+    lsp_server: Arc<dyn LspServer>,
     fs_host: Arc<dyn FsHost>,
     rope: Rope,
     encoding: OffsetEncoding,
@@ -343,7 +343,7 @@ async fn run_request(
                     items.extend(
                         crate::completion::lsp::fetch(
                             &ctx,
-                            lsp_host.as_ref(),
+                            lsp_server.as_ref(),
                             params,
                             &rope,
                             encoding,

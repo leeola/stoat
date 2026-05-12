@@ -10,7 +10,7 @@ use std::{path::Path, str::FromStr};
 
 /// Write the focused buffer's rope text to its backing file via
 /// [`crate::host::FsHost::write`], clear the buffer's dirty flag,
-/// and notify the LSP server via [`crate::host::LspHost::did_save`].
+/// and notify the LSP server via [`crate::host::LspServer::did_save`].
 /// No-op for scratch buffers (no path) or when no editor is
 /// focused. Write errors leave the dirty flag set so the user can
 /// retry.
@@ -50,7 +50,7 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
         text_document: TextDocumentIdentifier { uri },
         text: Some(text),
     };
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     stoat
         .executor
         .spawn(async move {
@@ -64,7 +64,7 @@ pub(super) fn save_buffer(stoat: &mut Stoat) -> UpdateEffect {
 
 /// Drop the focused buffer from the workspace's
 /// [`crate::buffer_registry::BufferRegistry`] and notify the LSP
-/// server via [`crate::host::LspHost::did_close`]. Editor states
+/// server via [`crate::host::LspServer::did_close`]. Editor states
 /// that referenced the buffer are rebound to fresh scratch buffers
 /// so panes stay coherent. Refuses to close when the buffer is
 /// dirty so unsaved edits aren't silently lost.
@@ -119,7 +119,7 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
                 let params = DidCloseTextDocumentParams {
                     text_document: TextDocumentIdentifier { uri },
                 };
-                let lsp = stoat.lsp_host.clone();
+                let lsp = stoat.lsp_server.clone();
                 stoat
                     .executor
                     .spawn(async move {

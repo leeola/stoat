@@ -9,7 +9,7 @@ use stoat::{
 /// [`LspState::update`]; the wrapper emits
 /// [`LspStateEvent::Changed`] when a Progress variant moves the
 /// state forward so the status bar re-paints. Today the inner type
-/// tracks a single `LspHost`; a future `LspManager` widens the key
+/// tracks a single `LspServer`; a future `LspManager` widens the key
 /// to `(LanguageServerId, ProgressToken)` and additional
 /// per-server status fields slot in without changing the event
 /// surface.

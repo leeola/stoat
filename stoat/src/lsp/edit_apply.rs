@@ -188,7 +188,7 @@ fn apply_text_edits_to_buffer(
     if edits.is_empty() {
         return Ok(buffer_id);
     }
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let buffer = stoat
         .active_workspace()
         .buffers

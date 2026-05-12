@@ -45,8 +45,11 @@ pub use git::{
     ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
     RebaseTodoOp, RewriteResult,
 };
-pub use local::{LocalClipboard, LocalGit, LocalTerminalHost};
-pub use lsp::{LanguageServerFeature, LspHost, LspNotification, NoopLsp, OffsetEncoding};
+pub use local::{LocalClipboard, LocalGit, LocalLspHost, LocalTerminalHost};
+pub use lsp::{
+    LanguageServerFeature, LspHost, LspNotification, LspServer, NoopLspHost, NoopLspServer,
+    OffsetEncoding,
+};
 #[cfg(any(test, feature = "test-support"))]
 pub use stoat_host::FakeShell;
 pub use stoat_host::{

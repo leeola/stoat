@@ -5,7 +5,7 @@
 //!
 //! Per-source fetch routines (path entries via
 //! [`crate::host::FsHost`], LSP completion via
-//! [`crate::host::LspHost`], rope-walk word source) live in
+//! [`crate::host::LspServer`], rope-walk word source) live in
 //! sibling submodules.
 
 pub(crate) mod accept;

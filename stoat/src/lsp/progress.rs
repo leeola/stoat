@@ -22,9 +22,9 @@ pub struct LspProgressEntry {
 }
 
 /// Per-server work-done progress state. Today there is a single
-/// [`crate::host::LspHost`] slot, so this map keys by
+/// [`crate::host::LspServer`] slot, so this map keys by
 /// [`ProgressToken`]; multi-server support keys by
-/// `(LanguageServerId, ProgressToken)` once `LspHost` is wrapped by
+/// `(LanguageServerId, ProgressToken)` once `LspServer` is wrapped by
 /// the planned `LspManager`.
 #[derive(Debug, Default)]
 pub struct LspProgressMap {

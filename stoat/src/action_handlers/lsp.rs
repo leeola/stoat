@@ -1,6 +1,6 @@
 //! LSP buffer-lifecycle plumbing. This module routes
 //! [`crate::buffer::BufferId`] open / close / save / change events to
-//! the workspace's [`crate::host::LspHost`] so a real language server
+//! the workspace's [`crate::host::LspServer`] so a real language server
 //! can keep its document mirror in sync with the editor.
 //!
 //! `did_open` fires synchronously per [`notify_buffer_opened`] and
@@ -55,7 +55,7 @@ pub(crate) enum DiagnosticDirection {
 /// not an editor, the buffer has no path, or no diagnostic lies in
 /// the requested direction.
 pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection) -> UpdateEffect {
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let (cursor_offset, buffer_id, rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -100,7 +100,7 @@ pub(crate) fn goto_diagnostic(stoat: &mut Stoat, direction: DiagnosticDirection)
 ///
 /// The dispatch is detached on the workspace's `Executor` because
 /// `did_open` is a fire-and-forget notification; production
-/// [`crate::host::LspHost`] implementations may write to a JSON-RPC
+/// [`crate::host::LspServer`] implementations may write to a JSON-RPC
 /// channel asynchronously, so blocking the open path on it would be
 /// wrong. Errors are swallowed -- a notification failure is not
 /// fatal to the open.
@@ -148,7 +148,7 @@ pub(crate) fn notify_buffer_opened(
             text: text.to_string(),
         },
     };
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     stoat
         .executor
         .spawn(async move {
@@ -171,7 +171,7 @@ pub(crate) fn notify_buffer_opened(
 /// [`TextDocumentSyncKind::INCREMENTAL`] (per-edit ranges via
 /// [`patch_to_content_changes`]). `NONE` skips silently.
 pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
-    let sync_kind = resolve_sync_kind(&stoat.lsp_host.capabilities().text_document_sync);
+    let sync_kind = resolve_sync_kind(&stoat.lsp_server.capabilities().text_document_sync);
     if !matches!(
         sync_kind,
         TextDocumentSyncKind::FULL | TextDocumentSyncKind::INCREMENTAL
@@ -185,7 +185,7 @@ pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
         return;
     }
 
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
 
     let dispatches: Vec<DispatchPlan> = stoat
         .lsp_opened
@@ -210,7 +210,7 @@ pub(crate) fn notify_buffer_changes_pending(stoat: &mut Stoat) {
             content_changes: plan.content_changes,
         };
 
-        let lsp = stoat.lsp_host.clone();
+        let lsp = stoat.lsp_server.clone();
         let executor = stoat.executor.clone();
         let last_text = stoat.lsp_last_delivered_text.clone();
         let last_version = stoat.lsp_last_delivered_buffer_version.clone();
@@ -464,11 +464,11 @@ pub(crate) fn goto_implementation(stoat: &mut Stoat) -> UpdateEffect {
 /// it, cancelling its spawned future -- only one in-flight jump is
 /// tracked at a time.
 fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
-    if !stoat.lsp_host.supports_feature(kind.feature()) {
+    if !stoat.lsp_server.supports_feature(kind.feature()) {
         return UpdateEffect::None;
     }
 
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let (cursor_offset, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -502,7 +502,7 @@ fn lsp_jump(stoat: &mut Stoat, kind: LspJumpKind) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let fs = stoat.fs_host.clone();
     let task = stoat.executor.spawn(async move {
         let result = match kind {
@@ -615,13 +615,13 @@ pub(crate) struct HoverPopup {
 /// is tracked at a time.
 pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
-        .lsp_host
+        .lsp_server
         .supports_feature(LanguageServerFeature::Hover)
     {
         return UpdateEffect::None;
     }
 
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let (cursor_offset, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -654,7 +654,7 @@ pub(crate) fn hover(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let task = stoat.executor.spawn(async move {
         match lsp.hover(params).await {
             Ok(Some(hover)) => Some(HoverResponse {
@@ -782,13 +782,13 @@ pub(crate) struct CodeActionPicker {
 /// code-action request is tracked at a time.
 pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
-        .lsp_host
+        .lsp_server
         .supports_feature(LanguageServerFeature::CodeAction)
     {
         return UpdateEffect::None;
     }
 
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let (range_byte, anchor_offset, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -837,7 +837,7 @@ pub(crate) fn code_action(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let task = stoat.executor.spawn(async move {
         match lsp.code_action(params).await {
             Ok(Some(actions)) => Some(actions),
@@ -978,7 +978,7 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
             }
         },
         CodeActionEntry::NeedsResolve { action, .. } => {
-            let lsp = stoat.lsp_host.clone();
+            let lsp = stoat.lsp_server.clone();
             let task = stoat.executor.spawn(async move {
                 match lsp.code_action_resolve(*action).await {
                     Ok(resolved) => resolved.edit,
@@ -1007,7 +1007,7 @@ pub(crate) fn pick_code_action(stoat: &mut Stoat, index: usize) -> bool {
 /// reply via the `workspace/applyEdit` request path); errors are
 /// logged and swallowed so a failing command does not crash the app.
 fn dispatch_execute_command(stoat: &Stoat, command: lsp_types::Command) {
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let label = command.command.clone();
     let params = lsp_types::ExecuteCommandParams {
         command: command.command,
@@ -1065,13 +1065,13 @@ pub(crate) struct RenameInputState {
 /// [`LanguageServerFeature::RenameSymbol`].
 pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
-        .lsp_host
+        .lsp_server
         .supports_feature(LanguageServerFeature::RenameSymbol)
     {
         return UpdateEffect::None;
     }
 
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let (cursor_offset, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -1104,7 +1104,7 @@ pub(crate) fn rename_symbol(stoat: &mut Stoat) -> UpdateEffect {
         position,
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let task = stoat.executor.spawn(async move {
         let response = match lsp.prepare_rename(params).await {
             Ok(Some(resp)) => resp,
@@ -1213,7 +1213,7 @@ pub(crate) fn rename_input_submit(stoat: &mut Stoat) -> bool {
         new_name,
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let task = stoat.executor.spawn(async move {
         match lsp.rename(params).await {
             Ok(edit) => edit,
@@ -1300,7 +1300,7 @@ pub(crate) struct SymbolPicker {
 /// [`LanguageServerFeature::DocumentSymbols`].
 pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
-        .lsp_host
+        .lsp_server
         .supports_feature(LanguageServerFeature::DocumentSymbols)
     {
         return UpdateEffect::None;
@@ -1334,7 +1334,7 @@ pub(crate) fn open_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let task = stoat.executor.spawn(async move {
         match lsp.document_symbol(params).await {
             Ok(resp) => resp,
@@ -1366,7 +1366,7 @@ pub(crate) fn pump_lsp_symbol_picker(stoat: &mut Stoat) -> bool {
     let mut cx = Context::from_waker(&waker);
     match Pin::new(&mut task).poll(&mut cx) {
         Poll::Ready(Some(response)) => {
-            let encoding = stoat.lsp_host.offset_encoding();
+            let encoding = stoat.lsp_server.offset_encoding();
             let rope = {
                 let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
                     stoat.pending_symbol_picker = None;
@@ -1512,7 +1512,7 @@ pub(crate) struct WorkspaceSymbolPicker {
 /// mode.
 pub(crate) fn open_workspace_symbol_picker(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
-        .lsp_host
+        .lsp_server
         .supports_feature(LanguageServerFeature::WorkspaceSymbols)
     {
         return UpdateEffect::None;
@@ -1568,7 +1568,7 @@ pub(crate) fn workspace_symbol_submit(stoat: &mut Stoat) -> bool {
         partial_result_params: Default::default(),
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let task = stoat.executor.spawn(async move {
         match lsp.workspace_symbol(params).await {
             Ok(resp) => resp,
@@ -1686,7 +1686,7 @@ pub(crate) fn pick_workspace_symbol(stoat: &mut Stoat, index: usize) -> bool {
     let focused = stoat.active_workspace().panes.focus();
     crate::action_handlers::file::open_file_in_pane(stoat, focused, &entry.path);
 
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
         return true;
     };
@@ -1718,13 +1718,13 @@ pub(crate) struct FormatResponse {
 /// [`LanguageServerFeature::Format`].
 pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
     if !stoat
-        .lsp_host
+        .lsp_server
         .supports_feature(LanguageServerFeature::Format)
     {
         return UpdateEffect::None;
     }
 
-    let encoding = stoat.lsp_host.offset_encoding();
+    let encoding = stoat.lsp_server.offset_encoding();
     let (range_byte, buffer_id, source_rope) = {
         let Some(editor) = crate::action_handlers::focused_editor_mut(stoat) else {
             return UpdateEffect::None;
@@ -1769,7 +1769,7 @@ pub(crate) fn format_selections(stoat: &mut Stoat) -> UpdateEffect {
         work_done_progress_params: WorkDoneProgressParams::default(),
     };
 
-    let lsp = stoat.lsp_host.clone();
+    let lsp = stoat.lsp_server.clone();
     let task = stoat.executor.spawn(async move {
         match lsp.range_formatting(params).await {
             Ok(Some(edits)) if !edits.is_empty() => Some(FormatResponse {

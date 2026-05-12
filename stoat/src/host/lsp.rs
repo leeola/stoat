@@ -27,8 +27,10 @@ use lsp_types::{
 use serde_json::Value;
 use std::{
     io,
+    path::Path,
     sync::{Arc, LazyLock},
 };
+use stoat_language::Language;
 
 #[derive(Debug, Clone)]
 pub enum LspNotification {
@@ -60,7 +62,7 @@ pub enum LspNotification {
 }
 
 /// Server-to-client request that the editor must answer via
-/// [`LspHost::reply`]. Distinct from [`LspNotification`] (which is
+/// [`LspServer::reply`]. Distinct from [`LspNotification`] (which is
 /// fire-and-forget) because the JSON-RPC envelope carries an `id`
 /// the server uses to correlate the eventual response. Each variant
 /// pairs the `id` with the typed params struct from `lsp_types`;
@@ -125,7 +127,7 @@ pub enum IncomingRequest {
 
 impl IncomingRequest {
     /// JSON-RPC request id, regardless of variant. The editor
-    /// echoes this back to [`LspHost::reply`] so the server can
+    /// echoes this back to [`LspServer::reply`] so the server can
     /// correlate the response with the originating request.
     pub fn id(&self) -> &NumberOrString {
         match self {
@@ -141,7 +143,7 @@ impl IncomingRequest {
 }
 
 /// JSON-RPC error envelope returned in place of a successful result
-/// from [`LspHost::reply`]. Mirrors the spec shape (`code`, `message`,
+/// from [`LspServer::reply`]. Mirrors the spec shape (`code`, `message`,
 /// optional `data`); `lsp_types` deliberately omits the JSON-RPC
 /// envelope so we model it locally. Code values follow the JSON-RPC
 /// 2.0 + LSP error-code conventions (e.g. `-32601` for
@@ -174,7 +176,7 @@ pub enum OffsetEncoding {
 /// Coarse capability category used to ask "does this server support
 /// feature X" without re-walking the raw [`ServerCapabilities`] at
 /// every callsite. The variant set mirrors the user-facing actions
-/// stoat dispatches; `LspHost::supports_feature` decodes each
+/// stoat dispatches; `LspServer::supports_feature` decodes each
 /// against the relevant `ServerCapabilities` field.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub enum LanguageServerFeature {
@@ -203,7 +205,7 @@ pub enum LanguageServerFeature {
 }
 
 #[async_trait]
-pub trait LspHost: Send + Sync {
+pub trait LspServer: Send + Sync {
     /// Capabilities the server reported in its `InitializeResult`.
     /// Returned by [`Arc`] clone so impls with interior-mutable
     /// storage (e.g. test fakes that swap capabilities mid-test)
@@ -517,19 +519,19 @@ pub trait LspHost: Send + Sync {
     ) -> io::Result<()>;
 }
 
-/// Default [`LspHost`] used when no language server is configured.
-/// Every method returns the empty / no-op success response so action
-/// handlers can call into the host unconditionally without branching
-/// on "is a real server installed". Replaced by `LocalLsp` once the
-/// production stdio transport lands; the test harness installs
+/// Default [`LspServer`] returned by [`NoopLspHost::launch`] when no
+/// language server is configured for a given language. Every method
+/// returns the empty / no-op success response so action handlers can
+/// call into the server unconditionally without branching on "is a
+/// real server installed". The test harness installs
 /// [`crate::host::FakeLsp`] in its place.
-pub struct NoopLsp;
+pub struct NoopLspServer;
 
 static NOOP_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> =
     LazyLock::new(|| Arc::new(ServerCapabilities::default()));
 
 #[async_trait]
-impl LspHost for NoopLsp {
+impl LspServer for NoopLspServer {
     fn capabilities(&self) -> Arc<ServerCapabilities> {
         NOOP_CAPABILITIES.clone()
     }
@@ -844,5 +846,33 @@ impl LspHost for NoopLsp {
         _result: Result<Value, LspResponseError>,
     ) -> io::Result<()> {
         Ok(())
+    }
+}
+
+/// Factory that launches new [`LspServer`] sessions for a given
+/// language at a given workspace root. Production wires
+/// [`crate::host::local::LocalLspHost`]; tests wire a factory that
+/// hands out a pre-configured [`crate::host::FakeLsp`].
+///
+/// Mirrors the factory shape of [`crate::host::ClaudeCodeHost`] and
+/// [`crate::host::TerminalHost`] so all hosts register uniformly.
+#[async_trait]
+pub trait LspHost: Send + Sync {
+    /// Launch a server session for `language` rooted at `root`. The
+    /// returned [`LspServer`] has not yet been initialized; the caller
+    /// is responsible for the `initialize` handshake.
+    async fn launch(&self, language: &Language, root: &Path) -> io::Result<Box<dyn LspServer>>;
+}
+
+/// [`LspHost`] that always launches a [`NoopLspServer`]. Used as the
+/// default factory when no production stdio transport is wired, so
+/// editor flows that consult an [`LspServer`] never observe an
+/// "absent host" branch.
+pub struct NoopLspHost;
+
+#[async_trait]
+impl LspHost for NoopLspHost {
+    async fn launch(&self, _language: &Language, _root: &Path) -> io::Result<Box<dyn LspServer>> {
+        Ok(Box::new(NoopLspServer))
     }
 }

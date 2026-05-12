@@ -1,5 +1,5 @@
 //! LSP-completion source. Calls
-//! [`crate::host::LspHost::completion`] for the focused buffer's
+//! [`crate::host::LspServer::completion`] for the focused buffer's
 //! cursor position, then translates each `lsp_types::CompletionItem`
 //! into the unified [`crate::completion::CompletionItem`] shape so
 //! the popup, the trigger pipeline, and the acceptance handler can
@@ -7,7 +7,7 @@
 
 use crate::{
     completion::{CompletionContext, CompletionItem, CompletionItemKind, CompletionSource},
-    host::{LspHost, OffsetEncoding},
+    host::{LspServer, OffsetEncoding},
     lsp::util,
 };
 use lsp_types::{
@@ -27,7 +27,7 @@ use stoat_text::Rope;
 /// `Ok(None)`.
 pub async fn fetch(
     ctx: &CompletionContext<'_>,
-    lsp: &dyn LspHost,
+    lsp: &dyn LspServer,
     params: CompletionParams,
     rope: &Rope,
     encoding: OffsetEncoding,

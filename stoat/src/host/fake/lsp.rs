@@ -1,5 +1,5 @@
 use crate::host::lsp::{
-    IncomingRequest, LspHost, LspNotification, LspResponseError, OffsetEncoding,
+    IncomingRequest, LspNotification, LspResponseError, LspServer, OffsetEncoding,
 };
 use async_trait::async_trait;
 use lsp_types::{
@@ -457,7 +457,7 @@ impl LspKey {
     }
 }
 
-/// Short-circuits an `LspHost` request method into the pending
+/// Short-circuits an `LspServer` request method into the pending
 /// queue when [`FakeLsp::set_pending_mode`] has flagged its
 /// `R::METHOD` as enabled. Expansion enqueues the params plus a
 /// `oneshot::Sender<R::Result>`, then awaits the receiver and
@@ -683,8 +683,8 @@ impl FakeLsp {
     }
 
     /// Replace the server capabilities returned by
-    /// [`LspHost::capabilities`] (and consulted by
-    /// [`LspHost::supports_feature`]). Tests call this before
+    /// [`LspServer::capabilities`] (and consulted by
+    /// [`LspServer::supports_feature`]). Tests call this before
     /// driving capability-dependent code paths so the host advertises
     /// the right feature set.
     pub fn set_capabilities(&self, capabilities: ServerCapabilities) {
@@ -693,7 +693,7 @@ impl FakeLsp {
 
     /// Convenience setter that swaps just the
     /// `position_encoding` field on the stored capabilities so
-    /// [`LspHost::offset_encoding`] reflects `encoding`. Other
+    /// [`LspServer::offset_encoding`] reflects `encoding`. Other
     /// capability fields are preserved. Use this when a test only
     /// needs to control the negotiated offset encoding without
     /// rebuilding a full [`ServerCapabilities`].
@@ -711,7 +711,7 @@ impl FakeLsp {
 
     /// Convenience setter that swaps just the
     /// `text_document_sync` field on the stored capabilities so
-    /// the editor's [`LspHost::did_change`] dispatch can find the
+    /// the editor's [`LspServer::did_change`] dispatch can find the
     /// configured `TextDocumentSyncKind`. Other capability fields
     /// are preserved.
     pub fn set_text_document_sync(&self, kind: TextDocumentSyncKind) {
@@ -735,7 +735,7 @@ impl FakeLsp {
     /// Programs the [`SelectionRange`] chain returned for the
     /// `textDocument/selectionRange` call whose request position
     /// matches `(path, line, col)`. Each call to
-    /// [`LspHost::selection_range`] looks up every position in the
+    /// [`LspServer::selection_range`] looks up every position in the
     /// request; if any position is unprogrammed the host returns
     /// `None`. Replaces any previously seeded chain for the same
     /// position.
@@ -996,7 +996,7 @@ impl FakeLsp {
     }
 
     /// Snapshot of every [`RenameFilesParams`] received via
-    /// [`LspHost::did_rename`] in call order. Tests use this to
+    /// [`LspServer::did_rename`] in call order. Tests use this to
     /// assert the editor notified the server about a completed
     /// rename.
     pub fn observed_renames(&self) -> Vec<RenameFilesParams> {
@@ -1004,7 +1004,7 @@ impl FakeLsp {
     }
 
     /// Snapshot of every [`DidOpenTextDocumentParams`] received
-    /// via [`LspHost::did_open`] in call order. Tests use this to
+    /// via [`LspServer::did_open`] in call order. Tests use this to
     /// assert that the editor notified the server when a buffer
     /// was opened, and that re-opens dedupe at the call site.
     pub fn observed_opens(&self) -> Vec<DidOpenTextDocumentParams> {
@@ -1012,7 +1012,7 @@ impl FakeLsp {
     }
 
     /// Snapshot of every [`DidChangeTextDocumentParams`] received
-    /// via [`LspHost::did_change`] in call order. Tests use this to
+    /// via [`LspServer::did_change`] in call order. Tests use this to
     /// assert that the editor's debouncer fired exactly once per
     /// quiet window with the latest text and a monotonic version.
     pub fn observed_changes(&self) -> Vec<DidChangeTextDocumentParams> {
@@ -1020,7 +1020,7 @@ impl FakeLsp {
     }
 
     /// Snapshot of every [`DidChangeWatchedFilesParams`] received
-    /// via [`LspHost::did_change_watched_files`] in call order.
+    /// via [`LspServer::did_change_watched_files`] in call order.
     pub fn observed_watched_file_changes(&self) -> Vec<DidChangeWatchedFilesParams> {
         self.state
             .lock()
@@ -1030,7 +1030,7 @@ impl FakeLsp {
     }
 
     /// Snapshot of every [`DidChangeConfigurationParams`] received
-    /// via [`LspHost::did_change_configuration`] in call order.
+    /// via [`LspServer::did_change_configuration`] in call order.
     pub fn observed_configuration_changes(&self) -> Vec<DidChangeConfigurationParams> {
         self.state
             .lock()
@@ -1040,7 +1040,7 @@ impl FakeLsp {
     }
 
     /// Snapshot of every [`DidChangeWorkspaceFoldersParams`] received
-    /// via [`LspHost::did_change_workspace_folders`] in call order.
+    /// via [`LspServer::did_change_workspace_folders`] in call order.
     pub fn observed_workspace_folder_changes(&self) -> Vec<DidChangeWorkspaceFoldersParams> {
         self.state
             .lock()
@@ -1051,16 +1051,16 @@ impl FakeLsp {
 
     /// Inject a synthetic server-initiated request onto the fake's
     /// incoming-request channel. The next
-    /// [`LspHost::recv_incoming_request`] call returns this request,
+    /// [`LspServer::recv_incoming_request`] call returns this request,
     /// after which the editor is expected to answer via
-    /// [`LspHost::reply`]. Quiet-fails if the channel is closed
+    /// [`LspServer::reply`]. Quiet-fails if the channel is closed
     /// (matches the production "server gone" case).
     pub fn push_incoming_request(&self, req: IncomingRequest) {
         let _ = self.req_tx.send(req);
     }
 
     /// Snapshot of every reply the host has received via
-    /// [`LspHost::reply`] in call order. Tests assert the editor
+    /// [`LspServer::reply`] in call order. Tests assert the editor
     /// answered an [`IncomingRequest`] with the right id and result.
     pub fn observed_replies(&self) -> Vec<(NumberOrString, Result<Value, LspResponseError>)> {
         self.state.lock().unwrap().observed_replies.clone()
@@ -1206,7 +1206,7 @@ impl FakeLsp {
     }
 
     /// Append a notification to the queue exposed via
-    /// [`LspHost::recv_notification`]. Lets tests inject server-push
+    /// [`LspServer::recv_notification`]. Lets tests inject server-push
     /// flows that bypass the existing `did_open` / `did_change` path:
     /// diagnostics published asynchronously after analysis,
     /// [`LspNotification::Progress`] frames, etc.
@@ -1330,7 +1330,7 @@ impl FakeLsp {
     }
 
     /// Toggle pending mode for the request method `R`. While
-    /// enabled, calls to the matching [`LspHost`] method enqueue
+    /// enabled, calls to the matching [`LspServer`] method enqueue
     /// `(params, oneshot::Sender<R::Result>)` onto an internal
     /// queue and await the receiver instead of returning the
     /// programmed response. Tests drain the queue with
@@ -1636,14 +1636,14 @@ impl FakeLsp {
     }
 
     /// Programs the [`InlayHint`]s returned by
-    /// [`LspHost::range_inlay_hint`] -- the viewport-bounded sibling of
-    /// [`LspHost::inlay_hint`]. The fake ignores the request's range
+    /// [`LspServer::range_inlay_hint`] -- the viewport-bounded sibling of
+    /// [`LspServer::inlay_hint`]. The fake ignores the request's range
     /// and returns whatever was programmed for the document; tests
     /// arrange URI and range to match. Replaces any previously seeded
     /// hints for the same document. Distinct from the
     /// [`Self::add_inlay_hint`] / [`Self::add_type_hint`] /
     /// [`Self::add_parameter_hint`] family, which seed responses for
-    /// the full-document [`LspHost::inlay_hint`] call.
+    /// the full-document [`LspServer::inlay_hint`] call.
     pub fn set_range_inlay_hints(&self, path: &str, hints: Vec<InlayHint>) {
         self.state
             .lock()
@@ -1727,7 +1727,7 @@ fn lookup_goto(
 }
 
 #[async_trait]
-impl LspHost for FakeLsp {
+impl LspServer for FakeLsp {
     fn capabilities(&self) -> Arc<ServerCapabilities> {
         self.state.lock().unwrap().capabilities.clone()
     }

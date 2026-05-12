@@ -9,8 +9,8 @@ use crate::{
     help::Help,
     host::{
         AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
-        EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspHost, NoopFsWatcher,
-        NoopLsp,
+        EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspServer,
+        NoopFsWatcher, NoopLspServer,
     },
     keymap::{Keymap, ResolvedAction},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
@@ -280,7 +280,7 @@ pub struct Stoat {
     /// While `Some`, `Drag(Left)` events extend the matching editor's
     /// primary selection head; `Up(Left)` clears the field.
     pub(crate) editor_drag: Option<(EditorId, BufferId)>,
-    /// Buffers for which `LspHost::did_open` has been dispatched.
+    /// Buffers for which `LspServer::did_open` has been dispatched.
     /// Dedupes re-opens of the same path: [`crate::buffer_registry::BufferRegistry::open`]
     /// returns the existing entry on second open, but the LSP
     /// notification must fire exactly once per buffer over its
@@ -357,10 +357,10 @@ pub struct Stoat {
     /// install [`crate::host::FakeEnv`] without leaking real env state.
     pub(crate) env_host: Arc<dyn EnvHost>,
     /// Language-server requests route through this trait. Defaults to
-    /// [`NoopLsp`] (every method returns the empty success response)
+    /// [`NoopLspServer`] (every method returns the empty success response)
     /// until a real `LocalLsp` is wired in; tests install
     /// [`crate::host::FakeLsp`] to drive end-to-end LSP scenarios.
-    pub(crate) lsp_host: Arc<dyn LspHost>,
+    pub(crate) lsp_server: Arc<dyn LspServer>,
     /// System-clipboard writes route through this trait. Defaults to
     /// [`NoopClipboard`] so headless or display-less environments do
     /// not error on the first clipboard event; tests install
@@ -374,7 +374,7 @@ pub struct Stoat {
     pub(crate) diff_cache: Arc<std::sync::Mutex<crate::diff_cache::DiffCache>>,
     /// Tracks `$/progress` notifications so the status bar can show
     /// the freshest in-progress operation. Drained from
-    /// [`crate::host::LspHost::try_recv_notification`] inside
+    /// [`crate::host::LspServer::try_recv_notification`] inside
     /// [`Stoat::update`].
     pub(crate) lsp_progress: crate::lsp::progress::LspProgressMap,
     /// In-flight goto-style LSP request (definition / type definition
@@ -678,7 +678,7 @@ impl Stoat {
             review_external_edit_rx,
             git_host: Arc::new(LocalGit::new()),
             env_host: Arc::new(LocalEnv),
-            lsp_host: Arc::new(NoopLsp),
+            lsp_server: Arc::new(NoopLspServer),
             clipboard_host: Arc::new(crate::host::NoopClipboard),
             diff_cache: Arc::new(std::sync::Mutex::new(crate::diff_cache::DiffCache::new(
                 256,
@@ -782,17 +782,17 @@ impl Stoat {
         self.shell_host = host;
     }
 
-    /// Swap in an alternative [`LspHost`]. The default is [`NoopLsp`]
-    /// (every request returns the empty success response); the test
-    /// harness installs [`crate::host::FakeLsp`] so LSP-driven flows
-    /// run against programmed responses.
-    pub fn set_lsp_host(&mut self, host: Arc<dyn LspHost>) {
-        self.lsp_host = host;
+    /// Swap in an alternative [`LspServer`]. The default is
+    /// [`NoopLspServer`] (every request returns the empty success
+    /// response); the test harness installs [`crate::host::FakeLsp`]
+    /// so LSP-driven flows run against programmed responses.
+    pub fn set_lsp_server(&mut self, server: Arc<dyn LspServer>) {
+        self.lsp_server = server;
     }
 
-    /// Returns the active [`LspHost`].
-    pub fn lsp_host(&self) -> &Arc<dyn LspHost> {
-        &self.lsp_host
+    /// Returns the active [`LspServer`].
+    pub fn lsp_server(&self) -> &Arc<dyn LspServer> {
+        &self.lsp_server
     }
 
     pub fn active_workspace(&self) -> &Workspace {
@@ -1112,7 +1112,7 @@ impl Stoat {
     }
 
     /// Drains every notification currently buffered on
-    /// [`crate::host::LspHost::try_recv_notification`] and dispatches
+    /// [`crate::host::LspServer::try_recv_notification`] and dispatches
     /// each by variant. `Progress` updates the [`crate::lsp::progress::LspProgressMap`];
     /// other variants log via tracing for now and become future
     /// per-feature consumer hooks. Cap is per-tick to avoid starving
@@ -1121,7 +1121,7 @@ impl Stoat {
     pub(crate) fn drain_lsp_notifications(&mut self) {
         use crate::host::LspNotification;
         use futures::FutureExt;
-        let host = self.lsp_host.clone();
+        let host = self.lsp_server.clone();
         for _ in 0..256 {
             // try_recv_notification is implemented on top of a
             // non-blocking channel poll, so its future resolves
