@@ -1,5 +1,5 @@
 use crate::host::lsp::{
-    IncomingRequest, LspNotification, LspResponseError, LspServer, OffsetEncoding,
+    IncomingRequest, LspHost, LspNotification, LspResponseError, LspServer, OffsetEncoding,
 };
 use async_trait::async_trait;
 use lsp_types::{
@@ -35,10 +35,12 @@ use std::{
     any::Any,
     collections::{BTreeMap, VecDeque},
     io,
+    path::Path,
     str::FromStr,
     sync::{Arc, Mutex},
     time::Duration,
 };
+use stoat_language::Language;
 use stoat_scheduler::Executor;
 use tokio::sync::{
     mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender},
@@ -2442,6 +2444,362 @@ impl LspServer for FakeLsp {
             .observed_replies
             .push((id, result));
         Ok(())
+    }
+}
+
+// --- FakeLspHost / ArcLspSession ---
+//
+// Mirrors the `FakeClaudeCodeHost` + `ArcSession` pattern: the
+// factory hands out a `Box<dyn LspServer>` while the test harness
+// retains its own `Arc<FakeLsp>` reference. The bridge type
+// `ArcLspSession` owns an `Arc<FakeLsp>` clone and forwards every
+// `LspServer` method to it so both paths target the same shared
+// state.
+
+/// Factory fake that hands out boxes wrapping the shared
+/// `Arc<FakeLsp>` so the harness's `lsp()` getter and the server
+/// returned by [`Self::launch`] see the same underlying state.
+pub struct FakeLspHost {
+    server: Arc<FakeLsp>,
+}
+
+impl FakeLspHost {
+    pub fn new(server: Arc<FakeLsp>) -> Self {
+        Self { server }
+    }
+}
+
+#[async_trait]
+impl LspHost for FakeLspHost {
+    async fn launch(&self, _language: &Language, _root: &Path) -> io::Result<Box<dyn LspServer>> {
+        Ok(Box::new(ArcLspSession(self.server.clone())))
+    }
+}
+
+/// Trait-object bridge so [`FakeLspHost::launch`] can hand out a
+/// `Box<dyn LspServer>` while the test harness retains its own
+/// `Arc<FakeLsp>` reference. Both paths target the same channels and
+/// mutex-backed state inside [`FakeLsp`].
+pub(crate) struct ArcLspSession(pub(crate) Arc<FakeLsp>);
+
+#[async_trait]
+impl LspServer for ArcLspSession {
+    fn capabilities(&self) -> Arc<ServerCapabilities> {
+        self.0.capabilities()
+    }
+
+    fn offset_encoding(&self) -> OffsetEncoding {
+        self.0.offset_encoding()
+    }
+
+    fn supports_feature(&self, feature: crate::host::lsp::LanguageServerFeature) -> bool {
+        self.0.supports_feature(feature)
+    }
+
+    async fn initialize(&self, root_uri: Option<Uri>) -> io::Result<InitializeResult> {
+        self.0.initialize(root_uri).await
+    }
+
+    async fn shutdown(&self) -> io::Result<()> {
+        self.0.shutdown().await
+    }
+
+    async fn did_open(&self, params: DidOpenTextDocumentParams) -> io::Result<()> {
+        self.0.did_open(params).await
+    }
+
+    async fn did_change(&self, params: DidChangeTextDocumentParams) -> io::Result<()> {
+        self.0.did_change(params).await
+    }
+
+    async fn did_save(&self, params: DidSaveTextDocumentParams) -> io::Result<()> {
+        self.0.did_save(params).await
+    }
+
+    async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()> {
+        self.0.did_close(params).await
+    }
+
+    async fn did_rename(&self, params: RenameFilesParams) -> io::Result<()> {
+        self.0.did_rename(params).await
+    }
+
+    async fn did_change_watched_files(
+        &self,
+        params: DidChangeWatchedFilesParams,
+    ) -> io::Result<()> {
+        self.0.did_change_watched_files(params).await
+    }
+
+    async fn did_change_configuration(
+        &self,
+        params: DidChangeConfigurationParams,
+    ) -> io::Result<()> {
+        self.0.did_change_configuration(params).await
+    }
+
+    async fn did_change_workspace_folders(
+        &self,
+        params: DidChangeWorkspaceFoldersParams,
+    ) -> io::Result<()> {
+        self.0.did_change_workspace_folders(params).await
+    }
+
+    async fn hover(&self, params: HoverParams) -> io::Result<Option<Hover>> {
+        self.0.hover(params).await
+    }
+
+    async fn goto_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.0.goto_definition(params).await
+    }
+
+    async fn goto_declaration(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.0.goto_declaration(params).await
+    }
+
+    async fn goto_type_definition(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.0.goto_type_definition(params).await
+    }
+
+    async fn goto_implementation(
+        &self,
+        params: GotoDefinitionParams,
+    ) -> io::Result<Option<GotoDefinitionResponse>> {
+        self.0.goto_implementation(params).await
+    }
+
+    async fn references(&self, params: ReferenceParams) -> io::Result<Option<Vec<Location>>> {
+        self.0.references(params).await
+    }
+
+    async fn document_highlight(
+        &self,
+        params: DocumentHighlightParams,
+    ) -> io::Result<Option<Vec<DocumentHighlight>>> {
+        self.0.document_highlight(params).await
+    }
+
+    async fn completion(&self, params: CompletionParams) -> io::Result<Option<CompletionResponse>> {
+        self.0.completion(params).await
+    }
+
+    async fn completion_resolve(&self, item: CompletionItem) -> io::Result<CompletionItem> {
+        self.0.completion_resolve(item).await
+    }
+
+    async fn code_action(
+        &self,
+        params: CodeActionParams,
+    ) -> io::Result<Option<Vec<CodeActionOrCommand>>> {
+        self.0.code_action(params).await
+    }
+
+    async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
+        self.0.code_action_resolve(action).await
+    }
+
+    async fn document_link(
+        &self,
+        params: DocumentLinkParams,
+    ) -> io::Result<Option<Vec<DocumentLink>>> {
+        self.0.document_link(params).await
+    }
+
+    async fn document_link_resolve(&self, link: DocumentLink) -> io::Result<DocumentLink> {
+        self.0.document_link_resolve(link).await
+    }
+
+    async fn document_color(
+        &self,
+        params: DocumentColorParams,
+    ) -> io::Result<Option<Vec<ColorInformation>>> {
+        self.0.document_color(params).await
+    }
+
+    async fn color_presentation(
+        &self,
+        params: ColorPresentationParams,
+    ) -> io::Result<Option<Vec<ColorPresentation>>> {
+        self.0.color_presentation(params).await
+    }
+
+    async fn semantic_tokens_full(
+        &self,
+        params: SemanticTokensParams,
+    ) -> io::Result<Option<SemanticTokensResult>> {
+        self.0.semantic_tokens_full(params).await
+    }
+
+    async fn semantic_tokens_range(
+        &self,
+        params: SemanticTokensRangeParams,
+    ) -> io::Result<Option<SemanticTokensRangeResult>> {
+        self.0.semantic_tokens_range(params).await
+    }
+
+    async fn prepare_call_hierarchy(
+        &self,
+        params: CallHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<CallHierarchyItem>>> {
+        self.0.prepare_call_hierarchy(params).await
+    }
+
+    async fn call_hierarchy_incoming_calls(
+        &self,
+        params: CallHierarchyIncomingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyIncomingCall>>> {
+        self.0.call_hierarchy_incoming_calls(params).await
+    }
+
+    async fn call_hierarchy_outgoing_calls(
+        &self,
+        params: CallHierarchyOutgoingCallsParams,
+    ) -> io::Result<Option<Vec<CallHierarchyOutgoingCall>>> {
+        self.0.call_hierarchy_outgoing_calls(params).await
+    }
+
+    async fn prepare_type_hierarchy(
+        &self,
+        params: TypeHierarchyPrepareParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        self.0.prepare_type_hierarchy(params).await
+    }
+
+    async fn type_hierarchy_supertypes(
+        &self,
+        params: TypeHierarchySupertypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        self.0.type_hierarchy_supertypes(params).await
+    }
+
+    async fn type_hierarchy_subtypes(
+        &self,
+        params: TypeHierarchySubtypesParams,
+    ) -> io::Result<Option<Vec<TypeHierarchyItem>>> {
+        self.0.type_hierarchy_subtypes(params).await
+    }
+
+    async fn document_symbol(
+        &self,
+        params: DocumentSymbolParams,
+    ) -> io::Result<Option<DocumentSymbolResponse>> {
+        self.0.document_symbol(params).await
+    }
+
+    async fn document_diagnostic(
+        &self,
+        params: DocumentDiagnosticParams,
+    ) -> io::Result<Option<DocumentDiagnosticReportResult>> {
+        self.0.document_diagnostic(params).await
+    }
+
+    async fn folding_range(
+        &self,
+        params: FoldingRangeParams,
+    ) -> io::Result<Option<Vec<FoldingRange>>> {
+        self.0.folding_range(params).await
+    }
+
+    async fn selection_range(
+        &self,
+        params: SelectionRangeParams,
+    ) -> io::Result<Option<Vec<SelectionRange>>> {
+        self.0.selection_range(params).await
+    }
+
+    async fn workspace_symbol(
+        &self,
+        params: WorkspaceSymbolParams,
+    ) -> io::Result<Option<WorkspaceSymbolResponse>> {
+        self.0.workspace_symbol(params).await
+    }
+
+    async fn signature_help(
+        &self,
+        params: SignatureHelpParams,
+    ) -> io::Result<Option<SignatureHelp>> {
+        self.0.signature_help(params).await
+    }
+
+    async fn inlay_hint(&self, params: InlayHintParams) -> io::Result<Option<Vec<InlayHint>>> {
+        self.0.inlay_hint(params).await
+    }
+
+    async fn inlay_hint_resolve(&self, hint: InlayHint) -> io::Result<InlayHint> {
+        self.0.inlay_hint_resolve(hint).await
+    }
+
+    async fn range_inlay_hint(
+        &self,
+        params: InlayHintParams,
+    ) -> io::Result<Option<Vec<InlayHint>>> {
+        self.0.range_inlay_hint(params).await
+    }
+
+    async fn prepare_rename(
+        &self,
+        params: TextDocumentPositionParams,
+    ) -> io::Result<Option<PrepareRenameResponse>> {
+        self.0.prepare_rename(params).await
+    }
+
+    async fn rename(&self, params: RenameParams) -> io::Result<Option<WorkspaceEdit>> {
+        self.0.rename(params).await
+    }
+
+    async fn formatting(
+        &self,
+        params: DocumentFormattingParams,
+    ) -> io::Result<Option<Vec<TextEdit>>> {
+        self.0.formatting(params).await
+    }
+
+    async fn range_formatting(
+        &self,
+        params: DocumentRangeFormattingParams,
+    ) -> io::Result<Option<Vec<TextEdit>>> {
+        self.0.range_formatting(params).await
+    }
+
+    async fn will_rename(&self, params: RenameFilesParams) -> io::Result<Option<WorkspaceEdit>> {
+        self.0.will_rename(params).await
+    }
+
+    async fn execute_command(&self, params: ExecuteCommandParams) -> io::Result<Option<Value>> {
+        self.0.execute_command(params).await
+    }
+
+    async fn recv_notification(&self) -> Option<LspNotification> {
+        self.0.recv_notification().await
+    }
+
+    async fn try_recv_notification(&self) -> Option<LspNotification> {
+        self.0.try_recv_notification().await
+    }
+
+    async fn recv_incoming_request(&self) -> Option<IncomingRequest> {
+        self.0.recv_incoming_request().await
+    }
+
+    async fn try_recv_incoming_request(&self) -> Option<IncomingRequest> {
+        self.0.try_recv_incoming_request().await
+    }
+
+    async fn reply(
+        &self,
+        id: NumberOrString,
+        result: Result<Value, LspResponseError>,
+    ) -> io::Result<()> {
+        self.0.reply(id, result).await
     }
 }
 

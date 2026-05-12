@@ -1,11 +1,22 @@
-use crate::workspace::Workspace;
+use crate::{
+    globals::{
+        ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal, FsHostGlobal,
+        FsWatchHostGlobal, GitHostGlobal, LspHostGlobal, ShellHostGlobal, TerminalHostGlobal,
+    },
+    workspace::Workspace,
+};
 use gpui::{
     AnyWindowHandle, App, AppContext, Bounds, Empty, Entity, Global, Keystroke, TestAppContext,
     WindowBounds, WindowHandle, WindowOptions,
 };
 use std::{sync::Arc, time::Duration};
-use stoat::host::fake::{
-    terminal::FakeTerminalSession, FakeClaudeCodeHost, FakeClipboard, FakeGit, FakeLsp,
+use stoat::host::{
+    fake::{
+        terminal::FakeTerminalSession, FakeClaudeCodeHost, FakeClipboard, FakeGit, FakeLsp,
+        FakeLspHost, FakeTerminalHost,
+    },
+    ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost, ShellHost,
+    TerminalHost,
 };
 use stoat_host::{FakeEnv, FakeFs, FakeFsWatcher, FakeShell};
 use stoat_scheduler::TestScheduler;
@@ -40,21 +51,64 @@ impl TestHarness {
             )
             .expect("open test window")
         });
-        Self {
+
+        let fs = Arc::new(FakeFs::new());
+        let fs_watcher = Arc::new(FakeFsWatcher::new());
+        let env = Arc::new(FakeEnv::new());
+        let shell = Arc::new(FakeShell::new());
+        let lsp = Arc::new(FakeLsp::new());
+        let git = Arc::new(FakeGit::new());
+        let claude = Arc::new(FakeClaudeCodeHost::new());
+        let clipboard = Arc::new(FakeClipboard::new());
+        let terminal = Arc::new(FakeTerminalSession::new());
+        let scheduler = Arc::new(TestScheduler::new());
+
+        let harness = Self {
             cx,
             window: window.into(),
             active_workspace: None,
-            fs: Arc::new(FakeFs::new()),
-            fs_watcher: Arc::new(FakeFsWatcher::new()),
-            env: Arc::new(FakeEnv::new()),
-            shell: Arc::new(FakeShell::new()),
-            lsp: Arc::new(FakeLsp::new()),
-            git: Arc::new(FakeGit::new()),
-            claude: Arc::new(FakeClaudeCodeHost::new()),
-            clipboard: Arc::new(FakeClipboard::new()),
-            terminal: Arc::new(FakeTerminalSession::new()),
-            scheduler: Arc::new(TestScheduler::new()),
-        }
+            fs,
+            fs_watcher,
+            env,
+            shell,
+            lsp,
+            git,
+            claude,
+            clipboard,
+            terminal,
+            scheduler,
+        };
+        harness.install_host_globals();
+        harness
+    }
+
+    fn install_host_globals(&self) {
+        let fs = self.fs.clone();
+        let fs_watcher = self.fs_watcher.clone();
+        let env = self.env.clone();
+        let shell = self.shell.clone();
+        let lsp = self.lsp.clone();
+        let git = self.git.clone();
+        let claude = self.claude.clone();
+        let clipboard = self.clipboard.clone();
+        let terminal = self.terminal.clone();
+        let executor = self.scheduler.executor();
+        self.cx.update(move |cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(FsWatchHostGlobal(fs_watcher as Arc<dyn FsWatchHost>));
+            cx.set_global(EnvHostGlobal(env as Arc<dyn EnvHost>));
+            cx.set_global(ShellHostGlobal(shell as Arc<dyn ShellHost>));
+            cx.set_global(LspHostGlobal(
+                Arc::new(FakeLspHost::new(lsp)) as Arc<dyn LspHost>
+            ));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+            cx.set_global(ClaudeCodeHostGlobal(claude as Arc<dyn ClaudeCodeHost>));
+            cx.set_global(ClipboardHostGlobal(clipboard as Arc<dyn ClipboardHost>));
+            cx.set_global(TerminalHostGlobal(
+                Arc::new(FakeTerminalHost::new(terminal)) as Arc<dyn TerminalHost>,
+            ));
+            cx.set_global(ExecutorGlobal(executor));
+        });
     }
 
     /// Register the workspace that [`keystroke`] / [`keystrokes`]
@@ -128,6 +182,71 @@ impl TestHarness {
 
     pub fn set_global<T: Global>(&mut self, global: T) {
         self.cx.update(|cx| cx.set_global(global));
+    }
+
+    /// Swap the registered [`FsHostGlobal`] to wrap `fake` and
+    /// update the harness's stored handle so [`Self::fs`] returns
+    /// the same `Arc`.
+    pub fn set_fs_host(&mut self, fake: Arc<FakeFs>) {
+        self.fs = fake.clone();
+        let arc = fake as Arc<dyn FsHost>;
+        self.cx.update(|cx| cx.set_global(FsHostGlobal(arc)));
+    }
+
+    pub fn set_fs_watch_host(&mut self, fake: Arc<FakeFsWatcher>) {
+        self.fs_watcher = fake.clone();
+        let arc = fake as Arc<dyn FsWatchHost>;
+        self.cx.update(|cx| cx.set_global(FsWatchHostGlobal(arc)));
+    }
+
+    pub fn set_env_host(&mut self, fake: Arc<FakeEnv>) {
+        self.env = fake.clone();
+        let arc = fake as Arc<dyn EnvHost>;
+        self.cx.update(|cx| cx.set_global(EnvHostGlobal(arc)));
+    }
+
+    pub fn set_shell_host(&mut self, fake: Arc<FakeShell>) {
+        self.shell = fake.clone();
+        let arc = fake as Arc<dyn ShellHost>;
+        self.cx.update(|cx| cx.set_global(ShellHostGlobal(arc)));
+    }
+
+    /// Swap the registered [`LspHostGlobal`] factory to wrap a
+    /// fresh [`FakeLspHost`] over `fake` and update the harness's
+    /// stored handle so [`Self::lsp`] returns the same `Arc`.
+    pub fn set_lsp_host(&mut self, fake: Arc<FakeLsp>) {
+        self.lsp = fake.clone();
+        let arc = Arc::new(FakeLspHost::new(fake)) as Arc<dyn LspHost>;
+        self.cx.update(|cx| cx.set_global(LspHostGlobal(arc)));
+    }
+
+    pub fn set_git_host(&mut self, fake: Arc<FakeGit>) {
+        self.git = fake.clone();
+        let arc = fake as Arc<dyn GitHost>;
+        self.cx.update(|cx| cx.set_global(GitHostGlobal(arc)));
+    }
+
+    pub fn set_claude_code_host(&mut self, fake: Arc<FakeClaudeCodeHost>) {
+        self.claude = fake.clone();
+        let arc = fake as Arc<dyn ClaudeCodeHost>;
+        self.cx
+            .update(|cx| cx.set_global(ClaudeCodeHostGlobal(arc)));
+    }
+
+    pub fn set_clipboard_host(&mut self, fake: Arc<FakeClipboard>) {
+        self.clipboard = fake.clone();
+        let arc = fake as Arc<dyn ClipboardHost>;
+        self.cx.update(|cx| cx.set_global(ClipboardHostGlobal(arc)));
+    }
+
+    /// Swap the registered [`TerminalHostGlobal`] factory to wrap a
+    /// fresh [`FakeTerminalHost`] over `fake` and update the
+    /// harness's stored handle so [`Self::terminal`] returns the
+    /// same `Arc`.
+    pub fn set_terminal_host(&mut self, fake: Arc<FakeTerminalSession>) {
+        self.terminal = fake.clone();
+        let arc = Arc::new(FakeTerminalHost::new(fake)) as Arc<dyn TerminalHost>;
+        self.cx.update(|cx| cx.set_global(TerminalHostGlobal(arc)));
     }
 
     pub fn fs(&self) -> &Arc<FakeFs> {
@@ -253,5 +372,51 @@ mod tests {
     fn keystroke_panics_without_active_workspace() {
         let mut harness = TestHarness::new();
         harness.keystroke("a");
+    }
+
+    #[test]
+    fn host_globals_registered_at_construction() {
+        let harness = TestHarness::new();
+        harness.cx.read(|cx| {
+            assert!(cx.has_global::<FsHostGlobal>(), "FsHostGlobal missing");
+            assert!(
+                cx.has_global::<FsWatchHostGlobal>(),
+                "FsWatchHostGlobal missing"
+            );
+            assert!(cx.has_global::<EnvHostGlobal>(), "EnvHostGlobal missing");
+            assert!(
+                cx.has_global::<ShellHostGlobal>(),
+                "ShellHostGlobal missing"
+            );
+            assert!(cx.has_global::<LspHostGlobal>(), "LspHostGlobal missing");
+            assert!(cx.has_global::<GitHostGlobal>(), "GitHostGlobal missing");
+            assert!(
+                cx.has_global::<ClaudeCodeHostGlobal>(),
+                "ClaudeCodeHostGlobal missing"
+            );
+            assert!(
+                cx.has_global::<ClipboardHostGlobal>(),
+                "ClipboardHostGlobal missing"
+            );
+            assert!(
+                cx.has_global::<TerminalHostGlobal>(),
+                "TerminalHostGlobal missing"
+            );
+            assert!(cx.has_global::<ExecutorGlobal>(), "ExecutorGlobal missing");
+        });
+    }
+
+    #[test]
+    fn set_fs_host_replaces_global() {
+        let mut harness = TestHarness::new();
+        let next = Arc::new(FakeFs::new());
+        let next_ptr = Arc::as_ptr(&next);
+        harness.set_fs_host(next);
+
+        assert_eq!(Arc::as_ptr(harness.fs()), next_ptr);
+        let registered_ptr = harness
+            .cx
+            .read(|cx| Arc::as_ptr(&cx.global::<FsHostGlobal>().0) as *const ());
+        assert_eq!(registered_ptr, next_ptr as *const ());
     }
 }

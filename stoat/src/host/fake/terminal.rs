@@ -1,9 +1,12 @@
 use crate::{
-    host::terminal::TerminalSession,
+    host::terminal::{SpawnArgs, TerminalHost, TerminalSession},
     run::{pty::PtyNotification, RunId},
 };
 use async_trait::async_trait;
-use std::{io, sync::Mutex};
+use std::{
+    io,
+    sync::{Arc, Mutex},
+};
 use tokio::sync::mpsc;
 
 pub struct FakeTerminalSession {
@@ -95,6 +98,47 @@ impl TerminalSession for FakeTerminalSession {
     async fn kill(&self) -> io::Result<()> {
         self.state.lock().unwrap().killed = true;
         Ok(())
+    }
+}
+
+/// Factory fake that hands out boxes wrapping the shared
+/// `Arc<FakeTerminalSession>` so the harness's `terminal()` getter and
+/// the box returned by [`Self::spawn`] see the same underlying state.
+pub struct FakeTerminalHost {
+    session: Arc<FakeTerminalSession>,
+}
+
+impl FakeTerminalHost {
+    pub fn new(session: Arc<FakeTerminalSession>) -> Self {
+        Self { session }
+    }
+}
+
+#[async_trait]
+impl TerminalHost for FakeTerminalHost {
+    async fn spawn(&self, _args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>> {
+        Ok(Box::new(ArcTerminalSession(self.session.clone())))
+    }
+}
+
+/// Trait-object bridge so [`FakeTerminalHost::spawn`] can hand out a
+/// `Box<dyn TerminalSession>` while the test harness retains its own
+/// `Arc<FakeTerminalSession>` reference. Both paths target the same
+/// underlying channels.
+pub(crate) struct ArcTerminalSession(pub(crate) Arc<FakeTerminalSession>);
+
+#[async_trait]
+impl TerminalSession for ArcTerminalSession {
+    async fn write(&self, data: &[u8]) -> io::Result<()> {
+        self.0.write(data).await
+    }
+
+    async fn read(&self, buf: &mut [u8]) -> io::Result<usize> {
+        self.0.read(buf).await
+    }
+
+    async fn kill(&self) -> io::Result<()> {
+        self.0.kill().await
     }
 }
 
