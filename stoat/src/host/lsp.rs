@@ -32,6 +32,9 @@ use std::{
 };
 use stoat_language::Language;
 
+static NOOP_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> =
+    LazyLock::new(|| Arc::new(ServerCapabilities::default()));
+
 #[derive(Debug, Clone)]
 pub enum LspNotification {
     Diagnostics {
@@ -519,6 +522,21 @@ pub trait LspServer: Send + Sync {
     ) -> io::Result<()>;
 }
 
+/// Factory that launches new [`LspServer`] sessions for a given
+/// language at a given workspace root. Production wires
+/// [`crate::host::local::LocalLspHost`]; tests wire a factory that
+/// hands out a pre-configured [`crate::host::FakeLsp`].
+///
+/// Mirrors the factory shape of [`crate::host::ClaudeCodeHost`] and
+/// [`crate::host::TerminalHost`] so all hosts register uniformly.
+#[async_trait]
+pub trait LspHost: Send + Sync {
+    /// Launch a server session for `language` rooted at `root`. The
+    /// returned [`LspServer`] has not yet been initialized; the caller
+    /// is responsible for the `initialize` handshake.
+    async fn launch(&self, language: &Language, root: &Path) -> io::Result<Box<dyn LspServer>>;
+}
+
 /// Default [`LspServer`] returned by [`NoopLspHost::launch`] when no
 /// language server is configured for a given language. Every method
 /// returns the empty / no-op success response so action handlers can
@@ -526,9 +544,6 @@ pub trait LspServer: Send + Sync {
 /// real server installed". The test harness installs
 /// [`crate::host::FakeLsp`] in its place.
 pub struct NoopLspServer;
-
-static NOOP_CAPABILITIES: LazyLock<Arc<ServerCapabilities>> =
-    LazyLock::new(|| Arc::new(ServerCapabilities::default()));
 
 #[async_trait]
 impl LspServer for NoopLspServer {
@@ -847,21 +862,6 @@ impl LspServer for NoopLspServer {
     ) -> io::Result<()> {
         Ok(())
     }
-}
-
-/// Factory that launches new [`LspServer`] sessions for a given
-/// language at a given workspace root. Production wires
-/// [`crate::host::local::LocalLspHost`]; tests wire a factory that
-/// hands out a pre-configured [`crate::host::FakeLsp`].
-///
-/// Mirrors the factory shape of [`crate::host::ClaudeCodeHost`] and
-/// [`crate::host::TerminalHost`] so all hosts register uniformly.
-#[async_trait]
-pub trait LspHost: Send + Sync {
-    /// Launch a server session for `language` rooted at `root`. The
-    /// returned [`LspServer`] has not yet been initialized; the caller
-    /// is responsible for the `initialize` handshake.
-    async fn launch(&self, language: &Language, root: &Path) -> io::Result<Box<dyn LspServer>>;
 }
 
 /// [`LspHost`] that always launches a [`NoopLspServer`]. Used as the

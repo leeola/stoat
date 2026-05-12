@@ -35,36 +35,6 @@ pub trait TerminalHost: Send + Sync {
     async fn spawn(&self, args: SpawnArgs) -> io::Result<Box<dyn TerminalSession>>;
 }
 
-/// Synchronous PTY-open helper shared between
-/// [`LocalTerminalHost::spawn`] and the legacy
-/// [`crate::run::spawn_shell`] / [`crate::run::spawn_oneshot`]
-/// entry points. Lives here so both call sites use the same
-/// portable-pty boilerplate without an async detour.
-pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
-    let pty_system = portable_pty::native_pty_system();
-    let pair = pty_system
-        .openpty(portable_pty::PtySize {
-            rows: 24,
-            cols: args.width,
-            pixel_width: 0,
-            pixel_height: 0,
-        })
-        .map_err(io::Error::other)?;
-
-    let mut cmd = CommandBuilder::new(args.program);
-    cmd.args(&args.args);
-    for (k, v) in &args.env {
-        cmd.env(k, v);
-    }
-    cmd.cwd(&args.cwd);
-
-    let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
-    let writer = pair.master.take_writer().map_err(io::Error::other)?;
-    let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
-
-    Ok(PtyTerminalSession::new(writer, child, reader))
-}
-
 pub struct PtyTerminalSession {
     writer: Mutex<Box<dyn io::Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
@@ -89,19 +59,6 @@ impl PtyTerminalSession {
             child: Mutex::new(child),
             read_rx: tokio::sync::Mutex::new(rx),
             leftover: tokio::sync::Mutex::new(Vec::new()),
-        }
-    }
-}
-
-fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
-    let mut buf = [0u8; 4096];
-    loop {
-        let n = match reader.read(&mut buf) {
-            Ok(0) | Err(_) => break,
-            Ok(n) => n,
-        };
-        if tx.blocking_send(buf[..n].to_vec()).is_err() {
-            break;
         }
     }
 }
@@ -148,6 +105,49 @@ impl TerminalSession for PtyTerminalSession {
             .lock()
             .map_err(|e| io::Error::other(e.to_string()))?;
         child.kill().map_err(io::Error::other)
+    }
+}
+
+/// Synchronous PTY-open helper shared between
+/// [`LocalTerminalHost::spawn`] and the legacy
+/// [`crate::run::spawn_shell`] / [`crate::run::spawn_oneshot`]
+/// entry points. Lives here so both call sites use the same
+/// portable-pty boilerplate without an async detour.
+pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
+    let pty_system = portable_pty::native_pty_system();
+    let pair = pty_system
+        .openpty(portable_pty::PtySize {
+            rows: 24,
+            cols: args.width,
+            pixel_width: 0,
+            pixel_height: 0,
+        })
+        .map_err(io::Error::other)?;
+
+    let mut cmd = CommandBuilder::new(args.program);
+    cmd.args(&args.args);
+    for (k, v) in &args.env {
+        cmd.env(k, v);
+    }
+    cmd.cwd(&args.cwd);
+
+    let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
+    let writer = pair.master.take_writer().map_err(io::Error::other)?;
+    let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+
+    Ok(PtyTerminalSession::new(writer, child, reader))
+}
+
+fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
+    let mut buf = [0u8; 4096];
+    loop {
+        let n = match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => n,
+        };
+        if tx.blocking_send(buf[..n].to_vec()).is_err() {
+            break;
+        }
     }
 }
 

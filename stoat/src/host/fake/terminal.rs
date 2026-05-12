@@ -20,12 +20,6 @@ struct FakeTerminalState {
     killed: bool,
 }
 
-impl Default for FakeTerminalSession {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FakeTerminalSession {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::channel(256);
@@ -73,6 +67,12 @@ impl FakeTerminalSession {
 
     pub fn was_killed(&self) -> bool {
         self.state.lock().unwrap().killed
+    }
+}
+
+impl Default for FakeTerminalSession {
+    fn default() -> Self {
+        Self::new()
     }
 }
 
