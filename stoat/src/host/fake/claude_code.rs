@@ -24,12 +24,6 @@ pub struct FakeClaudeCode {
     interrupts: Mutex<u32>,
 }
 
-impl Default for FakeClaudeCode {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FakeClaudeCode {
     pub fn new() -> Self {
         let (tx, rx) = mpsc::unbounded_channel();
@@ -272,6 +266,12 @@ impl FakeClaudeCode {
     }
 }
 
+impl Default for FakeClaudeCode {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 #[async_trait]
 impl ClaudeCodeSession for FakeClaudeCode {
     async fn send(&self, content: &str) -> io::Result<()> {
@@ -317,12 +317,6 @@ pub struct FakeClaudeCodeHost {
     summaries: Mutex<Vec<ClaudeSessionSummary>>,
 }
 
-impl Default for FakeClaudeCodeHost {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FakeClaudeCodeHost {
     pub fn new() -> Self {
         Self {
@@ -346,6 +340,29 @@ impl FakeClaudeCodeHost {
     /// they want the two to describe the same entity.
     pub fn register_summary(&self, summary: ClaudeSessionSummary) {
         self.summaries.lock().unwrap().push(summary);
+    }
+}
+
+impl Default for FakeClaudeCodeHost {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+#[async_trait]
+impl ClaudeCodeHost for FakeClaudeCodeHost {
+    async fn new_session(&self) -> io::Result<Box<dyn ClaudeCodeSession>> {
+        let arc = self
+            .sessions
+            .lock()
+            .unwrap()
+            .pop_front()
+            .ok_or_else(|| io::Error::other("no fake sessions queued"))?;
+        Ok(Box::new(ArcSession(arc)))
+    }
+
+    async fn list_sessions(&self) -> io::Result<Vec<ClaudeSessionSummary>> {
+        Ok(self.summaries.lock().unwrap().clone())
     }
 }
 
@@ -375,23 +392,6 @@ impl ClaudeCodeSession for ArcSession {
 
     async fn shutdown(&self) -> io::Result<()> {
         self.0.shutdown().await
-    }
-}
-
-#[async_trait]
-impl ClaudeCodeHost for FakeClaudeCodeHost {
-    async fn new_session(&self) -> io::Result<Box<dyn ClaudeCodeSession>> {
-        let arc = self
-            .sessions
-            .lock()
-            .unwrap()
-            .pop_front()
-            .ok_or_else(|| io::Error::other("no fake sessions queued"))?;
-        Ok(Box::new(ArcSession(arc)))
-    }
-
-    async fn list_sessions(&self) -> io::Result<Vec<ClaudeSessionSummary>> {
-        Ok(self.summaries.lock().unwrap().clone())
     }
 }
 

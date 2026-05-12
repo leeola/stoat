@@ -31,17 +31,6 @@ pub trait ClipboardHost: Send + Sync {
     }
 }
 
-/// Reports whether the running session should emit OSC 52 clipboard
-/// forwarding alongside [`ClipboardHost::set`]. Returns true when an
-/// SSH session is detected via `$SSH_CONNECTION` or `$SSH_TTY` and no
-/// parent multiplexer is announced via `$TMUX` or `$ZELLIJ` (in mux
-/// nesting the parent owns clipboard forwarding).
-pub fn osc52_should_emit(env: &dyn EnvHost) -> bool {
-    let in_ssh = env.var("SSH_CONNECTION").is_some() || env.var("SSH_TTY").is_some();
-    let in_mux = env.var("TMUX").is_some() || env.var("ZELLIJ").is_some();
-    in_ssh && !in_mux
-}
-
 /// No-op [`ClipboardHost`] used when no real clipboard is needed (or
 /// available). Logs the would-be write at trace level and returns
 /// success so call sites can ignore the absence of a real clipboard.
@@ -56,6 +45,17 @@ impl ClipboardHost for NoopClipboard {
         );
         Ok(())
     }
+}
+
+/// Reports whether the running session should emit OSC 52 clipboard
+/// forwarding alongside [`ClipboardHost::set`]. Returns true when an
+/// SSH session is detected via `$SSH_CONNECTION` or `$SSH_TTY` and no
+/// parent multiplexer is announced via `$TMUX` or `$ZELLIJ` (in mux
+/// nesting the parent owns clipboard forwarding).
+pub fn osc52_should_emit(env: &dyn EnvHost) -> bool {
+    let in_ssh = env.var("SSH_CONNECTION").is_some() || env.var("SSH_TTY").is_some();
+    let in_mux = env.var("TMUX").is_some() || env.var("ZELLIJ").is_some();
+    in_ssh && !in_mux
 }
 
 #[cfg(test)]

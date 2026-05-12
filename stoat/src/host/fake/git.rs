@@ -32,12 +32,6 @@ struct FakeGitState {
     discover_index: Vec<(PathBuf, PathBuf)>,
 }
 
-impl Default for FakeGit {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FakeGit {
     pub fn new() -> Self {
         Self {
@@ -170,6 +164,28 @@ impl FakeGit {
     }
 }
 
+impl Default for FakeGit {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GitHost for FakeGit {
+    fn discover(&self, path: &Path) -> Option<Arc<dyn GitRepo>> {
+        let state = self.state.lock().unwrap();
+        let workdir = state
+            .discover_index
+            .iter()
+            .filter(|(start, _)| path.starts_with(start))
+            .max_by_key(|(start, _)| start.components().count())
+            .map(|(_, wd)| wd.clone())?;
+        state
+            .repos
+            .get(&workdir)
+            .map(|arc| arc.clone() as Arc<dyn GitRepo>)
+    }
+}
+
 fn parse_patch_target(patch: &str) -> Option<PathBuf> {
     let mut buffer_target: Option<PathBuf> = None;
     let mut base_target: Option<PathBuf> = None;
@@ -187,22 +203,6 @@ fn parse_patch_target(patch: &str) -> Option<PathBuf> {
         base_target
     } else {
         buffer_target.or(base_target)
-    }
-}
-
-impl GitHost for FakeGit {
-    fn discover(&self, path: &Path) -> Option<Arc<dyn GitRepo>> {
-        let state = self.state.lock().unwrap();
-        let workdir = state
-            .discover_index
-            .iter()
-            .filter(|(start, _)| path.starts_with(start))
-            .max_by_key(|(start, _)| start.components().count())
-            .map(|(_, wd)| wd.clone())?;
-        state
-            .repos
-            .get(&workdir)
-            .map(|arc| arc.clone() as Arc<dyn GitRepo>)
     }
 }
 
