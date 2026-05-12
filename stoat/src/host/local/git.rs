@@ -12,6 +12,14 @@ use std::{
     sync::{Arc, Mutex},
 };
 
+const STAGED: Status = Status::INDEX_NEW
+    .union(Status::INDEX_MODIFIED)
+    .union(Status::INDEX_RENAMED);
+
+const UNSTAGED: Status = Status::WT_NEW
+    .union(Status::WT_MODIFIED)
+    .union(Status::WT_RENAMED);
+
 /// Production [`GitHost`] wrapping libgit2.
 pub struct LocalGit;
 
@@ -42,14 +50,6 @@ impl GitHost for LocalGit {
 struct LocalGitRepo {
     repo: Mutex<Repository>,
 }
-
-const STAGED: Status = Status::INDEX_NEW
-    .union(Status::INDEX_MODIFIED)
-    .union(Status::INDEX_RENAMED);
-
-const UNSTAGED: Status = Status::WT_NEW
-    .union(Status::WT_MODIFIED)
-    .union(Status::WT_RENAMED);
 
 impl GitRepo for LocalGitRepo {
     fn workdir(&self) -> Option<PathBuf> {

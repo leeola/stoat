@@ -10,21 +10,6 @@
 use super::types::{ToolCallContent, ToolCallLocation, ToolKind};
 use async_trait::async_trait;
 
-/// Host-provided callback for interactive tool-permission prompts.
-///
-/// JSON payloads are passed as `&str` so this trait (and the `stoat`
-/// crate) stays free of a `serde_json` dependency. Callbacks that need
-/// structured access should parse the strings themselves.
-#[async_trait]
-pub trait PermissionCallback: Send + Sync {
-    async fn can_use_tool(
-        &self,
-        tool_name: &str,
-        input_json: &str,
-        context: ToolPermissionContext<'_>,
-    ) -> PermissionResult;
-}
-
 /// Context passed to a [`PermissionCallback::can_use_tool`] invocation.
 ///
 /// Mirrors the fields in the Python SDK's `ToolPermissionContext`, plus
@@ -182,4 +167,19 @@ impl PermissionResult {
     pub fn cancel() -> Self {
         PermissionResult::Cancel
     }
+}
+
+/// Host-provided callback for interactive tool-permission prompts.
+///
+/// JSON payloads are passed as `&str` so this trait (and the `stoat`
+/// crate) stays free of a `serde_json` dependency. Callbacks that need
+/// structured access should parse the strings themselves.
+#[async_trait]
+pub trait PermissionCallback: Send + Sync {
+    async fn can_use_tool(
+        &self,
+        tool_name: &str,
+        input_json: &str,
+        context: ToolPermissionContext<'_>,
+    ) -> PermissionResult;
 }

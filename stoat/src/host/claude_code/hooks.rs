@@ -7,15 +7,6 @@
 
 use async_trait::async_trait;
 
-/// Host-provided callback for CLI hook events.
-///
-/// The event kind + payload are passed as `&str` so this trait (and
-/// the consumer crate) stays free of any serde dependency.
-#[async_trait]
-pub trait HookCallback: Send + Sync {
-    async fn handle_hook(&self, event: HookEvent<'_>) -> HookResponse;
-}
-
 /// Kind of hook the CLI is firing. Mirrors the event names defined by
 /// the Claude Code SDK. Unknown names fall through to `Unknown` so a
 /// new event doesn't break dispatch.
@@ -135,4 +126,13 @@ pub enum HookDecision {
     /// input). `updated_input_json` is the JSON-string representation
     /// of the replacement input object.
     Modify { updated_input_json: String },
+}
+
+/// Host-provided callback for CLI hook events.
+///
+/// The event kind + payload are passed as `&str` so this trait (and
+/// the consumer crate) stays free of any serde dependency.
+#[async_trait]
+pub trait HookCallback: Send + Sync {
+    async fn handle_hook(&self, event: HookEvent<'_>) -> HookResponse;
 }
