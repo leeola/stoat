@@ -610,12 +610,6 @@ struct PendingEntry {
     inner: Box<dyn Any + Send>,
 }
 
-impl Default for FakeLsp {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
 impl FakeLsp {
     pub fn new() -> Self {
         let (notif_tx, notif_rx) = unbounded_channel();
@@ -1720,12 +1714,10 @@ impl FakeLsp {
     }
 }
 
-fn lookup_goto(
-    map: &BTreeMap<LspKey, GotoDefinitionResponse>,
-    uri: &Uri,
-    pos: &Position,
-) -> Option<GotoDefinitionResponse> {
-    map.get(&LspKey::from_position(uri, pos)).cloned()
+impl Default for FakeLsp {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 #[async_trait]
@@ -2801,6 +2793,14 @@ impl LspServer for ArcLspSession {
     ) -> io::Result<()> {
         self.0.reply(id, result).await
     }
+}
+
+fn lookup_goto(
+    map: &BTreeMap<LspKey, GotoDefinitionResponse>,
+    uri: &Uri,
+    pos: &Position,
+) -> Option<GotoDefinitionResponse> {
+    map.get(&LspKey::from_position(uri, pos)).cloned()
 }
 
 #[cfg(test)]
