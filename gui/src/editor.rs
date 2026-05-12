@@ -5,6 +5,7 @@ use crate::{
 };
 use gpui::{Context, Entity, EventEmitter, Subscription};
 use stoat::{jumplist::JumpList, selection::SelectionsCollection};
+use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
 /// Entity holding the state a single editor view needs:
 /// [`Entity<MultiBuffer>`] for the source text, [`Entity<DisplayMap>`]
@@ -83,6 +84,10 @@ impl Editor {
         &self.selections
     }
 
+    pub fn selections_mut(&mut self) -> &mut SelectionsCollection {
+        &mut self.selections
+    }
+
     pub fn scroll_row(&self) -> u32 {
         self.scroll_row
     }
@@ -96,6 +101,85 @@ impl Editor {
             return;
         }
         self.scroll_row = row;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Insert `text` at every selection in this editor. Range
+    /// selections are replaced by `text`; empty selections (cursors)
+    /// have `text` inserted at their position. After all edits each
+    /// selection collapses to a single cursor immediately after the
+    /// inserted text in the post-edit buffer.
+    ///
+    /// Edits are applied in reverse-offset order so an earlier
+    /// edit's range is still valid after later edits have committed.
+    /// Each cursor's post-edit offset accounts for cumulative shifts
+    /// from edits at earlier offsets: for cursor `i` (ascending
+    /// offset order) the new offset is
+    /// `pre_start_i + text.len() + sum_{j<i}(text.len() - (pre_end_j - pre_start_j))`.
+    /// Multi-excerpt buffers are skipped with a `tracing::warn` --
+    /// the multi-buffer edit surface is not yet built.
+    pub fn apply_text_to_all_cursors(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "apply_text_to_all_cursors on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+
+        let mut ascending: Vec<(usize, std::ops::Range<usize>)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            self.selections
+                .all_anchors()
+                .iter()
+                .map(|sel| {
+                    let start = snapshot.resolve_anchor(&sel.start);
+                    let end = snapshot.resolve_anchor(&sel.end);
+                    let (lo, hi) = if start <= end {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    };
+                    (sel.id, lo..hi)
+                })
+                .collect()
+        };
+        ascending.sort_by_key(|(_, range)| range.start);
+
+        let text_len = text.len();
+        let mut cumulative_shift: isize = 0;
+        let mut post_offsets: Vec<(usize, usize)> = Vec::with_capacity(ascending.len());
+        for (id, range) in &ascending {
+            let post = (range.start as isize + cumulative_shift) as usize + text_len;
+            post_offsets.push((*id, post));
+            cumulative_shift += text_len as isize - (range.end - range.start) as isize;
+        }
+
+        for (_id, range) in ascending.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(range.clone(), text, cx));
+        }
+
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        let mut new_disjoint: Vec<Selection<Anchor>> = post_offsets
+            .into_iter()
+            .map(|(id, post)| {
+                let anchor = new_snapshot.anchor_at(post, Bias::Left);
+                Selection {
+                    id,
+                    start: anchor,
+                    end: anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }
+            })
+            .collect();
+        new_disjoint.sort_by_key(|s| s.id);
+
+        self.selections.replace_with(new_disjoint, &new_snapshot);
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -238,5 +322,105 @@ mod tests {
         assert_ne!(mb_id, dm_id);
         assert_ne!(mb_id, diff_id);
         assert_ne!(dm_id, diff_id);
+    }
+
+    fn cursor_offsets(editor: &Entity<Editor>, cx: &mut TestAppContext) -> Vec<usize> {
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            ed.selections()
+                .all_anchors()
+                .iter()
+                .map(|s| snapshot.resolve_anchor(&s.start))
+                .collect()
+        })
+    }
+
+    fn seed_cursors(editor: &Entity<Editor>, cx: &mut TestAppContext, offsets: &[usize]) {
+        let offsets = offsets.to_vec();
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let cursors: Vec<Selection<Anchor>> = offsets
+                .iter()
+                .enumerate()
+                .map(|(idx, off)| {
+                    let anchor = snapshot.anchor_at(*off, Bias::Left);
+                    Selection {
+                        id: 100 + idx,
+                        start: anchor,
+                        end: anchor,
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    }
+                })
+                .collect();
+            ed.selections_mut().replace_with(cursors, &snapshot);
+        });
+    }
+
+    #[test]
+    fn apply_text_to_all_cursors_inserts_at_default_cursor() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+
+        editor.update(&mut cx, |ed, cx| ed.apply_text_to_all_cursors("X", cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "Xhello");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![1]);
+    }
+
+    #[test]
+    fn apply_text_to_all_cursors_replaces_range_selection() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let start = snapshot.anchor_at(0, Bias::Left);
+            let end = snapshot.anchor_at(3, Bias::Left);
+            let sel = Selection {
+                id: 200,
+                start,
+                end,
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+
+        editor.update(&mut cx, |ed, cx| ed.apply_text_to_all_cursors("Y", cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "Ylo");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![1]);
+    }
+
+    #[test]
+    fn apply_text_to_all_cursors_inserts_at_each_of_multiple_cursors() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+        seed_cursors(&editor, &mut cx, &[1, 3]);
+
+        editor.update(&mut cx, |ed, cx| ed.apply_text_to_all_cursors("X", cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hXelXlo");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![2, 5]);
+    }
+
+    #[test]
+    fn apply_text_to_all_cursors_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.apply_text_to_all_cursors("Z", cx));
+        cx.run_until_parked();
+
+        let observed = drain(&events);
+        assert!(
+            observed.iter().all(|e| *e == EditorEvent::Changed),
+            "unexpected event in {observed:?}",
+        );
+        assert!(!observed.is_empty(), "expected at least one Changed event");
     }
 }

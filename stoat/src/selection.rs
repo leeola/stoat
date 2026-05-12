@@ -156,7 +156,7 @@ impl SelectionsCollection {
     /// Replace selections with `new_disjoint`, sorting by offset and deduping
     /// empty collisions at the same offset (keeping the highest-id survivor).
     /// Asserts non-empty: callers must ensure at least one selection.
-    pub(crate) fn replace_with(
+    pub fn replace_with(
         &mut self,
         new_disjoint: Vec<Selection<Anchor>>,
         snapshot: &MultiBufferSnapshot,

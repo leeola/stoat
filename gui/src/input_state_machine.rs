@@ -1,4 +1,4 @@
-use crate::workspace::Workspace;
+use crate::{editor::Editor, workspace::Workspace};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gpui::{Context, FocusHandle, Keystroke, WeakEntity};
 use std::ops::Range;
@@ -52,6 +52,11 @@ pub struct InputStateMachine {
     /// char with no modifiers and we are still in an allowed mode,
     /// the keystroke is dropped as a macOS IME duplicate.
     pending_duplicate_char: Option<char>,
+    /// Active editor that [`text_input`] dispatches IME commits
+    /// into via [`Editor::apply_text_to_all_cursors`]. Production
+    /// callers update this when an editor becomes the workspace's
+    /// focused item; tests stage it directly.
+    active_editor: Option<WeakEntity<Editor>>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -72,6 +77,7 @@ impl InputStateMachine {
             marked_range: None,
             last_text_input: None,
             pending_duplicate_char: None,
+            active_editor: None,
             workspace,
             keymap,
         }
@@ -128,6 +134,19 @@ impl InputStateMachine {
         self.last_text_input.as_deref()
     }
 
+    pub fn active_editor(&self) -> Option<&WeakEntity<Editor>> {
+        self.active_editor.as_ref()
+    }
+
+    /// Set the editor that [`text_input`] commits dispatch into.
+    /// Production code calls this when the workspace's focused
+    /// item changes; passing `None` detaches dispatch and leaves
+    /// `text_input` to fall back to recording on `last_text_input`
+    /// only.
+    pub fn set_active_editor(&mut self, editor: Option<WeakEntity<Editor>>) {
+        self.active_editor = editor;
+    }
+
     /// Modes in which IME / direct text input is accepted. Outside
     /// these modes, focus output keeps the input target unfocused
     /// in production so the OS does not route IME there; the gate
@@ -152,6 +171,12 @@ impl InputStateMachine {
     /// key event from macOS does not double-insert. Multi-char
     /// commits leave the marker cleared because the originating
     /// keystrokes were consumed by the IME and have no raw twin.
+    ///
+    /// When [`active_editor`] holds a live handle, the commit is
+    /// dispatched through [`Editor::apply_text_to_all_cursors`] so
+    /// the text lands at every cursor; the IME side stays unaware
+    /// of multi-cursor. The fallback (`active_editor` is `None` or
+    /// the weak handle is dead) only records on `last_text_input`.
     pub fn text_input(
         &mut self,
         text: &str,
@@ -168,6 +193,10 @@ impl InputStateMachine {
             let mut chars = text.chars();
             chars.next().filter(|_| chars.next().is_none())
         };
+        if let Some(editor) = self.active_editor.as_ref().and_then(WeakEntity::upgrade) {
+            let text = text.to_string();
+            editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&text, cx));
+        }
         cx.notify();
     }
 
@@ -885,6 +914,80 @@ mod tests {
             quit_kinds(sm.feed(&stroke, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+    }
+
+    fn new_singleton_editor(cx: &mut TestAppContext, text: &str) -> Entity<Editor> {
+        use crate::{
+            buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, multi_buffer::MultiBuffer,
+        };
+        use std::sync::Arc;
+        use stoat::buffer::BufferId;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            cx.update(|cx| cx.new(|cx| MultiBuffer::singleton(buffer, cx)))
+        };
+        let display_map = {
+            let buffer = buffer.clone();
+            cx.update(|cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
+        };
+        let diff_map = cx.update(|cx| cx.new(|cx| DiffMap::new(buffer, cx)));
+        cx.update(|cx| cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, cx)))
+    }
+
+    fn editor_text(cx: &mut TestAppContext, editor: &Entity<Editor>) -> String {
+        editor.update(cx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        })
+    }
+
+    #[test]
+    fn text_input_with_active_editor_dispatches_to_apply() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+        let editor = new_singleton_editor(&mut cx, "hello");
+        sm.update(&mut cx, |sm, _| {
+            sm.set_active_editor(Some(editor.downgrade()))
+        });
+
+        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("a", None, cx));
+        cx.run_until_parked();
+
+        assert_eq!(editor_text(&mut cx, &editor), "ahello");
+        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
+    }
+
+    #[test]
+    fn text_input_without_active_editor_only_records() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+
+        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("a", None, cx));
+
+        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
+    }
+
+    #[test]
+    fn composition_update_does_not_dispatch_to_editor() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+        let editor = new_singleton_editor(&mut cx, "hello");
+        sm.update(&mut cx, |sm, _| {
+            sm.set_active_editor(Some(editor.downgrade()))
+        });
+
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.composition_update("k", Some(0..1), None, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(editor_text(&mut cx, &editor), "hello");
     }
 
     #[test]
