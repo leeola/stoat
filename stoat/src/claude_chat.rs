@@ -105,6 +105,20 @@ pub enum ToolCardStatus {
     Cancelled,
 }
 
+#[derive(Debug, Clone)]
+pub struct ChatMessage {
+    pub role: ChatRole,
+    pub content: ChatMessageContent,
+    /// Sha of a `git stash create`-style commit captured at the moment
+    /// this message was recorded. Set on user-submit messages when the
+    /// active workspace's git repo had a non-clean working tree at
+    /// submit time; `None` for assistant messages, scratch sessions
+    /// without a repo, and clean-tree submits. Future per-message
+    /// checkpoint restore actions consume this sha to reset the
+    /// workspace to the captured state.
+    pub checkpoint_sha: Option<String>,
+}
+
 /// Derive the card status for `tool_id` from the chat state. The
 /// cancelled set takes precedence over server status; absent results
 /// imply the tool is still running.
@@ -123,20 +137,6 @@ pub(crate) fn tool_card_status(chat: &ClaudeChatState, tool_id: &str) -> ToolCar
         }
     }
     ToolCardStatus::Running
-}
-
-#[derive(Debug, Clone)]
-pub struct ChatMessage {
-    pub role: ChatRole,
-    pub content: ChatMessageContent,
-    /// Sha of a `git stash create`-style commit captured at the moment
-    /// this message was recorded. Set on user-submit messages when the
-    /// active workspace's git repo had a non-clean working tree at
-    /// submit time; `None` for assistant messages, scratch sessions
-    /// without a repo, and clean-tree submits. Future per-message
-    /// checkpoint restore actions consume this sha to reset the
-    /// workspace to the captured state.
-    pub checkpoint_sha: Option<String>,
 }
 
 #[cfg(test)]

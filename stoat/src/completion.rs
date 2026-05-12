@@ -35,6 +35,22 @@ pub enum CompletionSource {
     Word,
 }
 
+impl CompletionSource {
+    /// Whether this source should fire given the current cursor
+    /// context. Path source triggers on path-shaped prefixes; LSP
+    /// and Word source trigger on identifier-shaped prefixes. Each
+    /// per-source fetch routine (added in items 84-86) is
+    /// responsible for returning items consistent with its
+    /// predicate.
+    pub fn applies(&self, ctx: &CompletionContext<'_>) -> bool {
+        match self {
+            CompletionSource::Path => is_path_like(ctx),
+            CompletionSource::Lsp => is_identifier_like(ctx),
+            CompletionSource::Word => is_identifier_like(ctx),
+        }
+    }
+}
+
 /// High-level category badge shared across sources. The popup
 /// paints a one- or two-letter glyph derived from this; LSP
 /// completion items map to the closest variant, the path source
@@ -132,22 +148,6 @@ pub struct CompletionContext<'a> {
     /// than [`Self::prefix`] (e.g. path-prefix detection on `./`)
     /// read from this slice.
     pub text_before_cursor: &'a str,
-}
-
-impl CompletionSource {
-    /// Whether this source should fire given the current cursor
-    /// context. Path source triggers on path-shaped prefixes; LSP
-    /// and Word source trigger on identifier-shaped prefixes. Each
-    /// per-source fetch routine (added in items 84-86) is
-    /// responsible for returning items consistent with its
-    /// predicate.
-    pub fn applies(&self, ctx: &CompletionContext<'_>) -> bool {
-        match self {
-            CompletionSource::Path => is_path_like(ctx),
-            CompletionSource::Lsp => is_identifier_like(ctx),
-            CompletionSource::Word => is_identifier_like(ctx),
-        }
-    }
 }
 
 /// Returns the sources that apply, in priority order
