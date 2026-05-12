@@ -40,6 +40,37 @@ pub use types::{
     ToolCallLocation, ToolCallStatus, ToolKind,
 };
 
+/// Summary of a session surfaced by [`ClaudeCodeHost::list_sessions`].
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ClaudeSessionSummary {
+    pub session_id: String,
+    pub cwd: String,
+    pub title: String,
+    pub updated_at: String,
+}
+
+new_key_type! {
+    pub struct ClaudeSessionId;
+}
+
+pub enum ClaudeNotification {
+    CreateRequested {
+        session_id: ClaudeSessionId,
+    },
+    SessionReady {
+        session_id: ClaudeSessionId,
+        session: Box<dyn ClaudeCodeSession>,
+    },
+    SessionError {
+        session_id: ClaudeSessionId,
+        error: String,
+    },
+    Message {
+        session_id: ClaudeSessionId,
+        message: AgentMessage,
+    },
+}
+
 /// Per-session I/O handle for an active Claude Code conversation.
 #[async_trait]
 pub trait ClaudeCodeSession: Send + Sync {
@@ -108,37 +139,6 @@ pub trait ClaudeCodeHost: Send + Sync {
     async fn list_sessions(&self) -> io::Result<Vec<ClaudeSessionSummary>> {
         Ok(Vec::new())
     }
-}
-
-/// Summary of a session surfaced by [`ClaudeCodeHost::list_sessions`].
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct ClaudeSessionSummary {
-    pub session_id: String,
-    pub cwd: String,
-    pub title: String,
-    pub updated_at: String,
-}
-
-new_key_type! {
-    pub struct ClaudeSessionId;
-}
-
-pub enum ClaudeNotification {
-    CreateRequested {
-        session_id: ClaudeSessionId,
-    },
-    SessionReady {
-        session_id: ClaudeSessionId,
-        session: Box<dyn ClaudeCodeSession>,
-    },
-    SessionError {
-        session_id: ClaudeSessionId,
-        error: String,
-    },
-    Message {
-        session_id: ClaudeSessionId,
-        message: AgentMessage,
-    },
 }
 
 /// Owns zero or more active Claude Code sessions.

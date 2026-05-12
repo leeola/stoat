@@ -86,6 +86,103 @@ pub struct CommitFileChange {
     pub deletions: u32,
 }
 
+/// Result of a [`GitRepo::rewrite_commit`] call.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RewriteResult {
+    /// Sha of the new HEAD after the rewrite + cherry-pick chain.
+    pub new_head: String,
+    /// Map from the original sha (target + each descendant) to the
+    /// new sha it became. Callers that were pointing at an original
+    /// sha (e.g. a review session's `ReviewSource::Commit`) read this
+    /// to relocate.
+    pub mapping: std::collections::HashMap<String, String>,
+}
+
+/// Single entry in a rebase plan, mirroring the commands accepted by
+/// `git rebase -i` (minus reword/edit in v1).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct RebaseTodo {
+    pub op: RebaseTodoOp,
+    /// Sha of the commit this entry refers to in the pre-rebase
+    /// history.
+    pub sha: String,
+    /// Message from the pre-rebase commit, carried on the entry so
+    /// implementations (and the fake) can synthesize combined messages
+    /// without re-reading the original commit.
+    pub message: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RebaseTodoOp {
+    Pick,
+    Squash,
+    Fixup,
+    Drop,
+    /// Apply the commit, then pause so the user can supply a new
+    /// message. Implementations that cannot pause (fake test paths,
+    /// `run_rebase`) should treat this as `Pick` and the caller is
+    /// responsible for driving a stepper that handles the pause.
+    Reword,
+    /// Apply the commit, then pause so the user can modify the
+    /// resulting commit (via review-mode hunk removal, etc.) before
+    /// continuing.
+    Edit,
+}
+
+/// Result of applying one commit's diff onto another via 3-way merge.
+/// Surfaces either a clean tree ready to be committed, or a set of
+/// conflicted files with each stage's content for the UI to resolve.
+#[derive(Clone, Debug)]
+pub enum CherryPickOutcome {
+    Clean {
+        tree: BTreeMap<PathBuf, String>,
+        /// Commit message carried from the source commit.
+        message: String,
+        author_name: String,
+        author_email: String,
+        author_time: i64,
+    },
+    Conflict {
+        files: Vec<ConflictedFile>,
+    },
+}
+
+/// Per-file 3-way merge state when a cherry-pick produces conflicts.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct ConflictedFile {
+    pub path: PathBuf,
+    /// Content at the common ancestor. `None` when the file did not
+    /// exist at that point (pure addition on one side).
+    pub ancestor: Option<String>,
+    /// Content on the "ours" side (the rebase-so-far HEAD).
+    pub ours: Option<String>,
+    /// Content on the "theirs" side (the commit being applied).
+    pub theirs: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Snafu)]
+#[snafu(visibility(pub))]
+pub enum RebaseError {
+    #[snafu(display("rebase backend failure: {reason}"))]
+    #[snafu(context(name(RebaseBackendSnafu)))]
+    Backend {
+        reason: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("rebase conflict at {at_sha}"))]
+    Conflict {
+        at_sha: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("rebase requires a clean worktree"))]
+    DirtyWorktree {
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+}
+
 /// Discovers repositories. Kept separate from [`GitRepo`] so the host
 /// can be a cheap cloneable value (`Arc<dyn GitHost>`) while repository
 /// handles carry per-repo state.
@@ -219,101 +316,4 @@ pub trait GitRepo: Send + Sync {
     /// `Err(GitApplyError::Backend(..))` when the sha is unknown or
     /// the checkout fails.
     fn restore_tree(&self, sha: &str) -> Result<(), GitApplyError>;
-}
-
-/// Result of a [`GitRepo::rewrite_commit`] call.
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RewriteResult {
-    /// Sha of the new HEAD after the rewrite + cherry-pick chain.
-    pub new_head: String,
-    /// Map from the original sha (target + each descendant) to the
-    /// new sha it became. Callers that were pointing at an original
-    /// sha (e.g. a review session's `ReviewSource::Commit`) read this
-    /// to relocate.
-    pub mapping: std::collections::HashMap<String, String>,
-}
-
-/// Single entry in a rebase plan, mirroring the commands accepted by
-/// `git rebase -i` (minus reword/edit in v1).
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub struct RebaseTodo {
-    pub op: RebaseTodoOp,
-    /// Sha of the commit this entry refers to in the pre-rebase
-    /// history.
-    pub sha: String,
-    /// Message from the pre-rebase commit, carried on the entry so
-    /// implementations (and the fake) can synthesize combined messages
-    /// without re-reading the original commit.
-    pub message: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-pub enum RebaseTodoOp {
-    Pick,
-    Squash,
-    Fixup,
-    Drop,
-    /// Apply the commit, then pause so the user can supply a new
-    /// message. Implementations that cannot pause (fake test paths,
-    /// `run_rebase`) should treat this as `Pick` and the caller is
-    /// responsible for driving a stepper that handles the pause.
-    Reword,
-    /// Apply the commit, then pause so the user can modify the
-    /// resulting commit (via review-mode hunk removal, etc.) before
-    /// continuing.
-    Edit,
-}
-
-/// Result of applying one commit's diff onto another via 3-way merge.
-/// Surfaces either a clean tree ready to be committed, or a set of
-/// conflicted files with each stage's content for the UI to resolve.
-#[derive(Clone, Debug)]
-pub enum CherryPickOutcome {
-    Clean {
-        tree: BTreeMap<PathBuf, String>,
-        /// Commit message carried from the source commit.
-        message: String,
-        author_name: String,
-        author_email: String,
-        author_time: i64,
-    },
-    Conflict {
-        files: Vec<ConflictedFile>,
-    },
-}
-
-/// Per-file 3-way merge state when a cherry-pick produces conflicts.
-#[derive(Clone, Debug, Serialize, Deserialize)]
-pub struct ConflictedFile {
-    pub path: PathBuf,
-    /// Content at the common ancestor. `None` when the file did not
-    /// exist at that point (pure addition on one side).
-    pub ancestor: Option<String>,
-    /// Content on the "ours" side (the rebase-so-far HEAD).
-    pub ours: Option<String>,
-    /// Content on the "theirs" side (the commit being applied).
-    pub theirs: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Snafu)]
-#[snafu(visibility(pub))]
-pub enum RebaseError {
-    #[snafu(display("rebase backend failure: {reason}"))]
-    #[snafu(context(name(RebaseBackendSnafu)))]
-    Backend {
-        reason: String,
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
-    #[snafu(display("rebase conflict at {at_sha}"))]
-    Conflict {
-        at_sha: String,
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
-    #[snafu(display("rebase requires a clean worktree"))]
-    DirtyWorktree {
-        #[snafu(implicit)]
-        location: snafu::Location,
-    },
 }
