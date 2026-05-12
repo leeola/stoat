@@ -46,6 +46,12 @@ pub struct InputStateMachine {
     /// lands with the editor edit-action item; until then this
     /// field is the only place a committed IME insert surfaces.
     last_text_input: Option<String>,
+    /// One-shot marker set by [`text_input`] when a single-char
+    /// IME commit lands in an allowed mode. The next [`feed`] call
+    /// consumes it; if the raw key event matches the committed
+    /// char with no modifiers and we are still in an allowed mode,
+    /// the keystroke is dropped as a macOS IME duplicate.
+    pending_duplicate_char: Option<char>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -65,6 +71,7 @@ impl InputStateMachine {
             marked_text: None,
             marked_range: None,
             last_text_input: None,
+            pending_duplicate_char: None,
             workspace,
             keymap,
         }
@@ -139,6 +146,12 @@ impl InputStateMachine {
     /// `range` is forwarded for the eventual buffer-level dispatch
     /// but unused today; the field is the temporary observation
     /// point until the editor edit-action item lands.
+    ///
+    /// Single-char commits also arm a one-shot duplicate-drop
+    /// marker that the next [`feed`] call honours, so a paired raw
+    /// key event from macOS does not double-insert. Multi-char
+    /// commits leave the marker cleared because the originating
+    /// keystrokes were consumed by the IME and have no raw twin.
     pub fn text_input(
         &mut self,
         text: &str,
@@ -151,6 +164,10 @@ impl InputStateMachine {
         self.last_text_input = Some(text.to_string());
         self.marked_text = None;
         self.marked_range = None;
+        self.pending_duplicate_char = {
+            let mut chars = text.chars();
+            chars.next().filter(|_| chars.next().is_none())
+        };
         cx.notify();
     }
 
@@ -158,7 +175,9 @@ impl InputStateMachine {
     /// [`text_input_allowed`] is false the update is dropped
     /// silently. Otherwise the marked text and its UTF-16 range
     /// are recorded so [`marked_text`] / [`marked_range`] reflect
-    /// the in-flight composition.
+    /// the in-flight composition. Any pending duplicate-drop
+    /// marker is cleared -- composition transitions do not pair
+    /// with raw key duplicates.
     pub fn composition_update(
         &mut self,
         text: &str,
@@ -171,15 +190,20 @@ impl InputStateMachine {
         }
         self.marked_text = Some(text.to_string());
         self.marked_range = range;
+        self.pending_duplicate_char = None;
         cx.notify();
     }
 
     /// Clear any in-flight IME composition (`unmarkText`).
     /// Unconditional so a mode change mid-composition still leaves
-    /// the state machine with a clean composition slot.
+    /// the state machine with a clean composition slot. Also
+    /// clears any pending duplicate-drop marker so a stale entry
+    /// from a prior commit does not survive across composition
+    /// boundaries.
     pub fn composition_commit(&mut self, cx: &mut Context<'_, Self>) {
         self.marked_text = None;
         self.marked_range = None;
+        self.pending_duplicate_char = None;
         cx.notify();
     }
 
@@ -222,6 +246,15 @@ impl InputStateMachine {
     /// composite Action type, so the caller dispatches each child
     /// individually via `Workspace::dispatch_action`.
     ///
+    /// On macOS, a single keypress in a text-input mode can fire
+    /// both an IME commit (via [`text_input`]) and a raw key event.
+    /// `feed` consumes the duplicate-drop marker armed by the prior
+    /// `text_input` call: when the marker is set, the current mode
+    /// still allows text input, and the raw event is the unmodified
+    /// `KeyCode::Char` matching the committed character, the
+    /// keystroke is dropped. The marker is one-shot regardless of
+    /// match so a non-matching raw event also clears it.
+    ///
     /// Returning the action list rather than dispatching inline
     /// keeps this method off the workspace's update path; the
     /// `cx.observe_keystrokes` callback already holds a `&mut
@@ -241,6 +274,15 @@ impl InputStateMachine {
             return Vec::new();
         };
         let event = normalize_shift_event(event);
+
+        if let Some(dup) = self.pending_duplicate_char.take() {
+            if self.text_input_allowed()
+                && event.modifiers.is_empty()
+                && event.code == KeyCode::Char(dup)
+            {
+                return Vec::new();
+            }
+        }
 
         let count_active_mode = self.mode() == "normal" || self.mode() == "select";
         let digit = unmodified_ascii_digit(&event);
@@ -692,6 +734,157 @@ mod tests {
             assert_eq!(sm.marked_text(), None);
             assert_eq!(sm.marked_range(), None);
         });
+    }
+
+    fn quit_kinds(actions: Vec<Box<dyn stoat_action::Action>>) -> Vec<stoat_action::ActionKind> {
+        actions.iter().map(|a| a.kind()).collect()
+    }
+
+    #[test]
+    fn text_input_then_feed_drops_raw_duplicate_in_insert() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        let stroke = key("a");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("a", None, cx);
+            quit_kinds(sm.feed(&stroke, cx))
+        });
+        assert!(kinds.is_empty(), "raw duplicate should drop, got {kinds:?}");
+    }
+
+    #[test]
+    fn feed_after_text_input_only_drops_one_event() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        let stroke = key("a");
+        let (first, second) = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("a", None, cx);
+            let first = quit_kinds(sm.feed(&stroke, cx));
+            let second = quit_kinds(sm.feed(&stroke, cx));
+            (first, second)
+        });
+        assert!(first.is_empty(), "first feed should drop duplicate");
+        assert_eq!(second, vec![stoat_action::ActionKind::Quit]);
+    }
+
+    #[test]
+    fn text_input_in_normal_mode_does_not_set_marker() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        let stroke = key("a");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("a", None, cx);
+            quit_kinds(sm.feed(&stroke, cx))
+        });
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+    }
+
+    #[test]
+    fn mode_change_after_text_input_clears_drop() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        sm.update(&mut cx, |sm, cx| sm.text_input("a", None, cx));
+        set_mode(&mut cx, &sm, "normal");
+        let stroke = key("a");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+    }
+
+    #[test]
+    fn text_input_with_multi_char_does_not_set_marker() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        let stroke = key("a");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("ka", None, cx);
+            quit_kinds(sm.feed(&stroke, cx))
+        });
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+    }
+
+    #[test]
+    fn non_matching_feed_clears_marker() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); b -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        let a = key("a");
+        let b = key("b");
+        let (first, second) = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("a", None, cx);
+            let first = quit_kinds(sm.feed(&b, cx));
+            let second = quit_kinds(sm.feed(&a, cx));
+            (first, second)
+        });
+        assert_eq!(
+            first,
+            vec![stoat_action::ActionKind::Quit],
+            "non-matching feed processes"
+        );
+        assert_eq!(
+            second,
+            vec![stoat_action::ActionKind::Quit],
+            "marker was cleared by prior feed"
+        );
+    }
+
+    #[test]
+    fn composition_update_clears_pending_duplicate() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        let stroke = key("a");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("a", None, cx);
+            sm.composition_update("k", Some(0..1), None, cx);
+            quit_kinds(sm.feed(&stroke, cx))
+        });
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+    }
+
+    #[test]
+    fn composition_commit_clears_pending_duplicate() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        let stroke = key("a");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("a", None, cx);
+            sm.composition_commit(cx);
+            quit_kinds(sm.feed(&stroke, cx))
+        });
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+    }
+
+    #[test]
+    fn feed_with_modifier_is_not_a_duplicate() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { C-a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        let stroke = key_with(
+            "a",
+            Modifiers {
+                control: true,
+                ..Modifiers::default()
+            },
+        );
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.text_input("a", None, cx);
+            quit_kinds(sm.feed(&stroke, cx))
+        });
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
 
     #[test]
