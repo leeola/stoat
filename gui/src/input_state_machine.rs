@@ -1,6 +1,7 @@
 use crate::workspace::Workspace;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gpui::{Context, FocusHandle, Keystroke, WeakEntity};
+use std::ops::Range;
 use stoat::{
     keymap::{Keymap, KeymapState, StateValue},
     keymap_state::{normalize_shift_event, resolve_action},
@@ -37,6 +38,14 @@ pub struct InputStateMachine {
     pending_chord: Vec<KeyPart>,
     pending_operator: Option<Operator>,
     prev_focused: Option<FocusHandle>,
+    marked_text: Option<String>,
+    marked_range: Option<Range<usize>>,
+    /// Most recently accepted IME commit, kept here as the
+    /// observation point for `EditorInput`'s forwarding tests.
+    /// The downstream dispatch into the active editor's buffer
+    /// lands with the editor edit-action item; until then this
+    /// field is the only place a committed IME insert surfaces.
+    last_text_input: Option<String>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -53,6 +62,9 @@ impl InputStateMachine {
             pending_chord: Vec::new(),
             pending_operator: None,
             prev_focused: None,
+            marked_text: None,
+            marked_range: None,
+            last_text_input: None,
             workspace,
             keymap,
         }
@@ -97,6 +109,80 @@ impl InputStateMachine {
         self.prev_focused.as_ref()
     }
 
+    pub fn marked_text(&self) -> Option<&str> {
+        self.marked_text.as_deref()
+    }
+
+    pub fn marked_range(&self) -> Option<Range<usize>> {
+        self.marked_range.clone()
+    }
+
+    pub fn last_text_input(&self) -> Option<&str> {
+        self.last_text_input.as_deref()
+    }
+
+    /// Modes in which IME / direct text input is accepted. Outside
+    /// these modes, focus output keeps the input target unfocused
+    /// in production so the OS does not route IME there; the gate
+    /// here enforces the same contract for tests that bypass the
+    /// OS path.
+    pub fn text_input_allowed(&self) -> bool {
+        matches!(self.mode(), "insert" | "reword_insert" | "prompt" | "run")
+    }
+
+    /// Apply a committed IME insert (`insertText` from
+    /// NSTextInputClient). When [`text_input_allowed`] is false the
+    /// commit is dropped silently. Otherwise the text is recorded
+    /// as the most recent input and any in-flight composition state
+    /// is cleared.
+    ///
+    /// `range` is forwarded for the eventual buffer-level dispatch
+    /// but unused today; the field is the temporary observation
+    /// point until the editor edit-action item lands.
+    pub fn text_input(
+        &mut self,
+        text: &str,
+        _range: Option<Range<usize>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.text_input_allowed() {
+            return;
+        }
+        self.last_text_input = Some(text.to_string());
+        self.marked_text = None;
+        self.marked_range = None;
+        cx.notify();
+    }
+
+    /// Apply an IME composition update (`setMarkedText`). When
+    /// [`text_input_allowed`] is false the update is dropped
+    /// silently. Otherwise the marked text and its UTF-16 range
+    /// are recorded so [`marked_text`] / [`marked_range`] reflect
+    /// the in-flight composition.
+    pub fn composition_update(
+        &mut self,
+        text: &str,
+        range: Option<Range<usize>>,
+        _selected: Option<Range<usize>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if !self.text_input_allowed() {
+            return;
+        }
+        self.marked_text = Some(text.to_string());
+        self.marked_range = range;
+        cx.notify();
+    }
+
+    /// Clear any in-flight IME composition (`unmarkText`).
+    /// Unconditional so a mode change mid-composition still leaves
+    /// the state machine with a clean composition slot.
+    pub fn composition_commit(&mut self, cx: &mut Context<'_, Self>) {
+        self.marked_text = None;
+        self.marked_range = None;
+        cx.notify();
+    }
+
     pub fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
     }
@@ -111,6 +197,16 @@ impl InputStateMachine {
     /// pipeline.
     pub fn set_keymap(&mut self, keymap: Keymap) {
         self.keymap = keymap;
+    }
+
+    /// Stage the predicate-visible `mode` field directly. Used by
+    /// tests to drive scenarios where the state machine would
+    /// normally arrive at a given mode through action dispatch
+    /// (action wiring is a later item); production code transitions
+    /// modes through action handlers, never this method.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_mode_for_test(&mut self, mode: StateValue) {
+        self.mode = mode;
     }
 
     /// Drive one platform keystroke through the input pipeline:
@@ -476,6 +572,126 @@ mod tests {
                 stoat_action::ActionKind::Quit,
             ]
         );
+    }
+
+    fn set_mode(cx: &mut TestAppContext, sm: &Entity<InputStateMachine>, mode: &str) {
+        let mode = mode.to_string();
+        sm.update(cx, |sm, _| {
+            sm.mode = StateValue::String(mode.into());
+        });
+    }
+
+    #[test]
+    fn text_input_in_insert_mode_records_input() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("hi", None, cx));
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.last_text_input(), Some("hi"));
+            assert_eq!(sm.marked_text(), None);
+            assert_eq!(sm.marked_range(), None);
+        });
+    }
+
+    #[test]
+    fn text_input_in_normal_mode_is_dropped() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("hi", None, cx));
+        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_text_input(), None));
+    }
+
+    #[test]
+    fn text_input_allowed_for_each_mode() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        for mode in ["insert", "reword_insert", "prompt", "run"] {
+            set_mode(&mut cx, &sm, mode);
+            sm.read_with(&cx, |sm, _| {
+                assert!(sm.text_input_allowed(), "expected {mode} to allow input");
+            });
+        }
+        for mode in ["normal", "select"] {
+            set_mode(&mut cx, &sm, mode);
+            sm.read_with(&cx, |sm, _| {
+                assert!(!sm.text_input_allowed(), "expected {mode} to drop input");
+            });
+        }
+    }
+
+    #[test]
+    fn composition_update_sets_marked_state_in_insert() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.composition_update("ka", Some(0..2), None, cx)
+        });
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.marked_text(), Some("ka"));
+            assert_eq!(sm.marked_range(), Some(0..2));
+        });
+    }
+
+    #[test]
+    fn composition_update_dropped_in_normal() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.composition_update("ka", Some(0..2), None, cx)
+        });
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.marked_text(), None);
+            assert_eq!(sm.marked_range(), None);
+        });
+    }
+
+    #[test]
+    fn composition_commit_clears_marked_state() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.composition_update("ka", Some(0..2), None, cx);
+            sm.composition_commit(cx);
+        });
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.marked_text(), None);
+            assert_eq!(sm.marked_range(), None);
+        });
+    }
+
+    #[test]
+    fn composition_commit_clears_even_in_normal_mode() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.composition_update("ka", Some(0..2), None, cx);
+        });
+        set_mode(&mut cx, &sm, "normal");
+        feed_in_app(&mut cx, &sm, |sm, cx| sm.composition_commit(cx));
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.marked_text(), None);
+            assert_eq!(sm.marked_range(), None);
+        });
+    }
+
+    #[test]
+    fn text_input_clears_marked_state() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "insert");
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.composition_update("ka", Some(0..2), None, cx);
+            sm.text_input("か", None, cx);
+        });
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.last_text_input(), Some("か"));
+            assert_eq!(sm.marked_text(), None);
+            assert_eq!(sm.marked_range(), None);
+        });
     }
 
     #[test]
