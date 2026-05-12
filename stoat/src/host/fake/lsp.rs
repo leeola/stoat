@@ -47,393 +47,6 @@ use tokio::sync::{
     oneshot, Mutex as TokioMutex,
 };
 
-fn file_uri(path: &str) -> Uri {
-    Uri::from_str(&format!("file://{path}")).expect("valid file URI")
-}
-
-fn text_doc_id(path: &str) -> TextDocumentIdentifier {
-    TextDocumentIdentifier::new(file_uri(path))
-}
-
-fn text_doc_pos(path: &str, line: u32, col: u32) -> TextDocumentPositionParams {
-    TextDocumentPositionParams {
-        text_document: text_doc_id(path),
-        position: Position::new(line, col),
-    }
-}
-
-fn wdp() -> WorkDoneProgressParams {
-    WorkDoneProgressParams {
-        work_done_token: None,
-    }
-}
-
-fn prp() -> PartialResultParams {
-    PartialResultParams {
-        partial_result_token: None,
-    }
-}
-
-// --- Param builders ---
-
-pub fn hover_params(path: &str, line: u32, col: u32) -> HoverParams {
-    HoverParams {
-        text_document_position_params: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-    }
-}
-
-pub fn signature_help_params(path: &str, line: u32, col: u32) -> SignatureHelpParams {
-    SignatureHelpParams {
-        text_document_position_params: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-        context: None,
-    }
-}
-
-pub fn completion_params(path: &str, line: u32, col: u32) -> CompletionParams {
-    CompletionParams {
-        text_document_position: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-        context: None,
-    }
-}
-
-pub fn definition_params(path: &str, line: u32, col: u32) -> GotoDefinitionParams {
-    GotoDefinitionParams {
-        text_document_position_params: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn reference_params(path: &str, line: u32, col: u32) -> ReferenceParams {
-    ReferenceParams {
-        text_document_position: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-        context: ReferenceContext {
-            include_declaration: true,
-        },
-    }
-}
-
-pub fn document_highlight_params(path: &str, line: u32, col: u32) -> DocumentHighlightParams {
-    DocumentHighlightParams {
-        text_document_position_params: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn inlay_hint_params(path: &str, start_line: u32, end_line: u32) -> InlayHintParams {
-    InlayHintParams {
-        work_done_progress_params: wdp(),
-        text_document: text_doc_id(path),
-        range: Range::new(Position::new(start_line, 0), Position::new(end_line, 0)),
-    }
-}
-
-pub fn range_inlay_hint_params(
-    path: &str,
-    start_line: u32,
-    start_col: u32,
-    end_line: u32,
-    end_col: u32,
-) -> InlayHintParams {
-    InlayHintParams {
-        work_done_progress_params: wdp(),
-        text_document: text_doc_id(path),
-        range: Range::new(
-            Position::new(start_line, start_col),
-            Position::new(end_line, end_col),
-        ),
-    }
-}
-
-pub fn folding_range_params(path: &str) -> FoldingRangeParams {
-    FoldingRangeParams {
-        text_document: text_doc_id(path),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn selection_range_params(path: &str, positions: &[(u32, u32)]) -> SelectionRangeParams {
-    SelectionRangeParams {
-        text_document: text_doc_id(path),
-        positions: positions
-            .iter()
-            .map(|(line, col)| Position::new(*line, *col))
-            .collect(),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn range_formatting_params(
-    path: &str,
-    start_line: u32,
-    start_col: u32,
-    end_line: u32,
-    end_col: u32,
-) -> DocumentRangeFormattingParams {
-    DocumentRangeFormattingParams {
-        text_document: text_doc_id(path),
-        range: Range::new(
-            Position::new(start_line, start_col),
-            Position::new(end_line, end_col),
-        ),
-        options: FormattingOptions::default(),
-        work_done_progress_params: wdp(),
-    }
-}
-
-pub fn code_action_params(
-    path: &str,
-    start_line: u32,
-    start_col: u32,
-    end_line: u32,
-    end_col: u32,
-) -> CodeActionParams {
-    CodeActionParams {
-        text_document: text_doc_id(path),
-        range: Range::new(
-            Position::new(start_line, start_col),
-            Position::new(end_line, end_col),
-        ),
-        context: CodeActionContext {
-            diagnostics: Vec::new(),
-            only: None,
-            trigger_kind: None,
-        },
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn document_diagnostic_params(path: &str) -> DocumentDiagnosticParams {
-    DocumentDiagnosticParams {
-        text_document: text_doc_id(path),
-        identifier: None,
-        previous_result_id: None,
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn document_link_params(path: &str) -> DocumentLinkParams {
-    DocumentLinkParams {
-        text_document: text_doc_id(path),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn document_symbol_params(path: &str) -> DocumentSymbolParams {
-    DocumentSymbolParams {
-        text_document: text_doc_id(path),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn document_color_params(path: &str) -> DocumentColorParams {
-    DocumentColorParams {
-        text_document: text_doc_id(path),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn color_presentation_params(
-    path: &str,
-    color: Color,
-    start_line: u32,
-    start_col: u32,
-    end_line: u32,
-    end_col: u32,
-) -> ColorPresentationParams {
-    ColorPresentationParams {
-        text_document: text_doc_id(path),
-        color,
-        range: Range::new(
-            Position::new(start_line, start_col),
-            Position::new(end_line, end_col),
-        ),
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-    }
-}
-
-pub fn semantic_tokens_params(path: &str) -> SemanticTokensParams {
-    SemanticTokensParams {
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-        text_document: text_doc_id(path),
-    }
-}
-
-pub fn semantic_tokens_range_params(
-    path: &str,
-    start_line: u32,
-    start_col: u32,
-    end_line: u32,
-    end_col: u32,
-) -> SemanticTokensRangeParams {
-    SemanticTokensRangeParams {
-        work_done_progress_params: wdp(),
-        partial_result_params: prp(),
-        text_document: text_doc_id(path),
-        range: Range::new(
-            Position::new(start_line, start_col),
-            Position::new(end_line, end_col),
-        ),
-    }
-}
-
-pub fn call_hierarchy_prepare_params(
-    path: &str,
-    line: u32,
-    col: u32,
-) -> CallHierarchyPrepareParams {
-    CallHierarchyPrepareParams {
-        text_document_position_params: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-    }
-}
-
-/// Builds a minimal [`CallHierarchyItem`] anchored at
-/// `(path, line, col)`. The item's `range` and `selection_range`
-/// both span a single position so the fake's lookup
-/// (`item.range.start`) matches `(line, col)`.
-pub fn call_hierarchy_item(
-    path: &str,
-    name: &str,
-    kind: SymbolKind,
-    line: u32,
-    col: u32,
-) -> CallHierarchyItem {
-    let pos = Position::new(line, col);
-    let range = Range::new(pos, pos);
-    CallHierarchyItem {
-        name: name.to_string(),
-        kind,
-        tags: None,
-        detail: None,
-        uri: file_uri(path),
-        range,
-        selection_range: range,
-        data: None,
-    }
-}
-
-pub fn type_hierarchy_prepare_params(
-    path: &str,
-    line: u32,
-    col: u32,
-) -> TypeHierarchyPrepareParams {
-    TypeHierarchyPrepareParams {
-        text_document_position_params: text_doc_pos(path, line, col),
-        work_done_progress_params: wdp(),
-    }
-}
-
-/// Builds a minimal [`TypeHierarchyItem`] anchored at
-/// `(path, line, col)`. The item's `range` and `selection_range`
-/// both span a single position so the fake's supertypes/subtypes
-/// lookup (`item.range.start`) matches `(line, col)`.
-pub fn type_hierarchy_item(
-    path: &str,
-    name: &str,
-    kind: SymbolKind,
-    line: u32,
-    col: u32,
-) -> TypeHierarchyItem {
-    let pos = Position::new(line, col);
-    let range = Range::new(pos, pos);
-    TypeHierarchyItem {
-        name: name.to_string(),
-        kind,
-        tags: None,
-        detail: None,
-        uri: file_uri(path),
-        range,
-        selection_range: range,
-        data: None,
-    }
-}
-
-pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
-    WorkspaceSymbolParams {
-        partial_result_params: prp(),
-        work_done_progress_params: wdp(),
-        query: query.to_string(),
-    }
-}
-
-pub fn open_params(path: &str, text: &str, language: &str) -> DidOpenTextDocumentParams {
-    DidOpenTextDocumentParams {
-        text_document: TextDocumentItem::new(
-            file_uri(path),
-            language.to_string(),
-            0,
-            text.to_string(),
-        ),
-    }
-}
-
-pub fn change_params(path: &str, version: i32, new_text: &str) -> DidChangeTextDocumentParams {
-    DidChangeTextDocumentParams {
-        text_document: VersionedTextDocumentIdentifier::new(file_uri(path), version),
-        content_changes: vec![TextDocumentContentChangeEvent {
-            range: None,
-            range_length: None,
-            text: new_text.to_string(),
-        }],
-    }
-}
-
-/// Builds [`RenameFilesParams`] from a slice of `(old_path,
-/// new_path)` pairs. Each path is converted to a `file://` URI
-/// via [`file_uri`] so test inputs match the URIs the fake's
-/// `will_rename` lookup uses.
-pub fn rename_files_params(renames: &[(&str, &str)]) -> RenameFilesParams {
-    RenameFilesParams {
-        files: renames
-            .iter()
-            .map(|(old, new)| FileRename {
-                old_uri: file_uri(old).as_str().to_string(),
-                new_uri: file_uri(new).as_str().to_string(),
-            })
-            .collect(),
-    }
-}
-
-pub fn execute_command_params(command: &str, arguments: Vec<Value>) -> ExecuteCommandParams {
-    ExecuteCommandParams {
-        command: command.to_string(),
-        arguments,
-        work_done_progress_params: wdp(),
-    }
-}
-
-/// Build an [`IncomingRequest::Unknown`] for a method this host has
-/// not yet been taught about. Tests for typed variants
-/// (`IncomingRequest::WorkspaceApplyEdit`, etc.) construct the
-/// variant directly so the params type stays checked at compile
-/// time; this helper exists for the fallback path.
-pub fn incoming_request(method: &str, id: i32, params: Value) -> IncomingRequest {
-    IncomingRequest::Unknown {
-        id: NumberOrString::Number(id),
-        method: method.to_string(),
-        params,
-    }
-}
-
-// --- FakeLsp ---
-
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct LspKey {
     uri: String,
@@ -2792,6 +2405,391 @@ impl LspServer for ArcLspSession {
         result: Result<Value, LspResponseError>,
     ) -> io::Result<()> {
         self.0.reply(id, result).await
+    }
+}
+
+fn file_uri(path: &str) -> Uri {
+    Uri::from_str(&format!("file://{path}")).expect("valid file URI")
+}
+
+fn text_doc_id(path: &str) -> TextDocumentIdentifier {
+    TextDocumentIdentifier::new(file_uri(path))
+}
+
+fn text_doc_pos(path: &str, line: u32, col: u32) -> TextDocumentPositionParams {
+    TextDocumentPositionParams {
+        text_document: text_doc_id(path),
+        position: Position::new(line, col),
+    }
+}
+
+fn wdp() -> WorkDoneProgressParams {
+    WorkDoneProgressParams {
+        work_done_token: None,
+    }
+}
+
+fn prp() -> PartialResultParams {
+    PartialResultParams {
+        partial_result_token: None,
+    }
+}
+
+// --- Param builders ---
+
+pub fn hover_params(path: &str, line: u32, col: u32) -> HoverParams {
+    HoverParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+    }
+}
+
+pub fn signature_help_params(path: &str, line: u32, col: u32) -> SignatureHelpParams {
+    SignatureHelpParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+        context: None,
+    }
+}
+
+pub fn completion_params(path: &str, line: u32, col: u32) -> CompletionParams {
+    CompletionParams {
+        text_document_position: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+        context: None,
+    }
+}
+
+pub fn definition_params(path: &str, line: u32, col: u32) -> GotoDefinitionParams {
+    GotoDefinitionParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn reference_params(path: &str, line: u32, col: u32) -> ReferenceParams {
+    ReferenceParams {
+        text_document_position: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+        context: ReferenceContext {
+            include_declaration: true,
+        },
+    }
+}
+
+pub fn document_highlight_params(path: &str, line: u32, col: u32) -> DocumentHighlightParams {
+    DocumentHighlightParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn inlay_hint_params(path: &str, start_line: u32, end_line: u32) -> InlayHintParams {
+    InlayHintParams {
+        work_done_progress_params: wdp(),
+        text_document: text_doc_id(path),
+        range: Range::new(Position::new(start_line, 0), Position::new(end_line, 0)),
+    }
+}
+
+pub fn range_inlay_hint_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> InlayHintParams {
+    InlayHintParams {
+        work_done_progress_params: wdp(),
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+    }
+}
+
+pub fn folding_range_params(path: &str) -> FoldingRangeParams {
+    FoldingRangeParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn selection_range_params(path: &str, positions: &[(u32, u32)]) -> SelectionRangeParams {
+    SelectionRangeParams {
+        text_document: text_doc_id(path),
+        positions: positions
+            .iter()
+            .map(|(line, col)| Position::new(*line, *col))
+            .collect(),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn range_formatting_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> DocumentRangeFormattingParams {
+    DocumentRangeFormattingParams {
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+        options: FormattingOptions::default(),
+        work_done_progress_params: wdp(),
+    }
+}
+
+pub fn code_action_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> CodeActionParams {
+    CodeActionParams {
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+        context: CodeActionContext {
+            diagnostics: Vec::new(),
+            only: None,
+            trigger_kind: None,
+        },
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn document_diagnostic_params(path: &str) -> DocumentDiagnosticParams {
+    DocumentDiagnosticParams {
+        text_document: text_doc_id(path),
+        identifier: None,
+        previous_result_id: None,
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn document_link_params(path: &str) -> DocumentLinkParams {
+    DocumentLinkParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn document_symbol_params(path: &str) -> DocumentSymbolParams {
+    DocumentSymbolParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn document_color_params(path: &str) -> DocumentColorParams {
+    DocumentColorParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn color_presentation_params(
+    path: &str,
+    color: Color,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> ColorPresentationParams {
+    ColorPresentationParams {
+        text_document: text_doc_id(path),
+        color,
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn semantic_tokens_params(path: &str) -> SemanticTokensParams {
+    SemanticTokensParams {
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+        text_document: text_doc_id(path),
+    }
+}
+
+pub fn semantic_tokens_range_params(
+    path: &str,
+    start_line: u32,
+    start_col: u32,
+    end_line: u32,
+    end_col: u32,
+) -> SemanticTokensRangeParams {
+    SemanticTokensRangeParams {
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+        text_document: text_doc_id(path),
+        range: Range::new(
+            Position::new(start_line, start_col),
+            Position::new(end_line, end_col),
+        ),
+    }
+}
+
+pub fn call_hierarchy_prepare_params(
+    path: &str,
+    line: u32,
+    col: u32,
+) -> CallHierarchyPrepareParams {
+    CallHierarchyPrepareParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+    }
+}
+
+/// Builds a minimal [`CallHierarchyItem`] anchored at
+/// `(path, line, col)`. The item's `range` and `selection_range`
+/// both span a single position so the fake's lookup
+/// (`item.range.start`) matches `(line, col)`.
+pub fn call_hierarchy_item(
+    path: &str,
+    name: &str,
+    kind: SymbolKind,
+    line: u32,
+    col: u32,
+) -> CallHierarchyItem {
+    let pos = Position::new(line, col);
+    let range = Range::new(pos, pos);
+    CallHierarchyItem {
+        name: name.to_string(),
+        kind,
+        tags: None,
+        detail: None,
+        uri: file_uri(path),
+        range,
+        selection_range: range,
+        data: None,
+    }
+}
+
+pub fn type_hierarchy_prepare_params(
+    path: &str,
+    line: u32,
+    col: u32,
+) -> TypeHierarchyPrepareParams {
+    TypeHierarchyPrepareParams {
+        text_document_position_params: text_doc_pos(path, line, col),
+        work_done_progress_params: wdp(),
+    }
+}
+
+/// Builds a minimal [`TypeHierarchyItem`] anchored at
+/// `(path, line, col)`. The item's `range` and `selection_range`
+/// both span a single position so the fake's supertypes/subtypes
+/// lookup (`item.range.start`) matches `(line, col)`.
+pub fn type_hierarchy_item(
+    path: &str,
+    name: &str,
+    kind: SymbolKind,
+    line: u32,
+    col: u32,
+) -> TypeHierarchyItem {
+    let pos = Position::new(line, col);
+    let range = Range::new(pos, pos);
+    TypeHierarchyItem {
+        name: name.to_string(),
+        kind,
+        tags: None,
+        detail: None,
+        uri: file_uri(path),
+        range,
+        selection_range: range,
+        data: None,
+    }
+}
+
+pub fn workspace_symbol_params(query: &str) -> WorkspaceSymbolParams {
+    WorkspaceSymbolParams {
+        partial_result_params: prp(),
+        work_done_progress_params: wdp(),
+        query: query.to_string(),
+    }
+}
+
+pub fn open_params(path: &str, text: &str, language: &str) -> DidOpenTextDocumentParams {
+    DidOpenTextDocumentParams {
+        text_document: TextDocumentItem::new(
+            file_uri(path),
+            language.to_string(),
+            0,
+            text.to_string(),
+        ),
+    }
+}
+
+pub fn change_params(path: &str, version: i32, new_text: &str) -> DidChangeTextDocumentParams {
+    DidChangeTextDocumentParams {
+        text_document: VersionedTextDocumentIdentifier::new(file_uri(path), version),
+        content_changes: vec![TextDocumentContentChangeEvent {
+            range: None,
+            range_length: None,
+            text: new_text.to_string(),
+        }],
+    }
+}
+
+/// Builds [`RenameFilesParams`] from a slice of `(old_path,
+/// new_path)` pairs. Each path is converted to a `file://` URI
+/// via [`file_uri`] so test inputs match the URIs the fake's
+/// `will_rename` lookup uses.
+pub fn rename_files_params(renames: &[(&str, &str)]) -> RenameFilesParams {
+    RenameFilesParams {
+        files: renames
+            .iter()
+            .map(|(old, new)| FileRename {
+                old_uri: file_uri(old).as_str().to_string(),
+                new_uri: file_uri(new).as_str().to_string(),
+            })
+            .collect(),
+    }
+}
+
+pub fn execute_command_params(command: &str, arguments: Vec<Value>) -> ExecuteCommandParams {
+    ExecuteCommandParams {
+        command: command.to_string(),
+        arguments,
+        work_done_progress_params: wdp(),
+    }
+}
+
+/// Build an [`IncomingRequest::Unknown`] for a method this host has
+/// not yet been taught about. Tests for typed variants
+/// (`IncomingRequest::WorkspaceApplyEdit`, etc.) construct the
+/// variant directly so the params type stays checked at compile
+/// time; this helper exists for the fallback path.
+pub fn incoming_request(method: &str, id: i32, params: Value) -> IncomingRequest {
+    IncomingRequest::Unknown {
+        id: NumberOrString::Number(id),
+        method: method.to_string(),
+        params,
     }
 }
 
