@@ -1,6 +1,6 @@
 use crate::{editor::Editor, workspace::Workspace};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gpui::{Context, FocusHandle, Keystroke, WeakEntity};
+use gpui::{Context, FocusHandle, Keystroke, WeakEntity, Window};
 use std::ops::Range;
 use stoat::{
     keymap::{Keymap, KeymapState, StateValue},
@@ -57,6 +57,12 @@ pub struct InputStateMachine {
     /// callers update this when an editor becomes the workspace's
     /// focused item; tests stage it directly.
     active_editor: Option<WeakEntity<Editor>>,
+    /// Focus handle to focus when [`transition_mode`] enters an
+    /// input mode (insert / reword_insert / prompt / run).
+    /// External callers register this when an editor input target
+    /// becomes active. `None` means the state machine has nothing
+    /// to focus on input-mode entry.
+    editor_focus_target: Option<FocusHandle>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -78,6 +84,7 @@ impl InputStateMachine {
             last_text_input: None,
             pending_duplicate_char: None,
             active_editor: None,
+            editor_focus_target: None,
             workspace,
             keymap,
         }
@@ -145,6 +152,64 @@ impl InputStateMachine {
     /// only.
     pub fn set_active_editor(&mut self, editor: Option<WeakEntity<Editor>>) {
         self.active_editor = editor;
+    }
+
+    pub fn editor_focus_target(&self) -> Option<&FocusHandle> {
+        self.editor_focus_target.as_ref()
+    }
+
+    /// Register the focus handle that [`transition_mode`] focuses
+    /// when entering an input mode. External callers update this
+    /// when an editor input target becomes active. `None` detaches
+    /// the slot, leaving entry-into-input-mode without a focus
+    /// side effect.
+    pub fn set_editor_focus_target(&mut self, handle: Option<FocusHandle>) {
+        self.editor_focus_target = handle;
+    }
+
+    /// Update the active mode and produce focus output. When the
+    /// transition crosses from a non-input mode into an input mode
+    /// (insert / reword_insert / prompt / run) and an
+    /// `editor_focus_target` is registered, the target is focused
+    /// via `window.focus`. Transitions between input modes do not
+    /// refocus -- the input target is already focused; transitions
+    /// into a non-input mode produce no focus output (the next
+    /// action focuses whatever it intends to focus).
+    pub fn transition_mode(
+        &mut self,
+        mode: impl Into<String>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let was_input = self.text_input_allowed();
+        self.mode = StateValue::String(mode.into().into());
+        let now_input = self.text_input_allowed();
+        if !was_input && now_input {
+            if let Some(handle) = self.editor_focus_target.as_ref() {
+                window.focus(handle);
+            }
+        }
+        cx.notify();
+    }
+
+    /// Save `handle` for later restoration via
+    /// [`restore_prev_focus`]. Callers that own a transition into
+    /// a focus-grabbing surface (entering a fullscreen view,
+    /// opening a non-modal sub-pane) capture the previously
+    /// focused handle here so the symmetric exit can restore it.
+    pub fn capture_prev_focus(&mut self, handle: Option<FocusHandle>) {
+        self.prev_focused = handle;
+    }
+
+    /// Restore focus to the handle saved by [`capture_prev_focus`]
+    /// and clear the slot. No-op when no previous handle is
+    /// captured. Single-slot semantics; nested capture/restore
+    /// pairs that need stacking should track stacks externally
+    /// (see `ModalLayer::previous_focus_handle` for the modal case).
+    pub fn restore_prev_focus(&mut self, window: &mut Window) {
+        if let Some(handle) = self.prev_focused.take() {
+            window.focus(&handle);
+        }
     }
 
     /// Modes in which IME / direct text input is accepted. Outside
@@ -438,7 +503,7 @@ fn unmodified_ascii_digit(event: &KeyEvent) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext, Entity, Modifiers, TestAppContext};
+    use gpui::{AppContext, Entity, Modifiers, TestAppContext, VisualTestContext};
     use std::path::PathBuf;
     use stoat_config::Config;
 
@@ -1037,5 +1102,162 @@ mod tests {
     fn keystroke_to_key_event_rejects_multi_char_unknown() {
         let stroke = key("noodle");
         assert!(keystroke_to_key_event(&stroke).is_none());
+    }
+
+    fn new_state_machine_in_window(
+        cx: &mut TestAppContext,
+    ) -> (Entity<InputStateMachine>, &mut VisualTestContext) {
+        let (workspace, vcx) =
+            cx.add_window_view(|_, cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+        let weak = workspace.downgrade();
+        let sm = vcx.update(|_, cx| cx.new(|_| InputStateMachine::new(weak, empty_keymap())));
+        (sm, vcx)
+    }
+
+    /// Anchor entity that owns its own focus handle. Used to seed
+    /// focus targets in the focus-output tests so we can verify
+    /// `transition_mode` and `restore_prev_focus` move focus to the
+    /// expected handle.
+    struct FocusAnchor {
+        handle: FocusHandle,
+    }
+
+    impl FocusAnchor {
+        fn new(cx: &mut Context<'_, Self>) -> Self {
+            Self {
+                handle: cx.focus_handle(),
+            }
+        }
+    }
+
+    impl gpui::Render for FocusAnchor {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl gpui::IntoElement {
+            gpui::div()
+        }
+    }
+
+    fn make_focus_handle(vcx: &mut VisualTestContext) -> FocusHandle {
+        let entity = vcx.update(|_, cx| cx.new(FocusAnchor::new));
+        entity.read_with(vcx, |a, _| a.handle.clone())
+    }
+
+    #[test]
+    fn transition_mode_into_insert_focuses_editor_target() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let target = make_focus_handle(vcx);
+        sm.update(vcx, |sm, _| {
+            sm.set_editor_focus_target(Some(target.clone()));
+        });
+
+        sm.update_in(vcx, |sm, window, cx| {
+            sm.transition_mode("insert", window, cx);
+        });
+
+        let focused = vcx.update(|window, _| target.is_focused(window));
+        assert!(
+            focused,
+            "editor target should be focused after entering insert"
+        );
+    }
+
+    #[test]
+    fn transition_mode_into_insert_without_target_is_no_op() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+
+        sm.update_in(vcx, |sm, window, cx| {
+            sm.transition_mode("insert", window, cx);
+        });
+
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.mode(), "insert"));
+    }
+
+    #[test]
+    fn transition_between_input_modes_does_not_refocus() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let editor_target = make_focus_handle(vcx);
+        let other_handle = make_focus_handle(vcx);
+        sm.update(vcx, |sm, _| {
+            sm.set_editor_focus_target(Some(editor_target.clone()));
+        });
+
+        sm.update_in(vcx, |sm, window, cx| {
+            sm.transition_mode("insert", window, cx);
+        });
+        // Some other code subsequently focuses a different handle.
+        vcx.update(|window, _| window.focus(&other_handle));
+
+        sm.update_in(vcx, |sm, window, cx| {
+            sm.transition_mode("prompt", window, cx);
+        });
+
+        let other_still_focused = vcx.update(|window, _| other_handle.is_focused(window));
+        assert!(
+            other_still_focused,
+            "transition between input modes should not steal focus from existing target"
+        );
+    }
+
+    #[test]
+    fn transition_into_non_input_mode_does_not_focus_editor() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let editor_target = make_focus_handle(vcx);
+        let other_handle = make_focus_handle(vcx);
+        sm.update(vcx, |sm, _| {
+            sm.set_editor_focus_target(Some(editor_target.clone()));
+        });
+        vcx.update(|window, _| window.focus(&other_handle));
+
+        sm.update_in(vcx, |sm, window, cx| {
+            sm.transition_mode("select", window, cx);
+        });
+
+        let editor_focused = vcx.update(|window, _| editor_target.is_focused(window));
+        assert!(
+            !editor_focused,
+            "select is not an input mode; editor target stays unfocused"
+        );
+    }
+
+    #[test]
+    fn capture_then_restore_round_trips() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let original = make_focus_handle(vcx);
+        let other = make_focus_handle(vcx);
+        vcx.update(|window, _| window.focus(&original));
+
+        sm.update(vcx, |sm, _| sm.capture_prev_focus(Some(original.clone())));
+        vcx.update(|window, _| window.focus(&other));
+        sm.update_in(vcx, |sm, window, _cx| sm.restore_prev_focus(window));
+
+        let original_focused = vcx.update(|window, _| original.is_focused(window));
+        assert!(
+            original_focused,
+            "restore_prev_focus should bring captured handle back"
+        );
+        sm.read_with(vcx, |sm, _| {
+            assert!(sm.prev_focused().is_none(), "restore should clear the slot");
+        });
+    }
+
+    #[test]
+    fn restore_prev_focus_without_capture_is_no_op() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let original = make_focus_handle(vcx);
+        vcx.update(|window, _| window.focus(&original));
+
+        sm.update_in(vcx, |sm, window, _cx| sm.restore_prev_focus(window));
+
+        let still_focused = vcx.update(|window, _| original.is_focused(window));
+        assert!(still_focused, "no-op restore should leave focus unchanged");
     }
 }
