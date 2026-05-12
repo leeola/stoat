@@ -141,7 +141,12 @@ mod tests {
     }
 
     fn new_pane_with_items(cx: &mut TestAppContext, items: &[(&str, bool)]) -> Entity<Pane> {
-        let pane = cx.update(|cx| cx.new(Pane::new));
+        use crate::workspace::Workspace;
+        let workspace = cx.update(|cx| {
+            cx.new(|cx| Workspace::new("test", std::path::PathBuf::from("/tmp/repo"), cx))
+        });
+        let weak = workspace.downgrade();
+        let pane = cx.update(|cx| cx.new(|cx| Pane::new(stoat::pane::PaneId::default(), weak, cx)));
         for (label, dirty) in items {
             let label = SharedString::from(label.to_string());
             let dirty = *dirty;

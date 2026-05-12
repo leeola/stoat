@@ -20,6 +20,16 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    DismissModalDef,
+    DismissModal,
+    "DismissModal",
+    ActionKind::DismissModal,
+    "dismiss the active modal",
+    "Close the topmost modal in the workspace's modal layer. Dispatched by the modal layer's backdrop click handler and bindable from the keymap (typically `Escape` while a modal is open).",
+    ActionPriority::Common
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -39,6 +49,13 @@ mod tests {
         assert_eq!(QuitAll.def().name(), "QuitAll");
         assert!(QuitAll.def().params().is_empty());
         assert_eq!(QuitAll.def().short_desc(), "exit stoat, closing all panes");
+    }
+
+    #[test]
+    fn dismiss_modal() {
+        assert_eq!(DismissModal.kind(), ActionKind::DismissModal);
+        assert_eq!(DismissModal.def().name(), "DismissModal");
+        assert!(DismissModal.def().params().is_empty());
     }
 
     #[test]

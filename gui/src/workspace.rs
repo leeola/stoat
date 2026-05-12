@@ -54,9 +54,12 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let pane_tree = cx.new(|_| PaneTree::new());
-        let modal_layer = cx.new(ModalLayer::new);
-        let status_bar = cx.new(StatusBar::new);
         let workspace_handle = cx.weak_entity();
+        let modal_layer = {
+            let weak = workspace_handle.clone();
+            cx.new(|cx| ModalLayer::new(Some(weak), cx))
+        };
+        let status_bar = cx.new(StatusBar::new);
         // FIXME: replace the empty Keymap placeholder with a real
         // compile of the loaded config once the keymap loader
         // (`.todo-plans/TODO.md` "Stoat-native keymap loader") lands.
@@ -218,7 +221,7 @@ impl Workspace {
     pub fn dispatch_action(
         &mut self,
         action: Box<dyn stoat_action::Action>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         match action.kind() {
@@ -270,6 +273,24 @@ impl Workspace {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.close_others(cx);
                 });
+            },
+            ActionKind::SetActivePane => {
+                if let Some(set) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::SetActivePane>()
+                {
+                    let id = stoat::pane::PaneId::from_ffi(set.pane_id);
+                    self.pane_tree.update(cx, |tree, cx| tree.set_focus(id, cx));
+                }
+            },
+            ActionKind::DismissModal => {
+                self.dismiss_modal(window, cx);
+            },
+            ActionKind::ClickAt => {
+                // FIXME: routing into the active editor's text region waits
+                // for the editor render and active-editor lookup; the action
+                // exists so the mouse pipeline has a target today.
+                tracing::trace!(target: "stoat::dispatch", "ClickAt routing not wired yet");
             },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
@@ -760,6 +781,62 @@ mod tests {
         let before = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
 
         dispatch(&ws, vcx, stoat_action::MoveLeft);
+        vcx.run_until_parked();
+
+        let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn dispatch_set_active_pane_changes_focus() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitRight);
+        let original_id = pane_tree.read_with(vcx, |t, _| t.focus());
+        dispatch(&ws, vcx, stoat_action::FocusLeft);
+        let other_id = pane_tree.read_with(vcx, |t, _| t.focus());
+        assert_ne!(original_id, other_id);
+
+        dispatch(
+            &ws,
+            vcx,
+            crate::actions::SetActivePane {
+                pane_id: original_id.as_ffi(),
+            },
+        );
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.focus()), original_id);
+    }
+
+    #[test]
+    fn dispatch_dismiss_modal_closes_active_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update_in(vcx, |w, window, cx| {
+            w.toggle_modal::<TestModal, _>(window, cx, |_, cx| TestModal::new(cx));
+        });
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::DismissModal);
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer().read(cx).active_modal::<TestModal>()
+        });
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn dispatch_click_at_is_silent_for_now() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let before = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+
+        dispatch(&ws, vcx, crate::actions::ClickAt { row: 3, col: 7 });
         vcx.run_until_parked();
 
         let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));

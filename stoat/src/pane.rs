@@ -9,6 +9,24 @@ new_key_type! {
     struct NodeId;
 }
 
+impl PaneId {
+    /// FFI-stable `u64` representation. Round-trip with [`PaneId::from_ffi`]
+    /// for callers that need to carry a pane id through a type-erased
+    /// boundary (action structs, serialized state).
+    pub fn as_ffi(self) -> u64 {
+        use slotmap::Key;
+        self.data().as_ffi()
+    }
+
+    /// Reconstruct a [`PaneId`] from an FFI-stable `u64`. The id is only
+    /// valid against the `SlotMap` that originally produced it; using a
+    /// stale id against a tree where the pane has been removed is a
+    /// silent miss inside the map.
+    pub fn from_ffi(value: u64) -> Self {
+        Self::from(slotmap::KeyData::from_ffi(value))
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum Axis {
     /// Children stacked top-to-bottom (horizontal divider line).

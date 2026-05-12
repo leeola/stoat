@@ -1,8 +1,10 @@
+use crate::workspace::Workspace;
 use gpui::{
     div, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyContext, ManagedView,
-    ParentElement, Render, SharedString, Styled, Subscription, Window,
+    FocusHandle, Focusable, InteractiveElement, IntoElement, KeyContext, ManagedView, MouseButton,
+    ParentElement, Render, SharedString, Styled, Subscription, WeakEntity, Window,
 };
+use stoat_action::DismissModal;
 
 /// Modal entity hosted by a [`ModalLayer`]. Builds on gpui's
 /// [`ManagedView`] (focus handle + dismiss event + render) and adds a
@@ -61,10 +63,12 @@ struct ActiveModal {
     _subscriptions: [Subscription; 1],
 }
 
-/// Window-level overlay that owns a stack of modals. Stoat's
-/// keyboard-first flow: a modal is dismissed through its own
-/// `DismissEvent` (typically an Escape handler inside the modal),
-/// never silently by clicking outside or losing focus.
+/// Window-level overlay that owns a stack of modals. The active
+/// modal is dismissed through its own `DismissEvent` (typically an
+/// Escape handler inside the modal) or by a backdrop click on the
+/// layer's overlay. The backdrop click dispatches `DismissModal`
+/// through the optional workspace handle; clicks on the modal
+/// child itself are bubbled child-first by GPUI and handled there.
 ///
 /// Only the top of the stack renders and receives focus; pushing a
 /// new modal stacks it on top of any existing modal so dismissing
@@ -72,7 +76,12 @@ struct ActiveModal {
 /// from inside the file finder). `toggle_modal` operates on the top
 /// of the stack -- replace-on-different-type semantics survive
 /// unchanged.
+///
+/// `workspace` is `None` when the layer is constructed in isolation
+/// (most internal-state tests); production code wires it via
+/// `Workspace::new` so backdrop clicks have a dispatch target.
 pub struct ModalLayer {
+    workspace: Option<WeakEntity<Workspace>>,
     active_modals: Vec<ActiveModal>,
     focus_handle: FocusHandle,
 }
@@ -85,8 +94,9 @@ pub struct ModalOpenedEvent;
 impl EventEmitter<ModalOpenedEvent> for ModalLayer {}
 
 impl ModalLayer {
-    pub fn new(cx: &mut Context<'_, Self>) -> Self {
+    pub fn new(workspace: Option<WeakEntity<Workspace>>, cx: &mut Context<'_, Self>) -> Self {
         Self {
+            workspace,
             active_modals: Vec::new(),
             focus_handle: cx.focus_handle(),
         }
@@ -238,16 +248,30 @@ impl Render for ModalLayer {
             return div();
         };
         let key_context = self.build_key_context(cx);
-        // FIXME: render carries focus + key_context only; action
-        // dispatch routes through the workspace-hosted input
-        // state machine via direct entity.update, not on_action
-        // listeners on this layer.
         div()
             .absolute()
             .size_full()
             .inset_0()
             .key_context(key_context)
             .track_focus(&top.focus_handle)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, window, cx| {
+                    let Some(workspace) = this.workspace.as_ref().and_then(WeakEntity::upgrade)
+                    else {
+                        return;
+                    };
+                    // Defer the dispatch so the workspace's `dismiss_modal`
+                    // call (which re-enters this layer's `update` to call
+                    // `hide_modal`) runs after the listener returns and the
+                    // current `update` borrow on the layer is released.
+                    window.defer(cx, move |window, cx| {
+                        workspace.update(cx, |w, cx| {
+                            w.dispatch_action(Box::new(DismissModal), window, cx);
+                        });
+                    });
+                }),
+            )
             .child(top.modal.view())
     }
 }
@@ -376,7 +400,7 @@ mod tests {
     impl ModalView for AnonymousModal {}
 
     fn new_layer(cx: &mut TestAppContext) -> (Entity<ModalLayer>, &mut VisualTestContext) {
-        cx.add_window_view(|_window, cx| ModalLayer::new(cx))
+        cx.add_window_view(|_window, cx| ModalLayer::new(None, cx))
     }
 
     struct Recorder {
@@ -664,5 +688,94 @@ mod tests {
         assert!(!context.contains("TestModal"));
         assert!(!context.contains("OtherModal"));
         assert!(!context.contains("AnonymousModal"));
+    }
+
+    /// Bounded modal that leaves backdrop space around it. Plain
+    /// `TestModal::render` returns `div().size_full()`, which would
+    /// catch every click inside the window and prevent the layer's
+    /// backdrop handler from ever firing.
+    struct SmallModal {
+        focus_handle: FocusHandle,
+    }
+
+    impl SmallModal {
+        fn new(cx: &mut Context<'_, Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+            }
+        }
+    }
+
+    impl Render for SmallModal {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            use gpui::px;
+            div().w(px(40.0)).h(px(40.0))
+        }
+    }
+
+    impl Focusable for SmallModal {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl EventEmitter<DismissEvent> for SmallModal {}
+
+    impl ModalView for SmallModal {}
+
+    /// Adapter view that renders an externally-owned `ModalLayer`
+    /// entity. Used by the backdrop-click test below so the test
+    /// can drive a layer that was constructed inside a workspace
+    /// (and therefore dispatches DismissModal through that
+    /// workspace's own layer back into itself).
+    struct LayerHost {
+        layer: Entity<ModalLayer>,
+    }
+
+    impl Render for LayerHost {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            div().size_full().child(self.layer.clone())
+        }
+    }
+
+    #[test]
+    fn backdrop_click_dispatches_dismiss_modal() {
+        use crate::workspace::Workspace;
+        use gpui::{point, px, Modifiers};
+
+        let mut cx = TestAppContext::single();
+        let workspace = cx.update(|cx| {
+            cx.new(|cx| Workspace::new("main", std::path::PathBuf::from("/tmp/repo"), cx))
+        });
+        let layer = workspace.read_with(&cx, |w, _| w.modal_layer().clone());
+        let layer_for_host = layer.clone();
+        let (_host, vcx) = cx.add_window_view(|_, _| LayerHost {
+            layer: layer_for_host,
+        });
+        push_modal::<SmallModal>(&layer, vcx, SmallModal::new);
+        vcx.run_until_parked();
+        let active_before = layer.read_with(vcx, |l, _| l.active_modal::<SmallModal>());
+        assert!(active_before.is_some(), "modal should be open before click");
+
+        // Click far from the SmallModal's 40x40 footprint. GPUI bubbles
+        // child-first; the click misses the modal child and lands on the
+        // backdrop handler. The handler dispatches `DismissModal` through
+        // the workspace, which calls back into this layer's `hide_modal`.
+        vcx.simulate_click(point(px(500.0), px(500.0)), Modifiers::default());
+        vcx.run_until_parked();
+
+        let active_after = layer.read_with(vcx, |l, _| l.active_modal::<SmallModal>());
+        assert!(
+            active_after.is_none(),
+            "backdrop click should dismiss modal"
+        );
     }
 }

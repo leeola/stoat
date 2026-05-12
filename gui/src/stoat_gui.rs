@@ -13,6 +13,7 @@
 //! when the entity has already been released.
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
 
+mod actions;
 mod buffer;
 mod buffer_registry;
 mod diagnostics;
@@ -40,6 +41,7 @@ pub mod test;
 mod theme;
 mod workspace;
 
+pub use actions::{ClickAt, SetActivePane};
 pub use buffer::{Buffer, BufferEvent};
 pub use buffer_registry::{BufferRegistry, BufferRegistryEvent};
 pub use diagnostics::{DiagnosticSet, DiagnosticSetEvent};

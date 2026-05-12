@@ -1,6 +1,6 @@
 use crate::{
     defs::{
-        app::{Quit, QuitAll},
+        app::{DismissModal, Quit, QuitAll},
         claude::{
             ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeJumpToFocusedCard,
             ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
@@ -110,6 +110,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
+    add(DismissModal::DEF, |_| Ok(Box::new(DismissModal)));
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
     add(SplitNewRight::DEF, |_| Ok(Box::new(SplitNewRight)));
@@ -948,7 +949,8 @@ mod tests {
         // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
         //   ClaudeToggleToolCardExpand).
         // + 1 ClaudeJumpToFocusedCard.
-        assert_eq!(all().count(), 278);
+        // + 1 DismissModal.
+        assert_eq!(all().count(), 279);
     }
 
     #[test]

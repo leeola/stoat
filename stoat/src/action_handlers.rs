@@ -598,6 +598,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::PaletteSelectNext => prompt::palette_select_next(stoat),
         ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
         ActionKind::OpenLastPicker => open_last_picker(stoat),
+        ActionKind::SetActivePane | ActionKind::DismissModal | ActionKind::ClickAt => {
+            UpdateEffect::None
+        },
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

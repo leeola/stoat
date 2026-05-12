@@ -1,3 +1,5 @@
+pub mod mouse;
+
 use crate::{
     diff_map::{DiffMap, DiffMapEvent},
     display_map::{DisplayMap, DisplayMapEvent},

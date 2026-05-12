@@ -1,14 +1,23 @@
-use crate::item::ItemHandle;
+use crate::{actions::SetActivePane, item::ItemHandle, workspace::Workspace};
 use gpui::{
     div, App, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyContext,
-    Render, Styled, Window,
+    MouseButton, Render, Styled, WeakEntity, Window,
 };
+use stoat::pane::PaneId;
 
 /// Pane entity holding a tab list of [`ItemHandle`]s plus an active
 /// tab index and the pane's own [`FocusHandle`]. Mutations route
 /// through the entity so subscribers see [`PaneEvent`]s when items
 /// are added, removed, or activated.
+///
+/// The entity carries `pane_id` -- the [`PaneId`] of its corresponding
+/// inner pane in the workspace's [`stoat::pane::PaneTree`] -- and a
+/// weak workspace handle so its render's mouse handler can construct
+/// and dispatch [`SetActivePane`] without needing closure injection
+/// from a parent render.
 pub struct Pane {
+    pane_id: PaneId,
+    workspace: WeakEntity<Workspace>,
     items: Vec<Box<dyn ItemHandle>>,
     active_index: usize,
     focus_handle: FocusHandle,
@@ -24,12 +33,26 @@ pub enum PaneEvent {
 impl EventEmitter<PaneEvent> for Pane {}
 
 impl Pane {
-    pub fn new(cx: &mut Context<'_, Self>) -> Self {
+    pub fn new(
+        pane_id: PaneId,
+        workspace: WeakEntity<Workspace>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         Self {
+            pane_id,
+            workspace,
             items: Vec::new(),
             active_index: 0,
             focus_handle: cx.focus_handle(),
         }
+    }
+
+    pub fn pane_id(&self) -> PaneId {
+        self.pane_id
+    }
+
+    pub fn workspace(&self) -> &WeakEntity<Workspace> {
+        &self.workspace
     }
 
     pub fn items(&self) -> &[Box<dyn ItemHandle>] {
@@ -174,8 +197,23 @@ impl Render for Pane {
         // FIXME: replace with the real composition (tab strip +
         // active item view) once the workspace render composes
         // panes. The body here is a placeholder; the key_context
-        // wiring is the load-bearing part.
-        div().size_full().key_context(self.build_key_context(cx))
+        // and mouse-down wiring are the load-bearing parts.
+        div()
+            .size_full()
+            .key_context(self.build_key_context(cx))
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, _event, window, cx| {
+                    if let Some(workspace) = this.workspace.upgrade() {
+                        let action = SetActivePane {
+                            pane_id: this.pane_id.as_ffi(),
+                        };
+                        workspace.update(cx, |w, cx| {
+                            w.dispatch_action(Box::new(action), window, cx);
+                        });
+                    }
+                }),
+            )
     }
 }
 
@@ -184,11 +222,12 @@ mod tests {
     use super::*;
     use crate::item::{DeserializeSnafu, ItemError, ItemView};
     use gpui::{
-        div, App, AppContext, Entity, IntoElement, Render, SharedString, Styled, Subscription,
-        TestAppContext, Window,
+        div, point, px, App, AppContext, Entity, IntoElement, Modifiers, Render, SharedString,
+        Styled, Subscription, TestAppContext, Window,
     };
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
+    use stoat::pane::Axis;
 
     struct DummyItem {
         label: SharedString,
@@ -221,7 +260,11 @@ mod tests {
     }
 
     fn new_pane(cx: &mut TestAppContext) -> Entity<Pane> {
-        cx.update(|cx| cx.new(Pane::new))
+        let workspace = cx.update(|cx| {
+            cx.new(|cx| Workspace::new("test", std::path::PathBuf::from("/tmp/repo"), cx))
+        });
+        let weak = workspace.downgrade();
+        cx.update(|cx| cx.new(|cx| Pane::new(PaneId::default(), weak, cx)))
     }
 
     fn new_item(cx: &mut TestAppContext, label: &str) -> Box<dyn ItemHandle> {
@@ -635,5 +678,28 @@ mod tests {
         let context = pane.read_with(&cx, |p, app| p.build_key_context(app));
         assert!(context.contains("Pane"));
         assert!(context.contains("Editor"));
+    }
+
+    #[test]
+    fn mouse_down_dispatches_set_active_pane() {
+        let mut cx = TestAppContext::single();
+        let workspace = cx.update(|cx| {
+            cx.new(|cx| Workspace::new("main", std::path::PathBuf::from("/tmp/repo"), cx))
+        });
+        let pane_tree = workspace.read_with(&cx, |w, _| w.pane_tree().clone());
+        let new_pane_id = pane_tree.update(&mut cx, |t, cx| t.split(Axis::Vertical, cx));
+        let original_id = pane_tree.update(&mut cx, |t, cx| {
+            t.focus_direction(stoat::pane::Direction::Left, cx);
+            t.focus()
+        });
+        assert_ne!(original_id, new_pane_id);
+
+        let weak = workspace.downgrade();
+        let (_pane_view, vcx) =
+            cx.add_window_view(|_, cx| Pane::new(new_pane_id, weak.clone(), cx));
+        vcx.simulate_click(point(px(10.0), px(10.0)), Modifiers::default());
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.focus()), new_pane_id);
     }
 }

@@ -282,4 +282,7 @@ pub enum ActionKind {
     HelpJumpFirst,
     HelpJumpLast,
     CloseHelp,
+    SetActivePane,
+    DismissModal,
+    ClickAt,
 }
