@@ -131,6 +131,16 @@ pub enum FocusTarget {
     Dock(DockId),
 }
 
+/// Read-only view of [`PaneTree`]'s recursive split structure, exposed
+/// for renderers that compose nested layout containers from per-node
+/// axis information. Built via [`PaneTree::layout`]; the inner node
+/// graph stays private.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Layout {
+    Leaf(PaneId),
+    Split { axis: Axis, children: Vec<Layout> },
+}
+
 #[derive(Debug, Serialize, Deserialize)]
 pub struct Pane {
     pub view: View,
@@ -409,6 +419,28 @@ impl PaneTree {
     /// borrow of `self` across the loop.
     pub fn split_pane_ids(&self) -> Vec<PaneId> {
         self.split_panes().map(|(id, _)| id).collect()
+    }
+
+    /// Read-only structural view of the split tree. Renderers that need
+    /// per-node axis information (to compose nested flex containers, for
+    /// example) recurse on the returned [`Layout`]; consumers that only
+    /// need a flat pane list keep using [`Self::split_panes`].
+    pub fn layout(&self) -> Layout {
+        self.layout_at(self.root)
+    }
+
+    fn layout_at(&self, node: NodeId) -> Layout {
+        match &self.nodes[node].content {
+            NodeContent::Leaf(pane_id) => Layout::Leaf(*pane_id),
+            NodeContent::Split(split) => Layout::Split {
+                axis: split.axis,
+                children: split
+                    .children
+                    .iter()
+                    .map(|&child| self.layout_at(child))
+                    .collect(),
+            },
+        }
     }
 
     /// Enumerate the 1-cell gap segments that sit between adjacent children

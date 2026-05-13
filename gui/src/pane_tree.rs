@@ -1,5 +1,10 @@
-use gpui::{div, Context, EventEmitter, IntoElement, Render, Styled, Window};
-use stoat::pane::{Axis, Direction, PaneId, PaneTree as InnerTree};
+use crate::{pane::Pane, workspace::Workspace};
+use gpui::{
+    div, AnyElement, AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render,
+    Styled, WeakEntity, Window,
+};
+use std::collections::BTreeMap;
+use stoat::pane::{Axis, Direction, Layout, PaneId, PaneTree as InnerTree};
 
 /// Entity-shaped wrapper around [`stoat::pane::PaneTree`]. Carries the
 /// existing split-tree algorithms forward verbatim while exposing only
@@ -7,8 +12,15 @@ use stoat::pane::{Axis, Direction, PaneId, PaneTree as InnerTree};
 /// `Rect` geometry stays inert because the gpui-backed renderer will
 /// compute pane geometry from flex layout rather than reading
 /// `Pane::area`.
+///
+/// `panes` mirrors the inner tree's leaf set: one [`Entity<Pane>`] per
+/// [`PaneId`], inserted on construction / [`Self::split`] and pruned on
+/// [`Self::close`] / [`Self::close_others`]. The render pass recurses
+/// over [`InnerTree::layout`] and looks up each leaf's pane entity here.
 pub struct PaneTree {
     inner: InnerTree,
+    workspace: WeakEntity<Workspace>,
+    panes: BTreeMap<PaneId, Entity<Pane>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -19,9 +31,19 @@ pub enum PaneTreeEvent {
 impl EventEmitter<PaneTreeEvent> for PaneTree {}
 
 impl PaneTree {
-    pub fn new() -> Self {
+    pub fn new(workspace: WeakEntity<Workspace>, cx: &mut Context<'_, Self>) -> Self {
+        let inner = InnerTree::new_default();
+        let initial = inner.focus();
+        let pane = {
+            let workspace = workspace.clone();
+            cx.new(|cx| Pane::new(initial, workspace, cx))
+        };
+        let mut panes = BTreeMap::new();
+        panes.insert(initial, pane);
         Self {
-            inner: InnerTree::new_default(),
+            inner,
+            workspace,
+            panes,
         }
     }
 
@@ -51,6 +73,11 @@ impl PaneTree {
 
     pub fn split(&mut self, axis: Axis, cx: &mut Context<'_, Self>) -> PaneId {
         let new_id = self.inner.split(axis);
+        let pane = {
+            let workspace = self.workspace.clone();
+            cx.new(|cx| Pane::new(new_id, workspace, cx))
+        };
+        self.panes.insert(new_id, pane);
         cx.emit(PaneTreeEvent::Changed);
         cx.notify();
         new_id
@@ -59,6 +86,7 @@ impl PaneTree {
     pub fn close(&mut self, id: PaneId, cx: &mut Context<'_, Self>) -> bool {
         let closed = self.inner.close(id);
         if closed {
+            self.panes.remove(&id);
             cx.emit(PaneTreeEvent::Changed);
             cx.notify();
         }
@@ -106,6 +134,7 @@ impl PaneTree {
         let mut closed = 0;
         for id in to_close {
             if self.inner.close(id) {
+                self.panes.remove(&id);
                 closed += 1;
             }
         }
@@ -115,22 +144,38 @@ impl PaneTree {
         }
         closed
     }
-}
 
-impl Default for PaneTree {
-    fn default() -> Self {
-        Self::new()
+    fn build_layout_element(&self, layout: &Layout) -> AnyElement {
+        match layout {
+            Layout::Leaf(pane_id) => {
+                let pane = self
+                    .panes
+                    .get(pane_id)
+                    .expect("layout references pane absent from panes map");
+                div().flex_1().child(pane.clone()).into_any_element()
+            },
+            Layout::Split { axis, children } => {
+                let base = div().flex().flex_1();
+                let mut container = match axis {
+                    Axis::Vertical => base.flex_row(),
+                    Axis::Horizontal => base.flex_col(),
+                };
+                for child in children {
+                    container = container.child(self.build_layout_element(child));
+                }
+                container.into_any_element()
+            },
+        }
     }
 }
 
 impl Render for PaneTree {
     fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // FIXME: replace with the real per-pane render (split-tree
-        // subdivision, dividers) once the workspace render
-        // composes the pane area. Dispatch lands here from the
-        // workspace-hosted input state machine via direct
-        // entity.update, not from per-element on_action listeners.
-        div().size_full()
+        let layout = self.inner.layout();
+        div()
+            .flex()
+            .size_full()
+            .child(self.build_layout_element(&layout))
     }
 }
 
@@ -172,7 +217,10 @@ mod tests {
     }
 
     fn new_tree(cx: &mut TestAppContext) -> Entity<PaneTree> {
-        cx.update(|cx| cx.new(|_| PaneTree::new()))
+        let workspace = cx.update(|cx| {
+            cx.new(|cx| Workspace::new("test", std::path::PathBuf::from("/tmp/repo"), cx))
+        });
+        workspace.read_with(cx, |w, _| w.pane_tree().clone())
     }
 
     #[test]
@@ -337,5 +385,43 @@ mod tests {
         assert_eq!(drain(&events), vec![PaneTreeEvent::Changed]);
         assert_eq!(tree.read_with(&cx, |t, _| t.pane_count()), 1);
         assert_eq!(tree.read_with(&cx, |t, _| t.focus()), focus);
+    }
+
+    fn pane_ids(tree: &Entity<PaneTree>, cx: &TestAppContext) -> Vec<PaneId> {
+        tree.read_with(cx, |t, _| t.panes.keys().copied().collect())
+    }
+
+    #[test]
+    fn panes_map_matches_inner_tree_across_split_and_close() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx);
+        let initial = tree.read_with(&cx, |t, _| t.focus());
+
+        assert_eq!(pane_ids(&tree, &cx), vec![initial]);
+
+        let new_id = tree.update(&mut cx, |t, cx| t.split(Axis::Vertical, cx));
+        let mut expected = vec![initial, new_id];
+        expected.sort();
+        let mut actual = pane_ids(&tree, &cx);
+        actual.sort();
+        assert_eq!(actual, expected);
+
+        tree.update(&mut cx, |t, cx| t.close(new_id, cx));
+        assert_eq!(pane_ids(&tree, &cx), vec![initial]);
+    }
+
+    #[test]
+    fn close_others_prunes_panes_map() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx);
+        tree.update(&mut cx, |t, cx| {
+            t.split(Axis::Vertical, cx);
+            t.split(Axis::Horizontal, cx);
+        });
+        let focus = tree.read_with(&cx, |t, _| t.focus());
+
+        tree.update(&mut cx, |t, cx| t.close_others(cx));
+
+        assert_eq!(pane_ids(&tree, &cx), vec![focus]);
     }
 }

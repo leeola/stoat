@@ -51,8 +51,11 @@ impl Workspace {
         git_root: PathBuf,
         cx: &mut Context<'_, Self>,
     ) -> Self {
-        let pane_tree = cx.new(|_| PaneTree::new());
         let workspace_handle = cx.weak_entity();
+        let pane_tree = {
+            let workspace = workspace_handle.clone();
+            cx.new(|cx| PaneTree::new(workspace, cx))
+        };
         let modal_layer = {
             let weak = workspace_handle.clone();
             cx.new(|cx| ModalLayer::new(Some(weak), cx))
