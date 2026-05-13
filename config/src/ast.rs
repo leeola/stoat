@@ -134,6 +134,15 @@ pub enum Expr {
         else_expr: Box<Spanned<Expr>>,
     },
     Variable(String),
+    /// `value ?? fallback`. The evaluator returns `value`'s result
+    /// when it resolves, and `fallback`'s result when `value` evaluates
+    /// to a missing state ref or undefined ident. Chained `??` parses
+    /// left-associatively, so `a ?? b ?? c` becomes
+    /// `WithDefault { value: WithDefault { value: a, fallback: b }, fallback: c }`.
+    WithDefault {
+        value: Box<Spanned<Expr>>,
+        fallback: Box<Spanned<Expr>>,
+    },
 }
 
 #[derive(Debug, Clone, PartialEq)]

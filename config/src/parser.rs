@@ -197,27 +197,6 @@ fn expr<'src>() -> impl Parser<'src, &'src str, Expr, Extra<'src>> + Clone {
 
         let atom = choice((state_ref, string_expr, num_expr, ident_expr));
 
-        let with_default = atom
-            .clone()
-            .then(
-                ws().ignore_then(just("??"))
-                    .ignore_then(ws())
-                    .ignore_then(atom.clone())
-                    .or_not(),
-            )
-            .map(|(left, right)| match right {
-                Some(default) => {
-                    let left_val = match left {
-                        Expr::Value(v) => v,
-                        _ => return left,
-                    };
-                    // FIXME: Default expression not yet modeled in simplified Expr
-                    let _ = default;
-                    Expr::Value(left_val)
-                },
-                None => left,
-            });
-
         let spanned_expr = expr
             .clone()
             .map_with(|node, e| Spanned::new(node, span_to_range(e.span())));
@@ -241,7 +220,29 @@ fn expr<'src>() -> impl Parser<'src, &'src str, Expr, Extra<'src>> + Clone {
                 else_expr: Box::new(else_branch),
             });
 
-        if_expr.or(with_default)
+        let atom_or_if = if_expr.or(atom);
+        let spanned_atom_or_if =
+            atom_or_if.map_with(|node, e| Spanned::new(node, span_to_range(e.span())));
+
+        spanned_atom_or_if
+            .clone()
+            .foldl(
+                ws().ignore_then(just("??"))
+                    .ignore_then(ws())
+                    .ignore_then(spanned_atom_or_if)
+                    .repeated(),
+                |left, right| {
+                    let span = left.span.start..right.span.end;
+                    Spanned::new(
+                        Expr::WithDefault {
+                            value: Box::new(left),
+                            fallback: Box::new(right),
+                        },
+                        span,
+                    )
+                },
+            )
+            .map(|spanned| spanned.node)
     })
 }
 

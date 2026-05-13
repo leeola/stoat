@@ -597,6 +597,111 @@ mod tests {
     }
 
     #[test]
+    fn with_default_builds_node() {
+        let config = parse_ok(r##"on init { let color = $accent ?? "#ff0000"; }"##);
+        let let_binding = assert_let(&config.blocks[0].node.statements[0]);
+        match &let_binding.value.node {
+            Expr::WithDefault { value, fallback } => {
+                assert_eq!(
+                    value.node,
+                    Expr::Value(Value::StateRef("accent".to_string())),
+                );
+                assert_eq!(
+                    fallback.node,
+                    Expr::Value(Value::String("#ff0000".to_string())),
+                );
+            },
+            other => panic!("expected WithDefault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_default_chains_left_associative() {
+        let config = parse_ok(r##"on init { let color = $a ?? $b ?? "#0000ff"; }"##);
+        let let_binding = assert_let(&config.blocks[0].node.statements[0]);
+        match &let_binding.value.node {
+            Expr::WithDefault { value, fallback } => {
+                match &value.node {
+                    Expr::WithDefault {
+                        value: inner_value,
+                        fallback: inner_fallback,
+                    } => {
+                        assert_eq!(
+                            inner_value.node,
+                            Expr::Value(Value::StateRef("a".to_string())),
+                        );
+                        assert_eq!(
+                            inner_fallback.node,
+                            Expr::Value(Value::StateRef("b".to_string())),
+                        );
+                    },
+                    other => panic!("expected nested WithDefault on left, got {other:?}"),
+                }
+                assert_eq!(
+                    fallback.node,
+                    Expr::Value(Value::String("#0000ff".to_string())),
+                );
+            },
+            other => panic!("expected WithDefault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_default_accepts_if_expr_as_fallback() {
+        let config =
+            parse_ok("on init { let color = $accent ?? if dark then $dark_fg else $light_fg; }");
+        let let_binding = assert_let(&config.blocks[0].node.statements[0]);
+        match &let_binding.value.node {
+            Expr::WithDefault { value, fallback } => {
+                assert_eq!(
+                    value.node,
+                    Expr::Value(Value::StateRef("accent".to_string())),
+                );
+                assert!(
+                    matches!(fallback.node, Expr::If { .. }),
+                    "expected if-expr fallback, got {:?}",
+                    fallback.node,
+                );
+            },
+            other => panic!("expected WithDefault, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_default_composes_inside_if_branches() {
+        let config = parse_ok(
+            r##"on init { let color = if dark then $dark_fg else $light_fg ?? "#ffffff"; }"##,
+        );
+        let let_binding = assert_let(&config.blocks[0].node.statements[0]);
+        match &let_binding.value.node {
+            Expr::If { else_expr, .. } => match &else_expr.node {
+                Expr::WithDefault { value, fallback } => {
+                    assert_eq!(
+                        value.node,
+                        Expr::Value(Value::StateRef("light_fg".to_string())),
+                    );
+                    assert_eq!(
+                        fallback.node,
+                        Expr::Value(Value::String("#ffffff".to_string())),
+                    );
+                },
+                other => panic!("expected WithDefault in else, got {other:?}"),
+            },
+            other => panic!("expected If at top, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn with_default_absent_returns_bare_expr() {
+        let config = parse_ok("on init { let color = $accent; }");
+        let let_binding = assert_let(&config.blocks[0].node.statements[0]);
+        assert_eq!(
+            let_binding.value.node,
+            Expr::Value(Value::StateRef("accent".to_string())),
+        );
+    }
+
+    #[test]
     fn fn_declarations() {
         let config = parse_ok(
             r#"

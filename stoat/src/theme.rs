@@ -186,6 +186,15 @@ fn resolve_color_from_expr(
         Expr::Value(v) => resolve_color_from_value(v, palette),
         Expr::Variable(name) => lookup_named_or_palette(name, palette),
         Expr::If { .. } => UnsupportedExprSnafu.fail(),
+        Expr::WithDefault { value, fallback } => {
+            match resolve_color_from_expr(&value.node, palette) {
+                Ok(c) => Ok(c),
+                Err(ThemeError::UnknownColor { .. } | ThemeError::MissingStateRef { .. }) => {
+                    resolve_color_from_expr(&fallback.node, palette)
+                },
+                Err(e) => Err(e),
+            }
+        },
     }
 }
 
@@ -196,6 +205,10 @@ fn resolve_color_from_value(
     match value {
         Value::Ident(name) => lookup_named_or_palette(name, palette),
         Value::String(s) => parse_color_string(s),
+        Value::StateRef(name) => MissingStateRefSnafu {
+            name: name.to_string(),
+        }
+        .fail(),
         other => InvalidColorValueSnafu {
             value: format!("{other:?}"),
         }
@@ -332,6 +345,12 @@ pub enum ThemeError {
     },
     #[snafu(display("unknown palette ref or named color: '{name}'"))]
     UnknownColor {
+        name: String,
+        #[snafu(implicit)]
+        location: snafu::Location,
+    },
+    #[snafu(display("state ref '${name}' has no value in this context"))]
+    MissingStateRef {
         name: String,
         #[snafu(implicit)]
         location: snafu::Location,
@@ -615,6 +634,66 @@ mod tests {
         assert!(matches!(
             load_err(src, "t"),
             ThemeError::UnknownColor { name, .. } if name == "notacolor"
+        ));
+    }
+
+    #[test]
+    fn with_default_falls_back_on_missing_state_ref() {
+        let src = r##"theme t {
+            let accent = $missing ?? "#ff0000";
+            ui.cursor.fg = accent;
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(theme.palette_get("accent"), Some(Color::Rgb(0xff, 0, 0)));
+        assert_eq!(
+            theme.try_get("ui.cursor"),
+            Some(Style::default().fg(Color::Rgb(0xff, 0, 0))),
+        );
+    }
+
+    #[test]
+    fn with_default_falls_back_on_unknown_ident() {
+        let src = r##"theme t {
+            let accent = nosuchcolor ?? "#00ff00";
+            ui.cursor.fg = accent;
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(theme.palette_get("accent"), Some(Color::Rgb(0, 0xff, 0)));
+    }
+
+    #[test]
+    fn with_default_skips_fallback_when_value_resolves() {
+        let src = r##"theme t {
+            let primary = "#abcdef";
+            let accent = primary ?? "#000000";
+            ui.cursor.fg = accent;
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(
+            theme.palette_get("accent"),
+            Some(Color::Rgb(0xab, 0xcd, 0xef)),
+        );
+    }
+
+    #[test]
+    fn with_default_chains_walk_to_literal() {
+        let src = r##"theme t {
+            let accent = $missing_a ?? $missing_b ?? "#0000ff";
+            ui.cursor.fg = accent;
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(theme.palette_get("accent"), Some(Color::Rgb(0, 0, 0xff)));
+    }
+
+    #[test]
+    fn with_default_propagates_hard_errors() {
+        let src = r##"theme t {
+            let accent = "#gggggg" ?? "#000000";
+            ui.cursor.fg = accent;
+        }"##;
+        assert!(matches!(
+            load_err(src, "t"),
+            ThemeError::InvalidHexColor { value, .. } if value == "#gggggg",
         ));
     }
 
