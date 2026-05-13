@@ -1,12 +1,14 @@
 pub mod mouse;
 
 use crate::{
+    buffer::Buffer,
     diff_map::{DiffMap, DiffMapEvent},
     display_map::{DisplayMap, DisplayMapEvent},
+    globals::ExecutorGlobal,
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
-use gpui::{Context, Entity, EventEmitter, Subscription, WeakEntity};
-use stoat::{jumplist::JumpList, selection::SelectionsCollection};
+use gpui::{AppContext, Context, Entity, EventEmitter, Subscription, WeakEntity, Window};
+use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection};
 use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
 /// Sizing / behavior classification carried on each [`Editor`].
@@ -141,6 +143,62 @@ impl Editor {
         }
     }
 
+    /// Convenience constructor for an empty-buffer editor in
+    /// [`EditorMode::SingleLine`].
+    pub fn single_line(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+        Self::new_inline(EditorMode::SingleLine, window, cx)
+    }
+
+    /// Convenience constructor for an empty-buffer editor in
+    /// [`EditorMode::AutoHeight`] capped at `max_lines`.
+    pub fn auto_height(
+        min_lines: usize,
+        max_lines: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        Self::new_inline(
+            EditorMode::AutoHeight {
+                min_lines,
+                max_lines: Some(max_lines),
+            },
+            window,
+            cx,
+        )
+    }
+
+    /// Convenience constructor for an empty-buffer editor in
+    /// [`EditorMode::AutoHeight`] with no upper bound.
+    pub fn auto_height_unbounded(
+        min_lines: usize,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        Self::new_inline(
+            EditorMode::AutoHeight {
+                min_lines,
+                max_lines: None,
+            },
+            window,
+            cx,
+        )
+    }
+
+    fn new_inline(mode: EditorMode, _window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+        let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), ""));
+        let multi_buffer = cx.new({
+            let buffer = buffer.clone();
+            |cx| MultiBuffer::singleton(buffer, cx)
+        });
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let display_map = cx.new({
+            let buffer = buffer.clone();
+            |cx| DisplayMap::new(buffer, executor, cx)
+        });
+        let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
+        Self::new(multi_buffer, display_map, diff_map, mode, cx)
+    }
+
     pub fn mode(&self) -> &EditorMode {
         &self.mode
     }
@@ -265,8 +323,8 @@ impl Editor {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::Buffer;
-    use gpui::{AppContext, TestAppContext};
+    use crate::{buffer::Buffer, globals::ExecutorGlobal};
+    use gpui::{AppContext, TestAppContext, VisualTestContext};
     use std::sync::{Arc, Mutex};
     use stoat::buffer::BufferId;
     use stoat_scheduler::{Executor, TestScheduler};
@@ -500,5 +558,69 @@ mod tests {
             "unexpected event in {observed:?}",
         );
         assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
+    fn install_executor_global(cx: &mut TestAppContext) {
+        let executor = test_executor();
+        cx.update(|cx| cx.set_global(ExecutorGlobal(executor)));
+    }
+
+    fn assert_inline_editor_state(
+        editor: &Entity<Editor>,
+        vcx: &mut VisualTestContext,
+        expected_mode: &EditorMode,
+    ) {
+        editor.read_with(vcx, |ed, cx| {
+            assert_eq!(ed.mode(), expected_mode);
+            let mb = ed.multi_buffer().read(cx);
+            assert!(mb.is_singleton(), "expected singleton multi-buffer");
+            let buffer = mb.as_singleton().expect("singleton buffer");
+            assert_eq!(buffer.read(cx).text(), "");
+        });
+    }
+
+    #[test]
+    fn single_line_constructs_empty_singleton_in_single_line_mode() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let editor = vcx.update(|window, cx| cx.new(|cx| Editor::single_line(window, cx)));
+
+        assert_inline_editor_state(&editor, vcx, &EditorMode::SingleLine);
+    }
+
+    #[test]
+    fn auto_height_constructs_with_min_and_max_bounds() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let editor = vcx.update(|window, cx| cx.new(|cx| Editor::auto_height(2, 8, window, cx)));
+
+        assert_inline_editor_state(
+            &editor,
+            vcx,
+            &EditorMode::AutoHeight {
+                min_lines: 2,
+                max_lines: Some(8),
+            },
+        );
+    }
+
+    #[test]
+    fn auto_height_unbounded_constructs_with_no_max() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let editor =
+            vcx.update(|window, cx| cx.new(|cx| Editor::auto_height_unbounded(3, window, cx)));
+
+        assert_inline_editor_state(
+            &editor,
+            vcx,
+            &EditorMode::AutoHeight {
+                min_lines: 3,
+                max_lines: None,
+            },
+        );
     }
 }
