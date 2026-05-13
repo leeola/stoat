@@ -1,10 +1,12 @@
+use crate::diagnostics::DiagnosticSet;
 use gpui::{
     div, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle,
 };
+use lsp_types::DiagnosticSeverity;
 use ratatui::style::Color;
-use std::ops::Range;
-use stoat::{display_map::HighlightStyle as StoatHighlightStyle, DisplaySnapshot};
+use std::{collections::BTreeMap, ops::Range, path::Path};
+use stoat::{display_map::HighlightStyle as StoatHighlightStyle, DisplayPoint, DisplaySnapshot};
 
 const NAMED_COLOR_HEX: [u32; 16] = [
     0x000000, // 0 Black
@@ -163,6 +165,197 @@ fn append_run(
 pub(crate) fn render_row_element(row: RenderedRow) -> Div {
     let RenderedRow { text, runs } = row;
     div().child(StyledText::new(text).with_highlights(runs))
+}
+
+const DIFF_ADDED_HEX: u32 = 0x4caf50;
+const DIFF_MODIFIED_HEX: u32 = 0x2196f3;
+const DIFF_MOVED_HEX: u32 = 0x00bcd4;
+const DIAG_ERROR_HEX: u32 = 0xe53935;
+const DIAG_WARNING_HEX: u32 = 0xffb300;
+const DIAG_INFO_HEX: u32 = 0x29b6f6;
+const DIAG_HINT_HEX: u32 = 0x9e9e9e;
+const LINE_NUMBER_HEX: u32 = 0x808080;
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) struct GutterMetrics {
+    pub line_number_width: usize,
+    pub total_width: usize,
+}
+
+pub(crate) fn gutter_metrics(snapshot: &DisplaySnapshot) -> GutterMetrics {
+    let buffer_line_count = snapshot.buffer_line_count().max(1);
+    let line_number_width = digit_count(buffer_line_count);
+    GutterMetrics {
+        line_number_width,
+        total_width: line_number_width + 1 + 1 + 1,
+    }
+}
+
+fn digit_count(mut n: u32) -> usize {
+    let mut digits = 1usize;
+    while n >= 10 {
+        digits += 1;
+        n /= 10;
+    }
+    digits
+}
+
+pub(crate) type DiagnosticRowMap = BTreeMap<u32, DiagnosticSeverity>;
+
+pub(crate) fn compute_row_severity_for_path(
+    diagnostics: &DiagnosticSet,
+    path: &Path,
+) -> DiagnosticRowMap {
+    let mut out: DiagnosticRowMap = BTreeMap::new();
+    for diag in diagnostics.get(path) {
+        let sev = diag.severity.unwrap_or(DiagnosticSeverity::ERROR);
+        let start_line = diag.range.start.line;
+        let end_line = diag.range.end.line;
+        for row in start_line..=end_line {
+            out.entry(row)
+                .and_modify(|cur| {
+                    if severity_rank(sev) < severity_rank(*cur) {
+                        *cur = sev;
+                    }
+                })
+                .or_insert(sev);
+        }
+    }
+    out
+}
+
+fn severity_rank(sev: DiagnosticSeverity) -> u8 {
+    match sev {
+        DiagnosticSeverity::ERROR => 0,
+        DiagnosticSeverity::WARNING => 1,
+        DiagnosticSeverity::INFORMATION => 2,
+        DiagnosticSeverity::HINT => 3,
+        _ => 0,
+    }
+}
+
+fn diff_strip_for_status(status: stoat::DiffStatus) -> Option<(char, u32)> {
+    match status {
+        stoat::DiffStatus::Unchanged => None,
+        stoat::DiffStatus::Added => Some(('|', DIFF_ADDED_HEX)),
+        stoat::DiffStatus::Modified => Some(('|', DIFF_MODIFIED_HEX)),
+        stoat::DiffStatus::Moved => Some(('|', DIFF_MOVED_HEX)),
+    }
+}
+
+fn diagnostic_glyph_for(severity: DiagnosticSeverity) -> (char, u32) {
+    match severity {
+        DiagnosticSeverity::ERROR => ('E', DIAG_ERROR_HEX),
+        DiagnosticSeverity::WARNING => ('W', DIAG_WARNING_HEX),
+        DiagnosticSeverity::INFORMATION => ('I', DIAG_INFO_HEX),
+        DiagnosticSeverity::HINT => ('H', DIAG_HINT_HEX),
+        _ => ('E', DIAG_ERROR_HEX),
+    }
+}
+
+pub(crate) struct GutterPaint<'a> {
+    pub display_snapshot: &'a DisplaySnapshot,
+    pub diff_map: &'a stoat::DiffMap,
+    pub diagnostics: Option<&'a DiagnosticRowMap>,
+    pub metrics: GutterMetrics,
+}
+
+pub(crate) fn render_row_with_gutter(
+    row: RenderedRow,
+    display_row: u32,
+    paint: &GutterPaint<'_>,
+) -> Div {
+    let prefix = build_gutter_prefix(display_row, paint);
+    let RenderedRow {
+        text: row_text,
+        runs: mut row_runs,
+    } = row;
+
+    let prefix_len = prefix.text.len();
+    let mut text = String::with_capacity(prefix_len + row_text.len());
+    text.push_str(&prefix.text);
+    text.push_str(&row_text);
+
+    let mut runs: Vec<(Range<usize>, gpui::HighlightStyle)> = prefix
+        .runs
+        .into_iter()
+        .map(|(range, style)| (range.start..range.end, style))
+        .collect();
+    for (range, style) in row_runs.drain(..) {
+        runs.push(((range.start + prefix_len)..(range.end + prefix_len), style));
+    }
+
+    div().child(StyledText::new(SharedString::from(text)).with_highlights(runs))
+}
+
+struct GutterPrefix {
+    text: String,
+    runs: Vec<(Range<usize>, gpui::HighlightStyle)>,
+}
+
+fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefix {
+    let mut text = String::new();
+    let mut runs: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
+    let width = paint.metrics.line_number_width;
+
+    let buffer_row = paint
+        .display_snapshot
+        .display_to_buffer(DisplayPoint::new(display_row, 0))
+        .map(|p| p.row);
+    let show_line_number =
+        buffer_row.is_some() && !paint.display_snapshot.is_wrap_continuation(display_row);
+
+    if let (Some(row), true) = (buffer_row, show_line_number) {
+        let line_str = format!("{:>width$}", row + 1, width = width);
+        let start = text.len();
+        text.push_str(&line_str);
+        let end = text.len();
+        let style = gpui::HighlightStyle {
+            color: Some(rgb(LINE_NUMBER_HEX).into()),
+            ..Default::default()
+        };
+        runs.push((start..end, style));
+    } else {
+        for _ in 0..width {
+            text.push(' ');
+        }
+    }
+
+    let diff_status = buffer_row
+        .map(|row| paint.diff_map.status_for_line(row))
+        .unwrap_or(stoat::DiffStatus::Unchanged);
+    let start = text.len();
+    if let Some((ch, hex)) = diff_strip_for_status(diff_status) {
+        text.push(ch);
+        let end = text.len();
+        let style = gpui::HighlightStyle {
+            color: Some(rgb(hex).into()),
+            ..Default::default()
+        };
+        runs.push((start..end, style));
+    } else {
+        text.push(' ');
+    }
+
+    let diag_severity =
+        buffer_row.and_then(|row| paint.diagnostics.and_then(|map| map.get(&row).copied()));
+    let start = text.len();
+    if let Some(sev) = diag_severity {
+        let (ch, hex) = diagnostic_glyph_for(sev);
+        text.push(ch);
+        let end = text.len();
+        let style = gpui::HighlightStyle {
+            color: Some(rgb(hex).into()),
+            ..Default::default()
+        };
+        runs.push((start..end, style));
+    } else {
+        text.push(' ');
+    }
+
+    text.push(' ');
+
+    GutterPrefix { text, runs }
 }
 
 #[cfg(test)]
@@ -366,5 +559,163 @@ mod tests {
         assert_eq!(text, "foobar");
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].0, 0..6);
+    }
+
+    #[test]
+    fn gutter_metrics_for_single_line_returns_width_one() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "x");
+
+        let metrics = gutter_metrics(&snapshot);
+        assert_eq!(metrics.line_number_width, 1);
+        assert_eq!(metrics.total_width, 4);
+    }
+
+    #[test]
+    fn gutter_metrics_for_hundred_lines_uses_digit_count() {
+        let mut cx = TestAppContext::single();
+        let text = (0..100)
+            .map(|i| i.to_string())
+            .collect::<Vec<_>>()
+            .join("\n");
+        let snapshot = test_snapshot(&mut cx, &text);
+
+        let metrics = gutter_metrics(&snapshot);
+        assert_eq!(metrics.line_number_width, 3);
+        assert_eq!(metrics.total_width, 6);
+    }
+
+    fn diagnostic_set_with(
+        cx: &mut TestAppContext,
+        path: &Path,
+        diags: Vec<lsp_types::Diagnostic>,
+    ) -> gpui::Entity<DiagnosticSet> {
+        let path = path.to_path_buf();
+        let set = cx.update(|cx| cx.new(|_| DiagnosticSet::new()));
+        set.update(cx, |s, cx| s.replace_for_path(path, diags, cx));
+        set
+    }
+
+    fn diag(severity: DiagnosticSeverity, start_line: u32, end_line: u32) -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(start_line, 0),
+                lsp_types::Position::new(end_line, 0),
+            ),
+            severity: Some(severity),
+            code: None,
+            code_description: None,
+            source: None,
+            message: String::new(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    #[test]
+    fn compute_row_severity_picks_worst_per_row() {
+        let mut cx = TestAppContext::single();
+        let path = std::path::PathBuf::from("/ws/a.rs");
+        let set = diagnostic_set_with(
+            &mut cx,
+            &path,
+            vec![
+                diag(DiagnosticSeverity::WARNING, 0, 0),
+                diag(DiagnosticSeverity::ERROR, 0, 0),
+                diag(DiagnosticSeverity::HINT, 2, 2),
+            ],
+        );
+
+        let map = set.read_with(&cx, |s, _| compute_row_severity_for_path(s, &path));
+        assert_eq!(map.get(&0), Some(&DiagnosticSeverity::ERROR));
+        assert_eq!(map.get(&1), None);
+        assert_eq!(map.get(&2), Some(&DiagnosticSeverity::HINT));
+    }
+
+    #[test]
+    fn render_row_with_gutter_paints_line_number() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "hello\nworld");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            metrics,
+        };
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: Vec::new(),
+        };
+
+        let element = render_row_with_gutter(row, 0, &paint);
+        let _ = element;
+    }
+
+    #[test]
+    fn render_row_with_gutter_blanks_line_number_on_unknown_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            metrics,
+        };
+        let prefix = build_gutter_prefix(0, &paint);
+        assert!(prefix.text.starts_with('1'));
+    }
+
+    #[test]
+    fn build_gutter_prefix_omits_diagnostic_glyph_when_absent() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            metrics,
+        };
+        let prefix = build_gutter_prefix(0, &paint);
+
+        let line_num_width = metrics.line_number_width;
+        let diag_position = line_num_width + 1;
+        let diag_char = prefix
+            .text
+            .chars()
+            .nth(diag_position)
+            .expect("gutter prefix populated");
+        assert_eq!(diag_char, ' ');
+    }
+
+    #[test]
+    fn build_gutter_prefix_paints_diagnostic_glyph_when_severity_present() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let mut diagnostics: DiagnosticRowMap = BTreeMap::new();
+        diagnostics.insert(0, DiagnosticSeverity::WARNING);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: Some(&diagnostics),
+            metrics,
+        };
+        let prefix = build_gutter_prefix(0, &paint);
+
+        let diag_position = metrics.line_number_width + 1;
+        let diag_char = prefix
+            .text
+            .chars()
+            .nth(diag_position)
+            .expect("gutter prefix populated");
+        assert_eq!(diag_char, 'W');
     }
 }

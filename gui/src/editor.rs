@@ -103,7 +103,10 @@ pub struct Editor {
     scroll_row: u32,
     jumplist: JumpList,
     cell_size: Option<Size<Pixels>>,
+    file_path: Option<std::path::PathBuf>,
+    diagnostic_set: Option<Entity<crate::diagnostics::DiagnosticSet>>,
     _subscriptions: [Subscription; 3],
+    _diagnostic_subscription: Option<Subscription>,
 }
 
 /// Single coalesced "editor changed" signal. Subscribers re-render on
@@ -145,7 +148,10 @@ impl Editor {
             scroll_row: 0,
             jumplist: JumpList::new(),
             cell_size: None,
+            file_path: None,
+            diagnostic_set: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
+            _diagnostic_subscription: None,
         }
     }
 
@@ -377,6 +383,46 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn file_path(&self) -> Option<&std::path::Path> {
+        self.file_path.as_deref()
+    }
+
+    pub fn set_file_path(&mut self, path: Option<std::path::PathBuf>, cx: &mut Context<'_, Self>) {
+        if self.file_path == path {
+            return;
+        }
+        self.file_path = path;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn diagnostic_set(&self) -> Option<&Entity<crate::diagnostics::DiagnosticSet>> {
+        self.diagnostic_set.as_ref()
+    }
+
+    /// Attach an [`Entity<DiagnosticSet>`] whose diagnostics light up the
+    /// gutter glyph for `file_path`. The editor subscribes to the set
+    /// and re-emits [`EditorEvent::Changed`] when a diagnostic publish
+    /// touches any path; the gutter render filters by `file_path`.
+    pub fn set_diagnostic_set(
+        &mut self,
+        set: Option<Entity<crate::diagnostics::DiagnosticSet>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self._diagnostic_subscription = set.as_ref().map(|entity| {
+            cx.subscribe(
+                entity,
+                |_, _, _event: &crate::diagnostics::DiagnosticSetEvent, cx| {
+                    cx.emit(EditorEvent::Changed);
+                    cx.notify();
+                },
+            )
+        });
+        self.diagnostic_set = set;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     /// Translate a buffer UTF-16 offset to the pixel rectangle of the
     /// corresponding character cell, anchored relative to
     /// `element_origin`. Returns `None` when [`Editor::cell_size`] is
@@ -412,7 +458,32 @@ impl Editor {
         let end = range.end.min(total_rows);
         let start = range.start.min(end);
         let rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
-        rows.into_iter().map(render::render_row_element).collect()
+
+        if !self.mode.show_gutter() {
+            return rows.into_iter().map(render::render_row_element).collect();
+        }
+
+        let metrics = render::gutter_metrics(&display_snapshot);
+        let diff_map_inner = self.diff_map.read(cx).diff().clone();
+        let diagnostic_row_map = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
+            (Some(path), Some(set)) => {
+                Some(render::compute_row_severity_for_path(set.read(cx), path))
+            },
+            _ => None,
+        };
+        let paint = render::GutterPaint {
+            display_snapshot: &display_snapshot,
+            diff_map: &diff_map_inner,
+            diagnostics: diagnostic_row_map.as_ref(),
+            metrics,
+        };
+        rows.into_iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let display_row = (start + idx) as u32;
+                render::render_row_with_gutter(row, display_row, &paint)
+            })
+            .collect()
     }
 }
 
@@ -962,5 +1033,89 @@ mod tests {
             true
         });
         assert!(built);
+    }
+
+    #[test]
+    fn file_path_defaults_to_none_and_setter_stores() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+
+        assert_eq!(
+            editor.read_with(&cx, |ed, _| ed.file_path().map(|p| p.to_path_buf())),
+            None,
+        );
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_file_path(Some(std::path::PathBuf::from("/ws/a.rs")), cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(&cx, |ed, _| ed.file_path().map(|p| p.to_path_buf())),
+            Some(std::path::PathBuf::from("/ws/a.rs")),
+        );
+    }
+
+    #[test]
+    fn diagnostic_set_change_emits_changed_on_editor() {
+        use crate::diagnostics::DiagnosticSet;
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        let diag_set = cx.update(|cx| cx.new(|_| DiagnosticSet::new()));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_diagnostic_set(Some(diag_set.clone()), cx)
+        });
+        cx.run_until_parked();
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        let path = std::path::PathBuf::from("/ws/a.rs");
+        diag_set.update(&mut cx, |s, cx| {
+            s.replace_for_path(
+                path,
+                vec![lsp_types::Diagnostic {
+                    range: lsp_types::Range::new(
+                        lsp_types::Position::new(0, 0),
+                        lsp_types::Position::new(0, 1),
+                    ),
+                    severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: None,
+                    message: String::new(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let observed = drain(&events);
+        assert!(
+            observed.contains(&EditorEvent::Changed),
+            "expected Changed event from diagnostic publish; got {observed:?}",
+        );
+    }
+
+    #[test]
+    fn render_visible_rows_includes_gutter_in_full_mode() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha\nbeta\ngamma");
+
+        let rows = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(0..3, cx).len());
+        assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn render_visible_rows_omits_gutter_in_single_line_mode() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let editor = vcx.update(|window, cx| cx.new(|cx| Editor::single_line(window, cx)));
+
+        let count = editor.update(vcx, |ed, cx| ed.render_visible_rows(0..1, cx).len());
+        assert_eq!(count, 1);
     }
 }
