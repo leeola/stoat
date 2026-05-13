@@ -39,7 +39,10 @@ use std::{
     ops::Range,
     sync::Arc,
 };
-use stoat_text::{patch::Edit as PatchEdit, ContextLessSummary, Item, Rope, SumTree};
+use stoat_text::{
+    patch::{Edit as PatchEdit, Patch},
+    ContextLessSummary, Item, Rope, SumTree,
+};
 use tree_sitter::{Node, Query, StreamingIterator, Tree};
 
 /// One parsed tree at a particular nesting depth, anchored to a
@@ -233,24 +236,34 @@ impl SyntaxMap {
         };
     }
 
-    /// Apply tree-sitter edits to every layer's underlying [`Tree`].
-    /// After this call each layer's tree is positioned to act as
-    /// `old_tree` for an incremental [`reparse`](Self::reparse).
+    /// Apply tree-sitter edits to every layer's underlying [`Tree`]
+    /// and translate the layer's own `start_offset` / `end_offset`
+    /// through the same edits. After this call each layer's tree is
+    /// positioned to act as `old_tree` for an incremental
+    /// [`reparse`](Self::reparse), and the layer's byte range
+    /// reflects the post-edit rope so callers reading offsets
+    /// between [`interpolate`](Self::interpolate) and `reparse` see
+    /// consistent values.
     ///
-    /// Walks every layer and forwards `edits` to [`crate::edit_tree`].
+    /// Offsets are mapped via
+    /// [`Patch::old_to_new`](stoat_text::patch::Patch::old_to_new):
+    /// offsets before any edit are unchanged, offsets after every
+    /// edit shift by the net delta, and offsets that fall inside a
+    /// deleted range collapse to the edit's `new.start`. The latter
+    /// case truncates an injection layer whose host text was
+    /// partially overwritten; the next reparse rebuilds the layer
+    /// set from scratch.
     pub fn interpolate(&mut self, edits: &[PatchEdit<usize>], old_rope: &Rope, new_rope: &Rope) {
-        // FIXME: layer start_offset/end_offset are not translated through
-        // `edits`. A layer that covers bytes 50..100 stays at 50..100 even
-        // when edits insert or delete bytes before byte 50. Reparse rebuilds
-        // the layer set from scratch, so this is only visible to callers
-        // that read offsets between interpolate and reparse.
         if edits.is_empty() {
             return;
         }
+        let patch = Patch::new(edits.to_vec());
         let mut new_layers: Vec<SyntaxLayer> = Vec::with_capacity(self.snapshot.layer_count());
         for layer in self.snapshot.layers.iter() {
             let mut next = layer.clone();
             edit_tree(&mut next.tree, edits, old_rope, new_rope);
+            next.start_offset = patch.old_to_new(next.start_offset as usize) as u32;
+            next.end_offset = patch.old_to_new(next.end_offset as usize) as u32;
             new_layers.push(next);
         }
         self.install_layers(new_layers, self.snapshot.parsed_version);
@@ -736,6 +749,111 @@ mod tests {
             .to_sexp();
 
         assert_eq!(incremental, fresh_root);
+    }
+
+    #[test]
+    fn interpolate_shifts_root_layer_end_for_insertion() {
+        let lang = rust_lang();
+        let original = "fn main() {}";
+        let old_rope = Rope::from(original);
+        let mut map = SyntaxMap::new();
+        map.reparse(&old_rope, lang, 1).unwrap();
+
+        let insert_pos = 11;
+        let inserted = " let x = 1;";
+        let mut new_text = String::new();
+        new_text.push_str(&original[..insert_pos]);
+        new_text.push_str(inserted);
+        new_text.push_str(&original[insert_pos..]);
+        let new_rope = Rope::from(new_text.as_str());
+
+        let edits = vec![PatchEdit {
+            old: insert_pos..insert_pos,
+            new: insert_pos..(insert_pos + inserted.len()),
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        let root = map.snapshot().iter_layers().next().unwrap();
+        assert_eq!(root.start_offset, 0);
+        assert_eq!(root.end_offset, new_rope.len() as u32);
+    }
+
+    #[test]
+    fn interpolate_shifts_layer_when_edit_is_before_it() {
+        let lang = rust_lang();
+        let mut map = SyntaxMap::new();
+        let layer = SyntaxLayer {
+            depth: 1,
+            start_offset: 50,
+            end_offset: 100,
+            language: lang.clone(),
+            tree: parse_rust(""),
+        };
+        map.install_layers([layer], 1);
+
+        let old_rope = Rope::from(&"x".repeat(200) as &str);
+        let new_rope = Rope::from(&"x".repeat(210) as &str);
+        let edits = vec![PatchEdit {
+            old: 10..10,
+            new: 10..20,
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        let shifted = map.snapshot().iter_layers().next().unwrap();
+        assert_eq!(shifted.start_offset, 60);
+        assert_eq!(shifted.end_offset, 110);
+    }
+
+    #[test]
+    fn interpolate_leaves_layer_unchanged_when_edit_is_after_it() {
+        let lang = rust_lang();
+        let mut map = SyntaxMap::new();
+        let layer = SyntaxLayer {
+            depth: 1,
+            start_offset: 50,
+            end_offset: 100,
+            language: lang.clone(),
+            tree: parse_rust(""),
+        };
+        map.install_layers([layer], 1);
+
+        let old_rope = Rope::from(&"x".repeat(200) as &str);
+        let new_rope = Rope::from(&"x".repeat(210) as &str);
+        let edits = vec![PatchEdit {
+            old: 150..150,
+            new: 150..160,
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        let untouched = map.snapshot().iter_layers().next().unwrap();
+        assert_eq!(untouched.start_offset, 50);
+        assert_eq!(untouched.end_offset, 100);
+    }
+
+    #[test]
+    fn interpolate_shrinks_layer_when_deletion_is_before_it() {
+        let lang = rust_lang();
+        let mut map = SyntaxMap::new();
+        let layer = SyntaxLayer {
+            depth: 1,
+            start_offset: 50,
+            end_offset: 100,
+            language: lang.clone(),
+            tree: parse_rust(""),
+        };
+        map.install_layers([layer], 1);
+
+        let old_rope = Rope::from(&"x".repeat(200) as &str);
+        let new_rope = Rope::from(&"x".repeat(195) as &str);
+        let edits = vec![PatchEdit {
+            old: 10..15,
+            new: 10..10,
+        }];
+        map.interpolate(&edits, &old_rope, &new_rope);
+
+        let shifted = map.snapshot().iter_layers().next().unwrap();
+        assert_eq!(shifted.start_offset, 45);
+        assert_eq!(shifted.end_offset, 95);
     }
 
     #[test]
