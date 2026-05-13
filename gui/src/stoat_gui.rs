@@ -49,7 +49,10 @@ pub use diagnostics::{DiagnosticSet, DiagnosticSetEvent};
 pub use diff_map::{DiffMap, DiffMapEvent};
 pub use display_map::{DisplayMap, DisplayMapEvent};
 pub use dock::{Dock, DockEvent, DockSide, DockVisibility};
-pub use editor::{Editor, EditorEvent};
+pub use editor::{
+    scroll::{OngoingScroll, ScrollAnchor, ScrollManager, ScrollbarThumbState},
+    Editor, EditorEvent,
+};
 pub use editor_input::EditorInput;
 pub use executor::spawn_with_entity;
 pub use globals::{

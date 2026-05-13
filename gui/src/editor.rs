@@ -1,5 +1,6 @@
 pub mod mouse;
 pub mod render;
+pub mod scroll;
 
 use crate::{
     buffer::Buffer,
@@ -104,6 +105,7 @@ pub struct Editor {
     mode: EditorMode,
     selections: SelectionsCollection,
     scroll_row: u32,
+    scroll_manager: scroll::ScrollManager,
     jumplist: JumpList,
     cell_size: Option<Size<Pixels>>,
     file_path: Option<std::path::PathBuf>,
@@ -153,6 +155,7 @@ impl Editor {
             mode,
             selections: SelectionsCollection::new(),
             scroll_row: 0,
+            scroll_manager: scroll::ScrollManager::new(std::time::Instant::now()),
             jumplist: JumpList::new(),
             cell_size: None,
             file_path: None,
@@ -248,6 +251,14 @@ impl Editor {
 
     pub fn scroll_row(&self) -> u32 {
         self.scroll_row
+    }
+
+    pub fn scroll_manager(&self) -> &scroll::ScrollManager {
+        &self.scroll_manager
+    }
+
+    pub fn scroll_manager_mut(&mut self) -> &mut scroll::ScrollManager {
+        &mut self.scroll_manager
     }
 
     pub fn jumplist(&self) -> &JumpList {
@@ -910,6 +921,35 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(drain(&events), Vec::<EditorEvent>::new());
+    }
+
+    #[test]
+    fn scroll_manager_defaults_on_construction() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+
+        editor.read_with(&cx, |ed, _| {
+            let mgr = ed.scroll_manager();
+            assert_eq!(mgr.anchor(), &scroll::ScrollAnchor::new());
+            assert_eq!(mgr.ongoing().axis(), None);
+            assert_eq!(mgr.visible_line_count(), None);
+            assert_eq!(mgr.minimap_thumb_state(), None);
+        });
+    }
+
+    #[test]
+    fn scroll_manager_mut_lets_callers_update_visible_line_count() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+
+        editor.update(&mut cx, |ed, _| {
+            ed.scroll_manager_mut().set_visible_line_count(Some(24.5));
+        });
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.scroll_manager().visible_line_count(), Some(24.5));
+        });
     }
 
     #[test]
