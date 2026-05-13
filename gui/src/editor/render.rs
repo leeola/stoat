@@ -6,7 +6,9 @@ use gpui::{
 use lsp_types::DiagnosticSeverity;
 use ratatui::style::Color;
 use std::{collections::BTreeMap, ops::Range, path::Path};
-use stoat::{display_map::HighlightStyle as StoatHighlightStyle, DisplayPoint, DisplaySnapshot};
+use stoat::{
+    display_map::HighlightStyle as StoatHighlightStyle, BlockRowKind, DisplayPoint, DisplaySnapshot,
+};
 use stoat_text::{Anchor, Selection};
 
 const NAMED_COLOR_HEX: [u32; 16] = [
@@ -129,6 +131,21 @@ pub(crate) fn build_rendered_rows(
         }
     }
 
+    for idx in 0..count {
+        let display_row = range.start + idx as u32;
+        if let BlockRowKind::Block { block, line_index } = snapshot.classify_row(display_row) {
+            let line = block.get_line(line_index);
+            if line.is_empty() {
+                texts[idx].clear();
+                runs[idx].clear();
+                continue;
+            }
+            let style = block_text_style();
+            texts[idx] = line;
+            runs[idx] = vec![(0..texts[idx].len(), style)];
+        }
+    }
+
     texts
         .into_iter()
         .zip(runs)
@@ -137,6 +154,13 @@ pub(crate) fn build_rendered_rows(
             runs,
         })
         .collect()
+}
+
+fn block_text_style() -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        color: Some(rgb(BLOCK_TEXT_HEX).into()),
+        ..Default::default()
+    }
 }
 
 fn append_run(
@@ -308,6 +332,7 @@ const DIAG_INFO_HEX: u32 = 0x29b6f6;
 const DIAG_HINT_HEX: u32 = 0x9e9e9e;
 const LINE_NUMBER_HEX: u32 = 0x808080;
 const CURSOR_HEX: u32 = 0xc8d6ff;
+const BLOCK_TEXT_HEX: u32 = 0xa0a0a0;
 
 fn selection_bg() -> Hsla {
     hsla(0.6, 0.5, 0.5, 0.3)
@@ -1036,5 +1061,76 @@ mod tests {
         assert_eq!(painted.runs[0].1.background_color, Some(selection_bg()));
         assert_eq!(painted.runs[1].0, 2..3);
         assert_eq!(painted.runs[1].1.background_color, Some(cursor_bg()));
+    }
+
+    fn snapshot_with_block(
+        cx: &mut TestAppContext,
+        text: &str,
+        placement: stoat::display_map::BlockPlacement,
+        block_lines: Vec<String>,
+    ) -> DisplaySnapshot {
+        use stoat::display_map::{BlockProperties, BlockStyle};
+        let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let buffer_id = buffer.read_with(cx, |b, _| b.read(|tb| tb.buffer_id()));
+        let shared = buffer.read_with(cx, |b, _| b.shared().clone());
+        let multi_buffer = stoat::MultiBuffer::singleton(buffer_id, shared);
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut inner = stoat::DisplayMap::new(multi_buffer, executor);
+        inner.insert_blocks(vec![BlockProperties::from_text(
+            placement,
+            block_lines,
+            BlockStyle::Fixed,
+        )]);
+        inner.snapshot()
+    }
+
+    #[test]
+    fn block_rows_render_block_text() {
+        let mut cx = TestAppContext::single();
+        let snapshot = snapshot_with_block(
+            &mut cx,
+            "alpha\nbeta",
+            stoat::display_map::BlockPlacement::Above(0),
+            vec!["block-line-1".into(), "block-line-2".into()],
+        );
+
+        let total = snapshot.max_point().row + 1;
+        let rows = build_rendered_rows(&snapshot, 0..total);
+
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
+        assert_eq!(texts, vec!["block-line-1", "block-line-2", "alpha", "beta"]);
+    }
+
+    #[test]
+    fn buffer_rows_remain_unchanged_when_block_inserted() {
+        let mut cx = TestAppContext::single();
+        let snapshot = snapshot_with_block(
+            &mut cx,
+            "alpha\nbeta\ngamma",
+            stoat::display_map::BlockPlacement::Above(1),
+            vec!["divider".into()],
+        );
+
+        let total = snapshot.max_point().row + 1;
+        let rows = build_rendered_rows(&snapshot, 0..total);
+        let texts: Vec<&str> = rows.iter().map(|r| r.text.as_ref()).collect();
+        assert_eq!(texts, vec!["alpha", "divider", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn block_row_text_carries_block_style_run() {
+        let mut cx = TestAppContext::single();
+        let snapshot = snapshot_with_block(
+            &mut cx,
+            "alpha",
+            stoat::display_map::BlockPlacement::Above(0),
+            vec!["header".into()],
+        );
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        assert_eq!(rows[0].text.as_ref(), "header");
+        assert_eq!(rows[0].runs.len(), 1);
+        assert_eq!(rows[0].runs[0].0, 0..6);
+        assert_eq!(rows[0].runs[0].1.color.map(hex_of), Some(BLOCK_TEXT_HEX),);
     }
 }
