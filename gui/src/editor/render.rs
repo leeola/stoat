@@ -1,12 +1,13 @@
 use crate::diagnostics::DiagnosticSet;
 use gpui::{
-    div, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, SharedString,
+    div, hsla, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle,
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::style::Color;
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat::{display_map::HighlightStyle as StoatHighlightStyle, DisplayPoint, DisplaySnapshot};
+use stoat_text::{Anchor, Selection};
 
 const NAMED_COLOR_HEX: [u32; 16] = [
     0x000000, // 0 Black
@@ -167,6 +168,137 @@ pub(crate) fn render_row_element(row: RenderedRow) -> Div {
     div().child(StyledText::new(text).with_highlights(runs))
 }
 
+#[derive(Debug, Default, PartialEq)]
+pub(crate) struct SelectionPaint {
+    pub row_selection_spans: BTreeMap<u32, Vec<Range<usize>>>,
+    pub row_cursors: BTreeMap<u32, Vec<usize>>,
+}
+
+pub(crate) fn compute_selection_paint(
+    snapshot: &DisplaySnapshot,
+    selections: &[Selection<Anchor>],
+    rendered_rows: &[RenderedRow],
+    start_row: u32,
+) -> SelectionPaint {
+    let mut paint = SelectionPaint::default();
+    let end_row = start_row + rendered_rows.len() as u32;
+    let buffer = snapshot.buffer_snapshot();
+
+    for selection in selections {
+        let start_offset = buffer.resolve_anchor(&selection.start);
+        let end_offset = buffer.resolve_anchor(&selection.end);
+        let (lo, hi) = if start_offset <= end_offset {
+            (start_offset, end_offset)
+        } else {
+            (end_offset, start_offset)
+        };
+        let head_offset = buffer.resolve_anchor(&selection.head());
+
+        if lo != hi {
+            let lo_point = buffer.rope().offset_to_point(lo);
+            let hi_point = buffer.rope().offset_to_point(hi);
+            let lo_display = snapshot.buffer_to_display(lo_point);
+            let hi_display = snapshot.buffer_to_display(hi_point);
+            for row in lo_display.row..=hi_display.row {
+                if row < start_row || row >= end_row {
+                    continue;
+                }
+                let row_idx = (row - start_row) as usize;
+                let row_text: &str = rendered_rows[row_idx].text.as_ref();
+                let row_char_count = row_text.chars().count() as u32;
+                let start_col = if row == lo_display.row {
+                    lo_display.column
+                } else {
+                    0
+                };
+                let end_col = if row == hi_display.row {
+                    hi_display.column
+                } else {
+                    row_char_count
+                };
+                if start_col == end_col {
+                    continue;
+                }
+                let start_byte = column_to_byte_offset(row_text, start_col);
+                let end_byte = column_to_byte_offset(row_text, end_col);
+                paint
+                    .row_selection_spans
+                    .entry(row)
+                    .or_default()
+                    .push(start_byte..end_byte);
+            }
+        }
+
+        let head_point = buffer.rope().offset_to_point(head_offset);
+        let head_display = snapshot.buffer_to_display(head_point);
+        if head_display.row >= start_row && head_display.row < end_row {
+            let row_idx = (head_display.row - start_row) as usize;
+            let row_text: &str = rendered_rows[row_idx].text.as_ref();
+            let byte = column_to_byte_offset(row_text, head_display.column);
+            paint
+                .row_cursors
+                .entry(head_display.row)
+                .or_default()
+                .push(byte);
+        }
+    }
+
+    paint
+}
+
+fn column_to_byte_offset(row_text: &str, column: u32) -> usize {
+    row_text
+        .char_indices()
+        .nth(column as usize)
+        .map(|(byte_idx, _)| byte_idx)
+        .unwrap_or(row_text.len())
+}
+
+pub(crate) fn apply_selection_paint(
+    row: RenderedRow,
+    display_row: u32,
+    paint: &SelectionPaint,
+) -> RenderedRow {
+    let RenderedRow { text, mut runs } = row;
+    let mut text_owned: String = text.as_ref().to_string();
+
+    if let Some(spans) = paint.row_selection_spans.get(&display_row) {
+        let style = gpui::HighlightStyle {
+            background_color: Some(selection_bg()),
+            ..Default::default()
+        };
+        for span in spans {
+            runs.push((span.clone(), style));
+        }
+    }
+
+    if let Some(cursors) = paint.row_cursors.get(&display_row) {
+        let style = gpui::HighlightStyle {
+            background_color: Some(cursor_bg()),
+            ..Default::default()
+        };
+        for &offset in cursors {
+            if offset < text_owned.len() {
+                let after = text_owned[offset..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0);
+                runs.push((offset..offset + after, style));
+            } else {
+                let appended_start = text_owned.len();
+                text_owned.push(' ');
+                runs.push((appended_start..text_owned.len(), style));
+            }
+        }
+    }
+
+    RenderedRow {
+        text: SharedString::from(text_owned),
+        runs,
+    }
+}
+
 const DIFF_ADDED_HEX: u32 = 0x4caf50;
 const DIFF_MODIFIED_HEX: u32 = 0x2196f3;
 const DIFF_MOVED_HEX: u32 = 0x00bcd4;
@@ -175,6 +307,15 @@ const DIAG_WARNING_HEX: u32 = 0xffb300;
 const DIAG_INFO_HEX: u32 = 0x29b6f6;
 const DIAG_HINT_HEX: u32 = 0x9e9e9e;
 const LINE_NUMBER_HEX: u32 = 0x808080;
+const CURSOR_HEX: u32 = 0xc8d6ff;
+
+fn selection_bg() -> Hsla {
+    hsla(0.6, 0.5, 0.5, 0.3)
+}
+
+fn cursor_bg() -> Hsla {
+    rgb(CURSOR_HEX).into()
+}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GutterMetrics {
@@ -359,6 +500,7 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
 }
 
 #[cfg(test)]
+#[allow(clippy::single_range_in_vec_init)]
 mod tests {
     use super::*;
     use crate::{buffer::Buffer, display_map::DisplayMap};
@@ -717,5 +859,182 @@ mod tests {
             .nth(diag_position)
             .expect("gutter prefix populated");
         assert_eq!(diag_char, 'W');
+    }
+
+    use stoat_text::{Bias, SelectionGoal};
+
+    fn cursor_at(snapshot: &DisplaySnapshot, offset: usize, id: usize) -> Selection<Anchor> {
+        let anchor = snapshot.buffer_snapshot().anchor_at(offset, Bias::Left);
+        Selection {
+            id,
+            start: anchor,
+            end: anchor,
+            reversed: false,
+            goal: SelectionGoal::None,
+        }
+    }
+
+    fn range_selection(
+        snapshot: &DisplaySnapshot,
+        start: usize,
+        end: usize,
+        reversed: bool,
+        id: usize,
+    ) -> Selection<Anchor> {
+        let buffer = snapshot.buffer_snapshot();
+        Selection {
+            id,
+            start: buffer.anchor_at(start, Bias::Left),
+            end: buffer.anchor_at(end, Bias::Left),
+            reversed,
+            goal: SelectionGoal::None,
+        }
+    }
+
+    fn rows_for(snapshot: &DisplaySnapshot) -> Vec<RenderedRow> {
+        let total = snapshot.max_point().row + 1;
+        build_rendered_rows(snapshot, 0..total)
+    }
+
+    #[test]
+    fn column_to_byte_offset_ascii_is_identity() {
+        assert_eq!(column_to_byte_offset("hello", 0), 0);
+        assert_eq!(column_to_byte_offset("hello", 3), 3);
+        assert_eq!(column_to_byte_offset("hello", 5), 5);
+    }
+
+    #[test]
+    fn column_to_byte_offset_utf8_multibyte_uses_chars() {
+        // "wXrld" where X is a 2-byte UTF-8 char.
+        let text = "w\u{00f8}rld";
+        assert_eq!(column_to_byte_offset(text, 0), 0);
+        assert_eq!(column_to_byte_offset(text, 1), 1);
+        assert_eq!(column_to_byte_offset(text, 2), 3);
+        assert_eq!(column_to_byte_offset(text, 3), 4);
+        assert_eq!(column_to_byte_offset(text, 4), 5);
+    }
+
+    #[test]
+    fn column_to_byte_offset_past_end_returns_text_len() {
+        assert_eq!(column_to_byte_offset("abc", 99), 3);
+        assert_eq!(column_to_byte_offset("", 0), 0);
+        assert_eq!(column_to_byte_offset("", 5), 0);
+    }
+
+    #[test]
+    fn compute_selection_paint_empty_selection_records_cursor_only() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "hello");
+        let rows = rows_for(&snapshot);
+        let sel = cursor_at(&snapshot, 2, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 0);
+        assert!(paint.row_selection_spans.is_empty());
+        assert_eq!(paint.row_cursors.get(&0), Some(&vec![2usize]));
+    }
+
+    #[test]
+    fn compute_selection_paint_range_within_one_row_records_span() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "hello world");
+        let rows = rows_for(&snapshot);
+        let sel = range_selection(&snapshot, 2, 7, false, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 0);
+        assert_eq!(paint.row_selection_spans.get(&0), Some(&vec![2..7]));
+        assert_eq!(paint.row_cursors.get(&0), Some(&vec![7usize]));
+    }
+
+    #[test]
+    fn compute_selection_paint_range_spanning_rows_records_per_row_spans() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha\nbeta\ngamma");
+        let rows = rows_for(&snapshot);
+        // Offsets: 1 = 'l' on row 0, 8 = 'a' on row 1 (alpha\nbet|a).
+        let sel = range_selection(&snapshot, 1, 8, false, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 0);
+        assert_eq!(paint.row_selection_spans.get(&0), Some(&vec![1..5]));
+        assert_eq!(paint.row_selection_spans.get(&1), Some(&vec![0..2]));
+        assert_eq!(paint.row_selection_spans.get(&2), None);
+        assert_eq!(paint.row_cursors.get(&1), Some(&vec![2usize]));
+    }
+
+    #[test]
+    fn compute_selection_paint_reversed_selection_head_at_start() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "hello world");
+        let rows = rows_for(&snapshot);
+        let sel = range_selection(&snapshot, 2, 7, true, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 0);
+        assert_eq!(paint.row_selection_spans.get(&0), Some(&vec![2..7]));
+        assert_eq!(paint.row_cursors.get(&0), Some(&vec![2usize]));
+    }
+
+    #[test]
+    fn compute_selection_paint_skips_rows_outside_visible_range() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "row0\nrow1\nrow2\nrow3");
+        let rows = build_rendered_rows(&snapshot, 1..3);
+        // Selection on row 0 must not be recorded when start_row is 1.
+        let sel = range_selection(&snapshot, 0, 3, false, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 1);
+        assert!(paint.row_selection_spans.is_empty());
+        assert!(paint.row_cursors.is_empty());
+    }
+
+    #[test]
+    fn apply_selection_paint_adds_background_run_for_span() {
+        let mut paint = SelectionPaint::default();
+        paint.row_selection_spans.insert(0, vec![1..4]);
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: Vec::new(),
+        };
+
+        let painted = apply_selection_paint(row, 0, &paint);
+        assert_eq!(painted.text.as_ref(), "hello");
+        assert_eq!(painted.runs.len(), 1);
+        assert_eq!(painted.runs[0].0, 1..4);
+        assert_eq!(painted.runs[0].1.background_color, Some(selection_bg()));
+    }
+
+    #[test]
+    fn apply_selection_paint_appends_space_for_eol_cursor() {
+        let mut paint = SelectionPaint::default();
+        paint.row_cursors.insert(0, vec![5]);
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: Vec::new(),
+        };
+
+        let painted = apply_selection_paint(row, 0, &paint);
+        assert_eq!(painted.text.as_ref(), "hello ");
+        assert_eq!(painted.runs.len(), 1);
+        assert_eq!(painted.runs[0].0, 5..6);
+        assert_eq!(painted.runs[0].1.background_color, Some(cursor_bg()));
+    }
+
+    #[test]
+    fn apply_selection_paint_cursor_overrides_selection_at_head() {
+        let mut paint = SelectionPaint::default();
+        paint.row_selection_spans.insert(0, vec![0..5]);
+        paint.row_cursors.insert(0, vec![2]);
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: Vec::new(),
+        };
+
+        let painted = apply_selection_paint(row, 0, &paint);
+        assert_eq!(painted.text.as_ref(), "hello");
+        // Selection run added first, cursor run appended after; StyledText paints in
+        // order so the cursor highlight wins at byte 2.
+        assert_eq!(painted.runs.len(), 2);
+        assert_eq!(painted.runs[0].0, 0..5);
+        assert_eq!(painted.runs[0].1.background_color, Some(selection_bg()));
+        assert_eq!(painted.runs[1].0, 2..3);
+        assert_eq!(painted.runs[1].1.background_color, Some(cursor_bg()));
     }
 }

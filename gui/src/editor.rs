@@ -459,6 +459,22 @@ impl Editor {
         let start = range.start.min(end);
         let rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
 
+        let selection_paint = render::compute_selection_paint(
+            &display_snapshot,
+            self.selections.all_anchors(),
+            &rows,
+            start as u32,
+        );
+
+        let rows: Vec<render::RenderedRow> = rows
+            .into_iter()
+            .enumerate()
+            .map(|(idx, row)| {
+                let display_row = (start + idx) as u32;
+                render::apply_selection_paint(row, display_row, &selection_paint)
+            })
+            .collect();
+
         if !self.mode.show_gutter() {
             return rows.into_iter().map(render::render_row_element).collect();
         }
@@ -1117,5 +1133,25 @@ mod tests {
 
         let count = editor.update(vcx, |ed, cx| ed.render_visible_rows(0..1, cx).len());
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn render_visible_rows_with_cursor_and_selection_does_not_panic() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha\nbeta\ngamma");
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = Selection {
+                id: 1,
+                start: snapshot.anchor_at(2, Bias::Left),
+                end: snapshot.anchor_at(8, Bias::Left),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+
+        let rows = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(0..3, cx).len());
+        assert_eq!(rows, 3);
     }
 }
