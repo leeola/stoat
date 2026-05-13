@@ -6,12 +6,14 @@ use crate::{
     diff_map::{DiffMap, DiffMapEvent},
     display_map::{DisplayMap, DisplayMapEvent},
     globals::ExecutorGlobal,
+    item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
 use gpui::{
-    uniform_list, AppContext, Bounds, Context, Div, Entity, EventEmitter, IntoElement, Pixels,
-    Point, Render, Size, Styled, Subscription, WeakEntity, Window,
+    uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter, IntoElement, Pixels,
+    Point, Render, SharedString, Size, Styled, Subscription, Task, WeakEntity, Window,
 };
+use serde_json::Value;
 use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
 use stoat_text::{Anchor, Bias, OffsetUtf16, Selection, SelectionGoal};
 
@@ -519,6 +521,44 @@ impl Render for Editor {
                 .unwrap_or_default()
         })
         .size_full()
+    }
+}
+
+impl ItemView for Editor {
+    fn tab_label(&self, _cx: &App) -> SharedString {
+        self.file_path
+            .as_deref()
+            .and_then(|p| p.file_name())
+            .and_then(|n| n.to_str())
+            .map(|s| SharedString::from(s.to_string()))
+            .unwrap_or_else(|| SharedString::from("(scratch)"))
+    }
+
+    fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
+        Some(SharedString::from("Editor"))
+    }
+
+    fn is_dirty(&self, cx: &App) -> bool {
+        self.multi_buffer
+            .read(cx)
+            .as_singleton()
+            .map(|b| b.read(cx).is_dirty())
+            .unwrap_or(false)
+    }
+
+    fn save(&mut self, cx: &mut Context<'_, Self>) -> Task<Result<(), ItemError>> {
+        if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
+            buffer.update(cx, |b, cx| b.save(cx));
+        }
+        Task::ready(Ok(()))
+    }
+
+    fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError> {
+        DeserializeSnafu {
+            reason: "Editor deserialize requires workspace-persistence wiring \
+                     that has not yet landed",
+        }
+        .fail()
     }
 }
 
@@ -1153,5 +1193,75 @@ mod tests {
 
         let rows = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(0..3, cx).len());
         assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn tab_label_returns_scratch_when_file_path_is_unset() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+
+        editor.read_with(&cx, |ed, app| {
+            assert_eq!(ed.tab_label(app), SharedString::from("(scratch)"));
+        });
+    }
+
+    #[test]
+    fn tab_label_returns_basename_when_file_path_is_set() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/src/main.rs")), cx);
+        });
+
+        editor.read_with(&cx, |ed, app| {
+            assert_eq!(ed.tab_label(app), SharedString::from("main.rs"));
+        });
+    }
+
+    #[test]
+    fn key_context_name_is_editor() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "");
+
+        editor.read_with(&cx, |ed, app| {
+            assert_eq!(ed.key_context_name(app), Some(SharedString::from("Editor")));
+        });
+    }
+
+    #[test]
+    fn is_dirty_reflects_underlying_singleton_buffer() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+
+        editor.read_with(&cx, |ed, app| assert!(!ed.is_dirty(app)));
+
+        buffer.update(&mut cx, |b, cx| b.edit(5..5, "!", cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, app| assert!(ed.is_dirty(app)));
+    }
+
+    #[test]
+    fn save_clears_dirty_on_singleton_buffer() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+        buffer.update(&mut cx, |b, cx| b.edit(5..5, "!", cx));
+        cx.run_until_parked();
+        assert!(buffer.read_with(&cx, |b, _| b.is_dirty()));
+
+        let _task = editor.update(&mut cx, |ed, cx| ed.save(cx));
+        cx.run_until_parked();
+
+        assert!(!buffer.read_with(&cx, |b, _| b.is_dirty()));
+    }
+
+    #[test]
+    fn deserialize_returns_error_until_persistence_wires_through() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "");
+
+        let outcome = editor.update(&mut cx, |_, cx| Editor::deserialize(Value::Null, cx).err());
+        let err = outcome.expect("Editor::deserialize is unimplemented");
+        assert!(matches!(err, ItemError::Deserialize { .. }));
     }
 }
