@@ -8,7 +8,7 @@ use crate::{
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
 use gpui::{AppContext, Context, Entity, EventEmitter, Subscription, WeakEntity, Window};
-use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection};
+use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
 use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
 /// Sizing / behavior classification carried on each [`Editor`].
@@ -318,6 +318,40 @@ impl Editor {
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
+
+    /// Place a single cursor at display-grid `(row, col)`, replacing
+    /// every existing selection. Off-buffer rows or columns clamp to
+    /// the nearest valid display position via [`DisplaySnapshot::clip_point`].
+    /// Display rows that correspond to a custom block (no matching
+    /// buffer point) are silently ignored.
+    pub fn set_cursor_at_grid(&mut self, row: u32, col: u32, cx: &mut Context<'_, Self>) {
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
+        let Some(buffer_point) = display_snapshot.display_to_buffer(clipped) else {
+            return;
+        };
+        let offset = snapshot.rope().point_to_offset(buffer_point);
+        let anchor = snapshot.anchor_at(offset, Bias::Left);
+        let new_id = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|s| s.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(1);
+        let selection = Selection {
+            id: new_id,
+            start: anchor,
+            end: anchor,
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        self.selections.replace_with(vec![selection], &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
 }
 
 #[cfg(test)]
@@ -622,5 +656,78 @@ mod tests {
                 max_lines: None,
             },
         );
+    }
+
+    #[test]
+    fn set_cursor_at_grid_places_cursor_at_position() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(0, 6, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![6]);
+    }
+
+    #[test]
+    fn set_cursor_at_grid_on_multiline_uses_row_col() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "line0\nline1\nline2");
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(1, 2, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![8]);
+    }
+
+    #[test]
+    fn set_cursor_at_grid_clamps_out_of_bounds_row() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncd");
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(99, 0, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![3]);
+    }
+
+    #[test]
+    fn set_cursor_at_grid_clamps_out_of_bounds_col() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncdef");
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(0, 99, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![2]);
+    }
+
+    #[test]
+    fn set_cursor_at_grid_replaces_existing_selections() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+        seed_cursors(&editor, &mut cx, &[1, 3, 5]);
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(0, 7, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![7]);
+    }
+
+    #[test]
+    fn set_cursor_at_grid_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(0, 2, cx));
+        cx.run_until_parked();
+
+        let observed = drain(&events);
+        assert!(
+            observed.iter().all(|e| *e == EditorEvent::Changed),
+            "unexpected event in {observed:?}",
+        );
+        assert!(!observed.is_empty(), "expected at least one Changed event");
     }
 }

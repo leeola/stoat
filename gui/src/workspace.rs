@@ -287,10 +287,13 @@ impl Workspace {
                 self.dismiss_modal(window, cx);
             },
             ActionKind::ClickAt => {
-                // FIXME: routing into the active editor's text region waits
-                // for the editor render and active-editor lookup; the action
-                // exists so the mouse pipeline has a target today.
-                tracing::trace!(target: "stoat::dispatch", "ClickAt routing not wired yet");
+                if let Some(click) = action.as_any().downcast_ref::<crate::actions::ClickAt>() {
+                    let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+                    if let Some(editor) = weak_editor.and_then(|w| w.upgrade()) {
+                        let (row, col) = (click.row, click.col);
+                        editor.update(cx, |ed, cx| ed.set_cursor_at_grid(row, col, cx));
+                    }
+                }
             },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
@@ -908,8 +911,66 @@ mod tests {
         assert!(active.is_none());
     }
 
+    fn new_singleton_editor(
+        vcx: &mut VisualTestContext,
+        text: &str,
+    ) -> Entity<crate::editor::Editor> {
+        use crate::{
+            buffer::Buffer,
+            diff_map::DiffMap,
+            display_map::DisplayMap,
+            editor::{Editor, EditorMode},
+            multi_buffer::MultiBuffer,
+        };
+        use stoat::buffer::BufferId;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let buffer = vcx.update(|_, cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            vcx.update(|_, cx| cx.new(|cx| MultiBuffer::singleton(buffer, cx)))
+        };
+        let display_map = {
+            let buffer = buffer.clone();
+            vcx.update(|_, cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
+        };
+        let diff_map = vcx.update(|_, cx| cx.new(|cx| DiffMap::new(buffer, cx)));
+        vcx.update(|_, cx| {
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
+        })
+    }
+
+    fn cursor_offsets(
+        vcx: &mut VisualTestContext,
+        editor: &Entity<crate::editor::Editor>,
+    ) -> Vec<usize> {
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            ed.selections()
+                .all_anchors()
+                .iter()
+                .map(|s| snapshot.resolve_anchor(&s.start))
+                .collect()
+        })
+    }
+
     #[test]
-    fn dispatch_click_at_is_silent_for_now() {
+    fn dispatch_click_at_moves_active_editor_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 6 });
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![6]);
+    }
+
+    #[test]
+    fn dispatch_click_at_without_active_editor_is_silent() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
@@ -920,6 +981,22 @@ mod tests {
 
         let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn dispatch_click_at_with_dropped_editor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let weak = {
+            let editor = new_singleton_editor(vcx, "hello");
+            editor.downgrade()
+        };
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(weak)));
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 2 });
+        vcx.run_until_parked();
     }
 
     #[test]
