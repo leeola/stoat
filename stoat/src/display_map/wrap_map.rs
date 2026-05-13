@@ -952,7 +952,8 @@ pub enum WrapChunks<'a> {
     /// No wrapping: a thin wrapper around [`TabChunks`].
     Passthrough { tab_chunks: Box<TabChunks<'a>> },
     /// Wrapping active: emits row-by-row using the expanded display line
-    /// text. Unstyled; see the FIXME on [`WrapSnapshot::chunks`].
+    /// text. Per-chunk highlight spans are sliced into each wrapped row
+    /// via [`WrappedChunksInner`].
     Wrapped(Box<WrappedChunksInner<'a>>),
 }
 

@@ -15,9 +15,10 @@
 //!
 //! The `always_confirm` outcome currently maps to a non-interrupt
 //! [`PermissionResult::Deny`] with a message explaining that the
-//! approval modal is not yet implemented (see TODO item 50). Once
-//! the modal lands, that arm switches to routing the call into the
-//! modal -- no schema change required.
+//! approval modal is not yet implemented. Once the GUI "Permission
+//! approval modal with queue" (a Claude-chat sibling item) lands,
+//! that arm switches to routing the call into the modal -- no
+//! schema change required.
 
 use super::{
     permission::{PermissionCallback, PermissionResult, ToolPermissionContext},

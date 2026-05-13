@@ -3,10 +3,10 @@
 //! per-path summary that the status bar consumes.
 //!
 //! Single-server today: each path has at most one set of
-//! diagnostics. When [`crate::lsp`] gains an `LspManager` (TODO
-//! line 176) the key widens to `(PathBuf, LanguageServerId)` so
-//! parallel servers (rust-analyzer + clippy + custom linters) can
-//! contribute layered, independently-toggleable diagnostics.
+//! diagnostics. The eventual multi-server shape widens the key to
+//! `(PathBuf, LanguageServerId)` so parallel servers
+//! (rust-analyzer + clippy + custom linters) can contribute
+//! layered, independently-toggleable diagnostics.
 
 use lsp_types::{Diagnostic, DiagnosticSeverity};
 use std::{

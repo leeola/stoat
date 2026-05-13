@@ -13,9 +13,10 @@ use snafu::Snafu;
 /// overrides the two required methods.
 ///
 /// The trait is intentionally not object-safe -- `deserialize`
-/// returns `Self`. The future pane item-handle wrapper (TODO item
-/// 85) hides this behind an object-safe handle trait so a
-/// `Vec<Box<dyn ItemHandle>>` tab list still works.
+/// returns `Self`. The future `ItemHandle` wrapper hides this
+/// behind an object-safe trait (a `Box<dyn ItemHandle>` that omits
+/// the `deserialize -> Self` method) so a `Vec<Box<dyn ItemHandle>>`
+/// tab list still works.
 pub trait ItemView: Render + 'static {
     /// Tab label rendered in the pane's tab strip. Concrete impls
     /// derive this from their underlying buffer / session.

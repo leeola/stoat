@@ -9,9 +9,11 @@
 //! directory. [`crate::workspace::Workspace::is_fresh`] gates the save side
 //! so unused fresh workspaces never write a file at all.
 //!
-//! Coverage is best-effort: see sibling FIXMEs in `multi_buffer.rs`,
-//! `review_session.rs`, `commit_list.rs`, and `claude_chat.rs` for the
-//! remaining gaps. Buffer history (dirty content, undo stack, anchor-carrying
+//! Coverage is best-effort: the workspace-persistence work
+//! (per-chunk review status, commit-list selection by SHA, Claude
+//! chat scrollback, and live `MultiBuffer` excerpts) is tracked as
+//! its own group of follow-ups and is not yet complete here.
+//! Buffer history (dirty content, undo stack, anchor-carrying
 //! selections) rehydrates via the op log replay in
 //! [`crate::buffer::TextBuffer::from_history`]. Anything referencing a live OS
 //! resource (PTY-backed `Run`) is out of scope by design. For Claude, the
