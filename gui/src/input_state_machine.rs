@@ -983,7 +983,8 @@ mod tests {
 
     fn new_singleton_editor(cx: &mut TestAppContext, text: &str) -> Entity<Editor> {
         use crate::{
-            buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, multi_buffer::MultiBuffer,
+            buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
+            multi_buffer::MultiBuffer,
         };
         use std::sync::Arc;
         use stoat::buffer::BufferId;
@@ -1000,7 +1001,9 @@ mod tests {
             cx.update(|cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
         };
         let diff_map = cx.update(|cx| cx.new(|cx| DiffMap::new(buffer, cx)));
-        cx.update(|cx| cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, cx)))
+        cx.update(|cx| {
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
+        })
     }
 
     fn editor_text(cx: &mut TestAppContext, editor: &Entity<Editor>) -> String {

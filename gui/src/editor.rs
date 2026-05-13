@@ -5,15 +5,83 @@ use crate::{
     display_map::{DisplayMap, DisplayMapEvent},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
-use gpui::{Context, Entity, EventEmitter, Subscription};
+use gpui::{Context, Entity, EventEmitter, Subscription, WeakEntity};
 use stoat::{jumplist::JumpList, selection::SelectionsCollection};
 use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
+
+/// Sizing / behavior classification carried on each [`Editor`].
+/// The future render, scroll, and mouse paths consult these to
+/// decide soft-wrap, gutter visibility, scroll axes, and reported
+/// size without re-deriving the policy at every paint site.
+///
+/// - [`EditorMode::Full`] is the standard pane editor: soft-wrap on, gutter shown, both-axis
+///   scroll, fills the container.
+/// - [`EditorMode::SingleLine`] is a one-line text input used by picker queries, the file-finder
+///   query, the command palette query, the in-buffer search input, the Claude chat input, the
+///   rename input, and prompt inputs. No soft-wrap, no gutter, no vertical scroll, fixed line
+///   height.
+/// - [`EditorMode::AutoHeight`] grows with content from `min_lines` up to `max_lines` (or unbounded
+///   when `None`). No gutter; no vertical scroll until the cap is hit.
+/// - [`EditorMode::Minimap`] mirrors a parent editor at a reduced scale. No gutter, no independent
+///   scroll (driven by the parent).
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum EditorMode {
+    Full {},
+    SingleLine,
+    AutoHeight {
+        min_lines: usize,
+        max_lines: Option<usize>,
+    },
+    Minimap {
+        parent: WeakEntity<Editor>,
+    },
+}
+
+impl EditorMode {
+    /// Convenience constructor for the standard pane editor mode.
+    pub fn full() -> Self {
+        Self::Full {}
+    }
+
+    pub fn is_full(&self) -> bool {
+        matches!(self, Self::Full { .. })
+    }
+
+    pub fn is_single_line(&self) -> bool {
+        matches!(self, Self::SingleLine)
+    }
+
+    pub fn is_auto_height(&self) -> bool {
+        matches!(self, Self::AutoHeight { .. })
+    }
+
+    pub fn is_minimap(&self) -> bool {
+        matches!(self, Self::Minimap { .. })
+    }
+
+    /// Whether the render path soft-wraps long lines onto multiple
+    /// visual rows. `Full` and `Minimap` wrap; the single-line input
+    /// modes (`SingleLine`, `AutoHeight`) never wrap so cursor
+    /// motion stays one-row-per-line.
+    pub fn soft_wrap(&self) -> bool {
+        matches!(self, Self::Full { .. } | Self::Minimap { .. })
+    }
+
+    /// Whether the render path paints the gutter (line numbers, diff
+    /// strip, diagnostic markers). Only the standard pane editor
+    /// shows the gutter.
+    pub fn show_gutter(&self) -> bool {
+        matches!(self, Self::Full { .. })
+    }
+}
 
 /// Entity holding the state a single editor view needs:
 /// [`Entity<MultiBuffer>`] for the source text, [`Entity<DisplayMap>`]
 /// for the visible-line projection, [`Entity<DiffMap>`] for the
-/// gutter-strip diff data, the user's selections and jumplist, and
-/// the current scroll row.
+/// gutter-strip diff data, the user's selections and jumplist, the
+/// current scroll row, and the [`EditorMode`] that classifies the
+/// view (pane editor, single-line input, auto-height input,
+/// minimap).
 ///
 /// Render, mouse handling, action handlers, and `ItemView` registration
 /// land in sibling items; this struct exposes only the state fields,
@@ -24,6 +92,7 @@ pub struct Editor {
     multi_buffer: Entity<MultiBuffer>,
     display_map: Entity<DisplayMap>,
     diff_map: Entity<DiffMap>,
+    mode: EditorMode,
     selections: SelectionsCollection,
     scroll_row: u32,
     jumplist: JumpList,
@@ -45,6 +114,7 @@ impl Editor {
         multi_buffer: Entity<MultiBuffer>,
         display_map: Entity<DisplayMap>,
         diff_map: Entity<DiffMap>,
+        mode: EditorMode,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let mb_sub = cx.subscribe(&multi_buffer, |_, _, _event: &MultiBufferEvent, cx| {
@@ -63,11 +133,16 @@ impl Editor {
             multi_buffer,
             display_map,
             diff_map,
+            mode,
             selections: SelectionsCollection::new(),
             scroll_row: 0,
             jumplist: JumpList::new(),
             _subscriptions: [mb_sub, dm_sub, diff_sub],
         }
+    }
+
+    pub fn mode(&self) -> &EditorMode {
+        &self.mode
     }
 
     pub fn multi_buffer(&self) -> &Entity<MultiBuffer> {
@@ -246,8 +321,9 @@ mod tests {
             let buffer = buffer.clone();
             cx.update(|cx| cx.new(|cx| DiffMap::new(buffer, cx)))
         };
-        let editor =
-            cx.update(|cx| cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, cx)));
+        let editor = cx.update(|cx| {
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
+        });
         (buffer, editor)
     }
 
