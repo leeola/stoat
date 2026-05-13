@@ -1,9 +1,18 @@
-use crate::workspace::Workspace;
+use crate::{
+    buffer::Buffer,
+    diff_map::DiffMap,
+    display_map::DisplayMap,
+    editor::{Editor, EditorMode},
+    globals::ExecutorGlobal,
+    multi_buffer::MultiBuffer,
+    workspace::Workspace,
+};
 use gpui::{
     div, AppContext, Context, Entity, FocusHandle, IntoElement, ParentElement, Render,
     SharedString, Styled, Window,
 };
 use std::path::PathBuf;
+use stoat::buffer::BufferId;
 
 pub(crate) struct StoatApp {
     workspace: Entity<Workspace>,
@@ -20,6 +29,32 @@ impl StoatApp {
             .map(|s| SharedString::from(s.to_string()))
             .unwrap_or_else(|| SharedString::from("stoat"));
         let workspace = cx.new(|cx| Workspace::new(name, git_root.clone(), cx));
+
+        let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), ""));
+        let multi_buffer = cx.new({
+            let buffer = buffer.clone();
+            |cx| MultiBuffer::singleton(buffer, cx)
+        });
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let display_map = cx.new({
+            let buffer = buffer.clone();
+            |cx| DisplayMap::new(buffer, executor, cx)
+        });
+        let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
+        let editor =
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+
+        let pane_tree = workspace.read(cx).pane_tree().clone();
+        let focus_id = pane_tree.read(cx).focus();
+        let pane = pane_tree
+            .read(cx)
+            .pane(focus_id)
+            .expect("focused pane registered in PaneTree::panes")
+            .clone();
+        pane.update(cx, |p, cx| {
+            p.add_item(Box::new(editor), cx);
+        });
+
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
@@ -37,10 +72,18 @@ impl Render for StoatApp {
 mod tests {
     use super::*;
     use gpui::TestAppContext;
+    use std::sync::Arc;
+    use stoat_scheduler::{Executor, TestScheduler};
+
+    fn install_executor_global(cx: &mut TestAppContext) {
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        cx.update(|cx| cx.set_global(ExecutorGlobal(executor)));
+    }
 
     #[test]
     fn new_constructs_workspace_anchored_to_cwd() {
         let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
         let (app, _vcx) = cx.add_window_view(|_window, cx| StoatApp::new(cx));
         let cwd = std::env::current_dir().expect("current_dir");
         let expected_name: SharedString = cwd
@@ -53,6 +96,25 @@ mod tests {
             let ws = app.workspace.read(cx);
             assert_eq!(ws.git_root(), &cwd);
             assert_eq!(ws.name(), &expected_name);
+        });
+    }
+
+    #[test]
+    fn new_seeds_focused_pane_with_scratch_editor() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let (app, _vcx) = cx.add_window_view(|_window, cx| StoatApp::new(cx));
+
+        app.read_with(&cx, |app, cx| {
+            let ws = app.workspace.read(cx);
+            let pane_tree = ws.pane_tree().read(cx);
+            let focus_id = pane_tree.focus();
+            let pane = pane_tree.pane(focus_id).expect("focused pane").read(cx);
+            assert_eq!(pane.len(), 1);
+            let editor = pane
+                .active_item()
+                .expect("scratch editor active in focused pane");
+            assert_eq!(editor.tab_label(cx), SharedString::from("(scratch)"));
         });
     }
 }
