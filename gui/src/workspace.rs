@@ -298,6 +298,29 @@ impl Workspace {
                     }
                 }
             },
+            ActionKind::DragSelectTo => {
+                if let Some(drag) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::DragSelectTo>()
+                {
+                    let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+                    if let Some(editor) = weak_editor.and_then(|w| w.upgrade()) {
+                        let (row, col) = (drag.row, drag.col);
+                        editor.update(cx, |ed, cx| {
+                            ed.extend_primary_selection_to_grid(row, col, cx)
+                        });
+                    }
+                }
+            },
+            ActionKind::HoverAt => {
+                if let Some(hover) = action.as_any().downcast_ref::<crate::actions::HoverAt>() {
+                    let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+                    if let Some(editor) = weak_editor.and_then(|w| w.upgrade()) {
+                        let (row, col) = (hover.row, hover.col);
+                        editor.update(cx, |ed, cx| ed.set_hover_position(Some((row, col)), cx));
+                    }
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1019,6 +1042,86 @@ mod tests {
 
         dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 2 });
         vcx.run_until_parked();
+    }
+
+    fn selection_offsets(
+        vcx: &mut VisualTestContext,
+        editor: &Entity<crate::editor::Editor>,
+    ) -> Vec<(usize, usize)> {
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            ed.selections()
+                .all_anchors()
+                .iter()
+                .map(|s| {
+                    (
+                        snapshot.resolve_anchor(&s.start),
+                        snapshot.resolve_anchor(&s.end),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn dispatch_drag_select_to_extends_primary_selection() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 2 });
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, crate::actions::DragSelectTo { row: 0, col: 7 });
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(2, 7)]);
+    }
+
+    #[test]
+    fn dispatch_drag_select_to_without_active_editor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let before = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+
+        dispatch(&ws, vcx, crate::actions::DragSelectTo { row: 1, col: 4 });
+        vcx.run_until_parked();
+
+        let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn dispatch_hover_at_sets_position_on_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, crate::actions::HoverAt { row: 0, col: 4 });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.hover_position()),
+            Some((0, 4))
+        );
+    }
+
+    #[test]
+    fn dispatch_hover_at_without_active_editor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let before = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+
+        dispatch(&ws, vcx, crate::actions::HoverAt { row: 1, col: 2 });
+        vcx.run_until_parked();
+
+        let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+        assert_eq!(before, after);
     }
 
     #[test]

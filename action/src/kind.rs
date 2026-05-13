@@ -285,4 +285,6 @@ pub enum ActionKind {
     SetActivePane,
     DismissModal,
     ClickAt,
+    DragSelectTo,
+    HoverAt,
 }

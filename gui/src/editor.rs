@@ -10,8 +10,9 @@ use crate::{
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
 use gpui::{
-    uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter, IntoElement, Pixels,
-    Point, Render, SharedString, Size, Styled, Subscription, Task, WeakEntity, Window,
+    canvas, div, uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
+    Pixels, Point, Render, SharedString, Size, Styled, Subscription, Task, WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
@@ -107,6 +108,10 @@ pub struct Editor {
     cell_size: Option<Size<Pixels>>,
     file_path: Option<std::path::PathBuf>,
     diagnostic_set: Option<Entity<crate::diagnostics::DiagnosticSet>>,
+    workspace: Option<WeakEntity<crate::workspace::Workspace>>,
+    text_region_bounds: Option<Bounds<Pixels>>,
+    hover_position: Option<(u32, u32)>,
+    hover_debounce_task: Option<Task<()>>,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
 }
@@ -152,6 +157,10 @@ impl Editor {
             cell_size: None,
             file_path: None,
             diagnostic_set: None,
+            workspace: None,
+            text_region_bounds: None,
+            hover_position: None,
+            hover_debounce_task: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
         }
@@ -425,6 +434,193 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn workspace(&self) -> Option<&WeakEntity<crate::workspace::Workspace>> {
+        self.workspace.as_ref()
+    }
+
+    /// Wire the editor to its enclosing [`Workspace`] so mouse handlers
+    /// in the render path can dispatch positional actions
+    /// ([`crate::actions::ClickAt`], [`crate::actions::DragSelectTo`],
+    /// [`crate::actions::HoverAt`]) through the workspace's action
+    /// dispatch surface. Production callers set this after constructing
+    /// the editor; tests that exercise the render-side mouse handlers
+    /// must set it before simulating mouse events.
+    pub fn set_workspace(&mut self, workspace: Option<WeakEntity<crate::workspace::Workspace>>) {
+        self.workspace = workspace;
+    }
+
+    pub fn text_region_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.text_region_bounds
+    }
+
+    /// Record the bounds of the editor's text region as observed during
+    /// paint. Mouse handlers subtract `bounds.origin` from
+    /// window-relative event positions to obtain element-relative
+    /// pixels before passing them through
+    /// [`crate::editor::mouse::point_to_grid`]. Emits
+    /// [`EditorEvent::Changed`] only when the value actually changes.
+    pub fn set_text_region_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<'_, Self>) {
+        if self.text_region_bounds == Some(bounds) {
+            return;
+        }
+        self.text_region_bounds = Some(bounds);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn hover_position(&self) -> Option<(u32, u32)> {
+        self.hover_position
+    }
+
+    /// Store the most recent debounced hover grid position. The LSP
+    /// hover popup observes this to compute the hover request; the
+    /// mouse-move debounce in the editor's render path drives updates
+    /// through the [`crate::actions::HoverAt`] dispatch arm. Emits
+    /// [`EditorEvent::Changed`] only when the value actually changes.
+    pub fn set_hover_position(&mut self, position: Option<(u32, u32)>, cx: &mut Context<'_, Self>) {
+        if self.hover_position == position {
+            return;
+        }
+        self.hover_position = position;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Extend the primary selection's head to display-grid `(row, col)`,
+    /// preserving its anchor (`start`). Mouse-drag uses this to grow
+    /// the selection under the cursor while the user holds the left
+    /// button. Off-buffer rows or columns clamp to the nearest valid
+    /// display position via [`DisplaySnapshot::clip_point`]; display
+    /// rows that correspond to a custom block (no matching buffer
+    /// point) are silently ignored. No-op when the editor has no
+    /// selections.
+    pub fn extend_primary_selection_to_grid(
+        &mut self,
+        row: u32,
+        col: u32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
+        let Some(buffer_point) = display_snapshot.display_to_buffer(clipped) else {
+            return;
+        };
+        let offset = snapshot.rope().point_to_offset(buffer_point);
+        let head = snapshot.anchor_at(offset, Bias::Left);
+
+        let mut all = self.selections.all_anchors().to_vec();
+        let Some(primary) = all.first_mut() else {
+            return;
+        };
+        let anchor_offset = snapshot.resolve_anchor(&primary.start);
+        let head_offset = offset;
+        if head_offset >= anchor_offset {
+            primary.end = head;
+            primary.reversed = false;
+        } else {
+            primary.end = head;
+            primary.reversed = true;
+        }
+        primary.goal = SelectionGoal::None;
+        self.selections.replace_with(all, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Schedule a 50ms hover debounce that dispatches
+    /// [`crate::actions::HoverAt`] through the wired [`Workspace`].
+    /// Each call cancels the prior pending timer by replacing the
+    /// stored task; the new task fires only if the editor still has a
+    /// live workspace handle. No-op when the editor has no workspace
+    /// wired ([`set_workspace`] not called).
+    /// Resolve `position` (window-relative pixels) to a `(row, col)`
+    /// grid coordinate using the editor's stored text-region bounds
+    /// and cell metrics. Returns `None` when either is unset (no
+    /// paint has run yet or cell metrics have not been reported).
+    fn position_to_grid(&self, position: Point<Pixels>) -> Option<(u32, u32)> {
+        let bounds = self.text_region_bounds?;
+        let cell = self.cell_size?;
+        let elem = Point::new(position.x - bounds.origin.x, position.y - bounds.origin.y);
+        Some(mouse::point_to_grid(elem, cell))
+    }
+
+    fn dispatch_click_at(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((row, col)) = self.position_to_grid(position) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        workspace.update(cx, |w, cx| {
+            w.dispatch_action(Box::new(crate::actions::ClickAt { row, col }), window, cx);
+        });
+    }
+
+    fn dispatch_drag_select_to(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((row, col)) = self.position_to_grid(position) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
+            return;
+        };
+        workspace.update(cx, |w, cx| {
+            w.dispatch_action(
+                Box::new(crate::actions::DragSelectTo { row, col }),
+                window,
+                cx,
+            );
+        });
+    }
+
+    fn schedule_hover_at(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((row, col)) = self.position_to_grid(position) else {
+            return;
+        };
+        self.schedule_hover_debounce(row, col, window, cx);
+    }
+
+    pub fn schedule_hover_debounce(
+        &mut self,
+        row: u32,
+        col: u32,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(weak_workspace) = self.workspace.clone() else {
+            self.hover_debounce_task = None;
+            return;
+        };
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            executor.timer(std::time::Duration::from_millis(50)).await;
+            let _ = this.update_in(cx, |_, window, cx| {
+                let Some(workspace) = weak_workspace.upgrade() else {
+                    return;
+                };
+                workspace.update(cx, |w, cx| {
+                    w.dispatch_action(Box::new(crate::actions::HoverAt { row, col }), window, cx);
+                });
+            });
+        });
+        self.hover_debounce_task = Some(task);
+    }
+
     /// Translate a buffer UTF-16 offset to the pixel rectangle of the
     /// corresponding character cell, anchored relative to
     /// `element_origin`. Returns `None` when [`Editor::cell_size`] is
@@ -514,13 +710,41 @@ impl Render for Editor {
             .row as usize
             + 1;
         let handle = cx.entity().downgrade();
-        uniform_list("editor-rows", total_rows, move |range, _window, cx| {
+        let bounds_handle = handle.clone();
+        let list = uniform_list("editor-rows", total_rows, move |range, _window, cx| {
             handle
                 .upgrade()
                 .map(|editor| editor.update(cx, |ed, cx| ed.render_visible_rows(range, cx)))
                 .unwrap_or_default()
         })
-        .size_full()
+        .size_full();
+
+        let bounds_capture = canvas(
+            move |bounds, _window, cx| {
+                let _ = bounds_handle.update(cx, |ed, cx| ed.set_text_region_bounds(bounds, cx));
+            },
+            |_, _, _, _| {},
+        )
+        .size_full();
+
+        div()
+            .relative()
+            .size_full()
+            .child(list)
+            .child(bounds_capture)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.dispatch_click_at(event.position, window, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if event.dragging() {
+                    this.dispatch_drag_select_to(event.position, window, cx);
+                } else {
+                    this.schedule_hover_at(event.position, window, cx);
+                }
+            }))
     }
 }
 
@@ -567,7 +791,10 @@ mod tests {
     use super::*;
     use crate::{buffer::Buffer, globals::ExecutorGlobal};
     use gpui::{AppContext, TestAppContext, VisualTestContext};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
     use stoat::buffer::BufferId;
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -939,6 +1166,116 @@ mod tests {
         assert!(!observed.is_empty(), "expected at least one Changed event");
     }
 
+    fn selection_offsets(editor: &Entity<Editor>, cx: &mut TestAppContext) -> Vec<(usize, usize)> {
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            ed.selections()
+                .all_anchors()
+                .iter()
+                .map(|s| {
+                    (
+                        snapshot.resolve_anchor(&s.start),
+                        snapshot.resolve_anchor(&s.end),
+                    )
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn extend_primary_selection_to_grid_extends_head() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+        seed_cursors(&editor, &mut cx, &[0]);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.extend_primary_selection_to_grid(0, 5, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(selection_offsets(&editor, &mut cx), vec![(0, 5)]);
+    }
+
+    #[test]
+    fn extend_primary_selection_to_grid_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = Selection {
+                id: 1,
+                start: snapshot.anchor_at(2, Bias::Left),
+                end: snapshot.anchor_at(2, Bias::Left),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.extend_primary_selection_to_grid(0, 8, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(selection_offsets(&editor, &mut cx), vec![(2, 8)]);
+    }
+
+    #[test]
+    fn extend_primary_selection_to_grid_marks_reversed_when_head_precedes_anchor() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+        seed_cursors(&editor, &mut cx, &[8]);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.extend_primary_selection_to_grid(0, 2, cx)
+        });
+        cx.run_until_parked();
+
+        let reversed = editor.update(&mut cx, |ed, _| {
+            ed.selections()
+                .all_anchors()
+                .first()
+                .map(|s| s.reversed)
+                .unwrap_or(false)
+        });
+        assert!(reversed, "head before anchor should mark reversed");
+        assert_eq!(selection_offsets(&editor, &mut cx), vec![(8, 2)]);
+    }
+
+    #[test]
+    fn extend_primary_selection_to_grid_clamps_out_of_bounds_row() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncd");
+        seed_cursors(&editor, &mut cx, &[0]);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.extend_primary_selection_to_grid(99, 0, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(selection_offsets(&editor, &mut cx), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn extend_primary_selection_to_grid_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        seed_cursors(&editor, &mut cx, &[0]);
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.extend_primary_selection_to_grid(0, 3, cx)
+        });
+        cx.run_until_parked();
+
+        let observed = drain(&events);
+        assert!(
+            observed.iter().all(|e| *e == EditorEvent::Changed),
+            "unexpected event in {observed:?}",
+        );
+        assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
     fn cell(width: f32, height: f32) -> Size<Pixels> {
         gpui::size(gpui::px(width), gpui::px(height))
     }
@@ -976,6 +1313,113 @@ mod tests {
         let (_recorder, events) = Recorder::install(&mut cx, &editor);
 
         editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(7.0, 14.0), cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<EditorEvent>::new());
+    }
+
+    fn bounds_at(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
+        Bounds {
+            origin: Point::new(gpui::px(x), gpui::px(y)),
+            size: gpui::size(gpui::px(w), gpui::px(h)),
+        }
+    }
+
+    #[test]
+    fn workspace_defaults_to_none_and_setter_stores() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+
+        assert!(editor
+            .read_with(&cx, |ed, _| ed.workspace().cloned())
+            .is_none());
+
+        let workspace = cx.update(|cx| {
+            cx.new(|cx| crate::workspace::Workspace::new("test", PathBuf::from("/tmp/repo"), cx))
+        });
+        editor.update(&mut cx, |ed, _| {
+            ed.set_workspace(Some(workspace.downgrade()))
+        });
+
+        let stored_id = editor
+            .read_with(&cx, |ed, _| ed.workspace().and_then(|w| w.upgrade()))
+            .map(|w| w.entity_id());
+        assert_eq!(stored_id, Some(workspace.entity_id()));
+    }
+
+    #[test]
+    fn text_region_bounds_defaults_to_none() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+
+        assert_eq!(editor.read_with(&cx, |ed, _| ed.text_region_bounds()), None);
+    }
+
+    #[test]
+    fn set_text_region_bounds_stores_and_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+        let b = bounds_at(10.0, 20.0, 200.0, 100.0);
+
+        editor.update(&mut cx, |ed, cx| ed.set_text_region_bounds(b, cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(&cx, |ed, _| ed.text_region_bounds()),
+            Some(b)
+        );
+        assert_eq!(drain(&events), vec![EditorEvent::Changed]);
+    }
+
+    #[test]
+    fn set_text_region_bounds_idempotent_no_event() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        let b = bounds_at(10.0, 20.0, 200.0, 100.0);
+        editor.update(&mut cx, |ed, cx| ed.set_text_region_bounds(b, cx));
+        cx.run_until_parked();
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_text_region_bounds(b, cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<EditorEvent>::new());
+    }
+
+    #[test]
+    fn hover_position_defaults_to_none() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+
+        assert_eq!(editor.read_with(&cx, |ed, _| ed.hover_position()), None);
+    }
+
+    #[test]
+    fn set_hover_position_stores_and_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_hover_position(Some((4, 9)), cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(&cx, |ed, _| ed.hover_position()),
+            Some((4, 9))
+        );
+        assert_eq!(drain(&events), vec![EditorEvent::Changed]);
+    }
+
+    #[test]
+    fn set_hover_position_idempotent_no_event() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        editor.update(&mut cx, |ed, cx| ed.set_hover_position(Some((1, 2)), cx));
+        cx.run_until_parked();
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_hover_position(Some((1, 2)), cx));
         cx.run_until_parked();
 
         assert_eq!(drain(&events), Vec::<EditorEvent>::new());
@@ -1102,13 +1546,13 @@ mod tests {
         );
 
         editor.update(&mut cx, |ed, cx| {
-            ed.set_file_path(Some(std::path::PathBuf::from("/ws/a.rs")), cx)
+            ed.set_file_path(Some(PathBuf::from("/ws/a.rs")), cx)
         });
         cx.run_until_parked();
 
         assert_eq!(
             editor.read_with(&cx, |ed, _| ed.file_path().map(|p| p.to_path_buf())),
-            Some(std::path::PathBuf::from("/ws/a.rs")),
+            Some(PathBuf::from("/ws/a.rs")),
         );
     }
 
@@ -1125,7 +1569,7 @@ mod tests {
         cx.run_until_parked();
         let (_recorder, events) = Recorder::install(&mut cx, &editor);
 
-        let path = std::path::PathBuf::from("/ws/a.rs");
+        let path = PathBuf::from("/ws/a.rs");
         diag_set.update(&mut cx, |s, cx| {
             s.replace_for_path(
                 path,
@@ -1210,7 +1654,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let (_buffer, editor) = new_editor(&mut cx, "hello");
         editor.update(&mut cx, |ed, cx| {
-            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/src/main.rs")), cx);
+            ed.set_file_path(Some(PathBuf::from("/tmp/repo/src/main.rs")), cx);
         });
 
         editor.read_with(&cx, |ed, app| {

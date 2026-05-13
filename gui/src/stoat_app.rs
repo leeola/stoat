@@ -43,6 +43,7 @@ impl StoatApp {
         let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
         let editor =
             cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+        editor.update(cx, |ed, _| ed.set_workspace(Some(workspace.downgrade())));
 
         let pane_tree = workspace.read(cx).pane_tree().clone();
         let focus_id = pane_tree.read(cx).focus();

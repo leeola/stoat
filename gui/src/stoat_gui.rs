@@ -42,7 +42,7 @@ pub mod test;
 mod theme;
 mod workspace;
 
-pub use actions::{ClickAt, SetActivePane};
+pub use actions::{ClickAt, DragSelectTo, HoverAt, SetActivePane};
 pub use buffer::{Buffer, BufferEvent};
 pub use buffer_registry::{BufferRegistry, BufferRegistryEvent};
 pub use diagnostics::{DiagnosticSet, DiagnosticSetEvent};

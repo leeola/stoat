@@ -117,6 +117,122 @@ impl Action for ClickAt {
     }
 }
 
+/// Extend the active editor's primary selection head to the grid
+/// position `(row, col)`. Constructed by the editor's mouse-move
+/// handler while the left button is held; the anchor stays put and
+/// the head moves under the cursor. Not registered with the keymap
+/// registry.
+#[derive(Debug, Clone, Copy)]
+pub struct DragSelectTo {
+    pub row: u32,
+    pub col: u32,
+}
+
+#[derive(Debug)]
+pub struct DragSelectToDef;
+
+impl ActionDef for DragSelectToDef {
+    fn name(&self) -> &'static str {
+        "DragSelectTo"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::DragSelectTo
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "drag-select to editor grid position"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Extend the active editor's primary selection so its anchor stays put and its head moves to the row/column inside the editor's text region. Dispatched by mouse-drag on the editor's rendered text area; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl DragSelectTo {
+    pub const DEF: &DragSelectToDef = &DragSelectToDef;
+}
+
+impl Action for DragSelectTo {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Record a hover position inside the active editor's text region.
+/// Constructed by the editor's mouse-move handler after the 50ms
+/// hover debounce fires; the LSP hover popup observes this position
+/// to compute the hover request. Not registered with the keymap
+/// registry.
+#[derive(Debug, Clone, Copy)]
+pub struct HoverAt {
+    pub row: u32,
+    pub col: u32,
+}
+
+#[derive(Debug)]
+pub struct HoverAtDef;
+
+impl ActionDef for HoverAtDef {
+    fn name(&self) -> &'static str {
+        "HoverAt"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::HoverAt
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "hover at editor grid position"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Record the hover position inside the active editor's text region so the LSP hover popup can query the server. Dispatched after a 50ms debounce on the editor's mouse-move handler; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl HoverAt {
+    pub const DEF: &HoverAtDef = &HoverAtDef;
+}
+
+impl Action for HoverAt {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -138,9 +254,27 @@ mod tests {
     }
 
     #[test]
-    fn neither_action_is_palette_visible() {
+    fn drag_select_to_carries_grid_position() {
+        let action = DragSelectTo { row: 7, col: 3 };
+        assert_eq!(action.kind(), ActionKind::DragSelectTo);
+        assert_eq!(action.def().name(), "DragSelectTo");
+        assert_eq!((action.row, action.col), (7, 3));
+    }
+
+    #[test]
+    fn hover_at_carries_grid_position() {
+        let action = HoverAt { row: 2, col: 9 };
+        assert_eq!(action.kind(), ActionKind::HoverAt);
+        assert_eq!(action.def().name(), "HoverAt");
+        assert_eq!((action.row, action.col), (2, 9));
+    }
+
+    #[test]
+    fn no_mouse_action_is_palette_visible() {
         assert!(!SetActivePane::DEF.palette_visible());
         assert!(!ClickAt::DEF.palette_visible());
+        assert!(!DragSelectTo::DEF.palette_visible());
+        assert!(!HoverAt::DEF.palette_visible());
     }
 
     #[test]
