@@ -4,10 +4,11 @@ use gpui::{
     StrikethroughStyle, StyledText, UnderlineStyle,
 };
 use lsp_types::DiagnosticSeverity;
-use ratatui::style::Color;
+use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat::{
-    display_map::HighlightStyle as StoatHighlightStyle, BlockRowKind, DisplayPoint, DisplaySnapshot,
+    display_map::{Block, BlockContext, BlockId, HighlightStyle as StoatHighlightStyle},
+    BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
 };
 use stoat_text::{Anchor, Selection};
 
@@ -131,18 +132,30 @@ pub(crate) fn build_rendered_rows(
         }
     }
 
+    let buffer_snapshot = snapshot.buffer_snapshot();
     for idx in 0..count {
         let display_row = range.start + idx as u32;
         if let BlockRowKind::Block { block, line_index } = snapshot.classify_row(display_row) {
-            let line = block.get_line(line_index);
-            if line.is_empty() {
+            let ctx = block_context_for(block, display_row, buffer_snapshot);
+            let lines = block.render_lines(&ctx);
+            let Some(line) = lines.into_iter().nth(line_index as usize) else {
                 texts[idx].clear();
                 runs[idx].clear();
                 continue;
+            };
+            let mut row_text = String::new();
+            let mut row_runs: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
+            for span in line.spans {
+                if span.content.is_empty() {
+                    continue;
+                }
+                let start = row_text.len();
+                row_text.push_str(span.content.as_ref());
+                let end = row_text.len();
+                row_runs.push((start..end, convert_block_span_style(&span.style)));
             }
-            let style = block_text_style();
-            texts[idx] = line;
-            runs[idx] = vec![(0..texts[idx].len(), style)];
+            texts[idx] = row_text;
+            runs[idx] = row_runs;
         }
     }
 
@@ -156,11 +169,67 @@ pub(crate) fn build_rendered_rows(
         .collect()
 }
 
-fn block_text_style() -> gpui::HighlightStyle {
-    gpui::HighlightStyle {
-        color: Some(rgb(BLOCK_TEXT_HEX).into()),
-        ..Default::default()
+fn block_context_for<'a>(
+    block: &Block,
+    anchor_row: u32,
+    buffer_snapshot: &'a MultiBufferSnapshot,
+) -> BlockContext<'a> {
+    let block_id = match block {
+        Block::Custom(b) => BlockId::Custom(b.id),
+        Block::FoldedBuffer { first_excerpt, .. } => BlockId::FoldedBuffer(first_excerpt.id),
+        Block::ExcerptBoundary { excerpt, .. } => BlockId::ExcerptBoundary(excerpt.id),
+        Block::BufferHeader { excerpt, .. } => BlockId::BufferHeader(excerpt.id),
+        Block::Spacer { id, .. } => BlockId::Spacer(*id),
+    };
+    let diff_status = match block {
+        Block::Custom(b) => b.diff_status,
+        _ => None,
+    };
+    BlockContext {
+        block_id,
+        max_width: 256,
+        height: block.height(),
+        selected: false,
+        anchor_row,
+        diff_status,
+        buffer_snapshot,
     }
+}
+
+fn convert_ratatui_style(style: &RatatuiStyle) -> gpui::HighlightStyle {
+    let modifier = style.add_modifier;
+    gpui::HighlightStyle {
+        color: style.fg.and_then(ratatui_color_to_hsla),
+        background_color: style.bg.and_then(ratatui_color_to_hsla),
+        font_weight: modifier
+            .contains(Modifier::BOLD)
+            .then_some(FontWeight::BOLD),
+        font_style: modifier
+            .contains(Modifier::ITALIC)
+            .then_some(FontStyle::Italic),
+        underline: modifier
+            .contains(Modifier::UNDERLINED)
+            .then(|| UnderlineStyle {
+                thickness: px(1.0),
+                color: None,
+                wavy: false,
+            }),
+        strikethrough: modifier
+            .contains(Modifier::CROSSED_OUT)
+            .then(|| StrikethroughStyle {
+                thickness: px(1.0),
+                color: None,
+            }),
+        fade_out: None,
+    }
+}
+
+fn convert_block_span_style(style: &RatatuiStyle) -> gpui::HighlightStyle {
+    let mut converted = convert_ratatui_style(style);
+    if converted.color.is_none() {
+        converted.color = Some(rgb(BLOCK_TEXT_HEX).into());
+    }
+    converted
 }
 
 fn append_run(
@@ -1132,5 +1201,81 @@ mod tests {
         assert_eq!(rows[0].runs.len(), 1);
         assert_eq!(rows[0].runs[0].0, 0..6);
         assert_eq!(rows[0].runs[0].1.color.map(hex_of), Some(BLOCK_TEXT_HEX),);
+    }
+
+    fn snapshot_with_render_block(
+        cx: &mut TestAppContext,
+        text: &str,
+        placement: stoat::display_map::BlockPlacement,
+        height: u32,
+        render: stoat::display_map::RenderBlock,
+    ) -> DisplaySnapshot {
+        use stoat::display_map::{BlockProperties, BlockStyle};
+        let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let buffer_id = buffer.read_with(cx, |b, _| b.read(|tb| tb.buffer_id()));
+        let shared = buffer.read_with(cx, |b, _| b.shared().clone());
+        let multi_buffer = stoat::MultiBuffer::singleton(buffer_id, shared);
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut inner = stoat::DisplayMap::new(multi_buffer, executor);
+        inner.insert_blocks(vec![BlockProperties {
+            placement,
+            height: Some(height),
+            style: BlockStyle::Fixed,
+            render,
+            diff_status: None,
+            priority: 0,
+        }]);
+        inner.snapshot()
+    }
+
+    #[test]
+    fn block_spans_with_color_become_highlight_runs() {
+        use ratatui::text::{Line, Span};
+        let mut cx = TestAppContext::single();
+        let render: stoat::display_map::RenderBlock = Arc::new(|_ctx| {
+            vec![Line::from(vec![
+                Span::styled("red", RatatuiStyle::new().fg(Color::Red)),
+                Span::raw("plain"),
+            ])]
+        });
+        let snapshot = snapshot_with_render_block(
+            &mut cx,
+            "alpha",
+            stoat::display_map::BlockPlacement::Above(0),
+            1,
+            render,
+        );
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        assert_eq!(rows[0].text.as_ref(), "redplain");
+        assert_eq!(rows[0].runs.len(), 2);
+        assert_eq!(rows[0].runs[0].0, 0..3);
+        assert_eq!(rows[0].runs[0].1.color.map(hex_of), Some(0xcd0000));
+        assert_eq!(rows[0].runs[1].0, 3..8);
+        assert_eq!(rows[0].runs[1].1.color.map(hex_of), Some(BLOCK_TEXT_HEX));
+    }
+
+    #[test]
+    fn block_span_modifier_maps_to_font_attribute() {
+        use ratatui::text::{Line, Span};
+        let mut cx = TestAppContext::single();
+        let render: stoat::display_map::RenderBlock = Arc::new(|_ctx| {
+            vec![Line::from(vec![Span::styled(
+                "bold",
+                RatatuiStyle::new().add_modifier(Modifier::BOLD),
+            )])]
+        });
+        let snapshot = snapshot_with_render_block(
+            &mut cx,
+            "alpha",
+            stoat::display_map::BlockPlacement::Above(0),
+            1,
+            render,
+        );
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        assert_eq!(rows[0].text.as_ref(), "bold");
+        assert_eq!(rows[0].runs.len(), 1);
+        assert_eq!(rows[0].runs[0].1.font_weight, Some(FontWeight::BOLD));
     }
 }
