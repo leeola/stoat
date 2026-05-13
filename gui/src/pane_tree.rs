@@ -51,6 +51,10 @@ impl PaneTree {
         self.inner.focus()
     }
 
+    pub fn pane(&self, id: PaneId) -> Option<&Entity<Pane>> {
+        self.panes.get(&id)
+    }
+
     pub fn pane_count(&self) -> usize {
         self.inner.pane_count()
     }
@@ -423,5 +427,36 @@ mod tests {
         tree.update(&mut cx, |t, cx| t.close_others(cx));
 
         assert_eq!(pane_ids(&tree, &cx), vec![focus]);
+    }
+
+    #[test]
+    fn pane_returns_focused_pane_after_construction() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx);
+        let focus = tree.read_with(&cx, |t, _| t.focus());
+
+        let pane_id = tree.read_with(&cx, |t, _| {
+            t.pane(focus).expect("focused pane registered").entity_id()
+        });
+        let map_pane_id = tree.read_with(&cx, |t, _| {
+            t.panes
+                .get(&focus)
+                .expect("focused pane in map")
+                .entity_id()
+        });
+        assert_eq!(pane_id, map_pane_id);
+    }
+
+    #[test]
+    fn pane_returns_none_for_unknown_id() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx);
+        let new_id = tree.update(&mut cx, |t, cx| t.split(Axis::Vertical, cx));
+        tree.update(&mut cx, |t, cx| {
+            t.close(new_id, cx);
+        });
+
+        let lookup = tree.read_with(&cx, |t, _| t.pane(new_id).map(|p| p.entity_id()));
+        assert_eq!(lookup, None);
     }
 }
