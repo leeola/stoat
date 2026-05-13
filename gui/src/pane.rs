@@ -1,7 +1,9 @@
-use crate::{actions::SetActivePane, item::ItemHandle, workspace::Workspace};
+use crate::{
+    actions::SetActivePane, item::ItemHandle, tab_bar::render_tab_bar, workspace::Workspace,
+};
 use gpui::{
-    div, App, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement, KeyContext,
-    MouseButton, Render, Styled, WeakEntity, Window,
+    div, AnyElement, App, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
+    KeyContext, MouseButton, ParentElement, Render, Styled, WeakEntity, Window,
 };
 use stoat::pane::PaneId;
 
@@ -194,11 +196,20 @@ impl Pane {
 
 impl Render for Pane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // FIXME: replace with the real composition (tab strip +
-        // active item view) once the workspace render composes
-        // panes. The body here is a placeholder; the key_context
-        // and mouse-down wiring are the load-bearing parts.
+        let tab_bar = render_tab_bar(self, cx).into_any_element();
+        let body: AnyElement = match self.active_item() {
+            Some(item) => div().flex_1().child(item.to_any_view()).into_any_element(),
+            None => div()
+                .flex_1()
+                .flex()
+                .items_center()
+                .justify_center()
+                .child("(scratch)")
+                .into_any_element(),
+        };
         div()
+            .flex()
+            .flex_col()
             .size_full()
             .key_context(self.build_key_context(cx))
             .on_mouse_down(
@@ -214,6 +225,8 @@ impl Render for Pane {
                     }
                 }),
             )
+            .child(tab_bar)
+            .child(body)
     }
 }
 
@@ -701,5 +714,36 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(pane_tree.read_with(vcx, |t, _| t.focus()), new_pane_id);
+    }
+
+    fn workspace_weak(cx: &mut TestAppContext) -> WeakEntity<Workspace> {
+        let workspace = cx.update(|cx| {
+            cx.new(|cx| Workspace::new("main", std::path::PathBuf::from("/tmp/repo"), cx))
+        });
+        workspace.downgrade()
+    }
+
+    #[test]
+    fn render_paints_scratch_placeholder_for_empty_pane() {
+        let mut cx = TestAppContext::single();
+        let weak = workspace_weak(&mut cx);
+        let (_pane_view, vcx) = cx.add_window_view(|_, cx| Pane::new(PaneId::default(), weak, cx));
+        vcx.run_until_parked();
+    }
+
+    #[test]
+    fn render_paints_tab_strip_and_active_item_view() {
+        let mut cx = TestAppContext::single();
+        let weak = workspace_weak(&mut cx);
+        let alpha = new_item(&mut cx, "alpha");
+        let beta = new_item(&mut cx, "beta");
+        let (_pane_view, vcx) = cx.add_window_view(|_, cx| {
+            let mut pane = Pane::new(PaneId::default(), weak, cx);
+            pane.add_item(alpha, cx);
+            pane.add_item(beta, cx);
+            pane.activate(1, cx);
+            pane
+        });
+        vcx.run_until_parked();
     }
 }
