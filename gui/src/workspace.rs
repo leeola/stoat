@@ -9,8 +9,8 @@ use crate::{
     status_bar::StatusBar,
 };
 use gpui::{
-    div, App, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
-    IntoElement, KeyContext, Render, SharedString, Styled, Subscription, Window,
+    deferred, div, App, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
+    IntoElement, KeyContext, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
 use std::path::PathBuf;
 use stoat::pane::{Axis, Direction};
@@ -303,16 +303,35 @@ impl Workspace {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
-        // FIXME: replace with the real composition (pane area +
-        // docks + status bar + modal overlay) once those pieces
-        // are rendered. Dispatch routing lives in the workspace-
-        // hosted input state machine; the render layer carries
-        // focus + key_context only.
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let left_docks: Vec<Entity<Dock>> = self
+            .docks
+            .iter()
+            .filter(|d| d.read(cx).side() == DockSide::Left)
+            .cloned()
+            .collect();
+        let right_docks: Vec<Entity<Dock>> = self
+            .docks
+            .iter()
+            .filter(|d| d.read(cx).side() == DockSide::Right)
+            .cloned()
+            .collect();
         div()
+            .flex()
+            .flex_row()
             .size_full()
             .track_focus(&self.focus_handle)
             .key_context(self.build_key_context())
+            .children(left_docks)
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .flex_1()
+                    .child(self.pane_tree.clone()),
+            )
+            .children(right_docks)
+            .child(deferred(self.modal_layer.clone()))
     }
 }
 
@@ -1033,5 +1052,31 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 3);
+    }
+
+    #[test]
+    fn render_composes_docks_pane_area_and_modal_overlay_without_panic() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let left_item = new_item(&mut vcx.cx, "outline");
+        let right_item = new_item(&mut vcx.cx, "agent");
+        ws.update(vcx, |w, cx| {
+            w.add_dock(left_item, DockSide::Left, 200, cx);
+            w.add_dock(right_item, DockSide::Right, 240, cx);
+        });
+        ws.update_in(vcx, |w, window, cx| {
+            w.toggle_modal::<TestModal, _>(window, cx, |_, cx| TestModal::new(cx));
+        });
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.docks().len(), 2);
+            assert!(w
+                .modal_layer()
+                .read(cx)
+                .active_modal::<TestModal>()
+                .is_some());
+        });
     }
 }
