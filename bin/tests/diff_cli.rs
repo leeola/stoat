@@ -97,6 +97,17 @@ fn run_capture(args: &DiffArgs, cwd: &Path, opts: &CliRenderOptions) -> Vec<u8> 
     }
 }
 
+fn run_err(args: &DiffArgs, cwd: &Path, opts: &CliRenderOptions) -> String {
+    let fs = LocalFs;
+    let git = LocalGit::new();
+    let mut buf = Vec::new();
+    match run_with_io(args, &fs, &git, cwd, opts, &mut buf) {
+        Ok(()) => panic!("expected error, got Ok"),
+        Err(WriteError::BrokenPipe) => panic!("expected Other error, got BrokenPipe"),
+        Err(WriteError::Other(e)) => e.to_string(),
+    }
+}
+
 #[test]
 fn default_clean_tree_no_output() {
     let repo = TestRepo::new();
@@ -224,6 +235,35 @@ fn git_mode_create_via_dev_null() {
 
     let out = run_capture(&args, dir.path(), &opts_with(CliLayout::Unified, false));
     insta::assert_snapshot!("diff_cli_git_create", String::from_utf8(out).unwrap());
+}
+
+#[test]
+fn unknown_language_errors() {
+    let repo = TestRepo::new();
+    repo.commit_initial(&[("a.rs", "fn a() { 1 }\n")]);
+    repo.write("a.rs", "fn a() { 2 }\n");
+
+    let mut args = default_args();
+    args.language = Some("notalang".to_string());
+
+    let err = run_err(&args, repo.path(), &opts_with(CliLayout::Unified, false));
+    assert!(
+        err.contains("unknown language 'notalang'"),
+        "expected unknown-language error, got: {err}",
+    );
+}
+
+#[test]
+fn language_override_runs_for_known_language() {
+    let repo = TestRepo::new();
+    repo.commit_initial(&[("a.rs", "fn a() { 1 }\n")]);
+    repo.write("a.rs", "fn a() { 2 }\n");
+
+    let mut args = default_args();
+    args.language = Some("rust".to_string());
+
+    let out = run_capture(&args, repo.path(), &opts_with(CliLayout::Unified, false));
+    assert!(!out.is_empty(), "expected diff output, got empty");
 }
 
 #[test]

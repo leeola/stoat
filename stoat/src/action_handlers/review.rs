@@ -629,6 +629,7 @@ fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
         &*stoat.fs_host,
         &stoat.language_registry,
         git_root,
+        None,
     ) else {
         tracing::warn!("open_review: no working-tree changes to review");
         return None;

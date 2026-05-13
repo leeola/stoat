@@ -14,7 +14,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat_language::LanguageRegistry;
+use stoat_language::{Language, LanguageRegistry};
 
 /// Discover the git repo at `git_root`, list its working-tree changes,
 /// and build the [`ReviewFileInput`] vector that
@@ -24,6 +24,12 @@ use stoat_language::LanguageRegistry;
 /// [`crate::review_session::ReviewSession`] use it for
 /// [`crate::review_session::ReviewSource::WorkingTree`].
 ///
+/// When `language_override` is `Some`, every input's
+/// [`ReviewFileInput::language`] is set to that override regardless of
+/// the file's extension. When `None`, the per-file path is resolved
+/// against `langs` via [`LanguageRegistry::for_path`] (unknown
+/// extensions land as `None`).
+///
 /// Per-file read failures are logged at `warn` level and the file is
 /// skipped, matching the behavior the TUI review path has shipped with
 /// since `open_review` first landed.
@@ -32,6 +38,7 @@ pub fn scan_working_tree(
     fs: &dyn FsHost,
     langs: &LanguageRegistry,
     git_root: &Path,
+    language_override: Option<Arc<Language>>,
 ) -> Option<(PathBuf, Vec<ReviewFileInput>)> {
     let repo = git.discover(git_root)?;
     let workdir = repo.workdir()?;
@@ -56,7 +63,9 @@ pub fn scan_working_tree(
             },
         };
         let base_text = repo.head_content(&file.path).unwrap_or_default();
-        let lang = langs.for_path(&file.path);
+        let lang = language_override
+            .clone()
+            .or_else(|| langs.for_path(&file.path));
         let rel_path = file
             .path
             .strip_prefix(&workdir)

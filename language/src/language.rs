@@ -117,6 +117,16 @@ impl LanguageRegistry {
             .cloned()
     }
 
+    /// Look up a registered language by [`Language::name`]. The match
+    /// is case-insensitive so callers accepting user input (e.g. a
+    /// CLI flag) accept both `Rust` and `rust`.
+    pub fn find_by_name(&self, name: &str) -> Option<Arc<Language>> {
+        self.languages
+            .iter()
+            .find(|l| l.name.eq_ignore_ascii_case(name))
+            .cloned()
+    }
+
     pub fn languages(&self) -> &[Arc<Language>] {
         &self.languages
     }
@@ -324,6 +334,16 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.RS")).unwrap().name, "rust");
         assert!(reg.for_path(Path::new("a.txt")).is_none());
         assert!(reg.for_path(Path::new("noext")).is_none());
+    }
+
+    #[test]
+    fn find_by_name_matches_case_insensitively() {
+        let reg = LanguageRegistry::standard();
+        assert_eq!(reg.find_by_name("rust").unwrap().name, "rust");
+        assert_eq!(reg.find_by_name("RUST").unwrap().name, "rust");
+        assert_eq!(reg.find_by_name("Markdown").unwrap().name, "markdown");
+        assert!(reg.find_by_name("notalang").is_none());
+        assert!(reg.find_by_name("").is_none());
     }
 
     #[test]

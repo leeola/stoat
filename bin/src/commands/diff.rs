@@ -13,7 +13,7 @@ use stoat::{
     },
     host::{FsHost, GitHost, LocalFs, LocalGit},
 };
-use stoat_language::LanguageRegistry;
+use stoat_language::{Language, LanguageRegistry};
 
 #[derive(Args, Debug)]
 pub struct DiffArgs {
@@ -65,9 +65,6 @@ pub struct DiffArgs {
 }
 
 pub fn run(args: DiffArgs) -> Result<(), Whatever> {
-    // FIXME: --language is parsed but not threaded; per-file detection
-    // via `LanguageRegistry::for_path` covers default and --git modes.
-
     let fs: Arc<dyn FsHost> = Arc::new(LocalFs);
     let git: Arc<dyn GitHost> = Arc::new(LocalGit::new());
     let cwd = std::env::current_dir().whatever_context("read current directory")?;
@@ -121,8 +118,20 @@ pub fn run_with_io<W: Write>(
 ) -> Result<(), WriteError> {
     let langs = LanguageRegistry::standard();
 
+    let language_override = match args.language.as_deref() {
+        Some(name) => match langs.find_by_name(name) {
+            Some(lang) => Some(lang),
+            None => {
+                return Err(WriteError::Other(FromString::without_source(format!(
+                    "unknown language '{name}' supplied to --language",
+                ))));
+            },
+        },
+        None => None,
+    };
+
     let inputs = if args.git {
-        match read_git_external_inputs(fs, &langs, &args.git_args) {
+        match read_git_external_inputs(fs, &langs, language_override.clone(), &args.git_args) {
             Ok(input) => vec![input],
             Err(e) => return Err(WriteError::Other(e)),
         }
@@ -133,7 +142,8 @@ pub fn run_with_io<W: Write>(
                 args.git_args.len()
             ))));
         }
-        let Some((_workdir, inputs)) = scan_working_tree(git, fs, &langs, cwd) else {
+        let Some((_workdir, inputs)) = scan_working_tree(git, fs, &langs, cwd, language_override)
+        else {
             return Ok(());
         };
         inputs
@@ -176,6 +186,7 @@ impl WriteError {
 fn read_git_external_inputs(
     fs: &dyn FsHost,
     langs: &LanguageRegistry,
+    language_override: Option<Arc<Language>>,
     git_args: &[String],
 ) -> Result<ReviewFileInput, Whatever> {
     if git_args.len() != 7 {
@@ -193,7 +204,7 @@ fn read_git_external_inputs(
     let logical = PathBuf::from(path);
     let base_text = read_blob_text(fs, old_file)?;
     let buffer_text = read_blob_text(fs, new_file)?;
-    let language = langs.for_path(&logical);
+    let language = language_override.or_else(|| langs.for_path(&logical));
 
     Ok(ReviewFileInput {
         rel_path: path.clone(),
