@@ -13,7 +13,8 @@ use crate::{
 use gpui::{
     canvas, div, uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-    Pixels, Point, Render, SharedString, Size, Styled, Subscription, Task, WeakEntity, Window,
+    Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled, Subscription, Task,
+    WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
@@ -632,6 +633,42 @@ impl Editor {
         self.hover_debounce_task = Some(task);
     }
 
+    /// Apply a [`ScrollWheelEvent`] to the editor's scroll state.
+    /// Resolves the line height from [`Editor::cell_size`] (no-op
+    /// when unset), clamps the resulting fractional offset against
+    /// the buffer's last display row, and mirrors the floored row
+    /// into [`Editor::scroll_row`] so the existing render path keeps
+    /// painting at row granularity. Sub-pixel painting (next scroll
+    /// item) will pull the fractional remainder directly from the
+    /// [`scroll::ScrollManager`].
+    pub fn handle_scroll_wheel(
+        &mut self,
+        event: &ScrollWheelEvent,
+        _window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(cell) = self.cell_size else {
+            return;
+        };
+        let max_row = self
+            .display_map
+            .update(cx, |dm, _| dm.snapshot())
+            .max_point()
+            .row as f64;
+        let changed = self.scroll_manager.apply_wheel(
+            event.delta,
+            cell.height,
+            event.modifiers.alt,
+            std::time::Instant::now(),
+            max_row,
+        );
+        if !changed {
+            return;
+        }
+        let new_row = self.scroll_manager.anchor().offset.y.floor().max(0.0) as u32;
+        self.set_scroll_row(new_row, cx);
+    }
+
     /// Translate a buffer UTF-16 offset to the pixel rectangle of the
     /// corresponding character cell, anchored relative to
     /// `element_origin`. Returns `None` when [`Editor::cell_size`] is
@@ -755,6 +792,9 @@ impl Render for Editor {
                 } else {
                     this.schedule_hover_at(event.position, window, cx);
                 }
+            }))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+                this.handle_scroll_wheel(event, window, cx);
             }))
     }
 }
@@ -950,6 +990,88 @@ mod tests {
         editor.read_with(&cx, |ed, _| {
             assert_eq!(ed.scroll_manager().visible_line_count(), Some(24.5));
         });
+    }
+
+    fn wheel_event(delta: gpui::ScrollDelta, alt: bool) -> ScrollWheelEvent {
+        let modifiers = gpui::Modifiers {
+            alt,
+            ..gpui::Modifiers::default()
+        };
+        ScrollWheelEvent {
+            position: Point::new(gpui::px(0.), gpui::px(0.)),
+            delta,
+            modifiers,
+            touch_phase: gpui::TouchPhase::Moved,
+        }
+    }
+
+    #[test]
+    fn handle_scroll_wheel_no_op_without_cell_size() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = new_editor_in_window(vcx, "a\nb\nc\nd\ne\nf");
+
+        let before = editor.read_with(vcx, |ed, _| ed.scroll_row());
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -3.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), before);
+    }
+
+    #[test]
+    fn handle_scroll_wheel_advances_scroll_row() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = new_editor_in_window(vcx, "a\nb\nc\nd\ne\nf");
+        editor.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        vcx.run_until_parked();
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -3.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 3);
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            3.0,
+        );
+    }
+
+    fn new_editor_in_window(
+        vcx: &mut VisualTestContext,
+        text: &str,
+    ) -> (Entity<Buffer>, Entity<Editor>) {
+        let buffer = vcx.update(|_, cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let executor = test_executor();
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            vcx.update(|_, cx| cx.new(|cx| MultiBuffer::singleton(buffer, cx)))
+        };
+        let display_map = {
+            let buffer = buffer.clone();
+            vcx.update(|_, cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
+        };
+        let diff_map = {
+            let buffer = buffer.clone();
+            vcx.update(|_, cx| cx.new(|cx| DiffMap::new(buffer, cx)))
+        };
+        let editor = vcx.update(|_, cx| {
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
+        });
+        (buffer, editor)
     }
 
     #[test]

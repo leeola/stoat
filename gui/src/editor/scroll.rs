@@ -1,4 +1,4 @@
-use gpui::{px, Axis, Pixels, Point};
+use gpui::{px, Axis, Pixels, Point, ScrollDelta};
 use std::time::{Duration, Instant};
 use stoat_text::Anchor;
 
@@ -7,6 +7,14 @@ use stoat_text::Anchor;
 /// trackpad gesture that briefly slips perpendicular does not flip
 /// the locked axis.
 pub const SCROLL_EVENT_SEPARATION: Duration = Duration::from_millis(28);
+
+/// Multiplier applied to scroll deltas before they update the
+/// fractional scroll position. Constant for now; future work wires
+/// this through `stoat_config::Settings`.
+pub const DEFAULT_SCROLL_SENSITIVITY: f64 = 1.0;
+
+/// Multiplier applied while the alt modifier is held.
+pub const DEFAULT_FAST_SCROLL_SENSITIVITY: f64 = 2.5;
 
 const UNLOCK_PERCENT: f32 = 1.9;
 const UNLOCK_LOWER_BOUND: Pixels = px(6.);
@@ -182,6 +190,67 @@ impl ScrollManager {
     pub fn set_minimap_thumb_state(&mut self, state: Option<ScrollbarThumbState>) {
         self.minimap_thumb_state = state;
     }
+
+    /// Apply a wheel or trackpad event to the fractional scroll
+    /// position. `delta` is the platform's [`ScrollDelta`]:
+    /// `Pixels` events come from trackpads and route through
+    /// [`OngoingScroll::filter`] for axis lock; `Lines` events come
+    /// from notched wheels and convert to pixels using `line_height`.
+    /// `alt` selects between [`DEFAULT_SCROLL_SENSITIVITY`] and
+    /// [`DEFAULT_FAST_SCROLL_SENSITIVITY`]. `now` advances the
+    /// `OngoingScroll` clock so subsequent events see the new lock.
+    /// `max_row` clamps the resulting fractional y to
+    /// `[0, max_row]`.
+    ///
+    /// Returns `true` when the offset moved, `false` when the apply
+    /// landed on the same position (e.g. clamped against an edge).
+    /// Per-event application against the live offset is algebraically
+    /// equivalent to coalescing deltas across a frame and applying
+    /// the cumulative result against a snapshot, because subtraction
+    /// is associative; gpui's `cx.notify`-per-event pacing makes
+    /// 1:1 event/paint the steady-state regardless.
+    pub fn apply_wheel(
+        &mut self,
+        delta: ScrollDelta,
+        line_height: Pixels,
+        alt: bool,
+        now: Instant,
+        max_row: f64,
+    ) -> bool {
+        let line_height_f64: f64 = f32::from(line_height) as f64;
+        if line_height_f64 <= 0.0 {
+            return false;
+        }
+        let sensitivity = if alt {
+            DEFAULT_FAST_SCROLL_SENSITIVITY
+        } else {
+            DEFAULT_SCROLL_SENSITIVITY
+        };
+
+        let (pixel_delta, axis) = match delta {
+            ScrollDelta::Pixels(mut pixels) => {
+                let axis = self.ongoing.filter(&mut pixels, now);
+                (pixels, axis)
+            },
+            ScrollDelta::Lines(lines) => {
+                let pixels = Point::new(line_height * lines.x, line_height * lines.y);
+                (pixels, None)
+            },
+        };
+        self.ongoing.update(axis, now);
+
+        let dx = (f32::from(pixel_delta.x) as f64 * sensitivity) / line_height_f64;
+        let dy = (f32::from(pixel_delta.y) as f64 * sensitivity) / line_height_f64;
+        let new_x = (self.anchor.offset.x - dx).max(0.0);
+        let new_y = (self.anchor.offset.y - dy).clamp(0.0, max_row);
+        let new_offset = Point::new(new_x, new_y);
+
+        if new_offset == self.anchor.offset {
+            return false;
+        }
+        self.anchor.offset = new_offset;
+        true
+    }
 }
 
 #[cfg(test)]
@@ -306,5 +375,167 @@ mod tests {
             Some(ScrollbarThumbState::Hovered)
         );
         assert_eq!(mgr.anchor(), &new_anchor);
+    }
+
+    fn seed_offset(mgr: &mut ScrollManager, y: f64) {
+        let mut a = *mgr.anchor();
+        a.offset.y = y;
+        mgr.set_anchor(a);
+    }
+
+    #[test]
+    fn apply_wheel_pixels_advances_offset_y() {
+        let now = epoch();
+        let mut mgr = ScrollManager::new(now);
+        seed_offset(&mut mgr, 5.0);
+        let later = now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1);
+
+        let changed = mgr.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(0.), px(-30.))),
+            px(10.),
+            false,
+            later,
+            100.0,
+        );
+
+        assert!(changed);
+        assert_eq!(mgr.anchor().offset.y, 8.0);
+    }
+
+    #[test]
+    fn apply_wheel_pixels_clamps_to_zero() {
+        let now = epoch();
+        let mut mgr = ScrollManager::new(now);
+        let later = now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1);
+
+        let changed = mgr.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(0.), px(50.))),
+            px(10.),
+            false,
+            later,
+            100.0,
+        );
+
+        assert!(!changed);
+        assert_eq!(mgr.anchor().offset.y, 0.0);
+    }
+
+    #[test]
+    fn apply_wheel_pixels_clamps_to_max_row() {
+        let now = epoch();
+        let mut mgr = ScrollManager::new(now);
+        seed_offset(&mut mgr, 95.0);
+        let later = now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1);
+
+        let changed = mgr.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(0.), px(-500.))),
+            px(10.),
+            false,
+            later,
+            100.0,
+        );
+
+        assert!(changed);
+        assert_eq!(mgr.anchor().offset.y, 100.0);
+    }
+
+    #[test]
+    fn apply_wheel_lines_uses_line_height_conversion() {
+        let now = epoch();
+        let mut mgr = ScrollManager::new(now);
+        seed_offset(&mut mgr, 5.0);
+        let later = now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1);
+
+        let changed = mgr.apply_wheel(
+            ScrollDelta::Lines(Point::new(0., -2.0)),
+            px(10.),
+            false,
+            later,
+            100.0,
+        );
+
+        assert!(changed);
+        assert_eq!(mgr.anchor().offset.y, 7.0);
+    }
+
+    #[test]
+    fn apply_wheel_alt_modifier_uses_fast_sensitivity() {
+        let now = epoch();
+        let later = now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1);
+
+        let mut base = ScrollManager::new(now);
+        seed_offset(&mut base, 0.0);
+        base.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(0.), px(-10.))),
+            px(10.),
+            false,
+            later,
+            100.0,
+        );
+
+        let mut fast = ScrollManager::new(now);
+        seed_offset(&mut fast, 0.0);
+        fast.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(0.), px(-10.))),
+            px(10.),
+            true,
+            later,
+            100.0,
+        );
+
+        assert_eq!(base.anchor().offset.y, 1.0);
+        assert_eq!(
+            fast.anchor().offset.y,
+            DEFAULT_FAST_SCROLL_SENSITIVITY,
+            "fast variant should multiply by DEFAULT_FAST_SCROLL_SENSITIVITY",
+        );
+    }
+
+    #[test]
+    fn apply_wheel_trackpad_locks_axis() {
+        let now = epoch();
+        let mut mgr = ScrollManager::new(now);
+        seed_offset(&mut mgr, 5.0);
+        let first = now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1);
+
+        let _ = mgr.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(2.), px(-20.))),
+            px(10.),
+            false,
+            first,
+            100.0,
+        );
+        assert_eq!(mgr.ongoing().axis(), Some(Axis::Vertical));
+
+        let second = first + Duration::from_millis(5);
+        let _ = mgr.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(3.), px(-10.))),
+            px(10.),
+            false,
+            second,
+            100.0,
+        );
+        assert_eq!(
+            mgr.ongoing().axis(),
+            Some(Axis::Vertical),
+            "ongoing axis lock should hold within the separation window",
+        );
+    }
+
+    #[test]
+    fn apply_wheel_returns_false_when_position_unchanged() {
+        let now = epoch();
+        let mut mgr = ScrollManager::new(now);
+        let later = now + SCROLL_EVENT_SEPARATION + Duration::from_millis(1);
+
+        let changed = mgr.apply_wheel(
+            ScrollDelta::Pixels(Point::new(px(0.), px(0.))),
+            px(10.),
+            false,
+            later,
+            100.0,
+        );
+
+        assert!(!changed);
     }
 }
