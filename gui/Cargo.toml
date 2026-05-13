@@ -23,6 +23,7 @@ crossterm.workspace = true
 gpui.workspace = true
 insta = { version = "1", features = ["json"], optional = true }
 lsp-types.workspace = true
+ratatui.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 snafu = { workspace = true }

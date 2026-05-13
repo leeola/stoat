@@ -1,4 +1,5 @@
 pub mod mouse;
+pub mod render;
 
 use crate::{
     buffer::Buffer,
@@ -8,8 +9,8 @@ use crate::{
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
 use gpui::{
-    AppContext, Bounds, Context, Entity, EventEmitter, Pixels, Point, Size, Subscription,
-    WeakEntity, Window,
+    uniform_list, AppContext, Bounds, Context, Div, Entity, EventEmitter, IntoElement, Pixels,
+    Point, Render, Size, Styled, Subscription, WeakEntity, Window,
 };
 use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
 use stoat_text::{Anchor, Bias, OffsetUtf16, Selection, SelectionGoal};
@@ -399,6 +400,38 @@ impl Editor {
             element_origin.y + cell.height * display_point.row as usize,
         );
         Some(Bounds { origin, size: cell })
+    }
+
+    fn render_visible_rows(
+        &mut self,
+        range: std::ops::Range<usize>,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<Div> {
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let total_rows = (display_snapshot.max_point().row + 1) as usize;
+        let end = range.end.min(total_rows);
+        let start = range.start.min(end);
+        let rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
+        rows.into_iter().map(render::render_row_element).collect()
+    }
+}
+
+impl Render for Editor {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let total_rows = self
+            .display_map
+            .update(cx, |dm, _| dm.snapshot())
+            .max_point()
+            .row as usize
+            + 1;
+        let handle = cx.entity().downgrade();
+        uniform_list("editor-rows", total_rows, move |range, _window, cx| {
+            handle
+                .upgrade()
+                .map(|editor| editor.update(cx, |ed, cx| ed.render_visible_rows(range, cx)))
+                .unwrap_or_default()
+        })
+        .size_full()
     }
 }
 
@@ -884,5 +917,50 @@ mod tests {
                 size: cell(8.0, 16.0),
             }),
         );
+    }
+
+    #[test]
+    fn render_visible_rows_clamps_beyond_buffer() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "a\nb\nc");
+
+        let count = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(0..10, cx).len());
+        assert_eq!(count, 3);
+    }
+
+    #[test]
+    fn render_visible_rows_returns_zero_for_empty_range() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "a\nb");
+
+        let count = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(1..1, cx).len());
+        assert_eq!(count, 0);
+    }
+
+    #[test]
+    fn render_does_not_panic_on_empty_buffer() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let editor = vcx.update(|window, cx| cx.new(|cx| Editor::single_line(window, cx)));
+
+        let built = editor.update_in(vcx, |ed, window, cx| {
+            let _element = ed.render(window, cx).into_any_element();
+            true
+        });
+        assert!(built);
+    }
+
+    #[test]
+    fn render_does_not_panic_with_multiline_buffer() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha\nbeta\ngamma");
+        let vcx = cx.add_empty_window();
+
+        let built = editor.update_in(vcx, |ed, window, cx| {
+            let _element = ed.render(window, cx).into_any_element();
+            true
+        });
+        assert!(built);
     }
 }

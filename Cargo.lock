@@ -6344,6 +6344,7 @@ dependencies = [
  "gpui",
  "insta",
  "lsp-types",
+ "ratatui",
  "serde",
  "serde_json",
  "snafu",
