@@ -7,9 +7,12 @@ use crate::{
     globals::ExecutorGlobal,
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
-use gpui::{AppContext, Context, Entity, EventEmitter, Subscription, WeakEntity, Window};
+use gpui::{
+    AppContext, Bounds, Context, Entity, EventEmitter, Pixels, Point, Size, Subscription,
+    WeakEntity, Window,
+};
 use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
-use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
+use stoat_text::{Anchor, Bias, OffsetUtf16, Selection, SelectionGoal};
 
 /// Sizing / behavior classification carried on each [`Editor`].
 /// The future render, scroll, and mouse paths consult these to
@@ -98,6 +101,7 @@ pub struct Editor {
     selections: SelectionsCollection,
     scroll_row: u32,
     jumplist: JumpList,
+    cell_size: Option<Size<Pixels>>,
     _subscriptions: [Subscription; 3],
 }
 
@@ -139,6 +143,7 @@ impl Editor {
             selections: SelectionsCollection::new(),
             scroll_row: 0,
             jumplist: JumpList::new(),
+            cell_size: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
         }
     }
@@ -351,6 +356,49 @@ impl Editor {
         self.selections.replace_with(vec![selection], &snapshot);
         cx.emit(EditorEvent::Changed);
         cx.notify();
+    }
+
+    pub fn cell_size(&self) -> Option<Size<Pixels>> {
+        self.cell_size
+    }
+
+    /// Record the cell metrics the render path is laying out with.
+    /// Off-screen consumers (the IME bounds query in particular) need
+    /// these dimensions to convert display positions into pixel
+    /// coordinates. Emits [`EditorEvent::Changed`] when the value
+    /// actually changes.
+    pub fn set_cell_size(&mut self, size: Size<Pixels>, cx: &mut Context<'_, Self>) {
+        if self.cell_size == Some(size) {
+            return;
+        }
+        self.cell_size = Some(size);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Translate a buffer UTF-16 offset to the pixel rectangle of the
+    /// corresponding character cell, anchored relative to
+    /// `element_origin`. Returns `None` when [`Editor::cell_size`] is
+    /// unset (the render path has not yet reported cell metrics).
+    pub fn pixel_bounds_for_utf16_offset(
+        &mut self,
+        offset_utf16: usize,
+        element_origin: Point<Pixels>,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Bounds<Pixels>> {
+        let cell = self.cell_size?;
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let byte_offset = snapshot
+            .rope()
+            .offset_utf16_to_offset(OffsetUtf16(offset_utf16));
+        let buffer_point = snapshot.rope().offset_to_point(byte_offset);
+        let display_point = display_snapshot.buffer_to_display(buffer_point);
+        let origin = Point::new(
+            element_origin.x + cell.width * display_point.column as usize,
+            element_origin.y + cell.height * display_point.row as usize,
+        );
+        Some(Bounds { origin, size: cell })
     }
 }
 
@@ -729,5 +777,112 @@ mod tests {
             "unexpected event in {observed:?}",
         );
         assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
+    fn cell(width: f32, height: f32) -> Size<Pixels> {
+        gpui::size(gpui::px(width), gpui::px(height))
+    }
+
+    #[test]
+    fn cell_size_defaults_to_none() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+
+        assert_eq!(editor.read_with(&cx, |ed, _| ed.cell_size()), None);
+    }
+
+    #[test]
+    fn set_cell_size_stores_and_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(7.0, 14.0), cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(&cx, |ed, _| ed.cell_size()),
+            Some(cell(7.0, 14.0)),
+        );
+        assert_eq!(drain(&events), vec![EditorEvent::Changed]);
+    }
+
+    #[test]
+    fn set_cell_size_idempotent_no_event() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(7.0, 14.0), cx));
+        cx.run_until_parked();
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(7.0, 14.0), cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<EditorEvent>::new());
+    }
+
+    #[test]
+    fn pixel_bounds_for_utf16_offset_returns_none_without_cell_size() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+
+        let result = editor.update(&mut cx, |ed, cx| {
+            ed.pixel_bounds_for_utf16_offset(2, Point::new(gpui::px(0.0), gpui::px(0.0)), cx)
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn pixel_bounds_for_utf16_offset_positions_at_offset_zero() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+
+        let result = editor.update(&mut cx, |ed, cx| {
+            ed.pixel_bounds_for_utf16_offset(0, Point::new(gpui::px(10.0), gpui::px(20.0)), cx)
+        });
+        assert_eq!(
+            result,
+            Some(Bounds {
+                origin: Point::new(gpui::px(10.0), gpui::px(20.0)),
+                size: cell(8.0, 16.0),
+            }),
+        );
+    }
+
+    #[test]
+    fn pixel_bounds_for_utf16_offset_uses_display_row_col() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc\ndef");
+        editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+
+        let result = editor.update(&mut cx, |ed, cx| {
+            ed.pixel_bounds_for_utf16_offset(5, Point::new(gpui::px(0.0), gpui::px(0.0)), cx)
+        });
+        assert_eq!(
+            result,
+            Some(Bounds {
+                origin: Point::new(gpui::px(8.0), gpui::px(16.0)),
+                size: cell(8.0, 16.0),
+            }),
+        );
+    }
+
+    #[test]
+    fn pixel_bounds_for_utf16_offset_handles_utf16_surrogate_pair() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "\u{1F600}x");
+        editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+
+        let result = editor.update(&mut cx, |ed, cx| {
+            ed.pixel_bounds_for_utf16_offset(2, Point::new(gpui::px(0.0), gpui::px(0.0)), cx)
+        });
+        assert_eq!(
+            result,
+            Some(Bounds {
+                origin: Point::new(gpui::px(16.0), gpui::px(0.0)),
+                size: cell(8.0, 16.0),
+            }),
+        );
     }
 }

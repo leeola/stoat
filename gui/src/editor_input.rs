@@ -111,15 +111,16 @@ impl EntityInputHandler for EditorInput {
 
     fn bounds_for_range(
         &mut self,
-        _range_utf16: Range<usize>,
-        _element_bounds: Bounds<Pixels>,
+        range_utf16: Range<usize>,
+        element_bounds: Bounds<Pixels>,
         _window: &mut Window,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Option<Bounds<Pixels>> {
-        // FIXME: needs the active-editor lookup that lands with the
-        // editor-as-ItemView item; without it the IME has no buffer
-        // to translate UTF-16 offsets against.
-        None
+        let sm = self.state_machine.upgrade()?;
+        let editor = sm.read(cx).active_editor()?.upgrade()?;
+        editor.update(cx, |ed, cx| {
+            ed.pixel_bounds_for_utf16_offset(range_utf16.start, element_bounds.origin, cx)
+        })
     }
 
     fn character_index_for_point(
@@ -261,5 +262,96 @@ mod tests {
         let editor_input = new_editor_input(&sm, vcx);
 
         let _handle = editor_input.read_with(vcx, |ei, _| ei.focus_handle().clone());
+    }
+
+    fn new_singleton_editor(
+        vcx: &mut VisualTestContext,
+        text: &str,
+    ) -> Entity<crate::editor::Editor> {
+        use crate::{
+            buffer::Buffer,
+            diff_map::DiffMap,
+            display_map::DisplayMap,
+            editor::{Editor, EditorMode},
+            multi_buffer::MultiBuffer,
+        };
+        use std::sync::Arc;
+        use stoat::buffer::BufferId;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let buffer = vcx.update(|_, cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            vcx.update(|_, cx| cx.new(|cx| MultiBuffer::singleton(buffer, cx)))
+        };
+        let display_map = {
+            let buffer = buffer.clone();
+            vcx.update(|_, cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
+        };
+        let diff_map = vcx.update(|_, cx| cx.new(|cx| DiffMap::new(buffer, cx)));
+        vcx.update(|_, cx| {
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
+        })
+    }
+
+    fn unit_bounds() -> Bounds<Pixels> {
+        Bounds {
+            origin: Point::new(gpui::px(0.0), gpui::px(0.0)),
+            size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+        }
+    }
+
+    #[test]
+    fn bounds_for_range_returns_none_without_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.bounds_for_range(0..0, unit_bounds(), window, cx)
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn bounds_for_range_returns_none_when_editor_lacks_cell_size() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.bounds_for_range(0..0, unit_bounds(), window, cx)
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn bounds_for_range_returns_bounds_when_editor_has_cell_size() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        editor.update(vcx, |ed, cx| {
+            ed.set_cell_size(gpui::size(gpui::px(8.0), gpui::px(16.0)), cx)
+        });
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let bounds = Bounds {
+            origin: Point::new(gpui::px(10.0), gpui::px(20.0)),
+            size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+        };
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.bounds_for_range(2..2, bounds, window, cx)
+        });
+        assert_eq!(
+            result,
+            Some(Bounds {
+                origin: Point::new(gpui::px(10.0 + 16.0), gpui::px(20.0)),
+                size: gpui::size(gpui::px(8.0), gpui::px(16.0)),
+            }),
+        );
     }
 }
