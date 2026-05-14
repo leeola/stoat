@@ -35,6 +35,19 @@ pub enum WordTarget {
 /// (`stoat::action_handlers::movement::DEFAULT_VIEWPORT_ROWS`).
 pub const DEFAULT_VIEWPORT_ROWS: u32 = 20;
 
+/// Direction + landing offset for the after-key
+/// [`Editor::handle_find_char`] chord. `Next`/`Prev` land on the
+/// matched character; `TillNext`/`TillPrev` land one position
+/// before/after it so the cursor sits adjacent to the target.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+#[allow(clippy::enum_variant_names)]
+pub enum FindKind {
+    NextChar,
+    PrevChar,
+    TillNextChar,
+    TillPrevChar,
+}
+
 impl Editor {
     /// Move every selection's head by `count * delta` characters
     /// along the buffer. Negative `delta` walks backward.
@@ -335,6 +348,130 @@ impl Editor {
         if !moved {
             return;
         }
+        self.selections.replace_with(new_disjoint, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Land the primary selection on the `count`th occurrence of
+    /// `ch` on the cursor's current line. `kind` picks the direction
+    /// and whether to land on the matched char (`NextChar`/`PrevChar`)
+    /// or one position adjacent to it (`TillNextChar`/`TillPrevChar`).
+    /// `extend = true` keeps the selection anchor in place and moves
+    /// only the head. No-op when the char is not found in the
+    /// requested direction within the current line.
+    pub fn handle_find_char(
+        &mut self,
+        kind: FindKind,
+        ch: char,
+        extend: bool,
+        count: u32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope();
+        let head_offset = {
+            let sel = self
+                .selections
+                .all_anchors()
+                .iter()
+                .max_by_key(|s| s.id)
+                .expect("at least one selection");
+            snapshot.resolve_anchor(&sel.head())
+        };
+        let head_point = rope.offset_to_point(head_offset);
+        let max_row = rope.max_point().row;
+        let line_start = rope.point_to_offset(stoat_text::Point::new(head_point.row, 0));
+        let line_end = if head_point.row >= max_row {
+            rope.len()
+        } else {
+            rope.point_to_offset(stoat_text::Point::new(head_point.row + 1, 0))
+                .saturating_sub(1)
+        };
+
+        let count = count.max(1);
+        let target = match kind {
+            FindKind::NextChar | FindKind::TillNextChar => {
+                let scan_start = head_offset.saturating_add(
+                    rope.chars_at(head_offset)
+                        .next()
+                        .map_or(0, |c| c.len_utf8()),
+                );
+                let mut offset = scan_start;
+                let mut found = None;
+                let mut remaining = count;
+                for c in rope.chars_at(scan_start) {
+                    if offset >= line_end || c == '\n' {
+                        break;
+                    }
+                    if c == ch {
+                        remaining -= 1;
+                        if remaining == 0 {
+                            found = Some(offset);
+                            break;
+                        }
+                    }
+                    offset += c.len_utf8();
+                }
+                let Some(found) = found else {
+                    return;
+                };
+                if matches!(kind, FindKind::TillNextChar) {
+                    rope.reversed_chars_at(found)
+                        .next()
+                        .map(|c| found - c.len_utf8())
+                        .unwrap_or(found)
+                } else {
+                    found
+                }
+            },
+            FindKind::PrevChar | FindKind::TillPrevChar => {
+                let mut offset = head_offset;
+                let mut found = None;
+                let mut remaining = count;
+                for c in rope.reversed_chars_at(head_offset) {
+                    if offset == 0 {
+                        break;
+                    }
+                    offset -= c.len_utf8();
+                    if offset < line_start || c == '\n' {
+                        break;
+                    }
+                    if c == ch {
+                        remaining -= 1;
+                        if remaining == 0 {
+                            found = Some(offset);
+                            break;
+                        }
+                    }
+                }
+                let Some(found) = found else {
+                    return;
+                };
+                if matches!(kind, FindKind::TillPrevChar) {
+                    let len = rope.chars_at(found).next().map_or(0, |c| c.len_utf8());
+                    found + len
+                } else {
+                    found
+                }
+            },
+        };
+
+        let target_anchor = snapshot.anchor_at(target, Bias::Right);
+        let new_disjoint: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                if extend {
+                    extend_head(sel, target_anchor, target, sel.goal, &snapshot)
+                } else {
+                    let mut new = sel.clone();
+                    new.collapse_to(target_anchor, SelectionGoal::None);
+                    new
+                }
+            })
+            .collect();
         self.selections.replace_with(new_disjoint, &snapshot);
         cx.emit(EditorEvent::Changed);
         cx.notify();
@@ -843,5 +980,111 @@ mod tests {
         // The backward branch only shifts the head for PrevEnd; long-end
         // leaves the head at the position returned by prev_long_word_end.
         assert_eq!(selection_span(&editor, &mut cx), (7, 11, true));
+    }
+
+    #[test]
+    fn find_next_char_lands_on_target() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "hello world");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::NextChar, 'o', false, 1, cx)
+        });
+
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 4);
+    }
+
+    #[test]
+    fn find_next_char_count_advances_to_nth_occurrence() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "abacada");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::NextChar, 'a', false, 3, cx)
+        });
+
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 6);
+    }
+
+    #[test]
+    fn till_next_char_lands_one_before_target() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "hello world");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::TillNextChar, 'o', false, 1, cx)
+        });
+
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 3);
+    }
+
+    #[test]
+    fn find_prev_char_walks_backward() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "hello world");
+        seed_at_offset(&editor, &mut cx, 9);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::PrevChar, 'l', false, 1, cx)
+        });
+
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 3);
+    }
+
+    #[test]
+    fn till_prev_char_lands_one_after_target() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "hello world");
+        seed_at_offset(&editor, &mut cx, 9);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::TillPrevChar, 'l', false, 1, cx)
+        });
+
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 4);
+    }
+
+    #[test]
+    fn find_next_char_does_not_cross_newline() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "hello\nworld");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::NextChar, 'w', false, 1, cx)
+        });
+
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 0);
+    }
+
+    #[test]
+    fn find_next_char_no_match_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "hello");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::NextChar, 'z', false, 1, cx)
+        });
+
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 0);
+    }
+
+    #[test]
+    fn find_next_char_extend_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "hello world");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_find_char(FindKind::NextChar, 'o', true, 1, cx)
+        });
+
+        let (start, end, reversed) = selection_span(&editor, &mut cx);
+        assert_eq!((start, end), (0, 4));
+        assert!(!reversed);
     }
 }

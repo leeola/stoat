@@ -481,6 +481,62 @@ impl Workspace {
                 true,
                 cx,
             ),
+            ActionKind::FindNextChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::NextChar,
+                false,
+                cx,
+            ),
+            ActionKind::FindPrevChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::PrevChar,
+                false,
+                cx,
+            ),
+            ActionKind::TillNextChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::TillNextChar,
+                false,
+                cx,
+            ),
+            ActionKind::TillPrevChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::TillPrevChar,
+                false,
+                cx,
+            ),
+            ActionKind::ExtendFindNextChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::NextChar,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendFindPrevChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::PrevChar,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendTillNextChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::TillNextChar,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendTillPrevChar => self.dispatch_set_pending_find(
+                crate::editor::actions::movement::FindKind::TillPrevChar,
+                true,
+                cx,
+            ),
+            ActionKind::ApplyFindChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplyFindChar>()
+                {
+                    if let Some(editor) = self.active_editor(cx) {
+                        let kind = apply.kind;
+                        let ch = apply.ch;
+                        let extend = apply.extend;
+                        let count = apply.count;
+                        editor.update(cx, |ed, cx| {
+                            ed.handle_find_char(kind, ch, extend, count, cx)
+                        });
+                    }
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -648,6 +704,17 @@ impl Workspace {
         self.input_state_machine
             .update(cx, |sm, _| sm.take_consumed_count())
             .unwrap_or(1)
+    }
+
+    fn dispatch_set_pending_find(
+        &mut self,
+        kind: crate::editor::actions::movement::FindKind,
+        extend: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let count = self.take_count(cx);
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.set_pending_find(kind, extend, count, cx));
     }
 }
 
@@ -1722,6 +1789,47 @@ mod tests {
 
         let sel = selection_offsets(vcx, &editor);
         assert_eq!(sel, vec![(0, 7)]);
+        let reversed = editor.read_with(vcx, |ed, _| ed.selections().all_anchors()[0].reversed);
+        assert!(reversed);
+    }
+
+    #[test]
+    fn dispatch_find_next_char_arms_chord_and_executes_on_char() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::FindNextChar);
+        vcx.run_until_parked();
+        sm.read_with(vcx, |sm, _| {
+            assert!(
+                sm.pending_find().is_some(),
+                "chord armed after FindNextChar"
+            )
+        });
+
+        vcx.simulate_keystrokes("o");
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![4]);
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_find().is_none()));
+    }
+
+    #[test]
+    fn dispatch_extend_till_prev_char_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 9);
+
+        dispatch(&ws, vcx, stoat_action::ExtendTillPrevChar);
+        vcx.simulate_keystrokes("h");
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(1, 9)]);
         let reversed = editor.read_with(vcx, |ed, _| ed.selections().all_anchors()[0].reversed);
         assert!(reversed);
     }

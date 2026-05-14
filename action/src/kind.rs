@@ -287,4 +287,5 @@ pub enum ActionKind {
     ClickAt,
     DragSelectTo,
     HoverAt,
+    ApplyFindChar,
 }

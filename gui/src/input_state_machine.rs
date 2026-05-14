@@ -1,4 +1,8 @@
-use crate::{editor::Editor, workspace::Workspace};
+use crate::{
+    actions::ApplyFindChar,
+    editor::{actions::movement::FindKind, Editor},
+    workspace::Workspace,
+};
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gpui::{Context, FocusHandle, Keystroke, WeakEntity, Window};
 use std::ops::Range;
@@ -70,8 +74,26 @@ pub struct InputStateMachine {
     /// becomes active. `None` means the state machine has nothing
     /// to focus on input-mode entry.
     editor_focus_target: Option<FocusHandle>,
+    /// Active after-key chord set by the Find/Till priming
+    /// actions. The next keystroke in normal/select mode that
+    /// resolves to `KeyCode::Char` is consumed as the chord-target
+    /// character and dispatched through
+    /// [`crate::actions::ApplyFindChar`]; any other keystroke
+    /// clears the chord and falls through to the normal keymap
+    /// path.
+    pending_find: Option<PendingFind>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
+}
+
+/// Chord state armed by the Find/Till priming actions
+/// ([`crate::input_state_machine::InputStateMachine::set_pending_find`])
+/// and consumed by the next chord-completing keystroke.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub struct PendingFind {
+    pub kind: FindKind,
+    pub extend: bool,
+    pub count: u32,
 }
 
 impl InputStateMachine {
@@ -93,6 +115,7 @@ impl InputStateMachine {
             pending_duplicate_char: None,
             active_editor: None,
             editor_focus_target: None,
+            pending_find: None,
             workspace,
             keymap,
         }
@@ -327,6 +350,30 @@ impl InputStateMachine {
         cx.notify();
     }
 
+    /// Active after-key chord state, if a Find/Till priming action
+    /// armed one and the consuming keystroke has not arrived yet.
+    pub fn pending_find(&self) -> Option<&PendingFind> {
+        self.pending_find.as_ref()
+    }
+
+    /// Arm the after-key Find/Till chord. The next keystroke that
+    /// resolves to `KeyCode::Char` in normal/select mode is consumed
+    /// as the chord target; any other keystroke clears the chord.
+    pub fn set_pending_find(
+        &mut self,
+        kind: FindKind,
+        extend: bool,
+        count: u32,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pending_find = Some(PendingFind {
+            kind,
+            extend,
+            count,
+        });
+        cx.notify();
+    }
+
     pub fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
     }
@@ -405,6 +452,21 @@ impl InputStateMachine {
         }
 
         let count_active_mode = self.mode() == "normal" || self.mode() == "select";
+
+        if count_active_mode && self.pending_find.is_some() {
+            if let KeyCode::Char(ch) = event.code {
+                let pf = self.pending_find.take().expect("checked above");
+                cx.notify();
+                return vec![Box::new(ApplyFindChar {
+                    kind: pf.kind,
+                    ch,
+                    extend: pf.extend,
+                    count: pf.count,
+                })];
+            }
+            self.pending_find = None;
+            cx.notify();
+        }
         let digit = unmodified_ascii_digit(&event);
 
         if count_active_mode && self.pending_count.is_some() {
@@ -1314,5 +1376,94 @@ mod tests {
 
         let still_focused = vcx.update(|window, _| original.is_focused(window));
         assert!(still_focused, "no-op restore should leave focus unchanged");
+    }
+
+    #[test]
+    fn set_pending_find_arms_chord() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "normal");
+
+        sm.update(&mut cx, |sm, cx| {
+            sm.set_pending_find(FindKind::NextChar, false, 1, cx)
+        });
+
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(
+                sm.pending_find().copied(),
+                Some(PendingFind {
+                    kind: FindKind::NextChar,
+                    extend: false,
+                    count: 1,
+                }),
+            );
+        });
+    }
+
+    #[test]
+    fn char_keystroke_consumes_chord_and_emits_apply_action() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "normal");
+        sm.update(&mut cx, |sm, cx| {
+            sm.set_pending_find(FindKind::TillNextChar, true, 3, cx)
+        });
+
+        let stroke = key("x");
+        let actions = feed_in_app(&mut cx, &sm, |sm, cx| sm.feed(&stroke, cx));
+
+        assert_eq!(actions.len(), 1);
+        let apply = actions[0]
+            .as_any()
+            .downcast_ref::<ApplyFindChar>()
+            .expect("ApplyFindChar");
+        assert_eq!(apply.kind, FindKind::TillNextChar);
+        assert_eq!(apply.ch, 'x');
+        assert!(apply.extend);
+        assert_eq!(apply.count, 3);
+        sm.read_with(&cx, |sm, _| assert!(sm.pending_find().is_none()));
+    }
+
+    #[test]
+    fn non_char_keystroke_clears_chord_and_falls_through() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { Escape -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "normal");
+        sm.update(&mut cx, |sm, cx| {
+            sm.set_pending_find(FindKind::NextChar, false, 1, cx)
+        });
+
+        let stroke = key("escape");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+        sm.read_with(&cx, |sm, _| assert!(sm.pending_find().is_none()));
+    }
+
+    #[test]
+    fn pending_find_outside_normal_or_select_is_inert() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "insert");
+        sm.update(&mut cx, |sm, cx| {
+            sm.set_pending_find(FindKind::NextChar, false, 1, cx)
+        });
+
+        let stroke = key("a");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(
+                sm.pending_find().copied(),
+                Some(PendingFind {
+                    kind: FindKind::NextChar,
+                    extend: false,
+                    count: 1,
+                }),
+            );
+        });
     }
 }
