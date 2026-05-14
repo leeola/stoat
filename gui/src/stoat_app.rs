@@ -21,7 +21,7 @@ pub(crate) struct StoatApp {
 }
 
 impl StoatApp {
-    pub(crate) fn new(cx: &mut Context<'_, Self>) -> Self {
+    pub(crate) fn new(files: Vec<PathBuf>, cx: &mut Context<'_, Self>) -> Self {
         let git_root = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let name = git_root
             .file_name()
@@ -30,6 +30,19 @@ impl StoatApp {
             .unwrap_or_else(|| SharedString::from("stoat"));
         let workspace = cx.new(|cx| Workspace::new(name, git_root.clone(), cx));
 
+        if files.is_empty() {
+            Self::open_scratch(&workspace, cx);
+        } else {
+            workspace.update(cx, |w, cx| w.open_paths(&files, cx));
+        }
+
+        Self {
+            workspace,
+            focus_handle: cx.focus_handle(),
+        }
+    }
+
+    fn open_scratch(workspace: &Entity<Workspace>, cx: &mut Context<'_, Self>) {
         let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), ""));
         let multi_buffer = cx.new({
             let buffer = buffer.clone();
@@ -55,11 +68,6 @@ impl StoatApp {
         pane.update(cx, |p, cx| {
             p.add_item(Box::new(editor), cx);
         });
-
-        Self {
-            workspace,
-            focus_handle: cx.focus_handle(),
-        }
     }
 }
 
@@ -85,7 +93,7 @@ mod tests {
     fn new_constructs_workspace_anchored_to_cwd() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
-        let (app, _vcx) = cx.add_window_view(|_window, cx| StoatApp::new(cx));
+        let (app, _vcx) = cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), cx));
         let cwd = std::env::current_dir().expect("current_dir");
         let expected_name: SharedString = cwd
             .file_name()
@@ -104,7 +112,7 @@ mod tests {
     fn new_seeds_focused_pane_with_scratch_editor() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
-        let (app, _vcx) = cx.add_window_view(|_window, cx| StoatApp::new(cx));
+        let (app, _vcx) = cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), cx));
 
         app.read_with(&cx, |app, cx| {
             let ws = app.workspace.read(cx);

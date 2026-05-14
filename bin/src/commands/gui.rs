@@ -1,5 +1,5 @@
 use snafu::{ResultExt, Whatever};
-use std::sync::Arc;
+use std::{path::PathBuf, sync::Arc};
 use stoat::host::{
     LocalClipboard, LocalEnv, LocalFs, LocalFsWatcher, LocalGit, LocalLspHost, LocalShell,
     LocalTerminalHost,
@@ -12,7 +12,7 @@ use stoat_gui::{
 };
 use stoat_scheduler::TokioScheduler;
 
-pub fn run() -> Result<(), Whatever> {
+pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
     install_panic_hook();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -44,6 +44,6 @@ pub fn run() -> Result<(), Whatever> {
         executor: ExecutorGlobal(executor),
     };
 
-    stoat_gui::run(globals);
+    stoat_gui::run(globals, files);
     Ok(())
 }

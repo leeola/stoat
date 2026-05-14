@@ -1,9 +1,16 @@
 use crate::{
+    buffer::Buffer,
+    buffer_registry::BufferRegistry,
+    diff_map::DiffMap,
+    display_map::DisplayMap,
     dock::{Dock, DockSide},
+    editor::{Editor, EditorMode},
+    globals::{ExecutorGlobal, FsHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
     keymap_loader::{compile_default_keymap, compile_from_settings},
     modal_layer::{ModalLayer, ModalView},
+    multi_buffer::MultiBuffer,
     pane_tree::PaneTree,
     settings::Settings,
     status_bar::StatusBar,
@@ -12,7 +19,7 @@ use gpui::{
     deferred, div, App, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
     IntoElement, KeyContext, ParentElement, Render, SharedString, Styled, Subscription, Window,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use stoat::pane::{Axis, Direction};
 use stoat_action::ActionKind;
 
@@ -28,6 +35,7 @@ pub struct Workspace {
     name: SharedString,
     git_root: PathBuf,
     pane_tree: Entity<PaneTree>,
+    buffer_registry: Entity<BufferRegistry>,
     docks: Vec<Entity<Dock>>,
     modal_layer: Entity<ModalLayer>,
     status_bar: Entity<StatusBar>,
@@ -61,6 +69,7 @@ impl Workspace {
             cx.new(|cx| ModalLayer::new(Some(weak), cx))
         };
         let status_bar = cx.new(StatusBar::new);
+        let buffer_registry = cx.new(|_| BufferRegistry::new());
         let keymap = cx
             .try_global::<Settings>()
             .map_or_else(compile_default_keymap, compile_from_settings);
@@ -83,6 +92,7 @@ impl Workspace {
             name: name.into(),
             git_root,
             pane_tree,
+            buffer_registry,
             docks: Vec::new(),
             modal_layer,
             status_bar,
@@ -102,6 +112,73 @@ impl Workspace {
 
     pub fn pane_tree(&self) -> &Entity<PaneTree> {
         &self.pane_tree
+    }
+
+    pub fn buffer_registry(&self) -> &Entity<BufferRegistry> {
+        &self.buffer_registry
+    }
+
+    /// Open every path in `paths` as an [`Entity<Editor>`] hosted in
+    /// the workspace's pane tree. The first path lands in the
+    /// currently focused pane; each additional path triggers
+    /// [`PaneTree::split`] with [`Axis::Vertical`] and the editor
+    /// goes into the new pane. Empty `paths` is a no-op.
+    ///
+    /// Path resolution makes each relative path absolute against
+    /// the current working directory. Symlinks are **not** resolved
+    /// -- canonicalization needs the file to exist, and we want
+    /// unsaved new-file paths to open as empty buffers under the
+    /// path the user typed.
+    ///
+    /// Files unreadable today (missing, permission denied, etc.)
+    /// open as empty buffers under their absolute path so a
+    /// subsequent save writes through. The IO failure is logged at
+    /// `tracing::warn`.
+    pub fn open_paths(&mut self, paths: &[PathBuf], cx: &mut Context<'_, Self>) {
+        if paths.is_empty() {
+            return;
+        }
+        let cwd = std::env::current_dir().ok();
+        for (index, path) in paths.iter().enumerate() {
+            let absolute = absolute_path(path, cwd.as_deref());
+            let text = read_path_or_empty(&absolute, cx);
+            let (_, shared) = self
+                .buffer_registry
+                .update(cx, |registry, cx| registry.open(&absolute, &text, cx));
+            let buffer = cx.new(|_| Buffer::from_shared(shared));
+            let executor = cx.global::<ExecutorGlobal>().0.clone();
+            let multi_buffer = {
+                let buffer = buffer.clone();
+                cx.new(|cx| MultiBuffer::singleton(buffer, cx))
+            };
+            let display_map = {
+                let buffer = buffer.clone();
+                cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+            };
+            let diff_map = {
+                let buffer = buffer.clone();
+                cx.new(|cx| DiffMap::new(buffer, cx))
+            };
+            let workspace_handle = cx.weak_entity();
+            let editor = cx
+                .new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+            editor.update(cx, |ed, _| ed.set_workspace(Some(workspace_handle)));
+            let pane_id = if index == 0 {
+                self.pane_tree.read(cx).focus()
+            } else {
+                self.pane_tree
+                    .update(cx, |tree, cx| tree.split(Axis::Vertical, cx))
+            };
+            let pane = self
+                .pane_tree
+                .read(cx)
+                .pane(pane_id)
+                .expect("pane tree returns its own pane id")
+                .clone();
+            pane.update(cx, |p, cx| {
+                p.add_item(Box::new(editor), cx);
+            });
+        }
     }
 
     pub fn docks(&self) -> &[Entity<Dock>] {
@@ -791,6 +868,34 @@ impl Workspace {
             JumpDir::Backward => ed.handle_jump_backward(count, cx),
             JumpDir::Forward => ed.handle_jump_forward(count, cx),
         });
+    }
+}
+
+fn absolute_path(path: &Path, cwd: Option<&Path>) -> PathBuf {
+    if path.is_absolute() {
+        return path.to_path_buf();
+    }
+    match cwd {
+        Some(cwd) => cwd.join(path),
+        None => path.to_path_buf(),
+    }
+}
+
+fn read_path_or_empty(path: &Path, cx: &App) -> String {
+    let fs = cx.global::<FsHostGlobal>().0.clone();
+    let mut buf = Vec::new();
+    match fs.read(path, &mut buf) {
+        Ok(()) => match String::from_utf8(buf) {
+            Ok(text) => text,
+            Err(err) => {
+                tracing::warn!(?path, %err, "open_paths: file is not valid UTF-8, opening empty");
+                String::new()
+            },
+        },
+        Err(err) => {
+            tracing::warn!(?path, %err, "open_paths: read failed, opening empty buffer");
+            String::new()
+        },
     }
 }
 
@@ -2111,6 +2216,139 @@ mod tests {
                 .read(cx)
                 .active_modal::<TestModal>()
                 .is_some());
+        });
+    }
+
+    fn install_globals_with_fs(cx: &mut TestAppContext, fs: Arc<stoat::host::FakeFs>) {
+        use crate::globals::{ExecutorGlobal, FsHostGlobal};
+        use stoat_scheduler::{Executor, TestScheduler};
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn stoat::host::FsHost>));
+            cx.set_global(ExecutorGlobal(Executor::new(
+                Arc::new(TestScheduler::new()),
+            )));
+        });
+    }
+
+    #[test]
+    fn open_paths_with_no_files_is_noop() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| w.open_paths(&[], cx));
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.buffer_registry().read(cx).len(), 0);
+            assert_eq!(w.pane_tree().read(cx).pane_count(), 1);
+        });
+    }
+
+    #[test]
+    fn open_paths_single_file_opens_into_focused_pane() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello stoat\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.buffer_registry().read(cx).len(), 1);
+            assert_eq!(w.pane_tree().read(cx).pane_count(), 1);
+            let focus = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane present")
+                .read(cx);
+            assert_eq!(pane.len(), 1);
+            assert!(pane.active_item().is_some());
+        });
+    }
+
+    #[test]
+    fn open_paths_multiple_files_split_per_extra_path() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"a");
+        fs.insert_file("/tmp/repo/b.rs", b"b");
+        fs.insert_file("/tmp/repo/c.rs", b"c");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(
+                &[
+                    PathBuf::from("/tmp/repo/a.rs"),
+                    PathBuf::from("/tmp/repo/b.rs"),
+                    PathBuf::from("/tmp/repo/c.rs"),
+                ],
+                cx,
+            )
+        });
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.buffer_registry().read(cx).len(), 3);
+            assert_eq!(w.pane_tree().read(cx).pane_count(), 3);
+        });
+    }
+
+    #[test]
+    fn open_paths_unreadable_path_opens_empty_buffer() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/new.rs")], cx)
+        });
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.buffer_registry().read(cx).len(), 1);
+            let id = w
+                .buffer_registry()
+                .read(cx)
+                .id_for_path(Path::new("/tmp/repo/new.rs"))
+                .expect("path registered under its absolute form");
+            let shared = w
+                .buffer_registry()
+                .read(cx)
+                .get(id)
+                .expect("buffer present");
+            assert_eq!(
+                shared.read().expect("buffer lock").rope().to_string(),
+                String::new()
+            );
+        });
+    }
+
+    #[test]
+    fn open_paths_resolves_relative_paths_against_cwd() {
+        let mut cx = TestAppContext::single();
+        let cwd = std::env::current_dir().expect("cwd");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let abs = cwd.join("relative.rs");
+        fs.insert_file(&abs, b"relative");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("relative.rs")], cx)
+        });
+
+        ws.read_with(vcx, |w, cx| {
+            let registered = w.buffer_registry().read(cx).id_for_path(&abs);
+            assert!(
+                registered.is_some(),
+                "relative path should be registered under its absolute form"
+            );
         });
     }
 }

@@ -83,7 +83,7 @@ pub use tab_bar::{render_tab_bar, DraggedTab};
 pub use theme::Theme;
 pub use workspace::{Workspace, WorkspaceEvent};
 
-pub fn run(globals: Globals) {
+pub fn run(globals: Globals, files: Vec<std::path::PathBuf>) {
     Application::new().run(move |cx: &mut App| {
         tracing::info!("stoat gui starting");
         install_production_globals(cx, globals);
@@ -97,7 +97,7 @@ pub fn run(globals: Globals) {
                 }),
                 ..Default::default()
             },
-            |_window, cx| cx.new(StoatApp::new),
+            move |_window, cx| cx.new(|cx| StoatApp::new(files, cx)),
         )
         .expect("open root window");
         cx.on_window_closed(|cx| {

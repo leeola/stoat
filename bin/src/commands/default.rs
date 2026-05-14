@@ -73,12 +73,12 @@ enum Command {
 }
 
 pub fn run() -> Result<(), Whatever> {
-    let Args { command, .. } = Args::parse();
+    let Args { command, files, .. } = Args::parse();
 
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
-        Some(Command::Gui) => crate::commands::gui::run(),
+        Some(Command::Gui) => crate::commands::gui::run(files),
         Some(Command::Review) | None => print_gui_hint(),
     }
 }
