@@ -10,6 +10,26 @@ use gpui::{
     Focusable, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Task, UniformListScrollHandle, Window,
 };
+pub use stoat::fuzzy::{match_and_rank, RankedMatch};
+
+/// Filter and rank `(item, haystack)` pairs against `query` using
+/// the shared nucleo matcher and the picker-side score-descending
+/// convention.
+///
+/// Returns `None` when `query` produces no usable atoms -- the
+/// caller falls back to its natural ordering (alphabetical,
+/// priority, etc.) in that case. The returned `Vec` is sorted by
+/// [`RankedMatch::score`] descending; ties keep their input order
+/// so callers can apply a secondary tie-break (basename,
+/// registration order, ...) with a stable sort afterward.
+pub fn rank_matches<T>(
+    query: &str,
+    items: impl IntoIterator<Item = (T, String)>,
+) -> Option<Vec<RankedMatch<T>>> {
+    let mut matches = match_and_rank(query, items)?;
+    matches.sort_by_key(|m| std::cmp::Reverse(m.score));
+    Some(matches)
+}
 
 /// Stoat-native picker container. Owns the query editor, the result
 /// list's scroll handle, the focus handle pushed into gpui by the
@@ -311,5 +331,51 @@ mod tests {
             });
         });
         assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 0);
+    }
+
+    fn items(pairs: &[(usize, &str)]) -> Vec<(usize, String)> {
+        pairs.iter().map(|(i, s)| (*i, (*s).to_string())).collect()
+    }
+
+    #[test]
+    fn rank_matches_returns_none_for_empty_query() {
+        assert!(rank_matches("", items(&[(0, "alpha"), (1, "beta")])).is_none());
+        assert!(rank_matches("   ", items(&[(0, "alpha"), (1, "beta")])).is_none());
+    }
+
+    #[test]
+    fn rank_matches_sorts_by_score_descending() {
+        let ranked = rank_matches(
+            "foo",
+            items(&[(0, "barfoo"), (1, "foo.rs"), (2, "f_o_o"), (3, "foobar")]),
+        )
+        .expect("query has atoms");
+        let order: Vec<usize> = ranked.iter().map(|m| m.item).collect();
+        let scores: Vec<u32> = ranked.iter().map(|m| m.score).collect();
+        assert!(
+            scores.windows(2).all(|w| w[0] >= w[1]),
+            "scores not descending: {scores:?} (order {order:?})",
+        );
+    }
+
+    #[test]
+    fn rank_matches_filters_non_matches() {
+        let ranked = rank_matches("foo", items(&[(0, "alpha"), (1, "bravo"), (2, "foobar")]))
+            .expect("query has atoms");
+        let kept: Vec<usize> = ranked.iter().map(|m| m.item).collect();
+        assert_eq!(kept, vec![2]);
+    }
+
+    #[test]
+    fn rank_matches_propagates_matched_indices() {
+        let ranked = rank_matches("foo", items(&[(0, "foo.rs")])).expect("query has atoms");
+        assert_eq!(ranked.len(), 1);
+        assert!(
+            !ranked[0].matched_indices.is_empty(),
+            "expected nucleo to mark at least one matched index",
+        );
+        let mut sorted = ranked[0].matched_indices.clone();
+        sorted.sort_unstable();
+        assert_eq!(ranked[0].matched_indices, sorted);
     }
 }
