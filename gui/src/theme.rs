@@ -1,4 +1,5 @@
-use gpui::Global;
+use crate::editor::render::ratatui_color_to_hsla;
+use gpui::{rgb, App, Global, Hsla};
 
 /// Default monospace font family used by the editor pane when the
 /// active [`Settings`] does not override it. Picked to resolve on
@@ -20,6 +21,46 @@ pub const DEFAULT_UI_FONT_FAMILY: &str = ".SystemUIFont";
 
 /// Default chrome font size in logical pixels.
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
+
+/// Fallback for the inactive border / divider color when no
+/// theme overrides `ui.border.inactive`. Muted enough to read as
+/// a separator against the default backgrounds.
+pub const DEFAULT_BORDER_INACTIVE_HEX: u32 = 0x404040;
+
+/// Fallback for the focus-ring color when no theme overrides
+/// `ui.border.focused`. Subtle accent blue so the focused pane
+/// reads as the active surface without dominating the chrome.
+pub const DEFAULT_BORDER_FOCUSED_HEX: u32 = 0x6090ff;
+
+/// Resolve the inactive border color from the active [`Theme`]
+/// global, falling back to [`DEFAULT_BORDER_INACTIVE_HEX`] when
+/// no theme is installed or the scope is unset.
+pub fn border_inactive_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_BORDER_INACTIVE,
+        DEFAULT_BORDER_INACTIVE_HEX,
+    )
+}
+
+/// Resolve the focus-ring color from the active [`Theme`] global,
+/// falling back to [`DEFAULT_BORDER_FOCUSED_HEX`] when no theme is
+/// installed or the scope is unset.
+pub fn border_focused_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_BORDER_FOCUSED,
+        DEFAULT_BORDER_FOCUSED_HEX,
+    )
+}
+
+fn theme_fg_or(cx: &App, scope: &str, fallback_hex: u32) -> Hsla {
+    cx.try_global::<Theme>()
+        .and_then(|t| t.0.try_get(scope))
+        .and_then(|style| style.fg)
+        .and_then(ratatui_color_to_hsla)
+        .unwrap_or_else(|| rgb(fallback_hex).into())
+}
 
 /// App-global wrapper around [`stoat::theme::Theme`]. Stored via
 /// [`gpui::App::set_global`] and observed via

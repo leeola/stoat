@@ -1,7 +1,11 @@
-use crate::{pane::Pane, workspace::Workspace};
+use crate::{
+    pane::Pane,
+    theme::{border_focused_color, border_inactive_color},
+    workspace::Workspace,
+};
 use gpui::{
-    div, AnyElement, AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement, Render,
-    Styled, WeakEntity, Window,
+    div, AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement,
+    Render, Styled, WeakEntity, Window,
 };
 use std::collections::BTreeMap;
 use stoat::pane::{Axis, Direction, Layout, PaneId, PaneTree as InnerTree};
@@ -149,14 +153,24 @@ impl PaneTree {
         closed
     }
 
-    fn build_layout_element(&self, layout: &Layout) -> AnyElement {
+    fn build_layout_element(&self, layout: &Layout, cx: &App) -> AnyElement {
         match layout {
             Layout::Leaf(pane_id) => {
                 let pane = self
                     .panes
                     .get(pane_id)
                     .expect("layout references pane absent from panes map");
-                div().flex_1().child(pane.clone()).into_any_element()
+                let color = if self.inner.focus() == *pane_id {
+                    border_focused_color(cx)
+                } else {
+                    border_inactive_color(cx)
+                };
+                div()
+                    .flex_1()
+                    .border_1()
+                    .border_color(color)
+                    .child(pane.clone())
+                    .into_any_element()
             },
             Layout::Split { axis, children } => {
                 let base = div().flex().flex_1();
@@ -165,7 +179,7 @@ impl PaneTree {
                     Axis::Horizontal => base.flex_col(),
                 };
                 for child in children {
-                    container = container.child(self.build_layout_element(child));
+                    container = container.child(self.build_layout_element(child, cx));
                 }
                 container.into_any_element()
             },
@@ -174,12 +188,12 @@ impl PaneTree {
 }
 
 impl Render for PaneTree {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let layout = self.inner.layout();
         div()
             .flex()
             .size_full()
-            .child(self.build_layout_element(&layout))
+            .child(self.build_layout_element(&layout, cx))
     }
 }
 

@@ -2236,6 +2236,19 @@ mod tests {
     }
 
     #[test]
+    fn render_pane_tree_with_split_does_not_panic_with_border_styling() {
+        use stoat::pane::Axis;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        pane_tree.update(vcx, |tree, cx| {
+            tree.split(Axis::Vertical, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+    }
+
+    #[test]
     fn render_composes_docks_pane_area_and_modal_overlay_without_panic() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");

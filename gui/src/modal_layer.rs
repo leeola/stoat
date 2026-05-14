@@ -1,4 +1,4 @@
-use crate::workspace::Workspace;
+use crate::{theme::border_focused_color, workspace::Workspace};
 use gpui::{
     div, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
     FocusHandle, Focusable, InteractiveElement, IntoElement, KeyContext, ManagedView, MouseButton,
@@ -295,6 +295,7 @@ impl Render for ModalLayer {
             return div();
         };
         let key_context = self.build_key_context(cx);
+        let border = border_focused_color(cx);
         div()
             .absolute()
             .size_full()
@@ -319,7 +320,12 @@ impl Render for ModalLayer {
                     });
                 }),
             )
-            .child(top.modal.view())
+            .child(
+                div()
+                    .border_1()
+                    .border_color(border)
+                    .child(top.modal.view()),
+            )
     }
 }
 
