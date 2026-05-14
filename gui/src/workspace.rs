@@ -321,10 +321,10 @@ impl Workspace {
                     }
                 }
             },
-            ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, cx),
-            ActionKind::MoveRight => self.dispatch_move_horizontal(1, cx),
-            ActionKind::MoveUp => self.dispatch_move_vertical(-1, cx),
-            ActionKind::MoveDown => self.dispatch_move_vertical(1, cx),
+            ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, false, cx),
+            ActionKind::MoveRight => self.dispatch_move_horizontal(1, false, cx),
+            ActionKind::MoveUp => self.dispatch_move_vertical(-1, false, cx),
+            ActionKind::MoveDown => self.dispatch_move_vertical(1, false, cx),
             ActionKind::PageUp => {
                 self.dispatch_page_motion(crate::editor::actions::movement::PageDir::Up, false, cx)
             },
@@ -339,41 +339,53 @@ impl Workspace {
             ActionKind::HalfPageDown => {
                 self.dispatch_page_motion(crate::editor::actions::movement::PageDir::Down, true, cx)
             },
-            ActionKind::MoveNextWordStart => {
-                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::NextStart, cx)
-            },
-            ActionKind::MoveNextWordEnd => {
-                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::NextEnd, cx)
-            },
-            ActionKind::MovePrevWordStart => {
-                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::PrevStart, cx)
-            },
-            ActionKind::MovePrevWordEnd => {
-                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::PrevEnd, cx)
-            },
+            ActionKind::MoveNextWordStart => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::NextStart,
+                false,
+                cx,
+            ),
+            ActionKind::MoveNextWordEnd => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::NextEnd,
+                false,
+                cx,
+            ),
+            ActionKind::MovePrevWordStart => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::PrevStart,
+                false,
+                cx,
+            ),
+            ActionKind::MovePrevWordEnd => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::PrevEnd,
+                false,
+                cx,
+            ),
             ActionKind::MoveNextLongWordStart => self.dispatch_move_word(
                 crate::editor::actions::movement::WordTarget::NextLongStart,
+                false,
                 cx,
             ),
             ActionKind::MoveNextLongWordEnd => self.dispatch_move_word(
                 crate::editor::actions::movement::WordTarget::NextLongEnd,
+                false,
                 cx,
             ),
             ActionKind::MovePrevLongWordStart => self.dispatch_move_word(
                 crate::editor::actions::movement::WordTarget::PrevLongStart,
+                false,
                 cx,
             ),
             ActionKind::MovePrevLongWordEnd => self.dispatch_move_word(
                 crate::editor::actions::movement::WordTarget::PrevLongEnd,
+                false,
                 cx,
             ),
-            ActionKind::GotoLineStart => self.dispatch_simple_goto(GotoKind::LineStart, cx),
-            ActionKind::GotoLineEnd => self.dispatch_simple_goto(GotoKind::LineEnd, cx),
+            ActionKind::GotoLineStart => self.dispatch_simple_goto(GotoKind::LineStart, false, cx),
+            ActionKind::GotoLineEnd => self.dispatch_simple_goto(GotoKind::LineEnd, false, cx),
             ActionKind::GotoFirstNonwhitespace => {
-                self.dispatch_simple_goto(GotoKind::FirstNonwhitespace, cx)
+                self.dispatch_simple_goto(GotoKind::FirstNonwhitespace, false, cx)
             },
-            ActionKind::GotoFileStart => self.dispatch_simple_goto(GotoKind::FileStart, cx),
-            ActionKind::GotoLastLine => self.dispatch_simple_goto(GotoKind::LastLine, cx),
+            ActionKind::GotoFileStart => self.dispatch_simple_goto(GotoKind::FileStart, false, cx),
+            ActionKind::GotoLastLine => self.dispatch_simple_goto(GotoKind::LastLine, false, cx),
             ActionKind::GotoLineNumber => self.dispatch_goto_line_number(cx),
             ActionKind::GotoColumn => self.dispatch_goto_column(cx),
             ActionKind::ExpandSelection => self.dispatch_expand_selection(cx),
@@ -420,37 +432,78 @@ impl Workspace {
                 crate::editor::actions::treesitter::NavDirection::Prev,
                 cx,
             ),
+            ActionKind::ExtendLeft => self.dispatch_move_horizontal(-1, true, cx),
+            ActionKind::ExtendRight => self.dispatch_move_horizontal(1, true, cx),
+            ActionKind::ExtendUp => self.dispatch_move_vertical(-1, true, cx),
+            ActionKind::ExtendDown => self.dispatch_move_vertical(1, true, cx),
+            ActionKind::ExtendNextWordStart => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::NextStart,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendNextWordEnd => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::NextEnd,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendPrevWordStart => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::PrevStart,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendPrevWordEnd => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::PrevEnd,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendToLineEnd => self.dispatch_simple_goto(GotoKind::LineEnd, true, cx),
+            ActionKind::ExtendToFileStart => {
+                self.dispatch_simple_goto(GotoKind::FileStart, true, cx)
+            },
+            ActionKind::ExtendToLastLine => self.dispatch_simple_goto(GotoKind::LastLine, true, cx),
+            ActionKind::ExtendSelectNextSibling => self.dispatch_select_sibling(
+                crate::editor::actions::treesitter::SiblingDir::Next,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendSelectPrevSibling => self.dispatch_select_sibling(
+                crate::editor::actions::treesitter::SiblingDir::Prev,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendMoveParentNodeStart => self.dispatch_move_parent_bound(
+                crate::editor::actions::treesitter::NodeBound::Start,
+                true,
+                cx,
+            ),
+            ActionKind::ExtendMoveParentNodeEnd => self.dispatch_move_parent_bound(
+                crate::editor::actions::treesitter::NodeBound::End,
+                true,
+                cx,
+            ),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
         }
     }
 
-    fn dispatch_move_horizontal(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
-        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+    fn dispatch_move_horizontal(&mut self, delta: i32, extend: bool, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
             return;
         };
-        let count = self
-            .input_state_machine
-            .update(cx, |sm, _| sm.take_consumed_count())
-            .unwrap_or(1);
+        let count = self.take_count(cx);
         editor.update(cx, |ed, cx| {
-            ed.handle_move_horizontal(delta, count, false, cx)
+            ed.handle_move_horizontal(delta, count, extend, cx)
         });
     }
 
-    fn dispatch_move_vertical(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
-        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+    fn dispatch_move_vertical(&mut self, delta: i32, extend: bool, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
             return;
         };
-        let count = self
-            .input_state_machine
-            .update(cx, |sm, _| sm.take_consumed_count())
-            .unwrap_or(1);
+        let count = self.take_count(cx);
         editor.update(cx, |ed, cx| {
-            ed.handle_move_vertical(delta, count, false, cx)
+            ed.handle_move_vertical(delta, count, extend, cx)
         });
     }
 
@@ -460,50 +513,41 @@ impl Workspace {
         half: bool,
         cx: &mut Context<'_, Self>,
     ) {
-        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+        let Some(editor) = self.active_editor(cx) else {
             return;
         };
-        let count = self
-            .input_state_machine
-            .update(cx, |sm, _| sm.take_consumed_count())
-            .unwrap_or(1);
+        let count = self.take_count(cx);
         editor.update(cx, |ed, cx| ed.handle_page_motion(dir, half, count, cx));
     }
 
     fn dispatch_move_word(
         &mut self,
         target: crate::editor::actions::movement::WordTarget,
+        extend: bool,
         cx: &mut Context<'_, Self>,
     ) {
-        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+        let Some(editor) = self.active_editor(cx) else {
             return;
         };
-        let count = self
-            .input_state_machine
-            .update(cx, |sm, _| sm.take_consumed_count())
-            .unwrap_or(1);
-        editor.update(cx, |ed, cx| ed.handle_move_word(target, count, false, cx));
+        let count = self.take_count(cx);
+        editor.update(cx, |ed, cx| ed.handle_move_word(target, count, extend, cx));
     }
 
-    fn dispatch_simple_goto(&mut self, kind: GotoKind, cx: &mut Context<'_, Self>) {
-        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+    fn dispatch_simple_goto(&mut self, kind: GotoKind, extend: bool, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
             return;
         };
         editor.update(cx, |ed, cx| match kind {
-            GotoKind::LineStart => ed.handle_goto_line_start(false, cx),
-            GotoKind::LineEnd => ed.handle_goto_line_end(false, cx),
-            GotoKind::FirstNonwhitespace => ed.handle_goto_first_nonwhitespace(false, cx),
-            GotoKind::FileStart => ed.handle_goto_file_start(false, cx),
-            GotoKind::LastLine => ed.handle_goto_last_line(false, cx),
+            GotoKind::LineStart => ed.handle_goto_line_start(extend, cx),
+            GotoKind::LineEnd => ed.handle_goto_line_end(extend, cx),
+            GotoKind::FirstNonwhitespace => ed.handle_goto_first_nonwhitespace(extend, cx),
+            GotoKind::FileStart => ed.handle_goto_file_start(extend, cx),
+            GotoKind::LastLine => ed.handle_goto_last_line(extend, cx),
         });
     }
 
     fn dispatch_goto_line_number(&mut self, cx: &mut Context<'_, Self>) {
-        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+        let Some(editor) = self.active_editor(cx) else {
             return;
         };
         let count = self
@@ -513,14 +557,10 @@ impl Workspace {
     }
 
     fn dispatch_goto_column(&mut self, cx: &mut Context<'_, Self>) {
-        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+        let Some(editor) = self.active_editor(cx) else {
             return;
         };
-        let count = self
-            .input_state_machine
-            .update(cx, |sm, _| sm.take_consumed_count())
-            .unwrap_or(1);
+        let count = self.take_count(cx);
         editor.update(cx, |ed, cx| ed.handle_goto_column(count, false, cx));
     }
 
@@ -1561,6 +1601,145 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(selection_offsets(vcx, &editor), vec![(0, 7)]);
+    }
+
+    fn seed_primary_offset(
+        vcx: &mut VisualTestContext,
+        editor: &Entity<crate::editor::Editor>,
+        offset: usize,
+    ) {
+        use stoat_text::{Bias, Selection, SelectionGoal};
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let anchor = snapshot.anchor_at(offset, Bias::Left);
+            ed.selections_mut().replace_with(
+                vec![Selection {
+                    id: 1,
+                    start: anchor,
+                    end: anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }],
+                &snapshot,
+            );
+        });
+    }
+
+    #[test]
+    fn dispatch_extend_right_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abcdef");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 2);
+
+        dispatch(&ws, vcx, stoat_action::ExtendRight);
+        dispatch(&ws, vcx, stoat_action::ExtendRight);
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn dispatch_extend_left_walks_anchor_backward() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abcdef");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 4);
+
+        dispatch(&ws, vcx, stoat_action::ExtendLeft);
+        dispatch(&ws, vcx, stoat_action::ExtendLeft);
+        vcx.run_until_parked();
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(2, 4)]);
+        let reversed = editor.read_with(vcx, |ed, _| ed.selections().all_anchors()[0].reversed);
+        assert!(reversed);
+    }
+
+    #[test]
+    fn dispatch_extend_down_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abc\ndef\nghi");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 1);
+
+        dispatch(&ws, vcx, stoat_action::ExtendDown);
+        vcx.run_until_parked();
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(1, 5)]);
+    }
+
+    #[test]
+    fn dispatch_extend_next_word_start_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo bar baz");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 1);
+
+        dispatch(&ws, vcx, stoat_action::ExtendNextWordStart);
+        vcx.run_until_parked();
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(1, 3)]);
+    }
+
+    #[test]
+    fn dispatch_extend_to_line_end_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world\nnext");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 2);
+
+        dispatch(&ws, vcx, stoat_action::ExtendToLineEnd);
+        vcx.run_until_parked();
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(2, 11)]);
+    }
+
+    #[test]
+    fn dispatch_extend_to_file_start_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 7);
+
+        dispatch(&ws, vcx, stoat_action::ExtendToFileStart);
+        vcx.run_until_parked();
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(0, 7)]);
+        let reversed = editor.read_with(vcx, |ed, _| ed.selections().all_anchors()[0].reversed);
+        assert!(reversed);
+    }
+
+    #[test]
+    fn dispatch_extend_to_last_line_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 2);
+
+        dispatch(&ws, vcx, stoat_action::ExtendToLastLine);
+        vcx.run_until_parked();
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(2, 11)]);
     }
 
     #[test]
