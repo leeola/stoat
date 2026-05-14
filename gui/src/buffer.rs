@@ -1,7 +1,9 @@
+use crate::globals::FsHostGlobal;
 use gpui::{Context, EventEmitter};
 use std::{
     collections::HashMap,
     ops::Range,
+    path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
 use stoat::buffer::{BufferId, SharedBuffer, TextBuffer};
@@ -13,6 +15,7 @@ use stoat_text::Anchor;
 /// gpui foreground; subscribers re-render in response.
 pub struct Buffer {
     inner: SharedBuffer,
+    file_path: Option<PathBuf>,
     syntax_map: Option<SyntaxMap>,
     marks: HashMap<char, Anchor>,
 }
@@ -23,6 +26,7 @@ pub enum BufferEvent {
     LanguageChanged,
     DiagnosticsUpdated,
     Saved,
+    SaveFailed { error: String },
     Reloaded,
 }
 
@@ -32,6 +36,7 @@ impl Buffer {
     pub fn from_shared(inner: SharedBuffer) -> Self {
         Self {
             inner,
+            file_path: None,
             syntax_map: None,
             marks: HashMap::new(),
         }
@@ -40,9 +45,26 @@ impl Buffer {
     pub fn with_text(buffer_id: BufferId, text: &str) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TextBuffer::with_text(buffer_id, text))),
+            file_path: None,
             syntax_map: None,
             marks: HashMap::new(),
         }
+    }
+
+    pub fn file_path(&self) -> Option<&Path> {
+        self.file_path.as_deref()
+    }
+
+    /// Attach (or clear) the on-disk path this buffer represents.
+    /// [`save`] consults this when deciding whether to write through
+    /// [`FsHostGlobal`]; `None` keeps `save` in the flip-dirty-only
+    /// fallback used by scratch buffers and tests.
+    pub fn set_file_path(&mut self, path: Option<PathBuf>, cx: &mut Context<'_, Self>) {
+        if self.file_path == path {
+            return;
+        }
+        self.file_path = path;
+        cx.notify();
     }
 
     pub fn shared(&self) -> &SharedBuffer {
@@ -71,10 +93,38 @@ impl Buffer {
         cx.notify();
     }
 
+    /// Write the buffer's rope text through [`FsHostGlobal`] when
+    /// the buffer carries a [`file_path`]; on success the inner
+    /// dirty flag clears and [`BufferEvent::Saved`] fires. On IO
+    /// failure the dirty flag stays set and
+    /// [`BufferEvent::SaveFailed`] fires so the status bar can
+    /// surface the error.
+    ///
+    /// Buffers with no [`file_path`] (scratch, test fixtures) skip
+    /// the write and fall through to the historical flip-dirty +
+    /// emit-[`BufferEvent::Saved`] behavior.
     pub fn save(&self, cx: &mut Context<'_, Self>) {
-        self.inner.write().expect("buffer lock poisoned").dirty = false;
-        cx.emit(BufferEvent::Saved);
-        cx.notify();
+        let Some(path) = self.file_path.clone() else {
+            self.inner.write().expect("buffer lock poisoned").dirty = false;
+            cx.emit(BufferEvent::Saved);
+            cx.notify();
+            return;
+        };
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        let text = self.text();
+        match fs.write(&path, text.as_bytes()) {
+            Ok(()) => {
+                self.inner.write().expect("buffer lock poisoned").dirty = false;
+                cx.emit(BufferEvent::Saved);
+                cx.notify();
+            },
+            Err(err) => {
+                cx.emit(BufferEvent::SaveFailed {
+                    error: err.to_string(),
+                });
+                cx.notify();
+            },
+        }
     }
 
     pub fn reload(&self, cx: &mut Context<'_, Self>) {
@@ -243,6 +293,96 @@ mod tests {
                 .rope()
                 .to_string(),
             "abcd"
+        );
+    }
+
+    fn install_fs_global(
+        cx: &mut TestAppContext,
+        fs: Arc<stoat::host::FakeFs>,
+    ) -> Arc<stoat::host::FakeFs> {
+        let arc: Arc<dyn stoat::host::FsHost> = fs.clone();
+        cx.update(|cx| cx.set_global(FsHostGlobal(arc)));
+        fs
+    }
+
+    #[test]
+    fn save_with_path_writes_through_fs_and_clears_dirty() {
+        use stoat::host::FsHost;
+        let mut cx = TestAppContext::single();
+        let fs = install_fs_global(&mut cx, Arc::new(stoat::host::FakeFs::new()));
+        let buffer = new_buffer(&mut cx, "hello");
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/tmp/out.txt")), cx)
+        });
+        buffer.update(&mut cx, |b, cx| b.edit(5..5, " world", cx));
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        buffer.update(&mut cx, |b, cx| b.save(cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), vec![BufferEvent::Saved]);
+        assert!(!buffer.read_with(&cx, |b, _| b.is_dirty()));
+        let mut buf = Vec::new();
+        (*fs)
+            .read(Path::new("/tmp/out.txt"), &mut buf)
+            .expect("file present after save");
+        assert_eq!(String::from_utf8(buf).expect("utf8"), "hello world");
+    }
+
+    #[test]
+    fn save_with_path_io_failure_keeps_dirty_and_emits_save_failed() {
+        let mut cx = TestAppContext::single();
+        let fs = install_fs_global(&mut cx, Arc::new(stoat::host::FakeFs::new()));
+        fs.fail_writes_to("/tmp/locked.txt", std::io::ErrorKind::PermissionDenied);
+        let buffer = new_buffer(&mut cx, "important");
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/tmp/locked.txt")), cx)
+        });
+        buffer.update(&mut cx, |b, cx| b.edit(9..9, "!", cx));
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        buffer.update(&mut cx, |b, cx| b.save(cx));
+        cx.run_until_parked();
+
+        let drained = drain(&events);
+        assert!(
+            matches!(drained.as_slice(), [BufferEvent::SaveFailed { .. }]),
+            "expected SaveFailed event, got {drained:?}",
+        );
+        assert!(buffer.read_with(&cx, |b, _| b.is_dirty()));
+    }
+
+    #[test]
+    fn save_without_path_keeps_legacy_dirty_flip() {
+        let mut cx = TestAppContext::single();
+        let buffer = new_buffer(&mut cx, "scratch");
+        buffer.update(&mut cx, |b, cx| b.edit(7..7, "!", cx));
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        buffer.update(&mut cx, |b, cx| b.save(cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), vec![BufferEvent::Saved]);
+        assert!(!buffer.read_with(&cx, |b, _| b.is_dirty()));
+    }
+
+    #[test]
+    fn set_file_path_no_op_when_unchanged_does_not_notify() {
+        let mut cx = TestAppContext::single();
+        let buffer = new_buffer(&mut cx, "x");
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/a")), cx)
+        });
+        assert_eq!(
+            buffer.read_with(&cx, |b, _| b.file_path().map(Path::to_path_buf)),
+            Some(PathBuf::from("/a")),
+        );
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/a")), cx)
+        });
+        assert_eq!(
+            buffer.read_with(&cx, |b, _| b.file_path().map(Path::to_path_buf)),
+            Some(PathBuf::from("/a")),
         );
     }
 }

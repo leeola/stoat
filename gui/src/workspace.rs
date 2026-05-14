@@ -146,6 +146,7 @@ impl Workspace {
                 .buffer_registry
                 .update(cx, |registry, cx| registry.open(&absolute, &text, cx));
             let buffer = cx.new(|_| Buffer::from_shared(shared));
+            buffer.update(cx, |b, cx| b.set_file_path(Some(absolute.clone()), cx));
             let executor = cx.global::<ExecutorGlobal>().0.clone();
             let multi_buffer = {
                 let buffer = buffer.clone();
@@ -162,7 +163,10 @@ impl Workspace {
             let workspace_handle = cx.weak_entity();
             let editor = cx
                 .new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
-            editor.update(cx, |ed, _| ed.set_workspace(Some(workspace_handle)));
+            editor.update(cx, |ed, cx| {
+                ed.set_workspace(Some(workspace_handle));
+                ed.set_file_path(Some(absolute.clone()), cx);
+            });
             let pane_id = if index == 0 {
                 self.pane_tree.read(cx).focus()
             } else {
@@ -661,6 +665,7 @@ impl Workspace {
                 }
             },
             ActionKind::SaveSelection => self.dispatch_save_selection(cx),
+            ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
             other => {
@@ -857,6 +862,22 @@ impl Workspace {
             return;
         };
         editor.update(cx, |ed, cx| ed.handle_save_selection(cx));
+    }
+
+    fn dispatch_save_buffer(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let buffer = editor
+            .read(cx)
+            .multi_buffer()
+            .read(cx)
+            .as_singleton()
+            .cloned();
+        let Some(buffer) = buffer else {
+            return;
+        };
+        buffer.update(cx, |b, cx| b.save(cx));
     }
 
     fn dispatch_jump(&mut self, dir: JumpDir, cx: &mut Context<'_, Self>) {
@@ -2327,6 +2348,60 @@ mod tests {
                 String::new()
             );
         });
+    }
+
+    #[test]
+    fn dispatch_save_buffer_writes_active_editor_buffer() {
+        use stoat::host::FsHost;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/save.rs", b"before");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/save.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let editor = ws.read_with(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .clone();
+            pane.read(cx)
+                .active_item()
+                .expect("editor active in pane")
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("active item is Editor")
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        let buffer_entity = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton buffer in editor");
+        buffer_entity.update(vcx, |b, cx| b.edit(6..6, " after", cx));
+        vcx.run_until_parked();
+        assert!(buffer_entity.read_with(vcx, |b, _| b.is_dirty()));
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.dispatch_action(Box::new(stoat_action::SaveBuffer), window, cx);
+        });
+        vcx.run_until_parked();
+
+        assert!(!buffer_entity.read_with(vcx, |b, _| b.is_dirty()));
+        let mut on_disk = Vec::new();
+        (*fs)
+            .read(Path::new("/tmp/repo/save.rs"), &mut on_disk)
+            .expect("save wrote through");
+        assert_eq!(String::from_utf8(on_disk).expect("utf8"), "before after");
     }
 
     #[test]

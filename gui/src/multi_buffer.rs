@@ -23,6 +23,7 @@ struct BufferBinding {
 pub enum MultiBufferEvent {
     Edited,
     Saved,
+    SaveFailed { error: String },
     Reloaded,
     DiagnosticsUpdated,
     LanguageChanged,
@@ -128,6 +129,9 @@ fn subscribe_buffer(buffer: &Entity<Buffer>, cx: &mut Context<'_, MultiBuffer>) 
         let re_emit = match event {
             BufferEvent::Edited => MultiBufferEvent::Edited,
             BufferEvent::Saved => MultiBufferEvent::Saved,
+            BufferEvent::SaveFailed { error } => MultiBufferEvent::SaveFailed {
+                error: error.clone(),
+            },
             BufferEvent::Reloaded => MultiBufferEvent::Reloaded,
             BufferEvent::DiagnosticsUpdated => MultiBufferEvent::DiagnosticsUpdated,
             BufferEvent::LanguageChanged => MultiBufferEvent::LanguageChanged,
