@@ -1,6 +1,6 @@
 use crate::diagnostics::DiagnosticSet;
 use gpui::{
-    div, hsla, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, SharedString,
+    div, hsla, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, Pixels, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle,
 };
 use lsp_types::DiagnosticSeverity;
@@ -392,6 +392,21 @@ pub(crate) fn apply_selection_paint(
     }
 }
 
+/// Convert a fractional `scroll_position.y` (in display rows) to the
+/// pixel offset suitable for `ScrollHandle::set_offset`. Returns a
+/// negative pixel value because gpui scrolls content up by holding a
+/// negative offset on the inner list. With this offset, `uniform_list`
+/// paints each visible row at
+/// `padded_bounds.origin.y + visible_ix * line_height - (scroll_position.y * line_height) %
+/// line_height`, matching the sub-pixel formula in
+/// `references/zed/crates/editor/src/element.rs:3575-3590`.
+pub(crate) fn scroll_position_to_pixel_offset_y(
+    scroll_position_y: f64,
+    line_height: Pixels,
+) -> Pixels {
+    Pixels::from(-(scroll_position_y * f64::from(f32::from(line_height))) as f32)
+}
+
 const DIFF_ADDED_HEX: u32 = 0x4caf50;
 const DIFF_MODIFIED_HEX: u32 = 0x2196f3;
 const DIFF_MOVED_HEX: u32 = 0x00bcd4;
@@ -609,6 +624,30 @@ mod tests {
         let g = (rgba.g * 255.0).round() as u32;
         let b = (rgba.b * 255.0).round() as u32;
         (r << 16) | (g << 8) | b
+    }
+
+    #[test]
+    fn scroll_position_to_pixel_offset_y_zero() {
+        let offset = scroll_position_to_pixel_offset_y(0.0, px(16.0));
+        assert_eq!(f32::from(offset), 0.0);
+    }
+
+    #[test]
+    fn scroll_position_to_pixel_offset_y_integer_row() {
+        let offset = scroll_position_to_pixel_offset_y(3.0, px(16.0));
+        assert_eq!(f32::from(offset), -48.0);
+    }
+
+    #[test]
+    fn scroll_position_to_pixel_offset_y_fractional_row() {
+        let offset = scroll_position_to_pixel_offset_y(2.5, px(16.0));
+        assert_eq!(f32::from(offset), -40.0);
+    }
+
+    #[test]
+    fn scroll_position_to_pixel_offset_y_sub_pixel_fraction() {
+        let offset = scroll_position_to_pixel_offset_y(0.25, px(16.0));
+        assert_eq!(f32::from(offset), -4.0);
     }
 
     #[test]

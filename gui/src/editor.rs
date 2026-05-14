@@ -11,10 +11,10 @@ use crate::{
     multi_buffer::{MultiBuffer, MultiBufferEvent},
 };
 use gpui::{
-    canvas, div, uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter,
+    canvas, div, px, uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter,
     InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
     Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled, Subscription, Task,
-    WeakEntity, Window,
+    UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
@@ -107,6 +107,7 @@ pub struct Editor {
     selections: SelectionsCollection,
     scroll_row: u32,
     scroll_manager: scroll::ScrollManager,
+    scroll_handle: UniformListScrollHandle,
     jumplist: JumpList,
     cell_size: Option<Size<Pixels>>,
     file_path: Option<std::path::PathBuf>,
@@ -157,6 +158,7 @@ impl Editor {
             selections: SelectionsCollection::new(),
             scroll_row: 0,
             scroll_manager: scroll::ScrollManager::new(std::time::Instant::now()),
+            scroll_handle: UniformListScrollHandle::new(),
             jumplist: JumpList::new(),
             cell_size: None,
             file_path: None,
@@ -260,6 +262,10 @@ impl Editor {
 
     pub fn scroll_manager_mut(&mut self) -> &mut scroll::ScrollManager {
         &mut self.scroll_manager
+    }
+
+    pub fn scroll_handle(&self) -> &UniformListScrollHandle {
+        &self.scroll_handle
     }
 
     pub fn jumplist(&self) -> &JumpList {
@@ -636,11 +642,11 @@ impl Editor {
     /// Apply a [`ScrollWheelEvent`] to the editor's scroll state.
     /// Resolves the line height from [`Editor::cell_size`] (no-op
     /// when unset), clamps the resulting fractional offset against
-    /// the buffer's last display row, and mirrors the floored row
-    /// into [`Editor::scroll_row`] so the existing render path keeps
-    /// painting at row granularity. Sub-pixel painting (next scroll
-    /// item) will pull the fractional remainder directly from the
-    /// [`scroll::ScrollManager`].
+    /// the buffer's last display row, mirrors the floored row into
+    /// [`Editor::scroll_row`], and pushes the fractional pixel offset
+    /// into the tracked [`UniformListScrollHandle`] so the
+    /// `uniform_list` paints each visible row at
+    /// `padded_bounds.origin.y + visible_ix * line_height - (scroll_pixel_y % line_height)`.
     pub fn handle_scroll_wheel(
         &mut self,
         event: &ScrollWheelEvent,
@@ -665,7 +671,15 @@ impl Editor {
         if !changed {
             return;
         }
-        let new_row = self.scroll_manager.anchor().offset.y.floor().max(0.0) as u32;
+        let scroll_position_y = self.scroll_manager.anchor().offset.y;
+        let pixel_offset_y =
+            render::scroll_position_to_pixel_offset_y(scroll_position_y, cell.height);
+        self.scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(Point::new(px(0.0), pixel_offset_y));
+        let new_row = scroll_position_y.floor().max(0.0) as u32;
         self.set_scroll_row(new_row, cx);
     }
 
@@ -765,6 +779,7 @@ impl Render for Editor {
                 .map(|editor| editor.update(cx, |ed, cx| ed.render_visible_rows(range, cx)))
                 .unwrap_or_default()
         })
+        .track_scroll(self.scroll_handle.clone())
         .size_full();
 
         let bounds_capture = canvas(
@@ -998,7 +1013,7 @@ mod tests {
             ..gpui::Modifiers::default()
         };
         ScrollWheelEvent {
-            position: Point::new(gpui::px(0.), gpui::px(0.)),
+            position: Point::new(px(0.), px(0.)),
             delta,
             modifiers,
             touch_phase: gpui::TouchPhase::Moved,
@@ -1048,6 +1063,58 @@ mod tests {
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
             3.0,
         );
+    }
+
+    #[test]
+    fn handle_scroll_wheel_pushes_pixel_offset_to_scroll_handle() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = new_editor_in_window(vcx, "a\nb\nc\nd\ne\nf\ng\nh");
+        editor.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        vcx.run_until_parked();
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(
+                    gpui::ScrollDelta::Pixels(Point::new(px(0.), px(-24.5))),
+                    false,
+                ),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        let offset = editor.read_with(vcx, |ed, _| {
+            ed.scroll_handle().0.borrow().base_handle.offset()
+        });
+        assert_eq!(offset.y, px(-24.5));
+        assert_eq!(offset.x, px(0.0));
+    }
+
+    #[test]
+    fn handle_scroll_wheel_pixel_offset_uses_fractional_row_position() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = new_editor_in_window(vcx, "a\nb\nc\nd\ne\nf");
+        editor.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        vcx.run_until_parked();
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -1.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        let offset = editor.read_with(vcx, |ed, _| {
+            ed.scroll_handle().0.borrow().base_handle.offset()
+        });
+        assert_eq!(offset.y, px(-16.0));
     }
 
     fn new_editor_in_window(
@@ -1439,7 +1506,7 @@ mod tests {
     }
 
     fn cell(width: f32, height: f32) -> Size<Pixels> {
-        gpui::size(gpui::px(width), gpui::px(height))
+        gpui::size(px(width), px(height))
     }
 
     #[test]
@@ -1482,8 +1549,8 @@ mod tests {
 
     fn bounds_at(x: f32, y: f32, w: f32, h: f32) -> Bounds<Pixels> {
         Bounds {
-            origin: Point::new(gpui::px(x), gpui::px(y)),
-            size: gpui::size(gpui::px(w), gpui::px(h)),
+            origin: Point::new(px(x), px(y)),
+            size: gpui::size(px(w), px(h)),
         }
     }
 
@@ -1593,7 +1660,7 @@ mod tests {
         let (_buffer, editor) = new_editor(&mut cx, "hello");
 
         let result = editor.update(&mut cx, |ed, cx| {
-            ed.pixel_bounds_for_utf16_offset(2, Point::new(gpui::px(0.0), gpui::px(0.0)), cx)
+            ed.pixel_bounds_for_utf16_offset(2, Point::new(px(0.0), px(0.0)), cx)
         });
         assert_eq!(result, None);
     }
@@ -1605,12 +1672,12 @@ mod tests {
         editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
 
         let result = editor.update(&mut cx, |ed, cx| {
-            ed.pixel_bounds_for_utf16_offset(0, Point::new(gpui::px(10.0), gpui::px(20.0)), cx)
+            ed.pixel_bounds_for_utf16_offset(0, Point::new(px(10.0), px(20.0)), cx)
         });
         assert_eq!(
             result,
             Some(Bounds {
-                origin: Point::new(gpui::px(10.0), gpui::px(20.0)),
+                origin: Point::new(px(10.0), px(20.0)),
                 size: cell(8.0, 16.0),
             }),
         );
@@ -1623,12 +1690,12 @@ mod tests {
         editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
 
         let result = editor.update(&mut cx, |ed, cx| {
-            ed.pixel_bounds_for_utf16_offset(5, Point::new(gpui::px(0.0), gpui::px(0.0)), cx)
+            ed.pixel_bounds_for_utf16_offset(5, Point::new(px(0.0), px(0.0)), cx)
         });
         assert_eq!(
             result,
             Some(Bounds {
-                origin: Point::new(gpui::px(8.0), gpui::px(16.0)),
+                origin: Point::new(px(8.0), px(16.0)),
                 size: cell(8.0, 16.0),
             }),
         );
@@ -1641,12 +1708,12 @@ mod tests {
         editor.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
 
         let result = editor.update(&mut cx, |ed, cx| {
-            ed.pixel_bounds_for_utf16_offset(2, Point::new(gpui::px(0.0), gpui::px(0.0)), cx)
+            ed.pixel_bounds_for_utf16_offset(2, Point::new(px(0.0), px(0.0)), cx)
         });
         assert_eq!(
             result,
             Some(Bounds {
-                origin: Point::new(gpui::px(16.0), gpui::px(0.0)),
+                origin: Point::new(px(16.0), px(0.0)),
                 size: cell(8.0, 16.0),
             }),
         );
