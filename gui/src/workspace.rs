@@ -339,6 +339,34 @@ impl Workspace {
             ActionKind::HalfPageDown => {
                 self.dispatch_page_motion(crate::editor::actions::movement::PageDir::Down, true, cx)
             },
+            ActionKind::MoveNextWordStart => {
+                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::NextStart, cx)
+            },
+            ActionKind::MoveNextWordEnd => {
+                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::NextEnd, cx)
+            },
+            ActionKind::MovePrevWordStart => {
+                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::PrevStart, cx)
+            },
+            ActionKind::MovePrevWordEnd => {
+                self.dispatch_move_word(crate::editor::actions::movement::WordTarget::PrevEnd, cx)
+            },
+            ActionKind::MoveNextLongWordStart => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::NextLongStart,
+                cx,
+            ),
+            ActionKind::MoveNextLongWordEnd => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::NextLongEnd,
+                cx,
+            ),
+            ActionKind::MovePrevLongWordStart => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::PrevLongStart,
+                cx,
+            ),
+            ActionKind::MovePrevLongWordEnd => self.dispatch_move_word(
+                crate::editor::actions::movement::WordTarget::PrevLongEnd,
+                cx,
+            ),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -388,6 +416,22 @@ impl Workspace {
             .update(cx, |sm, _| sm.take_consumed_count())
             .unwrap_or(1);
         editor.update(cx, |ed, cx| ed.handle_page_motion(dir, half, count, cx));
+    }
+
+    fn dispatch_move_word(
+        &mut self,
+        target: crate::editor::actions::movement::WordTarget,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let count = self
+            .input_state_machine
+            .update(cx, |sm, _| sm.take_consumed_count())
+            .unwrap_or(1);
+        editor.update(cx, |ed, cx| ed.handle_move_word(target, count, false, cx));
     }
 }
 
@@ -1253,6 +1297,37 @@ mod tests {
 
         let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn dispatch_move_next_word_start_selects_first_word() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo bar baz");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::MoveNextWordStart);
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn dispatch_move_word_consumes_count() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo bar baz qux");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| {
+            sm.set_active_editor(Some(editor.downgrade()));
+            sm.set_consumed_count_for_test(Some(2));
+        });
+
+        dispatch(&ws, vcx, stoat_action::MoveNextWordStart);
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 7)]);
     }
 
     #[test]

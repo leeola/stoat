@@ -1,7 +1,10 @@
 use crate::editor::{Editor, EditorEvent};
 use gpui::Context;
 use stoat::{multi_buffer::MultiBufferSnapshot, DisplayPoint};
-use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
+use stoat_text::{
+    next_long_word_end, next_long_word_start, next_word_end, next_word_start, prev_long_word_end,
+    prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias, Selection, SelectionGoal,
+};
 
 /// Vertical-only page-style motion direction. `Up` walks toward
 /// row 0; `Down` walks toward the last buffer row.
@@ -9,6 +12,22 @@ use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 pub enum PageDir {
     Up,
     Down,
+}
+
+/// Word-boundary target for [`Editor::handle_move_word`]. `Long`
+/// variants treat any run of non-whitespace as one word, ignoring
+/// punctuation-vs-alphanumeric boundaries; the non-`Long` variants
+/// split on those boundaries.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WordTarget {
+    NextStart,
+    NextEnd,
+    PrevStart,
+    PrevEnd,
+    NextLongStart,
+    NextLongEnd,
+    PrevLongStart,
+    PrevLongEnd,
 }
 
 /// Fallback viewport row count when the editor's text-region
@@ -204,6 +223,123 @@ impl Editor {
         cx.notify();
     }
 
+    /// Move every selection's head to the next or previous word
+    /// boundary `count` times. When `extend = false`, the selection
+    /// covers the traversed word (Helix/Kakoune-style); when
+    /// `extend = true`, only the head moves and the tail is
+    /// preserved.
+    pub fn handle_move_word(
+        &mut self,
+        target: WordTarget,
+        count: u32,
+        extend: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let mut moved = false;
+        let new_disjoint: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let head_offset = snapshot.resolve_anchor(&sel.head());
+                let mut target_offset = head_offset;
+                for _ in 0..count {
+                    let next = match target {
+                        WordTarget::NextStart => next_word_start(snapshot.rope(), target_offset),
+                        WordTarget::NextEnd => next_word_end(snapshot.rope(), target_offset),
+                        WordTarget::PrevStart => prev_word_start(snapshot.rope(), target_offset),
+                        WordTarget::PrevEnd => prev_word_end(snapshot.rope(), target_offset),
+                        WordTarget::NextLongStart => {
+                            next_long_word_start(snapshot.rope(), target_offset)
+                        },
+                        WordTarget::NextLongEnd => {
+                            next_long_word_end(snapshot.rope(), target_offset)
+                        },
+                        WordTarget::PrevLongStart => {
+                            prev_long_word_start(snapshot.rope(), target_offset)
+                        },
+                        WordTarget::PrevLongEnd => {
+                            prev_long_word_end(snapshot.rope(), target_offset)
+                        },
+                    };
+                    if next == target_offset {
+                        break;
+                    }
+                    target_offset = next;
+                }
+                if target_offset == head_offset {
+                    return sel.clone();
+                }
+                moved = true;
+
+                let shift_to_prev_char = || {
+                    snapshot
+                        .rope()
+                        .reversed_chars_at(target_offset)
+                        .next()
+                        .map(|ch| target_offset - ch.len_utf8())
+                        .unwrap_or(target_offset)
+                };
+
+                if extend {
+                    let new_head_offset =
+                        if target_offset > head_offset || matches!(target, WordTarget::PrevEnd) {
+                            shift_to_prev_char()
+                        } else {
+                            target_offset
+                        };
+                    let head_anchor = snapshot.anchor_at(new_head_offset, Bias::Right);
+                    return extend_head(
+                        sel,
+                        head_anchor,
+                        new_head_offset,
+                        SelectionGoal::None,
+                        &snapshot,
+                    );
+                }
+
+                if target_offset > head_offset {
+                    let end_offset = shift_to_prev_char();
+                    let tail_anchor = snapshot.anchor_at(head_offset, Bias::Right);
+                    let head_anchor = snapshot.anchor_at(end_offset, Bias::Right);
+                    Selection {
+                        id: sel.id,
+                        start: tail_anchor,
+                        end: head_anchor,
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    }
+                } else {
+                    let resolved_head_offset = if matches!(target, WordTarget::PrevEnd) {
+                        shift_to_prev_char()
+                    } else {
+                        target_offset
+                    };
+                    let head_anchor = snapshot.anchor_at(resolved_head_offset, Bias::Right);
+                    let tail_offset = match snapshot.rope().chars_at(head_offset).next() {
+                        Some(ch) => head_offset + ch.len_utf8(),
+                        None => head_offset,
+                    };
+                    let tail_anchor = snapshot.anchor_at(tail_offset, Bias::Right);
+                    Selection {
+                        id: sel.id,
+                        start: head_anchor,
+                        end: tail_anchor,
+                        reversed: true,
+                        goal: SelectionGoal::None,
+                    }
+                }
+            })
+            .collect();
+        if !moved {
+            return;
+        }
+        self.selections.replace_with(new_disjoint, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     fn viewport_rows_for_page(&self) -> u32 {
         let Some(bounds) = self.text_region_bounds else {
             return DEFAULT_VIEWPORT_ROWS;
@@ -296,6 +432,18 @@ mod tests {
             let head_anchor = ed.selections().all_anchors()[0].head();
             let head_point = buffer_snap.point_for_anchor(&head_anchor);
             snapshot.buffer_to_display(head_point).row
+        })
+    }
+
+    fn selection_span(editor: &Entity<Editor>, cx: &mut TestAppContext) -> (usize, usize, bool) {
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = &ed.selections().all_anchors()[0];
+            (
+                snapshot.resolve_anchor(&sel.start),
+                snapshot.resolve_anchor(&sel.end),
+                sel.reversed,
+            )
         })
     }
 
@@ -512,5 +660,188 @@ mod tests {
         });
 
         assert_eq!(cursor_display_row(&editor, &mut cx), 7);
+    }
+
+    #[test]
+    fn move_word_next_start_creates_selection() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo bar");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (0, 3, false));
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 3);
+    }
+
+    #[test]
+    fn move_word_next_start_repeated_snaps_tail() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo bar baz");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
+        });
+        assert_eq!(selection_span(&editor, &mut cx), (0, 3, false));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
+        });
+        assert_eq!(selection_span(&editor, &mut cx), (3, 7, false));
+    }
+
+    #[test]
+    fn move_word_next_end_creates_selection() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo bar");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextEnd, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (0, 2, false));
+    }
+
+    #[test]
+    fn move_word_next_end_at_eof_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo");
+        seed_at_offset(&editor, &mut cx, 3);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextEnd, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (3, 3, false));
+    }
+
+    #[test]
+    fn move_word_prev_start_creates_reversed_selection() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo bar");
+        seed_at_offset(&editor, &mut cx, 6);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::PrevStart, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (4, 7, true));
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 4);
+    }
+
+    #[test]
+    fn move_word_prev_start_at_start_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo bar");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::PrevStart, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (0, 0, false));
+    }
+
+    #[test]
+    fn move_word_prev_end_lands_on_last_char_of_prev_word() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo bar");
+        seed_at_offset(&editor, &mut cx, 6);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::PrevEnd, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (2, 7, true));
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 2);
+    }
+
+    #[test]
+    fn move_word_count_accumulates_across_words() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo bar baz qux");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextStart, 3, false, cx)
+        });
+
+        // count repeats next_word_start three times (0 -> 4 -> 8 -> 12),
+        // then collapses the trailing position to the char before, leaving
+        // a selection that spans every word traversed.
+        assert_eq!(selection_span(&editor, &mut cx), (0, 11, false));
+    }
+
+    #[test]
+    fn move_word_long_start_skips_punctuation_within_word() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo.bar baz");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextLongStart, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (0, 7, false));
+    }
+
+    #[test]
+    fn move_word_short_start_stops_on_punctuation_boundary() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo.bar baz");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
+        });
+
+        // next_word_start lands on the '.' (offset 3); the forward branch
+        // shifts back one char so the selection covers "foo" only.
+        assert_eq!(selection_span(&editor, &mut cx), (0, 2, false));
+    }
+
+    #[test]
+    fn move_word_long_end_advances_past_punctuation() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo.bar baz");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::NextLongEnd, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (0, 6, false));
+    }
+
+    #[test]
+    fn move_word_prev_long_start_walks_full_run_backward() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo.bar baz");
+        seed_at_offset(&editor, &mut cx, 10);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::PrevLongStart, 1, false, cx)
+        });
+
+        assert_eq!(selection_span(&editor, &mut cx), (8, 11, true));
+    }
+
+    #[test]
+    fn move_word_prev_long_end_lands_just_after_prev_run() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "foo.bar baz");
+        seed_at_offset(&editor, &mut cx, 10);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_move_word(WordTarget::PrevLongEnd, 1, false, cx)
+        });
+
+        // The backward branch only shifts the head for PrevEnd; long-end
+        // leaves the head at the position returned by prev_long_word_end.
+        assert_eq!(selection_span(&editor, &mut cx), (7, 11, true));
     }
 }
