@@ -7,8 +7,8 @@ use crate::{
 pub use delegate::{PickerDelegate, PickerSecondary};
 use gpui::{
     div, uniform_list, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window,
+    Focusable, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Render, Styled,
+    Subscription, Task, UniformListScrollHandle, Window,
 };
 use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
@@ -237,10 +237,6 @@ impl<D: PickerDelegate> Picker<D> {
 }
 
 impl<D: PickerDelegate> ModalView for Picker<D> {
-    fn key_context_name(&self, _cx: &gpui::App) -> Option<SharedString> {
-        Some("Picker".into())
-    }
-
     fn handle_action(
         &mut self,
         action: &dyn stoat_action::Action,

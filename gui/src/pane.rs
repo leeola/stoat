@@ -2,8 +2,8 @@ use crate::{
     actions::SetActivePane, item::ItemHandle, tab_bar::render_tab_bar, workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, App, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
-    KeyContext, MouseButton, ParentElement, Render, Styled, WeakEntity, Window,
+    div, AnyElement, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, Styled, WeakEntity, Window,
 };
 use stoat::pane::PaneId;
 
@@ -79,22 +79,6 @@ impl Pane {
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
-    }
-
-    /// Compose the `KeyContext` pushed by this pane's rendered
-    /// element. The bare `"Pane"` tag is always present; the
-    /// active item's `key_context_name(cx)` is added when it
-    /// returns a value so keymap predicates can target the
-    /// active item type.
-    pub fn build_key_context(&self, cx: &App) -> KeyContext {
-        let mut context = KeyContext::default();
-        context.add("Pane");
-        if let Some(item) = self.active_item() {
-            if let Some(name) = item.key_context_name(cx) {
-                context.add(name);
-            }
-        }
-        context
     }
 
     pub fn add_item(&mut self, item: Box<dyn ItemHandle>, cx: &mut Context<'_, Self>) -> usize {
@@ -211,7 +195,6 @@ impl Render for Pane {
             .flex()
             .flex_col()
             .size_full()
-            .key_context(self.build_key_context(cx))
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, _event, window, cx| {
@@ -618,79 +601,6 @@ mod tests {
         assert_eq!(drain(&events), Vec::<PaneEvent>::new());
         assert_eq!(item_labels(&pane, &cx), vec!["b", "a", "c", "d"]);
         assert_eq!(pane.read_with(&cx, |p, _| p.active_index()), 2);
-    }
-
-    struct EditorLikeItem;
-
-    impl Render for EditorLikeItem {
-        fn render(
-            &mut self,
-            _window: &mut Window,
-            _cx: &mut Context<'_, Self>,
-        ) -> impl IntoElement {
-            div().size_full()
-        }
-    }
-
-    impl ItemView for EditorLikeItem {
-        fn tab_label(&self, _cx: &App) -> SharedString {
-            "editor".into()
-        }
-
-        fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
-            Some("Editor".into())
-        }
-
-        fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError>
-        where
-            Self: Sized,
-        {
-            DeserializeSnafu {
-                reason: "EditorLikeItem is test-only and does not deserialize",
-            }
-            .fail()
-        }
-    }
-
-    #[test]
-    fn build_key_context_on_empty_pane_includes_only_pane_tag() {
-        let mut cx = TestAppContext::single();
-        let pane = new_pane(&mut cx);
-
-        let context = pane.read_with(&cx, |p, app| p.build_key_context(app));
-        assert!(context.contains("Pane"));
-        assert!(!context.contains("Editor"));
-    }
-
-    #[test]
-    fn build_key_context_with_default_item_omits_item_tag() {
-        let mut cx = TestAppContext::single();
-        let pane = new_pane(&mut cx);
-        let item = new_item(&mut cx, "a");
-        pane.update(&mut cx, |p, cx| {
-            p.add_item(item, cx);
-        });
-
-        let context = pane.read_with(&cx, |p, app| p.build_key_context(app));
-        assert!(context.contains("Pane"));
-        assert!(!context.contains("Editor"));
-    }
-
-    #[test]
-    fn build_key_context_includes_active_item_tag_when_present() {
-        let mut cx = TestAppContext::single();
-        let pane = new_pane(&mut cx);
-        let item: Box<dyn ItemHandle> = {
-            let entity = cx.update(|cx| cx.new(|_| EditorLikeItem));
-            Box::new(entity)
-        };
-        pane.update(&mut cx, |p, cx| {
-            p.add_item(item, cx);
-        });
-
-        let context = pane.read_with(&cx, |p, app| p.build_key_context(app));
-        assert!(context.contains("Pane"));
-        assert!(context.contains("Editor"));
     }
 
     #[test]

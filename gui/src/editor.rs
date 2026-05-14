@@ -975,10 +975,6 @@ impl ItemView for Editor {
             .unwrap_or_else(|| SharedString::from("(scratch)"))
     }
 
-    fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
-        Some(SharedString::from("Editor"))
-    }
-
     fn is_dirty(&self, cx: &App) -> bool {
         self.multi_buffer
             .read(cx)
@@ -2172,16 +2168,6 @@ mod tests {
 
         editor.read_with(&cx, |ed, app| {
             assert_eq!(ed.tab_label(app), SharedString::from("main.rs"));
-        });
-    }
-
-    #[test]
-    fn key_context_name_is_editor() {
-        let mut cx = TestAppContext::single();
-        let (_buffer, editor) = new_editor(&mut cx, "");
-
-        editor.read_with(&cx, |ed, app| {
-            assert_eq!(ed.key_context_name(app), Some(SharedString::from("Editor")));
         });
     }
 

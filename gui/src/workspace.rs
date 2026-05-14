@@ -19,8 +19,8 @@ use crate::{
 };
 use gpui::{
     deferred, div, px, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
-    InteractiveElement, IntoElement, KeyContext, ParentElement, Render, SharedString, Styled,
-    Subscription, Window,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
+    Window,
 };
 use std::path::{Path, PathBuf};
 use stoat::pane::{Axis, Direction};
@@ -335,19 +335,6 @@ impl Workspace {
         cx.emit(WorkspaceEvent::DockAdded { index });
         cx.notify();
         index
-    }
-
-    /// Compose the `KeyContext` pushed by this workspace's
-    /// rendered element. Today only the "Workspace" tag is
-    /// added; per-workspace flags (`mode`, `palette_open`,
-    /// `finder_open`, `claude_focused`) fold in as their owning
-    /// features add the corresponding state to `Workspace`.
-    pub fn build_key_context(&self) -> KeyContext {
-        let mut context = KeyContext::default();
-        context.add("Workspace");
-        // FIXME: per-workspace flags land as their owning features
-        // (mode, ModalLayer, claude chat) add fields to Workspace.
-        context
     }
 
     /// Remove and return the dock at `index`. Out-of-range indices
@@ -1043,7 +1030,6 @@ impl Render for Workspace {
             .font_family(ui_family)
             .text_size(px(ui_size))
             .track_focus(&self.focus_handle)
-            .key_context(self.build_key_context())
             .children(left_docks)
             .child(
                 div()
@@ -1209,15 +1195,6 @@ mod tests {
         let label = SharedString::from(label.to_string());
         let entity = cx.update(|cx| cx.new(|_| WorkspaceItem { label }));
         Box::new(entity)
-    }
-
-    #[test]
-    fn build_key_context_includes_workspace_tag() {
-        let mut cx = TestAppContext::single();
-        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
-
-        let context = ws.read_with(&cx, |w, _| w.build_key_context());
-        assert!(context.contains("Workspace"));
     }
 
     #[test]

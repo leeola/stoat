@@ -28,15 +28,6 @@ pub trait ItemView: Render + 'static {
         None
     }
 
-    /// Identifier pushed into the host pane's `KeyContext` when
-    /// this item is active. Concrete impls return their type name
-    /// (`"Editor"`, `"Run"`, `"Claude"`, ...) so keymap predicates
-    /// can target the active item type. Defaults to `None`, which
-    /// adds no item-specific context.
-    fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
-        None
-    }
-
     /// Whether the item has unsaved changes. The tab bar paints a
     /// dirty marker when this returns `true`. Defaults to `false`
     /// for read-only items.
@@ -85,7 +76,6 @@ pub trait ItemHandle: Send + 'static {
     fn boxed_clone(&self) -> Box<dyn ItemHandle>;
     fn tab_label(&self, cx: &App) -> SharedString;
     fn tab_icon(&self, cx: &App) -> Option<SharedString>;
-    fn key_context_name(&self, cx: &App) -> Option<SharedString>;
     fn is_dirty(&self, cx: &App) -> bool;
     fn serialize(&self, cx: &App) -> serde_json::Value;
     fn save(&self, cx: &mut App) -> Task<Result<(), ItemError>>;
@@ -110,10 +100,6 @@ impl<T: ItemView> ItemHandle for Entity<T> {
 
     fn tab_icon(&self, cx: &App) -> Option<SharedString> {
         self.read(cx).tab_icon(cx)
-    }
-
-    fn key_context_name(&self, cx: &App) -> Option<SharedString> {
-        self.read(cx).key_context_name(cx)
     }
 
     fn is_dirty(&self, cx: &App) -> bool {
@@ -210,10 +196,6 @@ mod tests {
             Some("file".into())
         }
 
-        fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
-            Some("Editor".into())
-        }
-
         fn serialize(&self, _cx: &App) -> Value {
             Value::String(self.body.clone())
         }
@@ -244,7 +226,6 @@ mod tests {
         item.read_with(&cx, |item, app| {
             assert_eq!(item.tab_label(app), SharedString::from("readme"));
             assert!(item.tab_icon(app).is_none());
-            assert!(item.key_context_name(app).is_none());
             assert!(!item.is_dirty(app));
             assert!(item.serialize(app).is_null());
         });
@@ -263,10 +244,6 @@ mod tests {
         item.read_with(&cx, |item, app| {
             assert_eq!(item.tab_label(app), SharedString::from("draft"));
             assert_eq!(item.tab_icon(app), Some(SharedString::from("file")));
-            assert_eq!(
-                item.key_context_name(app),
-                Some(SharedString::from("Editor"))
-            );
             assert!(item.is_dirty(app));
             assert_eq!(item.serialize(app), Value::String("hello".into()));
         });
