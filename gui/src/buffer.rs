@@ -1,10 +1,12 @@
 use gpui::{Context, EventEmitter};
 use std::{
+    collections::HashMap,
     ops::Range,
     sync::{Arc, RwLock},
 };
 use stoat::buffer::{BufferId, SharedBuffer, TextBuffer};
 use stoat_language::SyntaxMap;
+use stoat_text::Anchor;
 
 /// Entity-shaped wrapper around [`SharedBuffer`]. Mutations go through
 /// the wrapper's methods so the entity emits [`BufferEvent`]s on the
@@ -12,6 +14,7 @@ use stoat_language::SyntaxMap;
 pub struct Buffer {
     inner: SharedBuffer,
     syntax_map: Option<SyntaxMap>,
+    marks: HashMap<char, Anchor>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -30,6 +33,7 @@ impl Buffer {
         Self {
             inner,
             syntax_map: None,
+            marks: HashMap::new(),
         }
     }
 
@@ -37,6 +41,7 @@ impl Buffer {
         Self {
             inner: Arc::new(RwLock::new(TextBuffer::with_text(buffer_id, text))),
             syntax_map: None,
+            marks: HashMap::new(),
         }
     }
 
@@ -96,6 +101,19 @@ impl Buffer {
         self.syntax_map = map;
         cx.emit(BufferEvent::LanguageChanged);
         cx.notify();
+    }
+
+    /// Store the cursor anchor `anchor` under mark name `ch`.
+    /// Overwrites any prior mark with the same name. Marks are not
+    /// rendered, so the call does not emit [`BufferEvent`].
+    pub fn set_mark(&mut self, ch: char, anchor: Anchor) {
+        self.marks.insert(ch, anchor);
+    }
+
+    /// Returns the anchor stored under mark name `ch`, or `None`
+    /// when no mark has been set under that name.
+    pub fn get_mark(&self, ch: char) -> Option<Anchor> {
+        self.marks.get(&ch).copied()
     }
 
     pub fn diagnostics_updated(&self, cx: &mut Context<'_, Self>) {

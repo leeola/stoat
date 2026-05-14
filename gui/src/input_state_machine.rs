@@ -1,6 +1,9 @@
 use crate::{
-    actions::ApplyFindChar,
-    editor::{actions::movement::FindKind, Editor},
+    actions::{ApplyFindChar, ApplyMarkChar},
+    editor::{
+        actions::{marks::MarkRequest, movement::FindKind},
+        Editor,
+    },
     workspace::Workspace,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -82,6 +85,14 @@ pub struct InputStateMachine {
     /// clears the chord and falls through to the normal keymap
     /// path.
     pending_find: Option<PendingFind>,
+    /// Active after-key chord set by the
+    /// `SetMark`/`GotoMark`/`GotoMarkExact` priming actions. The
+    /// next keystroke in normal mode that resolves to
+    /// `KeyCode::Char` is consumed as the mark name and dispatched
+    /// through [`crate::actions::ApplyMarkChar`]; any other
+    /// keystroke clears the chord and falls through to the normal
+    /// keymap path.
+    pending_mark: Option<MarkRequest>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -116,6 +127,7 @@ impl InputStateMachine {
             active_editor: None,
             editor_focus_target: None,
             pending_find: None,
+            pending_mark: None,
             workspace,
             keymap,
         }
@@ -374,6 +386,20 @@ impl InputStateMachine {
         cx.notify();
     }
 
+    /// Active after-key chord state, if a mark priming action
+    /// armed one and the consuming keystroke has not arrived yet.
+    pub fn pending_mark(&self) -> Option<MarkRequest> {
+        self.pending_mark
+    }
+
+    /// Arm the after-key mark chord. The next keystroke that
+    /// resolves to `KeyCode::Char` in normal mode is consumed as
+    /// the mark name; any other keystroke clears the chord.
+    pub fn set_pending_mark(&mut self, request: MarkRequest, cx: &mut Context<'_, Self>) {
+        self.pending_mark = Some(request);
+        cx.notify();
+    }
+
     pub fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
     }
@@ -465,6 +491,16 @@ impl InputStateMachine {
                 })];
             }
             self.pending_find = None;
+            cx.notify();
+        }
+
+        if self.mode() == "normal" && self.pending_mark.is_some() {
+            if let KeyCode::Char(ch) = event.code {
+                let request = self.pending_mark.take().expect("checked above");
+                cx.notify();
+                return vec![Box::new(ApplyMarkChar { request, ch })];
+            }
+            self.pending_mark = None;
             cx.notify();
         }
         let digit = unmodified_ascii_digit(&event);
@@ -1439,6 +1475,56 @@ mod tests {
 
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
         sm.read_with(&cx, |sm, _| assert!(sm.pending_find().is_none()));
+    }
+
+    #[test]
+    fn set_pending_mark_arms_chord() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "normal");
+
+        sm.update(&mut cx, |sm, cx| sm.set_pending_mark(MarkRequest::Set, cx));
+
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.pending_mark(), Some(MarkRequest::Set));
+        });
+    }
+
+    #[test]
+    fn char_keystroke_consumes_mark_chord_and_emits_apply_action() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        set_mode(&mut cx, &sm, "normal");
+        sm.update(&mut cx, |sm, cx| {
+            sm.set_pending_mark(MarkRequest::GotoExact, cx)
+        });
+
+        let stroke = key("m");
+        let actions = feed_in_app(&mut cx, &sm, |sm, cx| sm.feed(&stroke, cx));
+
+        assert_eq!(actions.len(), 1);
+        let apply = actions[0]
+            .as_any()
+            .downcast_ref::<ApplyMarkChar>()
+            .expect("ApplyMarkChar");
+        assert_eq!(apply.request, MarkRequest::GotoExact);
+        assert_eq!(apply.ch, 'm');
+        sm.read_with(&cx, |sm, _| assert!(sm.pending_mark().is_none()));
+    }
+
+    #[test]
+    fn non_char_keystroke_clears_mark_chord_and_falls_through() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { Escape -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(&mut cx, &sm, "normal");
+        sm.update(&mut cx, |sm, cx| sm.set_pending_mark(MarkRequest::Set, cx));
+
+        let stroke = key("escape");
+        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
+        sm.read_with(&cx, |sm, _| assert!(sm.pending_mark().is_none()));
     }
 
     #[test]

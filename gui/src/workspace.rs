@@ -537,6 +537,42 @@ impl Workspace {
                     }
                 }
             },
+            ActionKind::SetMark => {
+                self.dispatch_set_pending_mark(crate::editor::actions::marks::MarkRequest::Set, cx)
+            },
+            ActionKind::GotoMark => self.dispatch_set_pending_mark(
+                crate::editor::actions::marks::MarkRequest::GotoLine,
+                cx,
+            ),
+            ActionKind::GotoMarkExact => self.dispatch_set_pending_mark(
+                crate::editor::actions::marks::MarkRequest::GotoExact,
+                cx,
+            ),
+            ActionKind::ApplyMarkChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplyMarkChar>()
+                {
+                    if let Some(editor) = self.active_editor(cx) {
+                        let request = apply.request;
+                        let ch = apply.ch;
+                        editor.update(cx, |ed, cx| match request {
+                            crate::editor::actions::marks::MarkRequest::Set => {
+                                ed.handle_set_mark(ch, cx)
+                            },
+                            crate::editor::actions::marks::MarkRequest::GotoLine => {
+                                ed.handle_goto_mark(ch, false, cx)
+                            },
+                            crate::editor::actions::marks::MarkRequest::GotoExact => {
+                                ed.handle_goto_mark(ch, true, cx)
+                            },
+                        });
+                    }
+                }
+            },
+            ActionKind::SaveSelection => self.dispatch_save_selection(cx),
+            ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
+            ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -716,6 +752,39 @@ impl Workspace {
         self.input_state_machine
             .update(cx, |sm, cx| sm.set_pending_find(kind, extend, count, cx));
     }
+
+    fn dispatch_set_pending_mark(
+        &mut self,
+        request: crate::editor::actions::marks::MarkRequest,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.set_pending_mark(request, cx));
+    }
+
+    fn dispatch_save_selection(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| ed.handle_save_selection(cx));
+    }
+
+    fn dispatch_jump(&mut self, dir: JumpDir, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let count = self.take_count(cx);
+        editor.update(cx, |ed, cx| match dir {
+            JumpDir::Backward => ed.handle_jump_backward(count, cx),
+            JumpDir::Forward => ed.handle_jump_forward(count, cx),
+        });
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum JumpDir {
+    Backward,
+    Forward,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -1814,6 +1883,43 @@ mod tests {
 
         assert_eq!(cursor_offsets(vcx, &editor), vec![4]);
         sm.read_with(vcx, |sm, _| assert!(sm.pending_find().is_none()));
+    }
+
+    #[test]
+    fn dispatch_set_mark_then_goto_mark_round_trips() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abcdef");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 4);
+
+        dispatch(&ws, vcx, stoat_action::SetMark);
+        vcx.simulate_keystrokes("a");
+
+        seed_primary_offset(vcx, &editor, 0);
+        dispatch(&ws, vcx, stoat_action::GotoMarkExact);
+        vcx.simulate_keystrokes("a");
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![4]);
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_mark().is_none()));
+    }
+
+    #[test]
+    fn dispatch_jump_backward_returns_to_saved_position() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abcdef");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 3);
+        dispatch(&ws, vcx, stoat_action::SaveSelection);
+
+        seed_primary_offset(vcx, &editor, 0);
+        dispatch(&ws, vcx, stoat_action::JumpBackward);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![3]);
     }
 
     #[test]

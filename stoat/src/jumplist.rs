@@ -14,13 +14,13 @@ impl JumpList {
         Self::default()
     }
 
-    pub(crate) fn save(&mut self, pos: usize) {
+    pub fn save(&mut self, pos: usize) {
         self.positions.truncate(self.cursor);
         self.positions.push(pos);
         self.cursor = self.positions.len();
     }
 
-    pub(crate) fn backward(&mut self) -> Option<usize> {
+    pub fn backward(&mut self) -> Option<usize> {
         if self.cursor == 0 {
             return None;
         }
@@ -28,7 +28,7 @@ impl JumpList {
         Some(self.positions[self.cursor])
     }
 
-    pub(crate) fn forward(&mut self) -> Option<usize> {
+    pub fn forward(&mut self) -> Option<usize> {
         if self.cursor + 1 >= self.positions.len() {
             return None;
         }
@@ -47,7 +47,7 @@ impl JumpList {
     /// Position the navigation cursor as if `idx` had just been jumped to:
     /// the next [`Self::backward`] walks from `idx`, the next [`Self::forward`]
     /// walks toward newer entries. Out-of-range `idx` is a no-op.
-    pub(crate) fn set_cursor(&mut self, idx: usize) {
+    pub fn set_cursor(&mut self, idx: usize) {
         if idx >= self.positions.len() {
             return;
         }

@@ -288,4 +288,5 @@ pub enum ActionKind {
     DragSelectTo,
     HoverAt,
     ApplyFindChar,
+    ApplyMarkChar,
 }

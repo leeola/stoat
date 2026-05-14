@@ -1,4 +1,4 @@
-use crate::editor::actions::movement::FindKind;
+use crate::editor::actions::{marks::MarkRequest, movement::FindKind};
 use std::any::Any;
 use stoat_action::{Action, ActionDef, ActionKind, ActionPriority, ParamDef};
 
@@ -288,6 +288,67 @@ impl ApplyFindChar {
 }
 
 impl Action for ApplyFindChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Chord-completing action for the mark pipeline. Synthesized by
+/// [`crate::input_state_machine::InputStateMachine::feed`] when a
+/// `KeyCode::Char` keystroke lands while
+/// [`crate::input_state_machine::InputStateMachine::pending_mark`]
+/// is set; carries the chord-target character plus the priming
+/// request so `Workspace::dispatch_action` can route the lookup to
+/// the active editor's `handle_set_mark` / `handle_goto_mark`. Not
+/// keymap-bindable -- only the input pipeline constructs it.
+#[derive(Debug, Clone, Copy)]
+pub struct ApplyMarkChar {
+    pub request: MarkRequest,
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplyMarkCharDef;
+
+impl ActionDef for ApplyMarkCharDef {
+    fn name(&self) -> &'static str {
+        "ApplyMarkChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplyMarkChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending mark chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending Set/GotoMark/GotoMarkExact chord against the active editor with the chord-completing character. Synthesized by the input pipeline after a `SetMark`/`GotoMark`/`GotoMarkExact` action arms the chord; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplyMarkChar {
+    pub const DEF: &ApplyMarkCharDef = &ApplyMarkCharDef;
+}
+
+impl Action for ApplyMarkChar {
     fn def(&self) -> &'static dyn ActionDef {
         Self::DEF
     }
