@@ -356,7 +356,7 @@ impl Editor {
     }
 }
 
-fn extend_head(
+pub(super) fn extend_head(
     sel: &Selection<Anchor>,
     new_head: Anchor,
     new_head_offset: usize,

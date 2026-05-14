@@ -367,6 +367,15 @@ impl Workspace {
                 crate::editor::actions::movement::WordTarget::PrevLongEnd,
                 cx,
             ),
+            ActionKind::GotoLineStart => self.dispatch_simple_goto(GotoKind::LineStart, cx),
+            ActionKind::GotoLineEnd => self.dispatch_simple_goto(GotoKind::LineEnd, cx),
+            ActionKind::GotoFirstNonwhitespace => {
+                self.dispatch_simple_goto(GotoKind::FirstNonwhitespace, cx)
+            },
+            ActionKind::GotoFileStart => self.dispatch_simple_goto(GotoKind::FileStart, cx),
+            ActionKind::GotoLastLine => self.dispatch_simple_goto(GotoKind::LastLine, cx),
+            ActionKind::GotoLineNumber => self.dispatch_goto_line_number(cx),
+            ActionKind::GotoColumn => self.dispatch_goto_column(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -433,6 +442,52 @@ impl Workspace {
             .unwrap_or(1);
         editor.update(cx, |ed, cx| ed.handle_move_word(target, count, false, cx));
     }
+
+    fn dispatch_simple_goto(&mut self, kind: GotoKind, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| match kind {
+            GotoKind::LineStart => ed.handle_goto_line_start(false, cx),
+            GotoKind::LineEnd => ed.handle_goto_line_end(false, cx),
+            GotoKind::FirstNonwhitespace => ed.handle_goto_first_nonwhitespace(false, cx),
+            GotoKind::FileStart => ed.handle_goto_file_start(false, cx),
+            GotoKind::LastLine => ed.handle_goto_last_line(false, cx),
+        });
+    }
+
+    fn dispatch_goto_line_number(&mut self, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let count = self
+            .input_state_machine
+            .update(cx, |sm, _| sm.take_consumed_count());
+        editor.update(cx, |ed, cx| ed.handle_goto_line_number(count, cx));
+    }
+
+    fn dispatch_goto_column(&mut self, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let count = self
+            .input_state_machine
+            .update(cx, |sm, _| sm.take_consumed_count())
+            .unwrap_or(1);
+        editor.update(cx, |ed, cx| ed.handle_goto_column(count, false, cx));
+    }
+}
+
+#[derive(Copy, Clone, Debug)]
+enum GotoKind {
+    LineStart,
+    LineEnd,
+    FirstNonwhitespace,
+    FileStart,
+    LastLine,
 }
 
 impl Render for Workspace {
@@ -1311,6 +1366,54 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(selection_offsets(vcx, &editor), vec![(0, 3)]);
+    }
+
+    #[test]
+    fn dispatch_goto_line_number_consumes_count() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| {
+            sm.set_active_editor(Some(editor.downgrade()));
+            sm.set_consumed_count_for_test(Some(2));
+        });
+
+        dispatch(&ws, vcx, stoat_action::GotoLineNumber);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![6]);
+    }
+
+    #[test]
+    fn dispatch_goto_line_number_without_count_jumps_to_last_line() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::GotoLineNumber);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![11]);
+    }
+
+    #[test]
+    fn dispatch_goto_line_start_jumps_to_column_zero() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 6 });
+        vcx.run_until_parked();
+        assert_eq!(cursor_offsets(vcx, &editor), vec![6]);
+
+        dispatch(&ws, vcx, stoat_action::GotoLineStart);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![0]);
     }
 
     #[test]
