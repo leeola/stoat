@@ -17,10 +17,10 @@ use crate::{
     theme::{DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
 };
 use gpui::{
-    canvas, div, px, uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement,
-    Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window,
+    canvas, div, font, px, size as gpui_size, uniform_list, App, AppContext, Bounds, Context, Div,
+    Entity, EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size,
+    Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
@@ -891,15 +891,31 @@ impl Render for Editor {
         .track_scroll(self.scroll_handle.clone())
         .size_full();
 
+        let (family, size) = editor_font(cx);
+        let cell_family = family.clone();
         let bounds_capture = canvas(
-            move |bounds, _window, cx| {
-                let _ = bounds_handle.update(cx, |ed, cx| ed.set_text_region_bounds(bounds, cx));
+            move |bounds, window, cx| {
+                let font_id = window
+                    .text_system()
+                    .resolve_font(&font(cell_family.clone()));
+                let font_size = px(size);
+                let line_height = px((size * GPUI_DEFAULT_LINE_HEIGHT_RATIO).round());
+                let measured_cell = window
+                    .text_system()
+                    .em_advance(font_id, font_size)
+                    .ok()
+                    .map(|width| gpui_size(width, line_height));
+                let _ = bounds_handle.update(cx, |ed, cx| {
+                    ed.set_text_region_bounds(bounds, cx);
+                    if let Some(cell) = measured_cell {
+                        ed.set_cell_size(cell, cx);
+                    }
+                });
             },
             |_, _, _, _| {},
         )
         .size_full();
 
-        let (family, size) = editor_font(cx);
         div()
             .relative()
             .size_full()
@@ -925,6 +941,13 @@ impl Render for Editor {
             }))
     }
 }
+
+/// Matches the GPUI `TextStyle::default` `line_height` of `phi()`
+/// (golden ratio) applied when no `with_text_style` refinement on the
+/// element tree overrides it. The editor's render path relies on that
+/// default, so the cell-height measurement reproduces the constant
+/// rather than threading a `TextStyle` through the paint callback.
+const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
 
 fn editor_font(cx: &App) -> (SharedString, f32) {
     let (family, size) = match cx.try_global::<Settings>() {
