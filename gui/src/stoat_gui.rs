@@ -33,6 +33,7 @@ mod multi_buffer;
 mod pane;
 mod pane_tree;
 mod panic_hook;
+mod picker;
 mod settings;
 mod status_bar;
 mod stoat_app;
