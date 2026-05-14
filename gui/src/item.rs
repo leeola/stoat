@@ -77,6 +77,12 @@ pub trait ItemView: Render + 'static {
 pub trait ItemHandle: Send + 'static {
     fn item_id(&self) -> EntityId;
     fn to_any_view(&self) -> AnyView;
+    /// Clone the underlying entity handle into a fresh boxed
+    /// trait object. Lets callers pass an owned `Box<dyn
+    /// ItemHandle>` (and therefore decouple from any read borrow
+    /// the source was extracted from) without making the trait
+    /// non-object-safe via a `Clone` bound.
+    fn boxed_clone(&self) -> Box<dyn ItemHandle>;
     fn tab_label(&self, cx: &App) -> SharedString;
     fn tab_icon(&self, cx: &App) -> Option<SharedString>;
     fn key_context_name(&self, cx: &App) -> Option<SharedString>;
@@ -92,6 +98,10 @@ impl<T: ItemView> ItemHandle for Entity<T> {
 
     fn to_any_view(&self) -> AnyView {
         AnyView::from(self.clone())
+    }
+
+    fn boxed_clone(&self) -> Box<dyn ItemHandle> {
+        Box::new(self.clone())
     }
 
     fn tab_label(&self, cx: &App) -> SharedString {

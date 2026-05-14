@@ -11,9 +11,9 @@ use crate::{
     keymap_loader::{compile_default_keymap, compile_from_settings},
     modal_layer::{ModalLayer, ModalView},
     multi_buffer::MultiBuffer,
-    pane_tree::PaneTree,
+    pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
-    status_bar::StatusBar,
+    status_bar::{StatusBar, StatusItemView},
     theme::{DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
@@ -90,6 +90,10 @@ impl Workspace {
                 .input_state_machine
                 .update(cx, |sm, _| sm.set_keymap(keymap));
         });
+        let pane_tree_subscription =
+            cx.subscribe(&pane_tree, |workspace, _, _: &PaneTreeEvent, cx| {
+                workspace.broadcast_active_pane_item(cx);
+            });
         Self {
             name: name.into(),
             git_root,
@@ -100,7 +104,11 @@ impl Workspace {
             status_bar,
             input_state_machine,
             focus_handle: cx.focus_handle(),
-            _subscriptions: vec![keystroke_subscription, settings_subscription],
+            _subscriptions: vec![
+                keystroke_subscription,
+                settings_subscription,
+                pane_tree_subscription,
+            ],
         }
     }
 
@@ -217,6 +225,54 @@ impl Workspace {
 
     pub fn status_bar(&self) -> &Entity<StatusBar> {
         &self.status_bar
+    }
+
+    /// Register a status item at the left side of the status bar.
+    /// Fires the item's [`StatusItemView::set_active_pane_item`]
+    /// callback immediately so it picks up the workspace's current
+    /// active pane item on registration.
+    pub fn add_status_item_left<V>(&mut self, item: Entity<V>, cx: &mut Context<'_, Self>)
+    where
+        V: StatusItemView,
+    {
+        let initial = self.active_pane_item(cx);
+        self.status_bar.update(cx, |bar, cx| {
+            bar.add_left_item(item.clone(), cx);
+        });
+        item.update(cx, |item, cx| {
+            item.set_active_pane_item(initial.as_deref(), cx);
+        });
+    }
+
+    /// Register a status item at the right side of the status bar.
+    /// Right-side items render in reverse-registration order so the
+    /// most-recently-added item lands at the window's right edge.
+    pub fn add_status_item_right<V>(&mut self, item: Entity<V>, cx: &mut Context<'_, Self>)
+    where
+        V: StatusItemView,
+    {
+        let initial = self.active_pane_item(cx);
+        self.status_bar.update(cx, |bar, cx| {
+            bar.add_right_item(item.clone(), cx);
+        });
+        item.update(cx, |item, cx| {
+            item.set_active_pane_item(initial.as_deref(), cx);
+        });
+    }
+
+    fn active_pane_item(&self, cx: &App) -> Option<Box<dyn ItemHandle>> {
+        let tree = self.pane_tree.read(cx);
+        let focus = tree.focus();
+        tree.pane(focus)
+            .and_then(|p| p.read(cx).active_item().map(ItemHandle::boxed_clone))
+    }
+
+    fn broadcast_active_pane_item(&mut self, cx: &mut Context<'_, Self>) {
+        let active = self.active_pane_item(cx);
+        let status_bar = self.status_bar.clone();
+        status_bar.update(cx, |bar, cx| {
+            bar.set_active_pane_item(active.as_deref(), cx);
+        });
     }
 
     pub fn input_state_machine(&self) -> &Entity<InputStateMachine> {
@@ -966,7 +1022,8 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .child(self.pane_tree.clone()),
+                    .child(div().flex_1().child(self.pane_tree.clone()))
+                    .child(self.status_bar.clone()),
             )
             .children(right_docks)
             .child(deferred(self.modal_layer.clone()))
@@ -2233,6 +2290,68 @@ mod tests {
             })
             .expect("picker active");
         assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 1);
+    }
+
+    #[test]
+    fn add_status_item_left_invokes_initial_callback_and_responds_to_pane_changes() {
+        use crate::status_bar::StatusItemView;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        struct Probe {
+            observed: Arc<Mutex<Vec<usize>>>,
+        }
+        impl gpui::Render for Probe {
+            fn render(
+                &mut self,
+                _window: &mut gpui::Window,
+                _cx: &mut Context<'_, Self>,
+            ) -> impl IntoElement {
+                div().size_full()
+            }
+        }
+        impl StatusItemView for Probe {
+            fn set_active_pane_item(
+                &mut self,
+                _: Option<&dyn ItemHandle>,
+                _cx: &mut Context<'_, Self>,
+            ) {
+                *self
+                    .observed
+                    .lock()
+                    .expect("probe mutex")
+                    .last_mut()
+                    .unwrap_or(&mut 0) += 1;
+                self.observed.lock().expect("probe mutex").push(0);
+            }
+        }
+
+        let observed: Arc<Mutex<Vec<usize>>> = Arc::new(Mutex::new(vec![0]));
+        let probe = {
+            let observed = observed.clone();
+            vcx.update(|_, cx| cx.new(|_| Probe { observed }))
+        };
+        ws.update(vcx, |w, cx| {
+            w.add_status_item_left(probe.clone(), cx);
+        });
+        vcx.run_until_parked();
+        assert!(
+            observed.lock().expect("probe mutex").len() >= 2,
+            "registration should fire initial set_active_pane_item",
+        );
+
+        let probe_calls_before = observed.lock().expect("probe mutex").len();
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        pane_tree.update(vcx, |tree, cx| {
+            tree.split(stoat::pane::Axis::Vertical, cx);
+        });
+        vcx.run_until_parked();
+
+        let probe_calls_after = observed.lock().expect("probe mutex").len();
+        assert!(
+            probe_calls_after > probe_calls_before,
+            "pane-tree change should re-fire set_active_pane_item",
+        );
     }
 
     #[test]
