@@ -94,9 +94,23 @@ impl EntityInputHandler for EditorInput {
         &mut self,
         _ignore_disabled_input: bool,
         _window: &mut Window,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Option<UTF16Selection> {
-        None
+        let sm = self.state_machine.upgrade()?;
+        let editor = sm.read(cx).active_editor()?.upgrade()?;
+        editor.update(cx, |ed, cx| {
+            let selection = ed.selections().all_anchors().first()?.clone();
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let start = snapshot.resolve_anchor(&selection.start);
+            let end = snapshot.resolve_anchor(&selection.end);
+            let rope = snapshot.rope();
+            let start_utf16 = rope.offset_to_offset_utf16(start).0;
+            let end_utf16 = rope.offset_to_offset_utf16(end).0;
+            Some(UTF16Selection {
+                range: start_utf16..end_utf16,
+                reversed: selection.reversed,
+            })
+        })
     }
 
     fn text_for_range(
@@ -326,6 +340,96 @@ mod tests {
             ei.bounds_for_range(0..0, unit_bounds(), window, cx)
         });
         assert_eq!(result, None);
+    }
+
+    fn seed_primary_range(
+        vcx: &mut VisualTestContext,
+        editor: &Entity<crate::editor::Editor>,
+        range: Range<usize>,
+        reversed: bool,
+    ) {
+        use stoat_text::{Bias, Selection, SelectionGoal};
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let start = snapshot.anchor_at(range.start, Bias::Left);
+            let end = snapshot.anchor_at(range.end, Bias::Left);
+            ed.selections_mut().replace_with(
+                vec![Selection {
+                    id: 1,
+                    start,
+                    end,
+                    reversed,
+                    goal: SelectionGoal::None,
+                }],
+                &snapshot,
+            );
+        });
+    }
+
+    #[test]
+    fn selected_text_range_returns_none_without_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.selected_text_range(false, window, cx)
+        });
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn selected_text_range_reports_primary_selection_offsets() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        seed_primary_range(vcx, &editor, 1..4, false);
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input
+            .update_in(vcx, |ei, window, cx| {
+                ei.selected_text_range(false, window, cx)
+            })
+            .expect("selection range");
+        assert_eq!(result.range, 1..4);
+        assert!(!result.reversed);
+    }
+
+    #[test]
+    fn selected_text_range_translates_to_utf16_across_surrogate() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "a\u{1f600}b");
+        seed_primary_range(vcx, &editor, 1..5, false);
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input
+            .update_in(vcx, |ei, window, cx| {
+                ei.selected_text_range(false, window, cx)
+            })
+            .expect("selection range");
+        assert_eq!(result.range, 1..3);
+        assert!(!result.reversed);
+    }
+
+    #[test]
+    fn selected_text_range_reports_reversed_flag() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        seed_primary_range(vcx, &editor, 1..4, true);
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input
+            .update_in(vcx, |ei, window, cx| {
+                ei.selected_text_range(false, window, cx)
+            })
+            .expect("selection range");
+        assert_eq!(result.range, 1..4);
+        assert!(result.reversed);
     }
 
     #[test]
