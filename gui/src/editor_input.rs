@@ -4,6 +4,7 @@ use gpui::{
     UTF16Selection, WeakEntity, Window,
 };
 use std::ops::Range;
+use stoat_text::OffsetUtf16;
 
 /// Entity that bridges the platform's IME pipeline to the
 /// workspace-hosted [`InputStateMachine`]. The render path wraps
@@ -115,12 +116,25 @@ impl EntityInputHandler for EditorInput {
 
     fn text_for_range(
         &mut self,
-        _range: Range<usize>,
-        _adjusted_range: &mut Option<Range<usize>>,
+        range_utf16: Range<usize>,
+        adjusted_range: &mut Option<Range<usize>>,
         _window: &mut Window,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Option<String> {
-        None
+        let sm = self.state_machine.upgrade()?;
+        let editor = sm.read(cx).active_editor()?.upgrade()?;
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let rope = snapshot.rope();
+            let start_byte = rope.offset_utf16_to_offset(OffsetUtf16(range_utf16.start));
+            let end_byte = rope.offset_utf16_to_offset(OffsetUtf16(range_utf16.end));
+            let actual_start = rope.offset_to_offset_utf16(start_byte).0;
+            let actual_end = rope.offset_to_offset_utf16(end_byte).0;
+            if actual_start != range_utf16.start || actual_end != range_utf16.end {
+                *adjusted_range = Some(actual_start..actual_end);
+            }
+            Some(rope.chunks_in_range(start_byte..end_byte).collect())
+        })
     }
 
     fn bounds_for_range(
@@ -430,6 +444,84 @@ mod tests {
             .expect("selection range");
         assert_eq!(result.range, 1..4);
         assert!(result.reversed);
+    }
+
+    #[test]
+    fn text_for_range_returns_none_without_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let mut adjusted: Option<Range<usize>> = None;
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.text_for_range(0..1, &mut adjusted, window, cx)
+        });
+        assert_eq!(result, None);
+        assert_eq!(adjusted, None);
+    }
+
+    #[test]
+    fn text_for_range_returns_buffer_substring() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello world");
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let mut adjusted: Option<Range<usize>> = None;
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.text_for_range(0..5, &mut adjusted, window, cx)
+        });
+        assert_eq!(result.as_deref(), Some("hello"));
+        assert_eq!(adjusted, None);
+    }
+
+    #[test]
+    fn text_for_range_handles_utf16_offsets() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "a\u{1f600}b");
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let mut adjusted: Option<Range<usize>> = None;
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.text_for_range(1..3, &mut adjusted, window, cx)
+        });
+        assert_eq!(result.as_deref(), Some("\u{1f600}"));
+        assert_eq!(adjusted, None);
+    }
+
+    #[test]
+    fn text_for_range_adjusts_when_boundary_straddles_surrogate() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "a\u{1f600}b");
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let mut adjusted: Option<Range<usize>> = None;
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.text_for_range(0..2, &mut adjusted, window, cx)
+        });
+        assert_eq!(result.as_deref(), Some("a\u{1f600}"));
+        assert_eq!(adjusted, Some(0..3));
+    }
+
+    #[test]
+    fn text_for_range_clamps_to_buffer_length() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "abc");
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let mut adjusted: Option<Range<usize>> = None;
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.text_for_range(1..10, &mut adjusted, window, cx)
+        });
+        assert_eq!(result.as_deref(), Some("bc"));
+        assert_eq!(adjusted, Some(1..3));
     }
 
     #[test]
