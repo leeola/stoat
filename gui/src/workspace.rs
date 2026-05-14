@@ -5,6 +5,7 @@ use crate::{
     display_map::DisplayMap,
     dock::{Dock, DockSide},
     editor::{Editor, EditorMode},
+    editor_input::EditorInput,
     globals::{ExecutorGlobal, FsHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
@@ -42,6 +43,7 @@ pub struct Workspace {
     modal_layer: Entity<ModalLayer>,
     status_bar: Entity<StatusBar>,
     input_state_machine: Entity<InputStateMachine>,
+    editor_input: Entity<EditorInput>,
     focus_handle: FocusHandle,
     _subscriptions: Vec<Subscription>,
 }
@@ -76,6 +78,10 @@ impl Workspace {
             .try_global::<Settings>()
             .map_or_else(compile_default_keymap, compile_from_settings);
         let input_state_machine = cx.new(|_| InputStateMachine::new(workspace_handle, keymap));
+        let editor_input = {
+            let weak_sm = input_state_machine.downgrade();
+            cx.new(|cx| EditorInput::new(weak_sm, cx))
+        };
         let keystroke_subscription = cx.observe_keystrokes(|workspace, event, window, cx| {
             let sm = workspace.input_state_machine.clone();
             let keystroke = event.keystroke.clone();
@@ -93,6 +99,7 @@ impl Workspace {
         let pane_tree_subscription =
             cx.subscribe(&pane_tree, |workspace, _, _: &PaneTreeEvent, cx| {
                 workspace.broadcast_active_pane_item(cx);
+                workspace.broadcast_active_editor(cx);
             });
         Self {
             name: name.into(),
@@ -103,6 +110,7 @@ impl Workspace {
             modal_layer,
             status_bar,
             input_state_machine,
+            editor_input,
             focus_handle: cx.focus_handle(),
             _subscriptions: vec![
                 keystroke_subscription,
@@ -272,6 +280,26 @@ impl Workspace {
         let status_bar = self.status_bar.clone();
         status_bar.update(cx, |bar, cx| {
             bar.set_active_pane_item(active.as_deref(), cx);
+        });
+    }
+
+    /// Push the focused pane's active editor (if any) into the
+    /// [`InputStateMachine`]'s `active_editor` and
+    /// `editor_focus_target` slots. Non-editor active items (or no
+    /// active item) clear both slots. Drives the motion / save /
+    /// save-selection / jump dispatch helpers on [`Workspace`] that
+    /// look up the active editor through the state machine.
+    fn broadcast_active_editor(&mut self, cx: &mut Context<'_, Self>) {
+        let editor = self
+            .active_pane_item(cx)
+            .and_then(|item| item.to_any_view().downcast::<Editor>().ok());
+        let focus_target = editor
+            .as_ref()
+            .map(|_| self.editor_input.read(cx).focus_handle().clone());
+        let weak_editor = editor.as_ref().map(Entity::downgrade);
+        self.input_state_machine.update(cx, |sm, _| {
+            sm.set_active_editor(weak_editor);
+            sm.set_editor_focus_target(focus_target);
         });
     }
 
@@ -2555,6 +2583,83 @@ mod tests {
             .read(Path::new("/tmp/repo/save.rs"), &mut on_disk)
             .expect("save wrote through");
         assert_eq!(String::from_utf8(on_disk).expect("utf8"), "before after");
+    }
+
+    #[test]
+    fn pane_focus_change_broadcasts_active_editor_to_state_machine() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+
+        let pane_a = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).focus());
+
+        ws.update(vcx, |w, cx| {
+            w.pane_tree()
+                .update(cx, |tree, cx| tree.split(Axis::Horizontal, cx));
+        });
+        vcx.run_until_parked();
+
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.read_with(vcx, |sm, _| {
+            assert!(sm.active_editor().is_none());
+            assert!(sm.editor_focus_target().is_none());
+        });
+
+        ws.update(vcx, |w, cx| {
+            w.pane_tree()
+                .update(cx, |tree, cx| tree.set_focus(pane_a, cx));
+        });
+        vcx.run_until_parked();
+
+        let expected_editor = ws.read_with(vcx, |w, cx| {
+            w.pane_tree()
+                .read(cx)
+                .pane(pane_a)
+                .expect("pane a present")
+                .read(cx)
+                .active_item()
+                .expect("editor active in pane a")
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("active item is Editor")
+        });
+        let expected_handle =
+            ws.read_with(vcx, |w, cx| w.editor_input.read(cx).focus_handle().clone());
+
+        sm.read_with(vcx, |sm, _| {
+            let active = sm.active_editor().expect("active editor set");
+            assert_eq!(
+                active.upgrade().expect("editor live").entity_id(),
+                expected_editor.entity_id(),
+            );
+            assert_eq!(sm.editor_focus_target(), Some(&expected_handle));
+        });
+    }
+
+    #[test]
+    fn pane_focus_change_clears_state_machine_when_no_editor_active() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.pane_tree()
+                .update(cx, |tree, cx| tree.split(Axis::Horizontal, cx));
+        });
+        vcx.run_until_parked();
+
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.read_with(vcx, |sm, _| {
+            assert!(sm.active_editor().is_none());
+            assert!(sm.editor_focus_target().is_none());
+        });
     }
 
     #[test]
