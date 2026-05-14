@@ -9,6 +9,7 @@ pub mod help;
 pub mod lsp;
 pub mod palette;
 pub mod pane;
+pub mod picker;
 pub mod prompt;
 pub mod rebase;
 pub mod review;

@@ -64,6 +64,10 @@ use crate::{
             CloseOtherPanes, ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight,
             FocusUp, SplitDown, SplitNewDown, SplitNewRight, SplitRight,
         },
+        picker::{
+            PickerConfirm, PickerConfirmSplitDown, PickerConfirmSplitRight, PickerSelectNext,
+            PickerSelectPrev,
+        },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
             PromptInsertNewline, SubmitPromptInput,
@@ -614,6 +618,15 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(PaletteScopeToggle::DEF, |_| {
         Ok(Box::new(PaletteScopeToggle))
     });
+    add(PickerSelectPrev::DEF, |_| Ok(Box::new(PickerSelectPrev)));
+    add(PickerSelectNext::DEF, |_| Ok(Box::new(PickerSelectNext)));
+    add(PickerConfirm::DEF, |_| Ok(Box::new(PickerConfirm)));
+    add(PickerConfirmSplitRight::DEF, |_| {
+        Ok(Box::new(PickerConfirmSplitRight))
+    });
+    add(PickerConfirmSplitDown::DEF, |_| {
+        Ok(Box::new(PickerConfirmSplitDown))
+    });
 
     map
 }
@@ -795,6 +808,11 @@ mod tests {
         "PaletteSelectPrev",
         "PaletteSelectNext",
         "PaletteScopeToggle",
+        "PickerSelectPrev",
+        "PickerSelectNext",
+        "PickerConfirm",
+        "PickerConfirmSplitRight",
+        "PickerConfirmSplitDown",
     ];
 
     #[test]
@@ -950,7 +968,10 @@ mod tests {
         //   ClaudeToggleToolCardExpand).
         // + 1 ClaudeJumpToFocusedCard.
         // + 1 DismissModal.
-        assert_eq!(all().count(), 279);
+        // + 5 Picker actions (SelectPrev/SelectNext/Confirm/ConfirmSplitRight/ ConfirmSplitDown)
+        //   that the GUI's `Picker<D>` primitive routes via `Workspace::dispatch_action` -> active
+        //   modal -> `Picker::handle_action`.
+        assert_eq!(all().count(), 284);
     }
 
     #[test]

@@ -221,12 +221,25 @@ impl Workspace {
     /// through to a `tracing::trace` and are wired by the items
     /// that build their target entities (editor render, review
     /// item, modals, etc.).
+    ///
+    /// Active-modal routing runs first: if the top modal's
+    /// [`ModalView::handle_action`] returns `true` (the picker uses
+    /// this for select / confirm / dismiss), the workspace's own
+    /// match is skipped. This is how `Enter` / `Ctrl-V` / `Ctrl-X`
+    /// confirm the picker without consulting the editor or pane
+    /// dispatch paths.
     pub fn dispatch_action(
         &mut self,
         action: Box<dyn stoat_action::Action>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        let handled_by_modal = self
+            .modal_layer
+            .update(cx, |layer, cx| layer.handle_action(&*action, window, cx));
+        if handled_by_modal {
+            return;
+        }
         match action.kind() {
             ActionKind::Quit => self.handle_quit(cx),
             ActionKind::QuitAll => cx.quit(),
@@ -1990,6 +2003,89 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 3);
+    }
+
+    #[test]
+    fn dispatch_action_routes_picker_select_next_to_active_modal() {
+        use crate::{
+            globals::ExecutorGlobal,
+            picker::{Picker, PickerDelegate, PickerSecondary},
+        };
+        use gpui::{AnyElement, Task};
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        struct StubDelegate {
+            count: usize,
+            selected: usize,
+        }
+
+        impl PickerDelegate for StubDelegate {
+            fn match_count(&self) -> usize {
+                self.count
+            }
+            fn selected_index(&self) -> usize {
+                self.selected
+            }
+            fn set_selected_index(&mut self, ix: usize, _cx: &mut Context<'_, Picker<Self>>) {
+                self.selected = ix;
+            }
+            fn update_matches(
+                &mut self,
+                _query: String,
+                _cx: &mut Context<'_, Picker<Self>>,
+            ) -> Task<()> {
+                Task::ready(())
+            }
+            fn confirm(
+                &mut self,
+                _secondary: Option<PickerSecondary>,
+                _cx: &mut Context<'_, Picker<Self>>,
+            ) {
+            }
+            fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
+            fn render_match(
+                &self,
+                _ix: usize,
+                _selected: bool,
+                _cx: &mut Context<'_, Picker<Self>>,
+            ) -> AnyElement {
+                div().into_any_element()
+            }
+        }
+
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.set_global(ExecutorGlobal(Executor::new(
+                Arc::new(TestScheduler::new()),
+            )));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update_in(vcx, |w, window, cx| {
+            w.toggle_modal::<Picker<StubDelegate>, _>(window, cx, |window, cx| {
+                Picker::new(
+                    StubDelegate {
+                        count: 3,
+                        selected: 0,
+                    },
+                    window,
+                    cx,
+                )
+            });
+        });
+        vcx.run_until_parked();
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.dispatch_action(Box::new(stoat_action::PickerSelectNext), window, cx);
+        });
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<StubDelegate>>()
+            })
+            .expect("picker active");
+        assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 1);
     }
 
     #[test]

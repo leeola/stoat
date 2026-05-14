@@ -33,12 +33,33 @@ pub trait ModalView: ManagedView {
     fn key_context_name(&self, _cx: &App) -> Option<SharedString> {
         None
     }
+
+    /// Consume a Stoat action routed by
+    /// [`ModalLayer::handle_action`]. Returns `true` when the modal
+    /// fully handled the action so the caller can short-circuit its
+    /// own dispatch. Defaults to `false` so the workspace falls back
+    /// to its own match. The picker primitive overrides this to
+    /// route select/confirm/dismiss kinds into its delegate.
+    fn handle_action(
+        &mut self,
+        _action: &dyn stoat_action::Action,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Self>,
+    ) -> bool {
+        false
+    }
 }
 
 trait ModalViewHandle {
     fn view(&self) -> AnyView;
     fn on_before_dismiss(&mut self, window: &mut Window, cx: &mut App) -> bool;
     fn key_context_name(&self, cx: &App) -> Option<SharedString>;
+    fn handle_action(
+        &mut self,
+        action: &dyn stoat_action::Action,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -52,6 +73,15 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
 
     fn key_context_name(&self, cx: &App) -> Option<SharedString> {
         self.read(cx).key_context_name(cx)
+    }
+
+    fn handle_action(
+        &mut self,
+        action: &dyn stoat_action::Action,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> bool {
+        self.update(cx, |modal, cx| modal.handle_action(action, window, cx))
     }
 }
 
@@ -224,6 +254,23 @@ impl ModalLayer {
         }
         let new_modal = cx.new(|cx| build(window, cx));
         self.show_modal(new_modal, window, cx);
+    }
+
+    /// Forward an action to the top of the modal stack. Returns
+    /// `true` when the top modal consumed the action so the caller
+    /// (typically [`Workspace::dispatch_action`]) can short-circuit
+    /// its own dispatch; returns `false` when no modal is active or
+    /// the top modal's [`ModalView::handle_action`] returned `false`.
+    pub fn handle_action(
+        &mut self,
+        action: &dyn stoat_action::Action,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some(top) = self.active_modals.last_mut() else {
+            return false;
+        };
+        top.modal.handle_action(action, window, cx)
     }
 
     /// Compose the `KeyContext` pushed by the layer's wrapping

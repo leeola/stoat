@@ -68,6 +68,10 @@ pub use defs::{
         ClosePane, FocusDown, FocusLeft, FocusNext, FocusPrev, FocusRight, FocusUp, SplitDown,
         SplitNewDown, SplitNewRight, SplitRight,
     },
+    picker::{
+        PickerConfirm, PickerConfirmSplitDown, PickerConfirmSplitRight, PickerSelectNext,
+        PickerSelectPrev,
+    },
     prompt::{
         CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
         PromptInsertNewline, SubmitPromptInput,

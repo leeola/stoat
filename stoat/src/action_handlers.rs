@@ -604,7 +604,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::DragSelectTo
         | ActionKind::HoverAt
         | ActionKind::ApplyFindChar
-        | ActionKind::ApplyMarkChar => UpdateEffect::None,
+        | ActionKind::ApplyMarkChar
+        | ActionKind::PickerSelectPrev
+        | ActionKind::PickerSelectNext
+        | ActionKind::PickerConfirm
+        | ActionKind::PickerConfirmSplitRight
+        | ActionKind::PickerConfirmSplitDown => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

@@ -11,6 +11,7 @@ use gpui::{
     Subscription, Task, UniformListScrollHandle, Window,
 };
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
+use stoat_action::ActionKind;
 
 /// Filter and rank `(item, haystack)` pairs against `query` using
 /// the shared nucleo matcher and the picker-side score-descending
@@ -104,18 +105,85 @@ impl<D: PickerDelegate> Picker<D> {
     }
 
     /// Route an action resolved by the workspace's input pipeline
-    /// into the picker. The match table for select-next /
-    /// select-prev / confirm / dismiss lands with the
-    /// modifier-routed confirmations follow-up; this method holds
-    /// the dispatch surface in place so workspace wiring can target
-    /// the active picker without waiting on the action wiring.
+    /// into the picker. Returns `true` when the action was handled
+    /// (selection move, confirm, dismiss) so the caller can
+    /// short-circuit its own dispatch; returns `false` for any
+    /// action the picker does not own.
+    ///
+    /// Dismiss is routed through [`ActionKind::DismissModal`]: the
+    /// picker calls [`PickerDelegate::dismissed`] and then emits
+    /// [`DismissEvent`] so the [`ModalLayer`]'s existing dismissal
+    /// subscription pops the modal from the stack.
     pub fn handle_action(
         &mut self,
-        action: Box<dyn stoat_action::Action>,
+        action: &dyn stoat_action::Action,
         _window: &mut Window,
-        _cx: &mut Context<'_, Self>,
-    ) {
-        let _ = action;
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        match action.kind() {
+            ActionKind::PickerSelectPrev => {
+                self.move_selection(-1, cx);
+                true
+            },
+            ActionKind::PickerSelectNext => {
+                self.move_selection(1, cx);
+                true
+            },
+            ActionKind::PickerConfirm => self.confirm_selection(None, cx),
+            ActionKind::PickerConfirmSplitRight => {
+                self.confirm_selection(Some(PickerSecondary::OpenInRight), cx)
+            },
+            ActionKind::PickerConfirmSplitDown => {
+                self.confirm_selection(Some(PickerSecondary::OpenInDown), cx)
+            },
+            ActionKind::DismissModal => {
+                self.delegate.dismissed(cx);
+                cx.emit(DismissEvent);
+                true
+            },
+            _ => false,
+        }
+    }
+
+    fn move_selection(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
+        let count = self.delegate.match_count();
+        if count == 0 {
+            return;
+        }
+        let current = self.delegate.selected_index() as i64;
+        let last = count as i64 - 1;
+        let next = (current + delta as i64).clamp(0, last) as usize;
+        if next != self.delegate.selected_index() {
+            self.delegate.set_selected_index(next, cx);
+            cx.notify();
+        }
+    }
+
+    fn confirm_selection(
+        &mut self,
+        secondary: Option<PickerSecondary>,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        if self.delegate.match_count() == 0 {
+            return true;
+        }
+        self.delegate.confirm(secondary, cx);
+        true
+    }
+}
+
+impl<D: PickerDelegate> ModalView for Picker<D> {
+    fn key_context_name(&self, _cx: &gpui::App) -> Option<SharedString> {
+        Some("Picker".into())
+    }
+
+    fn handle_action(
+        &mut self,
+        action: &dyn stoat_action::Action,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        Picker::handle_action(self, action, window, cx)
     }
 }
 
@@ -166,12 +234,6 @@ impl<D: PickerDelegate> Focusable for Picker<D> {
 }
 
 impl<D: PickerDelegate> EventEmitter<DismissEvent> for Picker<D> {}
-
-impl<D: PickerDelegate> ModalView for Picker<D> {
-    fn key_context_name(&self, _cx: &gpui::App) -> Option<SharedString> {
-        Some("Picker".into())
-    }
-}
 
 #[cfg(test)]
 mod tests {
@@ -317,20 +379,170 @@ mod tests {
     }
 
     #[test]
-    fn handle_action_is_a_noop_until_action_wiring_lands() {
+    fn handle_action_returns_false_for_non_picker_kinds() {
         let mut cx = TestAppContext::single();
         let h = new_picker(&mut cx, vec!["alpha".into()]);
         let picker = h.picker.clone();
+        let handled = h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                let action = crate::actions::SetActivePane { pane_id: 0 };
+                p.handle_action(&action, window, cx)
+            })
+        });
+        assert!(!handled, "non-picker action should fall through");
+        assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 0);
+    }
+
+    #[test]
+    fn handle_action_select_next_advances_selection() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        let picker = h.picker.clone();
+        let handled = h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerSelectNext, window, cx)
+            })
+        });
+        assert!(handled);
+        assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 1);
+    }
+
+    #[test]
+    fn handle_action_select_next_clamps_at_last_row() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into(), "beta".into()]);
+        let picker = h.picker.clone();
         h.vcx.update(|window, cx| {
             picker.update(cx, |p, cx| {
-                p.handle_action(
-                    Box::new(crate::actions::SetActivePane { pane_id: 0 }),
-                    window,
-                    cx,
-                )
-            });
+                p.handle_action(&stoat_action::PickerSelectNext, window, cx);
+                p.handle_action(&stoat_action::PickerSelectNext, window, cx);
+                p.handle_action(&stoat_action::PickerSelectNext, window, cx)
+            })
+        });
+        assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 1);
+    }
+
+    #[test]
+    fn handle_action_select_prev_clamps_at_first_row() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into(), "beta".into()]);
+        let picker = h.picker.clone();
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerSelectPrev, window, cx)
+            })
         });
         assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 0);
+    }
+
+    #[test]
+    fn handle_action_select_next_on_empty_is_noop() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, Vec::new());
+        let picker = h.picker.clone();
+        let handled = h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerSelectNext, window, cx)
+            })
+        });
+        assert!(handled);
+        assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 0);
+    }
+
+    #[test]
+    fn handle_action_confirm_passes_no_secondary() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into()]);
+        let confirmed = h
+            .picker
+            .read_with(h.vcx, |p, _| p.delegate().confirmed.clone());
+        let picker = h.picker.clone();
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerConfirm, window, cx)
+            })
+        });
+        let snapshot = confirmed.lock().expect("confirmed mutex").clone();
+        assert_eq!(snapshot, vec![None]);
+    }
+
+    #[test]
+    fn handle_action_confirm_split_right_passes_open_in_right() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into()]);
+        let confirmed = h
+            .picker
+            .read_with(h.vcx, |p, _| p.delegate().confirmed.clone());
+        let picker = h.picker.clone();
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerConfirmSplitRight, window, cx)
+            })
+        });
+        let snapshot = confirmed.lock().expect("confirmed mutex").clone();
+        assert_eq!(snapshot, vec![Some(PickerSecondary::OpenInRight)]);
+    }
+
+    #[test]
+    fn handle_action_confirm_split_down_passes_open_in_down() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into()]);
+        let confirmed = h
+            .picker
+            .read_with(h.vcx, |p, _| p.delegate().confirmed.clone());
+        let picker = h.picker.clone();
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerConfirmSplitDown, window, cx)
+            })
+        });
+        let snapshot = confirmed.lock().expect("confirmed mutex").clone();
+        assert_eq!(snapshot, vec![Some(PickerSecondary::OpenInDown)]);
+    }
+
+    #[test]
+    fn handle_action_confirm_on_empty_does_not_fire_delegate() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, Vec::new());
+        let confirmed = h
+            .picker
+            .read_with(h.vcx, |p, _| p.delegate().confirmed.clone());
+        let picker = h.picker.clone();
+        let handled = h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerConfirm, window, cx)
+            })
+        });
+        assert!(handled);
+        let snapshot = confirmed.lock().expect("confirmed mutex").clone();
+        assert!(snapshot.is_empty(), "delegate confirm should not fire");
+    }
+
+    #[test]
+    fn handle_action_dismiss_calls_delegate_and_emits_dismiss_event() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into()]);
+        let dismissed = h
+            .picker
+            .read_with(h.vcx, |p, _| p.delegate().dismissed.clone());
+        let dismiss_events: Arc<Mutex<u32>> = Arc::new(Mutex::new(0));
+        let picker = h.picker.clone();
+        let _subscription = h.vcx.update(|_, cx| {
+            let sink = dismiss_events.clone();
+            cx.subscribe(&picker, move |_, _: &DismissEvent, _| {
+                *sink.lock().expect("dismiss events mutex") += 1;
+            })
+        });
+        let picker_for_call = picker.clone();
+        let handled = h.vcx.update(|window, cx| {
+            picker_for_call.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::DismissModal, window, cx)
+            })
+        });
+        h.vcx.run_until_parked();
+        assert!(handled);
+        assert_eq!(*dismissed.lock().expect("dismissed mutex"), 1);
+        assert_eq!(*dismiss_events.lock().expect("dismiss events mutex"), 1);
     }
 
     fn items(pairs: &[(usize, &str)]) -> Vec<(usize, String)> {

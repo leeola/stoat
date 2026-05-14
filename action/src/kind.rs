@@ -289,4 +289,9 @@ pub enum ActionKind {
     HoverAt,
     ApplyFindChar,
     ApplyMarkChar,
+    PickerSelectPrev,
+    PickerSelectNext,
+    PickerConfirm,
+    PickerConfirmSplitRight,
+    PickerConfirmSplitDown,
 }
