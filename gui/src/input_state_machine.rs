@@ -35,6 +35,13 @@ pub struct InputStateMachine {
     help_open: StateValue,
     claude_focused: StateValue,
     pending_count: Option<u32>,
+    /// Count carried over for dispatch after [`feed`] consumes a
+    /// keystroke. `feed` moves `pending_count` into this slot once
+    /// the keystroke resolves to at least one action, so the
+    /// downstream `Workspace::dispatch_action` arms (motion
+    /// handlers, etc.) can observe the count between the resolve
+    /// and the next keystroke.
+    consumed_count: Option<u32>,
     pending_chord: Vec<KeyPart>,
     pending_operator: Option<Operator>,
     prev_focused: Option<FocusHandle>,
@@ -76,6 +83,7 @@ impl InputStateMachine {
             help_open: StateValue::Bool(false),
             claude_focused: StateValue::Bool(false),
             pending_count: None,
+            consumed_count: None,
             pending_chord: Vec::new(),
             pending_operator: None,
             prev_focused: None,
@@ -115,6 +123,24 @@ impl InputStateMachine {
 
     pub fn pending_count(&self) -> Option<u32> {
         self.pending_count
+    }
+
+    pub fn consumed_count(&self) -> Option<u32> {
+        self.consumed_count
+    }
+
+    /// Return the count consumed by the most recent
+    /// [`feed`]-resolved action and clear the slot. Dispatch arms
+    /// for count-aware actions (motion handlers, etc.) call this
+    /// once to read the count and prevent the next keystroke
+    /// from observing a stale value.
+    pub fn take_consumed_count(&mut self) -> Option<u32> {
+        self.consumed_count.take()
+    }
+
+    #[cfg(test)]
+    pub(crate) fn set_consumed_count_for_test(&mut self, count: Option<u32>) {
+        self.consumed_count = count;
     }
 
     pub fn pending_chord(&self) -> &[KeyPart] {
@@ -416,7 +442,7 @@ impl InputStateMachine {
             .collect();
 
         if !actions.is_empty() && self.pending_count.is_some() {
-            self.pending_count = None;
+            self.consumed_count = self.pending_count.take();
             cx.notify();
         }
 
@@ -668,6 +694,32 @@ mod tests {
             sm.feed(&stroke, cx);
         });
         sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
+    }
+
+    #[test]
+    fn feed_matched_action_moves_pending_count_into_consumed() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { q -> Quit(); }");
+        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        sm.update(&mut cx, |sm, _| sm.pending_count = Some(5));
+        let stroke = key("q");
+        feed_in_app(&mut cx, &sm, |sm, cx| {
+            sm.feed(&stroke, cx);
+        });
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.pending_count(), None);
+            assert_eq!(sm.consumed_count(), Some(5));
+        });
+    }
+
+    #[test]
+    fn take_consumed_count_returns_and_clears() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        sm.update(&mut cx, |sm, _| sm.consumed_count = Some(7));
+        let taken = sm.update(&mut cx, |sm, _| sm.take_consumed_count());
+        assert_eq!(taken, Some(7));
+        sm.read_with(&cx, |sm, _| assert_eq!(sm.consumed_count(), None));
     }
 
     #[test]

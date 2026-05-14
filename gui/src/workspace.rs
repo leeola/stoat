@@ -321,10 +321,73 @@ impl Workspace {
                     }
                 }
             },
+            ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, cx),
+            ActionKind::MoveRight => self.dispatch_move_horizontal(1, cx),
+            ActionKind::MoveUp => self.dispatch_move_vertical(-1, cx),
+            ActionKind::MoveDown => self.dispatch_move_vertical(1, cx),
+            ActionKind::PageUp => {
+                self.dispatch_page_motion(crate::editor::actions::movement::PageDir::Up, false, cx)
+            },
+            ActionKind::PageDown => self.dispatch_page_motion(
+                crate::editor::actions::movement::PageDir::Down,
+                false,
+                cx,
+            ),
+            ActionKind::HalfPageUp => {
+                self.dispatch_page_motion(crate::editor::actions::movement::PageDir::Up, true, cx)
+            },
+            ActionKind::HalfPageDown => {
+                self.dispatch_page_motion(crate::editor::actions::movement::PageDir::Down, true, cx)
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
         }
+    }
+
+    fn dispatch_move_horizontal(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let count = self
+            .input_state_machine
+            .update(cx, |sm, _| sm.take_consumed_count())
+            .unwrap_or(1);
+        editor.update(cx, |ed, cx| {
+            ed.handle_move_horizontal(delta, count, false, cx)
+        });
+    }
+
+    fn dispatch_move_vertical(&mut self, delta: i32, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let count = self
+            .input_state_machine
+            .update(cx, |sm, _| sm.take_consumed_count())
+            .unwrap_or(1);
+        editor.update(cx, |ed, cx| {
+            ed.handle_move_vertical(delta, count, false, cx)
+        });
+    }
+
+    fn dispatch_page_motion(
+        &mut self,
+        dir: crate::editor::actions::movement::PageDir,
+        half: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let count = self
+            .input_state_machine
+            .update(cx, |sm, _| sm.take_consumed_count())
+            .unwrap_or(1);
+        editor.update(cx, |ed, cx| ed.handle_page_motion(dir, half, count, cx));
     }
 }
 
@@ -1118,6 +1181,74 @@ mod tests {
         let before = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
 
         dispatch(&ws, vcx, crate::actions::HoverAt { row: 1, col: 2 });
+        vcx.run_until_parked();
+
+        let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+        assert_eq!(before, after);
+    }
+
+    #[test]
+    fn dispatch_move_right_advances_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::MoveRight);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![1]);
+    }
+
+    #[test]
+    fn dispatch_move_consumes_count_from_state_machine() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| {
+            sm.set_active_editor(Some(editor.downgrade()));
+            sm.set_consumed_count_for_test(Some(4));
+        });
+
+        dispatch(&ws, vcx, stoat_action::MoveRight);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![4]);
+        let leftover = sm.read_with(vcx, |sm, _| sm.consumed_count());
+        assert_eq!(leftover, None);
+    }
+
+    #[test]
+    fn dispatch_move_down_advances_display_row() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abc\ndef\nghi");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::MoveDown);
+        vcx.run_until_parked();
+
+        let row = editor.update(vcx, |ed, cx| {
+            let snapshot = ed.display_map().update(cx, |dm, _| dm.snapshot());
+            let buffer_snap = ed.multi_buffer().read(cx).snapshot();
+            let head_anchor = ed.selections().all_anchors()[0].head();
+            let head_point = buffer_snap.point_for_anchor(&head_anchor);
+            snapshot.buffer_to_display(head_point).row
+        });
+        assert_eq!(row, 1);
+    }
+
+    #[test]
+    fn dispatch_move_without_active_editor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let before = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
+
+        dispatch(&ws, vcx, stoat_action::MoveRight);
         vcx.run_until_parked();
 
         let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));

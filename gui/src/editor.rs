@@ -1,3 +1,4 @@
+pub mod actions;
 pub mod mouse;
 pub mod render;
 pub mod scroll;
