@@ -1,3 +1,5 @@
+pub mod mode_badge;
+
 use crate::item::ItemHandle;
 use gpui::{
     div, AnyView, App, Context, Entity, IntoElement, ParentElement, Render, Styled, Window,
