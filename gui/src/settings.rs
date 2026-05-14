@@ -17,17 +17,25 @@ pub struct Settings {
 impl Global for Settings {}
 
 impl Settings {
-    /// Parse stcfg source text into [`Settings`]. Parse errors are
-    /// discarded -- the loader silently falls back to an empty
-    /// config when parsing fails, matching the TUI's behavior.
-    pub fn load_from_source(source: &str) -> Self {
-        let (config, _errors) = stoat_config::parse(source);
-        let config = config.unwrap_or_else(|| stoat_config::Config {
-            blocks: Vec::new(),
-            themes: Vec::new(),
-        });
+    /// Build [`Settings`] from an already-parsed
+    /// [`stoat_config::Config`]. Stores the config and the
+    /// resolved settings derived from it via
+    /// [`stoat_config::Settings::from_config`].
+    pub fn from_config(config: stoat_config::Config) -> Self {
         let resolved = stoat_config::Settings::from_config(&config);
         Self { config, resolved }
+    }
+
+    /// Parse stcfg source text into [`Settings`]. Parse errors are
+    /// discarded -- the loader silently falls back to
+    /// [`Settings::default`] when parsing fails, matching the
+    /// TUI's behavior.
+    pub fn load_from_source(source: &str) -> Self {
+        let (config, _errors) = stoat_config::parse(source);
+        match config {
+            Some(c) => Self::from_config(c),
+            None => Self::default(),
+        }
     }
 }
 

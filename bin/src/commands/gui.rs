@@ -12,6 +12,8 @@ use stoat_gui::{
 };
 use stoat_scheduler::TokioScheduler;
 
+const DEFAULT_CONFIG: &str = include_str!("../../../config.stcfg");
+
 pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
     install_panic_hook();
 
@@ -28,9 +30,11 @@ pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
     let fs_watcher = LocalFsWatcher::new().whatever_context("init LocalFsWatcher")?;
     let claude_launcher = ClaudeCodeLauncher::new(fs_host.clone(), executor.clone());
 
+    let (settings, theme) = load_default_settings_and_theme();
+
     let globals = Globals {
-        settings: Settings::default(),
-        theme: Theme::load_from_source("", "default"),
+        settings,
+        theme,
         language_registry: LanguageRegistry::standard(),
         fs_host: FsHostGlobal(fs_host),
         fs_watch_host: FsWatchHostGlobal(Arc::new(fs_watcher)),
@@ -46,4 +50,24 @@ pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
 
     stoat_gui::run(globals, files);
     Ok(())
+}
+
+fn load_default_settings_and_theme() -> (Settings, Theme) {
+    let (config, errors) = stoat_config::parse(DEFAULT_CONFIG);
+    if !errors.is_empty() {
+        tracing::error!(
+            "default config parse errors: {}",
+            stoat_config::format_errors(DEFAULT_CONFIG, &errors)
+        );
+    }
+    let Some(config) = config else {
+        return (Settings::default(), Theme::empty());
+    };
+
+    let settings = Settings::from_config(config);
+    let theme = {
+        let name = settings.resolved.theme.as_deref().unwrap_or("default_dark");
+        Theme::from_config(&settings.config, name)
+    };
+    (settings, theme)
 }

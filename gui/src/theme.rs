@@ -73,15 +73,34 @@ pub struct Theme(pub stoat::theme::Theme);
 impl Global for Theme {}
 
 impl Theme {
+    /// Construct an empty [`Theme`] -- every scope lookup returns
+    /// `None`. Used as the parse-failure fallback so the GUI never
+    /// refuses to render due to a bad config.
+    pub fn empty() -> Self {
+        Self(stoat::theme::Theme::empty())
+    }
+
+    /// Resolve the named theme block from an already-parsed
+    /// [`stoat_config::Config`]. Logs a tracing error and falls
+    /// back to [`Theme::empty`] when the block is absent or fails
+    /// to resolve.
+    pub fn from_config(config: &stoat_config::Config, name: &str) -> Self {
+        match stoat::theme::Theme::from_config(config, name) {
+            Ok(inner) => Self(inner),
+            Err(e) => {
+                tracing::error!("theme '{name}' load failed: {e}");
+                Self::empty()
+            },
+        }
+    }
+
     /// Parse stcfg source text and resolve the named theme block.
-    /// Falls back to [`stoat::theme::Theme::empty`] if the source
-    /// fails to parse or the named block is absent, so the GUI
-    /// never refuses to render due to a bad config.
+    /// Falls back to [`Theme::empty`] if the source fails to parse.
     pub fn load_from_source(source: &str, name: &str) -> Self {
         let (config, _errors) = stoat_config::parse(source);
-        let inner = config
-            .and_then(|c| stoat::theme::Theme::from_config(&c, name).ok())
-            .unwrap_or_else(stoat::theme::Theme::empty);
-        Self(inner)
+        match config {
+            Some(c) => Self::from_config(&c, name),
+            None => Self::empty(),
+        }
     }
 }
