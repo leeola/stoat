@@ -7,9 +7,10 @@ use crate::{
 pub use delegate::{PickerDelegate, PickerSecondary};
 use gpui::{
     div, uniform_list, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Task, UniformListScrollHandle, Window,
+    Focusable, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Task, UniformListScrollHandle, Window,
 };
+use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
 use stoat_action::ActionKind;
 
@@ -30,6 +31,69 @@ pub fn rank_matches<T>(
     let mut matches = match_and_rank(query, items)?;
     matches.sort_by_key(|m| std::cmp::Reverse(m.score));
     Some(matches)
+}
+
+/// Convert nucleo-style character indices into byte-range
+/// highlights ready to feed into [`gpui::StyledText::with_highlights`].
+///
+/// `char_indices` are the matched cell positions as
+/// [`RankedMatch::matched_indices`] returns them: sorted,
+/// deduplicated, in haystack character (UTF-32) coordinates.
+/// Contiguous indices collapse into a single range so the returned
+/// `Vec` carries one entry per run, not one per cell. Indices past
+/// the haystack's character count are dropped silently so a stale
+/// index list (e.g. carried over a buffer mutation) cannot panic the
+/// renderer.
+///
+/// The returned ranges are byte offsets aligned to UTF-8 character
+/// boundaries, so [`gpui::StyledText::with_highlights`] accepts
+/// them without further conversion. The caller chooses `style`;
+/// typical picker delegates resolve a foreground color from the
+/// active [`stoat::theme::Theme`] (e.g. via the
+/// `UI_SEARCH_MATCH` scope) and supply a [`HighlightStyle`] whose
+/// `color` field is set.
+pub fn match_highlight_runs(
+    haystack: &str,
+    char_indices: &[u32],
+    style: HighlightStyle,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    if char_indices.is_empty() || haystack.is_empty() {
+        return Vec::new();
+    }
+
+    let mut char_to_byte: Vec<usize> = Vec::with_capacity(haystack.len() + 1);
+    char_to_byte.push(0);
+    for (byte_pos, _) in haystack.char_indices() {
+        if byte_pos != 0 {
+            char_to_byte.push(byte_pos);
+        }
+    }
+    char_to_byte.push(haystack.len());
+
+    let total_chars = char_to_byte.len() - 1;
+    let mut runs: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
+    let mut i = 0;
+    while i < char_indices.len() {
+        let start_char = char_indices[i] as usize;
+        if start_char >= total_chars {
+            break;
+        }
+        let mut end_char = start_char + 1;
+        let mut j = i + 1;
+        while j < char_indices.len()
+            && (char_indices[j] as usize) == end_char
+            && end_char < total_chars
+        {
+            end_char += 1;
+            j += 1;
+        }
+        let start_byte = char_to_byte[start_char];
+        let end_byte = char_to_byte[end_char];
+        runs.push((start_byte..end_byte, style));
+        i = j;
+    }
+
+    runs
 }
 
 /// Stoat-native picker container. Owns the query editor, the result
@@ -589,5 +653,67 @@ mod tests {
         let mut sorted = ranked[0].matched_indices.clone();
         sorted.sort_unstable();
         assert_eq!(ranked[0].matched_indices, sorted);
+    }
+
+    fn style() -> HighlightStyle {
+        HighlightStyle {
+            color: Some(gpui::Hsla {
+                h: 0.0,
+                s: 0.0,
+                l: 1.0,
+                a: 1.0,
+            }),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn match_highlight_runs_empty_inputs_return_empty() {
+        let s = style();
+        assert!(match_highlight_runs("", &[], s).is_empty());
+        assert!(match_highlight_runs("hello", &[], s).is_empty());
+        assert!(match_highlight_runs("", &[0, 1], s).is_empty());
+    }
+
+    #[test]
+    fn match_highlight_runs_merges_contiguous_indices() {
+        let s = style();
+        let runs = match_highlight_runs("foo.rs", &[0, 1, 2], s);
+        assert_eq!(runs, vec![(0..3, s)]);
+    }
+
+    #[test]
+    fn match_highlight_runs_splits_discontiguous_indices() {
+        let s = style();
+        let runs = match_highlight_runs("barfoo", &[0, 3, 4, 5], s);
+        assert_eq!(runs, vec![(0..1, s), (3..6, s)]);
+    }
+
+    #[test]
+    fn match_highlight_runs_drops_indices_past_end() {
+        let s = style();
+        let runs = match_highlight_runs("foo", &[1, 2, 5, 7], s);
+        assert_eq!(runs, vec![(1..3, s)]);
+    }
+
+    #[test]
+    fn match_highlight_runs_returns_byte_ranges_for_multibyte_chars() {
+        let s = style();
+        let runs = match_highlight_runs("café", &[2, 3], s);
+        assert_eq!(runs, vec![(2..5, s)]);
+    }
+
+    #[test]
+    fn match_highlight_runs_handles_match_spanning_multibyte_boundary() {
+        let s = style();
+        let runs = match_highlight_runs("a\u{00e9}b", &[0, 1, 2], s);
+        assert_eq!(runs, vec![(0..4, s)]);
+    }
+
+    #[test]
+    fn match_highlight_runs_index_at_last_char_produces_run() {
+        let s = style();
+        let runs = match_highlight_runs("abc", &[2], s);
+        assert_eq!(runs, vec![(2..3, s)]);
     }
 }
