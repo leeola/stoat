@@ -4,12 +4,14 @@ use std::{
     sync::{Arc, RwLock},
 };
 use stoat::buffer::{BufferId, SharedBuffer, TextBuffer};
+use stoat_language::SyntaxMap;
 
 /// Entity-shaped wrapper around [`SharedBuffer`]. Mutations go through
 /// the wrapper's methods so the entity emits [`BufferEvent`]s on the
 /// gpui foreground; subscribers re-render in response.
 pub struct Buffer {
     inner: SharedBuffer,
+    syntax_map: Option<SyntaxMap>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -25,12 +27,16 @@ impl EventEmitter<BufferEvent> for Buffer {}
 
 impl Buffer {
     pub fn from_shared(inner: SharedBuffer) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            syntax_map: None,
+        }
     }
 
     pub fn with_text(buffer_id: BufferId, text: &str) -> Self {
         Self {
             inner: Arc::new(RwLock::new(TextBuffer::with_text(buffer_id, text))),
+            syntax_map: None,
         }
     }
 
@@ -72,6 +78,22 @@ impl Buffer {
     }
 
     pub fn language_changed(&self, cx: &mut Context<'_, Self>) {
+        cx.emit(BufferEvent::LanguageChanged);
+        cx.notify();
+    }
+
+    /// Returns the buffer's multi-layer parse tree, if one has been
+    /// installed by the parsing pipeline. Tree-sitter motion handlers
+    /// no-op when this returns `None`.
+    pub fn syntax_map(&self) -> Option<&SyntaxMap> {
+        self.syntax_map.as_ref()
+    }
+
+    /// Install (or clear) the buffer's multi-layer parse tree. Emits
+    /// [`BufferEvent::LanguageChanged`] so editors re-render any
+    /// syntax-driven decoration.
+    pub fn set_syntax_map(&mut self, map: Option<SyntaxMap>, cx: &mut Context<'_, Self>) {
+        self.syntax_map = map;
         cx.emit(BufferEvent::LanguageChanged);
         cx.notify();
     }

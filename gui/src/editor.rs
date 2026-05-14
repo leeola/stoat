@@ -120,6 +120,8 @@ pub struct Editor {
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
     hover_debounce_task: Option<Task<()>>,
+    expansion_history: Vec<std::ops::Range<usize>>,
+    expansion_tip: Option<std::ops::Range<usize>>,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
 }
@@ -171,6 +173,8 @@ impl Editor {
             text_region_bounds: None,
             hover_position: None,
             hover_debounce_task: None,
+            expansion_history: Vec::new(),
+            expansion_tip: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
         }

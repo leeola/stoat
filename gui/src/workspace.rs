@@ -376,6 +376,50 @@ impl Workspace {
             ActionKind::GotoLastLine => self.dispatch_simple_goto(GotoKind::LastLine, cx),
             ActionKind::GotoLineNumber => self.dispatch_goto_line_number(cx),
             ActionKind::GotoColumn => self.dispatch_goto_column(cx),
+            ActionKind::ExpandSelection => self.dispatch_expand_selection(cx),
+            ActionKind::ShrinkSelection => self.dispatch_shrink_selection(cx),
+            ActionKind::SelectNextSibling => self.dispatch_select_sibling(
+                crate::editor::actions::treesitter::SiblingDir::Next,
+                false,
+                cx,
+            ),
+            ActionKind::SelectPrevSibling => self.dispatch_select_sibling(
+                crate::editor::actions::treesitter::SiblingDir::Prev,
+                false,
+                cx,
+            ),
+            ActionKind::SelectAllSiblings => self.dispatch_select_all_siblings(cx),
+            ActionKind::SelectAllChildren => self.dispatch_select_all_children(cx),
+            ActionKind::MoveParentNodeStart => self.dispatch_move_parent_bound(
+                crate::editor::actions::treesitter::NodeBound::Start,
+                false,
+                cx,
+            ),
+            ActionKind::MoveParentNodeEnd => self.dispatch_move_parent_bound(
+                crate::editor::actions::treesitter::NodeBound::End,
+                false,
+                cx,
+            ),
+            ActionKind::GotoNextFunction => self.dispatch_goto_textobject(
+                crate::editor::actions::treesitter::NavKind::Function,
+                crate::editor::actions::treesitter::NavDirection::Next,
+                cx,
+            ),
+            ActionKind::GotoPrevFunction => self.dispatch_goto_textobject(
+                crate::editor::actions::treesitter::NavKind::Function,
+                crate::editor::actions::treesitter::NavDirection::Prev,
+                cx,
+            ),
+            ActionKind::GotoNextClass => self.dispatch_goto_textobject(
+                crate::editor::actions::treesitter::NavKind::Class,
+                crate::editor::actions::treesitter::NavDirection::Next,
+                cx,
+            ),
+            ActionKind::GotoPrevClass => self.dispatch_goto_textobject(
+                crate::editor::actions::treesitter::NavKind::Class,
+                crate::editor::actions::treesitter::NavDirection::Prev,
+                cx,
+            ),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -478,6 +522,92 @@ impl Workspace {
             .update(cx, |sm, _| sm.take_consumed_count())
             .unwrap_or(1);
         editor.update(cx, |ed, cx| ed.handle_goto_column(count, false, cx));
+    }
+
+    fn dispatch_expand_selection(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let count = self.take_count(cx);
+        editor.update(cx, |ed, cx| ed.handle_expand_selection(count, cx));
+    }
+
+    fn dispatch_shrink_selection(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let count = self.take_count(cx);
+        editor.update(cx, |ed, cx| ed.handle_shrink_selection(count, cx));
+    }
+
+    fn dispatch_select_sibling(
+        &mut self,
+        dir: crate::editor::actions::treesitter::SiblingDir,
+        extend: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let count = self.take_count(cx);
+        editor.update(cx, |ed, cx| {
+            ed.handle_select_sibling(dir, extend, count, cx)
+        });
+    }
+
+    fn dispatch_select_all_siblings(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| ed.handle_select_all_siblings(cx));
+    }
+
+    fn dispatch_select_all_children(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| ed.handle_select_all_children(cx));
+    }
+
+    fn dispatch_move_parent_bound(
+        &mut self,
+        bound: crate::editor::actions::treesitter::NodeBound,
+        extend: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let count = self.take_count(cx);
+        editor.update(cx, |ed, cx| {
+            ed.handle_move_parent_bound(bound, extend, count, cx)
+        });
+    }
+
+    fn dispatch_goto_textobject(
+        &mut self,
+        kind: crate::editor::actions::treesitter::NavKind,
+        direction: crate::editor::actions::treesitter::NavDirection,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| ed.handle_goto_textobject(kind, direction, cx));
+    }
+
+    fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<crate::editor::Editor>> {
+        self.input_state_machine
+            .read(cx)
+            .active_editor()
+            .cloned()
+            .and_then(|w| w.upgrade())
+    }
+
+    fn take_count(&mut self, cx: &mut Context<'_, Self>) -> u32 {
+        self.input_state_machine
+            .update(cx, |sm, _| sm.take_consumed_count())
+            .unwrap_or(1)
     }
 }
 
