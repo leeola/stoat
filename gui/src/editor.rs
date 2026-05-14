@@ -6,6 +6,9 @@ use crate::{
     buffer::Buffer,
     diff_map::{DiffMap, DiffMapEvent},
     display_map::{DisplayMap, DisplayMapEvent},
+    editor::scroll::autoscroll::{
+        compute_autoscroll_y, AutoscrollStrategy, DEFAULT_VERTICAL_SCROLL_MARGIN,
+    },
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
@@ -278,6 +281,15 @@ impl Editor {
         }
         self.scroll_row = row;
         cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Request that the next layout pass scroll the viewport according
+    /// to `strategy`. The request is stored on the scroll manager and
+    /// consumed once by [`Editor::apply_pending_autoscroll`]; subsequent
+    /// frames do not re-apply it.
+    pub fn request_autoscroll(&mut self, strategy: AutoscrollStrategy, cx: &mut Context<'_, Self>) {
+        self.scroll_manager.set_autoscroll_request(Some(strategy));
         cx.notify();
     }
 
@@ -683,6 +695,95 @@ impl Editor {
         self.set_scroll_row(new_row, cx);
     }
 
+    /// Consume any pending [`AutoscrollStrategy`] and snap the scroll
+    /// position toward the resolved target row. No-op when cell
+    /// metrics or text-region bounds have not been reported yet (e.g.
+    /// the first paint); a future `request_autoscroll` after those
+    /// fields populate will scroll on its own next pass.
+    pub fn apply_pending_autoscroll(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(strategy) = self.scroll_manager.take_autoscroll_request() else {
+            return;
+        };
+        let Some(cell) = self.cell_size else {
+            return;
+        };
+        let Some(text_region) = self.text_region_bounds else {
+            return;
+        };
+        let line_height_f64 = f32::from(cell.height) as f64;
+        let viewport_height_f64 = f32::from(text_region.size.height) as f64;
+        if line_height_f64 <= 0.0 || viewport_height_f64 <= 0.0 {
+            return;
+        }
+        let visible_rows = viewport_height_f64 / line_height_f64;
+
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let multi_buffer_snapshot = self.multi_buffer.read(cx).snapshot();
+
+        let selections = self.selections.all_anchors();
+        if selections.is_empty() {
+            return;
+        }
+
+        let mut min_row = u32::MAX;
+        let mut max_row = 0u32;
+        let mut newest: &Selection<Anchor> = &selections[0];
+        for selection in selections {
+            if selection.id > newest.id {
+                newest = selection;
+            }
+            let head = selection.head();
+            let head_offset = multi_buffer_snapshot.resolve_anchor(&head);
+            let head_point = multi_buffer_snapshot.rope().offset_to_point(head_offset);
+            let head_display = display_snapshot.buffer_to_display(head_point);
+            min_row = min_row.min(head_display.row);
+            max_row = max_row.max(head_display.row);
+        }
+        let mut target_top = min_row as f64;
+        let mut target_bottom = max_row as f64 + 1.0;
+
+        let selections_fit = target_bottom - target_top <= visible_rows;
+        if matches!(strategy, AutoscrollStrategy::Newest)
+            || (matches!(strategy, AutoscrollStrategy::Fit) && !selections_fit)
+        {
+            let head = newest.head();
+            let head_offset = multi_buffer_snapshot.resolve_anchor(&head);
+            let head_point = multi_buffer_snapshot.rope().offset_to_point(head_offset);
+            let head_display = display_snapshot.buffer_to_display(head_point);
+            target_top = head_display.row as f64;
+            target_bottom = target_top + 1.0;
+        }
+
+        let total_rows = (display_snapshot.max_point().row + 1) as f64;
+        let max_scroll_top = (total_rows - visible_rows).max(0.0);
+        let current_y = self.scroll_manager.anchor().offset.y;
+
+        let new_y = compute_autoscroll_y(
+            strategy,
+            current_y,
+            target_top,
+            target_bottom,
+            visible_rows,
+            max_scroll_top,
+            DEFAULT_VERTICAL_SCROLL_MARGIN,
+        );
+
+        if new_y == current_y {
+            return;
+        }
+        let mut anchor = *self.scroll_manager.anchor();
+        anchor.offset.y = new_y;
+        self.scroll_manager.set_anchor(anchor);
+        let pixel_offset_y = render::scroll_position_to_pixel_offset_y(new_y, cell.height);
+        self.scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(Point::new(px(0.0), pixel_offset_y));
+        let new_row = new_y.floor().max(0.0) as u32;
+        self.set_scroll_row(new_row, cx);
+    }
+
     /// Translate a buffer UTF-16 offset to the pixel rectangle of the
     /// corresponding character cell, anchored relative to
     /// `element_origin`. Returns `None` when [`Editor::cell_size`] is
@@ -765,6 +866,7 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        self.apply_pending_autoscroll(cx);
         let total_rows = self
             .display_map
             .update(cx, |dm, _| dm.snapshot())
@@ -1091,6 +1193,139 @@ mod tests {
         });
         assert_eq!(offset.y, px(-24.5));
         assert_eq!(offset.x, px(0.0));
+    }
+
+    fn editor_with_viewport(
+        vcx: &mut VisualTestContext,
+        text: &str,
+    ) -> (Entity<Buffer>, Entity<Editor>) {
+        let (buffer, editor) = new_editor_in_window(vcx, text);
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.set_cell_size(cell(8.0, 16.0), cx);
+            ed.set_text_region_bounds(
+                Bounds {
+                    origin: Point::new(px(0.0), px(0.0)),
+                    size: gpui::size(px(160.0), px(320.0)),
+                },
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+        (buffer, editor)
+    }
+
+    fn multiline_text(rows: usize) -> String {
+        (0..rows)
+            .map(|i| format!("line{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn request_autoscroll_stores_pending_strategy() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = new_editor_in_window(vcx, "a");
+
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.request_autoscroll(AutoscrollStrategy::Center, cx);
+        });
+
+        let pending = editor.read_with(vcx, |ed, _| ed.scroll_manager().autoscroll_request());
+        assert_eq!(pending, Some(AutoscrollStrategy::Center));
+    }
+
+    #[test]
+    fn apply_pending_autoscroll_center_moves_scroll_position() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let text = multiline_text(30);
+        let (_buffer, editor) = editor_with_viewport(vcx, &text);
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.set_cursor_at_grid(10, 0, cx);
+            ed.request_autoscroll(AutoscrollStrategy::Center, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            1.0,
+        );
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 1);
+    }
+
+    #[test]
+    fn apply_pending_autoscroll_top_places_cursor_at_top() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let text = multiline_text(30);
+        let (_buffer, editor) = editor_with_viewport(vcx, &text);
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.set_cursor_at_grid(15, 0, cx);
+            ed.request_autoscroll(AutoscrollStrategy::Top, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            10.0,
+        );
+    }
+
+    #[test]
+    fn apply_pending_autoscroll_consumes_request() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let text = multiline_text(30);
+        let (_buffer, editor) = editor_with_viewport(vcx, &text);
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.request_autoscroll(AutoscrollStrategy::Center, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+
+        let pending = editor.read_with(vcx, |ed, _| ed.scroll_manager().autoscroll_request());
+        assert_eq!(pending, None);
+    }
+
+    #[test]
+    fn apply_pending_autoscroll_pushes_pixel_offset_to_scroll_handle() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let text = multiline_text(30);
+        let (_buffer, editor) = editor_with_viewport(vcx, &text);
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.set_cursor_at_grid(15, 0, cx);
+            ed.request_autoscroll(AutoscrollStrategy::Top, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+        vcx.run_until_parked();
+
+        let offset = editor.read_with(vcx, |ed, _| {
+            ed.scroll_handle().0.borrow().base_handle.offset()
+        });
+        assert_eq!(offset.y, px(-160.0));
+    }
+
+    #[test]
+    fn apply_pending_autoscroll_noop_when_cell_size_unset() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = new_editor_in_window(vcx, "a\nb\nc");
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.request_autoscroll(AutoscrollStrategy::Top, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+
+        let y = editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y);
+        assert_eq!(y, 0.0);
     }
 
     #[test]

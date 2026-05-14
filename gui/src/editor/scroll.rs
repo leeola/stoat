@@ -1,3 +1,6 @@
+pub mod autoscroll;
+
+use autoscroll::AutoscrollStrategy;
 use gpui::{px, Axis, Pixels, Point, ScrollDelta};
 use std::time::{Duration, Instant};
 use stoat_text::Anchor;
@@ -139,14 +142,16 @@ pub enum ScrollbarThumbState {
 
 /// Per-editor scroll state. Owns the active [`ScrollAnchor`], the
 /// in-progress [`OngoingScroll`] gesture, a cached visible-line count
-/// the render path fills in during paint, and the minimap thumb
-/// state. The wheel listener mutates this struct on each frame; the
+/// the render path fills in during paint, the minimap thumb state,
+/// and a pending [`AutoscrollStrategy`] consumed by the next layout
+/// pass. The wheel listener mutates this struct on each frame; the
 /// render path reads from it; tests construct it directly.
 pub struct ScrollManager {
     anchor: ScrollAnchor,
     ongoing: OngoingScroll,
     visible_line_count: Option<f64>,
     minimap_thumb_state: Option<ScrollbarThumbState>,
+    autoscroll_request: Option<AutoscrollStrategy>,
 }
 
 impl ScrollManager {
@@ -156,6 +161,7 @@ impl ScrollManager {
             ongoing: OngoingScroll::new(now),
             visible_line_count: None,
             minimap_thumb_state: None,
+            autoscroll_request: None,
         }
     }
 
@@ -189,6 +195,21 @@ impl ScrollManager {
 
     pub fn set_minimap_thumb_state(&mut self, state: Option<ScrollbarThumbState>) {
         self.minimap_thumb_state = state;
+    }
+
+    pub fn autoscroll_request(&self) -> Option<AutoscrollStrategy> {
+        self.autoscroll_request
+    }
+
+    pub fn set_autoscroll_request(&mut self, request: Option<AutoscrollStrategy>) {
+        self.autoscroll_request = request;
+    }
+
+    /// Take the pending autoscroll request, leaving the slot empty.
+    /// The render path calls this once per paint after applying the
+    /// strategy, so a request never re-fires across frames.
+    pub fn take_autoscroll_request(&mut self) -> Option<AutoscrollStrategy> {
+        self.autoscroll_request.take()
     }
 
     /// Apply a wheel or trackpad event to the fractional scroll
