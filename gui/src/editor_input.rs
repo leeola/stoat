@@ -4,7 +4,8 @@ use gpui::{
     UTF16Selection, WeakEntity, Window,
 };
 use std::ops::Range;
-use stoat_text::OffsetUtf16;
+use stoat::DisplayPoint;
+use stoat_text::{Bias, OffsetUtf16};
 
 /// Entity that bridges the platform's IME pipeline to the
 /// workspace-hosted [`InputStateMachine`]. The render path wraps
@@ -153,11 +154,27 @@ impl EntityInputHandler for EditorInput {
 
     fn character_index_for_point(
         &mut self,
-        _point: Point<Pixels>,
+        point: Point<Pixels>,
         _window: &mut Window,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Option<usize> {
-        None
+        let sm = self.state_machine.upgrade()?;
+        let editor = sm.read(cx).active_editor()?.upgrade()?;
+        editor.update(cx, |ed, cx| {
+            let cell = ed.cell_size()?;
+            let bounds = ed.text_region_bounds()?;
+            if !bounds.contains(&point) {
+                return None;
+            }
+            let local = Point::new(point.x - bounds.origin.x, point.y - bounds.origin.y);
+            let (row, col) = crate::editor::mouse::point_to_grid(local, cell);
+            let display_snapshot = ed.display_map().update(cx, |dm, _| dm.snapshot());
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
+            let buffer_point = display_snapshot.display_to_buffer(clipped)?;
+            let byte_offset = snapshot.rope().point_to_offset(buffer_point);
+            Some(snapshot.rope().offset_to_offset_utf16(byte_offset).0)
+        })
     }
 }
 
@@ -522,6 +539,119 @@ mod tests {
         });
         assert_eq!(result.as_deref(), Some("bc"));
         assert_eq!(adjusted, Some(1..3));
+    }
+
+    fn region_bounds() -> Bounds<Pixels> {
+        Bounds {
+            origin: Point::new(gpui::px(10.0), gpui::px(20.0)),
+            size: gpui::size(gpui::px(100.0), gpui::px(100.0)),
+        }
+    }
+
+    #[test]
+    fn character_index_for_point_returns_none_without_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.character_index_for_point(Point::new(gpui::px(10.0), gpui::px(20.0)), window, cx)
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn character_index_for_point_returns_none_without_cell_size() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        editor.update(vcx, |ed, cx| ed.set_text_region_bounds(region_bounds(), cx));
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.character_index_for_point(Point::new(gpui::px(10.0), gpui::px(20.0)), window, cx)
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn character_index_for_point_returns_none_without_text_region_bounds() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        editor.update(vcx, |ed, cx| {
+            ed.set_cell_size(gpui::size(gpui::px(8.0), gpui::px(16.0)), cx)
+        });
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.character_index_for_point(Point::new(gpui::px(10.0), gpui::px(20.0)), window, cx)
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn character_index_for_point_returns_none_when_point_outside_bounds() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        editor.update(vcx, |ed, cx| {
+            ed.set_cell_size(gpui::size(gpui::px(8.0), gpui::px(16.0)), cx);
+            ed.set_text_region_bounds(region_bounds(), cx);
+        });
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input.update_in(vcx, |ei, window, cx| {
+            ei.character_index_for_point(Point::new(gpui::px(0.0), gpui::px(0.0)), window, cx)
+        });
+        assert_eq!(result, None);
+    }
+
+    #[test]
+    fn character_index_for_point_maps_point_to_utf16_offset() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "hello");
+        editor.update(vcx, |ed, cx| {
+            ed.set_cell_size(gpui::size(gpui::px(8.0), gpui::px(16.0)), cx);
+            ed.set_text_region_bounds(region_bounds(), cx);
+        });
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input
+            .update_in(vcx, |ei, window, cx| {
+                ei.character_index_for_point(
+                    Point::new(gpui::px(10.0 + 16.0), gpui::px(20.0)),
+                    window,
+                    cx,
+                )
+            })
+            .expect("offset");
+        assert_eq!(result, 2);
+    }
+
+    #[test]
+    fn character_index_for_point_origin_maps_to_offset_zero() {
+        let mut cx = TestAppContext::single();
+        let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
+        let editor = new_singleton_editor(vcx, "a\u{1f600}b");
+        editor.update(vcx, |ed, cx| {
+            ed.set_cell_size(gpui::size(gpui::px(8.0), gpui::px(16.0)), cx);
+            ed.set_text_region_bounds(region_bounds(), cx);
+        });
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let editor_input = new_editor_input(&sm, vcx);
+
+        let result = editor_input
+            .update_in(vcx, |ei, window, cx| {
+                ei.character_index_for_point(Point::new(gpui::px(10.0), gpui::px(20.0)), window, cx)
+            })
+            .expect("offset");
+        assert_eq!(result, 0);
     }
 
     #[test]
