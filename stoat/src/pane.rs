@@ -1067,6 +1067,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: std::collections::BTreeMap::new(),
                 claude_permissions: std::collections::BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);

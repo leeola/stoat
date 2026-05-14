@@ -13,6 +13,8 @@ use crate::{
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
+    settings::Settings,
+    theme::{DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
 };
 use gpui::{
     canvas, div, px, uniform_list, App, AppContext, Bounds, Context, Div, Entity, EventEmitter,
@@ -897,9 +899,12 @@ impl Render for Editor {
         )
         .size_full();
 
+        let (family, size) = editor_font(cx);
         div()
             .relative()
             .size_full()
+            .font_family(family)
+            .text_size(px(size))
             .child(list)
             .child(bounds_capture)
             .on_mouse_down(
@@ -919,6 +924,22 @@ impl Render for Editor {
                 this.handle_scroll_wheel(event, window, cx);
             }))
     }
+}
+
+fn editor_font(cx: &App) -> (SharedString, f32) {
+    let (family, size) = match cx.try_global::<Settings>() {
+        Some(settings) => (
+            settings.resolved.editor_font_family.clone(),
+            settings.resolved.editor_font_size,
+        ),
+        None => (None, None),
+    };
+    (
+        family
+            .map(SharedString::from)
+            .unwrap_or_else(|| SharedString::from(DEFAULT_EDITOR_FONT_FAMILY)),
+        size.unwrap_or(DEFAULT_EDITOR_FONT_SIZE),
+    )
 }
 
 impl ItemView for Editor {

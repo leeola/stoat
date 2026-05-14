@@ -65,6 +65,18 @@ pub struct Settings {
     /// configured. Right-hand wins on merge: a CLI override fully
     /// replaces the file's rules for any tool it specifies.
     pub claude_permissions: BTreeMap<String, ToolPermissions>,
+    /// Monospace font family for the editor pane. Set via
+    /// `editor.font.family = "Menlo";`.
+    pub editor_font_family: Option<String>,
+    /// Editor pane font size in logical pixels. Set via
+    /// `editor.font.size = 14;`.
+    pub editor_font_size: Option<f32>,
+    /// Proportional font family for chrome (status bar, tab bar,
+    /// modals, dock panels). Set via `ui.font.family = "SF Pro";`.
+    pub ui_font_family: Option<String>,
+    /// Chrome font size in logical pixels. Set via
+    /// `ui.font.size = 14;`.
+    pub ui_font_size: Option<f32>,
 }
 
 impl Settings {
@@ -102,6 +114,10 @@ impl Settings {
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             mode_badges,
             claude_permissions,
+            editor_font_family: other.editor_font_family.or(self.editor_font_family),
+            editor_font_size: other.editor_font_size.or(self.editor_font_size),
+            ui_font_family: other.ui_font_family.or(self.ui_font_family),
+            ui_font_size: other.ui_font_size.or(self.ui_font_size),
         }
     }
 
@@ -151,6 +167,26 @@ impl Settings {
                 };
                 if let Some(p) = policy {
                     self.mouse_capture = Some(p);
+                }
+            },
+            ["editor", "font", "family"] => {
+                if let Value::String(s) = &setting.value.node {
+                    self.editor_font_family = Some(s.clone());
+                }
+            },
+            ["editor", "font", "size"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.editor_font_size = Some(n as f32);
+                }
+            },
+            ["ui", "font", "family"] => {
+                if let Value::String(s) = &setting.value.node {
+                    self.ui_font_family = Some(s.clone());
+                }
+            },
+            ["ui", "font", "size"] => {
+                if let Value::Number(n) = setting.value.node {
+                    self.ui_font_size = Some(n as f32);
                 }
             },
             ["claude", "permissions", tool, behavior] => {
@@ -203,6 +239,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -219,6 +259,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -235,6 +279,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -260,6 +308,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         let right = Settings {
             text_proto_log: Some(true),
@@ -268,6 +320,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         assert_eq!(
             left.merge(right),
@@ -278,6 +334,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -291,6 +351,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         let right = Settings::default();
         assert_eq!(
@@ -302,6 +366,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -326,6 +394,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -342,6 +414,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -358,6 +434,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -383,6 +463,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         let right = Settings::default();
         assert_eq!(
@@ -394,6 +478,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -410,6 +498,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -426,6 +518,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -439,6 +535,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         let right = Settings {
             text_proto_log: None,
@@ -447,6 +547,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
     }
@@ -460,6 +564,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         let right = Settings {
             text_proto_log: None,
@@ -468,6 +576,10 @@ mod tests {
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
             claude_permissions: BTreeMap::new(),
+            editor_font_family: None,
+            editor_font_size: None,
+            ui_font_family: None,
+            ui_font_size: None,
         };
         assert_eq!(
             left.merge(right),
@@ -478,6 +590,10 @@ mod tests {
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
                 claude_permissions: BTreeMap::new(),
+                editor_font_family: None,
+                editor_font_size: None,
+                ui_font_family: None,
+                ui_font_size: None,
             }
         );
     }
@@ -711,5 +827,79 @@ mod tests {
         let merged = left.merge(right);
         assert!(merged.claude_permissions.contains_key("Bash"));
         assert!(merged.claude_permissions.contains_key("Read"));
+    }
+
+    #[test]
+    fn from_config_extracts_editor_font_family() {
+        let config = parse_ok(r#"on init { editor.font.family = "Menlo"; }"#);
+        assert_eq!(
+            Settings::from_config(&config).editor_font_family,
+            Some("Menlo".to_string()),
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_editor_font_size() {
+        let config = parse_ok("on init { editor.font.size = 13; }");
+        assert_eq!(Settings::from_config(&config).editor_font_size, Some(13.0));
+    }
+
+    #[test]
+    fn from_config_extracts_ui_font_family() {
+        let config = parse_ok(r#"on init { ui.font.family = "SF Pro"; }"#);
+        assert_eq!(
+            Settings::from_config(&config).ui_font_family,
+            Some("SF Pro".to_string()),
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_ui_font_size() {
+        let config = parse_ok("on init { ui.font.size = 15; }");
+        assert_eq!(Settings::from_config(&config).ui_font_size, Some(15.0));
+    }
+
+    #[test]
+    fn from_config_ignores_wrong_type_font_family() {
+        let config = parse_ok("on init { editor.font.family = 12; }");
+        assert!(Settings::from_config(&config).editor_font_family.is_none());
+    }
+
+    #[test]
+    fn from_config_ignores_wrong_type_font_size() {
+        let config = parse_ok(r#"on init { editor.font.size = "big"; }"#);
+        assert!(Settings::from_config(&config).editor_font_size.is_none());
+    }
+
+    #[test]
+    fn merge_right_overrides_editor_font_family() {
+        let left = Settings {
+            editor_font_family: Some("Menlo".into()),
+            ..Settings::default()
+        };
+        let right = Settings {
+            editor_font_family: Some("Cascadia".into()),
+            ..Settings::default()
+        };
+        assert_eq!(
+            left.merge(right).editor_font_family,
+            Some("Cascadia".to_string()),
+        );
+    }
+
+    #[test]
+    fn merge_right_none_preserves_font_fields() {
+        let left = Settings {
+            editor_font_family: Some("Menlo".into()),
+            editor_font_size: Some(13.0),
+            ui_font_family: Some("SF Pro".into()),
+            ui_font_size: Some(14.0),
+            ..Settings::default()
+        };
+        let merged = left.merge(Settings::default());
+        assert_eq!(merged.editor_font_family, Some("Menlo".to_string()));
+        assert_eq!(merged.editor_font_size, Some(13.0));
+        assert_eq!(merged.ui_font_family, Some("SF Pro".to_string()));
+        assert_eq!(merged.ui_font_size, Some(14.0));
     }
 }

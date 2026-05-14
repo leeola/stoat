@@ -1,5 +1,26 @@
 use gpui::Global;
 
+/// Default monospace font family used by the editor pane when the
+/// active [`Settings`] does not override it. Picked to resolve on
+/// gpui's primary platform without requiring the user to install
+/// extra fonts.
+///
+/// [`Settings`]: crate::settings::Settings
+pub const DEFAULT_EDITOR_FONT_FAMILY: &str = "Menlo";
+
+/// Default editor pane font size in logical pixels. Mirrors the
+/// size most editors ship with so a fresh install reads correctly
+/// at 1x scaling.
+pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 14.0;
+
+/// Default proportional font family for chrome (status bar, tab
+/// bar, modals, dock panels). `.SystemUIFont` is the platform's
+/// resolved system UI face on the gpui-supported platforms.
+pub const DEFAULT_UI_FONT_FAMILY: &str = ".SystemUIFont";
+
+/// Default chrome font size in logical pixels.
+pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
+
 /// App-global wrapper around [`stoat::theme::Theme`]. Stored via
 /// [`gpui::App::set_global`] and observed via
 /// [`gpui::App::observe_global::<Theme>`]. The inner value is the

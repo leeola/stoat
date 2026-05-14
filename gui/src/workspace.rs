@@ -14,10 +14,12 @@ use crate::{
     pane_tree::PaneTree,
     settings::Settings,
     status_bar::StatusBar,
+    theme::{DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
-    deferred, div, App, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
-    IntoElement, KeyContext, ParentElement, Render, SharedString, Styled, Subscription, Window,
+    deferred, div, px, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
+    InteractiveElement, IntoElement, KeyContext, ParentElement, Render, SharedString, Styled,
+    Subscription, Window,
 };
 use std::path::{Path, PathBuf};
 use stoat::pane::{Axis, Direction};
@@ -949,10 +951,13 @@ impl Render for Workspace {
             .filter(|d| d.read(cx).side() == DockSide::Right)
             .cloned()
             .collect();
+        let (ui_family, ui_size) = ui_font(cx);
         div()
             .flex()
             .flex_row()
             .size_full()
+            .font_family(ui_family)
+            .text_size(px(ui_size))
             .track_focus(&self.focus_handle)
             .key_context(self.build_key_context())
             .children(left_docks)
@@ -966,6 +971,22 @@ impl Render for Workspace {
             .children(right_docks)
             .child(deferred(self.modal_layer.clone()))
     }
+}
+
+fn ui_font(cx: &App) -> (SharedString, f32) {
+    let (family, size) = match cx.try_global::<Settings>() {
+        Some(settings) => (
+            settings.resolved.ui_font_family.clone(),
+            settings.resolved.ui_font_size,
+        ),
+        None => (None, None),
+    };
+    (
+        family
+            .map(SharedString::from)
+            .unwrap_or_else(|| SharedString::from(DEFAULT_UI_FONT_FAMILY)),
+        size.unwrap_or(DEFAULT_UI_FONT_SIZE),
+    )
 }
 
 #[cfg(test)]
