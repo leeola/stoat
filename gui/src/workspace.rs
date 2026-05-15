@@ -16,8 +16,8 @@ use crate::{
     pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
     status_bar::{
-        active_file::ActiveFileLabel, mode_badge::ModeBadge, workspace_label::WorkspaceLabel,
-        StatusBar, StatusItemView,
+        active_file::ActiveFileLabel, cursor_position::CursorPosition, mode_badge::ModeBadge,
+        workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
     },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
@@ -50,6 +50,7 @@ pub struct Workspace {
     editor_input: Entity<EditorInput>,
     workspace_label: Entity<WorkspaceLabel>,
     active_file_label: Entity<ActiveFileLabel>,
+    cursor_position: Entity<CursorPosition>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -131,6 +132,7 @@ impl Workspace {
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
         let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
+        let cursor_position = cx.new(|_| CursorPosition::new());
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -141,12 +143,16 @@ impl Workspace {
             bar.add_left_item(mode_badge.clone(), cx);
             bar.add_left_item(workspace_label.clone(), cx);
             bar.add_left_item(active_file_label.clone(), cx);
+            bar.add_right_item(cursor_position.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         active_file_label.update(cx, |label, cx| {
             label.set_active_pane_item(initial_status_item.as_deref(), cx);
+        });
+        cursor_position.update(cx, |item, cx| {
+            item.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         Self {
             name,
@@ -160,6 +166,7 @@ impl Workspace {
             editor_input,
             workspace_label,
             active_file_label,
+            cursor_position,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -293,6 +300,10 @@ impl Workspace {
 
     pub fn active_file_label(&self) -> &Entity<ActiveFileLabel> {
         &self.active_file_label
+    }
+
+    pub fn cursor_position(&self) -> &Entity<CursorPosition> {
+        &self.cursor_position
     }
 
     /// Register a status item at the left side of the status bar.
@@ -1454,7 +1465,7 @@ mod tests {
     }
 
     #[test]
-    fn new_registers_default_left_status_items() {
+    fn new_registers_default_status_items() {
         let mut cx = TestAppContext::single();
         let ws = new_workspace(&mut cx, "main", "/tmp/repo");
         let status_bar = ws.read_with(&cx, |w, _| w.status_bar().clone());
@@ -1462,7 +1473,7 @@ mod tests {
             (bar.left_items().len(), bar.right_items().len())
         });
         assert_eq!(left, 3);
-        assert_eq!(right, 0);
+        assert_eq!(right, 1);
     }
 
     #[test]
@@ -2624,6 +2635,24 @@ mod tests {
     }
 
     #[test]
+    fn opening_a_file_populates_cursor_position() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello stoat\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let item = ws.read_with(vcx, |w, _| w.cursor_position().clone());
+        let position = item.read_with(vcx, |c, _| c.position());
+        assert_eq!(position, Some((1, 1)));
+    }
+
+    #[test]
     fn open_paths_multiple_files_split_per_extra_path() {
         let mut cx = TestAppContext::single();
         let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
@@ -2817,7 +2846,6 @@ mod tests {
         let ws = new_workspace(&mut cx, "main", "/tmp/repo");
         ws.read_with(&cx, |w, cx| {
             let bar = w.status_bar().read(cx);
-            assert!(bar.right_items().is_empty());
             assert!(bar.left_items()[0].to_any().downcast::<ModeBadge>().is_ok());
         });
     }
