@@ -143,6 +143,7 @@ pub(crate) fn build_rendered_rows(
                 runs[idx].clear();
                 continue;
             };
+            let fallback = block_fallback_color(block);
             let mut row_text = String::new();
             let mut row_runs: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
             for span in line.spans {
@@ -152,7 +153,7 @@ pub(crate) fn build_rendered_rows(
                 let start = row_text.len();
                 row_text.push_str(span.content.as_ref());
                 let end = row_text.len();
-                row_runs.push((start..end, convert_block_span_style(&span.style)));
+                row_runs.push((start..end, convert_block_span_style(&span.style, fallback)));
             }
             texts[idx] = row_text;
             runs[idx] = row_runs;
@@ -224,12 +225,25 @@ fn convert_ratatui_style(style: &RatatuiStyle) -> gpui::HighlightStyle {
     }
 }
 
-fn convert_block_span_style(style: &RatatuiStyle) -> gpui::HighlightStyle {
+fn convert_block_span_style(style: &RatatuiStyle, fallback_color: u32) -> gpui::HighlightStyle {
     let mut converted = convert_ratatui_style(style);
     if converted.color.is_none() {
-        converted.color = Some(rgb(BLOCK_TEXT_HEX).into());
+        converted.color = Some(rgb(fallback_color).into());
     }
     converted
+}
+
+fn block_fallback_color(block: &Block) -> u32 {
+    let Block::Custom(custom) = block else {
+        return BLOCK_TEXT_HEX;
+    };
+    match custom.diff_status {
+        Some(stoat::DiffHunkStatus::Deleted) | Some(stoat::DiffHunkStatus::Modified) => {
+            DIFF_DELETED_HEX
+        },
+        Some(stoat::DiffHunkStatus::Moved) => DIFF_MOVED_HEX,
+        _ => BLOCK_TEXT_HEX,
+    }
 }
 
 fn append_run(
@@ -1623,5 +1637,73 @@ mod tests {
         assert_eq!(rows[0].text.as_ref(), "bold");
         assert_eq!(rows[0].runs.len(), 1);
         assert_eq!(rows[0].runs[0].1.font_weight, Some(FontWeight::BOLD));
+    }
+
+    fn snapshot_with_diff_block(
+        cx: &mut TestAppContext,
+        text: &str,
+        block_lines: Vec<String>,
+        diff_status: stoat::DiffHunkStatus,
+    ) -> DisplaySnapshot {
+        use stoat::display_map::{BlockPlacement, BlockProperties, BlockStyle};
+        let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let buffer_id = buffer.read_with(cx, |b, _| b.read(|tb| tb.buffer_id()));
+        let shared = buffer.read_with(cx, |b, _| b.shared().clone());
+        let multi_buffer = stoat::MultiBuffer::singleton(buffer_id, shared);
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut inner = stoat::DisplayMap::new(multi_buffer, executor);
+        let mut props =
+            BlockProperties::from_text(BlockPlacement::Above(0), block_lines, BlockStyle::Fixed);
+        props.diff_status = Some(diff_status);
+        inner.insert_blocks(vec![props]);
+        inner.snapshot()
+    }
+
+    #[test]
+    fn block_with_deleted_diff_status_paints_red() {
+        let mut cx = TestAppContext::single();
+        let snapshot = snapshot_with_diff_block(
+            &mut cx,
+            "alpha",
+            vec!["gone".into()],
+            stoat::DiffHunkStatus::Deleted,
+        );
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        assert_eq!(rows[0].text.as_ref(), "gone");
+        assert_eq!(rows[0].runs.len(), 1);
+        assert_eq!(rows[0].runs[0].1.color.map(hex_of), Some(DIFF_DELETED_HEX));
+    }
+
+    #[test]
+    fn block_with_modified_diff_status_paints_red() {
+        let mut cx = TestAppContext::single();
+        let snapshot = snapshot_with_diff_block(
+            &mut cx,
+            "alpha",
+            vec!["replaced".into()],
+            stoat::DiffHunkStatus::Modified,
+        );
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        assert_eq!(rows[0].text.as_ref(), "replaced");
+        assert_eq!(rows[0].runs.len(), 1);
+        assert_eq!(rows[0].runs[0].1.color.map(hex_of), Some(DIFF_DELETED_HEX));
+    }
+
+    #[test]
+    fn block_with_moved_diff_status_paints_cyan() {
+        let mut cx = TestAppContext::single();
+        let snapshot = snapshot_with_diff_block(
+            &mut cx,
+            "alpha",
+            vec!["relocated".into()],
+            stoat::DiffHunkStatus::Moved,
+        );
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        assert_eq!(rows[0].text.as_ref(), "relocated");
+        assert_eq!(rows[0].runs.len(), 1);
+        assert_eq!(rows[0].runs[0].1.color.map(hex_of), Some(DIFF_MOVED_HEX));
     }
 }
