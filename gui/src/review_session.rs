@@ -91,6 +91,23 @@ impl ReviewSession {
         cx.notify();
     }
 
+    /// Replace the entry for `path` with `new_input` and
+    /// re-extract its hunks in isolation. No-op when `path` is
+    /// not in the session's files. Emits
+    /// [`ReviewSessionEvent::Changed`] +
+    /// [`ReviewSessionEvent::Refreshed`].
+    pub fn refresh_file(
+        &mut self,
+        path: &std::path::Path,
+        new_input: ReviewFileInput,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner.refresh_file(path, new_input);
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::Refreshed);
+        cx.notify();
+    }
+
     pub fn progress(&self) -> ReviewProgress {
         self.inner.progress()
     }
@@ -305,6 +322,51 @@ mod tests {
         session.read_with(&cx, |s, _| {
             assert_eq!(s.inner().files.len(), 1);
             assert_eq!(s.inner().order.len(), 1);
+        });
+    }
+
+    #[test]
+    fn refresh_file_emits_changed_and_refreshed_and_updates_inner() {
+        use std::path::PathBuf;
+        let mut cx = TestAppContext::single();
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = InnerSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
+                inner.add_files(vec![ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                    buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+                }]);
+                ReviewSession::new(inner)
+            })
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+
+        session.update(&mut cx, |s, cx| {
+            s.refresh_file(
+                &PathBuf::from("a.txt"),
+                ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                    buffer_text: Arc::new("a\nNEWER\nc\n".to_string()),
+                },
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            drain(&events),
+            vec![ReviewSessionEvent::Changed, ReviewSessionEvent::Refreshed],
+        );
+        session.read_with(&cx, |s, _| {
+            assert_eq!(s.inner().files[0].buffer_text.as_str(), "a\nNEWER\nc\n");
         });
     }
 

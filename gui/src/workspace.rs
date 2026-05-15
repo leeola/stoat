@@ -7,7 +7,7 @@ use crate::{
     dock::{Dock, DockSide},
     editor::{Editor, EditorEvent, EditorMode},
     editor_input::EditorInput,
-    fs_watcher_driver::FsWatcherDriver,
+    fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
     globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
@@ -180,6 +180,13 @@ impl Workspace {
                 }
             },
         );
+        let fs_watcher_subscription = cx.subscribe(
+            &fs_watcher_driver,
+            |workspace, _, event: &FsWatcherDriverEvent, cx| {
+                let FsWatcherDriverEvent::ExternalEdit { path } = event;
+                workspace.dispatch_review_external_edit(path.clone(), cx);
+            },
+        );
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -247,6 +254,7 @@ impl Workspace {
                 settings_subscription,
                 pane_tree_subscription,
                 buffer_registry_subscription,
+                fs_watcher_subscription,
             ],
         }
     }
@@ -1044,6 +1052,15 @@ impl Workspace {
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
             ActionKind::ReviewRefresh => self.dispatch_review_refresh(cx),
+            ActionKind::ReviewExternalEdit => {
+                if let Some(action) = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::ReviewExternalEdit>()
+                {
+                    let path = action.path.clone();
+                    self.dispatch_review_external_edit(path, cx);
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1450,6 +1467,61 @@ impl Workspace {
         let source = session.read(cx).inner().source.clone();
         let inputs = review_inputs_for_source(&source, cx);
         session.update(cx, |session, cx| session.refresh_files(inputs, cx));
+    }
+
+    fn dispatch_review_external_edit(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        let Some((rel_path, language, base_text)) = ({
+            let inner = session.read(cx).inner();
+            inner
+                .files
+                .iter()
+                .find(|f| f.path == path)
+                .map(|f| (f.rel_path.clone(), f.language.clone(), f.base_text.clone()))
+        }) else {
+            return;
+        };
+
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        let buffer_text = {
+            let mut buf = Vec::new();
+            match fs.read(&path, &mut buf) {
+                Ok(()) => match String::from_utf8(buf) {
+                    Ok(text) => text,
+                    Err(err) => {
+                        tracing::warn!(
+                            ?path,
+                            %err,
+                            "ReviewExternalEdit: file is not valid UTF-8, skipping refresh",
+                        );
+                        return;
+                    },
+                },
+                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+                Err(err) => {
+                    tracing::warn!(
+                        ?path,
+                        %err,
+                        "ReviewExternalEdit: fs read failed, skipping refresh",
+                    );
+                    return;
+                },
+            }
+        };
+
+        let new_input = ReviewFileInput {
+            path: path.clone(),
+            rel_path,
+            language,
+            base_text,
+            buffer_text: Arc::new(buffer_text),
+        };
+        session.update(cx, |session, cx| {
+            session.refresh_file(&path, new_input, cx);
+        });
     }
 }
 
@@ -4428,6 +4500,95 @@ mod tests {
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
 
         dispatch(&ws, vcx, stoat_action::ReviewRefresh);
+        vcx.run_until_parked();
+    }
+
+    fn install_fs_host_global(vcx: &mut VisualTestContext, fs: Arc<stoat::host::FakeFs>) {
+        use crate::globals::FsHostGlobal;
+        vcx.update(|_, cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn stoat::host::FsHost>));
+        });
+    }
+
+    #[test]
+    fn dispatch_review_external_edit_refreshes_named_file() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEW\nc\n");
+        install_fs_host_global(vcx, fs.clone());
+        let session = in_memory_session_with_files(
+            vcx,
+            vec![stoat::review_session::InMemoryFile {
+                path: PathBuf::from("/tmp/repo/a.txt"),
+                base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+            }],
+        );
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEWER\nc\n");
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit {
+                path: PathBuf::from("/tmp/repo/a.txt"),
+            },
+        );
+        vcx.run_until_parked();
+
+        session.read_with(vcx, |s, _| {
+            assert_eq!(s.inner().files[0].buffer_text.as_str(), "a\nNEWER\nc\n");
+        });
+    }
+
+    #[test]
+    fn dispatch_review_external_edit_with_unknown_path_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_fs_host_global(vcx, fs.clone());
+        let session = in_memory_session_with_files(
+            vcx,
+            vec![stoat::review_session::InMemoryFile {
+                path: PathBuf::from("/tmp/repo/a.txt"),
+                base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+            }],
+        );
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        let version_before = session.read_with(vcx, |s, _| s.inner().version);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit {
+                path: PathBuf::from("/tmp/repo/elsewhere.txt"),
+            },
+        );
+        vcx.run_until_parked();
+
+        let version_after = session.read_with(vcx, |s, _| s.inner().version);
+        assert_eq!(
+            version_after, version_before,
+            "unknown path must not bump the session version",
+        );
+    }
+
+    #[test]
+    fn dispatch_review_external_edit_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_fs_host_global(vcx, fs);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit {
+                path: PathBuf::from("/tmp/repo/a.txt"),
+            },
+        );
         vcx.run_until_parked();
     }
 }

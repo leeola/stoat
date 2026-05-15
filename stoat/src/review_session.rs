@@ -446,6 +446,124 @@ impl ReviewSession {
         }
     }
 
+    /// Replace the entry for `path` with `new_input` and
+    /// re-extract its hunks in isolation. Other files in the
+    /// session are untouched; cross-file move metadata referencing
+    /// the refreshed file may go stale until a whole-session
+    /// refresh fires.
+    ///
+    /// No-op when `path` is not currently in [`Self::files`].
+    /// Decided statuses on the file's prior chunks carry across
+    /// when the new chunks' [`Self::identity_key`] matches.
+    /// Cursor behavior: if the cursor was on a chunk in this file,
+    /// it sticks to a new chunk with the same identity (else the
+    /// first chunk in the refreshed file); if the session had no
+    /// cursor, it adopts the first new chunk; cursors on other
+    /// files are left alone.
+    pub fn refresh_file(&mut self, path: &std::path::Path, new_input: ReviewFileInput) {
+        let Some(file_index) = self.files.iter().position(|f| f.path == path) else {
+            return;
+        };
+
+        let old_chunk_ids: Vec<ReviewChunkId> = self.files[file_index].chunks.clone();
+        let carried: HashMap<ChunkIdentity, ChunkStatus> = old_chunk_ids
+            .iter()
+            .filter_map(|id| {
+                let status = self.chunks.get(id)?.status;
+                if !status.is_decided() {
+                    return None;
+                }
+                let ident = self.identity_key(*id)?;
+                Some((ident, status))
+            })
+            .collect();
+        let prev_cursor_ident = self
+            .cursor
+            .current
+            .filter(|id| old_chunk_ids.contains(id))
+            .and_then(|id| self.identity_key(id));
+        let cursor_was_in_file = self
+            .cursor
+            .current
+            .map(|id| old_chunk_ids.contains(&id))
+            .unwrap_or(false);
+        let session_had_no_cursor = self.cursor.current.is_none();
+
+        let order_insert_pos = old_chunk_ids
+            .first()
+            .and_then(|first| self.order.iter().position(|id| id == first))
+            .unwrap_or(self.order.len());
+        for id in &old_chunk_ids {
+            self.chunks.remove(id);
+        }
+        self.order.retain(|id| !old_chunk_ids.contains(id));
+
+        let inputs = vec![new_input];
+        let mut hunks_per_file = extract_review_hunks_changeset(&inputs, 3);
+        let new_input = inputs.into_iter().next().expect("single input");
+        let hunks = hunks_per_file.pop().unwrap_or_default();
+
+        let base_offsets = line_byte_offsets(&split_lines(&new_input.base_text));
+        let buffer_offsets = line_byte_offsets(&split_lines(&new_input.buffer_text));
+
+        let mut new_chunk_ids: Vec<ReviewChunkId> = Vec::with_capacity(hunks.len());
+        for (chunk_index_in_file, hunk) in hunks.into_iter().enumerate() {
+            let id = self.alloc_id();
+            let (base_line_range, buffer_line_range) = hunk_line_ranges(&hunk);
+            let base_byte_range = lines_to_bytes(&base_offsets, &base_line_range);
+            let buffer_byte_range = lines_to_bytes(&buffer_offsets, &buffer_line_range);
+            self.chunks.insert(
+                id,
+                ReviewChunk {
+                    id,
+                    file_index,
+                    chunk_index_in_file,
+                    hunk,
+                    buffer_line_range,
+                    base_line_range,
+                    buffer_byte_range,
+                    base_byte_range,
+                    status: ChunkStatus::Pending,
+                },
+            );
+            new_chunk_ids.push(id);
+        }
+
+        for (i, id) in new_chunk_ids.iter().enumerate() {
+            self.order.insert(order_insert_pos + i, *id);
+        }
+
+        self.files[file_index] = ReviewFile {
+            path: new_input.path,
+            rel_path: new_input.rel_path,
+            language: new_input.language,
+            base_text: new_input.base_text,
+            buffer_text: new_input.buffer_text,
+            chunks: new_chunk_ids.clone(),
+        };
+
+        for id in &new_chunk_ids {
+            let Some(ident) = self.identity_key(*id) else {
+                continue;
+            };
+            if let Some(status) = carried.get(&ident).copied() {
+                self.set_status(*id, status);
+            }
+        }
+
+        if cursor_was_in_file || session_had_no_cursor {
+            let by_identity = prev_cursor_ident.and_then(|ident| {
+                new_chunk_ids
+                    .iter()
+                    .find(|id| self.identity_key(**id).as_ref() == Some(&ident))
+                    .copied()
+            });
+            self.cursor.current = by_identity.or_else(|| new_chunk_ids.first().copied());
+        }
+
+        self.version += 1;
+    }
+
     /// Replace the session's files with `new_files`, re-extracting
     /// hunks via [`extract_review_hunks_changeset`]. Decided
     /// statuses carry across the refresh keyed by
@@ -1032,6 +1150,116 @@ mod tests {
         assert!(s.chunks.is_empty());
         assert!(s.order.is_empty());
         assert_eq!(s.cursor.current, None);
+    }
+
+    #[test]
+    fn refresh_file_replaces_one_file_entry_in_place() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        add(&mut s, "b.txt", "x\nOLD\nz\n", "x\nNEW\nz\n");
+        let total_before = s.order.len();
+        let b_chunks_before: Vec<_> = s.files[1].chunks.clone();
+
+        s.refresh_file(
+            &PathBuf::from("a.txt"),
+            refresh_input("a.txt", "a\nDIFFERENT\nc\n", "a\nNEWER\nc\n"),
+        );
+
+        assert_eq!(
+            s.order.len(),
+            total_before,
+            "single-file refresh keeps the total chunk count",
+        );
+        assert_eq!(
+            s.files[1].chunks, b_chunks_before,
+            "the other file's chunk ids are untouched",
+        );
+        assert_eq!(s.files[0].buffer_text.as_str(), "a\nNEWER\nc\n");
+    }
+
+    #[test]
+    fn refresh_file_preserves_decided_status_by_identity() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        s.set_status(ids[0], ChunkStatus::Staged);
+
+        // Same base/buffer -> identity preserved -> Staged carries.
+        s.refresh_file(
+            &PathBuf::from("a.txt"),
+            refresh_input("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n"),
+        );
+
+        let id = s.files[0].chunks[0];
+        assert_eq!(s.chunks[&id].status, ChunkStatus::Staged);
+    }
+
+    #[test]
+    fn refresh_file_keeps_cursor_on_matching_identity() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        let cursor_before = s.cursor.current.expect("cursor set");
+        let ident = s.identity_key(cursor_before).unwrap();
+
+        s.refresh_file(
+            &PathBuf::from("a.txt"),
+            refresh_input("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n"),
+        );
+
+        let cursor_after = s.cursor.current.expect("cursor still present");
+        assert_eq!(s.identity_key(cursor_after), Some(ident));
+    }
+
+    #[test]
+    fn refresh_file_falls_back_cursor_to_first_chunk_in_refreshed_file() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        assert_eq!(s.cursor.current, Some(ids[0]));
+
+        // Change the base content so the chunk's identity no longer
+        // matches; cursor must land on the file's first new chunk.
+        s.refresh_file(
+            &PathBuf::from("a.txt"),
+            refresh_input("a.txt", "a\nDIFFERENT\nc\n", "a\nNEWER\nc\n"),
+        );
+
+        let cursor = s.cursor.current.expect("cursor present");
+        assert_eq!(cursor, s.files[0].chunks[0]);
+    }
+
+    #[test]
+    fn refresh_file_with_unknown_path_is_noop() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        let version_before = s.version;
+
+        s.refresh_file(
+            &PathBuf::from("nowhere.txt"),
+            refresh_input("nowhere.txt", "x\n", "y\n"),
+        );
+
+        assert_eq!(s.version, version_before);
+        assert_eq!(s.files.len(), 1);
+        assert_eq!(s.order, ids);
+    }
+
+    #[test]
+    fn refresh_file_on_other_file_leaves_cursor_alone() {
+        let mut s = in_memory_session();
+        let a_ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        add(&mut s, "b.txt", "x\nOLD\nz\n", "x\nNEW\nz\n");
+        // Cursor is on a.txt's first chunk by default.
+        assert_eq!(s.cursor.current, Some(a_ids[0]));
+
+        s.refresh_file(
+            &PathBuf::from("b.txt"),
+            refresh_input("b.txt", "x\nDIFFERENT\nz\n", "x\nNEWER\nz\n"),
+        );
+
+        assert_eq!(
+            s.cursor.current,
+            Some(a_ids[0]),
+            "refreshing a different file must not move the cursor",
+        );
     }
 
     use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
