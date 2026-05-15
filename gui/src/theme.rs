@@ -80,6 +80,26 @@ pub const DEFAULT_LINE_HIGHLIGHT_HEX: u32 = 0x2a2a2a;
 /// requiring a theme.
 pub const DEFAULT_MUTED_TEXT_HEX: u32 = 0x808080;
 
+/// Fallback for the diagnostic-error foreground when no theme
+/// overrides `ui.diagnostic.error`. Saturated red so error badges
+/// read against the status-bar fill without a theme installed.
+pub const DEFAULT_DIAGNOSTIC_ERROR_HEX: u32 = 0xff5555;
+
+/// Fallback for the diagnostic-warning foreground when no theme
+/// overrides `ui.diagnostic.warning`. Amber so warning badges read
+/// distinctly from error and info severities without a theme.
+pub const DEFAULT_DIAGNOSTIC_WARNING_HEX: u32 = 0xffaa00;
+
+/// Fallback for the diagnostic-information foreground when no theme
+/// overrides `ui.diagnostic.info`. Accent blue so info badges read
+/// against the status-bar fill without a theme installed.
+pub const DEFAULT_DIAGNOSTIC_INFO_HEX: u32 = 0x6090ff;
+
+/// Fallback for the diagnostic-hint foreground when no theme
+/// overrides `ui.diagnostic.hint`. Muted gray so hint badges fade
+/// into chrome rather than competing with higher severities.
+pub const DEFAULT_DIAGNOSTIC_HINT_HEX: u32 = 0x808080;
+
 /// Fallback for the editor selection band when no theme overrides
 /// `ui.selection.editor`. Returns a semi-transparent blue so a
 /// selection over text remains legible without a theme installed.
@@ -207,6 +227,54 @@ pub fn muted_text_color(cx: &App) -> Hsla {
         cx,
         stoat::theme::scope::UI_TEXT_MUTED,
         DEFAULT_MUTED_TEXT_HEX,
+    )
+}
+
+/// Resolve the diagnostic-error foreground from the active [`Theme`]
+/// global, falling back to [`DEFAULT_DIAGNOSTIC_ERROR_HEX`] when no
+/// theme is installed or the scope is unset. Reads the scope's `fg`
+/// channel; consumed by the status-bar diagnostic badge.
+pub fn diagnostic_error_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_DIAGNOSTIC_ERROR,
+        DEFAULT_DIAGNOSTIC_ERROR_HEX,
+    )
+}
+
+/// Resolve the diagnostic-warning foreground from the active
+/// [`Theme`] global, falling back to
+/// [`DEFAULT_DIAGNOSTIC_WARNING_HEX`] when no theme is installed or
+/// the scope is unset. Reads the scope's `fg` channel.
+pub fn diagnostic_warning_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_DIAGNOSTIC_WARNING,
+        DEFAULT_DIAGNOSTIC_WARNING_HEX,
+    )
+}
+
+/// Resolve the diagnostic-information foreground from the active
+/// [`Theme`] global, falling back to
+/// [`DEFAULT_DIAGNOSTIC_INFO_HEX`] when no theme is installed or
+/// the scope is unset. Reads the scope's `fg` channel.
+pub fn diagnostic_info_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_DIAGNOSTIC_INFO,
+        DEFAULT_DIAGNOSTIC_INFO_HEX,
+    )
+}
+
+/// Resolve the diagnostic-hint foreground from the active [`Theme`]
+/// global, falling back to [`DEFAULT_DIAGNOSTIC_HINT_HEX`] when no
+/// theme is installed or the scope is unset. Reads the scope's `fg`
+/// channel.
+pub fn diagnostic_hint_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_DIAGNOSTIC_HINT,
+        DEFAULT_DIAGNOSTIC_HINT_HEX,
     )
 }
 
@@ -423,5 +491,83 @@ mod tests {
             active_line_color(cx)
         });
         assert_ne!(resolved, rgb(DEFAULT_LINE_HIGHLIGHT_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_error_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| diagnostic_error_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_ERROR_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_error_color_resolves_fg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme =
+            Theme::load_from_source("theme custom { ui.diagnostic.error.fg = blue; }", "custom");
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            diagnostic_error_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_ERROR_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_warning_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| diagnostic_warning_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_WARNING_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_warning_color_resolves_fg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme = Theme::load_from_source(
+            "theme custom { ui.diagnostic.warning.fg = blue; }",
+            "custom",
+        );
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            diagnostic_warning_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_WARNING_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_info_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| diagnostic_info_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_INFO_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_info_color_resolves_fg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme =
+            Theme::load_from_source("theme custom { ui.diagnostic.info.fg = blue; }", "custom");
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            diagnostic_info_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_INFO_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_hint_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| diagnostic_hint_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_HINT_HEX).into());
+    }
+
+    #[test]
+    fn diagnostic_hint_color_resolves_fg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme =
+            Theme::load_from_source("theme custom { ui.diagnostic.hint.fg = blue; }", "custom");
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            diagnostic_hint_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_HINT_HEX).into());
     }
 }

@@ -17,7 +17,8 @@ use crate::{
     settings::Settings,
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
-        mode_badge::ModeBadge, workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
+        diagnostics_badge::DiagnosticsBadge, mode_badge::ModeBadge,
+        workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
     },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
@@ -52,6 +53,7 @@ pub struct Workspace {
     active_file_label: Entity<ActiveFileLabel>,
     cursor_position: Entity<CursorPosition>,
     count_prefix: Entity<CountPrefix>,
+    diagnostics_badge: Entity<DiagnosticsBadge>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -135,6 +137,7 @@ impl Workspace {
         let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
         let cursor_position = cx.new(|_| CursorPosition::new());
         let count_prefix = cx.new(|cx| CountPrefix::new(input_state_machine.clone(), cx));
+        let diagnostics_badge = cx.new(|_| DiagnosticsBadge::new());
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -147,6 +150,7 @@ impl Workspace {
             bar.add_left_item(active_file_label.clone(), cx);
             bar.add_right_item(cursor_position.clone(), cx);
             bar.add_right_item(count_prefix.clone(), cx);
+            bar.add_right_item(diagnostics_badge.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
@@ -156,6 +160,9 @@ impl Workspace {
         });
         cursor_position.update(cx, |item, cx| {
             item.set_active_pane_item(initial_status_item.as_deref(), cx);
+        });
+        diagnostics_badge.update(cx, |badge, cx| {
+            badge.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         Self {
             name,
@@ -171,6 +178,7 @@ impl Workspace {
             active_file_label,
             cursor_position,
             count_prefix,
+            diagnostics_badge,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -312,6 +320,10 @@ impl Workspace {
 
     pub fn count_prefix(&self) -> &Entity<CountPrefix> {
         &self.count_prefix
+    }
+
+    pub fn diagnostics_badge(&self) -> &Entity<DiagnosticsBadge> {
+        &self.diagnostics_badge
     }
 
     /// Register a status item at the left side of the status bar.
@@ -1481,7 +1493,7 @@ mod tests {
             (bar.left_items().len(), bar.right_items().len())
         });
         assert_eq!(left, 3);
-        assert_eq!(right, 2);
+        assert_eq!(right, 3);
     }
 
     #[test]
@@ -2674,6 +2686,23 @@ mod tests {
         let item = ws.read_with(vcx, |w, _| w.cursor_position().clone());
         let position = item.read_with(vcx, |c, _| c.position());
         assert_eq!(position, Some((1, 1)));
+    }
+
+    #[test]
+    fn opening_a_file_without_diagnostics_leaves_badge_empty() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello stoat\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let badge = ws.read_with(vcx, |w, _| w.diagnostics_badge().clone());
+        badge.read_with(vcx, |b, _| assert!(b.summary().is_none()));
     }
 
     #[test]
