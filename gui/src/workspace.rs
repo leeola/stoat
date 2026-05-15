@@ -20,7 +20,8 @@ use crate::{
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
         diagnostics_badge::DiagnosticsBadge, lsp_progress::LspProgress, mode_badge::ModeBadge,
-        workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
+        review_progress::ReviewProgress, workspace_label::WorkspaceLabel, StatusBar,
+        StatusItemView,
     },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
@@ -59,6 +60,7 @@ pub struct Workspace {
     count_prefix: Entity<CountPrefix>,
     diagnostics_badge: Entity<DiagnosticsBadge>,
     lsp_progress: Entity<LspProgress>,
+    review_progress: Entity<ReviewProgress>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -150,6 +152,7 @@ impl Workspace {
         let count_prefix = cx.new(|cx| CountPrefix::new(input_state_machine.clone(), cx));
         let diagnostics_badge = cx.new(|_| DiagnosticsBadge::new());
         let lsp_progress = cx.new(|cx| LspProgress::new(lsp_state.clone(), cx));
+        let review_progress = cx.new(|_| ReviewProgress::new());
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -164,6 +167,7 @@ impl Workspace {
             bar.add_right_item(count_prefix.clone(), cx);
             bar.add_right_item(lsp_progress.clone(), cx);
             bar.add_right_item(diagnostics_badge.clone(), cx);
+            bar.add_right_item(review_progress.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
@@ -175,6 +179,9 @@ impl Workspace {
             item.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         diagnostics_badge.update(cx, |badge, cx| {
+            badge.set_active_pane_item(initial_status_item.as_deref(), cx);
+        });
+        review_progress.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         Self {
@@ -195,6 +202,7 @@ impl Workspace {
             count_prefix,
             diagnostics_badge,
             lsp_progress,
+            review_progress,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -352,6 +360,10 @@ impl Workspace {
 
     pub fn lsp_progress(&self) -> &Entity<LspProgress> {
         &self.lsp_progress
+    }
+
+    pub fn review_progress(&self) -> &Entity<ReviewProgress> {
+        &self.review_progress
     }
 
     /// Register a status item at the left side of the status bar.
@@ -1521,7 +1533,7 @@ mod tests {
             (bar.left_items().len(), bar.right_items().len())
         });
         assert_eq!(left, 3);
-        assert_eq!(right, 4);
+        assert_eq!(right, 5);
     }
 
     #[test]

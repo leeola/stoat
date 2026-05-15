@@ -118,6 +118,7 @@ pub struct Editor {
     cell_size: Option<Size<Pixels>>,
     file_path: Option<std::path::PathBuf>,
     diagnostic_set: Option<Entity<crate::diagnostics::DiagnosticSet>>,
+    review_session: Option<Entity<crate::review_session::ReviewSession>>,
     workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
@@ -126,6 +127,7 @@ pub struct Editor {
     expansion_tip: Option<std::ops::Range<usize>>,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
+    _review_session_subscription: Option<Subscription>,
 }
 
 /// Single coalesced "editor changed" signal. Subscribers re-render on
@@ -171,6 +173,7 @@ impl Editor {
             cell_size: None,
             file_path: None,
             diagnostic_set: None,
+            review_session: None,
             workspace: None,
             text_region_bounds: None,
             hover_position: None,
@@ -179,6 +182,7 @@ impl Editor {
             expansion_tip: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
+            _review_session_subscription: None,
         }
     }
 
@@ -467,6 +471,35 @@ impl Editor {
             )
         });
         self.diagnostic_set = set;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn review_session(&self) -> Option<&Entity<crate::review_session::ReviewSession>> {
+        self.review_session.as_ref()
+    }
+
+    /// Attach an [`Entity<ReviewSession>`] so review-aware UI -- the
+    /// status-bar progress badge and (in sibling items) the review
+    /// ItemView -- can read the session's progress and chunk state.
+    /// The editor subscribes to the session and re-emits
+    /// [`EditorEvent::Changed`] on every mutation so observers refresh
+    /// without polling.
+    pub fn set_review_session(
+        &mut self,
+        session: Option<Entity<crate::review_session::ReviewSession>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self._review_session_subscription = session.as_ref().map(|entity| {
+            cx.subscribe(
+                entity,
+                |_, _, _event: &crate::review_session::ReviewSessionEvent, cx| {
+                    cx.emit(EditorEvent::Changed);
+                    cx.notify();
+                },
+            )
+        });
+        self.review_session = session;
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }

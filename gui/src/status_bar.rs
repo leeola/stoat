@@ -4,6 +4,7 @@ pub mod cursor_position;
 pub mod diagnostics_badge;
 pub mod lsp_progress;
 pub mod mode_badge;
+pub mod review_progress;
 pub mod workspace_label;
 
 use crate::{item::ItemHandle, theme};
