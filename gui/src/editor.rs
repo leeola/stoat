@@ -14,7 +14,7 @@ use crate::{
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
     settings::Settings,
-    theme::{DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
+    theme::{self, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
 };
 use gpui::{
     canvas, div, font, px, size as gpui_size, uniform_list, App, AppContext, Bounds, Context, Div,
@@ -833,13 +833,21 @@ impl Editor {
             &rows,
             start as u32,
         );
+        let selection_color = theme::selection_color(cx);
+        let cursor_color = theme::cursor_color(cx);
 
         let rows: Vec<render::RenderedRow> = rows
             .into_iter()
             .enumerate()
             .map(|(idx, row)| {
                 let display_row = (start + idx) as u32;
-                render::apply_selection_paint(row, display_row, &selection_paint)
+                render::apply_selection_paint(
+                    row,
+                    display_row,
+                    &selection_paint,
+                    selection_color,
+                    cursor_color,
+                )
             })
             .collect();
 

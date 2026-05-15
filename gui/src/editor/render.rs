@@ -1,6 +1,6 @@
 use crate::diagnostics::DiagnosticSet;
 use gpui::{
-    div, hsla, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, Pixels, SharedString,
+    div, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, Pixels, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle,
 };
 use lsp_types::DiagnosticSeverity;
@@ -351,13 +351,15 @@ pub(crate) fn apply_selection_paint(
     row: RenderedRow,
     display_row: u32,
     paint: &SelectionPaint,
+    selection_color: Hsla,
+    cursor_color: Hsla,
 ) -> RenderedRow {
     let RenderedRow { text, mut runs } = row;
     let mut text_owned: String = text.as_ref().to_string();
 
     if let Some(spans) = paint.row_selection_spans.get(&display_row) {
         let style = gpui::HighlightStyle {
-            background_color: Some(selection_bg()),
+            background_color: Some(selection_color),
             ..Default::default()
         };
         for span in spans {
@@ -367,7 +369,7 @@ pub(crate) fn apply_selection_paint(
 
     if let Some(cursors) = paint.row_cursors.get(&display_row) {
         let style = gpui::HighlightStyle {
-            background_color: Some(cursor_bg()),
+            background_color: Some(cursor_color),
             ..Default::default()
         };
         for &offset in cursors {
@@ -415,16 +417,7 @@ const DIAG_WARNING_HEX: u32 = 0xffb300;
 const DIAG_INFO_HEX: u32 = 0x29b6f6;
 const DIAG_HINT_HEX: u32 = 0x9e9e9e;
 const LINE_NUMBER_HEX: u32 = 0x808080;
-const CURSOR_HEX: u32 = 0xc8d6ff;
 const BLOCK_TEXT_HEX: u32 = 0xa0a0a0;
-
-fn selection_bg() -> Hsla {
-    hsla(0.6, 0.5, 0.5, 0.3)
-}
-
-fn cursor_bg() -> Hsla {
-    rgb(CURSOR_HEX).into()
-}
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GutterMetrics {
@@ -613,7 +606,7 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
 mod tests {
     use super::*;
     use crate::{buffer::Buffer, display_map::DisplayMap};
-    use gpui::{AppContext, TestAppContext};
+    use gpui::{hsla, AppContext, TestAppContext};
     use std::sync::Arc;
     use stoat::buffer::BufferId;
     use stoat_scheduler::{Executor, TestScheduler};
@@ -1126,12 +1119,14 @@ mod tests {
             text: SharedString::from("hello"),
             runs: Vec::new(),
         };
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color = rgb(0xc8d6ff).into();
 
-        let painted = apply_selection_paint(row, 0, &paint);
+        let painted = apply_selection_paint(row, 0, &paint, selection_color, cursor_color);
         assert_eq!(painted.text.as_ref(), "hello");
         assert_eq!(painted.runs.len(), 1);
         assert_eq!(painted.runs[0].0, 1..4);
-        assert_eq!(painted.runs[0].1.background_color, Some(selection_bg()));
+        assert_eq!(painted.runs[0].1.background_color, Some(selection_color));
     }
 
     #[test]
@@ -1142,12 +1137,14 @@ mod tests {
             text: SharedString::from("hello"),
             runs: Vec::new(),
         };
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color = rgb(0xc8d6ff).into();
 
-        let painted = apply_selection_paint(row, 0, &paint);
+        let painted = apply_selection_paint(row, 0, &paint, selection_color, cursor_color);
         assert_eq!(painted.text.as_ref(), "hello ");
         assert_eq!(painted.runs.len(), 1);
         assert_eq!(painted.runs[0].0, 5..6);
-        assert_eq!(painted.runs[0].1.background_color, Some(cursor_bg()));
+        assert_eq!(painted.runs[0].1.background_color, Some(cursor_color));
     }
 
     #[test]
@@ -1159,16 +1156,18 @@ mod tests {
             text: SharedString::from("hello"),
             runs: Vec::new(),
         };
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color = rgb(0xc8d6ff).into();
 
-        let painted = apply_selection_paint(row, 0, &paint);
+        let painted = apply_selection_paint(row, 0, &paint, selection_color, cursor_color);
         assert_eq!(painted.text.as_ref(), "hello");
         // Selection run added first, cursor run appended after; StyledText paints in
         // order so the cursor highlight wins at byte 2.
         assert_eq!(painted.runs.len(), 2);
         assert_eq!(painted.runs[0].0, 0..5);
-        assert_eq!(painted.runs[0].1.background_color, Some(selection_bg()));
+        assert_eq!(painted.runs[0].1.background_color, Some(selection_color));
         assert_eq!(painted.runs[1].0, 2..3);
-        assert_eq!(painted.runs[1].1.background_color, Some(cursor_bg()));
+        assert_eq!(painted.runs[1].1.background_color, Some(cursor_color));
     }
 
     fn snapshot_with_block(

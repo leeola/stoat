@@ -1,5 +1,5 @@
 use crate::editor::render::ratatui_color_to_hsla;
-use gpui::{rgb, App, Global, Hsla};
+use gpui::{hsla, rgb, App, Global, Hsla};
 
 /// Default monospace font family used by the editor pane when the
 /// active [`Settings`] does not override it. Picked to resolve on
@@ -57,6 +57,20 @@ pub const DEFAULT_TAB_ACTIVE_HEX: u32 = 0x2d2d2d;
 /// `ui.tab.label`. Light gray so labels read against both tab
 /// fills without requiring a theme.
 pub const DEFAULT_TAB_LABEL_HEX: u32 = 0xcccccc;
+
+/// Fallback for the editor cursor cell fill when no theme overrides
+/// `ui.cursor`. Light blue so the cursor reads against dark editor
+/// backgrounds without a theme installed.
+pub const DEFAULT_CURSOR_HEX: u32 = 0xc8d6ff;
+
+/// Fallback for the editor selection band when no theme overrides
+/// `ui.selection.editor`. Returns a semi-transparent blue so a
+/// selection over text remains legible without a theme installed.
+/// Used in place of a packed-RGB constant because the alpha channel
+/// matters for selection paint.
+pub fn default_selection_color() -> Hsla {
+    hsla(0.6, 0.5, 0.5, 0.3)
+}
 
 /// Resolve the workspace background fill from the active
 /// [`Theme`] global, falling back to [`DEFAULT_BACKGROUND_HEX`]
@@ -131,6 +145,27 @@ pub fn tab_active_color(cx: &App) -> Hsla {
 /// installed or the scope is unset. Reads the scope's `fg` channel.
 pub fn tab_label_color(cx: &App) -> Hsla {
     theme_fg_or(cx, stoat::theme::scope::UI_TAB_LABEL, DEFAULT_TAB_LABEL_HEX)
+}
+
+/// Resolve the editor cursor cell fill from the active [`Theme`]
+/// global, falling back to [`DEFAULT_CURSOR_HEX`] when no theme is
+/// installed or the scope is unset. Reads the scope's `bg` channel
+/// because the cursor paints as a highlighted cell behind the
+/// underlying character.
+pub fn cursor_color(cx: &App) -> Hsla {
+    theme_bg_or(cx, stoat::theme::scope::UI_CURSOR, DEFAULT_CURSOR_HEX)
+}
+
+/// Resolve the editor selection band fill from the active [`Theme`]
+/// global, falling back to [`default_selection_color`] when no
+/// theme is installed or the scope is unset. Reads the scope's
+/// `bg` channel.
+pub fn selection_color(cx: &App) -> Hsla {
+    cx.try_global::<Theme>()
+        .and_then(|t| t.0.try_get(stoat::theme::scope::UI_SELECTION_EDITOR))
+        .and_then(|style| style.bg)
+        .and_then(ratatui_color_to_hsla)
+        .unwrap_or_else(default_selection_color)
 }
 
 fn theme_fg_or(cx: &App, scope: &str, fallback_hex: u32) -> Hsla {
@@ -253,5 +288,26 @@ mod tests {
             tab_active_color(cx)
         });
         assert_ne!(resolved, rgb(DEFAULT_TAB_ACTIVE_HEX).into());
+    }
+
+    #[test]
+    fn selection_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| selection_color(cx));
+        assert_eq!(resolved, default_selection_color());
+    }
+
+    #[test]
+    fn selection_color_resolves_bg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme = Theme::load_from_source(
+            "theme custom { ui.selection.editor = { bg: blue }; }",
+            "custom",
+        );
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            selection_color(cx)
+        });
+        assert_ne!(resolved, default_selection_color());
     }
 }
