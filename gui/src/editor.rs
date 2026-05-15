@@ -943,29 +943,54 @@ impl Editor {
             },
             _ => None,
         };
-        let review_chunk_markers = match (&self.review_session, self.review_file_index) {
-            (Some(session), Some(file_index)) => {
-                let session_ref = session.read(cx);
-                let inner = session_ref.inner();
-                inner
-                    .files
-                    .get(file_index)
-                    .map(|file| {
-                        file.chunks
-                            .iter()
-                            .filter_map(|id| inner.chunks.get(id))
-                            .map(|chunk| (chunk.buffer_line_range.start, chunk.status))
-                            .collect::<Vec<_>>()
-                    })
-                    .unwrap_or_default()
-            },
-            _ => Vec::new(),
-        };
+        let (review_chunk_markers, review_move_provenances) =
+            match (&self.review_session, self.review_file_index) {
+                (Some(session), Some(file_index)) => {
+                    let session_ref = session.read(cx);
+                    let inner = session_ref.inner();
+                    let file = inner.files.get(file_index);
+                    let markers = file
+                        .map(|file| {
+                            file.chunks
+                                .iter()
+                                .filter_map(|id| inner.chunks.get(id))
+                                .map(|chunk| (chunk.buffer_line_range.start, chunk.status))
+                                .collect::<Vec<_>>()
+                        })
+                        .unwrap_or_default();
+                    let provenances = file
+                        .map(|file| {
+                            let mut out = Vec::new();
+                            for id in &file.chunks {
+                                let Some(chunk) = inner.chunks.get(id) else {
+                                    continue;
+                                };
+                                for row in &chunk.hunk.rows {
+                                    let stoat::review::ReviewRow::Changed { right, .. } = row
+                                    else {
+                                        continue;
+                                    };
+                                    let Some(right) = right else { continue };
+                                    let Some(prov) = right.move_provenance.clone() else {
+                                        continue;
+                                    };
+                                    let buffer_row = right.line_num.saturating_sub(1);
+                                    out.push((buffer_row, prov));
+                                }
+                            }
+                            out
+                        })
+                        .unwrap_or_default();
+                    (markers, provenances)
+                },
+                _ => (Vec::new(), Vec::new()),
+            };
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
             review_chunk_markers: &review_chunk_markers,
+            review_move_provenances: &review_move_provenances,
             metrics,
             line_number_color: theme::muted_text_color(cx),
         };

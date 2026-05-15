@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat::{
     display_map::{Block, BlockContext, BlockId, HighlightStyle as StoatHighlightStyle},
+    review::MoveProvenance,
     review_session::ChunkStatus,
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
 };
@@ -722,8 +723,42 @@ pub(crate) struct GutterPaint<'a> {
     pub diff_map: &'a stoat::DiffMap,
     pub diagnostics: Option<&'a DiagnosticRowMap>,
     pub review_chunk_markers: &'a [(u32, ChunkStatus)],
+    pub review_move_provenances: &'a [(u32, MoveProvenance)],
     pub metrics: GutterMetrics,
     pub line_number_color: Hsla,
+}
+
+struct RowSuffix {
+    text: String,
+    runs: Vec<(Range<usize>, gpui::HighlightStyle)>,
+}
+
+fn build_row_suffix(buffer_row: Option<u32>, paint: &GutterPaint<'_>) -> RowSuffix {
+    let mut text = String::new();
+    let mut runs: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
+    let Some(buffer_row) = buffer_row else {
+        return RowSuffix { text, runs };
+    };
+    let Some(provenance) = paint
+        .review_move_provenances
+        .iter()
+        .find(|(row, _)| *row == buffer_row)
+        .map(|(_, prov)| prov)
+    else {
+        return RowSuffix { text, runs };
+    };
+
+    let chip = format!("  <- {}:{}", provenance.rel_path, provenance.line + 1);
+    let start = text.len();
+    text.push_str(&chip);
+    runs.push((
+        start..text.len(),
+        gpui::HighlightStyle {
+            color: Some(rgb(DIFF_MOVED_HEX).into()),
+            ..Default::default()
+        },
+    ));
+    RowSuffix { text, runs }
 }
 
 pub(crate) fn render_row_with_gutter(
@@ -732,15 +767,22 @@ pub(crate) fn render_row_with_gutter(
     paint: &GutterPaint<'_>,
 ) -> Div {
     let prefix = build_gutter_prefix(display_row, paint);
+    let buffer_row = paint
+        .display_snapshot
+        .display_to_buffer(DisplayPoint::new(display_row, 0))
+        .map(|p| p.row);
+    let suffix = build_row_suffix(buffer_row, paint);
     let RenderedRow {
         text: row_text,
         runs: mut row_runs,
     } = row;
 
     let prefix_len = prefix.text.len();
-    let mut text = String::with_capacity(prefix_len + row_text.len());
+    let row_len = row_text.len();
+    let mut text = String::with_capacity(prefix_len + row_len + suffix.text.len());
     text.push_str(&prefix.text);
     text.push_str(&row_text);
+    text.push_str(&suffix.text);
 
     let mut runs: Vec<(Range<usize>, gpui::HighlightStyle)> = prefix
         .runs
@@ -749,6 +791,13 @@ pub(crate) fn render_row_with_gutter(
         .collect();
     for (range, style) in row_runs.drain(..) {
         runs.push(((range.start + prefix_len)..(range.end + prefix_len), style));
+    }
+    let suffix_offset = prefix_len + row_len;
+    for (range, style) in suffix.runs {
+        runs.push((
+            (range.start + suffix_offset)..(range.end + suffix_offset),
+            style,
+        ));
     }
 
     div().child(StyledText::new(SharedString::from(text)).with_highlights(runs))
@@ -1168,6 +1217,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1191,6 +1241,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1209,6 +1260,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1237,6 +1289,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: Some(&diagnostics),
             review_chunk_markers: &[],
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1279,6 +1332,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &markers,
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1299,6 +1353,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &markers,
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1318,6 +1373,99 @@ mod tests {
             ('o', DIFF_DELETED_HEX)
         );
         assert_eq!(chunk_glyph_for(ChunkStatus::Skipped), ('x', DIAG_HINT_HEX));
+    }
+
+    #[test]
+    fn build_row_suffix_appends_chip_when_provenance_at_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let provenances = vec![(
+            1u32,
+            MoveProvenance {
+                rel_path: "src/foo.rs".to_string(),
+                line: 41,
+            },
+        )];
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &provenances,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let suffix = build_row_suffix(Some(1), &paint);
+        assert_eq!(suffix.text, "  <- src/foo.rs:42");
+        assert_eq!(suffix.runs.len(), 1);
+        assert_eq!(
+            suffix.runs[0].1.color,
+            Some(rgb(DIFF_MOVED_HEX).into()),
+            "chip text should be painted in the move color",
+        );
+    }
+
+    #[test]
+    fn build_row_suffix_is_empty_when_no_provenance_at_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let provenances = vec![(
+            5u32,
+            MoveProvenance {
+                rel_path: "src/foo.rs".to_string(),
+                line: 0,
+            },
+        )];
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &provenances,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let suffix = build_row_suffix(Some(2), &paint);
+        assert!(suffix.text.is_empty());
+        assert!(suffix.runs.is_empty());
+        let suffix = build_row_suffix(None, &paint);
+        assert!(suffix.text.is_empty());
+    }
+
+    #[test]
+    fn build_row_suffix_chip_uses_one_indexed_line_number() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let provenances = vec![(
+            0u32,
+            MoveProvenance {
+                rel_path: "a.rs".to_string(),
+                line: 0,
+            },
+        )];
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &provenances,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let suffix = build_row_suffix(Some(0), &paint);
+        assert_eq!(
+            suffix.text, "  <- a.rs:1",
+            "line 0 in the source displays as 1 (1-indexed) per TUI convention",
+        );
     }
 
     fn deleted_after(line: u32) -> stoat::DiffHunk {
@@ -1354,6 +1502,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1374,6 +1523,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1396,6 +1546,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
+            review_move_provenances: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
