@@ -1,3 +1,4 @@
+pub mod active_file;
 pub mod mode_badge;
 pub mod workspace_label;
 

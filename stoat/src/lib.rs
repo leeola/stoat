@@ -31,7 +31,7 @@ pub mod keymap_state;
 pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;
-mod paths;
+pub mod paths;
 pub(crate) mod permission_prompt;
 pub(crate) mod quit_all_confirm;
 mod rebase;

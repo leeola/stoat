@@ -16,7 +16,8 @@ use crate::{
     pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
     status_bar::{
-        mode_badge::ModeBadge, workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
+        active_file::ActiveFileLabel, mode_badge::ModeBadge, workspace_label::WorkspaceLabel,
+        StatusBar, StatusItemView,
     },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
@@ -48,6 +49,7 @@ pub struct Workspace {
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
     workspace_label: Entity<WorkspaceLabel>,
+    active_file_label: Entity<ActiveFileLabel>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -128,6 +130,7 @@ impl Workspace {
 
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
+        let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -137,9 +140,13 @@ impl Workspace {
         status_bar.update(cx, |bar, cx| {
             bar.add_left_item(mode_badge.clone(), cx);
             bar.add_left_item(workspace_label.clone(), cx);
+            bar.add_left_item(active_file_label.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
+        });
+        active_file_label.update(cx, |label, cx| {
+            label.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         Self {
             name,
@@ -152,6 +159,7 @@ impl Workspace {
             input_state_machine,
             editor_input,
             workspace_label,
+            active_file_label,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -281,6 +289,10 @@ impl Workspace {
 
     pub fn workspace_label(&self) -> &Entity<WorkspaceLabel> {
         &self.workspace_label
+    }
+
+    pub fn active_file_label(&self) -> &Entity<ActiveFileLabel> {
+        &self.active_file_label
     }
 
     /// Register a status item at the left side of the status bar.
@@ -1442,14 +1454,14 @@ mod tests {
     }
 
     #[test]
-    fn new_registers_mode_badge_and_workspace_label_as_left_items() {
+    fn new_registers_default_left_status_items() {
         let mut cx = TestAppContext::single();
         let ws = new_workspace(&mut cx, "main", "/tmp/repo");
         let status_bar = ws.read_with(&cx, |w, _| w.status_bar().clone());
         let (left, right) = status_bar.read_with(&cx, |bar, _| {
             (bar.left_items().len(), bar.right_items().len())
         });
-        assert_eq!(left, 2);
+        assert_eq!(left, 3);
         assert_eq!(right, 0);
     }
 
@@ -2591,6 +2603,24 @@ mod tests {
             assert_eq!(pane.len(), 1);
             assert!(pane.active_item().is_some());
         });
+    }
+
+    #[test]
+    fn opening_a_file_updates_active_file_label() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello stoat\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let label = ws.read_with(vcx, |w, _| w.active_file_label().clone());
+        let filename = label.read_with(vcx, |l, _| l.filename().cloned());
+        assert_eq!(filename, Some(SharedString::from("foo.rs")));
     }
 
     #[test]

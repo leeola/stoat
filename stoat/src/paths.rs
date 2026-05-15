@@ -1,4 +1,4 @@
-//! Path formatting for TUI display.
+//! Path formatting for human display.
 //!
 //! Centralises the rule used wherever Stoat renders a path: show the tail
 //! relative to a context directory, fall back to `~/<tail>` when the path is
@@ -25,7 +25,7 @@ use std::path::{Component, Path, PathBuf};
 /// 3. Else return the path lossily decoded.
 ///
 /// Relative `path` inputs pass through unchanged.
-pub(crate) fn display_relative(path: &Path, context: &Path) -> String {
+pub fn display_relative(path: &Path, context: &Path) -> String {
     display_relative_with_home(path, context, home_dir().as_deref())
 }
 
