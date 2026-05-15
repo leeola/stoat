@@ -1,18 +1,23 @@
-use gpui::{Context, EventEmitter};
-use stoat::review_session::{ReviewProgress, ReviewSession as InnerSession};
+use gpui::{App, Context, EventEmitter};
+use stoat::review_session::{
+    ChunkStatus, ReviewChunkId, ReviewProgress, ReviewSession as InnerSession, ReviewViewState,
+};
 
 /// Entity-shaped wrapper around [`stoat::review_session::ReviewSession`].
 /// Holds the underlying session and emits
-/// [`ReviewSessionEvent::Changed`] whenever the inner state mutates,
-/// so editors and status items can re-render without polling.
+/// [`ReviewSessionEvent`]s on every mutation so editors, status
+/// items, and the ReviewItem render path can re-render without
+/// polling.
 ///
-/// The mutation surface is intentionally minimal in this slice; the
-/// review pipeline that opens sessions and routes navigation /
-/// staging actions lands in sibling items in
-/// `.todo-plans/TODO.md`. Until then the wrapper exposes read access
-/// to the inner session plus an explicit [`Self::notify_changed`]
-/// signal that callers fire after they have mutated the inner
-/// session through some other path.
+/// Event fan-out:
+/// - `Changed` fires on every mutation that bumps the inner version (catch-all signal for "session
+///   state changed").
+/// - `CursorMoved` fires in addition to `Changed` when [`Self::next`] / [`Self::prev`] actually
+///   move the cursor.
+/// - `Applied` and `Refreshed` are external signals emitted by the workspace's review action
+///   handlers when staged chunks are applied to git or the session is rebuilt against a fresh diff
+///   extraction; the wrapper provides [`Self::notify_applied`] / [`Self::notify_refreshed`] so
+///   callers can fan them out without re-implementing the emit dance.
 pub struct ReviewSession {
     inner: InnerSession,
 }
@@ -20,6 +25,9 @@ pub struct ReviewSession {
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ReviewSessionEvent {
     Changed,
+    CursorMoved,
+    Applied,
+    Refreshed,
 }
 
 impl EventEmitter<ReviewSessionEvent> for ReviewSession {}
@@ -37,11 +45,84 @@ impl ReviewSession {
         self.inner.progress()
     }
 
+    /// Build a fresh [`ReviewViewState`] cache from the current
+    /// session state. The ReviewItem render path calls this on
+    /// every `Changed` event to refresh its cached row-status
+    /// data.
+    pub fn view_state(&self, _cx: &App) -> ReviewViewState {
+        ReviewViewState::from_session(&self.inner)
+    }
+
+    /// Mutate the chunk's status. Emits [`ReviewSessionEvent::Changed`].
+    pub fn set_status(
+        &mut self,
+        id: ReviewChunkId,
+        status: ChunkStatus,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner.set_status(id, status);
+        self.emit_changed(cx);
+    }
+
+    /// Toggle the chunk between `Staged` and `Unstaged`; chunks in
+    /// `Pending` / `Skipped` flip to `Staged`. Emits
+    /// [`ReviewSessionEvent::Changed`].
+    pub fn toggle_stage(&mut self, id: ReviewChunkId, cx: &mut Context<'_, Self>) {
+        self.inner.toggle_stage(id);
+        self.emit_changed(cx);
+    }
+
+    /// Advance the cursor to the next chunk in order. Returns the
+    /// new cursor id when the cursor actually moved (in which case
+    /// [`ReviewSessionEvent::Changed`] and
+    /// [`ReviewSessionEvent::CursorMoved`] both fire), `None`
+    /// otherwise (no event).
+    pub fn next(&mut self, cx: &mut Context<'_, Self>) -> Option<ReviewChunkId> {
+        let id = self.inner.next()?;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::CursorMoved);
+        cx.notify();
+        Some(id)
+    }
+
+    /// Move the cursor to the previous chunk in order. Same
+    /// semantics as [`Self::next`].
+    pub fn prev(&mut self, cx: &mut Context<'_, Self>) -> Option<ReviewChunkId> {
+        let id = self.inner.prev()?;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::CursorMoved);
+        cx.notify();
+        Some(id)
+    }
+
     /// Fire [`ReviewSessionEvent::Changed`] and notify observers.
-    /// Callers use this after mutating the inner session through a
-    /// path the wrapper does not yet expose (for example via the
-    /// owning workspace) so subscribers refresh.
+    /// Callers use this after mutating the inner session through
+    /// a path the wrapper does not yet expose so subscribers
+    /// refresh.
     pub fn notify_changed(&mut self, cx: &mut Context<'_, Self>) {
+        self.emit_changed(cx);
+    }
+
+    /// Signal that the session's staged chunks were applied (to
+    /// git, to the working buffer, etc.). Fires both
+    /// [`ReviewSessionEvent::Changed`] and
+    /// [`ReviewSessionEvent::Applied`].
+    pub fn notify_applied(&mut self, cx: &mut Context<'_, Self>) {
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::Applied);
+        cx.notify();
+    }
+
+    /// Signal that the session was rebuilt from a fresh diff
+    /// extraction. Fires both [`ReviewSessionEvent::Changed`] and
+    /// [`ReviewSessionEvent::Refreshed`].
+    pub fn notify_refreshed(&mut self, cx: &mut Context<'_, Self>) {
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::Refreshed);
+        cx.notify();
+    }
+
+    fn emit_changed(&mut self, cx: &mut Context<'_, Self>) {
         cx.emit(ReviewSessionEvent::Changed);
         cx.notify();
     }
@@ -91,6 +172,10 @@ mod tests {
         }
     }
 
+    fn drain(events: &Arc<Mutex<Vec<ReviewSessionEvent>>>) -> Vec<ReviewSessionEvent> {
+        std::mem::take(&mut *events.lock().expect("recorder mutex"))
+    }
+
     #[test]
     fn empty_session_reports_default_progress() {
         let mut cx = TestAppContext::single();
@@ -101,7 +186,7 @@ mod tests {
     }
 
     #[test]
-    fn notify_changed_emits_event() {
+    fn notify_changed_emits_change_event() {
         let mut cx = TestAppContext::single();
         let session = new_session(&mut cx);
         let (_recorder, events) = Recorder::install(&mut cx, &session);
@@ -109,9 +194,73 @@ mod tests {
         session.update(&mut cx, |s, cx| s.notify_changed(cx));
         cx.run_until_parked();
 
+        assert_eq!(drain(&events), vec![ReviewSessionEvent::Changed]);
+    }
+
+    #[test]
+    fn notify_applied_emits_changed_and_applied() {
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+
+        session.update(&mut cx, |s, cx| s.notify_applied(cx));
+        cx.run_until_parked();
+
         assert_eq!(
-            events.lock().expect("recorder mutex").clone(),
-            vec![ReviewSessionEvent::Changed],
+            drain(&events),
+            vec![ReviewSessionEvent::Changed, ReviewSessionEvent::Applied],
         );
+    }
+
+    #[test]
+    fn notify_refreshed_emits_changed_and_refreshed() {
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+
+        session.update(&mut cx, |s, cx| s.notify_refreshed(cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            drain(&events),
+            vec![ReviewSessionEvent::Changed, ReviewSessionEvent::Refreshed,],
+        );
+    }
+
+    #[test]
+    fn next_on_empty_session_is_silent() {
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+
+        let result = session.update(&mut cx, |s, cx| s.next(cx));
+        cx.run_until_parked();
+
+        assert_eq!(result, None);
+        assert_eq!(drain(&events), Vec::<ReviewSessionEvent>::new());
+    }
+
+    #[test]
+    fn prev_on_empty_session_is_silent() {
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+
+        let result = session.update(&mut cx, |s, cx| s.prev(cx));
+        cx.run_until_parked();
+
+        assert_eq!(result, None);
+        assert_eq!(drain(&events), Vec::<ReviewSessionEvent>::new());
+    }
+
+    #[test]
+    fn view_state_round_trips_empty_session() {
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let view = session.read_with(&cx, |s, cx| s.view_state(cx));
+        assert!(view.rows.is_empty());
+        assert!(view.chunk_row_starts.is_empty());
+        assert!(view.chunk_statuses.is_empty());
+        assert!(view.current_chunk.is_none());
     }
 }
