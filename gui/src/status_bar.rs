@@ -1,6 +1,6 @@
 pub mod mode_badge;
 
-use crate::item::ItemHandle;
+use crate::{item::ItemHandle, theme};
 use gpui::{
     div, AnyView, App, Context, Entity, IntoElement, ParentElement, Render, Styled, Window,
 };
@@ -110,7 +110,7 @@ impl StatusBar {
 }
 
 impl Render for StatusBar {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let left = div()
             .flex()
             .flex_row()
@@ -124,6 +124,7 @@ impl Render for StatusBar {
             .flex_row()
             .w_full()
             .justify_between()
+            .bg(theme::statusbar_focused_color(cx))
             .child(left)
             .child(right)
     }

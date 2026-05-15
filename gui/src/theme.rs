@@ -37,6 +37,12 @@ pub const DEFAULT_BORDER_INACTIVE_HEX: u32 = 0x404040;
 /// reads as the active surface without dominating the chrome.
 pub const DEFAULT_BORDER_FOCUSED_HEX: u32 = 0x6090ff;
 
+/// Fallback for the focused status-bar fill when no theme overrides
+/// `ui.statusbar.focused`. Slightly lighter than the workspace-bg
+/// fallback so the row reads as a distinct chrome strip even with
+/// no theme installed.
+pub const DEFAULT_STATUSBAR_FOCUSED_HEX: u32 = 0x2d2d2d;
+
 /// Resolve the workspace background fill from the active
 /// [`Theme`] global, falling back to [`DEFAULT_BACKGROUND_HEX`]
 /// when no theme is installed or the scope is unset.
@@ -70,10 +76,31 @@ pub fn border_focused_color(cx: &App) -> Hsla {
     )
 }
 
+/// Resolve the focused status-bar fill from the active [`Theme`]
+/// global, falling back to [`DEFAULT_STATUSBAR_FOCUSED_HEX`] when no
+/// theme is installed or the scope is unset. Reads the scope's
+/// `bg` channel because chrome strips paint their fill from the
+/// theme's background, not its foreground.
+pub fn statusbar_focused_color(cx: &App) -> Hsla {
+    theme_bg_or(
+        cx,
+        stoat::theme::scope::UI_STATUSBAR_FOCUSED,
+        DEFAULT_STATUSBAR_FOCUSED_HEX,
+    )
+}
+
 fn theme_fg_or(cx: &App, scope: &str, fallback_hex: u32) -> Hsla {
     cx.try_global::<Theme>()
         .and_then(|t| t.0.try_get(scope))
         .and_then(|style| style.fg)
+        .and_then(ratatui_color_to_hsla)
+        .unwrap_or_else(|| rgb(fallback_hex).into())
+}
+
+fn theme_bg_or(cx: &App, scope: &str, fallback_hex: u32) -> Hsla {
+    cx.try_global::<Theme>()
+        .and_then(|t| t.0.try_get(scope))
+        .and_then(|style| style.bg)
         .and_then(ratatui_color_to_hsla)
         .unwrap_or_else(|| rgb(fallback_hex).into())
 }
@@ -142,5 +169,26 @@ mod tests {
             background_color(cx)
         });
         assert_ne!(resolved, rgb(DEFAULT_BACKGROUND_HEX).into());
+    }
+
+    #[test]
+    fn statusbar_focused_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| statusbar_focused_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_STATUSBAR_FOCUSED_HEX).into());
+    }
+
+    #[test]
+    fn statusbar_focused_color_resolves_bg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme = Theme::load_from_source(
+            "theme custom { ui.statusbar.focused = { bg: blue }; }",
+            "custom",
+        );
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            statusbar_focused_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_STATUSBAR_FOCUSED_HEX).into());
     }
 }
