@@ -16,8 +16,8 @@ use crate::{
     pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
     status_bar::{
-        active_file::ActiveFileLabel, cursor_position::CursorPosition, mode_badge::ModeBadge,
-        workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
+        active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
+        mode_badge::ModeBadge, workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
     },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
@@ -51,6 +51,7 @@ pub struct Workspace {
     workspace_label: Entity<WorkspaceLabel>,
     active_file_label: Entity<ActiveFileLabel>,
     cursor_position: Entity<CursorPosition>,
+    count_prefix: Entity<CountPrefix>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -133,6 +134,7 @@ impl Workspace {
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
         let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
         let cursor_position = cx.new(|_| CursorPosition::new());
+        let count_prefix = cx.new(|cx| CountPrefix::new(input_state_machine.clone(), cx));
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -144,6 +146,7 @@ impl Workspace {
             bar.add_left_item(workspace_label.clone(), cx);
             bar.add_left_item(active_file_label.clone(), cx);
             bar.add_right_item(cursor_position.clone(), cx);
+            bar.add_right_item(count_prefix.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
@@ -167,6 +170,7 @@ impl Workspace {
             workspace_label,
             active_file_label,
             cursor_position,
+            count_prefix,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -304,6 +308,10 @@ impl Workspace {
 
     pub fn cursor_position(&self) -> &Entity<CursorPosition> {
         &self.cursor_position
+    }
+
+    pub fn count_prefix(&self) -> &Entity<CountPrefix> {
+        &self.count_prefix
     }
 
     /// Register a status item at the left side of the status bar.
@@ -1473,7 +1481,7 @@ mod tests {
             (bar.left_items().len(), bar.right_items().len())
         });
         assert_eq!(left, 3);
-        assert_eq!(right, 1);
+        assert_eq!(right, 2);
     }
 
     #[test]
@@ -2632,6 +2640,22 @@ mod tests {
         let label = ws.read_with(vcx, |w, _| w.active_file_label().clone());
         let filename = label.read_with(vcx, |l, _| l.filename().cloned());
         assert_eq!(filename, Some(SharedString::from("foo.rs")));
+    }
+
+    #[test]
+    fn pending_count_propagates_to_count_prefix() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let sm = ws.read_with(&cx, |w, _| w.input_state_machine().clone());
+        let count_prefix = ws.read_with(&cx, |w, _| w.count_prefix().clone());
+
+        let initial = count_prefix.read_with(&cx, |_, cx| sm.read(cx).pending_count());
+        assert_eq!(initial, None);
+
+        sm.update(&mut cx, |sm, cx| sm.set_pending_count_for_test(Some(7), cx));
+        cx.run_until_parked();
+        let after = count_prefix.read_with(&cx, |_, cx| sm.read(cx).pending_count());
+        assert_eq!(after, Some(7));
     }
 
     #[test]

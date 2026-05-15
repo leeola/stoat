@@ -1,4 +1,5 @@
 pub mod active_file;
+pub mod count_prefix;
 pub mod cursor_position;
 pub mod mode_badge;
 pub mod workspace_label;

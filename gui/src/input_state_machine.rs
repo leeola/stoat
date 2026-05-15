@@ -178,6 +178,16 @@ impl InputStateMachine {
         self.consumed_count = count;
     }
 
+    #[cfg(test)]
+    pub(crate) fn set_pending_count_for_test(
+        &mut self,
+        count: Option<u32>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pending_count = count;
+        cx.notify();
+    }
+
     pub fn pending_chord(&self) -> &[KeyPart] {
         &self.pending_chord
     }
