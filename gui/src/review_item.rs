@@ -22,12 +22,17 @@ use stoat::{
 use stoat_scheduler::Executor;
 
 /// Pane-hosted review surface. Wraps an [`Entity<ReviewSession>`] and
-/// one [`ReviewFileView`] per file in the session; subsequent items
-/// own MultiBuffer / Editor construction and the render path that
-/// stacks each file's editor vertically.
+/// one [`ReviewFileView`] per file in the session.
+///
+/// `commit_summary` carries the optional commit subject line used by
+/// [`ItemView::tab_label`] for the [`ReviewSource::Commit`] variant.
+/// The workspace's `OpenReviewCommit` action populates it from the
+/// git host after constructing the item; absent a summary the label
+/// falls back to the short sha.
 pub struct ReviewItem {
     session: Entity<ReviewSession>,
     files: Vec<ReviewFileView>,
+    commit_summary: Option<String>,
 }
 
 /// One file's view state: the workspace-relative path, the editor
@@ -41,7 +46,11 @@ pub struct ReviewFileView {
 
 impl ReviewItem {
     pub fn new(session: Entity<ReviewSession>, files: Vec<ReviewFileView>) -> Self {
-        Self { session, files }
+        Self {
+            session,
+            files,
+            commit_summary: None,
+        }
     }
 
     /// Build a [`ReviewItem`] for `session`, materializing one
@@ -66,7 +75,25 @@ impl ReviewItem {
             .into_iter()
             .map(|spec| build_file_view(spec, source_kind, buffer_registry, executor.clone(), cx))
             .collect();
-        Self { session, files }
+        Self {
+            session,
+            files,
+            commit_summary: None,
+        }
+    }
+
+    /// Attach the commit subject line consumed by [`ItemView::tab_label`]
+    /// for [`ReviewSource::Commit`]. Other variants ignore this field.
+    pub fn set_commit_summary(&mut self, summary: Option<String>, cx: &mut Context<'_, Self>) {
+        if self.commit_summary == summary {
+            return;
+        }
+        self.commit_summary = summary;
+        cx.notify();
+    }
+
+    pub fn commit_summary(&self) -> Option<&str> {
+        self.commit_summary.as_deref()
     }
 
     pub fn session(&self) -> &Entity<ReviewSession> {
@@ -208,7 +235,11 @@ impl Render for ReviewItem {
 
 impl ItemView for ReviewItem {
     fn tab_label(&self, cx: &App) -> SharedString {
-        review_source_label(&self.session.read(cx).inner().source).into()
+        review_source_label(
+            &self.session.read(cx).inner().source,
+            self.commit_summary.as_deref(),
+        )
+        .into()
     }
 
     fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError> {
@@ -220,7 +251,7 @@ impl ItemView for ReviewItem {
     }
 }
 
-fn review_source_label(source: &ReviewSource) -> String {
+fn review_source_label(source: &ReviewSource, commit_summary: Option<&str>) -> String {
     match source {
         ReviewSource::WorkingTree { workdir } => {
             let name = workdir
@@ -230,7 +261,10 @@ fn review_source_label(source: &ReviewSource) -> String {
                 .unwrap_or_else(|| workdir.display().to_string());
             format!("Review: {name}")
         },
-        ReviewSource::Commit { sha, .. } => format!("Commit: {}", short_sha(sha)),
+        ReviewSource::Commit { sha, .. } => match commit_summary {
+            Some(summary) => format!("Commit: {}: {}", short_sha(sha), summary),
+            None => format!("Commit: {}", short_sha(sha)),
+        },
         ReviewSource::CommitRange { from, to, .. } => {
             format!("Range: {}..{}", short_sha(from), short_sha(to))
         },
@@ -318,6 +352,46 @@ mod tests {
         );
         item.read_with(&cx, |item, app| {
             assert_eq!(item.tab_label(app), SharedString::from("Commit: abcdef1"));
+        });
+    }
+
+    #[test]
+    fn tab_label_reflects_commit_source_with_summary() {
+        let mut cx = TestAppContext::single();
+        let item = new_item(
+            &mut cx,
+            ReviewSource::Commit {
+                workdir: PathBuf::from("/repos/stoat"),
+                sha: "abcdef1234567890".to_string(),
+            },
+        );
+        item.update(&mut cx, |item, cx| {
+            item.set_commit_summary(Some("fix the thing".to_string()), cx);
+        });
+        item.read_with(&cx, |item, app| {
+            assert_eq!(
+                item.tab_label(app),
+                SharedString::from("Commit: abcdef1: fix the thing"),
+            );
+        });
+    }
+
+    #[test]
+    fn set_commit_summary_clears_when_passed_none() {
+        let mut cx = TestAppContext::single();
+        let item = new_item(
+            &mut cx,
+            ReviewSource::Commit {
+                workdir: PathBuf::from("/repos/stoat"),
+                sha: "abc".to_string(),
+            },
+        );
+        item.update(&mut cx, |item, cx| {
+            item.set_commit_summary(Some("first".to_string()), cx);
+            item.set_commit_summary(None, cx);
+        });
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.commit_summary(), None);
         });
     }
 
