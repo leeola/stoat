@@ -443,12 +443,13 @@ pub(crate) struct BufferEntrySnap {
     pub history: BufferHistory,
 }
 
-/// 32-byte blake3 hash of `text`. Used both to key [`CachedDiff`] in
-/// the buffer registry and to populate
+/// 32-byte blake3 hash of `text`. Used to key [`CachedDiff`] in
+/// the buffer registry, to populate
 /// [`stoat_language::structural_diff::BufferRef::fingerprint`] for
-/// cross-file move detection in the structural diff pipeline.
-#[allow(dead_code)]
-pub(crate) fn fingerprint_bytes(text: &str) -> [u8; 32] {
+/// cross-file move detection in the structural diff pipeline, and
+/// by the GUI's buffer reload path to detect whether disk content
+/// matches the buffer's current text.
+pub fn fingerprint_bytes(text: &str) -> [u8; 32] {
     blake3::hash(text.as_bytes()).into()
 }
 

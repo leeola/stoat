@@ -127,7 +127,50 @@ impl Buffer {
         }
     }
 
+    /// Reload the buffer from disk via [`FsHostGlobal`].
+    ///
+    /// Reads the bytes at [`Self::file_path`], compares against the
+    /// current buffer text via
+    /// [`stoat::buffer_registry::fingerprint_bytes`], and replaces
+    /// the inner rope only when the disk content differs.
+    /// [`BufferEvent::Reloaded`] fires exactly when content changed;
+    /// matches yield no event.
+    ///
+    /// Path-less buffers (scratch, test fixtures) fall back to
+    /// emitting `Reloaded` without touching the host so callers that
+    /// use the method as a signal trigger still observe it.
+    ///
+    /// Failure modes log at `tracing::warn` and return without
+    /// emitting: a missing file, a read IO error, or non-UTF-8 disk
+    /// bytes.
     pub fn reload(&self, cx: &mut Context<'_, Self>) {
+        let Some(path) = self.file_path.clone() else {
+            cx.emit(BufferEvent::Reloaded);
+            cx.notify();
+            return;
+        };
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        let mut bytes = Vec::new();
+        if let Err(err) = fs.read(&path, &mut bytes) {
+            tracing::warn!(?path, %err, "buffer reload: fs read failed");
+            return;
+        }
+        let Ok(disk_text) = std::str::from_utf8(&bytes) else {
+            tracing::warn!(?path, "buffer reload: disk bytes are not valid UTF-8");
+            return;
+        };
+        let current_fingerprint =
+            self.read(|b| stoat::buffer_registry::fingerprint_bytes(&b.rope().to_string()));
+        let disk_fingerprint = stoat::buffer_registry::fingerprint_bytes(disk_text);
+        if disk_fingerprint == current_fingerprint {
+            return;
+        }
+        {
+            let mut guard = self.inner.write().expect("buffer lock poisoned");
+            let len = guard.rope().len();
+            guard.edit(0..len, disk_text);
+            guard.dirty = false;
+        }
         cx.emit(BufferEvent::Reloaded);
         cx.notify();
     }
@@ -364,6 +407,80 @@ mod tests {
 
         assert_eq!(drain(&events), vec![BufferEvent::Saved]);
         assert!(!buffer.read_with(&cx, |b, _| b.is_dirty()));
+    }
+
+    #[test]
+    fn reload_with_matching_disk_content_is_noop() {
+        let mut cx = TestAppContext::single();
+        let fs = install_fs_global(&mut cx, Arc::new(stoat::host::FakeFs::new()));
+        fs.insert_file("/tmp/same.txt", b"same");
+        let buffer = new_buffer(&mut cx, "same");
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/tmp/same.txt")), cx)
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        buffer.update(&mut cx, |b, cx| b.reload(cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<BufferEvent>::new());
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "same");
+    }
+
+    #[test]
+    fn reload_with_differing_disk_content_replaces_text() {
+        let mut cx = TestAppContext::single();
+        let fs = install_fs_global(&mut cx, Arc::new(stoat::host::FakeFs::new()));
+        fs.insert_file("/tmp/file.txt", b"new content");
+        let buffer = new_buffer(&mut cx, "old content");
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/tmp/file.txt")), cx)
+        });
+        buffer.update(&mut cx, |b, cx| b.edit(0..0, "x", cx));
+        assert!(buffer.read_with(&cx, |b, _| b.is_dirty()));
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        buffer.update(&mut cx, |b, cx| b.reload(cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), vec![BufferEvent::Reloaded]);
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "new content");
+        assert!(!buffer.read_with(&cx, |b, _| b.is_dirty()));
+    }
+
+    #[test]
+    fn reload_with_read_error_emits_nothing() {
+        let mut cx = TestAppContext::single();
+        let _fs = install_fs_global(&mut cx, Arc::new(stoat::host::FakeFs::new()));
+        let buffer = new_buffer(&mut cx, "kept");
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/tmp/missing.txt")), cx)
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        buffer.update(&mut cx, |b, cx| b.reload(cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<BufferEvent>::new());
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "kept");
+    }
+
+    #[test]
+    fn reload_with_invalid_utf8_emits_nothing() {
+        let mut cx = TestAppContext::single();
+        let fs = install_fs_global(&mut cx, Arc::new(stoat::host::FakeFs::new()));
+        fs.insert_file("/tmp/binary.bin", &[0xffu8, 0xfe, 0xfd]);
+        let buffer = new_buffer(&mut cx, "kept");
+        buffer.update(&mut cx, |b, cx| {
+            b.set_file_path(Some(PathBuf::from("/tmp/binary.bin")), cx)
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        buffer.update(&mut cx, |b, cx| b.reload(cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<BufferEvent>::new());
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "kept");
     }
 
     #[test]
