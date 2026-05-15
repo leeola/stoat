@@ -1,12 +1,25 @@
 use crate::{
-    editor::Editor,
+    buffer::Buffer,
+    buffer_registry::BufferRegistry,
+    diff_map::DiffMap,
+    display_map::DisplayMap,
+    editor::{Editor, EditorMode},
+    globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::MultiBuffer,
     review_session::ReviewSession,
 };
-use gpui::{div, App, Context, Entity, IntoElement, Render, SharedString, Styled, Window};
+use gpui::{
+    div, App, AppContext, Context, Entity, IntoElement, Render, SharedString, Styled, Window,
+};
 use serde_json::Value;
-use stoat::review_session::ReviewSource;
+use std::{ops::Range, path::PathBuf, sync::Arc};
+use stoat::{
+    buffer::BufferId,
+    display_map::{BlockPlacement, BlockProperties, BlockStyle},
+    review_session::ReviewSource,
+};
+use stoat_scheduler::Executor;
 
 /// Pane-hosted review surface. Wraps an [`Entity<ReviewSession>`] and
 /// one [`ReviewFileView`] per file in the session; subsequent items
@@ -31,12 +44,159 @@ impl ReviewItem {
         Self { session, files }
     }
 
+    /// Build a [`ReviewItem`] for `session`, materializing one
+    /// [`ReviewFileView`] per file in the session.
+    ///
+    /// For [`ReviewSource::WorkingTree`], each file's buffer comes
+    /// from `buffer_registry` so edits and LSP attach to the
+    /// workspace's live working-tree buffer. For all other sources
+    /// the file's buffer is a fresh read-only [`Buffer`] materialized
+    /// from the session's stored `buffer_text`.
+    ///
+    /// Reads [`ExecutorGlobal`] for the per-file [`DisplayMap`]; the
+    /// caller must install it before constructing the entity.
+    pub fn from_session(
+        session: Entity<ReviewSession>,
+        buffer_registry: &Entity<BufferRegistry>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let (source_kind, file_specs) = snapshot_session(&session, cx);
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let files: Vec<ReviewFileView> = file_specs
+            .into_iter()
+            .map(|spec| build_file_view(spec, source_kind, buffer_registry, executor.clone(), cx))
+            .collect();
+        Self { session, files }
+    }
+
     pub fn session(&self) -> &Entity<ReviewSession> {
         &self.session
     }
 
     pub fn files(&self) -> &[ReviewFileView] {
         &self.files
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum SourceKind {
+    WorkingTree,
+    ReadOnly,
+}
+
+struct FileSpec {
+    path: PathBuf,
+    rel_path: String,
+    buffer_text: Arc<String>,
+    excerpt_ranges: Vec<Range<usize>>,
+    deletion_blocks: Vec<BlockProperties>,
+}
+
+fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, Vec<FileSpec>) {
+    let session_ref = session.read(cx);
+    let inner = session_ref.inner();
+    let source_kind = match &inner.source {
+        ReviewSource::WorkingTree { .. } => SourceKind::WorkingTree,
+        _ => SourceKind::ReadOnly,
+    };
+    let file_specs = inner
+        .files
+        .iter()
+        .map(|file| {
+            let mut excerpt_ranges = Vec::new();
+            let mut deletion_blocks = Vec::new();
+            for chunk_id in &file.chunks {
+                let Some(chunk) = inner.chunks.get(chunk_id) else {
+                    continue;
+                };
+                if !chunk.buffer_byte_range.is_empty() {
+                    excerpt_ranges.push(chunk.buffer_byte_range.clone());
+                }
+                if chunk.base_byte_range.is_empty() {
+                    continue;
+                }
+                let Some(slice) = file.base_text.get(chunk.base_byte_range.clone()) else {
+                    continue;
+                };
+                let lines: Vec<String> = slice.lines().map(String::from).collect();
+                if lines.is_empty() {
+                    continue;
+                }
+                deletion_blocks.push(BlockProperties::from_text(
+                    BlockPlacement::Above(chunk.buffer_line_range.start),
+                    lines,
+                    BlockStyle::Fixed,
+                ));
+            }
+            FileSpec {
+                path: file.path.clone(),
+                rel_path: file.rel_path.clone(),
+                buffer_text: file.buffer_text.clone(),
+                excerpt_ranges,
+                deletion_blocks,
+            }
+        })
+        .collect();
+    (source_kind, file_specs)
+}
+
+fn build_file_view(
+    spec: FileSpec,
+    source_kind: SourceKind,
+    buffer_registry: &Entity<BufferRegistry>,
+    executor: Executor,
+    cx: &mut Context<'_, ReviewItem>,
+) -> ReviewFileView {
+    let buffer = match source_kind {
+        SourceKind::WorkingTree => {
+            let (_, shared) =
+                buffer_registry.update(cx, |reg, cx| reg.open(&spec.path, &spec.buffer_text, cx));
+            let buffer = cx.new(|_| Buffer::from_shared(shared));
+            buffer.update(cx, |b, cx| b.set_file_path(Some(spec.path.clone()), cx));
+            buffer
+        },
+        SourceKind::ReadOnly => cx.new(|_| Buffer::with_text(BufferId::new(0), &spec.buffer_text)),
+    };
+
+    let multi_buffer = {
+        let buffer = buffer.clone();
+        let excerpt_ranges = spec.excerpt_ranges;
+        cx.new(|cx| {
+            let mut m = MultiBuffer::singleton(buffer.clone(), cx);
+            if !excerpt_ranges.is_empty() {
+                m.insert_excerpts(buffer, excerpt_ranges, cx);
+            }
+            m
+        })
+    };
+
+    let display_map = {
+        let buffer = buffer.clone();
+        cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+    };
+    let diff_map = {
+        let buffer = buffer.clone();
+        cx.new(|cx| DiffMap::new(buffer, cx))
+    };
+
+    if !spec.deletion_blocks.is_empty() {
+        display_map.update(cx, |dm, cx| dm.insert_blocks(spec.deletion_blocks, cx));
+    }
+
+    let editor = cx.new(|cx| {
+        Editor::new(
+            multi_buffer.clone(),
+            display_map,
+            diff_map,
+            EditorMode::full(),
+            cx,
+        )
+    });
+
+    ReviewFileView {
+        rel_path: spec.rel_path,
+        editor,
+        multi_buffer,
     }
 }
 
@@ -88,7 +248,42 @@ mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::{path::PathBuf, sync::Arc};
-    use stoat::review_session::ReviewSession as InnerSession;
+    use stoat::{review::ReviewFileInput, review_session::ReviewSession as InnerSession};
+    use stoat_scheduler::TestScheduler;
+
+    fn install_executor(cx: &mut TestAppContext) {
+        cx.update(|cx| {
+            cx.set_global(ExecutorGlobal(Executor::new(
+                Arc::new(TestScheduler::new()),
+            )));
+        });
+    }
+
+    fn make_session(cx: &mut TestAppContext, source: ReviewSource) -> Entity<ReviewSession> {
+        cx.update(|cx| cx.new(|_| ReviewSession::new(InnerSession::new(source))))
+    }
+
+    fn session_with_file(
+        cx: &mut TestAppContext,
+        source: ReviewSource,
+        path: &str,
+        base_text: &str,
+        buffer_text: &str,
+    ) -> Entity<ReviewSession> {
+        cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = InnerSession::new(source);
+                inner.add_files(vec![ReviewFileInput {
+                    path: PathBuf::from(path),
+                    rel_path: path.to_string(),
+                    language: None,
+                    base_text: Arc::new(base_text.to_string()),
+                    buffer_text: Arc::new(buffer_text.to_string()),
+                }]);
+                ReviewSession::new(inner)
+            })
+        })
+    }
 
     fn new_item(cx: &mut TestAppContext, source: ReviewSource) -> Entity<ReviewItem> {
         cx.update(|cx| {
@@ -200,5 +395,166 @@ mod tests {
             ReviewItem::deserialize(Value::Null, cx).err()
         });
         assert!(matches!(err, Some(ItemError::Deserialize { .. })));
+    }
+
+    #[test]
+    fn from_session_with_empty_session_creates_empty_files_list() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = make_session(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        item.read_with(&cx, |item, _| {
+            assert!(item.files().is_empty());
+        });
+    }
+
+    #[test]
+    fn from_session_with_in_memory_source_creates_one_view_per_file() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "alpha\nbeta\n",
+            "alpha modified\nbeta\n",
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        item.read_with(&cx, |item, _| {
+            assert_eq!(item.files().len(), 1);
+            assert_eq!(item.files()[0].rel_path, "a.txt");
+        });
+        registry.read_with(&cx, |r, _| {
+            assert_eq!(r.len(), 0, "in-memory source must not register buffers");
+        });
+    }
+
+    #[test]
+    fn from_session_with_working_tree_source_registers_buffer() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::WorkingTree {
+                workdir: PathBuf::from("/repos/stoat"),
+            },
+            "/repos/stoat/a.txt",
+            "alpha\n",
+            "alpha modified\n",
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let _item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        registry.read_with(&cx, |r, _| {
+            assert_eq!(r.len(), 1);
+            assert!(r
+                .id_for_path(&PathBuf::from("/repos/stoat/a.txt"))
+                .is_some());
+        });
+    }
+
+    #[test]
+    fn from_session_builds_multi_buffer_per_file() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "alpha\nbeta\ngamma\n",
+            "alpha modified\nbeta\ngamma\n",
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        item.read_with(&cx, |item, cx| {
+            let view = &item.files()[0];
+            assert!(!view.multi_buffer.read(cx).is_singleton());
+        });
+    }
+
+    #[test]
+    fn from_session_inserts_deletion_blocks_for_modified_chunks() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let with_block = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "old line\n",
+            "new line\n",
+        );
+        let no_block = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "b.txt",
+            "",
+            "added line\n",
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item_with = cx.update(|cx| {
+            let session = with_block.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+        let item_without = cx.update(|cx| {
+            let session = no_block.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        let display_with = item_with.read_with(&cx, |item, cx| {
+            item.files()[0].editor.read(cx).display_map().clone()
+        });
+        let display_without = item_without.read_with(&cx, |item, cx| {
+            item.files()[0].editor.read(cx).display_map().clone()
+        });
+
+        let max_with = display_with.update(&mut cx, |dm, _| dm.snapshot().max_point().row);
+        let max_without = display_without.update(&mut cx, |dm, _| dm.snapshot().max_point().row);
+
+        assert!(
+            max_with > max_without,
+            "deletion block must add at least one display row \
+             (with_block max_point.row={max_with}, no_block max_point.row={max_without})",
+        );
     }
 }

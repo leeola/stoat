@@ -37,7 +37,7 @@ pub(crate) mod quit_all_confirm;
 pub mod rebase;
 mod register;
 pub(crate) mod render;
-mod review;
+pub mod review;
 pub mod review_apply;
 pub mod review_session;
 pub mod run;

@@ -1,7 +1,8 @@
 use crate::buffer::{Buffer, BufferEvent};
 use gpui::{Context, Entity, EventEmitter, Subscription};
 use stoat::{
-    multi_buffer::MultiBuffer as InnerMultiBuffer, DisplayMap as InnerDisplayMap, DisplaySnapshot,
+    display_map::BlockProperties, multi_buffer::MultiBuffer as InnerMultiBuffer,
+    DisplayMap as InnerDisplayMap, DisplaySnapshot,
 };
 use stoat_scheduler::Executor;
 
@@ -47,6 +48,19 @@ impl DisplayMap {
     /// invoke this via `entity.update(cx, |dm, _| dm.snapshot())`.
     pub fn snapshot(&mut self) -> DisplaySnapshot {
         self.inner.snapshot()
+    }
+
+    pub(crate) fn insert_blocks(
+        &mut self,
+        blocks: Vec<BlockProperties>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if blocks.is_empty() {
+            return;
+        }
+        self.inner.insert_blocks(blocks);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
     }
 }
 
@@ -148,6 +162,42 @@ mod tests {
         let (_recorder, events) = Recorder::install(&mut cx, &display_map);
 
         buffer.update(&mut cx, |b, cx| b.save(cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<DisplayMapEvent>::new());
+    }
+
+    #[test]
+    fn insert_blocks_emits_changed_and_extends_snapshot() {
+        use stoat::display_map::{BlockPlacement, BlockProperties, BlockStyle};
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "alpha\nbeta");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        display_map.update(&mut cx, |dm, cx| {
+            dm.insert_blocks(
+                vec![BlockProperties::from_text(
+                    BlockPlacement::Above(0),
+                    vec!["header".into()],
+                    BlockStyle::Fixed,
+                )],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+        let max_row = display_map.update(&mut cx, |dm, _| dm.snapshot().max_point().row);
+        assert_eq!(max_row, 2);
+    }
+
+    #[test]
+    fn insert_blocks_with_empty_input_does_not_emit() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "x");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        display_map.update(&mut cx, |dm, cx| dm.insert_blocks(Vec::new(), cx));
         cx.run_until_parked();
 
         assert_eq!(drain(&events), Vec::<DisplayMapEvent>::new());
