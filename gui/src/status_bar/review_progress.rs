@@ -1,6 +1,7 @@
 use crate::{
     editor::{Editor, EditorEvent},
     item::ItemHandle,
+    review_session::ReviewApplyResult,
     status_bar::StatusItemView,
     theme::statusbar_text_color,
 };
@@ -11,10 +12,15 @@ use gpui::{
 use stoat::review_session::ReviewProgress as InnerProgress;
 
 /// Status-bar item that surfaces the active editor's review session
-/// counts as ` {staged}/{total} `, plus a ` skip:{skipped} ` segment
-/// when any chunks have been skipped. Hides entirely when the active
-/// item is not an editor, has no review session attached, or has a
-/// review session with zero chunks.
+/// state. When the session has recorded a
+/// [`stoat_action::ReviewApplyStaged`] outcome via
+/// [`crate::review_session::ReviewSession::set_apply_result`] the
+/// badge renders that result (` applied N ` or
+/// ` applied N/M `); otherwise it falls back to the live
+/// `{staged}/{total}` progress, plus a ` skip:{skipped} ` segment
+/// when any chunks have been skipped. Hides entirely when the
+/// active item is not an editor, has no review session attached,
+/// or has a review session with zero chunks and no apply result.
 ///
 /// Rebinds whenever the active pane item changes; subscribes to the
 /// editor's [`EditorEvent::Changed`] so review-session mutations --
@@ -23,6 +29,7 @@ use stoat::review_session::ReviewProgress as InnerProgress;
 /// refresh the badge without polling.
 pub struct ReviewProgress {
     progress: Option<InnerProgress>,
+    apply_result: Option<ReviewApplyResult>,
     editor: Option<WeakEntity<Editor>>,
     _editor_subscription: Option<Subscription>,
 }
@@ -37,6 +44,7 @@ impl ReviewProgress {
     pub fn new() -> Self {
         Self {
             progress: None,
+            apply_result: None,
             editor: None,
             _editor_subscription: None,
         }
@@ -44,6 +52,10 @@ impl ReviewProgress {
 
     pub fn progress(&self) -> Option<&InnerProgress> {
         self.progress.as_ref()
+    }
+
+    pub fn apply_result(&self) -> Option<&ReviewApplyResult> {
+        self.apply_result.as_ref()
     }
 
     fn bind_to_editor(&mut self, editor: &Entity<Editor>, cx: &mut Context<'_, Self>) {
@@ -58,18 +70,25 @@ impl ReviewProgress {
     }
 
     fn refresh_from_editor(&mut self, editor: &Entity<Editor>, cx: &mut Context<'_, Self>) {
-        let next = compute_progress(editor.read(cx), cx);
-        if self.progress != next {
-            self.progress = next;
+        let next_progress = compute_progress(editor.read(cx), cx);
+        let next_apply = compute_apply_result(editor.read(cx), cx);
+        if self.progress != next_progress || self.apply_result != next_apply {
+            self.progress = next_progress;
+            self.apply_result = next_apply;
             cx.notify();
         }
     }
 
     fn clear(&mut self, cx: &mut Context<'_, Self>) {
-        if self.progress.is_none() && self.editor.is_none() && self._editor_subscription.is_none() {
+        if self.progress.is_none()
+            && self.apply_result.is_none()
+            && self.editor.is_none()
+            && self._editor_subscription.is_none()
+        {
             return;
         }
         self.progress = None;
+        self.apply_result = None;
         self.editor = None;
         self._editor_subscription = None;
         cx.notify();
@@ -78,11 +97,11 @@ impl ReviewProgress {
 
 impl Render for ReviewProgress {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let label = self.progress.as_ref().map(|progress| {
+        let label = format_badge(self.apply_result.as_ref(), self.progress.as_ref()).map(|text| {
             div()
                 .px_2()
                 .text_color(statusbar_text_color(cx))
-                .child(SharedString::from(format_label(progress)))
+                .child(SharedString::from(text))
         });
         div().children(label)
     }
@@ -111,7 +130,25 @@ fn compute_progress(editor: &Editor, cx: &App) -> Option<InnerProgress> {
     Some(progress)
 }
 
-fn format_label(progress: &InnerProgress) -> String {
+fn compute_apply_result(editor: &Editor, cx: &App) -> Option<ReviewApplyResult> {
+    let session = editor.review_session()?;
+    session.read(cx).last_apply_result().cloned()
+}
+
+/// Render the badge label, preferring an apply result over the live
+/// progress counters when both are present. Returns `None` when
+/// neither piece of state should produce a visible badge.
+fn format_badge(
+    apply: Option<&ReviewApplyResult>,
+    progress: Option<&InnerProgress>,
+) -> Option<String> {
+    if let Some(apply) = apply {
+        return Some(format_apply_result(apply));
+    }
+    progress.map(format_progress)
+}
+
+fn format_progress(progress: &InnerProgress) -> String {
     if progress.skipped > 0 {
         format!(
             " {}/{} skip:{} ",
@@ -119,6 +156,14 @@ fn format_label(progress: &InnerProgress) -> String {
         )
     } else {
         format!(" {}/{} ", progress.staged, progress.total)
+    }
+}
+
+fn format_apply_result(result: &ReviewApplyResult) -> String {
+    if result.first_failure.is_some() {
+        format!(" applied {}/{} ", result.applied, result.total)
+    } else {
+        format!(" applied {} ", result.applied)
     }
 }
 
@@ -267,7 +312,7 @@ mod tests {
             skipped: 0,
             ..Default::default()
         };
-        assert_eq!(format_label(&progress), " 2/5 ");
+        assert_eq!(format_progress(&progress), " 2/5 ");
     }
 
     #[test]
@@ -278,7 +323,7 @@ mod tests {
             skipped: 2,
             ..Default::default()
         };
-        assert_eq!(format_label(&progress), " 1/4 skip:2 ");
+        assert_eq!(format_progress(&progress), " 1/4 skip:2 ");
     }
 
     #[test]
@@ -289,6 +334,62 @@ mod tests {
             skipped: 0,
             ..Default::default()
         };
-        assert_eq!(format_label(&progress), " 0/3 ");
+        assert_eq!(format_progress(&progress), " 0/3 ");
+    }
+
+    #[test]
+    fn format_apply_result_renders_just_applied_count_on_full_success() {
+        let result = ReviewApplyResult {
+            applied: 3,
+            total: 3,
+            first_failure: None,
+        };
+        assert_eq!(format_apply_result(&result), " applied 3 ");
+    }
+
+    #[test]
+    fn format_apply_result_renders_partial_count_on_failure() {
+        let result = ReviewApplyResult {
+            applied: 1,
+            total: 3,
+            first_failure: Some("disk full".to_string()),
+        };
+        assert_eq!(format_apply_result(&result), " applied 1/3 ");
+    }
+
+    #[test]
+    fn format_badge_prefers_apply_result_over_progress() {
+        let result = ReviewApplyResult {
+            applied: 2,
+            total: 2,
+            first_failure: None,
+        };
+        let progress = InnerProgress {
+            staged: 0,
+            total: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_badge(Some(&result), Some(&progress)),
+            Some(" applied 2 ".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_badge_falls_back_to_progress_when_no_apply_result() {
+        let progress = InnerProgress {
+            staged: 2,
+            total: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_badge(None, Some(&progress)),
+            Some(" 2/5 ".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_badge_is_none_when_neither_set() {
+        assert_eq!(format_badge(None, None), None);
     }
 }

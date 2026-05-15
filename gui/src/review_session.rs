@@ -20,6 +20,22 @@ use stoat::review_session::{
 ///   callers can fan them out without re-implementing the emit dance.
 pub struct ReviewSession {
     inner: InnerSession,
+    last_apply_result: Option<ReviewApplyResult>,
+}
+
+/// Outcome of a [`stoat_action::ReviewApplyStaged`] run.
+///
+/// `applied` is the number of staged chunks that landed in the git
+/// index; `total` is the number attempted. `first_failure` carries
+/// the backend's reason string for the first chunk that failed, or
+/// `None` when every attempt succeeded. Consumers (status-bar
+/// badges) render the success/failure shape based on whether
+/// `first_failure` is `Some`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReviewApplyResult {
+    pub applied: usize,
+    pub total: usize,
+    pub first_failure: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,11 +50,29 @@ impl EventEmitter<ReviewSessionEvent> for ReviewSession {}
 
 impl ReviewSession {
     pub fn new(inner: InnerSession) -> Self {
-        Self { inner }
+        Self {
+            inner,
+            last_apply_result: None,
+        }
     }
 
     pub fn inner(&self) -> &InnerSession {
         &self.inner
+    }
+
+    pub fn last_apply_result(&self) -> Option<&ReviewApplyResult> {
+        self.last_apply_result.as_ref()
+    }
+
+    /// Record the result of a [`stoat_action::ReviewApplyStaged`]
+    /// run and fan out [`ReviewSessionEvent::Changed`] +
+    /// [`ReviewSessionEvent::Applied`] so status-bar badges and
+    /// other subscribers re-render.
+    pub fn set_apply_result(&mut self, result: ReviewApplyResult, cx: &mut Context<'_, Self>) {
+        self.last_apply_result = Some(result);
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::Applied);
+        cx.notify();
     }
 
     pub fn progress(&self) -> ReviewProgress {
@@ -251,6 +285,29 @@ mod tests {
 
         assert_eq!(result, None);
         assert_eq!(drain(&events), Vec::<ReviewSessionEvent>::new());
+    }
+
+    #[test]
+    fn set_apply_result_emits_changed_and_applied_and_stores_result() {
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+        let result = ReviewApplyResult {
+            applied: 2,
+            total: 3,
+            first_failure: Some("boom".to_string()),
+        };
+
+        session.update(&mut cx, |s, cx| s.set_apply_result(result.clone(), cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            drain(&events),
+            vec![ReviewSessionEvent::Changed, ReviewSessionEvent::Applied],
+        );
+        session.read_with(&cx, |s, _| {
+            assert_eq!(s.last_apply_result(), Some(&result));
+        });
     }
 
     #[test]

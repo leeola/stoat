@@ -17,6 +17,7 @@ use crate::{
     multi_buffer::MultiBuffer,
     pane::{Pane, PaneEvent},
     pane_tree::{PaneTree, PaneTreeEvent},
+    review_session::ReviewApplyResult,
     settings::Settings,
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
@@ -39,7 +40,7 @@ use stoat::{
     buffer::BufferId,
     host::WatchToken,
     pane::{Axis, Direction},
-    review_apply::remove_chunks_from_buffer,
+    review_apply::{chunk_to_unified_diff, remove_chunks_from_buffer},
     review_session::{ChunkStatus, ReviewSource},
 };
 use stoat_action::ActionKind;
@@ -1039,6 +1040,7 @@ impl Workspace {
                 self.dispatch_review_set_status(ReviewStatusChange::Toggle, cx)
             },
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
+            ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1364,6 +1366,77 @@ impl Workspace {
         };
         let len = buffer.read(cx).read(|b| b.rope().len());
         buffer.update(cx, |b, cx| b.edit(0..len, &new_buffer, cx));
+    }
+
+    fn dispatch_review_apply_staged(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        let Some((workdir, patches)) = ({
+            let inner = session.read(cx).inner();
+            let workdir = match &inner.source {
+                ReviewSource::WorkingTree { workdir } => workdir.clone(),
+                _ => {
+                    tracing::warn!(
+                        "ReviewApplyStaged: only WorkingTree sources are applyable; \
+                         other sources are read-only reviews"
+                    );
+                    return;
+                },
+            };
+            let patches: Vec<String> = inner
+                .order
+                .iter()
+                .filter_map(|id| {
+                    let chunk = inner.chunks.get(id)?;
+                    if chunk.status != ChunkStatus::Staged {
+                        return None;
+                    }
+                    let file = inner.files.get(chunk.file_index)?;
+                    Some(chunk_to_unified_diff(file, chunk, &workdir))
+                })
+                .collect();
+            Some((workdir, patches))
+        }) else {
+            return;
+        };
+
+        if patches.is_empty() {
+            tracing::info!("ReviewApplyStaged: nothing staged");
+            return;
+        }
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("ReviewApplyStaged: no git repo at {}", workdir.display());
+            return;
+        };
+
+        let total = patches.len();
+        let mut applied = 0usize;
+        let mut first_failure: Option<String> = None;
+        for patch in &patches {
+            match repo.apply_to_index(patch) {
+                Ok(()) => applied += 1,
+                Err(stoat::host::GitApplyError::Backend { reason, .. }) => {
+                    if first_failure.is_none() {
+                        first_failure = Some(reason);
+                    }
+                },
+            }
+        }
+
+        session.update(cx, |session, cx| {
+            session.set_apply_result(
+                ReviewApplyResult {
+                    applied,
+                    total,
+                    first_failure,
+                },
+                cx,
+            );
+        });
     }
 }
 
@@ -4010,5 +4083,133 @@ mod tests {
 
         dispatch(&ws, vcx, stoat_action::ReviewRemoveSelected);
         vcx.run_until_parked();
+    }
+
+    fn install_git_host_global(vcx: &mut VisualTestContext, git: Arc<stoat::host::fake::FakeGit>) {
+        use crate::globals::GitHostGlobal;
+        vcx.update(|_, cx| {
+            cx.set_global(GitHostGlobal(git as Arc<dyn stoat::host::GitHost>));
+        });
+    }
+
+    fn session_apply_result(
+        vcx: &mut VisualTestContext,
+        session: &Entity<crate::review_session::ReviewSession>,
+    ) -> Option<ReviewApplyResult> {
+        session.read_with(vcx, |s, _| s.last_apply_result().cloned())
+    }
+
+    fn stage_all(
+        vcx: &mut VisualTestContext,
+        session: &Entity<crate::review_session::ReviewSession>,
+    ) {
+        let ids: Vec<_> = session.read_with(vcx, |s, _| s.inner().order.clone());
+        session.update(vcx, |s, cx| {
+            for id in ids {
+                s.set_status(id, ChunkStatus::Staged, cx);
+            }
+        });
+    }
+
+    #[test]
+    fn dispatch_review_apply_staged_applies_each_staged_chunk_via_git_host() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_git_host_global(vcx, git.clone());
+        let (session, _, _) = new_two_chunk_working_tree_session(vcx, "/tmp/repo", "a.txt");
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        stage_all(vcx, &session);
+
+        dispatch(&ws, vcx, stoat_action::ReviewApplyStaged);
+        vcx.run_until_parked();
+
+        assert_eq!(git.applied_patches(Path::new("/tmp/repo")).len(), 2);
+        assert_eq!(
+            session_apply_result(vcx, &session),
+            Some(ReviewApplyResult {
+                applied: 2,
+                total: 2,
+                first_failure: None,
+            }),
+        );
+    }
+
+    #[test]
+    fn dispatch_review_apply_staged_records_partial_failure() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo").fail_apply_with("disk full");
+        install_git_host_global(vcx, git.clone());
+        let (session, _, _) = new_two_chunk_working_tree_session(vcx, "/tmp/repo", "a.txt");
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        stage_all(vcx, &session);
+
+        dispatch(&ws, vcx, stoat_action::ReviewApplyStaged);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            git.applied_patches(Path::new("/tmp/repo")).len(),
+            2,
+            "every staged chunk reaches apply_to_index even on failure",
+        );
+        assert_eq!(
+            session_apply_result(vcx, &session),
+            Some(ReviewApplyResult {
+                applied: 0,
+                total: 2,
+                first_failure: Some("disk full".to_string()),
+            }),
+        );
+    }
+
+    #[test]
+    fn dispatch_review_apply_staged_with_nothing_staged_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_git_host_global(vcx, git.clone());
+        let (session, _, _) = new_two_chunk_working_tree_session(vcx, "/tmp/repo", "a.txt");
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewApplyStaged);
+        vcx.run_until_parked();
+
+        assert!(git.applied_patches(Path::new("/tmp/repo")).is_empty());
+        assert_eq!(session_apply_result(vcx, &session), None);
+    }
+
+    #[test]
+    fn dispatch_review_apply_staged_is_noop_for_in_memory_source() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_git_host_global(vcx, git.clone());
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        stage_all(vcx, &session);
+
+        dispatch(&ws, vcx, stoat_action::ReviewApplyStaged);
+        vcx.run_until_parked();
+
+        assert!(git.applied_patches(Path::new("/tmp/repo")).is_empty());
+        assert_eq!(session_apply_result(vcx, &session), None);
+    }
+
+    #[test]
+    fn dispatch_review_apply_staged_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        install_git_host_global(vcx, git.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewApplyStaged);
+        vcx.run_until_parked();
+
+        assert!(git.applied_patches(Path::new("/tmp/repo")).is_empty());
     }
 }
