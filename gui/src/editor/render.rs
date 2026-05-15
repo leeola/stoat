@@ -416,7 +416,6 @@ const DIAG_ERROR_HEX: u32 = 0xe53935;
 const DIAG_WARNING_HEX: u32 = 0xffb300;
 const DIAG_INFO_HEX: u32 = 0x29b6f6;
 const DIAG_HINT_HEX: u32 = 0x9e9e9e;
-const LINE_NUMBER_HEX: u32 = 0x808080;
 const BLOCK_TEXT_HEX: u32 = 0xa0a0a0;
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -501,6 +500,7 @@ pub(crate) struct GutterPaint<'a> {
     pub diff_map: &'a stoat::DiffMap,
     pub diagnostics: Option<&'a DiagnosticRowMap>,
     pub metrics: GutterMetrics,
+    pub line_number_color: Hsla,
 }
 
 pub(crate) fn render_row_with_gutter(
@@ -554,7 +554,7 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
         text.push_str(&line_str);
         let end = text.len();
         let style = gpui::HighlightStyle {
-            color: Some(rgb(LINE_NUMBER_HEX).into()),
+            color: Some(paint.line_number_color),
             ..Default::default()
         };
         runs.push((start..end, style));
@@ -912,6 +912,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             metrics,
+            line_number_color: rgb(0x808080).into(),
         };
         let row = RenderedRow {
             text: SharedString::from("hello"),
@@ -933,6 +934,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             metrics,
+            line_number_color: rgb(0x808080).into(),
         };
         let prefix = build_gutter_prefix(0, &paint);
         assert!(prefix.text.starts_with('1'));
@@ -949,6 +951,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: None,
             metrics,
+            line_number_color: rgb(0x808080).into(),
         };
         let prefix = build_gutter_prefix(0, &paint);
 
@@ -975,6 +978,7 @@ mod tests {
             diff_map: &diff_map,
             diagnostics: Some(&diagnostics),
             metrics,
+            line_number_color: rgb(0x808080).into(),
         };
         let prefix = build_gutter_prefix(0, &paint);
 

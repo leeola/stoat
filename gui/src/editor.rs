@@ -868,6 +868,7 @@ impl Editor {
             diff_map: &diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
             metrics,
+            line_number_color: theme::muted_text_color(cx),
         };
         rows.into_iter()
             .enumerate()

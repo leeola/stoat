@@ -63,6 +63,12 @@ pub const DEFAULT_TAB_LABEL_HEX: u32 = 0xcccccc;
 /// backgrounds without a theme installed.
 pub const DEFAULT_CURSOR_HEX: u32 = 0xc8d6ff;
 
+/// Fallback for muted-text scopes (gutter line numbers, dimmed
+/// chrome text) when no theme overrides `ui.text.muted`. Medium gray
+/// so muted text reads against dark editor backgrounds without
+/// requiring a theme.
+pub const DEFAULT_MUTED_TEXT_HEX: u32 = 0x808080;
+
 /// Fallback for the editor selection band when no theme overrides
 /// `ui.selection.editor`. Returns a semi-transparent blue so a
 /// selection over text remains legible without a theme installed.
@@ -154,6 +160,18 @@ pub fn tab_label_color(cx: &App) -> Hsla {
 /// underlying character.
 pub fn cursor_color(cx: &App) -> Hsla {
     theme_bg_or(cx, stoat::theme::scope::UI_CURSOR, DEFAULT_CURSOR_HEX)
+}
+
+/// Resolve the muted-text color (gutter line numbers, dimmed chrome
+/// text) from the active [`Theme`] global, falling back to
+/// [`DEFAULT_MUTED_TEXT_HEX`] when no theme is installed or the
+/// scope is unset. Reads the scope's `fg` channel.
+pub fn muted_text_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_TEXT_MUTED,
+        DEFAULT_MUTED_TEXT_HEX,
+    )
 }
 
 /// Resolve the editor selection band fill from the active [`Theme`]
@@ -309,5 +327,23 @@ mod tests {
             selection_color(cx)
         });
         assert_ne!(resolved, default_selection_color());
+    }
+
+    #[test]
+    fn muted_text_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| muted_text_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_MUTED_TEXT_HEX).into());
+    }
+
+    #[test]
+    fn muted_text_color_resolves_fg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme = Theme::load_from_source("theme custom { ui.text.muted.fg = blue; }", "custom");
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            muted_text_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_MUTED_TEXT_HEX).into());
     }
 }
