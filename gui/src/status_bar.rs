@@ -2,6 +2,7 @@ pub mod active_file;
 pub mod count_prefix;
 pub mod cursor_position;
 pub mod diagnostics_badge;
+pub mod lsp_progress;
 pub mod mode_badge;
 pub mod workspace_label;
 

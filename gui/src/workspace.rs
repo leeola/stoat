@@ -10,6 +10,7 @@ use crate::{
     input_state_machine::InputStateMachine,
     item::ItemHandle,
     keymap_loader::{compile_default_keymap, compile_from_settings},
+    lsp_state::LspState,
     modal_layer::{ModalLayer, ModalView},
     multi_buffer::MultiBuffer,
     pane::{Pane, PaneEvent},
@@ -17,7 +18,7 @@ use crate::{
     settings::Settings,
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
-        diagnostics_badge::DiagnosticsBadge, mode_badge::ModeBadge,
+        diagnostics_badge::DiagnosticsBadge, lsp_progress::LspProgress, mode_badge::ModeBadge,
         workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
     },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
@@ -49,11 +50,13 @@ pub struct Workspace {
     status_bar: Entity<StatusBar>,
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
+    lsp_state: Entity<LspState>,
     workspace_label: Entity<WorkspaceLabel>,
     active_file_label: Entity<ActiveFileLabel>,
     cursor_position: Entity<CursorPosition>,
     count_prefix: Entity<CountPrefix>,
     diagnostics_badge: Entity<DiagnosticsBadge>,
+    lsp_progress: Entity<LspProgress>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -132,12 +135,14 @@ impl Workspace {
             })
             .collect();
 
+        let lsp_state = cx.new(|_| LspState::new());
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
         let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
         let cursor_position = cx.new(|_| CursorPosition::new());
         let count_prefix = cx.new(|cx| CountPrefix::new(input_state_machine.clone(), cx));
         let diagnostics_badge = cx.new(|_| DiagnosticsBadge::new());
+        let lsp_progress = cx.new(|cx| LspProgress::new(lsp_state.clone(), cx));
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -150,6 +155,7 @@ impl Workspace {
             bar.add_left_item(active_file_label.clone(), cx);
             bar.add_right_item(cursor_position.clone(), cx);
             bar.add_right_item(count_prefix.clone(), cx);
+            bar.add_right_item(lsp_progress.clone(), cx);
             bar.add_right_item(diagnostics_badge.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
@@ -174,11 +180,13 @@ impl Workspace {
             status_bar,
             input_state_machine,
             editor_input,
+            lsp_state,
             workspace_label,
             active_file_label,
             cursor_position,
             count_prefix,
             diagnostics_badge,
+            lsp_progress,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -324,6 +332,14 @@ impl Workspace {
 
     pub fn diagnostics_badge(&self) -> &Entity<DiagnosticsBadge> {
         &self.diagnostics_badge
+    }
+
+    pub fn lsp_state(&self) -> &Entity<LspState> {
+        &self.lsp_state
+    }
+
+    pub fn lsp_progress(&self) -> &Entity<LspProgress> {
+        &self.lsp_progress
     }
 
     /// Register a status item at the left side of the status bar.
@@ -1493,7 +1509,7 @@ mod tests {
             (bar.left_items().len(), bar.right_items().len())
         });
         assert_eq!(left, 3);
-        assert_eq!(right, 3);
+        assert_eq!(right, 4);
     }
 
     #[test]
