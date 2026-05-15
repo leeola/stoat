@@ -35,6 +35,10 @@ pub struct ReviewItem {
     files: Vec<ReviewFileView>,
     commit_summary: Option<String>,
     buffer_registry: Option<Entity<BufferRegistry>>,
+    /// `(chunk, index)` cursor for the `JumpToNextMoveSource` /
+    /// `JumpToPrevMoveSource` cycle. Cleared whenever the
+    /// session's chunk cursor moves.
+    move_cursor: Option<(stoat::review_session::ReviewChunkId, usize)>,
     _session_subscription: Option<Subscription>,
 }
 
@@ -56,6 +60,7 @@ impl ReviewItem {
             files,
             commit_summary: None,
             buffer_registry: None,
+            move_cursor: None,
             _session_subscription: None,
         }
     }
@@ -94,6 +99,7 @@ impl ReviewItem {
         let subscription = cx.subscribe(&session, |this, _, event: &ReviewSessionEvent, cx| {
             if matches!(event, ReviewSessionEvent::Refreshed) {
                 this.rebuild_files(cx);
+                this.move_cursor = None;
             }
             cx.notify();
         });
@@ -102,8 +108,20 @@ impl ReviewItem {
             files,
             commit_summary: None,
             buffer_registry: Some(buffer_registry.clone()),
+            move_cursor: None,
             _session_subscription: Some(subscription),
         }
+    }
+
+    pub fn move_cursor(&self) -> Option<(stoat::review_session::ReviewChunkId, usize)> {
+        self.move_cursor
+    }
+
+    pub fn set_move_cursor(
+        &mut self,
+        cursor: Option<(stoat::review_session::ReviewChunkId, usize)>,
+    ) {
+        self.move_cursor = cursor;
     }
 
     /// Rebuild every [`ReviewFileView`] from the current

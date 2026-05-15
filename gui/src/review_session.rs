@@ -67,6 +67,23 @@ impl ReviewSession {
         self.last_apply_result.as_ref()
     }
 
+    /// Park the session's chunk cursor on `id` and fan out
+    /// [`ReviewSessionEvent::Changed`] +
+    /// [`ReviewSessionEvent::CursorMoved`] so observers re-render.
+    /// Used by move-navigation action handlers that need to
+    /// reposition the cursor without stepping through the order
+    /// list.
+    pub fn set_cursor_chunk(&mut self, id: ReviewChunkId, cx: &mut Context<'_, Self>) {
+        if self.inner.cursor.current == Some(id) {
+            return;
+        }
+        self.inner.cursor.current = Some(id);
+        self.inner.version += 1;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::CursorMoved);
+        cx.notify();
+    }
+
     /// Record the result of a [`stoat_action::ReviewApplyStaged`]
     /// run and fan out [`ReviewSessionEvent::Changed`] +
     /// [`ReviewSessionEvent::Applied`] so status-bar badges and

@@ -2,8 +2,8 @@ use crate::{
     editor_state::EditorId,
     host::WatchToken,
     review::{
-        extract_review_hunks_changeset, line_byte_offsets, split_lines, ReviewFileInput,
-        ReviewHunk, ReviewRow,
+        extract_review_hunks_changeset, line_byte_offsets, split_lines, MoveProvenance,
+        ReviewFileInput, ReviewHunk, ReviewRow,
     },
 };
 use std::{
@@ -409,6 +409,83 @@ impl ReviewSession {
     #[allow(dead_code)]
     pub fn current(&self) -> Option<&ReviewChunk> {
         self.cursor.current.and_then(|id| self.chunks.get(&id))
+    }
+
+    /// Walk the chunk's rows and collect every distinct
+    /// [`MoveProvenance`] attached to the RHS side -- the
+    /// counterpart source location for content moved INTO this
+    /// chunk. Order preserved; duplicates collapsed by
+    /// `(rel_path, line)` so an N-row chunk pointing at one
+    /// source returns one entry.
+    pub fn move_sources_in_chunk(&self, id: ReviewChunkId) -> Vec<MoveProvenance> {
+        let Some(chunk) = self.chunks.get(&id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<MoveProvenance> = Vec::new();
+        for row in &chunk.hunk.rows {
+            let ReviewRow::Changed { right, .. } = row else {
+                continue;
+            };
+            let Some(right) = right else { continue };
+            let Some(prov) = right.move_provenance.as_ref() else {
+                continue;
+            };
+            if !out.iter().any(|p| p == prov) {
+                out.push(prov.clone());
+            }
+        }
+        out
+    }
+
+    /// Walk the chunk's rows and collect every distinct
+    /// [`MoveProvenance`] attached to the LHS side of an LHS-only
+    /// row -- the target location for content moved OUT of this
+    /// chunk. Order preserved; duplicates collapsed by
+    /// `(rel_path, line)`.
+    pub fn move_targets_in_chunk(&self, id: ReviewChunkId) -> Vec<MoveProvenance> {
+        let Some(chunk) = self.chunks.get(&id) else {
+            return Vec::new();
+        };
+        let mut out: Vec<MoveProvenance> = Vec::new();
+        for row in &chunk.hunk.rows {
+            let ReviewRow::Changed { left, right } = row else {
+                continue;
+            };
+            if right.is_some() {
+                continue;
+            }
+            let Some(left) = left else { continue };
+            let Some(prov) = left.move_provenance.as_ref() else {
+                continue;
+            };
+            if !out.iter().any(|p| p == prov) {
+                out.push(prov.clone());
+            }
+        }
+        out
+    }
+
+    /// Resolve a `(file_index, buffer_line)` pair to a chunk in
+    /// that file. Returns the chunk whose `buffer_line_range`
+    /// contains `line`; otherwise the first chunk that starts at
+    /// or after `line`; otherwise the file's last chunk so
+    /// out-of-range navigation still produces a stable cursor
+    /// target. Returns `None` only when `file_index` is out of
+    /// range or the file has no chunks.
+    pub fn chunk_for_buffer_line(&self, file_index: usize, line: u32) -> Option<ReviewChunkId> {
+        let file = self.files.get(file_index)?;
+        let mut last: Option<ReviewChunkId> = None;
+        for id in &file.chunks {
+            let chunk = self.chunks.get(id)?;
+            if chunk.buffer_line_range.contains(&line) {
+                return Some(*id);
+            }
+            if chunk.buffer_line_range.start >= line {
+                return Some(*id);
+            }
+            last = Some(*id);
+        }
+        last
     }
 
     /// Advance the cursor to the next chunk. Clamps at the last chunk and
@@ -1260,6 +1337,174 @@ mod tests {
             Some(a_ids[0]),
             "refreshing a different file must not move the cursor",
         );
+    }
+
+    fn chunk_with_move_provenance(
+        left_prov: Option<MoveProvenance>,
+        right_prov: Option<MoveProvenance>,
+        right_present: bool,
+    ) -> ReviewChunk {
+        use crate::review::ReviewSide;
+        let left = Some(ReviewSide {
+            text: String::new(),
+            line_num: 1,
+            change_spans: Vec::new(),
+            moved_spans: Vec::new(),
+            move_provenance: left_prov,
+        });
+        let right = if right_present {
+            Some(ReviewSide {
+                text: String::new(),
+                line_num: 1,
+                change_spans: Vec::new(),
+                moved_spans: Vec::new(),
+                move_provenance: right_prov,
+            })
+        } else {
+            None
+        };
+        ReviewChunk {
+            id: ReviewChunkId(0),
+            file_index: 0,
+            chunk_index_in_file: 0,
+            hunk: ReviewHunk {
+                rows: vec![ReviewRow::Changed { left, right }],
+            },
+            buffer_line_range: 0..1,
+            base_line_range: 0..1,
+            buffer_byte_range: 0..0,
+            base_byte_range: 0..0,
+            status: ChunkStatus::Pending,
+        }
+    }
+
+    fn insert_synthetic_chunk(s: &mut ReviewSession, chunk: ReviewChunk) -> ReviewChunkId {
+        let id = s.alloc_id();
+        let mut chunk = chunk;
+        chunk.id = id;
+        s.chunks.insert(id, chunk);
+        s.order.push(id);
+        id
+    }
+
+    #[test]
+    fn move_sources_in_chunk_returns_unique_right_provenances() {
+        let mut s = in_memory_session();
+        let prov_a = MoveProvenance {
+            rel_path: "src/foo.rs".to_string(),
+            line: 10,
+        };
+        let prov_b = MoveProvenance {
+            rel_path: "src/bar.rs".to_string(),
+            line: 20,
+        };
+        let id = insert_synthetic_chunk(
+            &mut s,
+            chunk_with_move_provenance(None, Some(prov_a.clone()), true),
+        );
+
+        // Add two more rows: one duplicate, one distinct.
+        if let Some(chunk) = s.chunks.get_mut(&id) {
+            use crate::review::ReviewSide;
+            chunk.hunk.rows.push(ReviewRow::Changed {
+                left: None,
+                right: Some(ReviewSide {
+                    text: String::new(),
+                    line_num: 2,
+                    change_spans: Vec::new(),
+                    moved_spans: Vec::new(),
+                    move_provenance: Some(prov_a.clone()),
+                }),
+            });
+            chunk.hunk.rows.push(ReviewRow::Changed {
+                left: None,
+                right: Some(ReviewSide {
+                    text: String::new(),
+                    line_num: 3,
+                    change_spans: Vec::new(),
+                    moved_spans: Vec::new(),
+                    move_provenance: Some(prov_b.clone()),
+                }),
+            });
+        }
+
+        assert_eq!(s.move_sources_in_chunk(id), vec![prov_a, prov_b]);
+    }
+
+    #[test]
+    fn move_targets_in_chunk_returns_left_provenances_from_lhs_only_rows() {
+        let mut s = in_memory_session();
+        let prov = MoveProvenance {
+            rel_path: "src/dest.rs".to_string(),
+            line: 42,
+        };
+        // LHS-only row (right: None) with left.move_provenance set.
+        let id = insert_synthetic_chunk(
+            &mut s,
+            chunk_with_move_provenance(Some(prov.clone()), None, false),
+        );
+
+        assert_eq!(s.move_targets_in_chunk(id), vec![prov]);
+    }
+
+    #[test]
+    fn move_targets_in_chunk_skips_rows_with_right_side() {
+        let mut s = in_memory_session();
+        let prov = MoveProvenance {
+            rel_path: "src/dest.rs".to_string(),
+            line: 42,
+        };
+        // left.move_provenance is set but the row has a right side too,
+        // so the row is not a target candidate.
+        let id = insert_synthetic_chunk(&mut s, chunk_with_move_provenance(Some(prov), None, true));
+
+        assert!(s.move_targets_in_chunk(id).is_empty());
+    }
+
+    #[test]
+    fn move_sources_in_chunk_returns_empty_when_no_provenance() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        assert!(s.move_sources_in_chunk(ids[0]).is_empty());
+    }
+
+    #[test]
+    fn chunk_for_buffer_line_finds_chunk_in_range() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "a.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        assert_eq!(ids.len(), 2);
+        let chunk0_start = s.chunks[&ids[0]].buffer_line_range.start;
+        let chunk1_start = s.chunks[&ids[1]].buffer_line_range.start;
+
+        assert_eq!(s.chunk_for_buffer_line(0, chunk0_start), Some(ids[0]));
+        assert_eq!(s.chunk_for_buffer_line(0, chunk1_start), Some(ids[1]));
+    }
+
+    #[test]
+    fn chunk_for_buffer_line_falls_back_to_last_chunk_when_past_end() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "a.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        // Beyond every chunk's buffer_line_range -> last chunk.
+        assert_eq!(
+            s.chunk_for_buffer_line(0, 1_000),
+            Some(*ids.last().unwrap())
+        );
+    }
+
+    #[test]
+    fn chunk_for_buffer_line_returns_none_when_file_has_no_chunks() {
+        let s = in_memory_session();
+        assert_eq!(s.chunk_for_buffer_line(0, 0), None);
     }
 
     use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};

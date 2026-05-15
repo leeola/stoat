@@ -1061,6 +1061,16 @@ impl Workspace {
                     self.dispatch_review_external_edit(path, cx);
                 }
             },
+            ActionKind::JumpToMoveSource => {
+                self.dispatch_jump_to_move_source(JumpMoveNav::First, cx)
+            },
+            ActionKind::JumpToNextMoveSource => {
+                self.dispatch_jump_to_move_source(JumpMoveNav::Next, cx)
+            },
+            ActionKind::JumpToPrevMoveSource => {
+                self.dispatch_jump_to_move_source(JumpMoveNav::Prev, cx)
+            },
+            ActionKind::JumpToMoveTarget => self.dispatch_jump_to_move_target(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1523,6 +1533,143 @@ impl Workspace {
             session.refresh_file(&path, new_input, cx);
         });
     }
+
+    fn dispatch_jump_to_move_source(&mut self, nav: JumpMoveNav, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        // Anchor: `First` always re-anchors on the current cursor
+        // chunk; `Next` / `Prev` continue cycling against the last
+        // anchored chunk so navigating to a destination file doesn't
+        // break the cycle. Fall back to the current cursor chunk
+        // when no prior anchor exists.
+        let anchor_chunk = match nav {
+            JumpMoveNav::First => None,
+            JumpMoveNav::Next | JumpMoveNav::Prev => {
+                review_item.read(cx).move_cursor().map(|c| c.0)
+            },
+        }
+        .or_else(|| {
+            review_item
+                .read(cx)
+                .session()
+                .read(cx)
+                .inner()
+                .cursor
+                .current
+        });
+        let Some(anchor_chunk) = anchor_chunk else {
+            return;
+        };
+        let sources = review_item
+            .read(cx)
+            .session()
+            .read(cx)
+            .inner()
+            .move_sources_in_chunk(anchor_chunk);
+        if sources.is_empty() {
+            return;
+        }
+        let next_index = review_item.update(cx, |item, _| {
+            let len = sources.len();
+            let current = match item.move_cursor() {
+                Some((cid, idx)) if cid == anchor_chunk => idx,
+                _ => 0,
+            };
+            let next = match nav {
+                JumpMoveNav::First => 0,
+                JumpMoveNav::Next => (current + 1) % len.max(1),
+                JumpMoveNav::Prev => (current + len.saturating_sub(1)) % len.max(1),
+            };
+            item.set_move_cursor(Some((anchor_chunk, next)));
+            next
+        });
+        let Some(prov) = sources.get(next_index).cloned() else {
+            return;
+        };
+        navigate_to_move_provenance(&review_item, &prov, cx);
+    }
+
+    fn dispatch_jump_to_move_target(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let Some(chunk_id) = review_item
+            .read(cx)
+            .session()
+            .read(cx)
+            .inner()
+            .cursor
+            .current
+        else {
+            return;
+        };
+        let targets = review_item
+            .read(cx)
+            .session()
+            .read(cx)
+            .inner()
+            .move_targets_in_chunk(chunk_id);
+        let Some(prov) = targets.first().cloned() else {
+            return;
+        };
+        navigate_to_move_provenance(&review_item, &prov, cx);
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum JumpMoveNav {
+    First,
+    Next,
+    Prev,
+}
+
+/// Switch the active file's editor and editor cursor to point at
+/// `prov`. The session's chunk cursor parks on the chunk in the
+/// destination file containing the provenance line (falling back
+/// to the file's first chunk), so subsequent navigation knows the
+/// review focus has moved across files. Silent when the
+/// provenance's `rel_path` is not in the session.
+fn navigate_to_move_provenance(
+    review_item: &Entity<crate::review_item::ReviewItem>,
+    prov: &stoat::review::MoveProvenance,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let session = review_item.read(cx).session().clone();
+    let Some(file_index) = session
+        .read(cx)
+        .inner()
+        .files
+        .iter()
+        .position(|f| f.rel_path == prov.rel_path)
+    else {
+        tracing::warn!(
+            target = %prov.rel_path,
+            "JumpToMove*: target file not in review session, skipping",
+        );
+        return;
+    };
+    let new_chunk = session
+        .read(cx)
+        .inner()
+        .chunk_for_buffer_line(file_index, prov.line);
+    if let Some(new_chunk) = new_chunk {
+        session.update(cx, |s, cx| s.set_cursor_chunk(new_chunk, cx));
+    }
+
+    let editor = review_item
+        .read(cx)
+        .files()
+        .get(file_index)
+        .map(|f| f.editor.clone());
+    let Some(editor) = editor else { return };
+    editor.update(cx, |ed, cx| {
+        ed.set_cursor_at_buffer_row(prov.line, cx);
+        ed.request_autoscroll(
+            crate::editor::scroll::autoscroll::AutoscrollStrategy::Center,
+            cx,
+        );
+    });
 }
 
 /// Build a fresh [`ReviewFileInput`] list from `source` using the
@@ -4589,6 +4736,208 @@ mod tests {
                 path: PathBuf::from("/tmp/repo/a.txt"),
             },
         );
+        vcx.run_until_parked();
+    }
+
+    fn build_inner_session_with_provenances(
+        cursor_file_rel: &str,
+        target_file_rel: &str,
+        extra_provenances: &[stoat::review::MoveProvenance],
+    ) -> stoat::review_session::ReviewSession {
+        use stoat::review::ReviewSide;
+        let mut inner = stoat::review_session::ReviewSession::new(ReviewSource::InMemory {
+            files: Arc::new(Vec::new()),
+        });
+        inner.add_files(vec![
+            ReviewFileInput {
+                path: PathBuf::from(cursor_file_rel),
+                rel_path: cursor_file_rel.to_string(),
+                language: None,
+                base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+            },
+            ReviewFileInput {
+                path: PathBuf::from(target_file_rel),
+                rel_path: target_file_rel.to_string(),
+                language: None,
+                base_text: Arc::new("x\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n".to_string()),
+                buffer_text: Arc::new("X\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n".to_string()),
+            },
+        ]);
+        let cursor_id = inner.order[0];
+        let chunk = inner.chunks.get_mut(&cursor_id).expect("cursor chunk");
+        // Replace the chunk's rows with one synthetic Changed row
+        // per provenance entry; tests rely on these provenance
+        // values directly.
+        chunk.hunk.rows.clear();
+        for (i, prov) in extra_provenances.iter().enumerate() {
+            chunk.hunk.rows.push(stoat::review::ReviewRow::Changed {
+                left: None,
+                right: Some(ReviewSide {
+                    text: String::new(),
+                    line_num: (i as u32) + 1,
+                    change_spans: Vec::new(),
+                    moved_spans: Vec::new(),
+                    move_provenance: Some(prov.clone()),
+                }),
+            });
+        }
+        inner
+    }
+
+    fn session_with_inner(
+        vcx: &mut VisualTestContext,
+        inner: stoat::review_session::ReviewSession,
+    ) -> Entity<crate::review_session::ReviewSession> {
+        vcx.update(|_, cx| cx.new(|_| crate::review_session::ReviewSession::new(inner)))
+    }
+
+    fn active_file_index(
+        vcx: &mut VisualTestContext,
+        item: &Entity<crate::review_item::ReviewItem>,
+    ) -> Option<usize> {
+        item.read_with(vcx, |item, app| item.active_file_index(app))
+    }
+
+    #[test]
+    fn dispatch_jump_to_move_source_switches_file_and_scrolls() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let target = stoat::review::MoveProvenance {
+            rel_path: "b.txt".to_string(),
+            line: 0,
+        };
+        let inner = build_inner_session_with_provenances("a.txt", "b.txt", &[target]);
+        let session = session_with_inner(vcx, inner);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(active_file_index(vcx, &item), Some(0));
+
+        dispatch(&ws, vcx, stoat_action::JumpToMoveSource);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            active_file_index(vcx, &item),
+            Some(1),
+            "session cursor must move to a chunk in the target file",
+        );
+    }
+
+    #[test]
+    fn dispatch_jump_to_move_source_without_provenance_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        let active_before = active_file_index(vcx, &item);
+
+        dispatch(&ws, vcx, stoat_action::JumpToMoveSource);
+        vcx.run_until_parked();
+
+        assert_eq!(active_file_index(vcx, &item), active_before);
+    }
+
+    #[test]
+    fn dispatch_jump_to_next_move_source_cycles_through_distinct_sources() {
+        use stoat::review::MoveProvenance;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let prov_b = MoveProvenance {
+            rel_path: "b.txt".to_string(),
+            line: 0,
+        };
+        let prov_a = MoveProvenance {
+            rel_path: "a.txt".to_string(),
+            line: 0,
+        };
+        let inner = build_inner_session_with_provenances("a.txt", "b.txt", &[prov_b, prov_a]);
+        let session = session_with_inner(vcx, inner);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::JumpToMoveSource);
+        vcx.run_until_parked();
+        assert_eq!(active_file_index(vcx, &item), Some(1));
+
+        dispatch(&ws, vcx, stoat_action::JumpToNextMoveSource);
+        vcx.run_until_parked();
+        assert_eq!(
+            active_file_index(vcx, &item),
+            Some(0),
+            "next cycles to the second distinct provenance (a.txt)",
+        );
+    }
+
+    #[test]
+    fn dispatch_jump_to_prev_move_source_cycles_backward() {
+        use stoat::review::MoveProvenance;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let prov_b = MoveProvenance {
+            rel_path: "b.txt".to_string(),
+            line: 0,
+        };
+        let prov_a = MoveProvenance {
+            rel_path: "a.txt".to_string(),
+            line: 0,
+        };
+        let inner = build_inner_session_with_provenances("a.txt", "b.txt", &[prov_b, prov_a]);
+        let session = session_with_inner(vcx, inner);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::JumpToMoveSource);
+        vcx.run_until_parked();
+        assert_eq!(active_file_index(vcx, &item), Some(1));
+
+        dispatch(&ws, vcx, stoat_action::JumpToPrevMoveSource);
+        vcx.run_until_parked();
+        assert_eq!(
+            active_file_index(vcx, &item),
+            Some(0),
+            "prev wraps to the last distinct provenance (a.txt)",
+        );
+    }
+
+    #[test]
+    fn dispatch_jump_to_move_target_uses_lhs_only_provenance() {
+        use stoat::review::{MoveProvenance, ReviewSide};
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let target = MoveProvenance {
+            rel_path: "b.txt".to_string(),
+            line: 0,
+        };
+        let mut inner = build_inner_session_with_provenances("a.txt", "b.txt", &[]);
+        let cursor_id = inner.cursor.current.expect("cursor set");
+        let chunk = inner.chunks.get_mut(&cursor_id).expect("cursor chunk");
+        chunk.hunk.rows.clear();
+        chunk.hunk.rows.push(stoat::review::ReviewRow::Changed {
+            left: Some(ReviewSide {
+                text: String::new(),
+                line_num: 1,
+                change_spans: Vec::new(),
+                moved_spans: Vec::new(),
+                move_provenance: Some(target.clone()),
+            }),
+            right: None,
+        });
+        let session = session_with_inner(vcx, inner);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::JumpToMoveTarget);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            active_file_index(vcx, &item),
+            Some(1),
+            "JumpToMoveTarget must switch the active file using the LHS-only provenance",
+        );
+    }
+
+    #[test]
+    fn dispatch_jump_to_move_source_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::JumpToMoveSource);
         vcx.run_until_parked();
     }
 }
