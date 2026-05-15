@@ -14,7 +14,7 @@ use crate::review_session::ReviewChunk;
 /// assumed; the splice is applied from the tail of `buffer_text` back
 /// to the head so earlier ranges remain valid while later ones mutate
 /// the string.
-pub(crate) fn remove_chunks_from_buffer(
+pub fn remove_chunks_from_buffer(
     base_text: &str,
     buffer_text: &str,
     chunks: &[&ReviewChunk],

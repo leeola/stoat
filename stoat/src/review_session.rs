@@ -16,10 +16,10 @@ use std::{
 use stoat_language::Language;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ReviewChunkId(u32);
+pub struct ReviewChunkId(u32);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum ChunkStatus {
+pub enum ChunkStatus {
     Pending,
     Staged,
     Unstaged,
@@ -27,7 +27,7 @@ pub(crate) enum ChunkStatus {
 }
 
 impl ChunkStatus {
-    pub(crate) fn is_decided(self) -> bool {
+    pub fn is_decided(self) -> bool {
         matches!(
             self,
             ChunkStatus::Staged | ChunkStatus::Unstaged | ChunkStatus::Skipped
@@ -44,7 +44,7 @@ impl ChunkStatus {
 /// - [`ReviewSource::AgentEdits`]: in-memory edit proposals; no repo required.
 /// - [`ReviewSource::InMemory`]: test-only placeholder; not rescannable.
 #[derive(Clone, Debug)]
-pub(crate) enum ReviewSource {
+pub enum ReviewSource {
     WorkingTree {
         workdir: PathBuf,
     },
@@ -70,7 +70,7 @@ pub(crate) enum ReviewSource {
 /// concrete type rather than an opaque placeholder so the variant signature
 /// does not churn when the real agent bridge lands.
 #[derive(Clone, Debug)]
-pub(crate) struct AgentEditProposal {
+pub struct AgentEditProposal {
     pub path: PathBuf,
     pub base_text: Arc<String>,
     pub proposed_text: Arc<String>,
@@ -78,14 +78,14 @@ pub(crate) struct AgentEditProposal {
 
 #[allow(dead_code)]
 #[derive(Clone, Debug)]
-pub(crate) struct InMemoryFile {
+pub struct InMemoryFile {
     pub path: PathBuf,
     pub base_text: Arc<String>,
     pub buffer_text: Arc<String>,
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ReviewChunk {
+pub struct ReviewChunk {
     #[allow(dead_code)]
     pub id: ReviewChunkId,
     pub file_index: usize,
@@ -105,7 +105,7 @@ pub(crate) struct ReviewChunk {
 }
 
 #[derive(Clone)]
-pub(crate) struct ReviewFile {
+pub struct ReviewFile {
     pub path: PathBuf,
     pub rel_path: String,
     pub language: Option<Arc<Language>>,
@@ -115,12 +115,12 @@ pub(crate) struct ReviewFile {
 }
 
 #[derive(Clone, Copy, Debug, Default)]
-pub(crate) struct ReviewCursor {
+pub struct ReviewCursor {
     pub current: Option<ReviewChunkId>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) struct ReviewProgress {
+pub struct ReviewProgress {
     pub staged: usize,
     pub unstaged: usize,
     pub skipped: usize,
@@ -134,7 +134,7 @@ pub(crate) struct ReviewProgress {
 impl ReviewProgress {
     /// True when the session has at least one chunk and every chunk
     /// has been decided (staged, unstaged, or skipped).
-    pub(crate) fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         self.total > 0 && self.pending == 0
     }
 }
@@ -143,7 +143,7 @@ impl ReviewProgress {
 /// so `render_review` can paint without walking the session on every frame,
 /// and so navigation handlers can map a chunk id to a display row.
 #[derive(Clone, Debug)]
-pub(crate) struct ReviewViewState {
+pub struct ReviewViewState {
     /// Flattened rows across every file's chunks, in visit order. One row
     /// per placeholder-buffer line.
     pub rows: Vec<ReviewRow>,
@@ -163,7 +163,7 @@ pub(crate) struct ReviewViewState {
 }
 
 impl ReviewViewState {
-    pub(crate) fn from_session(session: &ReviewSession) -> Self {
+    pub fn from_session(session: &ReviewSession) -> Self {
         let mut rows: Vec<ReviewRow> = Vec::new();
         let mut chunk_row_starts: Vec<(ReviewChunkId, u32)> = Vec::new();
         let mut chunk_statuses: Vec<ChunkStatus> = Vec::new();
@@ -188,7 +188,7 @@ impl ReviewViewState {
     /// Sync the status cache and cursor from the session without rebuilding
     /// row data. Cheaper than `from_session` and the right call when only
     /// the cursor or a chunk's status has changed.
-    pub(crate) fn refresh_from_session(&mut self, session: &ReviewSession) {
+    pub fn refresh_from_session(&mut self, session: &ReviewSession) {
         if self.session_version == session.version {
             return;
         }
@@ -207,7 +207,7 @@ impl ReviewViewState {
     }
 
     /// Returns the (chunk_id, status) for the given display row, if any.
-    pub(crate) fn chunk_and_status_at_row(&self, row: u32) -> Option<(ReviewChunkId, ChunkStatus)> {
+    pub fn chunk_and_status_at_row(&self, row: u32) -> Option<(ReviewChunkId, ChunkStatus)> {
         let idx = self
             .chunk_row_starts
             .partition_point(|(_, start)| *start <= row)
@@ -219,7 +219,7 @@ impl ReviewViewState {
 
     /// Returns the first display row of the given chunk, or `None` if the
     /// chunk is not represented in this view.
-    pub(crate) fn row_of_chunk(&self, id: ReviewChunkId) -> Option<u32> {
+    pub fn row_of_chunk(&self, id: ReviewChunkId) -> Option<u32> {
         self.chunk_row_starts
             .iter()
             .find(|(c, _)| *c == id)
@@ -231,7 +231,7 @@ impl ReviewViewState {
 /// `CloseReview` should land the user (normal mode vs. back to the
 /// commit-list view).
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
-pub(crate) enum ReviewOrigin {
+pub enum ReviewOrigin {
     /// Opened directly from normal mode (e.g. `OpenReview` or
     /// `OpenReviewCommit` from the palette). `CloseReview` returns to
     /// normal mode.
@@ -256,7 +256,7 @@ pub(crate) enum ReviewOrigin {
 // `HashMap<ChunkFingerprint, ChunkStatus>`, and re-key on load. Chunks whose
 // fingerprint no longer matches (underlying file changed externally) degrade
 // to `Pending`.
-pub(crate) struct ReviewSession {
+pub struct ReviewSession {
     pub source: ReviewSource,
     pub files: Vec<ReviewFile>,
     pub chunks: HashMap<ReviewChunkId, ReviewChunk>,
@@ -276,7 +276,7 @@ pub(crate) struct ReviewSession {
 }
 
 impl ReviewSession {
-    pub(crate) fn new(source: ReviewSource) -> Self {
+    pub fn new(source: ReviewSource) -> Self {
         Self {
             source,
             files: Vec::new(),
@@ -319,7 +319,7 @@ impl ReviewSession {
     /// input order. Files that produce no hunks are still recorded
     /// (with an empty chunk list) so that subsequent file indices
     /// stay stable.
-    pub(crate) fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
+    pub fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
         let hunks_per_file = extract_review_hunks_changeset(&files, 3);
         let mut all_chunk_ids: Vec<Vec<ReviewChunkId>> = Vec::with_capacity(files.len());
 
@@ -375,7 +375,7 @@ impl ReviewSession {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn chunk(&self, id: ReviewChunkId) -> Option<&ReviewChunk> {
+    pub fn chunk(&self, id: ReviewChunkId) -> Option<&ReviewChunk> {
         self.chunks.get(&id)
     }
 
@@ -386,7 +386,7 @@ impl ReviewSession {
     /// past every existing hunk still get a navigation target.
     /// Returns `None` only when `file_index` is out of range or the
     /// file has no chunks.
-    pub(crate) fn chunk_containing_buffer_byte(
+    pub fn chunk_containing_buffer_byte(
         &self,
         file_index: usize,
         buffer_byte: usize,
@@ -407,14 +407,15 @@ impl ReviewSession {
     }
 
     #[allow(dead_code)]
-    pub(crate) fn current(&self) -> Option<&ReviewChunk> {
+    pub fn current(&self) -> Option<&ReviewChunk> {
         self.cursor.current.and_then(|id| self.chunks.get(&id))
     }
 
     /// Advance the cursor to the next chunk. Clamps at the last chunk and
     /// returns `None` when already there (callers may surface this as an
     /// "end of review" signal).
-    pub(crate) fn next(&mut self) -> Option<ReviewChunkId> {
+    #[allow(clippy::should_implement_trait)]
+    pub fn next(&mut self) -> Option<ReviewChunkId> {
         let idx = self.cursor_order_index();
         let next_idx = match idx {
             None if !self.order.is_empty() => 0,
@@ -427,7 +428,7 @@ impl ReviewSession {
         Some(id)
     }
 
-    pub(crate) fn prev(&mut self) -> Option<ReviewChunkId> {
+    pub fn prev(&mut self) -> Option<ReviewChunkId> {
         let idx = self.cursor_order_index()?;
         if idx == 0 {
             return None;
@@ -438,7 +439,7 @@ impl ReviewSession {
         Some(id)
     }
 
-    pub(crate) fn set_status(&mut self, id: ReviewChunkId, status: ChunkStatus) {
+    pub fn set_status(&mut self, id: ReviewChunkId, status: ChunkStatus) {
         if let Some(chunk) = self.chunks.get_mut(&id) {
             chunk.status = status;
             self.version += 1;
@@ -448,7 +449,7 @@ impl ReviewSession {
     /// Toggle between `Staged` and `Unstaged` for the given chunk. Chunks
     /// currently in `Pending` or `Skipped` flip to `Staged`, giving users
     /// a one-key path from "not looked at" into the accept lane.
-    pub(crate) fn toggle_stage(&mut self, id: ReviewChunkId) {
+    pub fn toggle_stage(&mut self, id: ReviewChunkId) {
         if let Some(chunk) = self.chunks.get_mut(&id) {
             chunk.status = match chunk.status {
                 ChunkStatus::Staged => ChunkStatus::Unstaged,
@@ -460,7 +461,7 @@ impl ReviewSession {
         }
     }
 
-    pub(crate) fn progress(&self) -> ReviewProgress {
+    pub fn progress(&self) -> ReviewProgress {
         let mut p = ReviewProgress {
             total: self.order.len(),
             current_index: self.cursor_order_index().map(|i| i + 1),
@@ -479,7 +480,7 @@ impl ReviewSession {
         p
     }
 
-    pub(crate) fn is_complete(&self) -> bool {
+    pub fn is_complete(&self) -> bool {
         !self.order.is_empty()
             && self
                 .order
@@ -492,7 +493,7 @@ impl ReviewSession {
     /// base line range, and a content hash of the base text for the chunk
     /// so that a chunk surviving a refresh keeps its decision, while a
     /// chunk whose underlying content moved or changed is treated as new.
-    pub(crate) fn identity_key(&self, id: ReviewChunkId) -> Option<ChunkIdentity> {
+    pub fn identity_key(&self, id: ReviewChunkId) -> Option<ChunkIdentity> {
         let chunk = self.chunks.get(&id)?;
         let file = self.files.get(chunk.file_index)?;
         let slice = file
@@ -523,7 +524,7 @@ impl ReviewSession {
 
 /// Stable, refresh-friendly key for a chunk. See [`ReviewSession::identity_key`].
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
-pub(crate) struct ChunkIdentity {
+pub struct ChunkIdentity {
     pub path: PathBuf,
     pub base_line_start: u32,
     pub base_line_end: u32,

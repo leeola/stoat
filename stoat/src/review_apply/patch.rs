@@ -22,11 +22,7 @@ const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 /// lacks a trailing newline and the chunk covers the file's final
 /// line, `\ No newline at end of file` is emitted on the affected
 /// side(s) per the gnu diff convention.
-pub(crate) fn chunk_to_unified_diff(
-    file: &ReviewFile,
-    chunk: &ReviewChunk,
-    workdir: &Path,
-) -> String {
+pub fn chunk_to_unified_diff(file: &ReviewFile, chunk: &ReviewChunk, workdir: &Path) -> String {
     let rel = file.path.strip_prefix(workdir).unwrap_or(&file.path);
     let rel_display = rel.display();
 

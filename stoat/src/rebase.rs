@@ -10,7 +10,7 @@ use std::{
 /// when the user presses `i` to enter the mode, mutated by todo-list
 /// edits (op changes, reorders), and consumed by `ExecuteRebase`.
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RebaseState {
+pub struct RebaseState {
     pub workdir: PathBuf,
     pub todo: Vec<RebaseEntry>,
     pub selected: usize,
@@ -20,13 +20,13 @@ pub(crate) struct RebaseState {
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
-pub(crate) struct RebaseEntry {
+pub struct RebaseEntry {
     pub op: RebaseTodoOp,
     pub commit: CommitInfo,
 }
 
 impl RebaseState {
-    pub(crate) fn new(workdir: PathBuf, onto: String, entries: Vec<RebaseEntry>) -> Self {
+    pub fn new(workdir: PathBuf, onto: String, entries: Vec<RebaseEntry>) -> Self {
         Self {
             workdir,
             todo: entries,
@@ -35,7 +35,7 @@ impl RebaseState {
         }
     }
 
-    pub(crate) fn move_up(&mut self) -> bool {
+    pub fn move_up(&mut self) -> bool {
         if self.selected == 0 {
             return false;
         }
@@ -43,7 +43,7 @@ impl RebaseState {
         true
     }
 
-    pub(crate) fn move_down(&mut self) -> bool {
+    pub fn move_down(&mut self) -> bool {
         if self.todo.is_empty() || self.selected + 1 >= self.todo.len() {
             return false;
         }
@@ -52,7 +52,7 @@ impl RebaseState {
     }
 
     /// Reorder: swap the selected entry with the one above.
-    pub(crate) fn swap_up(&mut self) -> bool {
+    pub fn swap_up(&mut self) -> bool {
         if self.selected == 0 || self.todo.is_empty() {
             return false;
         }
@@ -62,7 +62,7 @@ impl RebaseState {
     }
 
     /// Reorder: swap the selected entry with the one below.
-    pub(crate) fn swap_down(&mut self) -> bool {
+    pub fn swap_down(&mut self) -> bool {
         if self.todo.is_empty() || self.selected + 1 >= self.todo.len() {
             return false;
         }
@@ -71,7 +71,7 @@ impl RebaseState {
         true
     }
 
-    pub(crate) fn set_op(&mut self, op: RebaseTodoOp) -> bool {
+    pub fn set_op(&mut self, op: RebaseTodoOp) -> bool {
         let Some(entry) = self.todo.get_mut(self.selected) else {
             return false;
         };
@@ -87,7 +87,7 @@ impl RebaseState {
     /// Unused by the interactive stepper but still the right API for
     /// external consumers.
     #[allow(dead_code)]
-    pub(crate) fn to_git_todo(&self) -> Vec<RebaseTodo> {
+    pub fn to_git_todo(&self) -> Vec<RebaseTodo> {
         self.todo
             .iter()
             .map(|e| RebaseTodo {
@@ -104,7 +104,7 @@ impl RebaseState {
 /// when `ExecuteRebase` kicks off the plan and consumed when the plan
 /// completes or aborts. Lives on [`crate::workspace::Workspace`] as
 /// `rebase_active`.
-pub(crate) struct ActiveRebase {
+pub struct ActiveRebase {
     pub workdir: PathBuf,
     /// Original base the plan stacks onto; retained for diagnostics
     /// and potential recovery even though the stepper reads from
@@ -121,7 +121,7 @@ pub(crate) struct ActiveRebase {
     pub pause: Option<RebasePause>,
 }
 
-pub(crate) enum RebasePause {
+pub enum RebasePause {
     /// Waiting for the user to edit a commit message. The user's
     /// in-progress message lives in a real [`crate::editor_state::EditorState`]
     /// backed by a scratch [`crate::buffer::TextBuffer`], so reword gets
@@ -129,6 +129,7 @@ pub(crate) enum RebasePause {
     /// motions, multi-line). The editor and buffer are owned by the
     /// active workspace's slotmaps and are cleaned up by
     /// `reword_confirm` / `reword_abort`.
+    #[allow(private_interfaces)]
     Reword {
         /// The sha that was just cherry-picked and committed; will be
         /// replaced with a new commit carrying the user's message when
@@ -157,7 +158,7 @@ pub(crate) enum RebasePause {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[allow(dead_code)]
-pub(crate) enum ConflictResolution {
+pub enum ConflictResolution {
     TakeOurs,
     TakeTheirs,
     /// Skip this entry entirely (treat as Drop for rebase purposes).
@@ -168,7 +169,7 @@ pub(crate) enum ConflictResolution {
 }
 
 impl ActiveRebase {
-    pub(crate) fn new(state: RebaseState) -> Self {
+    pub fn new(state: RebaseState) -> Self {
         Self {
             workdir: state.workdir,
             onto: state.onto.clone(),

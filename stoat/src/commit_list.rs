@@ -26,7 +26,7 @@ use stoat_scheduler::Task;
 // and on load defer scroll restoration until the initial fetch reaches a page
 // containing that SHA. `pending_load` / `pending_preview` are in-flight task
 // handles and are intentionally not restorable.
-pub(crate) struct CommitListState {
+pub struct CommitListState {
     pub workdir: PathBuf,
     pub commits: Vec<CommitInfo>,
     /// True once the backing walk hit a root commit; further
@@ -49,13 +49,13 @@ pub(crate) struct CommitListState {
     pub requested_preview: Option<String>,
 }
 
-pub(crate) struct PendingPreview {
+pub struct PendingPreview {
     pub sha: String,
     pub task: Task<Option<ReviewSession>>,
 }
 
 impl CommitListState {
-    pub(crate) fn new(workdir: PathBuf) -> Self {
+    pub fn new(workdir: PathBuf) -> Self {
         Self {
             workdir,
             commits: Vec::new(),
@@ -71,12 +71,12 @@ impl CommitListState {
         }
     }
 
-    pub(crate) fn selected_sha(&self) -> Option<&str> {
+    pub fn selected_sha(&self) -> Option<&str> {
         self.commits.get(self.selected).map(|c| c.sha.as_str())
     }
 
     /// Keep `selected` within `[scroll_top, scroll_top + height)`.
-    pub(crate) fn ensure_selected_visible(&mut self, height: usize) {
+    pub fn ensure_selected_visible(&mut self, height: usize) {
         if height == 0 {
             return;
         }
@@ -89,7 +89,7 @@ impl CommitListState {
 
     /// Move selection down by `step`, clamping at the last loaded
     /// commit. Returns true if the position changed.
-    pub(crate) fn move_down(&mut self, step: usize) -> bool {
+    pub fn move_down(&mut self, step: usize) -> bool {
         if self.commits.is_empty() {
             return false;
         }
@@ -99,19 +99,19 @@ impl CommitListState {
         self.selected != prev
     }
 
-    pub(crate) fn move_up(&mut self, step: usize) -> bool {
+    pub fn move_up(&mut self, step: usize) -> bool {
         let prev = self.selected;
         self.selected = self.selected.saturating_sub(step);
         self.selected != prev
     }
 
-    pub(crate) fn move_to_first(&mut self) -> bool {
+    pub fn move_to_first(&mut self) -> bool {
         let prev = self.selected;
         self.selected = 0;
         self.selected != prev
     }
 
-    pub(crate) fn move_to_last(&mut self) -> bool {
+    pub fn move_to_last(&mut self) -> bool {
         if self.commits.is_empty() {
             return false;
         }
@@ -123,7 +123,7 @@ impl CommitListState {
     /// Poll the in-flight log-load task. On completion, appends results
     /// to `commits` and updates `reached_end`. Returns true when a
     /// result landed (caller should redraw).
-    pub(crate) fn poll_pending_load(&mut self) -> bool {
+    pub fn poll_pending_load(&mut self) -> bool {
         let Some(mut task) = self.pending_load.take() else {
             return false;
         };
@@ -147,7 +147,7 @@ impl CommitListState {
 
     /// Poll the in-flight preview task. On completion, caches the
     /// session under its sha. Returns true when a result landed.
-    pub(crate) fn poll_pending_preview(&mut self) -> bool {
+    pub fn poll_pending_preview(&mut self) -> bool {
         let Some(mut pending) = self.pending_preview.take() else {
             return false;
         };
