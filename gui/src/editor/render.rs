@@ -418,6 +418,52 @@ fn apply_token_overlay(
     }
 }
 
+/// Overlay the move-highlight underline on byte ranges within
+/// review rows. Each `(buffer_row, range)` entry corresponds to a
+/// [`stoat::review::ReviewSide::moved_spans`] range on that buffer
+/// row; the run is pushed in addition to any existing add/delete
+/// coloring so the move color (cyan) shows through. Spans that
+/// extend past the row's byte length clamp to the row, and spans
+/// whose row does not map to a regular display row in `range` are
+/// skipped.
+pub(crate) fn apply_review_moved_overlay(
+    rows: &mut [RenderedRow],
+    snapshot: &DisplaySnapshot,
+    range: Range<u32>,
+    moved_spans: &[(u32, Range<usize>)],
+) {
+    if moved_spans.is_empty() {
+        return;
+    }
+    for (idx, row) in rows.iter_mut().enumerate() {
+        let display_row = range.start + idx as u32;
+        if !matches!(
+            snapshot.classify_row(display_row),
+            BlockRowKind::BufferRow { .. }
+        ) {
+            continue;
+        }
+        let Some(buffer_point) = snapshot.display_to_buffer(DisplayPoint::new(display_row, 0))
+        else {
+            continue;
+        };
+        let buffer_row = buffer_point.row;
+        let row_len = row.text.len();
+        for (row_idx, span) in moved_spans {
+            if *row_idx != buffer_row {
+                continue;
+            }
+            let start = span.start.min(row_len);
+            let end = span.end.min(row_len);
+            if start >= end {
+                continue;
+            }
+            row.runs
+                .push((start..end, token_overlay_style(DIFF_MOVED_HEX)));
+        }
+    }
+}
+
 fn append_run(
     text: &mut String,
     runs: &mut Vec<(Range<usize>, gpui::HighlightStyle)>,
@@ -2250,5 +2296,61 @@ mod tests {
         let overlay = underline_run(&block_row.runs);
         assert_eq!(overlay.0, 0..3);
         assert_eq!(underline_color(&overlay.1), Some(DIFF_DELETED_HEX));
+    }
+
+    #[test]
+    fn review_moved_overlay_paints_underline_at_matching_buffer_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha\nbeta\ngamma");
+        let mut rows = build_rendered_rows(&snapshot, 0..3);
+        let moved = vec![(1u32, 1..3)];
+
+        apply_review_moved_overlay(&mut rows, &snapshot, 0..3, &moved);
+
+        assert!(
+            rows[0].runs.is_empty(),
+            "row 0 has no matching span and stays untouched"
+        );
+        let overlay = underline_run(&rows[1].runs);
+        assert_eq!(overlay.0, 1..3);
+        assert_eq!(underline_color(&overlay.1), Some(DIFF_MOVED_HEX));
+        assert!(
+            rows[2].runs.is_empty(),
+            "row 2 has no matching span and stays untouched"
+        );
+    }
+
+    #[test]
+    fn review_moved_overlay_clamps_span_exceeding_row_length() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "hi");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_review_moved_overlay(&mut rows, &snapshot, 0..1, &[(0, 0..99)]);
+
+        let overlay = underline_run(&rows[0].runs);
+        assert_eq!(overlay.0, 0..2);
+    }
+
+    #[test]
+    fn review_moved_overlay_is_noop_when_spans_empty() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_review_moved_overlay(&mut rows, &snapshot, 0..1, &[]);
+
+        assert!(rows[0].runs.is_empty());
+    }
+
+    #[test]
+    fn review_moved_overlay_skips_span_with_no_matching_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_review_moved_overlay(&mut rows, &snapshot, 0..1, &[(5, 0..2)]);
+
+        assert!(rows[0].runs.is_empty());
     }
 }

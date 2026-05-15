@@ -24,7 +24,10 @@ use gpui::{
     Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
-use stoat::{buffer::BufferId, jumplist::JumpList, selection::SelectionsCollection, DisplayPoint};
+use stoat::{
+    buffer::BufferId, jumplist::JumpList, review_session::ChunkStatus,
+    selection::SelectionsCollection, DisplayPoint,
+};
 use stoat_text::{Anchor, Bias, OffsetUtf16, Selection, SelectionGoal};
 
 /// Sizing / behavior classification carried on each [`Editor`].
@@ -142,6 +145,13 @@ pub enum EditorEvent {
 }
 
 impl EventEmitter<EditorEvent> for Editor {}
+
+#[derive(Default)]
+struct ReviewRenderData {
+    chunk_markers: Vec<(u32, ChunkStatus)>,
+    provenances: Vec<(u32, stoat::review::MoveProvenance)>,
+    moved_spans: Vec<(u32, std::ops::Range<usize>)>,
+}
 
 impl Editor {
     pub fn new(
@@ -894,6 +904,49 @@ impl Editor {
         Some(Bounds { origin, size: cell })
     }
 
+    fn collect_review_render_data(&self, cx: &App) -> ReviewRenderData {
+        let (Some(session), Some(file_index)) = (&self.review_session, self.review_file_index)
+        else {
+            return ReviewRenderData::default();
+        };
+        let session_ref = session.read(cx);
+        let inner = session_ref.inner();
+        let Some(file) = inner.files.get(file_index) else {
+            return ReviewRenderData::default();
+        };
+        let chunk_markers = file
+            .chunks
+            .iter()
+            .filter_map(|id| inner.chunks.get(id))
+            .map(|chunk| (chunk.buffer_line_range.start, chunk.status))
+            .collect::<Vec<_>>();
+        let mut provenances = Vec::new();
+        let mut moved_spans = Vec::new();
+        for id in &file.chunks {
+            let Some(chunk) = inner.chunks.get(id) else {
+                continue;
+            };
+            for row in &chunk.hunk.rows {
+                let stoat::review::ReviewRow::Changed { right, .. } = row else {
+                    continue;
+                };
+                let Some(right) = right else { continue };
+                let buffer_row = right.line_num.saturating_sub(1);
+                if let Some(prov) = right.move_provenance.clone() {
+                    provenances.push((buffer_row, prov));
+                }
+                for span in &right.moved_spans {
+                    moved_spans.push((buffer_row, span.clone()));
+                }
+            }
+        }
+        ReviewRenderData {
+            chunk_markers,
+            provenances,
+            moved_spans,
+        }
+    }
+
     fn render_visible_rows(
         &mut self,
         range: std::ops::Range<usize>,
@@ -903,7 +956,15 @@ impl Editor {
         let total_rows = (display_snapshot.max_point().row + 1) as usize;
         let end = range.end.min(total_rows);
         let start = range.start.min(end);
-        let rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
+        let mut rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
+
+        let review_data = self.collect_review_render_data(cx);
+        render::apply_review_moved_overlay(
+            &mut rows,
+            &display_snapshot,
+            start as u32..end as u32,
+            &review_data.moved_spans,
+        );
 
         let selection_paint = render::compute_selection_paint(
             &display_snapshot,
@@ -943,54 +1004,12 @@ impl Editor {
             },
             _ => None,
         };
-        let (review_chunk_markers, review_move_provenances) =
-            match (&self.review_session, self.review_file_index) {
-                (Some(session), Some(file_index)) => {
-                    let session_ref = session.read(cx);
-                    let inner = session_ref.inner();
-                    let file = inner.files.get(file_index);
-                    let markers = file
-                        .map(|file| {
-                            file.chunks
-                                .iter()
-                                .filter_map(|id| inner.chunks.get(id))
-                                .map(|chunk| (chunk.buffer_line_range.start, chunk.status))
-                                .collect::<Vec<_>>()
-                        })
-                        .unwrap_or_default();
-                    let provenances = file
-                        .map(|file| {
-                            let mut out = Vec::new();
-                            for id in &file.chunks {
-                                let Some(chunk) = inner.chunks.get(id) else {
-                                    continue;
-                                };
-                                for row in &chunk.hunk.rows {
-                                    let stoat::review::ReviewRow::Changed { right, .. } = row
-                                    else {
-                                        continue;
-                                    };
-                                    let Some(right) = right else { continue };
-                                    let Some(prov) = right.move_provenance.clone() else {
-                                        continue;
-                                    };
-                                    let buffer_row = right.line_num.saturating_sub(1);
-                                    out.push((buffer_row, prov));
-                                }
-                            }
-                            out
-                        })
-                        .unwrap_or_default();
-                    (markers, provenances)
-                },
-                _ => (Vec::new(), Vec::new()),
-            };
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
-            review_chunk_markers: &review_chunk_markers,
-            review_move_provenances: &review_move_provenances,
+            review_chunk_markers: &review_data.chunk_markers,
+            review_move_provenances: &review_data.provenances,
             metrics,
             line_number_color: theme::muted_text_color(cx),
         };
@@ -2279,6 +2298,68 @@ mod tests {
 
         let rows = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(0..3, cx).len());
         assert_eq!(rows, 3);
+    }
+
+    #[test]
+    #[allow(clippy::single_range_in_vec_init)]
+    fn collect_review_render_data_extracts_moved_spans_from_review_chunks() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha modified\nbeta\n");
+
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = stoat::review_session::ReviewSession::new(
+                    stoat::review_session::ReviewSource::InMemory {
+                        files: Arc::new(Vec::new()),
+                    },
+                );
+                inner.add_files(vec![stoat::review::ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("alpha\nbeta\n".to_string()),
+                    buffer_text: Arc::new("alpha modified\nbeta\n".to_string()),
+                }]);
+                let chunk_id = inner.order[0];
+                let chunk = inner.chunks.get_mut(&chunk_id).expect("seeded chunk");
+                chunk.hunk = stoat::review::ReviewHunk {
+                    rows: vec![stoat::review::ReviewRow::Changed {
+                        left: None,
+                        right: Some(stoat::review::ReviewSide {
+                            text: "alpha modified".to_string(),
+                            line_num: 1,
+                            change_spans: vec![],
+                            moved_spans: vec![6..14],
+                            move_provenance: None,
+                        }),
+                    }],
+                };
+                crate::review_session::ReviewSession::new(inner)
+            })
+        });
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_review_session(Some(session.clone()), cx);
+            ed.set_review_file_index(Some(0), cx);
+        });
+
+        editor.read_with(&cx, |ed, app| {
+            let data = ed.collect_review_render_data(app);
+            assert_eq!(data.moved_spans, [(0u32, 6..14)]);
+        });
+    }
+
+    #[test]
+    fn collect_review_render_data_returns_empty_when_no_review_session() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hi");
+
+        editor.read_with(&cx, |ed, app| {
+            let data = ed.collect_review_render_data(app);
+            assert!(data.chunk_markers.is_empty());
+            assert!(data.provenances.is_empty());
+            assert!(data.moved_spans.is_empty());
+        });
     }
 
     #[test]
