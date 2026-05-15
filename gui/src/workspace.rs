@@ -20,8 +20,8 @@ use crate::{
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
         diagnostics_badge::DiagnosticsBadge, lsp_progress::LspProgress, mode_badge::ModeBadge,
-        review_progress::ReviewProgress, workspace_label::WorkspaceLabel, StatusBar,
-        StatusItemView,
+        review_progress::ReviewProgress, search_indicator::SearchQueryIndicator,
+        workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
     },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
@@ -61,6 +61,7 @@ pub struct Workspace {
     diagnostics_badge: Entity<DiagnosticsBadge>,
     lsp_progress: Entity<LspProgress>,
     review_progress: Entity<ReviewProgress>,
+    search_indicator: Entity<SearchQueryIndicator>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -153,6 +154,7 @@ impl Workspace {
         let diagnostics_badge = cx.new(|_| DiagnosticsBadge::new());
         let lsp_progress = cx.new(|cx| LspProgress::new(lsp_state.clone(), cx));
         let review_progress = cx.new(|_| ReviewProgress::new());
+        let search_indicator = cx.new(|_| SearchQueryIndicator::new());
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -168,6 +170,7 @@ impl Workspace {
             bar.add_right_item(lsp_progress.clone(), cx);
             bar.add_right_item(diagnostics_badge.clone(), cx);
             bar.add_right_item(review_progress.clone(), cx);
+            bar.add_right_item(search_indicator.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
@@ -183,6 +186,9 @@ impl Workspace {
         });
         review_progress.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
+        });
+        search_indicator.update(cx, |item, cx| {
+            item.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         Self {
             name,
@@ -203,6 +209,7 @@ impl Workspace {
             diagnostics_badge,
             lsp_progress,
             review_progress,
+            search_indicator,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -364,6 +371,10 @@ impl Workspace {
 
     pub fn review_progress(&self) -> &Entity<ReviewProgress> {
         &self.review_progress
+    }
+
+    pub fn search_indicator(&self) -> &Entity<SearchQueryIndicator> {
+        &self.search_indicator
     }
 
     /// Register a status item at the left side of the status bar.
@@ -1533,7 +1544,7 @@ mod tests {
             (bar.left_items().len(), bar.right_items().len())
         });
         assert_eq!(left, 3);
-        assert_eq!(right, 5);
+        assert_eq!(right, 6);
     }
 
     #[test]

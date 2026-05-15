@@ -55,6 +55,7 @@ pub use display_map::{DisplayMap, DisplayMapEvent};
 pub use dock::{Dock, DockEvent, DockSide, DockVisibility};
 pub use editor::{
     scroll::{OngoingScroll, ScrollAnchor, ScrollManager, ScrollbarThumbState},
+    search::{SearchDirection, SearchState},
     Editor, EditorEvent,
 };
 pub use editor_input::EditorInput;

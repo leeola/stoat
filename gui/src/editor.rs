@@ -2,6 +2,7 @@ pub mod actions;
 pub mod mouse;
 pub mod render;
 pub mod scroll;
+pub mod search;
 
 use crate::{
     buffer::Buffer,
@@ -119,6 +120,7 @@ pub struct Editor {
     file_path: Option<std::path::PathBuf>,
     diagnostic_set: Option<Entity<crate::diagnostics::DiagnosticSet>>,
     review_session: Option<Entity<crate::review_session::ReviewSession>>,
+    search_state: Option<search::SearchState>,
     workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
@@ -174,6 +176,7 @@ impl Editor {
             file_path: None,
             diagnostic_set: None,
             review_session: None,
+            search_state: None,
             workspace: None,
             text_region_bounds: None,
             hover_position: None,
@@ -477,6 +480,27 @@ impl Editor {
 
     pub fn review_session(&self) -> Option<&Entity<crate::review_session::ReviewSession>> {
         self.review_session.as_ref()
+    }
+
+    pub fn search_state(&self) -> Option<&search::SearchState> {
+        self.search_state.as_ref()
+    }
+
+    /// Set the editor's in-buffer search state. The status-bar
+    /// indicator and (in sibling work) the highlight pass observe
+    /// the editor's [`EditorEvent::Changed`] and refresh from the
+    /// new state. Pass `None` to clear an active search.
+    pub fn set_search_state(
+        &mut self,
+        state: Option<search::SearchState>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.search_state == state {
+            return;
+        }
+        self.search_state = state;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
     }
 
     /// Attach an [`Entity<ReviewSession>`] so review-aware UI -- the
