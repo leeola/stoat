@@ -15,7 +15,7 @@ use crate::{
     pane::{Pane, PaneEvent},
     pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
-    status_bar::{StatusBar, StatusItemView},
+    status_bar::{mode_badge::ModeBadge, StatusBar, StatusItemView},
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
@@ -121,6 +121,20 @@ impl Workspace {
                 })
             })
             .collect();
+
+        let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
+        let initial_status_item: Option<Box<dyn ItemHandle>> = {
+            let tree = pane_tree.read(cx);
+            let focus = tree.focus();
+            tree.pane(focus)
+                .and_then(|p| p.read(cx).active_item().map(ItemHandle::boxed_clone))
+        };
+        status_bar.update(cx, |bar, cx| {
+            bar.add_left_item(mode_badge.clone(), cx);
+        });
+        mode_badge.update(cx, |badge, cx| {
+            badge.set_active_pane_item(initial_status_item.as_deref(), cx);
+        });
         Self {
             name: name.into(),
             git_root,
@@ -2724,6 +2738,18 @@ mod tests {
         sm.read_with(vcx, |sm, _| {
             assert!(sm.active_editor().is_none());
             assert!(sm.editor_focus_target().is_none());
+        });
+    }
+
+    #[test]
+    fn fresh_workspace_registers_mode_badge_as_left_status_item() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        ws.read_with(&cx, |w, cx| {
+            let bar = w.status_bar().read(cx);
+            assert_eq!(bar.left_items().len(), 1);
+            assert!(bar.right_items().is_empty());
+            assert!(bar.left_items()[0].to_any().downcast::<ModeBadge>().is_ok());
         });
     }
 
