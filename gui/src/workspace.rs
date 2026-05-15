@@ -1022,6 +1022,8 @@ impl Workspace {
             ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
+            ActionKind::ReviewNextChunk => self.dispatch_review_step(ReviewStepDir::Next, cx),
+            ActionKind::ReviewPrevChunk => self.dispatch_review_step(ReviewStepDir::Prev, cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1244,6 +1246,54 @@ impl Workspace {
             JumpDir::Forward => ed.handle_jump_forward(count, cx),
         });
     }
+
+    fn active_review_item(&self, cx: &App) -> Option<Entity<crate::review_item::ReviewItem>> {
+        self.active_pane_item(cx).and_then(|item| {
+            item.to_any_view()
+                .downcast::<crate::review_item::ReviewItem>()
+                .ok()
+        })
+    }
+
+    fn dispatch_review_step(&mut self, dir: ReviewStepDir, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        review_item.update(cx, |item, cx| {
+            let session = item.session().clone();
+            let new_id = session.update(cx, |session, cx| match dir {
+                ReviewStepDir::Next => session.next(cx),
+                ReviewStepDir::Prev => session.prev(cx),
+            });
+            let Some(new_id) = new_id else { return };
+            let target = session
+                .read(cx)
+                .inner()
+                .chunks
+                .get(&new_id)
+                .map(|chunk| (chunk.file_index, chunk.buffer_line_range.start));
+            let Some((file_index, buffer_row)) = target else {
+                return;
+            };
+            let Some(file) = item.files().get(file_index) else {
+                return;
+            };
+            let editor = file.editor.clone();
+            editor.update(cx, |ed, cx| {
+                ed.set_cursor_at_buffer_row(buffer_row, cx);
+                ed.request_autoscroll(
+                    crate::editor::scroll::autoscroll::AutoscrollStrategy::Center,
+                    cx,
+                );
+            });
+        });
+    }
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ReviewStepDir {
+    Next,
+    Prev,
 }
 
 fn absolute_path(path: &Path, cwd: Option<&Path>) -> PathBuf {
@@ -3344,5 +3394,261 @@ mod tests {
                 "relative path should be registered under its absolute form"
             );
         });
+    }
+
+    fn new_two_chunk_review_session(
+        vcx: &mut VisualTestContext,
+    ) -> Entity<crate::review_session::ReviewSession> {
+        vcx.update(|_, cx| {
+            cx.new(|_| {
+                let mut inner = stoat::review_session::ReviewSession::new(
+                    stoat::review_session::ReviewSource::InMemory {
+                        files: Arc::new(Vec::new()),
+                    },
+                );
+                let base = (0..14)
+                    .map(|i| format!("L{i}"))
+                    .collect::<Vec<_>>()
+                    .join("\n")
+                    + "\n";
+                let buffer = {
+                    let mut lines: Vec<String> = (0..14).map(|i| format!("L{i}")).collect();
+                    lines[0] = "L0_NEW".to_string();
+                    lines[13] = "L13_NEW".to_string();
+                    lines.join("\n") + "\n"
+                };
+                inner.add_files(vec![stoat::review::ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new(base),
+                    buffer_text: Arc::new(buffer),
+                }]);
+                assert_eq!(
+                    inner.order.len(),
+                    2,
+                    "test fixture requires a two-chunk diff; \
+                     got {} chunks",
+                    inner.order.len(),
+                );
+                crate::review_session::ReviewSession::new(inner)
+            })
+        })
+    }
+
+    fn open_review_item_in_focused_pane(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        session: Entity<crate::review_session::ReviewSession>,
+    ) -> Entity<crate::review_item::ReviewItem> {
+        let registry = ws.read_with(vcx, |w, _| w.buffer_registry().clone());
+        let item = vcx.update(|_, cx| {
+            cx.new(|cx| crate::review_item::ReviewItem::from_session(session, &registry, cx))
+        });
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            let handle: Box<dyn ItemHandle> = Box::new(item.clone());
+            pane.update(cx, |p, cx| {
+                p.add_item(handle, cx);
+            });
+        });
+        vcx.run_until_parked();
+        item
+    }
+
+    fn session_cursor(
+        vcx: &mut VisualTestContext,
+        session: &Entity<crate::review_session::ReviewSession>,
+    ) -> Option<usize> {
+        session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            inner
+                .cursor
+                .current
+                .and_then(|id| inner.order.iter().position(|x| *x == id))
+        })
+    }
+
+    fn editor_for_file(
+        vcx: &mut VisualTestContext,
+        review_item: &Entity<crate::review_item::ReviewItem>,
+        file_index: usize,
+    ) -> Entity<Editor> {
+        review_item.read_with(vcx, |item, _| item.files()[file_index].editor.clone())
+    }
+
+    #[test]
+    fn dispatch_review_next_chunk_advances_session_cursor_and_moves_editor_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        assert_eq!(session_cursor(vcx, &session), Some(0), "starts at chunk 0");
+        let target_row = session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            let id = inner.order[1];
+            inner.chunks[&id].buffer_line_range.start
+        });
+
+        dispatch(&ws, vcx, stoat_action::ReviewNextChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            session_cursor(vcx, &session),
+            Some(1),
+            "cursor advanced to chunk 1"
+        );
+        let editor = editor_for_file(vcx, &item, 0);
+        let cursor_row = editor_cursor_buffer_row(vcx, &editor);
+        assert_eq!(cursor_row, target_row);
+    }
+
+    #[test]
+    fn dispatch_review_next_chunk_at_last_chunk_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        session.update(vcx, |s, cx| {
+            s.next(cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(session_cursor(vcx, &session), Some(1));
+        let editor = editor_for_file(vcx, &item, 0);
+        let cursor_before = editor_cursor_buffer_row(vcx, &editor);
+
+        dispatch(&ws, vcx, stoat_action::ReviewNextChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(session_cursor(vcx, &session), Some(1), "cursor stays put");
+        let cursor_after = editor_cursor_buffer_row(vcx, &editor);
+        assert_eq!(
+            cursor_after, cursor_before,
+            "editor cursor untouched when clamping"
+        );
+    }
+
+    #[test]
+    fn dispatch_review_prev_chunk_steps_backward_and_moves_editor_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        session.update(vcx, |s, cx| {
+            s.next(cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(session_cursor(vcx, &session), Some(1));
+        let target_row = session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            let id = inner.order[0];
+            inner.chunks[&id].buffer_line_range.start
+        });
+
+        dispatch(&ws, vcx, stoat_action::ReviewPrevChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(session_cursor(vcx, &session), Some(0));
+        let editor = editor_for_file(vcx, &item, 0);
+        let cursor_row = editor_cursor_buffer_row(vcx, &editor);
+        assert_eq!(cursor_row, target_row);
+    }
+
+    #[test]
+    fn dispatch_review_prev_chunk_at_first_chunk_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(session_cursor(vcx, &session), Some(0));
+
+        dispatch(&ws, vcx, stoat_action::ReviewPrevChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(session_cursor(vcx, &session), Some(0));
+    }
+
+    #[test]
+    fn dispatch_review_next_chunk_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        // Active pane has no item; dispatch must not panic.
+
+        dispatch(&ws, vcx, stoat_action::ReviewNextChunk);
+        vcx.run_until_parked();
+    }
+
+    #[test]
+    fn dispatch_review_next_chunk_across_files_targets_new_file_editor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = vcx.update(|_, cx| {
+            cx.new(|_| {
+                let mut inner = stoat::review_session::ReviewSession::new(
+                    stoat::review_session::ReviewSource::InMemory {
+                        files: Arc::new(Vec::new()),
+                    },
+                );
+                inner.add_files(vec![
+                    stoat::review::ReviewFileInput {
+                        path: PathBuf::from("a.txt"),
+                        rel_path: "a.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("a_old\n".to_string()),
+                        buffer_text: Arc::new("a_new\n".to_string()),
+                    },
+                    stoat::review::ReviewFileInput {
+                        path: PathBuf::from("b.txt"),
+                        rel_path: "b.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("b_old\n".to_string()),
+                        buffer_text: Arc::new("b_new\n".to_string()),
+                    },
+                ]);
+                assert_eq!(inner.order.len(), 2, "one chunk per file expected");
+                crate::review_session::ReviewSession::new(inner)
+            })
+        });
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(session_cursor(vcx, &session), Some(0));
+        let editor_a = editor_for_file(vcx, &item, 0);
+        let editor_b = editor_for_file(vcx, &item, 1);
+        let cursor_a_before = editor_cursor_buffer_row(vcx, &editor_a);
+        let cursor_b_before = editor_cursor_buffer_row(vcx, &editor_b);
+        assert_eq!(cursor_b_before, 0, "fixture starts editor b at row 0");
+
+        dispatch(&ws, vcx, stoat_action::ReviewNextChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(session_cursor(vcx, &session), Some(1));
+        let target_row_b = session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            inner.chunks[&inner.order[1]].buffer_line_range.start
+        });
+        assert_eq!(
+            editor_cursor_buffer_row(vcx, &editor_b),
+            target_row_b,
+            "the new file's editor receives the cursor"
+        );
+        assert_eq!(
+            editor_cursor_buffer_row(vcx, &editor_a),
+            cursor_a_before,
+            "the previously-active file's editor is not retargeted"
+        );
+    }
+
+    fn editor_cursor_buffer_row(vcx: &mut VisualTestContext, editor: &Entity<Editor>) -> u32 {
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let offset = snapshot.resolve_anchor(&ed.selections().all_anchors()[0].start);
+            snapshot.rope().offset_to_point(offset).row
+        })
     }
 }

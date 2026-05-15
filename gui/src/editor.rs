@@ -432,6 +432,38 @@ impl Editor {
         cx.notify();
     }
 
+    /// Place a single cursor at the start of buffer `row`, replacing
+    /// every existing selection. Rows past the buffer's last line
+    /// clamp to the rope's last valid point via [`stoat_text::Rope::clip_point`].
+    /// Used by review-chunk navigation; future review handlers that
+    /// jump to a buffer row reuse this entry point.
+    pub fn set_cursor_at_buffer_row(&mut self, row: u32, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let clipped = snapshot
+            .rope()
+            .clip_point(stoat_text::Point::new(row, 0), Bias::Left);
+        let offset = snapshot.rope().point_to_offset(clipped);
+        let anchor = snapshot.anchor_at(offset, Bias::Left);
+        let new_id = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|s| s.id)
+            .max()
+            .map(|m| m + 1)
+            .unwrap_or(1);
+        let selection = Selection {
+            id: new_id,
+            start: anchor,
+            end: anchor,
+            reversed: false,
+            goal: SelectionGoal::None,
+        };
+        self.selections.replace_with(vec![selection], &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     pub fn cell_size(&self) -> Option<Size<Pixels>> {
         self.cell_size
     }
@@ -1825,6 +1857,40 @@ mod tests {
             "unexpected event in {observed:?}",
         );
         assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
+    #[test]
+    fn set_cursor_at_buffer_row_places_cursor_at_row_start() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "line0\nline1\nline2");
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![6]);
+    }
+
+    #[test]
+    fn set_cursor_at_buffer_row_clamps_past_last_row() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncd");
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(99, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![5]);
+    }
+
+    #[test]
+    fn set_cursor_at_buffer_row_replaces_existing_selections() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "line0\nline1\nline2");
+        seed_cursors(&editor, &mut cx, &[1, 3, 5]);
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(2, cx));
+        cx.run_until_parked();
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![12]);
     }
 
     fn selection_offsets(editor: &Entity<Editor>, cx: &mut TestAppContext) -> Vec<(usize, usize)> {
