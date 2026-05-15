@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat::{
     display_map::{Block, BlockContext, BlockId, HighlightStyle as StoatHighlightStyle},
+    review_session::ChunkStatus,
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
 };
 use stoat_text::{Anchor, Selection};
@@ -641,7 +642,16 @@ pub(crate) fn gutter_metrics(snapshot: &DisplaySnapshot) -> GutterMetrics {
     let line_number_width = digit_count(buffer_line_count);
     GutterMetrics {
         line_number_width,
-        total_width: line_number_width + 1 + 1 + 1,
+        total_width: line_number_width + 1 + 1 + 1 + 1,
+    }
+}
+
+fn chunk_glyph_for(status: ChunkStatus) -> (char, u32) {
+    match status {
+        ChunkStatus::Pending => ('>', DIAG_HINT_HEX),
+        ChunkStatus::Staged => ('+', DIFF_ADDED_HEX),
+        ChunkStatus::Unstaged => ('o', DIFF_DELETED_HEX),
+        ChunkStatus::Skipped => ('x', DIAG_HINT_HEX),
     }
 }
 
@@ -711,6 +721,7 @@ pub(crate) struct GutterPaint<'a> {
     pub display_snapshot: &'a DisplaySnapshot,
     pub diff_map: &'a stoat::DiffMap,
     pub diagnostics: Option<&'a DiagnosticRowMap>,
+    pub review_chunk_markers: &'a [(u32, ChunkStatus)],
     pub metrics: GutterMetrics,
     pub line_number_color: Hsla,
 }
@@ -809,6 +820,27 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     let start = text.len();
     if let Some(sev) = diag_severity {
         let (ch, hex) = diagnostic_glyph_for(sev);
+        text.push(ch);
+        let end = text.len();
+        let style = gpui::HighlightStyle {
+            color: Some(rgb(hex).into()),
+            ..Default::default()
+        };
+        runs.push((start..end, style));
+    } else {
+        text.push(' ');
+    }
+
+    let chunk_status = buffer_row.and_then(|row| {
+        paint
+            .review_chunk_markers
+            .iter()
+            .find(|(start, _)| *start == row)
+            .map(|(_, status)| *status)
+    });
+    let start = text.len();
+    if let Some(status) = chunk_status {
+        let (ch, hex) = chunk_glyph_for(status);
         text.push(ch);
         let end = text.len();
         let style = gpui::HighlightStyle {
@@ -1060,7 +1092,7 @@ mod tests {
 
         let metrics = gutter_metrics(&snapshot);
         assert_eq!(metrics.line_number_width, 1);
-        assert_eq!(metrics.total_width, 4);
+        assert_eq!(metrics.total_width, 5);
     }
 
     #[test]
@@ -1074,7 +1106,7 @@ mod tests {
 
         let metrics = gutter_metrics(&snapshot);
         assert_eq!(metrics.line_number_width, 3);
-        assert_eq!(metrics.total_width, 6);
+        assert_eq!(metrics.total_width, 7);
     }
 
     fn diagnostic_set_with(
@@ -1135,6 +1167,7 @@ mod tests {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
+            review_chunk_markers: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1157,6 +1190,7 @@ mod tests {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
+            review_chunk_markers: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1174,6 +1208,7 @@ mod tests {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
+            review_chunk_markers: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1201,6 +1236,7 @@ mod tests {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: Some(&diagnostics),
+            review_chunk_markers: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1221,6 +1257,67 @@ mod tests {
             .chars()
             .nth(line_number_width)
             .expect("gutter prefix populated")
+    }
+
+    fn chunk_glyph_char(prefix: &GutterPrefix, line_number_width: usize) -> char {
+        prefix
+            .text
+            .chars()
+            .nth(line_number_width + 2)
+            .expect("gutter prefix populated")
+    }
+
+    #[test]
+    fn build_gutter_prefix_paints_chunk_glyph_when_chunk_starts_at_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let markers = vec![(1, ChunkStatus::Staged)];
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &markers,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(1, &paint);
+        assert_eq!(chunk_glyph_char(&prefix, metrics.line_number_width), '+');
+    }
+
+    #[test]
+    fn build_gutter_prefix_omits_chunk_glyph_when_no_marker_at_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot);
+        let markers = vec![(1, ChunkStatus::Staged)];
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &markers,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(0, &paint);
+        assert_eq!(chunk_glyph_char(&prefix, metrics.line_number_width), ' ');
+        let prefix = build_gutter_prefix(2, &paint);
+        assert_eq!(chunk_glyph_char(&prefix, metrics.line_number_width), ' ');
+    }
+
+    #[test]
+    fn chunk_glyph_for_maps_each_status() {
+        assert_eq!(chunk_glyph_for(ChunkStatus::Pending), ('>', DIAG_HINT_HEX));
+        assert_eq!(chunk_glyph_for(ChunkStatus::Staged), ('+', DIFF_ADDED_HEX));
+        assert_eq!(
+            chunk_glyph_for(ChunkStatus::Unstaged),
+            ('o', DIFF_DELETED_HEX)
+        );
+        assert_eq!(chunk_glyph_for(ChunkStatus::Skipped), ('x', DIAG_HINT_HEX));
     }
 
     fn deleted_after(line: u32) -> stoat::DiffHunk {
@@ -1256,6 +1353,7 @@ mod tests {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
+            review_chunk_markers: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1275,6 +1373,7 @@ mod tests {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
+            review_chunk_markers: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1296,6 +1395,7 @@ mod tests {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
+            review_chunk_markers: &[],
             metrics,
             line_number_color: rgb(0x808080).into(),
         };

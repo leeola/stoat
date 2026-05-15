@@ -120,6 +120,7 @@ pub struct Editor {
     file_path: Option<std::path::PathBuf>,
     diagnostic_set: Option<Entity<crate::diagnostics::DiagnosticSet>>,
     review_session: Option<Entity<crate::review_session::ReviewSession>>,
+    review_file_index: Option<usize>,
     search_state: Option<search::SearchState>,
     workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     text_region_bounds: Option<Bounds<Pixels>>,
@@ -176,6 +177,7 @@ impl Editor {
             file_path: None,
             diagnostic_set: None,
             review_session: None,
+            review_file_index: None,
             search_state: None,
             workspace: None,
             text_region_bounds: None,
@@ -524,6 +526,25 @@ impl Editor {
             )
         });
         self.review_session = session;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Index of this editor's file within the attached
+    /// [`crate::review_session::ReviewSession`]'s `files` vec. The
+    /// render path filters chunks to those whose `file_index` matches
+    /// this value when painting per-chunk gutter glyphs; without a
+    /// file index, no glyphs are painted even when a review session
+    /// is attached.
+    pub fn review_file_index(&self) -> Option<usize> {
+        self.review_file_index
+    }
+
+    pub fn set_review_file_index(&mut self, index: Option<usize>, cx: &mut Context<'_, Self>) {
+        if self.review_file_index == index {
+            return;
+        }
+        self.review_file_index = index;
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -922,10 +943,29 @@ impl Editor {
             },
             _ => None,
         };
+        let review_chunk_markers = match (&self.review_session, self.review_file_index) {
+            (Some(session), Some(file_index)) => {
+                let session_ref = session.read(cx);
+                let inner = session_ref.inner();
+                inner
+                    .files
+                    .get(file_index)
+                    .map(|file| {
+                        file.chunks
+                            .iter()
+                            .filter_map(|id| inner.chunks.get(id))
+                            .map(|chunk| (chunk.buffer_line_range.start, chunk.status))
+                            .collect::<Vec<_>>()
+                    })
+                    .unwrap_or_default()
+            },
+            _ => Vec::new(),
+        };
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
+            review_chunk_markers: &review_chunk_markers,
             metrics,
             line_number_color: theme::muted_text_color(cx),
         };

@@ -76,7 +76,16 @@ impl ReviewItem {
         let executor = cx.global::<ExecutorGlobal>().0.clone();
         let files: Vec<ReviewFileView> = file_specs
             .into_iter()
-            .map(|spec| build_file_view(spec, source_kind, buffer_registry, executor.clone(), cx))
+            .enumerate()
+            .map(|(file_index, spec)| {
+                let view =
+                    build_file_view(spec, source_kind, buffer_registry, executor.clone(), cx);
+                view.editor.update(cx, |ed, cx| {
+                    ed.set_review_session(Some(session.clone()), cx);
+                    ed.set_review_file_index(Some(file_index), cx);
+                });
+                view
+            })
             .collect();
         let subscription = cx.subscribe(&session, |_, _, _event: &ReviewSessionEvent, cx| {
             cx.notify();
@@ -779,6 +788,60 @@ mod tests {
 
         item.read_with(&cx, |item, app| {
             assert_eq!(item.active_file_index(app), Some(1));
+        });
+    }
+
+    #[test]
+    fn from_session_attaches_session_and_file_index_to_each_editor() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = InnerSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
+                inner.add_files(vec![
+                    ReviewFileInput {
+                        path: PathBuf::from("a.txt"),
+                        rel_path: "a.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("a\n".to_string()),
+                        buffer_text: Arc::new("aa\n".to_string()),
+                    },
+                    ReviewFileInput {
+                        path: PathBuf::from("b.txt"),
+                        rel_path: "b.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("b\n".to_string()),
+                        buffer_text: Arc::new("bb\n".to_string()),
+                    },
+                ]);
+                ReviewSession::new(inner)
+            })
+        });
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        item.read_with(&cx, |item, cx| {
+            let session_id = item.session().entity_id();
+            for (expected_index, file) in item.files().iter().enumerate() {
+                let editor = file.editor.read(cx);
+                assert_eq!(
+                    editor.review_file_index(),
+                    Some(expected_index),
+                    "editor for file {expected_index} should know its index",
+                );
+                assert_eq!(
+                    editor.review_session().map(|s| s.entity_id()),
+                    Some(session_id),
+                    "editor for file {expected_index} should share the same session",
+                );
+            }
         });
     }
 }
