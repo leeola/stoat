@@ -24,6 +24,7 @@ mod dock;
 mod editor;
 mod editor_input;
 mod executor;
+mod fs_watcher_driver;
 mod globals;
 mod input_state_machine;
 mod item;
@@ -60,6 +61,7 @@ pub use editor::{
 };
 pub use editor_input::EditorInput;
 pub use executor::spawn_with_entity;
+pub use fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent};
 pub use globals::{
     install_production_globals, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal,
     ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry,
