@@ -439,6 +439,7 @@ pub(crate) fn scroll_position_to_pixel_offset_y(
 const DIFF_ADDED_HEX: u32 = 0x4caf50;
 const DIFF_MODIFIED_HEX: u32 = 0x2196f3;
 const DIFF_MOVED_HEX: u32 = 0x00bcd4;
+const DIFF_DELETED_HEX: u32 = 0xf44336;
 const DIAG_ERROR_HEX: u32 = 0xe53935;
 const DIAG_WARNING_HEX: u32 = 0xffb300;
 const DIAG_INFO_HEX: u32 = 0x29b6f6;
@@ -594,12 +595,24 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     let diff_status = buffer_row
         .map(|row| paint.diff_map.status_for_line(row))
         .unwrap_or(stoat::DiffStatus::Unchanged);
+    let deletion_above = buffer_row
+        .and_then(|row| row.checked_sub(1))
+        .map(|prev| paint.diff_map.has_deletion_after(prev))
+        .unwrap_or(false);
     let start = text.len();
     if let Some((ch, hex)) = diff_strip_for_status(diff_status) {
         text.push(ch);
         let end = text.len();
         let style = gpui::HighlightStyle {
             color: Some(rgb(hex).into()),
+            ..Default::default()
+        };
+        runs.push((start..end, style));
+    } else if deletion_above {
+        text.push('^');
+        let end = text.len();
+        let style = gpui::HighlightStyle {
+            color: Some(rgb(DIFF_DELETED_HEX).into()),
             ..Default::default()
         };
         runs.push((start..end, style));
@@ -1016,6 +1029,95 @@ mod tests {
             .nth(diag_position)
             .expect("gutter prefix populated");
         assert_eq!(diag_char, 'W');
+    }
+
+    fn diff_strip_char(prefix: &GutterPrefix, line_number_width: usize) -> char {
+        prefix
+            .text
+            .chars()
+            .nth(line_number_width)
+            .expect("gutter prefix populated")
+    }
+
+    fn deleted_after(line: u32) -> stoat::DiffHunk {
+        stoat::DiffHunk {
+            status: stoat::DiffHunkStatus::Deleted,
+            buffer_start_line: line + 1,
+            buffer_line_range: (line + 1)..(line + 1),
+            base_byte_range: 0..1,
+            anchor_range: None,
+            token_detail: None,
+        }
+    }
+
+    fn added_rows(range: Range<u32>) -> stoat::DiffHunk {
+        stoat::DiffHunk {
+            status: stoat::DiffHunkStatus::Added,
+            buffer_start_line: range.start,
+            buffer_line_range: range,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        }
+    }
+
+    #[test]
+    fn build_gutter_prefix_paints_caret_below_deletion() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map =
+            stoat::DiffMap::from_hunks([deleted_after(0)], Some(Arc::new("gone\n".to_string())));
+        let metrics = gutter_metrics(&snapshot);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(1, &paint);
+        assert_eq!(diff_strip_char(&prefix, metrics.line_number_width), '^');
+    }
+
+    #[test]
+    fn build_gutter_prefix_no_caret_on_first_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb");
+        let diff_map =
+            stoat::DiffMap::from_hunks([deleted_after(0)], Some(Arc::new("gone\n".to_string())));
+        let metrics = gutter_metrics(&snapshot);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(0, &paint);
+        assert_eq!(diff_strip_char(&prefix, metrics.line_number_width), ' ');
+    }
+
+    #[test]
+    fn build_gutter_prefix_status_wins_over_caret() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = stoat::DiffMap::from_hunks(
+            [deleted_after(0), added_rows(1..2)],
+            Some(Arc::new("gone\n".to_string())),
+        );
+        let metrics = gutter_metrics(&snapshot);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(1, &paint);
+        assert_eq!(diff_strip_char(&prefix, metrics.line_number_width), '|');
     }
 
     use stoat_text::{Bias, SelectionGoal};
