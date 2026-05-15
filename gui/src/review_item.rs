@@ -38,12 +38,14 @@ pub struct ReviewItem {
 }
 
 /// One file's view state: the workspace-relative path, the editor
-/// over the file's review excerpts, and the underlying multi-buffer
-/// that holds those excerpts.
+/// over the file's review excerpts, the underlying multi-buffer
+/// that holds those excerpts, and the source buffer the multi-buffer
+/// reads from.
 pub struct ReviewFileView {
     pub rel_path: String,
     pub editor: Entity<Editor>,
     pub multi_buffer: Entity<MultiBuffer>,
+    pub buffer: Entity<Buffer>,
 }
 
 impl ReviewItem {
@@ -267,6 +269,7 @@ fn build_file_view(
         rel_path: spec.rel_path,
         editor,
         multi_buffer,
+        buffer,
     }
 }
 

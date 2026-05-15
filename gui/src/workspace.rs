@@ -39,7 +39,8 @@ use stoat::{
     buffer::BufferId,
     host::WatchToken,
     pane::{Axis, Direction},
-    review_session::ChunkStatus,
+    review_apply::remove_chunks_from_buffer,
+    review_session::{ChunkStatus, ReviewSource},
 };
 use stoat_action::ActionKind;
 
@@ -1037,6 +1038,7 @@ impl Workspace {
             ActionKind::ReviewToggleStage => {
                 self.dispatch_review_set_status(ReviewStatusChange::Toggle, cx)
             },
+            ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1328,6 +1330,40 @@ impl Workspace {
                 session.toggle_stage(id, cx);
             },
         });
+    }
+
+    fn dispatch_review_remove_selected(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        let session_ref = session.read(cx);
+        let inner = session_ref.inner();
+        if !matches!(inner.source, ReviewSource::WorkingTree { .. }) {
+            return;
+        }
+        let Some(id) = inner.cursor.current else {
+            return;
+        };
+        let Some(chunk) = inner.chunks.get(&id) else {
+            return;
+        };
+        let Some(file) = inner.files.get(chunk.file_index) else {
+            return;
+        };
+        let file_index = chunk.file_index;
+        let new_buffer = remove_chunks_from_buffer(&file.base_text, &file.buffer_text, &[chunk]);
+
+        let Some(buffer) = review_item
+            .read(cx)
+            .files()
+            .get(file_index)
+            .map(|f| f.buffer.clone())
+        else {
+            return;
+        };
+        let len = buffer.read(cx).read(|b| b.rope().len());
+        buffer.update(cx, |b, cx| b.edit(0..len, &new_buffer, cx));
     }
 }
 
@@ -3852,5 +3888,127 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(cursor_chunk_status(vcx, &session), None);
+    }
+
+    fn new_two_chunk_working_tree_session(
+        vcx: &mut VisualTestContext,
+        workdir: &str,
+        rel_path: &str,
+    ) -> (Entity<crate::review_session::ReviewSession>, String, String) {
+        let base = (0..14)
+            .map(|i| format!("L{i}"))
+            .collect::<Vec<_>>()
+            .join("\n")
+            + "\n";
+        let buffer = {
+            let mut lines: Vec<String> = (0..14).map(|i| format!("L{i}")).collect();
+            lines[0] = "L0_NEW".to_string();
+            lines[13] = "L13_NEW".to_string();
+            lines.join("\n") + "\n"
+        };
+        let base_clone = base.clone();
+        let buffer_clone = buffer.clone();
+        let session = vcx.update(|_, cx| {
+            cx.new(|_| {
+                let mut inner =
+                    stoat::review_session::ReviewSession::new(ReviewSource::WorkingTree {
+                        workdir: PathBuf::from(workdir),
+                    });
+                inner.add_files(vec![stoat::review::ReviewFileInput {
+                    path: PathBuf::from(workdir).join(rel_path),
+                    rel_path: rel_path.to_string(),
+                    language: None,
+                    base_text: Arc::new(base_clone),
+                    buffer_text: Arc::new(buffer_clone),
+                }]);
+                assert_eq!(
+                    inner.order.len(),
+                    2,
+                    "test fixture requires a two-chunk diff; got {} chunks",
+                    inner.order.len(),
+                );
+                crate::review_session::ReviewSession::new(inner)
+            })
+        });
+        (session, base, buffer)
+    }
+
+    fn buffer_text_at_file(
+        vcx: &mut VisualTestContext,
+        item: &Entity<crate::review_item::ReviewItem>,
+        file_index: usize,
+    ) -> String {
+        let buffer = item.read_with(vcx, |item, _| item.files()[file_index].buffer.clone());
+        buffer.read_with(vcx, |b, _| b.text())
+    }
+
+    #[test]
+    fn dispatch_review_remove_selected_reverts_cursor_chunk_in_working_tree() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (session, base, buffer) = new_two_chunk_working_tree_session(vcx, "/tmp/repo", "a.txt");
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(buffer_text_at_file(vcx, &item, 0), buffer);
+
+        let expected = session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            let chunk = &inner.chunks[&inner.cursor.current.expect("cursor set on add_files")];
+            remove_chunks_from_buffer(&base, &buffer, &[chunk])
+        });
+
+        dispatch(&ws, vcx, stoat_action::ReviewRemoveSelected);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer_text_at_file(vcx, &item, 0), expected);
+        assert_ne!(
+            buffer_text_at_file(vcx, &item, 0),
+            buffer,
+            "buffer must differ from pre-revert state",
+        );
+    }
+
+    #[test]
+    fn dispatch_review_remove_selected_is_noop_for_in_memory_source() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        let before = buffer_text_at_file(vcx, &item, 0);
+
+        dispatch(&ws, vcx, stoat_action::ReviewRemoveSelected);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            buffer_text_at_file(vcx, &item, 0),
+            before,
+            "non-WorkingTree source must leave the buffer untouched",
+        );
+    }
+
+    #[test]
+    fn dispatch_review_remove_selected_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ReviewRemoveSelected);
+        vcx.run_until_parked();
+    }
+
+    #[test]
+    fn dispatch_review_remove_selected_with_no_session_cursor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = vcx.update(|_, cx| {
+            cx.new(|_| {
+                let inner = stoat::review_session::ReviewSession::new(ReviewSource::WorkingTree {
+                    workdir: PathBuf::from("/tmp/repo"),
+                });
+                crate::review_session::ReviewSession::new(inner)
+            })
+        });
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewRemoveSelected);
+        vcx.run_until_parked();
     }
 }
