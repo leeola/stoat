@@ -1074,6 +1074,7 @@ impl Workspace {
             ActionKind::QueryMoveRelationships => {
                 self.dispatch_query_move_relationships(window, cx)
             },
+            ActionKind::OpenReview => self.dispatch_open_review(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1658,6 +1659,41 @@ impl Workspace {
             let delegate =
                 crate::review_move_picker::MoveRelationshipPickerDelegate::new(relationships, workspace);
             crate::picker::Picker::new(delegate, window, cx)
+        });
+    }
+
+    fn dispatch_open_review(&mut self, cx: &mut Context<'_, Self>) {
+        let workdir = self.git_root.clone();
+        let source = ReviewSource::WorkingTree {
+            workdir: workdir.clone(),
+        };
+        let inputs = review_inputs_for_source(&source, cx);
+        if inputs.is_empty() {
+            tracing::warn!(?workdir, "OpenReview: no working-tree changes to review",);
+            return;
+        }
+
+        let mut inner_session = stoat::review_session::ReviewSession::new(source);
+        inner_session.add_files(inputs);
+        if inner_session.order.is_empty() {
+            tracing::warn!(?workdir, "OpenReview: no diff hunks to display");
+            return;
+        }
+
+        let session = cx.new(|_| crate::review_session::ReviewSession::new(inner_session));
+        let buffer_registry = self.buffer_registry.clone();
+        let review_item = cx
+            .new(|cx| crate::review_item::ReviewItem::from_session(session, &buffer_registry, cx));
+
+        let pane_id = self.pane_tree.read(cx).focus();
+        let pane = self
+            .pane_tree
+            .read(cx)
+            .pane(pane_id)
+            .expect("pane tree returns its own focused pane id")
+            .clone();
+        pane.update(cx, |p, cx| {
+            p.add_item(Box::new(review_item), cx);
         });
     }
 }
@@ -5035,5 +5071,85 @@ mod tests {
         vcx.run_until_parked();
 
         assert!(!modal_count(vcx, &ws));
+    }
+
+    fn active_pane_review_item(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+    ) -> Option<Entity<crate::review_item::ReviewItem>> {
+        ws.read_with(vcx, |w, cx| w.active_pane_item(cx))
+            .and_then(|handle| {
+                handle
+                    .to_any_view()
+                    .downcast::<crate::review_item::ReviewItem>()
+                    .ok()
+            })
+    }
+
+    fn install_full_globals(
+        vcx: &mut VisualTestContext,
+        fs: Arc<stoat::host::FakeFs>,
+        git: Arc<stoat::host::fake::FakeGit>,
+    ) {
+        use crate::globals::{FsHostGlobal, GitHostGlobal, LanguageRegistry};
+        vcx.update(|_, cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn stoat::host::FsHost>));
+            cx.set_global(GitHostGlobal(git as Arc<dyn stoat::host::GitHost>));
+            if !cx.has_global::<LanguageRegistry>() {
+                cx.set_global(LanguageRegistry::standard());
+            }
+        });
+    }
+
+    #[test]
+    fn dispatch_open_review_opens_review_item_for_working_tree() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEW\nc\n");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .with_fs(&fs)
+            .modified("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        install_full_globals(vcx, fs, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenReview);
+        vcx.run_until_parked();
+
+        let item = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        item.read_with(vcx, |item, cx| {
+            assert_eq!(item.files().len(), 1);
+            assert_eq!(item.files()[0].rel_path, "a.txt");
+            assert!(!item.session().read(cx).inner().order.is_empty());
+        });
+    }
+
+    #[test]
+    fn dispatch_open_review_with_no_changed_files_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_full_globals(vcx, fs, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenReview);
+        vcx.run_until_parked();
+
+        assert!(active_pane_review_item(vcx, &ws).is_none());
+    }
+
+    #[test]
+    fn dispatch_open_review_without_git_repo_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        install_full_globals(vcx, fs, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenReview);
+        vcx.run_until_parked();
+
+        assert!(active_pane_review_item(vcx, &ws).is_none());
     }
 }
