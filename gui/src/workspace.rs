@@ -1,13 +1,14 @@
 use crate::{
     buffer::Buffer,
-    buffer_registry::BufferRegistry,
+    buffer_registry::{BufferRegistry, BufferRegistryEvent},
     diff_coordinator::DiffCoordinator,
     diff_map::DiffMap,
     display_map::DisplayMap,
     dock::{Dock, DockSide},
     editor::{Editor, EditorEvent, EditorMode},
     editor_input::EditorInput,
-    globals::{ExecutorGlobal, FsHostGlobal},
+    fs_watcher_driver::FsWatcherDriver,
+    globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
     keymap_loader::{compile_default_keymap, compile_from_settings},
@@ -30,8 +31,15 @@ use gpui::{
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
     Window,
 };
-use std::path::{Path, PathBuf};
-use stoat::pane::{Axis, Direction};
+use std::{
+    collections::HashMap,
+    path::{Path, PathBuf},
+};
+use stoat::{
+    buffer::BufferId,
+    host::WatchToken,
+    pane::{Axis, Direction},
+};
 use stoat_action::ActionKind;
 
 /// Top-level workspace entity. Composes the structural pieces of
@@ -62,6 +70,9 @@ pub struct Workspace {
     lsp_progress: Entity<LspProgress>,
     review_progress: Entity<ReviewProgress>,
     search_indicator: Entity<SearchQueryIndicator>,
+    fs_watcher_driver: Entity<FsWatcherDriver>,
+    fs_watch_tokens: HashMap<PathBuf, WatchToken>,
+    buffer_paths: HashMap<BufferId, PathBuf>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -155,6 +166,15 @@ impl Workspace {
         let lsp_progress = cx.new(|cx| LspProgress::new(lsp_state.clone(), cx));
         let review_progress = cx.new(|_| ReviewProgress::new());
         let search_indicator = cx.new(|_| SearchQueryIndicator::new());
+        let fs_watcher_driver = cx.new(FsWatcherDriver::new);
+        let buffer_registry_subscription = cx.subscribe(
+            &buffer_registry,
+            |workspace, _, event: &BufferRegistryEvent, cx| {
+                if let BufferRegistryEvent::BufferRemoved(id) = event {
+                    workspace.release_buffer_watch(*id, cx);
+                }
+            },
+        );
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -210,6 +230,9 @@ impl Workspace {
             lsp_progress,
             review_progress,
             search_indicator,
+            fs_watcher_driver,
+            fs_watch_tokens: HashMap::new(),
+            buffer_paths: HashMap::new(),
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -218,6 +241,7 @@ impl Workspace {
                 keystroke_subscription,
                 settings_subscription,
                 pane_tree_subscription,
+                buffer_registry_subscription,
             ],
         }
     }
@@ -266,11 +290,12 @@ impl Workspace {
         for (index, path) in paths.iter().enumerate() {
             let absolute = absolute_path(path, cwd.as_deref());
             let text = read_path_or_empty(&absolute, cx);
-            let (_, shared) = self
+            let (buffer_id, shared) = self
                 .buffer_registry
                 .update(cx, |registry, cx| registry.open(&absolute, &text, cx));
             let buffer = cx.new(|_| Buffer::from_shared(shared));
             buffer.update(cx, |b, cx| b.set_file_path(Some(absolute.clone()), cx));
+            self.register_buffer_watch(buffer_id, absolute.clone(), buffer.clone(), cx);
             let executor = cx.global::<ExecutorGlobal>().0.clone();
             let multi_buffer = {
                 let buffer = buffer.clone();
@@ -425,6 +450,60 @@ impl Workspace {
         });
         self.refresh_active_editor_subscription(cx);
         cx.notify();
+    }
+
+    /// Register `path` with the workspace's fs-watch surfaces:
+    /// 1. Call [`crate::host::FsWatchHost::watch`] (storing the returned [`WatchToken`]) so
+    ///    external edits to the file enqueue a [`crate::host::FsWatchEvent`] on the host's queue.
+    /// 2. Call [`FsWatcherDriver::track`] so the per-workspace driver routes those events to the
+    ///    matching `buffer` entity.
+    ///
+    /// Idempotent for an already-watched `path`: the registry's
+    /// own dedup keeps `buffer_id` stable, and we keep one token
+    /// per path. Failed watches log at `tracing::warn`; the
+    /// buffer still opens.
+    fn register_buffer_watch(
+        &mut self,
+        buffer_id: BufferId,
+        path: PathBuf,
+        buffer: Entity<Buffer>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.buffer_paths.insert(buffer_id, path.clone());
+        if !self.fs_watch_tokens.contains_key(&path) {
+            let host = cx.global::<FsWatchHostGlobal>().0.clone();
+            match host.watch(&path) {
+                Ok(token) => {
+                    self.fs_watch_tokens.insert(path.clone(), token);
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        ?path,
+                        %err,
+                        "workspace: fs watch registration failed",
+                    );
+                },
+            }
+        }
+        self.fs_watcher_driver.update(cx, |driver, _| {
+            driver.track(path, buffer);
+        });
+    }
+
+    /// Drop the watch surfaces for the buffer at `buffer_id`,
+    /// inverse of [`Self::register_buffer_watch`]. Triggered by
+    /// [`BufferRegistryEvent::BufferRemoved`].
+    fn release_buffer_watch(&mut self, buffer_id: BufferId, cx: &mut Context<'_, Self>) {
+        let Some(path) = self.buffer_paths.remove(&buffer_id) else {
+            return;
+        };
+        if let Some(token) = self.fs_watch_tokens.remove(&path) {
+            let host = cx.global::<FsWatchHostGlobal>().0.clone();
+            host.unwatch(token);
+        }
+        self.fs_watcher_driver.update(cx, |driver, _| {
+            driver.untrack(&path);
+        });
     }
 
     /// Re-bind [`Workspace::_active_editor_subscription`] to the focused
@@ -1339,7 +1418,27 @@ mod tests {
         std::mem::take(&mut *events.lock().expect("recorder mutex"))
     }
 
+    fn install_workspace_test_globals(cx: &mut TestAppContext) {
+        use crate::globals::{ExecutorGlobal, FsWatchHostGlobal};
+        use stoat::host::FsWatchHost;
+        use stoat_host::NoopFsWatcher;
+        use stoat_scheduler::{Executor, TestScheduler};
+        cx.update(|cx| {
+            if !cx.has_global::<ExecutorGlobal>() {
+                cx.set_global(ExecutorGlobal(Executor::new(
+                    Arc::new(TestScheduler::new()),
+                )));
+            }
+            if !cx.has_global::<FsWatchHostGlobal>() {
+                cx.set_global(FsWatchHostGlobal(
+                    Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
+                ));
+            }
+        });
+    }
+
     fn new_workspace(cx: &mut TestAppContext, name: &str, root: &str) -> Entity<Workspace> {
+        install_workspace_test_globals(cx);
         let name = name.to_string();
         let root = PathBuf::from(root);
         cx.update(|cx| cx.new(|cx| Workspace::new(name, root, cx)))
@@ -1350,6 +1449,7 @@ mod tests {
         name: &str,
         root: &str,
     ) -> (Entity<Workspace>, &'a mut VisualTestContext) {
+        install_workspace_test_globals(cx);
         let name = name.to_string();
         let root = PathBuf::from(root);
         cx.add_window_view(|_window, cx| Workspace::new(name, root, cx))
@@ -2635,10 +2735,21 @@ mod tests {
     }
 
     fn install_globals_with_fs(cx: &mut TestAppContext, fs: Arc<stoat::host::FakeFs>) {
-        use crate::globals::{ExecutorGlobal, FsHostGlobal};
+        install_globals_with_fs_and_watcher(cx, fs, Arc::new(stoat_host::FakeFsWatcher::new()));
+    }
+
+    fn install_globals_with_fs_and_watcher(
+        cx: &mut TestAppContext,
+        fs: Arc<stoat::host::FakeFs>,
+        watcher: Arc<stoat_host::FakeFsWatcher>,
+    ) {
+        use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal};
         use stoat_scheduler::{Executor, TestScheduler};
         cx.update(|cx| {
             cx.set_global(FsHostGlobal(fs as Arc<dyn stoat::host::FsHost>));
+            cx.set_global(FsWatchHostGlobal(
+                watcher as Arc<dyn stoat::host::FsWatchHost>,
+            ));
             cx.set_global(ExecutorGlobal(Executor::new(
                 Arc::new(TestScheduler::new()),
             )));
@@ -2810,6 +2921,92 @@ mod tests {
                 shared.read().expect("buffer lock").rope().to_string(),
                 String::new()
             );
+        });
+    }
+
+    #[test]
+    fn open_paths_watches_each_opened_file() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello");
+        let watcher = Arc::new(stoat_host::FakeFsWatcher::new());
+        install_globals_with_fs_and_watcher(&mut cx, fs, watcher.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+
+        assert!(watcher.is_watching(Path::new("/tmp/repo/foo.rs")));
+    }
+
+    #[test]
+    fn open_paths_registers_buffer_with_watcher_driver() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.fs_watcher_driver.read(cx).tracked_count(), 1);
+        });
+    }
+
+    #[test]
+    fn open_paths_is_idempotent_for_known_path() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello");
+        let watcher = Arc::new(stoat_host::FakeFsWatcher::new());
+        install_globals_with_fs_and_watcher(&mut cx, fs, watcher.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+        });
+
+        assert_eq!(watcher.watched_paths().len(), 1);
+        ws.read_with(vcx, |w, _| {
+            assert_eq!(w.fs_watch_tokens.len(), 1);
+        });
+    }
+
+    #[test]
+    fn removing_buffer_unwatches_and_untracks() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello");
+        let watcher = Arc::new(stoat_host::FakeFsWatcher::new());
+        install_globals_with_fs_and_watcher(&mut cx, fs, watcher.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        assert!(watcher.is_watching(Path::new("/tmp/repo/foo.rs")));
+
+        let buffer_id = ws.read_with(vcx, |w, cx| {
+            w.buffer_registry()
+                .read(cx)
+                .id_for_path(Path::new("/tmp/repo/foo.rs"))
+                .expect("path registered")
+        });
+        ws.update(vcx, |w, cx| {
+            w.buffer_registry()
+                .update(cx, |r, cx| r.remove(buffer_id, cx));
+        });
+        vcx.run_until_parked();
+
+        assert!(!watcher.is_watching(Path::new("/tmp/repo/foo.rs")));
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.fs_watch_tokens.len(), 0);
+            assert_eq!(w.fs_watcher_driver.read(cx).tracked_count(), 0);
         });
     }
 

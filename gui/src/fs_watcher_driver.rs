@@ -60,7 +60,12 @@ impl FsWatcherDriver {
     }
 
     fn schedule_tick(&mut self, cx: &mut Context<'_, Self>) {
-        let executor = cx.global::<crate::globals::ExecutorGlobal>().0.clone();
+        let Some(executor) = cx
+            .try_global::<crate::globals::ExecutorGlobal>()
+            .map(|g| g.0.clone())
+        else {
+            return;
+        };
         let task = cx.spawn(async move |this, cx| {
             executor.timer(TICK_PERIOD).await;
             let _ = this.update(cx, |this, cx| {
@@ -72,7 +77,9 @@ impl FsWatcherDriver {
     }
 
     fn tick(&mut self, cx: &mut Context<'_, Self>) {
-        let host = cx.global::<FsWatchHostGlobal>().0.clone();
+        let Some(host) = cx.try_global::<FsWatchHostGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
         for _ in 0..MAX_EVENTS_PER_TICK {
             let Some(event) = host.try_recv() else {
                 break;
