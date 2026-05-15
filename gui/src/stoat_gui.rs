@@ -37,6 +37,7 @@ mod pane_tree;
 mod panic_hook;
 mod picker;
 mod review_item;
+mod review_move_picker;
 mod review_session;
 mod settings;
 mod status_bar;

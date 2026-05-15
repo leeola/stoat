@@ -1071,6 +1071,9 @@ impl Workspace {
                 self.dispatch_jump_to_move_source(JumpMoveNav::Prev, cx)
             },
             ActionKind::JumpToMoveTarget => self.dispatch_jump_to_move_target(cx),
+            ActionKind::QueryMoveRelationships => {
+                self.dispatch_query_move_relationships(window, cx)
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1614,6 +1617,48 @@ impl Workspace {
             return;
         };
         navigate_to_move_provenance(&review_item, &prov, cx);
+    }
+
+    /// Navigate the active [`ReviewItem`] to the target side of
+    /// `relationship`. Drives the same path as
+    /// [`Self::dispatch_jump_to_move_target`]; called by the
+    /// [`MoveRelationshipPickerDelegate`] on confirm.
+    pub fn navigate_to_move_relationship(
+        &mut self,
+        relationship: &stoat::review_session::MoveRelationship,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        navigate_to_move_provenance(&review_item, &relationship.target, cx);
+    }
+
+    fn dispatch_query_move_relationships(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let relationships = review_item
+            .read(cx)
+            .session()
+            .read(cx)
+            .inner()
+            .collect_move_relationships();
+        if relationships.is_empty() {
+            return;
+        }
+        let workspace = cx.weak_entity();
+        self.toggle_modal::<crate::picker::Picker<
+            crate::review_move_picker::MoveRelationshipPickerDelegate,
+        >, _>(window, cx, move |window, cx| {
+            let delegate =
+                crate::review_move_picker::MoveRelationshipPickerDelegate::new(relationships, workspace);
+            crate::picker::Picker::new(delegate, window, cx)
+        });
     }
 }
 
@@ -4939,5 +4984,56 @@ mod tests {
 
         dispatch(&ws, vcx, stoat_action::JumpToMoveSource);
         vcx.run_until_parked();
+    }
+
+    fn modal_count(vcx: &mut VisualTestContext, ws: &Entity<Workspace>) -> bool {
+        ws.read_with(vcx, |w, cx| w.modal_layer().read(cx).has_active_modal())
+    }
+
+    #[test]
+    fn dispatch_query_move_relationships_opens_picker_when_moves_exist() {
+        use stoat::review::MoveProvenance;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let target = MoveProvenance {
+            rel_path: "b.txt".to_string(),
+            line: 0,
+        };
+        let inner = build_inner_session_with_provenances("a.txt", "b.txt", &[target]);
+        let session = session_with_inner(vcx, inner);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert!(!modal_count(vcx, &ws));
+
+        dispatch(&ws, vcx, stoat_action::QueryMoveRelationships);
+        vcx.run_until_parked();
+
+        assert!(
+            modal_count(vcx, &ws),
+            "QueryMoveRelationships must push a picker modal when the session has cross-file moves",
+        );
+    }
+
+    #[test]
+    fn dispatch_query_move_relationships_with_no_moves_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session);
+
+        dispatch(&ws, vcx, stoat_action::QueryMoveRelationships);
+        vcx.run_until_parked();
+
+        assert!(!modal_count(vcx, &ws));
+    }
+
+    #[test]
+    fn dispatch_query_move_relationships_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::QueryMoveRelationships);
+        vcx.run_until_parked();
+
+        assert!(!modal_count(vcx, &ws));
     }
 }

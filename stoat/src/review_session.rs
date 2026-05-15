@@ -465,6 +465,59 @@ impl ReviewSession {
         out
     }
 
+    /// Walk every chunk in the session and collect every distinct
+    /// cross-file move as a [`MoveRelationship`] pair. Both
+    /// `right.move_provenance` on RHS-bearing rows and
+    /// `left.move_provenance` on LHS-only rows feed the same
+    /// dedup set keyed by `(source_path, source_line,
+    /// target_path, target_line)`, so a multi-row move shows
+    /// once and the two sources of truth converge. Order
+    /// preserved (first occurrence wins).
+    pub fn collect_move_relationships(&self) -> Vec<MoveRelationship> {
+        let mut out: Vec<MoveRelationship> = Vec::new();
+        for id in &self.order {
+            let Some(chunk) = self.chunks.get(id) else {
+                continue;
+            };
+            let Some(file) = self.files.get(chunk.file_index) else {
+                continue;
+            };
+            for row in &chunk.hunk.rows {
+                let ReviewRow::Changed { left, right } = row else {
+                    continue;
+                };
+                if let Some(right) = right {
+                    if let Some(prov) = right.move_provenance.as_ref() {
+                        let rel = MoveRelationship {
+                            source: prov.clone(),
+                            target: MoveProvenance {
+                                rel_path: file.rel_path.clone(),
+                                line: right.line_num.saturating_sub(1),
+                            },
+                        };
+                        if !out.contains(&rel) {
+                            out.push(rel);
+                        }
+                    }
+                } else if let Some(left) = left {
+                    if let Some(prov) = left.move_provenance.as_ref() {
+                        let rel = MoveRelationship {
+                            source: MoveProvenance {
+                                rel_path: file.rel_path.clone(),
+                                line: left.line_num.saturating_sub(1),
+                            },
+                            target: prov.clone(),
+                        };
+                        if !out.contains(&rel) {
+                            out.push(rel);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     /// Resolve a `(file_index, buffer_line)` pair to a chunk in
     /// that file. Returns the chunk whose `buffer_line_range`
     /// contains `line`; otherwise the first chunk that starts at
@@ -787,6 +840,17 @@ pub struct ChunkIdentity {
     pub base_line_start: u32,
     pub base_line_end: u32,
     pub content_hash: u64,
+}
+
+/// One cross-file move surfaced by
+/// [`ReviewSession::collect_move_relationships`]: `source` is the
+/// origin location (where the content used to be) and `target`
+/// is the destination location (where it now lives). Both sides
+/// are paths within the same review session.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct MoveRelationship {
+    pub source: MoveProvenance,
+    pub target: MoveProvenance,
 }
 
 fn lines_to_bytes(offsets: &[(usize, usize)], lines: &Range<u32>) -> Range<usize> {
@@ -1505,6 +1569,80 @@ mod tests {
     fn chunk_for_buffer_line_returns_none_when_file_has_no_chunks() {
         let s = in_memory_session();
         assert_eq!(s.chunk_for_buffer_line(0, 0), None);
+    }
+
+    #[test]
+    fn collect_move_relationships_returns_empty_for_session_without_moves() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        assert!(s.collect_move_relationships().is_empty());
+    }
+
+    fn add_empty_file(s: &mut ReviewSession, rel_path: &str) {
+        s.files.push(ReviewFile {
+            path: PathBuf::from(rel_path),
+            rel_path: rel_path.to_string(),
+            language: None,
+            base_text: Arc::new(String::new()),
+            buffer_text: Arc::new(String::new()),
+            chunks: Vec::new(),
+        });
+    }
+
+    #[test]
+    fn collect_move_relationships_dedupes_across_multi_row_moves() {
+        use crate::review::ReviewSide;
+        let mut s = in_memory_session();
+        add_empty_file(&mut s, "src/dest.rs");
+        let prov = MoveProvenance {
+            rel_path: "src/origin.rs".to_string(),
+            line: 10,
+        };
+        let id = insert_synthetic_chunk(
+            &mut s,
+            chunk_with_move_provenance(None, Some(prov.clone()), true),
+        );
+        // Add a second RHS row pointing at the same source --
+        // simulates a 2-line moved hunk landing in this chunk.
+        if let Some(chunk) = s.chunks.get_mut(&id) {
+            chunk.hunk.rows.push(ReviewRow::Changed {
+                left: None,
+                right: Some(ReviewSide {
+                    text: String::new(),
+                    line_num: 2,
+                    change_spans: Vec::new(),
+                    moved_spans: Vec::new(),
+                    move_provenance: Some(prov.clone()),
+                }),
+            });
+        }
+
+        let rels = s.collect_move_relationships();
+        assert_eq!(rels.len(), 2, "distinct target lines -> distinct rels");
+        assert_eq!(rels[0].source, prov);
+        assert_eq!(rels[0].target.rel_path, "src/dest.rs");
+        assert_eq!(rels[0].target.line, 0);
+        assert_eq!(rels[1].target.line, 1);
+    }
+
+    #[test]
+    fn collect_move_relationships_picks_up_lhs_only_provenances() {
+        let mut s = in_memory_session();
+        add_empty_file(&mut s, "src/origin.rs");
+        let target = MoveProvenance {
+            rel_path: "src/dest.rs".to_string(),
+            line: 5,
+        };
+        let _id = insert_synthetic_chunk(
+            &mut s,
+            chunk_with_move_provenance(Some(target.clone()), None, false),
+        );
+
+        let rels = s.collect_move_relationships();
+        assert_eq!(rels.len(), 1);
+        assert_eq!(rels[0].source.rel_path, "src/origin.rs");
+        assert_eq!(rels[0].source.line, 0);
+        assert_eq!(rels[0].target, target);
     }
 
     use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
