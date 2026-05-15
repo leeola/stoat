@@ -15,7 +15,7 @@ use crate::{
     pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
     status_bar::{StatusBar, StatusItemView},
-    theme::{DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
+    theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
     deferred, div, px, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
@@ -1027,6 +1027,7 @@ impl Render for Workspace {
             .flex()
             .flex_row()
             .size_full()
+            .bg(background_color(cx))
             .font_family(ui_family)
             .text_size(px(ui_size))
             .track_focus(&self.focus_handle)

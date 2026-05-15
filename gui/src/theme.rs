@@ -22,6 +22,11 @@ pub const DEFAULT_UI_FONT_FAMILY: &str = ".SystemUIFont";
 /// Default chrome font size in logical pixels.
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 
+/// Fallback for the workspace background fill when no theme
+/// overrides `ui.background`. Neutral dark so the empty window
+/// reads as an editor surface rather than GPUI's default black.
+pub const DEFAULT_BACKGROUND_HEX: u32 = 0x1e1e1e;
+
 /// Fallback for the inactive border / divider color when no
 /// theme overrides `ui.border.inactive`. Muted enough to read as
 /// a separator against the default backgrounds.
@@ -31,6 +36,17 @@ pub const DEFAULT_BORDER_INACTIVE_HEX: u32 = 0x404040;
 /// `ui.border.focused`. Subtle accent blue so the focused pane
 /// reads as the active surface without dominating the chrome.
 pub const DEFAULT_BORDER_FOCUSED_HEX: u32 = 0x6090ff;
+
+/// Resolve the workspace background fill from the active
+/// [`Theme`] global, falling back to [`DEFAULT_BACKGROUND_HEX`]
+/// when no theme is installed or the scope is unset.
+pub fn background_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_BACKGROUND,
+        DEFAULT_BACKGROUND_HEX,
+    )
+}
 
 /// Resolve the inactive border color from the active [`Theme`]
 /// global, falling back to [`DEFAULT_BORDER_INACTIVE_HEX`] when
@@ -102,5 +118,29 @@ impl Theme {
             Some(c) => Self::from_config(&c, name),
             None => Self::empty(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::TestAppContext;
+
+    #[test]
+    fn background_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| background_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_BACKGROUND_HEX).into());
+    }
+
+    #[test]
+    fn background_color_resolves_from_theme() {
+        let cx = TestAppContext::single();
+        let theme = Theme::load_from_source("theme custom { ui.background.fg = blue; }", "custom");
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            background_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_BACKGROUND_HEX).into());
     }
 }
