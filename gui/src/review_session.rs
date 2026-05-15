@@ -1,6 +1,9 @@
 use gpui::{App, Context, EventEmitter};
-use stoat::review_session::{
-    ChunkStatus, ReviewChunkId, ReviewProgress, ReviewSession as InnerSession, ReviewViewState,
+use stoat::{
+    review::ReviewFileInput,
+    review_session::{
+        ChunkStatus, ReviewChunkId, ReviewProgress, ReviewSession as InnerSession, ReviewViewState,
+    },
 };
 
 /// Entity-shaped wrapper around [`stoat::review_session::ReviewSession`].
@@ -72,6 +75,19 @@ impl ReviewSession {
         self.last_apply_result = Some(result);
         cx.emit(ReviewSessionEvent::Changed);
         cx.emit(ReviewSessionEvent::Applied);
+        cx.notify();
+    }
+
+    /// Re-extract hunks against `new_files` and update the inner
+    /// session in place. Decided chunk statuses and cursor focus
+    /// carry across the refresh keyed by
+    /// [`InnerSession::identity_key`]. Emits
+    /// [`ReviewSessionEvent::Changed`] +
+    /// [`ReviewSessionEvent::Refreshed`].
+    pub fn refresh_files(&mut self, new_files: Vec<ReviewFileInput>, cx: &mut Context<'_, Self>) {
+        self.inner.refresh_files(new_files);
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::Refreshed);
         cx.notify();
     }
 
@@ -259,6 +275,37 @@ mod tests {
             drain(&events),
             vec![ReviewSessionEvent::Changed, ReviewSessionEvent::Refreshed,],
         );
+    }
+
+    #[test]
+    fn refresh_files_emits_changed_and_refreshed_and_updates_inner() {
+        use std::path::PathBuf;
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+
+        session.update(&mut cx, |s, cx| {
+            s.refresh_files(
+                vec![ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("a\nb\n".to_string()),
+                    buffer_text: Arc::new("a\nB\n".to_string()),
+                }],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            drain(&events),
+            vec![ReviewSessionEvent::Changed, ReviewSessionEvent::Refreshed],
+        );
+        session.read_with(&cx, |s, _| {
+            assert_eq!(s.inner().files.len(), 1);
+            assert_eq!(s.inner().order.len(), 1);
+        });
     }
 
     #[test]

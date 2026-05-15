@@ -35,11 +35,13 @@ use gpui::{
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    sync::Arc,
 };
 use stoat::{
     buffer::BufferId,
     host::WatchToken,
     pane::{Axis, Direction},
+    review::ReviewFileInput,
     review_apply::{chunk_to_unified_diff, remove_chunks_from_buffer},
     review_session::{ChunkStatus, ReviewSource},
 };
@@ -1041,6 +1043,7 @@ impl Workspace {
             },
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
+            ActionKind::ReviewRefresh => self.dispatch_review_refresh(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1438,6 +1441,118 @@ impl Workspace {
             );
         });
     }
+
+    fn dispatch_review_refresh(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        let source = session.read(cx).inner().source.clone();
+        let inputs = review_inputs_for_source(&source, cx);
+        session.update(cx, |session, cx| session.refresh_files(inputs, cx));
+    }
+}
+
+/// Build a fresh [`ReviewFileInput`] list from `source` using the
+/// hosts and language registry on the app globals. Used by
+/// [`Workspace::dispatch_review_refresh`] to re-extract hunks
+/// against the same source the session was opened against.
+///
+/// Returns an empty `Vec` when the source has no usable data:
+/// `InMemory` / `AgentEdits` with empty stored data, working-tree
+/// without a discoverable repo, or commits that the git host
+/// cannot read. Empty input is the signal `ReviewSession::refresh_files`
+/// uses to clear all chunks; callers do not need to short-circuit.
+fn review_inputs_for_source(source: &ReviewSource, cx: &App) -> Vec<ReviewFileInput> {
+    use crate::globals::{FsHostGlobal, GitHostGlobal, LanguageRegistry};
+    let langs = &cx.global::<LanguageRegistry>().0;
+    match source {
+        ReviewSource::InMemory { files } => files
+            .iter()
+            .map(|file| ReviewFileInput {
+                path: file.path.clone(),
+                rel_path: file.path.display().to_string(),
+                language: langs.for_path(&file.path),
+                base_text: file.base_text.clone(),
+                buffer_text: file.buffer_text.clone(),
+            })
+            .collect(),
+        ReviewSource::AgentEdits { edits } => edits
+            .iter()
+            .map(|edit| ReviewFileInput {
+                path: edit.path.clone(),
+                rel_path: edit.path.display().to_string(),
+                language: langs.for_path(&edit.path),
+                base_text: edit.base_text.clone(),
+                buffer_text: edit.proposed_text.clone(),
+            })
+            .collect(),
+        ReviewSource::WorkingTree { workdir } => {
+            let git = cx.global::<GitHostGlobal>().0.clone();
+            let fs = cx.global::<FsHostGlobal>().0.clone();
+            stoat::diff::scan_working_tree(&*git, &*fs, langs, workdir, None)
+                .map(|(_, inputs)| inputs)
+                .unwrap_or_default()
+        },
+        ReviewSource::Commit { workdir, sha } => {
+            review_inputs_from_commit_trees(workdir, sha, None, langs, cx)
+        },
+        ReviewSource::CommitRange { workdir, from, to } => {
+            review_inputs_from_commit_trees(workdir, to, Some(from.as_str()), langs, cx)
+        },
+    }
+}
+
+fn review_inputs_from_commit_trees(
+    workdir: &Path,
+    head_sha: &str,
+    base_sha: Option<&str>,
+    langs: &stoat_language::LanguageRegistry,
+    cx: &App,
+) -> Vec<ReviewFileInput> {
+    use crate::globals::GitHostGlobal;
+    let git = cx.global::<GitHostGlobal>().0.clone();
+    let Some(repo) = git.discover(workdir) else {
+        return Vec::new();
+    };
+    let Some(workdir) = repo.workdir() else {
+        return Vec::new();
+    };
+    let Some(new_tree) = repo.commit_tree(head_sha) else {
+        return Vec::new();
+    };
+    let base_tree = match base_sha {
+        Some(sha) => repo.commit_tree(sha).unwrap_or_default(),
+        None => match repo.parent_sha(head_sha) {
+            Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
+            None => std::collections::BTreeMap::new(),
+        },
+    };
+    let mut paths: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
+    for p in base_tree.keys() {
+        paths.insert(p.as_path());
+    }
+    for p in new_tree.keys() {
+        paths.insert(p.as_path());
+    }
+    let mut inputs: Vec<ReviewFileInput> = Vec::new();
+    for rel in paths {
+        let base = base_tree.get(rel).cloned().unwrap_or_default();
+        let buffer = new_tree.get(rel).cloned().unwrap_or_default();
+        if base == buffer {
+            continue;
+        }
+        let abs = workdir.join(rel);
+        let lang = langs.for_path(&abs);
+        inputs.push(ReviewFileInput {
+            path: abs,
+            rel_path: rel.display().to_string(),
+            language: lang,
+            base_text: Arc::new(base),
+            buffer_text: Arc::new(buffer),
+        });
+    }
+    inputs
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -3987,7 +4102,7 @@ mod tests {
                     stoat::review_session::ReviewSession::new(ReviewSource::WorkingTree {
                         workdir: PathBuf::from(workdir),
                     });
-                inner.add_files(vec![stoat::review::ReviewFileInput {
+                inner.add_files(vec![ReviewFileInput {
                     path: PathBuf::from(workdir).join(rel_path),
                     rel_path: rel_path.to_string(),
                     language: None,
@@ -4211,5 +4326,108 @@ mod tests {
         vcx.run_until_parked();
 
         assert!(git.applied_patches(Path::new("/tmp/repo")).is_empty());
+    }
+
+    fn install_language_registry_global(vcx: &mut VisualTestContext) {
+        use crate::globals::LanguageRegistry;
+        vcx.update(|_, cx| {
+            if !cx.has_global::<LanguageRegistry>() {
+                cx.set_global(LanguageRegistry::standard());
+            }
+        });
+    }
+
+    fn in_memory_session_with_files(
+        vcx: &mut VisualTestContext,
+        files: Vec<stoat::review_session::InMemoryFile>,
+    ) -> Entity<crate::review_session::ReviewSession> {
+        let stored = Arc::new(files);
+        let inputs_for_session = stored.clone();
+        vcx.update(|_, cx| {
+            cx.new(|_| {
+                let mut inner = stoat::review_session::ReviewSession::new(ReviewSource::InMemory {
+                    files: stored.clone(),
+                });
+                let inputs: Vec<ReviewFileInput> = inputs_for_session
+                    .iter()
+                    .map(|f| ReviewFileInput {
+                        path: f.path.clone(),
+                        rel_path: f.path.display().to_string(),
+                        language: None,
+                        base_text: f.base_text.clone(),
+                        buffer_text: f.buffer_text.clone(),
+                    })
+                    .collect();
+                inner.add_files(inputs);
+                crate::review_session::ReviewSession::new(inner)
+            })
+        })
+    }
+
+    #[test]
+    fn dispatch_review_refresh_re_extracts_in_memory_session() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        install_language_registry_global(vcx);
+        let session = in_memory_session_with_files(
+            vcx,
+            vec![stoat::review_session::InMemoryFile {
+                path: PathBuf::from("a.txt"),
+                base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+            }],
+        );
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        let version_before = session.read_with(vcx, |s, _| s.inner().version);
+
+        dispatch(&ws, vcx, stoat_action::ReviewRefresh);
+        vcx.run_until_parked();
+
+        let version_after = session.read_with(vcx, |s, _| s.inner().version);
+        assert!(
+            version_after > version_before,
+            "refresh must bump the session version (before={version_before}, after={version_after})",
+        );
+        session.read_with(vcx, |s, _| {
+            assert_eq!(s.inner().files.len(), 1);
+            assert_eq!(s.inner().order.len(), 1);
+        });
+    }
+
+    #[test]
+    fn dispatch_review_refresh_carries_decided_statuses() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        install_language_registry_global(vcx);
+        let session = in_memory_session_with_files(
+            vcx,
+            vec![stoat::review_session::InMemoryFile {
+                path: PathBuf::from("a.txt"),
+                base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+            }],
+        );
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        let id_before = session.read_with(vcx, |s, _| s.inner().order[0]);
+        session.update(vcx, |s, cx| {
+            s.set_status(id_before, ChunkStatus::Staged, cx);
+        });
+
+        dispatch(&ws, vcx, stoat_action::ReviewRefresh);
+        vcx.run_until_parked();
+
+        session.read_with(vcx, |s, _| {
+            let id = s.inner().order[0];
+            assert_eq!(s.inner().chunks[&id].status, ChunkStatus::Staged);
+        });
+    }
+
+    #[test]
+    fn dispatch_review_refresh_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ReviewRefresh);
+        vcx.run_until_parked();
     }
 }

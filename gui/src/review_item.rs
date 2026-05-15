@@ -34,6 +34,7 @@ pub struct ReviewItem {
     session: Entity<ReviewSession>,
     files: Vec<ReviewFileView>,
     commit_summary: Option<String>,
+    buffer_registry: Option<Entity<BufferRegistry>>,
     _session_subscription: Option<Subscription>,
 }
 
@@ -54,6 +55,7 @@ impl ReviewItem {
             session,
             files,
             commit_summary: None,
+            buffer_registry: None,
             _session_subscription: None,
         }
     }
@@ -89,15 +91,51 @@ impl ReviewItem {
                 view
             })
             .collect();
-        let subscription = cx.subscribe(&session, |_, _, _event: &ReviewSessionEvent, cx| {
+        let subscription = cx.subscribe(&session, |this, _, event: &ReviewSessionEvent, cx| {
+            if matches!(event, ReviewSessionEvent::Refreshed) {
+                this.rebuild_files(cx);
+            }
             cx.notify();
         });
         Self {
             session,
             files,
             commit_summary: None,
+            buffer_registry: Some(buffer_registry.clone()),
             _session_subscription: Some(subscription),
         }
+    }
+
+    /// Rebuild every [`ReviewFileView`] from the current
+    /// [`ReviewSession`] state. Called when the session emits
+    /// [`ReviewSessionEvent::Refreshed`] so excerpts, deletion
+    /// blocks, and the file-header text reflect the freshly
+    /// extracted hunks. Reuses [`BufferRegistry`]-backed buffers for
+    /// working-tree sources via the registry stored at
+    /// [`Self::from_session`] time; without a registry (items
+    /// constructed via [`Self::new`] in tests) this method is a
+    /// no-op.
+    pub fn rebuild_files(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(registry) = self.buffer_registry.clone() else {
+            return;
+        };
+        let (source_kind, file_specs) = snapshot_session(&self.session, cx);
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let session = self.session.clone();
+        let files: Vec<ReviewFileView> = file_specs
+            .into_iter()
+            .enumerate()
+            .map(|(file_index, spec)| {
+                let view = build_file_view(spec, source_kind, &registry, executor.clone(), cx);
+                view.editor.update(cx, |ed, cx| {
+                    ed.set_review_session(Some(session.clone()), cx);
+                    ed.set_review_file_index(Some(file_index), cx);
+                });
+                view
+            })
+            .collect();
+        self.files = files;
+        cx.notify();
     }
 
     /// Attach the commit subject line consumed by [`ItemView::tab_label`]
@@ -845,6 +883,63 @@ mod tests {
                     "editor for file {expected_index} should share the same session",
                 );
             }
+        });
+    }
+
+    #[test]
+    fn rebuild_files_updates_file_views_after_refresh() {
+        use stoat::review::ReviewFileInput as Input;
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "alpha\nbeta\n",
+            "alpha modified\nbeta\n",
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+        item.read_with(&cx, |item, _| assert_eq!(item.files().len(), 1));
+
+        session.update(&mut cx, |s, cx| {
+            s.refresh_files(
+                vec![
+                    Input {
+                        path: PathBuf::from("a.txt"),
+                        rel_path: "a.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("alpha\nbeta\n".to_string()),
+                        buffer_text: Arc::new("alpha modified\nbeta\n".to_string()),
+                    },
+                    Input {
+                        path: PathBuf::from("b.txt"),
+                        rel_path: "b.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("".to_string()),
+                        buffer_text: Arc::new("brand new\n".to_string()),
+                    },
+                ],
+                cx,
+            );
+        });
+        cx.run_until_parked();
+
+        item.read_with(&cx, |item, _| {
+            assert_eq!(
+                item.files().len(),
+                2,
+                "Refreshed event must rebuild file views to reflect the new file count",
+            );
+            assert_eq!(item.files()[0].rel_path, "a.txt");
+            assert_eq!(item.files()[1].rel_path, "b.txt");
         });
     }
 }

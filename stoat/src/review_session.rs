@@ -446,6 +446,69 @@ impl ReviewSession {
         }
     }
 
+    /// Replace the session's files with `new_files`, re-extracting
+    /// hunks via [`extract_review_hunks_changeset`]. Decided
+    /// statuses carry across the refresh keyed by
+    /// [`Self::identity_key`]; chunks whose identity changed (the
+    /// surrounding base content moved) lose their carried status
+    /// and revert to [`ChunkStatus::Pending`]. The cursor sticks to
+    /// a chunk with the same identity as the prior cursor when
+    /// such a chunk exists in the refreshed session; otherwise it
+    /// settles on the first remaining [`ChunkStatus::Pending`]
+    /// chunk, or `None` when no pending chunk exists.
+    pub fn refresh_files(&mut self, new_files: Vec<ReviewFileInput>) {
+        let prev_cursor_ident = self.cursor.current.and_then(|id| self.identity_key(id));
+        let carried: HashMap<ChunkIdentity, ChunkStatus> = self
+            .order
+            .iter()
+            .filter_map(|id| {
+                let status = self.chunks.get(id)?.status;
+                if !status.is_decided() {
+                    return None;
+                }
+                let ident = self.identity_key(*id)?;
+                Some((ident, status))
+            })
+            .collect();
+
+        self.files.clear();
+        self.chunks.clear();
+        self.order.clear();
+        self.cursor.current = None;
+
+        self.add_files(new_files);
+
+        let new_ids: Vec<_> = self.order.clone();
+        for id in &new_ids {
+            let Some(ident) = self.identity_key(*id) else {
+                continue;
+            };
+            if let Some(status) = carried.get(&ident).copied() {
+                self.set_status(*id, status);
+            }
+        }
+
+        let cursor_by_identity = prev_cursor_ident.and_then(|ident| {
+            new_ids
+                .iter()
+                .find(|id| self.identity_key(**id).as_ref() == Some(&ident))
+                .copied()
+        });
+        let cursor_fallback = || {
+            new_ids
+                .iter()
+                .find(|id| {
+                    self.chunks
+                        .get(id)
+                        .map(|c| c.status == ChunkStatus::Pending)
+                        .unwrap_or(false)
+                })
+                .copied()
+        };
+        self.cursor.current = cursor_by_identity.or_else(cursor_fallback);
+        self.version += 1;
+    }
+
     /// Toggle between `Staged` and `Unstaged` for the given chunk. Chunks
     /// currently in `Pending` or `Skipped` flip to `Staged`, giving users
     /// a one-key path from "not looked at" into the accept lane.
@@ -863,6 +926,112 @@ mod tests {
         let k2 = s2.identity_key(ids2[0]).unwrap();
 
         assert_ne!(k1, k2);
+    }
+
+    fn refresh_input(path: &str, base: &str, buffer: &str) -> ReviewFileInput {
+        ReviewFileInput {
+            path: PathBuf::from(path),
+            rel_path: path.to_string(),
+            language: None,
+            base_text: Arc::new(base.to_string()),
+            buffer_text: Arc::new(buffer.to_string()),
+        }
+    }
+
+    #[test]
+    fn refresh_files_preserves_decided_status_by_identity() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        s.set_status(ids[0], ChunkStatus::Staged);
+        let ident = s.identity_key(ids[0]).unwrap();
+
+        s.refresh_files(vec![refresh_input("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n")]);
+
+        let new_id = s.order[0];
+        assert_eq!(s.identity_key(new_id), Some(ident));
+        assert_eq!(s.chunks[&new_id].status, ChunkStatus::Staged);
+    }
+
+    #[test]
+    fn refresh_files_drops_pending_status_on_identity_mismatch() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        s.set_status(ids[0], ChunkStatus::Staged);
+
+        s.refresh_files(vec![refresh_input(
+            "a.txt",
+            "a\nDIFFERENT\nc\n",
+            "a\nNEW\nc\n",
+        )]);
+
+        let new_id = s.order[0];
+        assert_eq!(
+            s.chunks[&new_id].status,
+            ChunkStatus::Pending,
+            "identity mismatch must drop the carried Staged status",
+        );
+    }
+
+    #[test]
+    fn refresh_files_keeps_cursor_on_same_identity() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "a.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        assert_eq!(ids.len(), 2);
+        s.next();
+        let cursor_ident = s.identity_key(ids[1]).unwrap();
+
+        s.refresh_files(vec![refresh_input(
+            "a.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        )]);
+
+        let new_cursor = s.cursor.current.expect("cursor present");
+        assert_eq!(s.identity_key(new_cursor), Some(cursor_ident));
+    }
+
+    #[test]
+    fn refresh_files_resets_cursor_to_first_pending_when_identity_lost() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "a.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        s.set_status(ids[0], ChunkStatus::Staged);
+        s.next();
+        assert_eq!(s.cursor.current, Some(ids[1]));
+
+        // Refresh with both lines shifted: second-chunk base content
+        // moves, so its identity no longer matches. First chunk still
+        // matches and carries the Staged status.
+        s.refresh_files(vec![refresh_input(
+            "a.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nKSHIFT\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nKNEW\n",
+        )]);
+
+        let cursor = s.cursor.current.expect("cursor present");
+        assert_eq!(s.chunks[&cursor].status, ChunkStatus::Pending);
+    }
+
+    #[test]
+    fn refresh_files_with_empty_input_clears_all_chunks() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+
+        s.refresh_files(Vec::new());
+
+        assert!(s.files.is_empty());
+        assert!(s.chunks.is_empty());
+        assert!(s.order.is_empty());
+        assert_eq!(s.cursor.current, None);
     }
 
     use crate::test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER};
