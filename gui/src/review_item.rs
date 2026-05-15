@@ -7,17 +7,18 @@ use crate::{
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::MultiBuffer,
-    review_session::ReviewSession,
+    review_session::{ReviewSession, ReviewSessionEvent},
 };
 use gpui::{
-    div, App, AppContext, Context, Entity, IntoElement, Render, SharedString, Styled, Window,
+    div, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Window,
 };
 use serde_json::Value;
 use std::{ops::Range, path::PathBuf, sync::Arc};
 use stoat::{
     buffer::BufferId,
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
-    review_session::ReviewSource,
+    review_session::{ChunkStatus, ReviewSource},
 };
 use stoat_scheduler::Executor;
 
@@ -33,6 +34,7 @@ pub struct ReviewItem {
     session: Entity<ReviewSession>,
     files: Vec<ReviewFileView>,
     commit_summary: Option<String>,
+    _session_subscription: Option<Subscription>,
 }
 
 /// One file's view state: the workspace-relative path, the editor
@@ -50,6 +52,7 @@ impl ReviewItem {
             session,
             files,
             commit_summary: None,
+            _session_subscription: None,
         }
     }
 
@@ -75,10 +78,14 @@ impl ReviewItem {
             .into_iter()
             .map(|spec| build_file_view(spec, source_kind, buffer_registry, executor.clone(), cx))
             .collect();
+        let subscription = cx.subscribe(&session, |_, _, _event: &ReviewSessionEvent, cx| {
+            cx.notify();
+        });
         Self {
             session,
             files,
             commit_summary: None,
+            _session_subscription: Some(subscription),
         }
     }
 
@@ -103,6 +110,15 @@ impl ReviewItem {
     pub fn files(&self) -> &[ReviewFileView] {
         &self.files
     }
+
+    /// File index of the chunk under the session's cursor, or `None`
+    /// when the session has no current chunk or the cursor's chunk is
+    /// missing from the chunk map.
+    pub fn active_file_index(&self, cx: &App) -> Option<usize> {
+        let session = self.session.read(cx).inner();
+        let id = session.cursor.current?;
+        session.chunks.get(&id).map(|chunk| chunk.file_index)
+    }
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -117,6 +133,7 @@ struct FileSpec {
     buffer_text: Arc<String>,
     excerpt_ranges: Vec<Range<usize>>,
     deletion_blocks: Vec<BlockProperties>,
+    header_block: BlockProperties,
 }
 
 fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, Vec<FileSpec>) {
@@ -132,10 +149,14 @@ fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, V
         .map(|file| {
             let mut excerpt_ranges = Vec::new();
             let mut deletion_blocks = Vec::new();
+            let mut staged_count = 0usize;
             for chunk_id in &file.chunks {
                 let Some(chunk) = inner.chunks.get(chunk_id) else {
                     continue;
                 };
+                if matches!(chunk.status, ChunkStatus::Staged) {
+                    staged_count += 1;
+                }
                 if !chunk.buffer_byte_range.is_empty() {
                     excerpt_ranges.push(chunk.buffer_byte_range.clone());
                 }
@@ -155,12 +176,24 @@ fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, V
                     BlockStyle::Fixed,
                 ));
             }
+            let header_text = format!(
+                "> {}   {}/{} staged",
+                file.rel_path,
+                staged_count,
+                file.chunks.len()
+            );
+            let header_block = BlockProperties::from_text(
+                BlockPlacement::Above(0),
+                vec![header_text],
+                BlockStyle::Sticky,
+            );
             FileSpec {
                 path: file.path.clone(),
                 rel_path: file.rel_path.clone(),
                 buffer_text: file.buffer_text.clone(),
                 excerpt_ranges,
                 deletion_blocks,
+                header_block,
             }
         })
         .collect();
@@ -206,9 +239,10 @@ fn build_file_view(
         cx.new(|cx| DiffMap::new(buffer, cx))
     };
 
-    if !spec.deletion_blocks.is_empty() {
-        display_map.update(cx, |dm, cx| dm.insert_blocks(spec.deletion_blocks, cx));
-    }
+    let mut blocks = Vec::with_capacity(spec.deletion_blocks.len() + 1);
+    blocks.push(spec.header_block);
+    blocks.extend(spec.deletion_blocks);
+    display_map.update(cx, |dm, cx| dm.insert_blocks(blocks, cx));
 
     let editor = cx.new(|cx| {
         Editor::new(
@@ -228,8 +262,21 @@ fn build_file_view(
 }
 
 impl Render for ReviewItem {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
-        div().size_full()
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let active = self.active_file_index(cx);
+        let children: Vec<_> = self
+            .files
+            .iter()
+            .enumerate()
+            .map(|(index, file)| {
+                let dimmed = active.is_some_and(|a| a != index);
+                div()
+                    .flex_1()
+                    .opacity(if dimmed { 0.6 } else { 1.0 })
+                    .child(file.editor.clone())
+            })
+            .collect();
+        div().flex().flex_col().size_full().children(children)
     }
 }
 
@@ -630,5 +677,108 @@ mod tests {
             "deletion block must add at least one display row \
              (with_block max_point.row={max_with}, no_block max_point.row={max_without})",
         );
+    }
+
+    #[test]
+    fn from_session_inserts_file_header_block() {
+        use stoat::display_map::BlockRowKind;
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "",
+            "alpha\n",
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        let display = item.read_with(&cx, |item, cx| {
+            item.files()[0].editor.read(cx).display_map().clone()
+        });
+        let row_0_is_block = display.update(&mut cx, |dm, _| {
+            matches!(dm.snapshot().classify_row(0), BlockRowKind::Block { .. })
+        });
+        assert!(
+            row_0_is_block,
+            "row 0 must be the file-header block, not a buffer row",
+        );
+    }
+
+    #[test]
+    fn active_file_index_returns_none_when_no_cursor() {
+        let mut cx = TestAppContext::single();
+        let item = new_item(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+        );
+        item.read_with(&cx, |item, app| {
+            assert_eq!(item.active_file_index(app), None);
+        });
+    }
+
+    #[test]
+    fn active_file_index_tracks_session_cursor() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = InnerSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
+                inner.add_files(vec![
+                    ReviewFileInput {
+                        path: PathBuf::from("a.txt"),
+                        rel_path: "a.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("a\n".to_string()),
+                        buffer_text: Arc::new("aa\n".to_string()),
+                    },
+                    ReviewFileInput {
+                        path: PathBuf::from("b.txt"),
+                        rel_path: "b.txt".to_string(),
+                        language: None,
+                        base_text: Arc::new("b\n".to_string()),
+                        buffer_text: Arc::new("bb\n".to_string()),
+                    },
+                ]);
+                ReviewSession::new(inner)
+            })
+        });
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        item.read_with(&cx, |item, app| {
+            assert_eq!(
+                item.active_file_index(app),
+                Some(0),
+                "first chunk is in file 0; cursor defaults to first chunk on add_files",
+            );
+        });
+
+        // Advance the cursor and assert it moves to the next chunk.
+        session.update(&mut cx, |s, cx| {
+            s.next(cx);
+        });
+        cx.run_until_parked();
+
+        item.read_with(&cx, |item, app| {
+            assert_eq!(item.active_file_index(app), Some(1));
+        });
     }
 }
