@@ -1,6 +1,7 @@
 use crate::{
     buffer::Buffer,
     buffer_registry::BufferRegistry,
+    diff_coordinator::DiffCoordinator,
     diff_map::DiffMap,
     display_map::DisplayMap,
     dock::{Dock, DockSide},
@@ -45,6 +46,7 @@ pub struct Workspace {
     git_root: PathBuf,
     pane_tree: Entity<PaneTree>,
     buffer_registry: Entity<BufferRegistry>,
+    diff_coordinator: Entity<DiffCoordinator>,
     docks: Vec<Entity<Dock>>,
     modal_layer: Entity<ModalLayer>,
     status_bar: Entity<StatusBar>,
@@ -91,6 +93,11 @@ impl Workspace {
         };
         let status_bar = cx.new(StatusBar::new);
         let buffer_registry = cx.new(|_| BufferRegistry::new());
+        let diff_coordinator = {
+            let registry = buffer_registry.clone();
+            let git_root = git_root.clone();
+            cx.new(|cx| DiffCoordinator::new(git_root, registry, cx))
+        };
         let keymap = cx
             .try_global::<Settings>()
             .map_or_else(compile_default_keymap, compile_from_settings);
@@ -175,6 +182,7 @@ impl Workspace {
             git_root,
             pane_tree,
             buffer_registry,
+            diff_coordinator,
             docks: Vec::new(),
             modal_layer,
             status_bar,
@@ -213,6 +221,10 @@ impl Workspace {
 
     pub fn buffer_registry(&self) -> &Entity<BufferRegistry> {
         &self.buffer_registry
+    }
+
+    pub fn diff_coordinator(&self) -> &Entity<DiffCoordinator> {
+        &self.diff_coordinator
     }
 
     /// Open every path in `paths` as an [`Entity<Editor>`] hosted in
