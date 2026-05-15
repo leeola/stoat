@@ -160,6 +160,8 @@ pub(crate) fn build_rendered_rows(
         }
     }
 
+    apply_token_overlay(&texts, &mut runs, snapshot, range);
+
     texts
         .into_iter()
         .zip(runs)
@@ -243,6 +245,174 @@ fn block_fallback_color(block: &Block) -> u32 {
         },
         Some(stoat::DiffHunkStatus::Moved) => DIFF_MOVED_HEX,
         _ => BLOCK_TEXT_HEX,
+    }
+}
+
+fn token_overlay_style(color_hex: u32) -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        underline: Some(UnderlineStyle {
+            thickness: px(1.0),
+            color: Some(rgb(color_hex).into()),
+            wavy: false,
+        }),
+        ..Default::default()
+    }
+}
+
+fn buffer_side_token_color(kind: &stoat::ChangeKind, hunk_status: stoat::DiffStatus) -> u32 {
+    if matches!(kind, stoat::ChangeKind::Moved) {
+        return DIFF_MOVED_HEX;
+    }
+    match hunk_status {
+        stoat::DiffStatus::Added => DIFF_ADDED_HEX,
+        stoat::DiffStatus::Moved => DIFF_MOVED_HEX,
+        _ => DIFF_MODIFIED_HEX,
+    }
+}
+
+fn base_side_token_color(kind: &stoat::ChangeKind) -> u32 {
+    match kind {
+        stoat::ChangeKind::Moved => DIFF_MOVED_HEX,
+        _ => DIFF_DELETED_HEX,
+    }
+}
+
+/// Byte range (in the full `base_text`) of the line at
+/// `line_index` within `hunk.base_byte_range`'s slice. Matches the
+/// line splitting used by `BlockProperties::from_text` (which calls
+/// `content.lines()` and so produces line ranges without the
+/// trailing `\n`).
+fn block_line_base_range(
+    hunk: &stoat::DiffHunk,
+    base_text: &str,
+    line_index: usize,
+) -> Option<Range<usize>> {
+    let content = base_text.get(hunk.base_byte_range.clone())?;
+    let mut count = 0usize;
+    let mut start = 0usize;
+    for (i, ch) in content.char_indices() {
+        if ch == '\n' {
+            if count == line_index {
+                let mut end = i;
+                if end > start && content.as_bytes().get(end - 1) == Some(&b'\r') {
+                    end -= 1;
+                }
+                return Some(
+                    (hunk.base_byte_range.start + start)..(hunk.base_byte_range.start + end),
+                );
+            }
+            count += 1;
+            start = i + 1;
+        }
+    }
+    if count == line_index && start < content.len() {
+        return Some(
+            (hunk.base_byte_range.start + start)..(hunk.base_byte_range.start + content.len()),
+        );
+    }
+    None
+}
+
+fn apply_token_overlay(
+    texts: &[String],
+    runs: &mut [Vec<(Range<usize>, gpui::HighlightStyle)>],
+    snapshot: &DisplaySnapshot,
+    range: Range<u32>,
+) {
+    let Some(diff_map) = snapshot.diff_map() else {
+        return;
+    };
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    for (idx, row_runs) in runs.iter_mut().enumerate() {
+        let display_row = range.start + idx as u32;
+        match snapshot.classify_row(display_row) {
+            BlockRowKind::Block { block, line_index } => {
+                let Block::Custom(custom) = block else {
+                    continue;
+                };
+                let Some(status) = custom.diff_status else {
+                    continue;
+                };
+                if !matches!(
+                    status,
+                    stoat::DiffHunkStatus::Deleted | stoat::DiffHunkStatus::Modified
+                ) {
+                    continue;
+                }
+                let placement_line = match custom.placement {
+                    stoat::display_map::BlockPlacement::Below(n) => n,
+                    _ => continue,
+                };
+                // `deleted_blocks()` uses
+                // `placement = Below(buffer_start_line.saturating_sub(1))`,
+                // so a placement_line of 0 may belong to a hunk starting
+                // at either row 0 or row 1.
+                let hunks = diff_map.hunks_in_range(placement_line..placement_line + 2);
+                let Some(hunk) = hunks.into_iter().find(|h| {
+                    (h.buffer_start_line == placement_line + 1
+                        || h.buffer_start_line == placement_line)
+                        && matches!(
+                            h.status,
+                            stoat::DiffHunkStatus::Deleted | stoat::DiffHunkStatus::Modified
+                        )
+                        && !h.base_byte_range.is_empty()
+                }) else {
+                    continue;
+                };
+                let Some(detail) = hunk.token_detail.as_ref() else {
+                    continue;
+                };
+                let Some(base_text) = diff_map.base_text() else {
+                    continue;
+                };
+                let Some(line_range) = block_line_base_range(hunk, base_text, line_index as usize)
+                else {
+                    continue;
+                };
+                let row_len = texts[idx].len();
+                for span in &detail.base_spans {
+                    let s = span.byte_range.start.max(line_range.start);
+                    let e = span.byte_range.end.min(line_range.end);
+                    if s >= e {
+                        continue;
+                    }
+                    let local_start = s - line_range.start;
+                    let local_end = (e - line_range.start).min(row_len);
+                    if local_start >= local_end {
+                        continue;
+                    }
+                    let color = base_side_token_color(&span.kind);
+                    row_runs.push((local_start..local_end, token_overlay_style(color)));
+                }
+            },
+            _ => {
+                let Some(buffer_point) =
+                    snapshot.display_to_buffer(DisplayPoint::new(display_row, 0))
+                else {
+                    continue;
+                };
+                let buffer_row = buffer_point.row;
+                let Some(detail) = diff_map.token_detail_for_line(buffer_row) else {
+                    continue;
+                };
+                let row_start = rope.point_to_offset(stoat_text::Point::new(buffer_row, 0));
+                let row_len = texts[idx].len();
+                let row_end = row_start + row_len;
+                let hunk_status = diff_map.status_for_line(buffer_row);
+                for span in &detail.buffer_spans {
+                    let s = span.byte_range.start.max(row_start);
+                    let e = span.byte_range.end.min(row_end);
+                    if s >= e {
+                        continue;
+                    }
+                    let local_start = s - row_start;
+                    let local_end = e - row_start;
+                    let color = buffer_side_token_color(&span.kind, hunk_status);
+                    row_runs.push((local_start..local_end, token_overlay_style(color)));
+                }
+            },
+        }
     }
 }
 
@@ -1705,5 +1875,129 @@ mod tests {
         assert_eq!(rows[0].text.as_ref(), "relocated");
         assert_eq!(rows[0].runs.len(), 1);
         assert_eq!(rows[0].runs[0].1.color.map(hex_of), Some(DIFF_MOVED_HEX));
+    }
+
+    fn snapshot_with_diff_map(
+        cx: &mut TestAppContext,
+        text: &str,
+        diff_map: stoat::DiffMap,
+    ) -> DisplaySnapshot {
+        let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let buffer_id = buffer.read_with(cx, |b, _| b.read(|tb| tb.buffer_id()));
+        let shared = buffer.read_with(cx, |b, _| b.shared().clone());
+        {
+            let mut guard = shared.write().expect("buffer lock poisoned");
+            guard.diff_map = Some(diff_map);
+        }
+        let multi_buffer = stoat::MultiBuffer::singleton(buffer_id, shared);
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut inner = stoat::DisplayMap::new(multi_buffer, executor);
+        inner.snapshot()
+    }
+
+    fn detail(
+        buffer_spans: Vec<stoat::ChangeSpan>,
+        base_spans: Vec<stoat::ChangeSpan>,
+    ) -> stoat::TokenDetail {
+        stoat::TokenDetail {
+            buffer_spans,
+            base_spans,
+        }
+    }
+
+    fn span(byte_range: Range<usize>, kind: stoat::ChangeKind) -> stoat::ChangeSpan {
+        stoat::ChangeSpan {
+            byte_range,
+            kind,
+            move_metadata: None,
+        }
+    }
+
+    fn underline_run(
+        runs: &[(Range<usize>, gpui::HighlightStyle)],
+    ) -> &(Range<usize>, gpui::HighlightStyle) {
+        runs.iter()
+            .find(|(_, style)| style.underline.is_some())
+            .expect("underline run")
+    }
+
+    fn underline_color(style: &gpui::HighlightStyle) -> Option<u32> {
+        style.underline.as_ref().and_then(|u| u.color).map(hex_of)
+    }
+
+    #[test]
+    fn token_overlay_paints_buffer_spans_as_underline() {
+        let mut cx = TestAppContext::single();
+        let hunk = stoat::DiffHunk {
+            status: stoat::DiffHunkStatus::Modified,
+            buffer_start_line: 1,
+            buffer_line_range: 1..2,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: Some(Arc::new(detail(
+                vec![span(7..10, stoat::ChangeKind::Replaced)],
+                Vec::new(),
+            ))),
+        };
+        let diff_map = stoat::DiffMap::from_hunks([hunk], None);
+        let snapshot = snapshot_with_diff_map(&mut cx, "hello\nworld", diff_map);
+
+        let rows = build_rendered_rows(&snapshot, 0..2);
+        assert_eq!(rows[1].text.as_ref(), "world");
+        let overlay = underline_run(&rows[1].runs);
+        assert_eq!(overlay.0, 1..4);
+        assert_eq!(underline_color(&overlay.1), Some(DIFF_MODIFIED_HEX));
+    }
+
+    #[test]
+    fn token_overlay_uses_moved_color_for_moved_kind() {
+        let mut cx = TestAppContext::single();
+        let hunk = stoat::DiffHunk {
+            status: stoat::DiffHunkStatus::Modified,
+            buffer_start_line: 0,
+            buffer_line_range: 0..1,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: Some(Arc::new(detail(
+                vec![span(0..2, stoat::ChangeKind::Moved)],
+                Vec::new(),
+            ))),
+        };
+        let diff_map = stoat::DiffMap::from_hunks([hunk], None);
+        let snapshot = snapshot_with_diff_map(&mut cx, "hi", diff_map);
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        let overlay = underline_run(&rows[0].runs);
+        assert_eq!(overlay.0, 0..2);
+        assert_eq!(underline_color(&overlay.1), Some(DIFF_MOVED_HEX));
+    }
+
+    #[test]
+    fn token_overlay_paints_base_spans_on_deleted_block() {
+        let mut cx = TestAppContext::single();
+        let base = "removed\n";
+        let hunk = stoat::DiffHunk {
+            status: stoat::DiffHunkStatus::Modified,
+            buffer_start_line: 1,
+            buffer_line_range: 1..2,
+            base_byte_range: 0..7,
+            anchor_range: None,
+            token_detail: Some(Arc::new(detail(
+                Vec::new(),
+                vec![span(0..3, stoat::ChangeKind::Replaced)],
+            ))),
+        };
+        let diff_map = stoat::DiffMap::from_hunks([hunk], Some(Arc::new(base.to_string())));
+        let snapshot = snapshot_with_diff_map(&mut cx, "kept\nstay", diff_map);
+
+        let total = snapshot.max_point().row + 1;
+        let rows = build_rendered_rows(&snapshot, 0..total);
+        let block_row = rows
+            .iter()
+            .find(|r| r.text.as_ref() == "removed")
+            .expect("deleted block row");
+        let overlay = underline_run(&block_row.runs);
+        assert_eq!(overlay.0, 0..3);
+        assert_eq!(underline_color(&overlay.1), Some(DIFF_DELETED_HEX));
     }
 }
