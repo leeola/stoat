@@ -38,6 +38,10 @@ theme default_dark {
     ui.badge.complete.fg = success;
     ui.badge.error.fg = danger;
 
+    ui.tab.inactive    = { bg: "#1e1e1e" };
+    ui.tab.active      = { bg: "#2d2d2d" };
+    ui.tab.label.fg    = "#cccccc";
+
     ui.statusbar.focused   = { fg: text, bg: muted };
     ui.statusbar.unfocused = { fg: muted, bg: black };
     ui.mode_label          = { fg: black, modifiers: [bold] };

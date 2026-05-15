@@ -43,6 +43,21 @@ pub const DEFAULT_BORDER_FOCUSED_HEX: u32 = 0x6090ff;
 /// no theme installed.
 pub const DEFAULT_STATUSBAR_FOCUSED_HEX: u32 = 0x2d2d2d;
 
+/// Fallback for the inactive tab fill when no theme overrides
+/// `ui.tab.inactive`. Matches the workspace-bg fallback so unfocused
+/// tabs read as part of the surrounding chrome.
+pub const DEFAULT_TAB_INACTIVE_HEX: u32 = 0x1e1e1e;
+
+/// Fallback for the active tab fill when no theme overrides
+/// `ui.tab.active`. Slightly lighter than the inactive fallback so
+/// the focused tab stands out against its siblings.
+pub const DEFAULT_TAB_ACTIVE_HEX: u32 = 0x2d2d2d;
+
+/// Fallback for the tab label color when no theme overrides
+/// `ui.tab.label`. Light gray so labels read against both tab
+/// fills without requiring a theme.
+pub const DEFAULT_TAB_LABEL_HEX: u32 = 0xcccccc;
+
 /// Resolve the workspace background fill from the active
 /// [`Theme`] global, falling back to [`DEFAULT_BACKGROUND_HEX`]
 /// when no theme is installed or the scope is unset.
@@ -87,6 +102,35 @@ pub fn statusbar_focused_color(cx: &App) -> Hsla {
         stoat::theme::scope::UI_STATUSBAR_FOCUSED,
         DEFAULT_STATUSBAR_FOCUSED_HEX,
     )
+}
+
+/// Resolve the inactive tab fill from the active [`Theme`] global,
+/// falling back to [`DEFAULT_TAB_INACTIVE_HEX`] when no theme is
+/// installed or the scope is unset. Reads the scope's `bg` channel.
+pub fn tab_inactive_color(cx: &App) -> Hsla {
+    theme_bg_or(
+        cx,
+        stoat::theme::scope::UI_TAB_INACTIVE,
+        DEFAULT_TAB_INACTIVE_HEX,
+    )
+}
+
+/// Resolve the active tab fill from the active [`Theme`] global,
+/// falling back to [`DEFAULT_TAB_ACTIVE_HEX`] when no theme is
+/// installed or the scope is unset. Reads the scope's `bg` channel.
+pub fn tab_active_color(cx: &App) -> Hsla {
+    theme_bg_or(
+        cx,
+        stoat::theme::scope::UI_TAB_ACTIVE,
+        DEFAULT_TAB_ACTIVE_HEX,
+    )
+}
+
+/// Resolve the tab label color from the active [`Theme`] global,
+/// falling back to [`DEFAULT_TAB_LABEL_HEX`] when no theme is
+/// installed or the scope is unset. Reads the scope's `fg` channel.
+pub fn tab_label_color(cx: &App) -> Hsla {
+    theme_fg_or(cx, stoat::theme::scope::UI_TAB_LABEL, DEFAULT_TAB_LABEL_HEX)
 }
 
 fn theme_fg_or(cx: &App, scope: &str, fallback_hex: u32) -> Hsla {
@@ -190,5 +234,24 @@ mod tests {
             statusbar_focused_color(cx)
         });
         assert_ne!(resolved, rgb(DEFAULT_STATUSBAR_FOCUSED_HEX).into());
+    }
+
+    #[test]
+    fn tab_active_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| tab_active_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_TAB_ACTIVE_HEX).into());
+    }
+
+    #[test]
+    fn tab_active_color_resolves_bg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme =
+            Theme::load_from_source("theme custom { ui.tab.active = { bg: blue }; }", "custom");
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            tab_active_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_TAB_ACTIVE_HEX).into());
     }
 }

@@ -1,7 +1,7 @@
-use crate::pane::Pane;
+use crate::{pane::Pane, theme};
 use gpui::{
-    div, rgb, AppContext, Context, ElementId, EntityId, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, AppContext, Context, ElementId, EntityId, InteractiveElement, IntoElement, MouseButton,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 /// Drag payload emitted when a tab is dragged out of its pane.
@@ -15,10 +15,6 @@ pub struct DraggedTab {
     pub pane: EntityId,
 }
 
-const TAB_BG_INACTIVE: u32 = 0x1e1e1e;
-const TAB_BG_ACTIVE: u32 = 0x2d2d2d;
-const TAB_FG: u32 = 0xcccccc;
-
 /// Build a tab strip for `pane`. Each rendered tab calls back into
 /// the pane on click (activate), middle-click (close), and drag-drop
 /// (reorder).
@@ -29,6 +25,10 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
     let active_index = pane.active_index();
     let pane_id = cx.entity_id();
     let item_count = pane.items().len();
+
+    let label_color = theme::tab_label_color(cx);
+    let active_bg = theme::tab_active_color(cx);
+    let inactive_bg = theme::tab_inactive_color(cx);
 
     let mut row = div().flex().flex_row().w_full();
     for ix in 0..item_count {
@@ -45,12 +45,8 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
             .id(element_id)
             .px_2()
             .py_1()
-            .text_color(rgb(TAB_FG))
-            .bg(rgb(if is_active {
-                TAB_BG_ACTIVE
-            } else {
-                TAB_BG_INACTIVE
-            }))
+            .text_color(label_color)
+            .bg(if is_active { active_bg } else { inactive_bg })
             .child(display)
             .on_click(cx.listener(move |this, _event, _window, cx| {
                 this.activate(ix, cx);
@@ -88,12 +84,12 @@ struct DraggedTabView {
 }
 
 impl Render for DraggedTabView {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         div()
             .px_2()
             .py_1()
-            .bg(rgb(TAB_BG_ACTIVE))
-            .text_color(rgb(TAB_FG))
+            .bg(theme::tab_active_color(cx))
+            .text_color(theme::tab_label_color(cx))
             .child(self.label.clone())
     }
 }
