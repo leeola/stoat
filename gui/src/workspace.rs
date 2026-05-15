@@ -4,7 +4,7 @@ use crate::{
     diff_map::DiffMap,
     display_map::DisplayMap,
     dock::{Dock, DockSide},
-    editor::{Editor, EditorMode},
+    editor::{Editor, EditorEvent, EditorMode},
     editor_input::EditorInput,
     globals::{ExecutorGlobal, FsHostGlobal},
     input_state_machine::InputStateMachine,
@@ -12,6 +12,7 @@ use crate::{
     keymap_loader::{compile_default_keymap, compile_from_settings},
     modal_layer::{ModalLayer, ModalView},
     multi_buffer::MultiBuffer,
+    pane::{Pane, PaneEvent},
     pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
     status_bar::{StatusBar, StatusItemView},
@@ -45,6 +46,9 @@ pub struct Workspace {
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
     focus_handle: FocusHandle,
+    last_window_title: Option<SharedString>,
+    _active_editor_subscription: Option<Subscription>,
+    _pane_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
 
@@ -98,9 +102,25 @@ impl Workspace {
         });
         let pane_tree_subscription =
             cx.subscribe(&pane_tree, |workspace, _, _: &PaneTreeEvent, cx| {
+                workspace.refresh_pane_subscriptions(cx);
                 workspace.broadcast_active_pane_item(cx);
                 workspace.broadcast_active_editor(cx);
             });
+        let initial_panes: Vec<Entity<Pane>> = {
+            let tree = pane_tree.read(cx);
+            tree.split_pane_ids()
+                .into_iter()
+                .filter_map(|id| tree.pane(id).cloned())
+                .collect()
+        };
+        let initial_pane_subscriptions: Vec<Subscription> = initial_panes
+            .into_iter()
+            .map(|pane| {
+                cx.subscribe(&pane, |workspace, _, _event: &PaneEvent, cx| {
+                    workspace.broadcast_active_pane_item(cx);
+                })
+            })
+            .collect();
         Self {
             name: name.into(),
             git_root,
@@ -112,6 +132,9 @@ impl Workspace {
             input_state_machine,
             editor_input,
             focus_handle: cx.focus_handle(),
+            last_window_title: None,
+            _active_editor_subscription: None,
+            _pane_subscriptions: initial_pane_subscriptions,
             _subscriptions: vec![
                 keystroke_subscription,
                 settings_subscription,
@@ -281,6 +304,64 @@ impl Workspace {
         status_bar.update(cx, |bar, cx| {
             bar.set_active_pane_item(active.as_deref(), cx);
         });
+        self.refresh_active_editor_subscription(cx);
+        cx.notify();
+    }
+
+    /// Re-bind [`Workspace::_active_editor_subscription`] to the focused
+    /// pane's active editor (if any). Each [`EditorEvent::Changed`]
+    /// notifies the workspace so the window-title formatter picks up
+    /// dirty-state transitions in the active buffer. Non-editor active
+    /// items clear the subscription -- their dirty state is constant
+    /// or rare enough that polling on pane-tree changes suffices.
+    fn refresh_active_editor_subscription(&mut self, cx: &mut Context<'_, Self>) {
+        let editor = self
+            .active_pane_item(cx)
+            .and_then(|item| item.to_any_view().downcast::<Editor>().ok());
+        self._active_editor_subscription = editor.map(|editor| {
+            cx.subscribe(&editor, |_, _, _event: &EditorEvent, cx| {
+                cx.notify();
+            })
+        });
+    }
+
+    /// Re-bind [`Workspace::_pane_subscriptions`] to every pane in the
+    /// current tree. Each pane's [`PaneEvent`] notifies the workspace
+    /// so per-pane tab changes (active item, item added/removed)
+    /// update the window-title formatter and the status bar without
+    /// going through [`PaneTreeEvent`], which only fires on tree
+    /// structure changes.
+    fn refresh_pane_subscriptions(&mut self, cx: &mut Context<'_, Self>) {
+        let panes: Vec<Entity<Pane>> = self
+            .pane_tree
+            .read(cx)
+            .split_pane_ids()
+            .into_iter()
+            .filter_map(|id| self.pane_tree.read(cx).pane(id).cloned())
+            .collect();
+        self._pane_subscriptions = panes
+            .into_iter()
+            .map(|pane| {
+                cx.subscribe(&pane, |workspace, _, _event: &PaneEvent, cx| {
+                    workspace.broadcast_active_pane_item(cx);
+                })
+            })
+            .collect();
+    }
+
+    /// Format the OS-level window title from the workspace name plus
+    /// the focused pane's active item label and dirty state. Matches
+    /// the tab-strip dirty marker convention at
+    /// [`crate::tab_bar`] (trailing ` [+]` when dirty). Falls back to
+    /// the workspace name alone when no item is active in the focused
+    /// pane.
+    fn compute_window_title(&self, cx: &App) -> SharedString {
+        let Some(item) = self.active_pane_item(cx) else {
+            return self.name.clone();
+        };
+        let label = item.tab_label(cx);
+        let dirty = if item.is_dirty(cx) { " [+]" } else { "" };
+        SharedString::from(format!("{} -- {}{}", self.name, label, dirty))
     }
 
     /// Push the focused pane's active editor (if any) into the
@@ -1009,7 +1090,13 @@ enum GotoKind {
 }
 
 impl Render for Workspace {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let title = self.compute_window_title(cx);
+        if self.last_window_title.as_ref() != Some(&title) {
+            window.set_window_title(&title);
+            self.last_window_title = Some(title);
+        }
+
         let left_docks: Vec<Entity<Dock>> = self
             .docks
             .iter()
@@ -2638,6 +2725,178 @@ mod tests {
             assert!(sm.active_editor().is_none());
             assert!(sm.editor_focus_target().is_none());
         });
+    }
+
+    #[test]
+    fn window_title_falls_back_to_workspace_name_when_no_active_item() {
+        let mut cx = TestAppContext::single();
+        let (_ws, vcx) = new_workspace_in_window(&mut cx, "demo", "/tmp/repo");
+        vcx.run_until_parked();
+        assert_eq!(vcx.window_title().as_deref(), Some("demo"));
+    }
+
+    #[test]
+    fn window_title_includes_active_item_tab_label() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "demo", "/tmp/repo");
+        let item = new_item(&mut vcx.cx, "main.rs");
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            pane.update(cx, |p, cx| {
+                p.add_item(item, cx);
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(vcx.window_title().as_deref(), Some("demo -- main.rs"));
+    }
+
+    #[test]
+    fn window_title_appends_dirty_marker_when_active_item_is_dirty() {
+        struct DirtyItem {
+            label: SharedString,
+        }
+        impl Render for DirtyItem {
+            fn render(
+                &mut self,
+                _window: &mut Window,
+                _cx: &mut Context<'_, Self>,
+            ) -> impl IntoElement {
+                div().size_full()
+            }
+        }
+        impl ItemView for DirtyItem {
+            fn tab_label(&self, _cx: &App) -> SharedString {
+                self.label.clone()
+            }
+            fn is_dirty(&self, _cx: &App) -> bool {
+                true
+            }
+            fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError>
+            where
+                Self: Sized,
+            {
+                DeserializeSnafu {
+                    reason: "DirtyItem is test-only",
+                }
+                .fail()
+            }
+        }
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "demo", "/tmp/repo");
+        let item: Box<dyn ItemHandle> = Box::new(vcx.update(|_, cx| {
+            cx.new(|_| DirtyItem {
+                label: SharedString::from("draft.txt"),
+            })
+        }));
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            pane.update(cx, |p, cx| {
+                p.add_item(item, cx);
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(vcx.window_title().as_deref(), Some("demo -- draft.txt [+]"));
+    }
+
+    #[test]
+    fn window_title_updates_when_active_item_changes() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "demo", "/tmp/repo");
+
+        let item_a = new_item(&mut vcx.cx, "a.rs");
+        let pane_a = ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            pane.update(cx, |p, cx| {
+                p.add_item(item_a, cx);
+            });
+            focus
+        });
+        let pane_b = ws.update(vcx, |w, cx| {
+            w.pane_tree
+                .update(cx, |tree, cx| tree.split(Axis::Vertical, cx))
+        });
+        let item_b = new_item(&mut vcx.cx, "b.rs");
+        ws.update(vcx, |w, cx| {
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(pane_b)
+                .expect("split pane")
+                .clone();
+            pane.update(cx, |p, cx| {
+                p.add_item(item_b, cx);
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(vcx.window_title().as_deref(), Some("demo -- b.rs"));
+
+        ws.update(vcx, |w, cx| {
+            w.pane_tree
+                .update(cx, |tree, cx| tree.set_focus(pane_a, cx));
+        });
+        vcx.run_until_parked();
+        assert_eq!(vcx.window_title().as_deref(), Some("demo -- a.rs"));
+    }
+
+    #[test]
+    fn window_title_updates_when_active_editor_buffer_dirties() {
+        use std::ops::Range;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "demo", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(vcx.window_title().as_deref(), Some("demo -- foo.rs"));
+
+        let editor = ws.read_with(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            w.pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .read(cx)
+                .active_item()
+                .expect("active item")
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("active item is Editor")
+        });
+        let buffer = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("singleton")
+                .clone()
+        });
+        buffer.update(vcx, |b, cx| {
+            b.edit(Range { start: 5, end: 5 }, " world", cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(vcx.window_title().as_deref(), Some("demo -- foo.rs [+]"));
     }
 
     #[test]
