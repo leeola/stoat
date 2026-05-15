@@ -39,6 +39,7 @@ use stoat::{
     buffer::BufferId,
     host::WatchToken,
     pane::{Axis, Direction},
+    review_session::ChunkStatus,
 };
 use stoat_action::ActionKind;
 
@@ -1024,6 +1025,18 @@ impl Workspace {
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
             ActionKind::ReviewNextChunk => self.dispatch_review_step(ReviewStepDir::Next, cx),
             ActionKind::ReviewPrevChunk => self.dispatch_review_step(ReviewStepDir::Prev, cx),
+            ActionKind::ReviewStageChunk => {
+                self.dispatch_review_set_status(ReviewStatusChange::Stage, cx)
+            },
+            ActionKind::ReviewUnstageChunk => {
+                self.dispatch_review_set_status(ReviewStatusChange::Unstage, cx)
+            },
+            ActionKind::ReviewSkipChunk => {
+                self.dispatch_review_set_status(ReviewStatusChange::Skip, cx)
+            },
+            ActionKind::ReviewToggleStage => {
+                self.dispatch_review_set_status(ReviewStatusChange::Toggle, cx)
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1288,12 +1301,48 @@ impl Workspace {
             });
         });
     }
+
+    fn dispatch_review_set_status(
+        &mut self,
+        change: ReviewStatusChange,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        let Some(id) = session.read(cx).inner().cursor.current else {
+            return;
+        };
+        session.update(cx, |session, cx| match change {
+            ReviewStatusChange::Stage => {
+                session.set_status(id, ChunkStatus::Staged, cx);
+            },
+            ReviewStatusChange::Unstage => {
+                session.set_status(id, ChunkStatus::Unstaged, cx);
+            },
+            ReviewStatusChange::Skip => {
+                session.set_status(id, ChunkStatus::Skipped, cx);
+            },
+            ReviewStatusChange::Toggle => {
+                session.toggle_stage(id, cx);
+            },
+        });
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ReviewStepDir {
     Next,
     Prev,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ReviewStatusChange {
+    Stage,
+    Unstage,
+    Skip,
+    Toggle,
 }
 
 fn absolute_path(path: &Path, cwd: Option<&Path>) -> PathBuf {
@@ -3650,5 +3699,158 @@ mod tests {
             let offset = snapshot.resolve_anchor(&ed.selections().all_anchors()[0].start);
             snapshot.rope().offset_to_point(offset).row
         })
+    }
+
+    fn cursor_chunk_status(
+        vcx: &mut VisualTestContext,
+        session: &Entity<crate::review_session::ReviewSession>,
+    ) -> Option<ChunkStatus> {
+        session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            let id = inner.cursor.current?;
+            Some(inner.chunks[&id].status)
+        })
+    }
+
+    #[test]
+    fn dispatch_review_stage_chunk_sets_cursor_chunk_to_staged() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Pending)
+        );
+
+        dispatch(&ws, vcx, stoat_action::ReviewStageChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Staged)
+        );
+    }
+
+    #[test]
+    fn dispatch_review_unstage_chunk_sets_cursor_chunk_to_unstaged() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewUnstageChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Unstaged)
+        );
+    }
+
+    #[test]
+    fn dispatch_review_skip_chunk_sets_cursor_chunk_to_skipped() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewSkipChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Skipped)
+        );
+    }
+
+    #[test]
+    fn dispatch_review_toggle_stage_flips_between_staged_and_unstaged() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleStage);
+        vcx.run_until_parked();
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Staged),
+            "pending -> staged on first toggle",
+        );
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleStage);
+        vcx.run_until_parked();
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Unstaged),
+            "staged -> unstaged on second toggle",
+        );
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleStage);
+        vcx.run_until_parked();
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Staged),
+            "unstaged -> staged on third toggle",
+        );
+    }
+
+    #[test]
+    fn dispatch_review_toggle_stage_from_skipped_promotes_to_staged() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        dispatch(&ws, vcx, stoat_action::ReviewSkipChunk);
+        vcx.run_until_parked();
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Skipped)
+        );
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleStage);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Staged)
+        );
+    }
+
+    #[test]
+    fn dispatch_review_stage_chunk_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ReviewStageChunk);
+        vcx.run_until_parked();
+    }
+
+    #[test]
+    fn dispatch_review_stage_chunk_with_no_session_cursor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = vcx.update(|_, cx| {
+            cx.new(|_| {
+                let inner = stoat::review_session::ReviewSession::new(
+                    stoat::review_session::ReviewSource::InMemory {
+                        files: Arc::new(Vec::new()),
+                    },
+                );
+                crate::review_session::ReviewSession::new(inner)
+            })
+        });
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            None,
+            "empty session has no cursor"
+        );
+
+        dispatch(&ws, vcx, stoat_action::ReviewStageChunk);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_chunk_status(vcx, &session), None);
     }
 }
