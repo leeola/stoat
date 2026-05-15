@@ -835,6 +835,7 @@ impl Editor {
         );
         let selection_color = theme::selection_color(cx);
         let cursor_color = theme::cursor_color(cx);
+        let active_line_color = theme::active_line_color(cx);
 
         let rows: Vec<render::RenderedRow> = rows
             .into_iter()
@@ -847,6 +848,7 @@ impl Editor {
                     &selection_paint,
                     selection_color,
                     cursor_color,
+                    active_line_color,
                 )
             })
             .collect();

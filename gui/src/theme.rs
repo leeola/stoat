@@ -63,6 +63,12 @@ pub const DEFAULT_TAB_LABEL_HEX: u32 = 0xcccccc;
 /// backgrounds without a theme installed.
 pub const DEFAULT_CURSOR_HEX: u32 = 0xc8d6ff;
 
+/// Fallback for the active-line row highlight when no theme overrides
+/// `ui.line_highlight`. Slightly lighter than the workspace background
+/// so the cursor's row reads against neighboring rows without a theme
+/// installed.
+pub const DEFAULT_LINE_HIGHLIGHT_HEX: u32 = 0x2a2a2a;
+
 /// Fallback for muted-text scopes (gutter line numbers, dimmed
 /// chrome text) when no theme overrides `ui.text.muted`. Medium gray
 /// so muted text reads against dark editor backgrounds without
@@ -160,6 +166,18 @@ pub fn tab_label_color(cx: &App) -> Hsla {
 /// underlying character.
 pub fn cursor_color(cx: &App) -> Hsla {
     theme_bg_or(cx, stoat::theme::scope::UI_CURSOR, DEFAULT_CURSOR_HEX)
+}
+
+/// Resolve the active-line row highlight from the active [`Theme`]
+/// global, falling back to [`DEFAULT_LINE_HIGHLIGHT_HEX`] when no
+/// theme is installed or the scope is unset. Reads the scope's `bg`
+/// channel because the highlight paints behind the row's characters.
+pub fn active_line_color(cx: &App) -> Hsla {
+    theme_bg_or(
+        cx,
+        stoat::theme::scope::UI_LINE_HIGHLIGHT,
+        DEFAULT_LINE_HIGHLIGHT_HEX,
+    )
 }
 
 /// Resolve the muted-text color (gutter line numbers, dimmed chrome
@@ -345,5 +363,26 @@ mod tests {
             muted_text_color(cx)
         });
         assert_ne!(resolved, rgb(DEFAULT_MUTED_TEXT_HEX).into());
+    }
+
+    #[test]
+    fn active_line_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| active_line_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_LINE_HIGHLIGHT_HEX).into());
+    }
+
+    #[test]
+    fn active_line_color_resolves_bg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme = Theme::load_from_source(
+            "theme custom { ui.line_highlight = { bg: blue }; }",
+            "custom",
+        );
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            active_line_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_LINE_HIGHLIGHT_HEX).into());
     }
 }

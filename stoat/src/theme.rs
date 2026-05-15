@@ -417,6 +417,8 @@ pub mod scope {
     pub const UI_SELECTION_EDITOR: &str = "ui.selection.editor";
     pub const UI_SELECTION_REVERSED: &str = "ui.selection.reversed";
 
+    pub const UI_LINE_HIGHLIGHT: &str = "ui.line_highlight";
+
     pub const UI_SEARCH_MATCH: &str = "ui.search.match";
 
     pub const UI_BORDER_FOCUSED: &str = "ui.border.focused";

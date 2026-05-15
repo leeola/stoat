@@ -265,6 +265,7 @@ pub(crate) fn render_row_element(row: RenderedRow) -> Div {
 pub(crate) struct SelectionPaint {
     pub row_selection_spans: BTreeMap<u32, Vec<Range<usize>>>,
     pub row_cursors: BTreeMap<u32, Vec<usize>>,
+    pub active_line_row: Option<u32>,
 }
 
 pub(crate) fn compute_selection_paint(
@@ -276,6 +277,20 @@ pub(crate) fn compute_selection_paint(
     let mut paint = SelectionPaint::default();
     let end_row = start_row + rendered_rows.len() as u32;
     let buffer = snapshot.buffer_snapshot();
+
+    let primary_id = selections.iter().map(|s| s.id).max();
+    if let Some(id) = primary_id {
+        let primary = selections
+            .iter()
+            .find(|s| s.id == id)
+            .expect("primary id must come from the selections slice");
+        let head_offset = buffer.resolve_anchor(&primary.head());
+        let head_point = buffer.rope().offset_to_point(head_offset);
+        let head_display = snapshot.buffer_to_display(head_point);
+        if head_display.row >= start_row && head_display.row < end_row {
+            paint.active_line_row = Some(head_display.row);
+        }
+    }
 
     for selection in selections {
         let start_offset = buffer.resolve_anchor(&selection.start);
@@ -353,9 +368,21 @@ pub(crate) fn apply_selection_paint(
     paint: &SelectionPaint,
     selection_color: Hsla,
     cursor_color: Hsla,
+    active_line_color: Hsla,
 ) -> RenderedRow {
     let RenderedRow { text, mut runs } = row;
     let mut text_owned: String = text.as_ref().to_string();
+
+    if paint.active_line_row == Some(display_row) {
+        if text_owned.is_empty() {
+            text_owned.push(' ');
+        }
+        let style = gpui::HighlightStyle {
+            background_color: Some(active_line_color),
+            ..Default::default()
+        };
+        runs.push((0..text_owned.len(), style));
+    }
 
     if let Some(spans) = paint.row_selection_spans.get(&display_row) {
         let style = gpui::HighlightStyle {
@@ -1113,6 +1140,41 @@ mod tests {
         let paint = compute_selection_paint(&snapshot, &[sel], &rows, 1);
         assert!(paint.row_selection_spans.is_empty());
         assert!(paint.row_cursors.is_empty());
+        assert_eq!(paint.active_line_row, None);
+    }
+
+    #[test]
+    fn compute_selection_paint_records_primary_head_display_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha\nbeta\ngamma");
+        let rows = rows_for(&snapshot);
+        let sel = cursor_at(&snapshot, 8, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 0);
+        assert_eq!(paint.active_line_row, Some(1));
+    }
+
+    #[test]
+    fn compute_selection_paint_active_line_follows_highest_id_selection() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha\nbeta\ngamma");
+        let rows = rows_for(&snapshot);
+        let secondary = cursor_at(&snapshot, 0, 1);
+        let primary = cursor_at(&snapshot, 8, 5);
+
+        let paint = compute_selection_paint(&snapshot, &[secondary, primary], &rows, 0);
+        assert_eq!(paint.active_line_row, Some(1));
+    }
+
+    #[test]
+    fn compute_selection_paint_active_line_unset_when_primary_offscreen() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "row0\nrow1\nrow2\nrow3");
+        let rows = build_rendered_rows(&snapshot, 2..4);
+        let sel = cursor_at(&snapshot, 1, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 2);
+        assert_eq!(paint.active_line_row, None);
     }
 
     #[test]
@@ -1125,8 +1187,16 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let active_line_color = rgb(0x2a2a2a).into();
 
-        let painted = apply_selection_paint(row, 0, &paint, selection_color, cursor_color);
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
         assert_eq!(painted.text.as_ref(), "hello");
         assert_eq!(painted.runs.len(), 1);
         assert_eq!(painted.runs[0].0, 1..4);
@@ -1143,8 +1213,16 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let active_line_color = rgb(0x2a2a2a).into();
 
-        let painted = apply_selection_paint(row, 0, &paint, selection_color, cursor_color);
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
         assert_eq!(painted.text.as_ref(), "hello ");
         assert_eq!(painted.runs.len(), 1);
         assert_eq!(painted.runs[0].0, 5..6);
@@ -1162,8 +1240,16 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let active_line_color = rgb(0x2a2a2a).into();
 
-        let painted = apply_selection_paint(row, 0, &paint, selection_color, cursor_color);
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
         assert_eq!(painted.text.as_ref(), "hello");
         // Selection run added first, cursor run appended after; StyledText paints in
         // order so the cursor highlight wins at byte 2.
@@ -1172,6 +1258,122 @@ mod tests {
         assert_eq!(painted.runs[0].1.background_color, Some(selection_color));
         assert_eq!(painted.runs[1].0, 2..3);
         assert_eq!(painted.runs[1].1.background_color, Some(cursor_color));
+    }
+
+    #[test]
+    fn apply_selection_paint_paints_active_line_row_wide() {
+        let paint = SelectionPaint {
+            active_line_row: Some(0),
+            ..Default::default()
+        };
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: Vec::new(),
+        };
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color = rgb(0xc8d6ff).into();
+        let active_line_color = rgb(0x2a2a2a).into();
+
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
+        assert_eq!(painted.text.as_ref(), "hello");
+        assert_eq!(painted.runs.len(), 1);
+        assert_eq!(painted.runs[0].0, 0..5);
+        assert_eq!(painted.runs[0].1.background_color, Some(active_line_color));
+    }
+
+    #[test]
+    fn apply_selection_paint_skips_active_line_on_other_rows() {
+        let paint = SelectionPaint {
+            active_line_row: Some(1),
+            ..Default::default()
+        };
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: Vec::new(),
+        };
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color = rgb(0xc8d6ff).into();
+        let active_line_color = rgb(0x2a2a2a).into();
+
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
+        assert_eq!(painted.text.as_ref(), "hello");
+        assert!(painted.runs.is_empty());
+    }
+
+    #[test]
+    fn apply_selection_paint_active_line_paints_under_selection_and_cursor() {
+        let mut paint = SelectionPaint {
+            active_line_row: Some(0),
+            ..Default::default()
+        };
+        paint.row_selection_spans.insert(0, vec![0..3]);
+        paint.row_cursors.insert(0, vec![3]);
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: Vec::new(),
+        };
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color = rgb(0xc8d6ff).into();
+        let active_line_color = rgb(0x2a2a2a).into();
+
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
+        // Active-line run first (back-most), then selection, then cursor.
+        assert_eq!(painted.runs.len(), 3);
+        assert_eq!(painted.runs[0].0, 0..5);
+        assert_eq!(painted.runs[0].1.background_color, Some(active_line_color));
+        assert_eq!(painted.runs[1].0, 0..3);
+        assert_eq!(painted.runs[1].1.background_color, Some(selection_color));
+        assert_eq!(painted.runs[2].0, 3..4);
+        assert_eq!(painted.runs[2].1.background_color, Some(cursor_color));
+    }
+
+    #[test]
+    fn apply_selection_paint_active_line_appends_space_on_empty_row() {
+        let paint = SelectionPaint {
+            active_line_row: Some(0),
+            ..Default::default()
+        };
+        let row = RenderedRow {
+            text: SharedString::from(""),
+            runs: Vec::new(),
+        };
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color = rgb(0xc8d6ff).into();
+        let active_line_color = rgb(0x2a2a2a).into();
+
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
+        assert_eq!(painted.text.as_ref(), " ");
+        assert_eq!(painted.runs.len(), 1);
+        assert_eq!(painted.runs[0].0, 0..1);
+        assert_eq!(painted.runs[0].1.background_color, Some(active_line_color));
     }
 
     fn snapshot_with_block(
