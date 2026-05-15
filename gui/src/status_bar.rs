@@ -1,4 +1,5 @@
 pub mod mode_badge;
+pub mod workspace_label;
 
 use crate::{item::ItemHandle, theme};
 use gpui::{

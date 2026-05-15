@@ -43,6 +43,11 @@ pub const DEFAULT_BORDER_FOCUSED_HEX: u32 = 0x6090ff;
 /// no theme installed.
 pub const DEFAULT_STATUSBAR_FOCUSED_HEX: u32 = 0x2d2d2d;
 
+/// Fallback for the focused status-bar text color when no theme
+/// overrides `ui.statusbar.focused.fg`. Light gray so chrome labels
+/// read against the status-bar fill without requiring a theme.
+pub const DEFAULT_STATUSBAR_TEXT_HEX: u32 = 0xcccccc;
+
 /// Fallback for the inactive tab fill when no theme overrides
 /// `ui.tab.inactive`. Matches the workspace-bg fallback so unfocused
 /// tabs read as part of the surrounding chrome.
@@ -127,6 +132,19 @@ pub fn statusbar_focused_color(cx: &App) -> Hsla {
         cx,
         stoat::theme::scope::UI_STATUSBAR_FOCUSED,
         DEFAULT_STATUSBAR_FOCUSED_HEX,
+    )
+}
+
+/// Resolve the focused status-bar text color from the active [`Theme`]
+/// global, falling back to [`DEFAULT_STATUSBAR_TEXT_HEX`] when no
+/// theme is installed or the scope is unset. Reads the scope's `fg`
+/// channel so chrome labels paint over the bar's fill in the theme's
+/// foreground color.
+pub fn statusbar_text_color(cx: &App) -> Hsla {
+    theme_fg_or(
+        cx,
+        stoat::theme::scope::UI_STATUSBAR_FOCUSED,
+        DEFAULT_STATUSBAR_TEXT_HEX,
     )
 }
 
@@ -305,6 +323,27 @@ mod tests {
             statusbar_focused_color(cx)
         });
         assert_ne!(resolved, rgb(DEFAULT_STATUSBAR_FOCUSED_HEX).into());
+    }
+
+    #[test]
+    fn statusbar_text_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| statusbar_text_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_STATUSBAR_TEXT_HEX).into());
+    }
+
+    #[test]
+    fn statusbar_text_color_resolves_fg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme = Theme::load_from_source(
+            "theme custom { ui.statusbar.focused = { fg: blue }; }",
+            "custom",
+        );
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            statusbar_text_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_STATUSBAR_TEXT_HEX).into());
     }
 
     #[test]

@@ -15,7 +15,9 @@ use crate::{
     pane::{Pane, PaneEvent},
     pane_tree::{PaneTree, PaneTreeEvent},
     settings::Settings,
-    status_bar::{mode_badge::ModeBadge, StatusBar, StatusItemView},
+    status_bar::{
+        mode_badge::ModeBadge, workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
+    },
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
@@ -45,6 +47,7 @@ pub struct Workspace {
     status_bar: Entity<StatusBar>,
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
+    workspace_label: Entity<WorkspaceLabel>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -67,6 +70,7 @@ impl Workspace {
         git_root: PathBuf,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        let name = name.into();
         let workspace_handle = cx.weak_entity();
         let pane_tree = {
             let workspace = workspace_handle.clone();
@@ -123,6 +127,7 @@ impl Workspace {
             .collect();
 
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
+        let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -131,12 +136,13 @@ impl Workspace {
         };
         status_bar.update(cx, |bar, cx| {
             bar.add_left_item(mode_badge.clone(), cx);
+            bar.add_left_item(workspace_label.clone(), cx);
         });
         mode_badge.update(cx, |badge, cx| {
             badge.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         Self {
-            name: name.into(),
+            name,
             git_root,
             pane_tree,
             buffer_registry,
@@ -145,6 +151,7 @@ impl Workspace {
             status_bar,
             input_state_machine,
             editor_input,
+            workspace_label,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -270,6 +277,10 @@ impl Workspace {
 
     pub fn status_bar(&self) -> &Entity<StatusBar> {
         &self.status_bar
+    }
+
+    pub fn workspace_label(&self) -> &Entity<WorkspaceLabel> {
+        &self.workspace_label
     }
 
     /// Register a status item at the left side of the status bar.
@@ -411,7 +422,9 @@ impl Workspace {
         if self.name == name {
             return false;
         }
-        self.name = name;
+        self.name = name.clone();
+        self.workspace_label
+            .update(cx, |label, cx| label.set_name(name, cx));
         cx.emit(WorkspaceEvent::NameChanged);
         cx.notify();
         true
@@ -1426,6 +1439,33 @@ mod tests {
             ws.read_with(&cx, |w, _| w.name().clone()),
             SharedString::from("renamed")
         );
+    }
+
+    #[test]
+    fn new_registers_mode_badge_and_workspace_label_as_left_items() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let status_bar = ws.read_with(&cx, |w, _| w.status_bar().clone());
+        let (left, right) = status_bar.read_with(&cx, |bar, _| {
+            (bar.left_items().len(), bar.right_items().len())
+        });
+        assert_eq!(left, 2);
+        assert_eq!(right, 0);
+    }
+
+    #[test]
+    fn set_name_propagates_to_workspace_label() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let label = ws.read_with(&cx, |w, _| w.workspace_label().clone());
+
+        let initial = label.read_with(&cx, |l, _| l.name().clone());
+        assert_eq!(initial, SharedString::from("main"));
+
+        ws.update(&mut cx, |w, cx| w.set_name("renamed", cx));
+        cx.run_until_parked();
+        let updated = label.read_with(&cx, |l, _| l.name().clone());
+        assert_eq!(updated, SharedString::from("renamed"));
     }
 
     #[test]
@@ -2747,7 +2787,6 @@ mod tests {
         let ws = new_workspace(&mut cx, "main", "/tmp/repo");
         ws.read_with(&cx, |w, cx| {
             let bar = w.status_bar().read(cx);
-            assert_eq!(bar.left_items().len(), 1);
             assert!(bar.right_items().is_empty());
             assert!(bar.left_items()[0].to_any().downcast::<ModeBadge>().is_ok());
         });
