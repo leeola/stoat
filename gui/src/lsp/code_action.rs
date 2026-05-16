@@ -1,7 +1,9 @@
 use crate::{
+    buffer::Buffer,
     editor::Editor,
     picker::{Picker, PickerDelegate, PickerSecondary},
     theme::statusbar_text_color,
+    workspace::Workspace,
 };
 use gpui::{div, AnyElement, Context, IntoElement, ParentElement, Styled, Task, WeakEntity};
 use lsp_types::{
@@ -55,15 +57,16 @@ impl CodeActionEntry {
 /// is a no-op because the list is short and bounded by the server.
 ///
 /// On confirm:
-/// - `Direct` entries apply the carried `WorkspaceEdit` to the active editor's buffer for the
-///   entries whose URI matches that buffer. Multi-file edits are dropped at this layer (the
-///   multi-buffer apply path is a follow-up).
+/// - `Direct` entries apply the carried `WorkspaceEdit` across every open buffer the workspace
+///   tracks, including the active editor's; edits targeting paths the workspace has not opened are
+///   silently dropped (a future iteration may load them from disk).
 /// - `Command` and the `Direct` follow-up command are dispatched through the held `Arc<dyn
 ///   LspServer>` via the canonical `Executor` so the request runs in the background.
 pub struct CodeActionPickerDelegate {
     entries: Vec<CodeActionEntry>,
     selected: usize,
     editor: WeakEntity<Editor>,
+    workspace: WeakEntity<Workspace>,
     uri: Uri,
     rope: stoat_text::Rope,
     encoding: OffsetEncoding,
@@ -75,6 +78,7 @@ impl CodeActionPickerDelegate {
     pub fn new(
         entries: Vec<CodeActionEntry>,
         editor: WeakEntity<Editor>,
+        workspace: WeakEntity<Workspace>,
         uri: Uri,
         rope: stoat_text::Rope,
         encoding: OffsetEncoding,
@@ -85,20 +89,13 @@ impl CodeActionPickerDelegate {
             entries,
             selected: 0,
             editor,
+            workspace,
             uri,
             rope,
             encoding,
             server,
             executor,
         }
-    }
-
-    pub fn entries(&self) -> &[CodeActionEntry] {
-        &self.entries
-    }
-
-    pub fn selected_entry(&self) -> Option<&CodeActionEntry> {
-        self.entries.get(self.selected)
     }
 }
 
@@ -166,8 +163,16 @@ impl CodeActionPickerDelegate {
         &self,
         edit: &WorkspaceEdit,
         cx: &mut Context<'_, Picker<Self>>,
-    ) -> bool {
-        apply_workspace_edit_to_buffer(edit, &self.uri, &self.rope, self.encoding, &self.editor, cx)
+    ) -> usize {
+        apply_workspace_edit_to_buffer(
+            edit,
+            &self.uri,
+            &self.rope,
+            self.encoding,
+            &self.editor,
+            &self.workspace,
+            cx,
+        )
     }
 
     /// Spawn a `codeAction/resolve` request for `action` and apply
@@ -182,6 +187,7 @@ impl CodeActionPickerDelegate {
         let rope = self.rope.clone();
         let encoding = self.encoding;
         let editor = self.editor.clone();
+        let workspace = self.workspace.clone();
         let executor = self.executor.clone();
         cx.spawn(async move |_, cx| {
             let resolved = match server.code_action_resolve(action).await {
@@ -199,7 +205,9 @@ impl CodeActionPickerDelegate {
             let command = resolved.command;
             let _ = cx.update(|cx| {
                 if let Some(edit) = edit {
-                    apply_workspace_edit_to_buffer(&edit, &uri, &rope, encoding, &editor, cx);
+                    apply_workspace_edit_to_buffer(
+                        &edit, &uri, &rope, encoding, &editor, &workspace, cx,
+                    );
                 }
                 if let Some(command) = command {
                     let server = server.clone();
@@ -250,34 +258,63 @@ impl CodeActionPickerDelegate {
     }
 }
 
-/// Apply the text edits in `edit` whose target URI matches `uri` to
-/// the singleton buffer of `editor`. Multi-file edits are dropped
-/// for the v1 picker scope. Returns `true` when at least one
-/// `TextEdit` landed.
+/// Apply a `WorkspaceEdit` across every open buffer the workspace
+/// tracks. For each URI in the edit, the active editor's buffer is
+/// used when the URI matches (cheap path, also covers the
+/// single-file case); other URIs are looked up via
+/// [`Workspace::buffer_for_path`]. Edits whose URI is not opened are
+/// silently dropped. Each per-buffer apply sorts its text edits in
+/// reverse byte order so earlier ranges stay stable as later edits
+/// land first. Returns the number of buffers actually mutated.
 fn apply_workspace_edit_to_buffer(
     edit: &WorkspaceEdit,
-    uri: &Uri,
-    rope: &stoat_text::Rope,
+    active_uri: &Uri,
+    active_rope: &stoat_text::Rope,
     encoding: OffsetEncoding,
     editor: &WeakEntity<Editor>,
+    workspace: &WeakEntity<Workspace>,
     cx: &mut gpui::App,
-) -> bool {
-    let text_edits = collect_text_edits_for_uri(edit, uri);
-    if text_edits.is_empty() {
-        return false;
+) -> usize {
+    let by_uri = collect_text_edits_by_uri(edit);
+    if by_uri.is_empty() {
+        return 0;
     }
-    let Some(editor) = editor.upgrade() else {
-        return false;
-    };
-    let Some(buffer) = editor
-        .read(cx)
-        .multi_buffer()
-        .read(cx)
-        .as_singleton()
-        .cloned()
-    else {
-        return false;
-    };
+    let mut buffers_touched = 0usize;
+    for (uri, text_edits) in by_uri {
+        if &uri == active_uri {
+            if let Some(buffer) = editor
+                .upgrade()
+                .and_then(|e| e.read(cx).multi_buffer().read(cx).as_singleton().cloned())
+            {
+                apply_text_edits(&buffer, text_edits, active_rope, encoding, cx);
+                buffers_touched += 1;
+                continue;
+            }
+        }
+        let path = match uri_to_path(&uri) {
+            Some(p) => p,
+            None => continue,
+        };
+        let Some(workspace) = workspace.upgrade() else {
+            continue;
+        };
+        let Some(buffer) = workspace.read(cx).buffer_for_path(&path, cx) else {
+            continue;
+        };
+        let rope = buffer.read(cx).read(|tb| tb.rope().clone());
+        apply_text_edits(&buffer, text_edits, &rope, encoding, cx);
+        buffers_touched += 1;
+    }
+    buffers_touched
+}
+
+fn apply_text_edits(
+    buffer: &gpui::Entity<Buffer>,
+    text_edits: Vec<TextEdit>,
+    rope: &stoat_text::Rope,
+    encoding: OffsetEncoding,
+    cx: &mut gpui::App,
+) {
     let mut byte_edits: Vec<(std::ops::Range<usize>, String)> = text_edits
         .into_iter()
         .map(|te| {
@@ -293,7 +330,12 @@ fn apply_workspace_edit_to_buffer(
             b.edit(range, &text, cx);
         }
     });
-    true
+}
+
+fn uri_to_path(uri: &Uri) -> Option<std::path::PathBuf> {
+    let s = uri.as_str();
+    let path = s.strip_prefix("file://").unwrap_or(s);
+    Some(std::path::PathBuf::from(path))
 }
 
 /// Translate raw LSP code-action items into the picker's enum.
@@ -335,40 +377,51 @@ fn translate_code_action(ca: LspCodeAction) -> Option<CodeActionEntry> {
     }
 }
 
-fn collect_text_edits_for_uri(edit: &WorkspaceEdit, uri: &Uri) -> Vec<TextEdit> {
+/// Group every text edit in `edit` by target URI. Honors LSP
+/// precedence: `document_changes` (when set) wins over the legacy
+/// `changes` map, mirroring the spec. `DocumentChanges::Operations`
+/// resource ops (Create / Delete / Rename) are dropped; only
+/// `Edit` ops contribute text edits.
+fn collect_text_edits_by_uri(
+    edit: &WorkspaceEdit,
+) -> std::collections::HashMap<Uri, Vec<TextEdit>> {
+    use std::collections::HashMap;
+    let mut out: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     if let Some(changes) = &edit.document_changes {
-        return match changes {
-            DocumentChanges::Edits(text_doc_edits) => text_doc_edits
-                .iter()
-                .filter(|tde| &tde.text_document.uri == uri)
-                .flat_map(|tde| {
-                    tde.edits.iter().map(|annotated| match annotated {
-                        OneOf::Left(e) => e.clone(),
-                        OneOf::Right(annotated) => annotated.text_edit.clone(),
-                    })
-                })
-                .collect(),
-            DocumentChanges::Operations(ops) => ops
-                .iter()
-                .filter_map(|op| match op {
-                    DocumentChangeOperation::Edit(tde) if &tde.text_document.uri == uri => {
-                        Some(tde.edits.iter().map(|annotated| match annotated {
+        match changes {
+            DocumentChanges::Edits(text_doc_edits) => {
+                for tde in text_doc_edits {
+                    let entry = out.entry(tde.text_document.uri.clone()).or_default();
+                    for annotated in &tde.edits {
+                        entry.push(match annotated {
                             OneOf::Left(e) => e.clone(),
-                            OneOf::Right(annotated) => annotated.text_edit.clone(),
-                        }))
-                    },
-                    _ => None,
-                })
-                .flatten()
-                .collect(),
-        };
+                            OneOf::Right(a) => a.text_edit.clone(),
+                        });
+                    }
+                }
+            },
+            DocumentChanges::Operations(ops) => {
+                for op in ops {
+                    if let DocumentChangeOperation::Edit(tde) = op {
+                        let entry = out.entry(tde.text_document.uri.clone()).or_default();
+                        for annotated in &tde.edits {
+                            entry.push(match annotated {
+                                OneOf::Left(e) => e.clone(),
+                                OneOf::Right(a) => a.text_edit.clone(),
+                            });
+                        }
+                    }
+                }
+            },
+        }
+        return out;
     }
     if let Some(changes) = &edit.changes {
-        if let Some(edits) = changes.get(uri) {
-            return edits.clone();
+        for (uri, edits) in changes {
+            out.entry(uri.clone()).or_default().extend(edits.clone());
         }
     }
-    Vec::new()
+    out
 }
 
 #[cfg(test)]
@@ -448,18 +501,19 @@ mod tests {
     }
 
     #[test]
-    fn collect_text_edits_uses_changes_map_for_matching_uri() {
-        let target = make_uri("file:///tmp/a.rs");
+    fn collect_text_edits_by_uri_groups_changes_map_per_target() {
+        let target_a = make_uri("file:///tmp/a.rs");
+        let target_b = make_uri("file:///tmp/other.rs");
         let mut changes = std::collections::HashMap::new();
         changes.insert(
-            target.clone(),
+            target_a.clone(),
             vec![TextEdit {
                 range: rng(0, 0, 0, 1),
                 new_text: "X".into(),
             }],
         );
         changes.insert(
-            make_uri("file:///tmp/other.rs"),
+            target_b.clone(),
             vec![TextEdit {
                 range: rng(1, 0, 1, 1),
                 new_text: "Y".into(),
@@ -469,9 +523,10 @@ mod tests {
             changes: Some(changes),
             ..Default::default()
         };
-        let edits = collect_text_edits_for_uri(&edit, &target);
-        assert_eq!(edits.len(), 1);
-        assert_eq!(edits[0].new_text, "X");
+        let grouped = collect_text_edits_by_uri(&edit);
+        assert_eq!(grouped.len(), 2);
+        assert_eq!(grouped.get(&target_a).unwrap()[0].new_text, "X");
+        assert_eq!(grouped.get(&target_b).unwrap()[0].new_text, "Y");
     }
 
     #[test]
@@ -489,7 +544,7 @@ mod tests {
             changes: Some(changes),
             ..Default::default()
         };
-        let edits = collect_text_edits_for_uri(&edit, &target);
-        assert!(edits.is_empty());
+        let grouped = collect_text_edits_by_uri(&edit);
+        assert!(grouped.get(&target).is_none());
     }
 }

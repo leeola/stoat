@@ -291,6 +291,15 @@ impl Workspace {
         &self.buffer_registry
     }
 
+    /// Look up an open [`Entity<Buffer>`] by absolute path. Returns
+    /// `None` for paths the workspace has not opened (or has since
+    /// closed). Delegates to the path tracked by
+    /// [`crate::fs_watcher_driver::FsWatcherDriver`], which the
+    /// `open_paths` flow populates as buffers come online.
+    pub fn buffer_for_path(&self, path: &Path, cx: &App) -> Option<Entity<Buffer>> {
+        self.fs_watcher_driver.read(cx).buffer_for_path(path)
+    }
+
     pub fn diff_coordinator(&self) -> &Entity<DiffCoordinator> {
         &self.diff_coordinator
     }
@@ -2645,8 +2654,10 @@ impl Workspace {
             if entries.is_empty() {
                 return;
             }
-            let _ =
-                weak_workspace.update_in(cx, |workspace, window, cx| {
+            let _ = weak_workspace
+                .clone()
+                .update_in(cx, |workspace, window, cx| {
+                    let weak_workspace_inner = cx.weak_entity();
                     workspace.toggle_modal::<
                     crate::picker::Picker<crate::lsp::CodeActionPickerDelegate>,
                     _,
@@ -2654,6 +2665,7 @@ impl Workspace {
                     let delegate = crate::lsp::CodeActionPickerDelegate::new(
                         entries,
                         weak_editor,
+                        weak_workspace_inner,
                         uri,
                         rope,
                         encoding,

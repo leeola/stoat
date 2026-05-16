@@ -59,6 +59,16 @@ impl FsWatcherDriver {
         self.tracked.len()
     }
 
+    /// Look up the live [`Entity<Buffer>`] previously registered for
+    /// `path`. Returns `None` when no buffer is tracked for that
+    /// path or when the prior entity has dropped. Callers use this
+    /// to apply path-keyed mutations (multi-file LSP workspace
+    /// edits, rename refactors) without owning their own path-to-
+    /// entity map.
+    pub fn buffer_for_path(&self, path: &Path) -> Option<gpui::Entity<Buffer>> {
+        self.tracked.get(path)?.upgrade()
+    }
+
     fn schedule_tick(&mut self, cx: &mut Context<'_, Self>) {
         let Some(executor) = cx
             .try_global::<crate::globals::ExecutorGlobal>()
