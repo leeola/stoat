@@ -256,6 +256,7 @@ pub enum ReviewOrigin {
 // `HashMap<ChunkFingerprint, ChunkStatus>`, and re-key on load. Chunks whose
 // fingerprint no longer matches (underlying file changed externally) degrade
 // to `Pending`.
+#[derive(Clone)]
 pub struct ReviewSession {
     pub source: ReviewSource,
     pub files: Vec<ReviewFile>,

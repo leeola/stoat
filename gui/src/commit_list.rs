@@ -1,7 +1,10 @@
 use crate::{
-    globals::{ExecutorGlobal, GitHostGlobal},
+    buffer_registry::BufferRegistry,
+    globals::{ExecutorGlobal, GitHostGlobal, LanguageRegistry},
     item::{DeserializeSnafu, ItemError, ItemView},
     picker::{Picker, PickerDelegate, PickerSecondary},
+    review_item::ReviewItem,
+    review_session::ReviewSession as GuiReviewSession,
     theme::statusbar_text_color,
 };
 use gpui::{
@@ -9,10 +12,16 @@ use gpui::{
     Render, SharedString, Styled, Subscription, Task, Window,
 };
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat::{
     commit_list::CommitListState as InnerCommitListState,
-    host::{CommitFileChange, CommitInfo, GitHost},
+    host::{CommitFileChange, CommitInfo, GitHost, GitRepo},
+    review::ReviewFileInput,
+    review_session::{ReviewSession as InnerReviewSession, ReviewSource},
 };
 use stoat_scheduler::Executor;
 use time::{format_description::FormatItem, macros::format_description, OffsetDateTime};
@@ -99,39 +108,88 @@ impl CommitListState {
         cx.emit(CommitListStateEvent::Changed);
         cx.notify();
     }
+
+    /// Cache the per-file change summary for `sha`. Used by the
+    /// background preview pipeline so the right pane's file-stats
+    /// list stays in sync with the loaded preview.
+    pub fn set_summary(
+        &mut self,
+        sha: String,
+        changes: Vec<CommitFileChange>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner.summaries.insert(sha, changes);
+        cx.emit(CommitListStateEvent::Changed);
+        cx.notify();
+    }
+
+    /// Cache the built review session for `sha`. The `Arc<inner>`
+    /// shape mirrors `stoat::commit_list::CommitListState::preview_sessions`
+    /// so renderers that share the inner state see the same cache.
+    pub fn set_preview_session(
+        &mut self,
+        sha: String,
+        session: Arc<stoat::review_session::ReviewSession>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner.preview_sessions.insert(sha, session);
+        cx.emit(CommitListStateEvent::Changed);
+        cx.notify();
+    }
 }
 
 /// Pane-hosted commit-list surface. Wraps an [`Entity<CommitListState>`]
 /// and a [`Picker<CommitListDelegate>`]; renders the list on the left
 /// and a per-commit file-change preview on the right.
 ///
-/// The state subscription pulls fresh `(match_count, selected_index)`
-/// into the delegate on every [`CommitListStateEvent::Changed`]. The
-/// delegate caches these values because [`PickerDelegate::match_count`]
-/// and [`PickerDelegate::selected_index`] take `&self` without a
-/// context, so they cannot read from `Entity<...>` storage directly.
+/// The state subscription pulls fresh `(match_count, selected_index,
+/// reached_end)` into the delegate on every
+/// [`CommitListStateEvent::Changed`] and fans out a background
+/// preview load for the newly selected sha when neither cached nor
+/// already in flight. The delegate caches `count` / `selected_index`
+/// because the [`PickerDelegate`] trait's accessors take `&self`
+/// without a context.
+///
+/// Built previews land in [`Self::preview_items`] keyed by sha so
+/// re-renders don't rebuild `Entity<Editor>` instances; the
+/// rendered right pane embeds the corresponding entry directly.
 pub struct CommitListItem {
     state: Entity<CommitListState>,
     picker: Entity<Picker<CommitListDelegate>>,
+    buffer_registry: Entity<BufferRegistry>,
+    workdir: PathBuf,
+    git_host: Arc<dyn GitHost>,
+    executor: Executor,
+    loading_previews: HashSet<String>,
+    preview_items: HashMap<String, Entity<ReviewItem>>,
     _state_subscription: Subscription,
 }
 
 impl CommitListItem {
     pub fn new(
         state: Entity<CommitListState>,
+        buffer_registry: Entity<BufferRegistry>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let delegate = CommitListDelegate::new(state.clone(), cx);
         let picker = cx.new(|cx| Picker::new(delegate, window, cx));
+        let workdir = state.read(cx).inner.workdir.clone();
+        let git_host = cx.global::<GitHostGlobal>().0.clone();
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
         let subscription = {
             let picker = picker.clone();
             cx.subscribe(
                 &state,
-                move |_this, state, _event: &CommitListStateEvent, cx| {
-                    let (count, selected, reached_end) = {
+                move |this, state, _event: &CommitListStateEvent, cx| {
+                    let (count, selected, reached_end, selected_sha) = {
                         let s = state.read(cx);
-                        (s.inner.commits.len(), s.inner.selected, s.inner.reached_end)
+                        (
+                            s.inner.commits.len(),
+                            s.inner.selected,
+                            s.inner.reached_end,
+                            s.inner.selected_sha().map(String::from),
+                        )
                     };
                     picker.update(cx, |p, _cx| {
                         let delegate = p.delegate_mut();
@@ -139,6 +197,9 @@ impl CommitListItem {
                         delegate.selected = selected;
                         delegate.reached_end = reached_end;
                     });
+                    if let Some(sha) = selected_sha {
+                        this.start_preview_load(sha, cx);
+                    }
                     cx.notify();
                 },
             )
@@ -146,6 +207,12 @@ impl CommitListItem {
         Self {
             state,
             picker,
+            buffer_registry,
+            workdir,
+            git_host,
+            executor,
+            loading_previews: HashSet::new(),
+            preview_items: HashMap::new(),
             _state_subscription: subscription,
         }
     }
@@ -157,6 +224,161 @@ impl CommitListItem {
     pub fn picker(&self) -> &Entity<Picker<CommitListDelegate>> {
         &self.picker
     }
+
+    pub fn preview_items(&self) -> &HashMap<String, Entity<ReviewItem>> {
+        &self.preview_items
+    }
+
+    /// Kick off a preview load for `sha` when it is neither cached
+    /// nor already in flight. Idempotent. The completion handler
+    /// runs on the gpui foreground, where it builds the inner
+    /// `ReviewSession` from the fetched trees, stashes
+    /// `Arc<inner>` in `state.preview_sessions[sha]`, and assembles
+    /// the rendered `Entity<ReviewItem>` keyed by sha.
+    fn start_preview_load(&mut self, sha: String, cx: &mut Context<'_, Self>) {
+        let already_cached = self
+            .state
+            .read(cx)
+            .inner
+            .preview_sessions
+            .contains_key(&sha);
+        if already_cached || self.loading_previews.contains(&sha) {
+            return;
+        }
+        let workdir = self.workdir.clone();
+        let git_host = self.git_host.clone();
+        let executor = self.executor.clone();
+        self.loading_previews.insert(sha.clone());
+
+        let sha_for_task = sha.clone();
+        cx.spawn(async move |weak_self, cx| {
+            let outcome = executor
+                .spawn(async move {
+                    let repo = git_host.discover(&workdir)?;
+                    Some(fetch_preview_trees(repo.as_ref(), &workdir, &sha_for_task))
+                })
+                .await;
+            let _ = weak_self.update(cx, |this, cx| {
+                this.preview_load_landed(sha, outcome, cx);
+            });
+        })
+        .detach();
+    }
+
+    fn preview_load_landed(
+        &mut self,
+        sha: String,
+        outcome: Option<PreviewTrees>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        // `loading_previews` stays populated until the very end so the
+        // subscription handlers that fire on every `state.update`
+        // emit below see the load as still in flight and skip
+        // spawning a duplicate.
+        let Some(trees) = outcome else {
+            self.loading_previews.remove(&sha);
+            return;
+        };
+        let PreviewTrees {
+            workdir,
+            summary,
+            base_tree,
+            new_tree,
+        } = trees;
+
+        self.state
+            .update(cx, |s, cx| s.set_summary(sha.clone(), summary, cx));
+
+        let inputs = build_review_inputs(&workdir, &base_tree, &new_tree, cx);
+        if inputs.is_empty() {
+            self.loading_previews.remove(&sha);
+            return;
+        }
+
+        let mut inner_session = InnerReviewSession::new(ReviewSource::Commit {
+            workdir,
+            sha: sha.clone(),
+        });
+        inner_session.add_files(inputs);
+        if inner_session.order.is_empty() {
+            self.loading_previews.remove(&sha);
+            return;
+        }
+
+        let arc_for_state = Arc::new(inner_session.clone());
+        self.state.update(cx, |s, cx| {
+            s.set_preview_session(sha.clone(), arc_for_state, cx)
+        });
+
+        let session_entity = cx.new(|_| GuiReviewSession::new(inner_session));
+        let buffer_registry = self.buffer_registry.clone();
+        let review_item =
+            cx.new(|cx| ReviewItem::from_session(session_entity, &buffer_registry, cx));
+        self.preview_items.insert(sha.clone(), review_item);
+        self.loading_previews.remove(&sha);
+        cx.notify();
+    }
+}
+
+/// Trees fetched on the executor for a preview load. The summary is
+/// included because `GitRepo::commit_file_changes` is the same
+/// (cheap) git call shape and pairing them avoids a second
+/// foreground -> executor hop just to fetch the file-stats row.
+struct PreviewTrees {
+    workdir: PathBuf,
+    summary: Vec<CommitFileChange>,
+    base_tree: BTreeMap<PathBuf, String>,
+    new_tree: BTreeMap<PathBuf, String>,
+}
+
+fn fetch_preview_trees(repo: &dyn GitRepo, workdir: &Path, sha: &str) -> PreviewTrees {
+    let workdir = repo.workdir().unwrap_or_else(|| workdir.to_path_buf());
+    let summary = repo.commit_file_changes(sha);
+    let new_tree = repo.commit_tree(sha).unwrap_or_default();
+    let base_tree = match repo.parent_sha(sha) {
+        Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
+        None => BTreeMap::new(),
+    };
+    PreviewTrees {
+        workdir,
+        summary,
+        base_tree,
+        new_tree,
+    }
+}
+
+fn build_review_inputs(
+    workdir: &Path,
+    base_tree: &BTreeMap<PathBuf, String>,
+    new_tree: &BTreeMap<PathBuf, String>,
+    cx: &App,
+) -> Vec<ReviewFileInput> {
+    let langs = &cx.global::<LanguageRegistry>().0;
+    let mut paths: BTreeSet<&Path> = BTreeSet::new();
+    for p in base_tree.keys() {
+        paths.insert(p.as_path());
+    }
+    for p in new_tree.keys() {
+        paths.insert(p.as_path());
+    }
+    let mut inputs: Vec<ReviewFileInput> = Vec::new();
+    for rel in paths {
+        let base = base_tree.get(rel).cloned().unwrap_or_default();
+        let buffer = new_tree.get(rel).cloned().unwrap_or_default();
+        if base == buffer {
+            continue;
+        }
+        let abs = workdir.join(rel);
+        let lang = langs.for_path(&abs);
+        inputs.push(ReviewFileInput {
+            path: abs,
+            rel_path: rel.display().to_string(),
+            language: lang,
+            base_text: Arc::new(base),
+            buffer_text: Arc::new(buffer),
+        });
+    }
+    inputs
 }
 
 /// Picker delegate driven by [`Entity<CommitListState>`]. Reads commit
@@ -322,30 +544,37 @@ impl PickerDelegate for CommitListDelegate {
 
 impl Render for CommitListItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (summary, has_session) = {
+        let (summary, selected_sha) = {
             let s = self.state.read(cx);
             let sha = s.inner.selected_sha().map(String::from);
             let summary = sha
                 .as_deref()
                 .and_then(|sha| s.inner.summaries.get(sha))
                 .cloned();
-            let has_session = sha
-                .as_deref()
-                .map(|sha| s.inner.preview_sessions.contains_key(sha))
-                .unwrap_or(false);
-            (summary, has_session)
+            (summary, sha)
         };
+        let preview_item = selected_sha
+            .as_deref()
+            .and_then(|sha| self.preview_items.get(sha))
+            .cloned();
+        let loading = selected_sha
+            .as_deref()
+            .map(|sha| self.loading_previews.contains(sha))
+            .unwrap_or(false);
+
+        let preview_pane = div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .child(render_summary_strip(summary.as_deref()))
+            .child(render_preview_body(preview_item, loading));
 
         div()
             .flex()
             .flex_row()
             .size_full()
             .child(div().flex_1().child(self.picker.clone()))
-            .child(
-                div()
-                    .flex_1()
-                    .child(render_preview_pane(summary.as_deref(), has_session)),
-            )
+            .child(div().flex_1().child(preview_pane))
     }
 }
 
@@ -366,11 +595,8 @@ impl ItemView for CommitListItem {
     }
 }
 
-fn render_preview_pane(
-    summary: Option<&[CommitFileChange]>,
-    has_session: bool,
-) -> impl IntoElement {
-    let mut col = div().flex().flex_col().size_full();
+fn render_summary_strip(summary: Option<&[CommitFileChange]>) -> impl IntoElement {
+    let mut col = div().flex().flex_col();
     match summary {
         Some(changes) if !changes.is_empty() => {
             for c in changes {
@@ -386,12 +612,26 @@ fn render_preview_pane(
             col = col.child("(no file change summary)");
         },
     }
-    let footer = if has_session {
-        "(preview loaded)"
-    } else {
-        "(no preview session)"
-    };
-    col.child(footer)
+    col
+}
+
+fn render_preview_body(
+    preview_item: Option<Entity<ReviewItem>>,
+    loading: bool,
+) -> impl IntoElement {
+    let mut wrapper = div().flex_1();
+    match (preview_item, loading) {
+        (Some(item), _) => {
+            wrapper = wrapper.child(item);
+        },
+        (None, true) => {
+            wrapper = wrapper.child("(loading preview...)");
+        },
+        (None, false) => {
+            wrapper = wrapper.child("(no preview session)");
+        },
+    }
+    wrapper
 }
 
 fn format_commit_row(commit: &CommitInfo) -> String {
@@ -418,6 +658,7 @@ mod tests {
         cx.update(|cx| {
             cx.set_global(ExecutorGlobal(executor));
             cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+            cx.set_global(LanguageRegistry::standard());
         });
     }
 
@@ -472,10 +713,12 @@ mod tests {
                 CommitListState::new(inner)
             })
         });
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
         let vcx = cx.add_empty_window();
         let item = vcx.update(|window, cx| {
             let state = state.clone();
-            cx.new(|cx| CommitListItem::new(state, window, cx))
+            let registry = registry.clone();
+            cx.new(|cx| CommitListItem::new(state, registry, window, cx))
         });
         Harness {
             item,
@@ -712,6 +955,112 @@ mod tests {
             (pending_before, pending_after),
             (false, false),
             "reached_end must prevent another spawn",
+        );
+    }
+
+    fn seed_repo_with_initial_commit(git: &Arc<FakeGit>, workdir: &str, sha: &str) {
+        git.add_repo(workdir).commit_with_message(
+            sha,
+            &format!("commit {sha}"),
+            &[("a.rs", "fn a() {}\n")],
+        );
+    }
+
+    fn trigger_initial_load(h: &mut Harness<'_>) {
+        let picker = h.item.read_with(h.vcx, |item, _| item.picker.clone());
+        picker.update(h.vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+        });
+        h.settle();
+    }
+
+    #[test]
+    fn selection_change_spawns_preview_load() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        seed_repo_with_initial_commit(&git, "/repo", "c0000000");
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+
+        trigger_initial_load(&mut h);
+
+        let state_has_preview = h.state.read_with(h.vcx, |s, _| {
+            s.inner.preview_sessions.contains_key("c0000000")
+        });
+        let item_has_preview = h.item.read_with(h.vcx, |item, _| {
+            item.preview_items().contains_key("c0000000")
+        });
+        assert!(
+            state_has_preview && item_has_preview,
+            "state.preview_sessions and preview_items must both carry c0000000",
+        );
+    }
+
+    #[test]
+    fn selection_change_populates_summary() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        seed_repo_with_initial_commit(&git, "/repo", "c0000001");
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+
+        trigger_initial_load(&mut h);
+
+        let summary = h
+            .state
+            .read_with(h.vcx, |s, _| s.inner.summaries.get("c0000001").cloned());
+        let changes = summary.expect("summary cached for selected sha");
+        assert!(
+            !changes.is_empty(),
+            "first commit against empty parent tree must report at least one CommitFileChange",
+        );
+    }
+
+    #[test]
+    fn preview_load_dedupes_in_flight() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        seed_repo_with_initial_commit(&git, "/repo", "c0000002");
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+
+        trigger_initial_load(&mut h);
+
+        // Second trigger via fresh state event for the same sha must
+        // not spawn another task: the cached preview short-circuits.
+        h.state.update(h.vcx, |s, cx| s.set_selected(0, cx));
+        h.vcx.run_until_parked();
+        let loading_after = h
+            .item
+            .read_with(h.vcx, |item, _| item.loading_previews.clone());
+        assert!(
+            loading_after.is_empty(),
+            "no in-flight load expected after cache hit (got {loading_after:?})",
+        );
+    }
+
+    #[test]
+    fn empty_commit_diff_does_not_cache_preview_item() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        // Two commits with identical trees: diff produces zero hunks.
+        git.add_repo("/repo")
+            .commit_with_message("c1000000", "first", &[("a.rs", "same\n")])
+            .commit_with_parent_message("c1000001", "c1000000", "noop", &[("a.rs", "same\n")]);
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+
+        trigger_initial_load(&mut h);
+
+        let item_has_preview = h.item.read_with(h.vcx, |item, _| {
+            item.preview_items().contains_key("c1000001")
+        });
+        let summary_has_entry = h
+            .state
+            .read_with(h.vcx, |s, _| s.inner.summaries.contains_key("c1000001"));
+        assert!(
+            !item_has_preview,
+            "preview_items must skip the empty-diff commit",
+        );
+        assert!(
+            summary_has_entry,
+            "summary still caches even when no hunks are present",
         );
     }
 }
