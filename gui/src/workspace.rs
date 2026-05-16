@@ -359,6 +359,7 @@ impl Workspace {
                 ed.set_file_path(Some(absolute.clone()), cx);
                 ed.install_hover_popup(cx);
                 ed.install_completion_popup(cx);
+                ed.install_inlay_hints(cx);
             });
             let pane_id = if index == 0 {
                 self.pane_tree.read(cx).focus()

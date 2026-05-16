@@ -131,6 +131,7 @@ pub struct Editor {
     hover_debounce_task: Option<Task<()>>,
     hover_popup: Option<Entity<crate::lsp::HoverPopup>>,
     completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
+    inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
     expansion_history: Vec<std::ops::Range<usize>>,
     expansion_tip: Option<std::ops::Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
@@ -200,6 +201,7 @@ impl Editor {
             hover_debounce_task: None,
             hover_popup: None,
             completion_popup: None,
+            inlay_hints_manager: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
             blame_state: None,
@@ -734,6 +736,24 @@ impl Editor {
 
     pub fn completion_popup(&self) -> Option<&Entity<crate::lsp::CompletionPopup>> {
         self.completion_popup.as_ref()
+    }
+
+    /// Construct the [`crate::lsp::InlayHintsManager`] entity that
+    /// observes this editor's buffer edits and scroll changes and
+    /// drives `textDocument/inlayHint` requests into the editor's
+    /// [`crate::display_map::DisplayMap`]. Production wiring calls
+    /// this once after [`Self::set_workspace`].
+    pub fn install_inlay_hints(&mut self, cx: &mut Context<'_, Self>) {
+        if self.inlay_hints_manager.is_some() {
+            return;
+        }
+        let editor = cx.entity();
+        let manager = cx.new(|mgr_cx| crate::lsp::InlayHintsManager::new(editor, mgr_cx));
+        self.inlay_hints_manager = Some(manager);
+    }
+
+    pub fn inlay_hints_manager(&self) -> Option<&Entity<crate::lsp::InlayHintsManager>> {
+        self.inlay_hints_manager.as_ref()
     }
 
     /// Extend the primary selection's head to display-grid `(row, col)`,
