@@ -1,10 +1,12 @@
 use crate::buffer::{Buffer, BufferEvent};
 use gpui::{Context, Entity, EventEmitter, Subscription};
 use stoat::{
-    display_map::BlockProperties, multi_buffer::MultiBuffer as InnerMultiBuffer,
+    display_map::{BlockProperties, InlayId, InlayKind},
+    multi_buffer::MultiBuffer as InnerMultiBuffer,
     DisplayMap as InnerDisplayMap, DisplaySnapshot,
 };
 use stoat_scheduler::Executor;
+use stoat_text::Anchor;
 
 /// Entity-shaped wrapper around [`stoat::DisplayMap`]. Subscribes to the
 /// source [`Entity<Buffer>`] and re-emits [`DisplayMapEvent::Changed`]
@@ -61,6 +63,27 @@ impl DisplayMap {
         self.inner.insert_blocks(blocks);
         cx.emit(DisplayMapEvent::Changed);
         cx.notify();
+    }
+
+    /// Splice the inlay set: remove the inlays identified by `remove`
+    /// and insert new anchored inlays for each `(Anchor, String,
+    /// InlayKind)` triple in `insert`, returning the freshly-allocated
+    /// [`InlayId`]s in the same order. Emits [`DisplayMapEvent::Changed`]
+    /// when either side of the splice is non-empty; an empty-empty
+    /// call is a no-op.
+    pub fn set_inlay_hints(
+        &mut self,
+        remove: Vec<InlayId>,
+        insert: Vec<(Anchor, String, InlayKind)>,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<InlayId> {
+        if remove.is_empty() && insert.is_empty() {
+            return Vec::new();
+        }
+        let ids = self.inner.splice_inlays(remove, insert);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+        ids
     }
 }
 
@@ -200,6 +223,62 @@ mod tests {
         display_map.update(&mut cx, |dm, cx| dm.insert_blocks(Vec::new(), cx));
         cx.run_until_parked();
 
+        assert_eq!(drain(&events), Vec::<DisplayMapEvent>::new());
+    }
+
+    #[test]
+    fn set_inlay_hints_inserts_and_removes_through_wrapper() {
+        use stoat_text::Bias;
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "hello world");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        let anchor = display_map.update(&mut cx, |dm, _| {
+            let snap = dm.snapshot();
+            let buffer_snap = snap.buffer_snapshot();
+            let off = buffer_snap
+                .rope()
+                .point_to_offset(stoat_text::Point::new(0, 5));
+            buffer_snap.anchor_at(off, Bias::Right)
+        });
+
+        let ids = display_map.update(&mut cx, |dm, cx| {
+            dm.set_inlay_hints(
+                Vec::new(),
+                vec![(anchor, ": str".to_string(), InlayKind::Hint)],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+
+        let inlay_text = display_map.update(&mut cx, |dm, _| {
+            dm.snapshot().inlay_snapshot().inlay_text().to_string()
+        });
+        assert_eq!(inlay_text, "hello: str world");
+
+        let removed = display_map.update(&mut cx, |dm, cx| dm.set_inlay_hints(ids, Vec::new(), cx));
+        cx.run_until_parked();
+        assert!(removed.is_empty());
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+        let inlay_text = display_map.update(&mut cx, |dm, _| {
+            dm.snapshot().inlay_snapshot().inlay_text().to_string()
+        });
+        assert_eq!(inlay_text, "hello world");
+    }
+
+    #[test]
+    fn set_inlay_hints_empty_empty_does_not_emit() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "x");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        let ids = display_map.update(&mut cx, |dm, cx| {
+            dm.set_inlay_hints(Vec::new(), Vec::new(), cx)
+        });
+        cx.run_until_parked();
+        assert!(ids.is_empty());
         assert_eq!(drain(&events), Vec::<DisplayMapEvent>::new());
     }
 }
