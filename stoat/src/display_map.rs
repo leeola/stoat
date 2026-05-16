@@ -385,6 +385,19 @@ impl DisplayMap {
         self.highlights_dirty = true;
     }
 
+    /// Remove the inlays identified by `remove` and insert new
+    /// anchored inlays for each `(Anchor, String, InlayKind)` triple
+    /// in `insert`. Returns the freshly-allocated [`InlayId`]s in the
+    /// same order as `insert`, so callers can track the live set for
+    /// the next splice. Delegates to [`InlayMap::splice`].
+    pub fn splice_inlays(
+        &mut self,
+        remove: Vec<InlayId>,
+        insert: Vec<(Anchor, String, InlayKind)>,
+    ) -> Vec<InlayId> {
+        self.inlay_map.splice(remove, insert)
+    }
+
     pub fn highlight_inlays(
         &mut self,
         key: HighlightKey,
@@ -1183,6 +1196,37 @@ mod tests {
         let snapshot = display_map.snapshot();
         let clipped = snapshot.clip_at_line_end(DisplayPoint::new(0, 100));
         assert_eq!(clipped, DisplayPoint::new(0, 5));
+    }
+
+    #[test]
+    fn splice_inlays_inserts_and_removes_through_public_api() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let mut display_map = DisplayMap::new(multi_buffer, test_executor());
+
+        let anchor = {
+            let snap = display_map.multi_buffer.snapshot();
+            let off = snap.rope().point_to_offset(Point::new(0, 5));
+            snap.anchor_at(off, stoat_text::Bias::Right)
+        };
+
+        let inserted = display_map.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": str".to_string(), InlayKind::Hint)],
+        );
+        assert_eq!(inserted.len(), 1);
+        assert_eq!(
+            display_map.snapshot().inlay_snapshot().inlay_text(),
+            "hello: str world"
+        );
+
+        let removed = display_map.splice_inlays(inserted, Vec::new());
+        assert!(removed.is_empty());
+        assert_eq!(
+            display_map.snapshot().inlay_snapshot().inlay_text(),
+            "hello world"
+        );
     }
 
     #[test]
