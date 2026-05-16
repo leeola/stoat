@@ -1085,6 +1085,17 @@ impl Workspace {
                     self.dispatch_open_review_commit(workdir, sha, cx);
                 }
             },
+            ActionKind::OpenReviewCommitRange => {
+                if let Some(action) = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::OpenReviewCommitRange>()
+                {
+                    let workdir = action.workdir.clone();
+                    let from = action.from.clone();
+                    let to = action.to.clone();
+                    self.dispatch_open_review_commit_range(workdir, from, to, cx);
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1686,6 +1697,17 @@ impl Workspace {
     ) {
         let source = ReviewSource::Commit { workdir, sha };
         self.open_review_source(source, "OpenReviewCommit", cx);
+    }
+
+    fn dispatch_open_review_commit_range(
+        &mut self,
+        workdir: PathBuf,
+        from: String,
+        to: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let source = ReviewSource::CommitRange { workdir, from, to };
+        self.open_review_source(source, "OpenReviewCommitRange", cx);
     }
 
     /// Build a [`ReviewItem`] for `source` and add it to the
@@ -5267,5 +5289,64 @@ mod tests {
             assert_eq!(item.files().len(), 1);
             assert_eq!(item.files()[0].rel_path, "a.txt");
         });
+    }
+
+    #[test]
+    fn dispatch_open_review_commit_range_opens_review_item() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("from", &[("a.txt", "a\nOLD\nc\n")])
+            .commit_with_parent("to", "from", &[("a.txt", "a\nNEW\nc\n")]);
+        install_full_globals(vcx, fs, git);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewCommitRange {
+                workdir: PathBuf::from("/tmp/repo"),
+                from: "from".to_string(),
+                to: "to".to_string(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let item = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        item.read_with(vcx, |item, cx| {
+            assert_eq!(item.files().len(), 1);
+            assert_eq!(item.files()[0].rel_path, "a.txt");
+            assert!(matches!(
+                item.session().read(cx).inner().source,
+                ReviewSource::CommitRange {
+                    ref from, ref to, ..
+                } if from == "from" && to == "to"
+            ));
+        });
+    }
+
+    #[test]
+    fn dispatch_open_review_commit_range_with_unknown_to_sha_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("from", &[("a.txt", "a\nOLD\nc\n")]);
+        install_full_globals(vcx, fs, git);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewCommitRange {
+                workdir: PathBuf::from("/tmp/repo"),
+                from: "from".to_string(),
+                to: "ghost".to_string(),
+            },
+        );
+        vcx.run_until_parked();
+
+        assert!(active_pane_review_item(vcx, &ws).is_none());
     }
 }
