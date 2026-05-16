@@ -38,6 +38,11 @@ const COMMITS_PAGE_LIMIT: usize = 64;
 /// stays ahead of the user.
 const COMMITS_PREFETCH_GAP: usize = 8;
 
+/// Page-step size for `CommitsPageDown` / `CommitsPageUp`. Matches
+/// the TUI's `action_handlers::commits::COMMITS_PAGE_STEP` so the
+/// page-down distance is the same in both surfaces.
+pub const COMMITS_PAGE_STEP: usize = 16;
+
 /// Entity-shaped wrapper around [`stoat::commit_list::CommitListState`].
 /// Holds the underlying state and emits [`CommitListStateEvent`]s on
 /// every mutation that affects rendering, so the picker and preview
@@ -136,6 +141,20 @@ impl CommitListState {
         cx.emit(CommitListStateEvent::Changed);
         cx.notify();
     }
+
+    /// Reset the commit / preview caches to their freshly opened
+    /// state. Used by `CommitsRefresh` so the next page reload
+    /// starts from HEAD without any stale rows.
+    pub fn reset_caches(&mut self, cx: &mut Context<'_, Self>) {
+        self.inner.commits.clear();
+        self.inner.reached_end = false;
+        self.inner.selected = 0;
+        self.inner.scroll_top = 0;
+        self.inner.summaries.clear();
+        self.inner.preview_sessions.clear();
+        cx.emit(CommitListStateEvent::Changed);
+        cx.notify();
+    }
 }
 
 /// Pane-hosted commit-list surface. Wraps an [`Entity<CommitListState>`]
@@ -227,6 +246,24 @@ impl CommitListItem {
 
     pub fn preview_items(&self) -> &HashMap<String, Entity<ReviewItem>> {
         &self.preview_items
+    }
+
+    /// Discard every cached commit, summary, preview entity, and
+    /// in-flight load marker, then kick the picker's
+    /// `update_matches` so the first page reloads from HEAD. Used
+    /// by `CommitsRefresh` after external branch changes.
+    pub fn refresh(&mut self, cx: &mut Context<'_, Self>) {
+        self.loading_previews.clear();
+        self.preview_items.clear();
+        self.state.update(cx, |s, cx| s.reset_caches(cx));
+        let picker = self.picker.clone();
+        picker.update(cx, |p, picker_cx| {
+            p.delegate_mut().reached_end = false;
+            p.delegate_mut()
+                .update_matches(String::new(), picker_cx)
+                .detach();
+        });
+        cx.notify();
     }
 
     /// Kick off a preview load for `sha` when it is neither cached

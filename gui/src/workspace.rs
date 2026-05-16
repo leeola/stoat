@@ -1105,6 +1105,15 @@ impl Workspace {
                     self.dispatch_open_review_agent_edits(edits, cx);
                 }
             },
+            ActionKind::CommitsNext => self.dispatch_commits_step(CommitStep::Down(1), cx),
+            ActionKind::CommitsPrev => self.dispatch_commits_step(CommitStep::Up(1), cx),
+            ActionKind::CommitsPageDown => self.dispatch_commits_step(CommitStep::PageDown, cx),
+            ActionKind::CommitsPageUp => self.dispatch_commits_step(CommitStep::PageUp, cx),
+            ActionKind::CommitsFirst => self.dispatch_commits_step(CommitStep::First, cx),
+            ActionKind::CommitsLast => self.dispatch_commits_step(CommitStep::Last, cx),
+            ActionKind::CommitsRefresh => self.dispatch_commits_refresh(cx),
+            ActionKind::CommitsOpenReview => self.dispatch_commits_open_review(cx),
+            ActionKind::CloseCommits => self.dispatch_close_commits(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1738,6 +1747,86 @@ impl Workspace {
         self.open_review_source(source, "OpenReviewAgentEdits", cx);
     }
 
+    fn active_commit_list(&self, cx: &App) -> Option<Entity<crate::commit_list::CommitListItem>> {
+        self.active_pane_item(cx).and_then(|item| {
+            item.to_any_view()
+                .downcast::<crate::commit_list::CommitListItem>()
+                .ok()
+        })
+    }
+
+    fn dispatch_commits_step(&mut self, step: CommitStep, cx: &mut Context<'_, Self>) {
+        let Some(item) = self.active_commit_list(cx) else {
+            return;
+        };
+        let picker = item.read(cx).picker().clone();
+        let count = item.read(cx).state().read(cx).inner().commits.len();
+        if count == 0 {
+            return;
+        }
+        let selected = picker.read(cx).selected_index();
+        let last = count - 1;
+        let new_ix = match step {
+            CommitStep::Down(n) => selected.saturating_add(n).min(last),
+            CommitStep::Up(n) => selected.saturating_sub(n),
+            CommitStep::PageDown => selected
+                .saturating_add(crate::commit_list::COMMITS_PAGE_STEP)
+                .min(last),
+            CommitStep::PageUp => selected.saturating_sub(crate::commit_list::COMMITS_PAGE_STEP),
+            CommitStep::First => 0,
+            CommitStep::Last => last,
+        };
+        if new_ix == selected {
+            return;
+        }
+        picker.update(cx, |p, picker_cx| p.set_selected_index(new_ix, picker_cx));
+    }
+
+    fn dispatch_commits_refresh(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(item) = self.active_commit_list(cx) else {
+            return;
+        };
+        item.update(cx, |item, cx| item.refresh(cx));
+    }
+
+    fn dispatch_commits_open_review(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(item) = self.active_commit_list(cx) else {
+            return;
+        };
+        let (workdir, sha) = {
+            let state = item.read(cx).state().read(cx);
+            let inner = state.inner();
+            let Some(sha) = inner.selected_sha().map(String::from) else {
+                return;
+            };
+            (inner.workdir.clone(), sha)
+        };
+        self.dispatch_open_review_commit(workdir, sha, cx);
+    }
+
+    fn dispatch_close_commits(&mut self, cx: &mut Context<'_, Self>) {
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        let active_idx = pane.read(cx).active_index();
+        let is_commit_list = pane
+            .read(cx)
+            .active_item()
+            .map(|item| {
+                item.to_any_view()
+                    .downcast::<crate::commit_list::CommitListItem>()
+                    .is_ok()
+            })
+            .unwrap_or(false);
+        if !is_commit_list {
+            return;
+        }
+        pane.update(cx, |p, cx| {
+            p.remove_item(active_idx, cx);
+        });
+    }
+
     /// Build a [`ReviewItem`] for `source` and add it to the
     /// focused pane. `action_label` is a human-readable name
     /// used only for warn-level diagnostics when the scan
@@ -1778,7 +1867,8 @@ impl Workspace {
             .expect("pane tree returns its own focused pane id")
             .clone();
         pane.update(cx, |p, cx| {
-            p.add_item(Box::new(review_item), cx);
+            let index = p.add_item(Box::new(review_item), cx);
+            p.activate(index, cx);
         });
     }
 }
@@ -1788,6 +1878,20 @@ enum JumpMoveNav {
     First,
     Next,
     Prev,
+}
+
+/// Direction and magnitude for a commit-list cursor step. The
+/// `Down` / `Up` variants carry the row delta; `PageDown` /
+/// `PageUp` use [`crate::commit_list::COMMITS_PAGE_STEP`]; `First`
+/// jumps to the newest commit, `Last` to the oldest loaded commit.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum CommitStep {
+    Down(usize),
+    Up(usize),
+    PageDown,
+    PageUp,
+    First,
+    Last,
 }
 
 /// Switch the active file's editor and editor cursor to point at
@@ -5421,5 +5525,296 @@ mod tests {
         vcx.run_until_parked();
 
         assert!(active_pane_review_item(vcx, &ws).is_none());
+    }
+
+    fn install_commit_list_globals(
+        vcx: &mut VisualTestContext,
+        git: Arc<stoat::host::fake::FakeGit>,
+    ) -> Arc<stoat_scheduler::TestScheduler> {
+        use crate::globals::{ExecutorGlobal, GitHostGlobal, LanguageRegistry};
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let executor = scheduler.executor();
+        vcx.update(|_, cx| {
+            cx.set_global(ExecutorGlobal(executor));
+            cx.set_global(GitHostGlobal(git as Arc<dyn stoat::host::GitHost>));
+            if !cx.has_global::<LanguageRegistry>() {
+                cx.set_global(LanguageRegistry::standard());
+            }
+        });
+        scheduler
+    }
+
+    fn seed_commits(git: &Arc<stoat::host::fake::FakeGit>, workdir: &str, count: usize) {
+        let mut builder = git.add_repo(workdir);
+        let mut prev: Option<String> = None;
+        for i in 0..count {
+            let sha = format!("c{:04}", i);
+            let body = format!("fn a() {{ /* {i} */ }}\n");
+            match prev.as_deref() {
+                None => {
+                    builder.commit_with_message(
+                        &sha,
+                        &format!("commit {sha}"),
+                        &[("a.rs", body.as_str())],
+                    );
+                },
+                Some(parent) => {
+                    builder.commit_with_parent_message(
+                        &sha,
+                        parent,
+                        &format!("commit {sha}"),
+                        &[("a.rs", body.as_str())],
+                    );
+                },
+            };
+            prev = Some(sha);
+        }
+    }
+
+    fn install_commit_list_in_focused_pane(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        workdir: &str,
+        commits: usize,
+    ) -> (
+        Entity<crate::commit_list::CommitListItem>,
+        Entity<crate::commit_list::CommitListState>,
+        Arc<stoat::host::fake::FakeGit>,
+        Arc<stoat_scheduler::TestScheduler>,
+    ) {
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        seed_commits(&git, workdir, commits);
+        let scheduler = install_commit_list_globals(vcx, git.clone());
+
+        let state = vcx.update(|_, cx| {
+            cx.new(|_| {
+                let inner = stoat::commit_list::CommitListState::new(PathBuf::from(workdir));
+                crate::commit_list::CommitListState::new(inner)
+            })
+        });
+        let registry = ws.read_with(vcx, |w, _| w.buffer_registry().clone());
+        let item = vcx.update(|window, cx| {
+            let state = state.clone();
+            let registry = registry.clone();
+            cx.new(|cx| crate::commit_list::CommitListItem::new(state, registry, window, cx))
+        });
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            let handle: Box<dyn ItemHandle> = Box::new(item.clone());
+            pane.update(cx, |p, cx| {
+                p.add_item(handle, cx);
+            });
+        });
+        (item, state, git, scheduler)
+    }
+
+    fn settle_commits(
+        scheduler: &Arc<stoat_scheduler::TestScheduler>,
+        vcx: &mut VisualTestContext,
+    ) {
+        for _ in 0..4 {
+            scheduler.run_until_parked();
+            vcx.run_until_parked();
+        }
+    }
+
+    fn trigger_initial_commits_load(
+        item: &Entity<crate::commit_list::CommitListItem>,
+        vcx: &mut VisualTestContext,
+    ) {
+        use crate::picker::PickerDelegate;
+        let picker = item.read_with(vcx, |item, _| item.picker().clone());
+        picker.update(vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+        });
+    }
+
+    fn delegate_selected(
+        item: &Entity<crate::commit_list::CommitListItem>,
+        vcx: &mut VisualTestContext,
+    ) -> usize {
+        let picker = item.read_with(vcx, |item, _| item.picker().clone());
+        picker.read_with(vcx, |p, _| p.selected_index())
+    }
+
+    #[test]
+    fn dispatch_commits_next_advances_selection() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsNext);
+        settle_commits(&scheduler, vcx);
+
+        assert_eq!(delegate_selected(&item, vcx), 1);
+    }
+
+    #[test]
+    fn dispatch_commits_prev_clamps_at_zero() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsPrev);
+        settle_commits(&scheduler, vcx);
+
+        assert_eq!(delegate_selected(&item, vcx), 0);
+    }
+
+    #[test]
+    fn dispatch_commits_page_down_advances_by_step() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 32);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsPageDown);
+        settle_commits(&scheduler, vcx);
+
+        assert_eq!(
+            delegate_selected(&item, vcx),
+            crate::commit_list::COMMITS_PAGE_STEP,
+        );
+    }
+
+    #[test]
+    fn dispatch_commits_first_returns_to_head() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 5);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+        // Move off zero first.
+        dispatch(&ws, vcx, stoat_action::CommitsNext);
+        dispatch(&ws, vcx, stoat_action::CommitsNext);
+        settle_commits(&scheduler, vcx);
+        assert_eq!(delegate_selected(&item, vcx), 2);
+
+        dispatch(&ws, vcx, stoat_action::CommitsFirst);
+        settle_commits(&scheduler, vcx);
+
+        assert_eq!(delegate_selected(&item, vcx), 0);
+    }
+
+    #[test]
+    fn dispatch_commits_last_jumps_to_loaded_tail() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 5);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsLast);
+        settle_commits(&scheduler, vcx);
+
+        assert_eq!(delegate_selected(&item, vcx), 4);
+    }
+
+    #[test]
+    fn dispatch_commits_refresh_clears_caches() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        // After the initial load, state.commits is non-empty.
+        let before = state.read_with(vcx, |s, _| s.inner().commits.len());
+        assert_eq!(before, 3);
+
+        dispatch(&ws, vcx, stoat_action::CommitsRefresh);
+        settle_commits(&scheduler, vcx);
+
+        // Refresh clears + reloads; final state should still have 3 commits
+        // but the preview cache and loading sets must have been cleared.
+        let after = state.read_with(vcx, |s, _| s.inner().commits.len());
+        assert_eq!(after, 3, "refresh reloads the same first page");
+        let preview_count = state.read_with(vcx, |s, _| s.inner().preview_sessions.len());
+        let summary_count = state.read_with(vcx, |s, _| s.inner().summaries.len());
+        let item_previews = item.read_with(vcx, |item, _| item.preview_items().len());
+        assert_eq!(
+            (preview_count, summary_count, item_previews),
+            (1, 1, 1),
+            "refresh rebuilds caches for the current selection",
+        );
+    }
+
+    #[test]
+    fn dispatch_commits_open_review_opens_review_item() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsOpenReview);
+        settle_commits(&scheduler, vcx);
+
+        let review = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        review.read_with(vcx, |review, cx| {
+            assert!(matches!(
+                review.session().read(cx).inner().source,
+                ReviewSource::Commit { .. },
+            ));
+        });
+    }
+
+    #[test]
+    fn dispatch_close_commits_removes_commit_list() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (_item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        settle_commits(&scheduler, vcx);
+
+        // Confirm the commit list is the active item before close.
+        let active_before = ws.read_with(vcx, |w, cx| {
+            w.active_pane_item(cx)
+                .map(|item| {
+                    item.to_any_view()
+                        .downcast::<crate::commit_list::CommitListItem>()
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            active_before,
+            "commit list must be the active item before close"
+        );
+
+        dispatch(&ws, vcx, stoat_action::CloseCommits);
+        settle_commits(&scheduler, vcx);
+
+        let active_after = ws.read_with(vcx, |w, cx| {
+            w.active_pane_item(cx)
+                .map(|item| {
+                    item.to_any_view()
+                        .downcast::<crate::commit_list::CommitListItem>()
+                        .is_ok()
+                })
+                .unwrap_or(false)
+        });
+        assert!(
+            !active_after,
+            "CloseCommits must remove the commit-list item"
+        );
     }
 }
