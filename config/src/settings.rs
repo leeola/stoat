@@ -41,6 +41,23 @@ pub struct ToolPermissions {
     pub always_deny: Vec<String>,
 }
 
+/// Spawn arguments for a per-language LSP server. The LSP launcher
+/// reads the matching entry from
+/// [`Settings::language_servers`] (keyed by language name) and uses
+/// `command` plus `args` as the child-process invocation, with each
+/// `env` pair exported into the child's environment.
+///
+/// Populated from stcfg paths
+/// `lsp.<lang>.command = "..."`,
+/// `lsp.<lang>.args = ["...", ...]`,
+/// `lsp.<lang>.env.<KEY> = "..."`.
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub struct LanguageServerCommand {
+    pub command: String,
+    pub args: Vec<String>,
+    pub env: BTreeMap<String, String>,
+}
+
 /// Top-level resolved settings struct.
 #[derive(Debug, Default, Clone, PartialEq)]
 pub struct Settings {
@@ -77,6 +94,12 @@ pub struct Settings {
     /// Chrome font size in logical pixels. Set via
     /// `ui.font.size = 14;`.
     pub ui_font_size: Option<f32>,
+    /// Per-language LSP server commands keyed by language name
+    /// (e.g. `rust`, `typescript`). Empty when no
+    /// `lsp.<lang>.*` settings are present. Right-hand wins on
+    /// merge: an override naming one language replaces that key
+    /// entirely without touching others.
+    pub language_servers: BTreeMap<String, LanguageServerCommand>,
 }
 
 impl Settings {
@@ -105,6 +128,8 @@ impl Settings {
         mode_badges.extend(other.mode_badges);
         let mut claude_permissions = self.claude_permissions;
         claude_permissions.extend(other.claude_permissions);
+        let mut language_servers = self.language_servers;
+        language_servers.extend(other.language_servers);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             claude_default_placement: other
@@ -118,6 +143,7 @@ impl Settings {
             editor_font_size: other.editor_font_size.or(self.editor_font_size),
             ui_font_family: other.ui_font_family.or(self.ui_font_family),
             ui_font_size: other.ui_font_size.or(self.ui_font_size),
+            language_servers,
         }
     }
 
@@ -211,6 +237,39 @@ impl Settings {
                     _ => {},
                 }
             },
+            ["lsp", lang, "command"] => {
+                if let Value::String(s) = &setting.value.node {
+                    self.language_servers
+                        .entry((*lang).to_string())
+                        .or_default()
+                        .command = s.clone();
+                }
+            },
+            ["lsp", lang, "args"] => {
+                let Value::Array(items) = &setting.value.node else {
+                    return;
+                };
+                let args: Vec<String> = items
+                    .iter()
+                    .filter_map(|item| match &item.node {
+                        Value::String(s) => Some(s.clone()),
+                        _ => None,
+                    })
+                    .collect();
+                self.language_servers
+                    .entry((*lang).to_string())
+                    .or_default()
+                    .args = args;
+            },
+            ["lsp", lang, "env", key] => {
+                if let Value::String(s) = &setting.value.node {
+                    self.language_servers
+                        .entry((*lang).to_string())
+                        .or_default()
+                        .env
+                        .insert((*key).to_string(), s.clone());
+                }
+            },
             _ => {},
         }
     }
@@ -243,6 +302,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -263,6 +323,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -283,6 +344,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -312,6 +374,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: Some(true),
@@ -324,6 +387,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
@@ -338,6 +402,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -355,6 +420,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
@@ -370,6 +436,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -398,6 +465,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -418,6 +486,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -438,6 +507,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -467,6 +537,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
@@ -482,6 +553,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -502,6 +574,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -522,6 +595,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -539,6 +613,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
@@ -551,6 +626,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
     }
@@ -568,6 +644,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
@@ -580,6 +657,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            language_servers: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
@@ -594,6 +672,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                language_servers: BTreeMap::new(),
             }
         );
     }
@@ -901,5 +980,173 @@ mod tests {
         assert_eq!(merged.editor_font_size, Some(13.0));
         assert_eq!(merged.ui_font_family, Some("SF Pro".to_string()));
         assert_eq!(merged.ui_font_size, Some(14.0));
+    }
+
+    #[test]
+    fn from_config_extracts_lsp_command() {
+        let config = parse_ok(r#"on init { lsp.rust.command = "rust-analyzer"; }"#);
+        let settings = Settings::from_config(&config);
+        let rust = settings.language_servers.get("rust").expect("rust entry");
+        assert_eq!(rust.command, "rust-analyzer");
+        assert!(rust.args.is_empty());
+        assert!(rust.env.is_empty());
+    }
+
+    #[test]
+    fn from_config_extracts_lsp_args() {
+        let config = parse_ok(
+            r#"on init {
+                lsp.rust.args = ["--stdio", "--log", "info"];
+            }"#,
+        );
+        let settings = Settings::from_config(&config);
+        let rust = settings.language_servers.get("rust").expect("rust entry");
+        assert_eq!(
+            rust.args,
+            vec![
+                "--stdio".to_string(),
+                "--log".to_string(),
+                "info".to_string(),
+            ],
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_lsp_env_entries() {
+        let config = parse_ok(
+            r#"on init {
+                lsp.rust.env.RUST_LOG = "debug";
+                lsp.rust.env.RA_LOG = "trace";
+            }"#,
+        );
+        let settings = Settings::from_config(&config);
+        let rust = settings.language_servers.get("rust").expect("rust entry");
+        assert_eq!(
+            rust.env,
+            BTreeMap::from([
+                ("RUST_LOG".to_string(), "debug".to_string()),
+                ("RA_LOG".to_string(), "trace".to_string()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn from_config_combines_lsp_subfields_for_same_language() {
+        let config = parse_ok(
+            r#"on init {
+                lsp.rust.command = "rust-analyzer";
+                lsp.rust.args = ["--stdio"];
+                lsp.rust.env.RUST_LOG = "info";
+            }"#,
+        );
+        let settings = Settings::from_config(&config);
+        let rust = settings.language_servers.get("rust").expect("rust entry");
+        assert_eq!(
+            rust,
+            &LanguageServerCommand {
+                command: "rust-analyzer".to_string(),
+                args: vec!["--stdio".to_string()],
+                env: BTreeMap::from([("RUST_LOG".to_string(), "info".to_string())]),
+            },
+        );
+    }
+
+    #[test]
+    fn from_config_keeps_lsp_entries_per_language() {
+        let config = parse_ok(
+            r#"on init {
+                lsp.rust.command = "rust-analyzer";
+                lsp.typescript.command = "typescript-language-server";
+                lsp.typescript.args = ["--stdio"];
+            }"#,
+        );
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.language_servers.len(), 2);
+        assert_eq!(
+            settings
+                .language_servers
+                .get("rust")
+                .map(|e| e.command.as_str()),
+            Some("rust-analyzer"),
+        );
+        let ts = settings
+            .language_servers
+            .get("typescript")
+            .expect("typescript entry");
+        assert_eq!(ts.command, "typescript-language-server");
+        assert_eq!(ts.args, vec!["--stdio".to_string()]);
+    }
+
+    #[test]
+    fn from_config_ignores_lsp_command_with_wrong_value_type() {
+        let config = parse_ok("on init { lsp.rust.command = 42; }");
+        assert!(Settings::from_config(&config).language_servers.is_empty());
+    }
+
+    #[test]
+    fn from_config_ignores_lsp_args_with_non_array_value() {
+        let config = parse_ok(r#"on init { lsp.rust.args = "not-an-array"; }"#);
+        assert!(Settings::from_config(&config).language_servers.is_empty());
+    }
+
+    #[test]
+    fn from_config_ignores_non_string_lsp_args_items() {
+        let config = parse_ok(r#"on init { lsp.rust.args = ["--stdio", 42, true]; }"#);
+        let settings = Settings::from_config(&config);
+        let rust = settings.language_servers.get("rust").expect("rust entry");
+        assert_eq!(rust.args, vec!["--stdio".to_string()]);
+    }
+
+    #[test]
+    fn merge_language_servers_replaces_per_key() {
+        let left = Settings {
+            language_servers: BTreeMap::from([
+                (
+                    "rust".to_string(),
+                    LanguageServerCommand {
+                        command: "rust-analyzer".to_string(),
+                        args: vec!["--left".to_string()],
+                        env: BTreeMap::new(),
+                    },
+                ),
+                (
+                    "python".to_string(),
+                    LanguageServerCommand {
+                        command: "pyright".to_string(),
+                        args: vec![],
+                        env: BTreeMap::new(),
+                    },
+                ),
+            ]),
+            ..Settings::default()
+        };
+        let right = Settings {
+            language_servers: BTreeMap::from([(
+                "rust".to_string(),
+                LanguageServerCommand {
+                    command: "rust-analyzer-override".to_string(),
+                    args: vec![],
+                    env: BTreeMap::from([("RUST_LOG".to_string(), "warn".to_string())]),
+                },
+            )]),
+            ..Settings::default()
+        };
+        let merged = left.merge(right);
+        assert_eq!(
+            merged.language_servers.get("rust"),
+            Some(&LanguageServerCommand {
+                command: "rust-analyzer-override".to_string(),
+                args: vec![],
+                env: BTreeMap::from([("RUST_LOG".to_string(), "warn".to_string())]),
+            }),
+        );
+        assert_eq!(
+            merged.language_servers.get("python"),
+            Some(&LanguageServerCommand {
+                command: "pyright".to_string(),
+                args: vec![],
+                env: BTreeMap::new(),
+            }),
+        );
     }
 }
