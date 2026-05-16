@@ -12,7 +12,10 @@ use gpui::{
     Styled, Window,
 };
 use serde_json::Value;
-use std::{ops::Range, path::PathBuf};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+};
 use stoat::{buffer::BufferId, host::ConflictedFile};
 
 const MISSING_SIDE_PLACEHOLDER: &str = "(file not present)\n";
@@ -124,6 +127,14 @@ impl ConflictItem {
         self.result.buffer.read(cx).text()
     }
 
+    /// Repository-relative path of the conflicted file this view
+    /// resolves. Used by the workspace's `ConflictApply` dispatcher to
+    /// match an open view against the [`stoat::host::ConflictedFile`]
+    /// list carried on [`stoat::rebase::RebasePause::Conflict`].
+    pub(crate) fn path(&self) -> &Path {
+        &self.rel_path
+    }
+
     /// Resolve the file by replacing the entire result buffer with
     /// the ancestor's content. Yields an empty buffer when the file
     /// had no common ancestor (`ConflictedFile.ancestor = None`).
@@ -139,6 +150,17 @@ impl ConflictItem {
     /// complete `<<<<<<< / ======= / >>>>>>>` block.
     pub(crate) fn has_unresolved_conflicts(&self, cx: &App) -> bool {
         has_any_conflict_block(&self.result_buffer_text(cx))
+    }
+
+    /// Overwrite the result buffer with `text`. Used by tests that
+    /// need deterministic resolved content without driving cursor
+    /// motion plus [`ConflictItem::take_side`].
+    #[cfg(test)]
+    pub(crate) fn set_result_buffer_text_for_test(&self, text: &str, cx: &mut Context<'_, Self>) {
+        let len = self.result_buffer_text(cx).len();
+        self.result.buffer.update(cx, |buf, cx| {
+            buf.edit(0..len, text, cx);
+        });
     }
 }
 

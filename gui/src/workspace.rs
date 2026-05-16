@@ -40,8 +40,9 @@ use std::{
 };
 use stoat::{
     buffer::BufferId,
-    host::WatchToken,
+    host::{CherryPickOutcome, GitApplyError, RebaseError, RebaseTodo, WatchToken},
     pane::{Axis, Direction},
+    rebase::{ActiveRebase, RebaseEntry, RebasePause},
     review::ReviewFileInput,
     review_apply::{chunk_to_unified_diff, remove_chunks_from_buffer},
     review_session::{ChunkStatus, ReviewSource},
@@ -79,6 +80,7 @@ pub struct Workspace {
     fs_watcher_driver: Entity<FsWatcherDriver>,
     fs_watch_tokens: HashMap<PathBuf, WatchToken>,
     buffer_paths: HashMap<BufferId, PathBuf>,
+    rebase_active: Option<ActiveRebase>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -246,6 +248,7 @@ impl Workspace {
             fs_watcher_driver,
             fs_watch_tokens: HashMap::new(),
             buffer_paths: HashMap::new(),
+            rebase_active: None,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -1125,6 +1128,7 @@ impl Workspace {
             ActionKind::ConflictNextFile => self.dispatch_conflict_nav(ConflictNavDir::Next, cx),
             ActionKind::ConflictPrevFile => self.dispatch_conflict_nav(ConflictNavDir::Prev, cx),
             ActionKind::ConflictSkipEntry => self.dispatch_conflict_skip_entry(cx),
+            ActionKind::ConflictApply => self.dispatch_conflict_apply(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1375,6 +1379,203 @@ impl Workspace {
         conflict_item.update(cx, |item, cx| item.skip_entry(cx));
     }
 
+    fn dispatch_conflict_apply(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(active) = self.rebase_active.as_ref() else {
+            return;
+        };
+        let Some(RebasePause::Conflict {
+            source_sha, files, ..
+        }) = active.pause.as_ref()
+        else {
+            return;
+        };
+        let source_sha = source_sha.clone();
+        let conflicted_paths: Vec<PathBuf> = files.iter().map(|f| f.path.clone()).collect();
+        let workdir = active.workdir.clone();
+        let current_head = active.current_head.clone();
+
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+
+        let resolutions: HashMap<PathBuf, String> = pane
+            .read(cx)
+            .items()
+            .iter()
+            .filter_map(|item| {
+                let conflict = item.to_any_view().downcast::<ConflictItem>().ok()?;
+                let conflict = conflict.read(cx);
+                Some((
+                    conflict.path().to_path_buf(),
+                    conflict.result_buffer_text(cx),
+                ))
+            })
+            .collect();
+
+        if !conflicted_paths.iter().all(|p| resolutions.contains_key(p)) {
+            tracing::warn!(
+                "ConflictApply: not every conflicted file has an open view; aborting apply",
+            );
+            return;
+        }
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("ConflictApply: no git repo at {}", workdir.display());
+            return;
+        };
+        let Some(mut tree) = repo.commit_tree(&current_head) else {
+            tracing::warn!("ConflictApply: current_head {current_head} has no tree",);
+            return;
+        };
+        for path in &conflicted_paths {
+            if let Some(text) = resolutions.get(path) {
+                tree.insert(path.clone(), text.clone());
+            }
+        }
+
+        let message = format!("conflict-resolved {source_sha}");
+        let new_sha = match repo.create_commit(
+            Some(&current_head),
+            &tree,
+            &message,
+            "stoat",
+            "stoat@example.invalid",
+        ) {
+            Ok(sha) => sha,
+            Err(GitApplyError::Backend { reason, .. }) => {
+                tracing::warn!("ConflictApply: create_commit failed: {reason}");
+                return;
+            },
+        };
+
+        if let Some(active) = self.rebase_active.as_mut() {
+            active.current_head = new_sha.clone();
+            active.last_pick_sha = Some(new_sha);
+            active.last_message = Some(message);
+            active.pause = None;
+        }
+
+        pane.update(cx, |p, cx| {
+            let conflict_indices: Vec<usize> = p
+                .items()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    item.to_any_view()
+                        .downcast::<ConflictItem>()
+                        .ok()
+                        .map(|_| i)
+                })
+                .collect();
+            for idx in conflict_indices.into_iter().rev() {
+                p.remove_item(idx, cx);
+            }
+        });
+
+        self.continue_rebase_atomic(pane, cx);
+    }
+
+    /// Drive the rebase forward after a `ConflictApply` resolves a
+    /// pause. With no remaining entries, finalize: point HEAD at the
+    /// conflict-resolved commit and clear `rebase_active`. Otherwise
+    /// re-invoke [`stoat::host::GitRepo::run_rebase`] atomically on
+    /// the remaining plan; a clean run finalizes the same way, and a
+    /// fresh conflict installs a new [`RebasePause::Conflict`] and
+    /// opens [`ConflictItem`] views in `pane` for the user to resolve.
+    fn continue_rebase_atomic(&mut self, pane: Entity<Pane>, cx: &mut Context<'_, Self>) {
+        let Some(active) = self.rebase_active.as_ref() else {
+            return;
+        };
+        if active.pause.is_some() {
+            return;
+        }
+
+        let workdir = active.workdir.clone();
+        let onto = active.current_head.clone();
+        let todo: Vec<RebaseTodo> = active
+            .remaining
+            .iter()
+            .map(|e| RebaseTodo {
+                op: e.op,
+                sha: e.commit.sha.clone(),
+                message: e.commit.summary.clone(),
+            })
+            .collect();
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("ConflictApply: no git repo at {}", workdir.display());
+            self.rebase_active = None;
+            return;
+        };
+
+        if todo.is_empty() {
+            let _ = repo.update_head(&onto);
+            self.rebase_active = None;
+            return;
+        }
+
+        match repo.run_rebase(&onto, &todo) {
+            Ok(new_head) => {
+                let _ = repo.update_head(&new_head);
+                self.rebase_active = None;
+            },
+            Err(RebaseError::Conflict { at_sha, .. }) => {
+                let files = match repo.cherry_pick_tree(&at_sha, &onto) {
+                    Ok(CherryPickOutcome::Conflict { files }) => files,
+                    Ok(CherryPickOutcome::Clean { .. }) => {
+                        tracing::warn!(
+                            "ConflictApply: run_rebase reported a conflict at {at_sha} but \
+                             cherry_pick_tree is clean; aborting",
+                        );
+                        self.rebase_active = None;
+                        return;
+                    },
+                    Err(GitApplyError::Backend { reason, .. }) => {
+                        tracing::warn!(
+                            "ConflictApply: cherry_pick_tree({at_sha}) failed: {reason}",
+                        );
+                        self.rebase_active = None;
+                        return;
+                    },
+                };
+
+                if let Some(active) = self.rebase_active.as_mut() {
+                    let pos = active.remaining.iter().position(|e| e.commit.sha == at_sha);
+                    if let Some(pos) = pos {
+                        for _ in 0..=pos {
+                            active.remaining.pop_front();
+                        }
+                    }
+                    active.pause = Some(RebasePause::Conflict {
+                        source_sha: at_sha,
+                        files: files.clone(),
+                        selected: 0,
+                        resolutions: HashMap::new(),
+                    });
+                }
+
+                pane.update(cx, |p, cx| {
+                    for file in files {
+                        let item = cx.new(|cx| ConflictItem::from_conflicted_file(file, cx));
+                        let handle: Box<dyn ItemHandle> = Box::new(item);
+                        p.add_item(handle, cx);
+                    }
+                });
+            },
+            Err(RebaseError::Backend { reason, .. }) => {
+                tracing::warn!("ConflictApply: run_rebase failed: {reason}");
+                self.rebase_active = None;
+            },
+            Err(RebaseError::DirtyWorktree { .. }) => {
+                tracing::warn!("ConflictApply: run_rebase requires a clean worktree");
+                self.rebase_active = None;
+            },
+        }
+    }
+
     fn dispatch_conflict_nav(&mut self, dir: ConflictNavDir, cx: &mut Context<'_, Self>) {
         let pane_id = self.pane_tree.read(cx).focus();
         let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
@@ -1564,7 +1765,7 @@ impl Workspace {
         for patch in &patches {
             match repo.apply_to_index(patch) {
                 Ok(()) => applied += 1,
-                Err(stoat::host::GitApplyError::Backend { reason, .. }) => {
+                Err(GitApplyError::Backend { reason, .. }) => {
                     if first_failure.is_none() {
                         first_failure = Some(reason);
                     }
@@ -6221,5 +6422,347 @@ mod tests {
 
         let text = item.read_with(vcx, |item, cx| item.result_buffer_text(cx));
         assert_eq!(text, "base\n");
+    }
+
+    fn rebase_entry(sha: &str, summary: &str) -> RebaseEntry {
+        RebaseEntry {
+            op: stoat::host::RebaseTodoOp::Pick,
+            commit: stoat::host::CommitInfo {
+                sha: sha.to_string(),
+                short_sha: sha.chars().take(7).collect(),
+                summary: summary.to_string(),
+                author_name: "stoat".to_string(),
+                author_email: "stoat@example.invalid".to_string(),
+                time: 1_700_000_000,
+                parent_count: 1,
+            },
+        }
+    }
+
+    fn install_conflict_rebase(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        workdir: &str,
+        source_sha: &str,
+        current_head: &str,
+        files: Vec<stoat::host::ConflictedFile>,
+        remaining: Vec<RebaseEntry>,
+    ) {
+        ws.update(vcx, |w, _| {
+            w.rebase_active = Some(ActiveRebase {
+                workdir: PathBuf::from(workdir),
+                onto: current_head.to_string(),
+                remaining: remaining.into(),
+                current_head: current_head.to_string(),
+                last_pick_sha: None,
+                last_message: None,
+                pause: Some(RebasePause::Conflict {
+                    source_sha: source_sha.to_string(),
+                    files,
+                    selected: 0,
+                    resolutions: HashMap::new(),
+                }),
+            });
+        });
+    }
+
+    fn focused_pane_conflict_item_count(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+    ) -> usize {
+        ws.read_with(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let Some(pane) = w.pane_tree.read(cx).pane(focus) else {
+                return 0;
+            };
+            pane.read(cx)
+                .items()
+                .iter()
+                .filter(|item| item.to_any_view().downcast::<ConflictItem>().is_ok())
+                .count()
+        })
+    }
+
+    fn head_sha(git: &Arc<stoat::host::fake::FakeGit>, workdir: &str) -> Option<String> {
+        use stoat::host::GitHost;
+        let repo = git.discover(Path::new(workdir))?;
+        repo.log_commits(None, 1).first().map(|c| c.sha.clone())
+    }
+
+    #[test]
+    fn dispatch_conflict_apply_creates_commit_with_resolved_tree() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "ours-content\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        let item = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "ours-content\n", "theirs-content\n"),
+        );
+        item.update(vcx, |item, cx| {
+            item.set_result_buffer_text_for_test("resolved-text\n", cx);
+        });
+        install_conflict_rebase(
+            vcx,
+            &ws,
+            "/tmp/repo",
+            "src1",
+            "head1",
+            vec![conflicted_file(
+                "a.txt",
+                "ours-content\n",
+                "theirs-content\n",
+            )],
+            Vec::new(),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictApply);
+        vcx.run_until_parked();
+
+        let new_head = head_sha(&git, "/tmp/repo").expect("HEAD points at the new commit");
+        assert_ne!(new_head, "head1", "HEAD must advance off the parent");
+        let message = git.commit_message(Path::new("/tmp/repo"), &new_head);
+        assert_eq!(message, Some("conflict-resolved src1".to_string()));
+
+        use stoat::host::GitHost;
+        let repo = git
+            .discover(Path::new("/tmp/repo"))
+            .expect("repo discoverable at /tmp/repo");
+        let new_tree = repo.commit_tree(&new_head).expect("new commit has a tree");
+        assert_eq!(
+            new_tree.get(&PathBuf::from("a.txt")).map(String::as_str),
+            Some("resolved-text\n"),
+        );
+    }
+
+    #[test]
+    fn dispatch_conflict_apply_clears_rebase_active_when_remaining_empty() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "ours-content\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        let item = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "ours-content\n", "theirs-content\n"),
+        );
+        item.update(vcx, |item, cx| {
+            item.set_result_buffer_text_for_test("resolved-text\n", cx);
+        });
+        install_conflict_rebase(
+            vcx,
+            &ws,
+            "/tmp/repo",
+            "src1",
+            "head1",
+            vec![conflicted_file(
+                "a.txt",
+                "ours-content\n",
+                "theirs-content\n",
+            )],
+            Vec::new(),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictApply);
+        vcx.run_until_parked();
+
+        let still_active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
+        assert!(
+            !still_active,
+            "rebase_active must clear when remaining is empty after apply",
+        );
+        assert_eq!(
+            focused_pane_conflict_item_count(vcx, &ws),
+            0,
+            "ConflictItem views must be closed after a successful apply",
+        );
+    }
+
+    #[test]
+    fn dispatch_conflict_apply_with_no_rebase_active_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "ours-content\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        let _ = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "ours-content\n", "theirs-content\n"),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictApply);
+        vcx.run_until_parked();
+
+        let head = head_sha(&git, "/tmp/repo").expect("seeded HEAD remains");
+        assert_eq!(
+            head, "head1",
+            "no rebase active: dispatch must not write any new commit",
+        );
+        assert_eq!(focused_pane_conflict_item_count(vcx, &ws), 1);
+    }
+
+    #[test]
+    fn dispatch_conflict_apply_with_missing_view_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "x\n"), ("b.txt", "y\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        let _ = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "a-ours\n", "a-theirs\n"),
+        );
+        install_conflict_rebase(
+            vcx,
+            &ws,
+            "/tmp/repo",
+            "src1",
+            "head1",
+            vec![
+                conflicted_file("a.txt", "a-ours\n", "a-theirs\n"),
+                conflicted_file("b.txt", "b-ours\n", "b-theirs\n"),
+            ],
+            Vec::new(),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictApply);
+        vcx.run_until_parked();
+
+        let head = head_sha(&git, "/tmp/repo").expect("seeded HEAD remains");
+        assert_eq!(
+            head, "head1",
+            "missing conflict view: dispatch must not write any new commit",
+        );
+        let still_active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
+        assert!(still_active, "rebase_active must remain installed");
+    }
+
+    #[test]
+    fn dispatch_conflict_apply_continues_with_run_rebase() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "ours-content\n")])
+            .commit_with_parent("c2", "head1", &[("a.txt", "c2-content\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        let item = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "ours-content\n", "theirs-content\n"),
+        );
+        item.update(vcx, |item, cx| {
+            item.set_result_buffer_text_for_test("resolved-text\n", cx);
+        });
+        install_conflict_rebase(
+            vcx,
+            &ws,
+            "/tmp/repo",
+            "src1",
+            "head1",
+            vec![conflicted_file(
+                "a.txt",
+                "ours-content\n",
+                "theirs-content\n",
+            )],
+            vec![rebase_entry("c2", "c2 summary")],
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictApply);
+        vcx.run_until_parked();
+
+        let still_active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
+        assert!(
+            !still_active,
+            "rebase_active must clear after the remaining plan completes cleanly",
+        );
+        let rebases = git.applied_rebases(Path::new("/tmp/repo"));
+        assert_eq!(rebases.len(), 1, "exactly one run_rebase invocation");
+        assert_eq!(
+            rebases[0].todo,
+            vec![RebaseTodo {
+                op: stoat::host::RebaseTodoOp::Pick,
+                sha: "c2".to_string(),
+                message: "c2 summary".to_string(),
+            }],
+        );
+    }
+
+    #[test]
+    fn dispatch_conflict_apply_opens_new_conflict_view_on_further_conflict() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "ours-content\n")])
+            .commit_with_parent("c2", "head1", &[("b.txt", "c2-b-content\n")])
+            .simulate_conflict_at("c2");
+        install_git_host_global(vcx, git.clone());
+
+        let item = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "ours-content\n", "theirs-content\n"),
+        );
+        item.update(vcx, |item, cx| {
+            item.set_result_buffer_text_for_test("resolved-text\n", cx);
+        });
+        install_conflict_rebase(
+            vcx,
+            &ws,
+            "/tmp/repo",
+            "src1",
+            "head1",
+            vec![conflicted_file(
+                "a.txt",
+                "ours-content\n",
+                "theirs-content\n",
+            )],
+            vec![rebase_entry("c2", "c2 summary")],
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictApply);
+        vcx.run_until_parked();
+
+        let pause_sha = ws.read_with(vcx, |w, _| {
+            match w.rebase_active.as_ref()?.pause.as_ref()? {
+                RebasePause::Conflict { source_sha, .. } => Some(source_sha.clone()),
+                _ => None,
+            }
+        });
+        assert_eq!(
+            pause_sha,
+            Some("c2".to_string()),
+            "a fresh conflict at c2 must install a new Conflict pause",
+        );
+        let remaining_len = ws.read_with(vcx, |w, _| {
+            w.rebase_active
+                .as_ref()
+                .expect("rebase active")
+                .remaining
+                .len()
+        });
+        assert_eq!(
+            remaining_len, 0,
+            "c2 is dropped from remaining when its conflict becomes the active pause",
+        );
+        assert!(
+            focused_pane_conflict_item_count(vcx, &ws) >= 1,
+            "ConflictItem views for c2's conflicted files must be opened",
+        );
     }
 }
