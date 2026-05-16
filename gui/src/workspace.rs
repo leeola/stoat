@@ -770,6 +770,15 @@ impl Workspace {
             },
             ActionKind::DismissModal => {
                 self.dismiss_modal(window, cx);
+                if let Some(editor) = self
+                    .input_state_machine
+                    .read(cx)
+                    .active_editor()
+                    .cloned()
+                    .and_then(|w| w.upgrade())
+                {
+                    editor.update(cx, |ed, cx| ed.set_hover_position(None, cx));
+                }
             },
             ActionKind::ClickAt => {
                 if let Some(click) = action.as_any().downcast_ref::<crate::actions::ClickAt>() {
@@ -4027,6 +4036,27 @@ mod tests {
 
         let after = pane_tree.read_with(vcx, |t, _| (t.pane_count(), t.focus()));
         assert_eq!(before, after);
+    }
+
+    #[test]
+    fn dispatch_dismiss_modal_clears_active_editors_hover_position() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        editor.update(vcx, |ed, cx| ed.set_hover_position(Some((0, 3)), cx));
+        vcx.run_until_parked();
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.hover_position()),
+            Some((0, 3))
+        );
+
+        dispatch(&ws, vcx, stoat_action::DismissModal);
+        vcx.run_until_parked();
+
+        assert!(editor.read_with(vcx, |ed, _| ed.hover_position()).is_none());
     }
 
     #[test]

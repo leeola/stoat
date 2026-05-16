@@ -152,6 +152,7 @@ on key {
         BackTab -> HelpScopeToggle();
     }
     mode == normal {
+        Escape -> DismissModal();
         q -> ReplayMacro();
         Space -> SetMode(space);
         : -> OpenCommandPalette();
