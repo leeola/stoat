@@ -1105,6 +1105,7 @@ impl Workspace {
                     self.dispatch_open_review_agent_edits(edits, cx);
                 }
             },
+            ActionKind::OpenCommits => self.dispatch_open_commits(window, cx),
             ActionKind::CommitsNext => self.dispatch_commits_step(CommitStep::Down(1), cx),
             ActionKind::CommitsPrev => self.dispatch_commits_step(CommitStep::Up(1), cx),
             ActionKind::CommitsPageDown => self.dispatch_commits_step(CommitStep::PageDown, cx),
@@ -1755,6 +1756,36 @@ impl Workspace {
         })
     }
 
+    fn dispatch_open_commits(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        use crate::picker::PickerDelegate;
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&self.git_root) else {
+            tracing::warn!(action = "OpenCommits", "not inside a git repository");
+            return;
+        };
+        let Some(workdir) = repo.workdir() else {
+            tracing::warn!(action = "OpenCommits", "git repo has no workdir");
+            return;
+        };
+
+        let state = cx.new(|_| {
+            crate::commit_list::CommitListState::new(stoat::commit_list::CommitListState::new(
+                workdir,
+            ))
+        });
+        let buffer_registry = self.buffer_registry.clone();
+        let item = cx
+            .new(|cx| crate::commit_list::CommitListItem::new(state, buffer_registry, window, cx));
+        self.open_item(Box::new(item.clone()), cx);
+
+        let picker = item.read(cx).picker().clone();
+        picker.update(cx, |p, picker_cx| {
+            p.delegate_mut()
+                .update_matches(String::new(), picker_cx)
+                .detach();
+        });
+    }
+
     fn dispatch_commits_step(&mut self, step: CommitStep, cx: &mut Context<'_, Self>) {
         let Some(item) = self.active_commit_list(cx) else {
             return;
@@ -1859,6 +1890,14 @@ impl Workspace {
         let review_item = cx
             .new(|cx| crate::review_item::ReviewItem::from_session(session, &buffer_registry, cx));
 
+        self.open_item(Box::new(review_item), cx);
+    }
+
+    /// Add `item` as a new tab in the focused pane and activate it.
+    /// Returns the index it was inserted at. Shared by every
+    /// dispatch arm that opens a fresh ItemView (`OpenReview*`,
+    /// `OpenCommits`, ...).
+    fn open_item(&mut self, item: Box<dyn ItemHandle>, cx: &mut Context<'_, Self>) -> usize {
         let pane_id = self.pane_tree.read(cx).focus();
         let pane = self
             .pane_tree
@@ -1867,9 +1906,10 @@ impl Workspace {
             .expect("pane tree returns its own focused pane id")
             .clone();
         pane.update(cx, |p, cx| {
-            let index = p.add_item(Box::new(review_item), cx);
+            let index = p.add_item(item, cx);
             p.activate(index, cx);
-        });
+            index
+        })
     }
 }
 
@@ -5815,6 +5855,73 @@ mod tests {
         assert!(
             !active_after,
             "CloseCommits must remove the commit-list item"
+        );
+    }
+
+    fn active_pane_commit_list(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+    ) -> Option<Entity<crate::commit_list::CommitListItem>> {
+        ws.read_with(vcx, |w, cx| w.active_pane_item(cx))
+            .and_then(|handle| {
+                handle
+                    .to_any_view()
+                    .downcast::<crate::commit_list::CommitListItem>()
+                    .ok()
+            })
+    }
+
+    #[test]
+    fn dispatch_open_commits_installs_commit_list_item() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        seed_commits(&git, "/tmp/repo", 3);
+        let _scheduler = install_commit_list_globals(vcx, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenCommits);
+        vcx.run_until_parked();
+
+        assert!(
+            active_pane_commit_list(vcx, &ws).is_some(),
+            "OpenCommits must install a CommitListItem in the focused pane",
+        );
+    }
+
+    #[test]
+    fn dispatch_open_commits_triggers_initial_page_load() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        seed_commits(&git, "/tmp/repo", 3);
+        let scheduler = install_commit_list_globals(vcx, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenCommits);
+        settle_commits(&scheduler, vcx);
+
+        let item =
+            active_pane_commit_list(vcx, &ws).expect("commit list installed in focused pane");
+        let count = item.read_with(vcx, |item, cx| item.state().read(cx).inner().commits.len());
+        assert_eq!(
+            count, 3,
+            "initial page load must populate state.commits after settle",
+        );
+    }
+
+    #[test]
+    fn dispatch_open_commits_without_git_repo_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        // FakeGit with no repo registered: discover returns None.
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        let _scheduler = install_commit_list_globals(vcx, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenCommits);
+        vcx.run_until_parked();
+
+        assert!(
+            active_pane_commit_list(vcx, &ws).is_none(),
+            "OpenCommits must skip when the workdir is not a git repo",
         );
     }
 }
