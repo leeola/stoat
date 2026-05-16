@@ -1630,18 +1630,28 @@ impl Workspace {
     /// Drive the rebase forward after a `ConflictApply` resolves a
     /// pause, or kick off execution from `ExecuteRebase`. With no
     /// remaining entries, finalize: point HEAD at `current_head` and
-    /// clear `rebase_active`. Otherwise spawn the
-    /// [`stoat::host::GitRepo::run_rebase`] call onto the executor so
-    /// the keyboard event loop stays responsive while libgit2 works;
-    /// when the task completes, route through
-    /// [`Self::apply_rebase_outcome`] on the main thread to mutate
-    /// `rebase_active`, finalize HEAD, or open new
-    /// [`ConflictItem`] views in `pane`.
+    /// clear `rebase_active`. Otherwise pick a path:
+    ///
+    /// - If `remaining` contains any [`RebaseTodoOp::Reword`] or [`RebaseTodoOp::Edit`] entry,
+    ///   dispatch to [`Self::drive_rebase_step`] -- one executor task per entry so we can install
+    ///   pauses between them.
+    /// - Otherwise spawn the atomic [`stoat::host::GitRepo::run_rebase`] call on the executor
+    ///   ([`Self::apply_rebase_outcome`] for the main-thread landing) which finalizes the plan in
+    ///   one shot.
     fn continue_rebase_atomic(&mut self, pane: Entity<Pane>, cx: &mut Context<'_, Self>) {
         let Some(active) = self.rebase_active.as_ref() else {
             return;
         };
         if active.pause.is_some() {
+            return;
+        }
+
+        if active
+            .remaining
+            .iter()
+            .any(|e| matches!(e.op, RebaseTodoOp::Reword | RebaseTodoOp::Edit))
+        {
+            self.drive_rebase_step(pane, cx);
             return;
         }
 
@@ -1685,6 +1695,182 @@ impl Workspace {
             });
         })
         .detach();
+    }
+
+    /// Stepper-driven execute path used when the plan contains
+    /// [`RebaseTodoOp::Reword`] or [`RebaseTodoOp::Edit`] entries.
+    /// Pops one entry, spawns an executor task running
+    /// [`execute_rebase_step`], then routes the outcome through
+    /// [`Self::apply_step_outcome`] which either continues the
+    /// loop (recursing) or installs a pause and stops.
+    ///
+    /// With no remaining entries this finalizes the rebase the
+    /// same way the atomic path does -- HEAD update + clear
+    /// `rebase_active` -- so a stepper-driven plan finishes
+    /// cleanly when its last entry was a clean Pick/Drop.
+    fn drive_rebase_step(&mut self, pane: Entity<Pane>, cx: &mut Context<'_, Self>) {
+        let Some(active) = self.rebase_active.as_ref() else {
+            return;
+        };
+        if active.pause.is_some() {
+            return;
+        }
+
+        let workdir = active.workdir.clone();
+        let current_head = active.current_head.clone();
+        let last_pick = active.last_pick_sha.clone();
+        let last_message = active.last_message.clone();
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("rebase: no git repo at {}", workdir.display());
+            self.rebase_active = None;
+            return;
+        };
+
+        let Some(entry) = active.remaining.front().cloned() else {
+            let _ = repo.update_head(&current_head);
+            self.rebase_active = None;
+            return;
+        };
+
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let weak_pane = pane.downgrade();
+        cx.spawn(async move |weak_self, cx| {
+            let outcome = executor
+                .spawn(async move {
+                    execute_rebase_step(
+                        repo.as_ref(),
+                        &entry,
+                        &current_head,
+                        last_pick.as_deref(),
+                        last_message.as_deref(),
+                    )
+                })
+                .await;
+            let _ = weak_self.update(cx, |this, cx| {
+                let Some(pane) = weak_pane.upgrade() else {
+                    this.rebase_active = None;
+                    return;
+                };
+                this.apply_step_outcome(outcome, pane, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Land a [`RebaseStepOutcome`] on the main thread. `Step` and
+    /// `Drop` advance the cursor and recurse via
+    /// [`Self::drive_rebase_step`]; `Reword` / `Edit` install the
+    /// matching [`RebasePause`] and stop (UI surfaces the pause).
+    /// `Conflict` mirrors the atomic-path conflict handling
+    /// (drop entries up to the failing sha, install pause, open
+    /// [`ConflictItem`] views). `Aborted` warns and clears state.
+    ///
+    /// For [`RebasePause::Edit`] this also opens a
+    /// [`ReviewSource::Commit`] review of the just-applied commit
+    /// in `pane` -- the user can dismiss or modify it before
+    /// dispatching `RebaseContinue` to resume. The Reword sub-modal
+    /// is .todo-plans/TODO.md line 3 (next iteration); for now the
+    /// pause sits installed and `AbortRebase` is the only escape.
+    fn apply_step_outcome(
+        &mut self,
+        outcome: RebaseStepOutcome,
+        pane: Entity<Pane>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match outcome {
+            RebaseStepOutcome::Step {
+                new_head,
+                new_message,
+                op,
+            } => {
+                if let Some(active) = self.rebase_active.as_mut() {
+                    active.remaining.pop_front();
+                    active.current_head = new_head.clone();
+                    if matches!(
+                        op,
+                        RebaseTodoOp::Pick | RebaseTodoOp::Squash | RebaseTodoOp::Fixup
+                    ) {
+                        active.last_pick_sha = Some(new_head);
+                        active.last_message = Some(new_message);
+                    }
+                }
+                self.drive_rebase_step(pane, cx);
+            },
+            RebaseStepOutcome::Drop => {
+                if let Some(active) = self.rebase_active.as_mut() {
+                    active.remaining.pop_front();
+                }
+                self.drive_rebase_step(pane, cx);
+            },
+            RebaseStepOutcome::Reword {
+                cherry_picked_commit,
+                original_message,
+            } => {
+                if let Some(active) = self.rebase_active.as_mut() {
+                    active.remaining.pop_front();
+                    active.current_head = cherry_picked_commit.clone();
+                    active.last_pick_sha = Some(cherry_picked_commit.clone());
+                    active.last_message = Some(original_message.clone());
+                    active.pause = Some(RebasePause::Reword {
+                        cherry_picked_commit,
+                        original_message,
+                    });
+                }
+            },
+            RebaseStepOutcome::Edit {
+                cherry_picked_commit,
+            } => {
+                let workdir_for_review = self.rebase_active.as_ref().map(|a| a.workdir.clone());
+                if let Some(active) = self.rebase_active.as_mut() {
+                    active.remaining.pop_front();
+                    active.current_head = cherry_picked_commit.clone();
+                    active.last_pick_sha = Some(cherry_picked_commit.clone());
+                    active.pause = Some(RebasePause::Edit {
+                        cherry_picked_commit: cherry_picked_commit.clone(),
+                    });
+                }
+                if let Some(workdir) = workdir_for_review {
+                    self.open_review_source(
+                        ReviewSource::Commit {
+                            workdir,
+                            sha: cherry_picked_commit,
+                        },
+                        "RebaseStepEdit",
+                        cx,
+                    );
+                }
+                let _ = pane;
+            },
+            RebaseStepOutcome::Conflict { at_sha, files } => {
+                if let Some(active) = self.rebase_active.as_mut() {
+                    let pos = active.remaining.iter().position(|e| e.commit.sha == at_sha);
+                    if let Some(pos) = pos {
+                        for _ in 0..=pos {
+                            active.remaining.pop_front();
+                        }
+                    }
+                    active.pause = Some(RebasePause::Conflict {
+                        source_sha: at_sha,
+                        files: files.clone(),
+                        selected: 0,
+                        resolutions: HashMap::new(),
+                    });
+                }
+                pane.update(cx, |p, cx| {
+                    for file in files {
+                        let item = cx.new(|cx| ConflictItem::from_conflicted_file(file, cx));
+                        let handle: Box<dyn ItemHandle> = Box::new(item);
+                        p.add_item(handle, cx);
+                    }
+                });
+            },
+            RebaseStepOutcome::Aborted(reason) => {
+                tracing::warn!("rebase: {reason}");
+                self.rebase_active = None;
+            },
+        }
     }
 
     /// Land the result of an executor-backed [`run_rebase`] call.
@@ -2458,6 +2644,142 @@ fn execute_rebase_plan(
         },
         Err(RebaseError::DirtyWorktree { .. }) => {
             RebaseExecutionOutcome::Aborted("run_rebase requires a clean worktree".into())
+        },
+    }
+}
+
+/// Per-entry result from the stepper-driven execute path. Variants
+/// model the outcome of one `cherry_pick_tree` + `create_commit`
+/// pair: `Step` for Pick / Squash / Fixup, `Drop` for entries that
+/// skip without touching git, `Reword` / `Edit` for ops that need
+/// to pause for user input, `Conflict` mid-cherry-pick, and
+/// `Aborted` for backend errors that should cancel the rebase. The
+/// main-thread handler [`Workspace::apply_step_outcome`] maps each
+/// variant to the corresponding state mutation and UI install.
+enum RebaseStepOutcome {
+    Step {
+        new_head: String,
+        new_message: String,
+        op: RebaseTodoOp,
+    },
+    Drop,
+    Reword {
+        cherry_picked_commit: String,
+        original_message: String,
+    },
+    Edit {
+        cherry_picked_commit: String,
+    },
+    Conflict {
+        at_sha: String,
+        files: Vec<ConflictedFile>,
+    },
+    Aborted(String),
+}
+
+/// Process a single rebase entry on the executor thread. Mirrors
+/// the per-op arms of the TUI stepper
+/// (`stoat/src/action_handlers/rebase.rs::drive_rebase`):
+/// cherry-pick onto `current_head` for Pick/Reword/Edit, onto
+/// `last_pick` for Squash/Fixup, skip for Drop. Returns a
+/// [`RebaseStepOutcome`] for the main thread to apply.
+fn execute_rebase_step(
+    repo: &dyn GitRepo,
+    entry: &RebaseEntry,
+    current_head: &str,
+    last_pick: Option<&str>,
+    last_message: Option<&str>,
+) -> RebaseStepOutcome {
+    match entry.op {
+        RebaseTodoOp::Drop => RebaseStepOutcome::Drop,
+        RebaseTodoOp::Pick | RebaseTodoOp::Reword | RebaseTodoOp::Edit => {
+            match repo.cherry_pick_tree(&entry.commit.sha, current_head) {
+                Ok(CherryPickOutcome::Clean {
+                    tree,
+                    message,
+                    author_name,
+                    author_email,
+                    ..
+                }) => match repo.create_commit(
+                    Some(current_head),
+                    &tree,
+                    &message,
+                    &author_name,
+                    &author_email,
+                ) {
+                    Ok(new_sha) => match entry.op {
+                        RebaseTodoOp::Pick => RebaseStepOutcome::Step {
+                            new_head: new_sha,
+                            new_message: message,
+                            op: RebaseTodoOp::Pick,
+                        },
+                        RebaseTodoOp::Reword => RebaseStepOutcome::Reword {
+                            cherry_picked_commit: new_sha,
+                            original_message: message,
+                        },
+                        RebaseTodoOp::Edit => RebaseStepOutcome::Edit {
+                            cherry_picked_commit: new_sha,
+                        },
+                        _ => unreachable!(),
+                    },
+                    Err(GitApplyError::Backend { reason, .. }) => {
+                        RebaseStepOutcome::Aborted(format!("create_commit failed: {reason}"))
+                    },
+                },
+                Ok(CherryPickOutcome::Conflict { files }) => RebaseStepOutcome::Conflict {
+                    at_sha: entry.commit.sha.clone(),
+                    files,
+                },
+                Err(GitApplyError::Backend { reason, .. }) => {
+                    RebaseStepOutcome::Aborted(format!("cherry-pick failed: {reason}"))
+                },
+            }
+        },
+        RebaseTodoOp::Squash | RebaseTodoOp::Fixup => {
+            let Some(last_pick) = last_pick else {
+                return RebaseStepOutcome::Aborted("squash/fixup without preceding pick".into());
+            };
+            let last_message = last_message.unwrap_or("");
+            match repo.cherry_pick_tree(&entry.commit.sha, last_pick) {
+                Ok(CherryPickOutcome::Clean {
+                    tree,
+                    message: source_msg,
+                    author_name,
+                    author_email,
+                    ..
+                }) => {
+                    let prev_parent = repo.parent_sha(last_pick);
+                    let combined = match entry.op {
+                        RebaseTodoOp::Squash => {
+                            format!("{}\n\n{}", last_message.trim_end(), source_msg.trim_end(),)
+                        },
+                        _ => last_message.to_string(),
+                    };
+                    match repo.create_commit(
+                        prev_parent.as_deref(),
+                        &tree,
+                        &combined,
+                        &author_name,
+                        &author_email,
+                    ) {
+                        Ok(new_sha) => RebaseStepOutcome::Step {
+                            new_head: new_sha,
+                            new_message: combined,
+                            op: entry.op,
+                        },
+                        Err(GitApplyError::Backend { reason, .. }) => RebaseStepOutcome::Aborted(
+                            format!("squash/fixup commit failed: {reason}"),
+                        ),
+                    }
+                },
+                Ok(CherryPickOutcome::Conflict { files }) => RebaseStepOutcome::Conflict {
+                    at_sha: entry.commit.sha.clone(),
+                    files,
+                },
+                Err(GitApplyError::Backend { reason, .. }) => RebaseStepOutcome::Aborted(format!(
+                    "squash/fixup cherry-pick failed: {reason}",
+                )),
+            }
         },
     }
 }
@@ -7270,8 +7592,12 @@ mod tests {
     }
 
     fn pick_entry(sha: &str, summary: &str) -> RebaseEntry {
+        rebase_entry_with_op(sha, summary, RebaseTodoOp::Pick)
+    }
+
+    fn rebase_entry_with_op(sha: &str, summary: &str, op: RebaseTodoOp) -> RebaseEntry {
         RebaseEntry {
-            op: RebaseTodoOp::Pick,
+            op,
             commit: stoat::host::CommitInfo {
                 sha: sha.to_string(),
                 short_sha: sha.chars().take(7).collect(),
@@ -7525,6 +7851,152 @@ mod tests {
         assert!(
             focused_pane_conflict_item_count(vcx, &ws) >= 1,
             "conflict views must be opened on conflict outcome",
+        );
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_stepper_handles_reword_pause() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit_with_message("onto1", "onto1 msg", &[("a.txt", "base\n")])
+            .commit_with_parent_message("c1", "onto1", "c1 msg", &[("a.txt", "c1\n")]);
+        install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![rebase_entry_with_op(
+                "c1",
+                "c1 summary",
+                RebaseTodoOp::Reword,
+            )]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
+
+        ws.read_with(vcx, |w, _| {
+            let active = w.rebase_active.as_ref().expect("rebase_active set");
+            assert!(matches!(
+                active.pause.as_ref(),
+                Some(RebasePause::Reword { .. })
+            ));
+            assert!(
+                active.remaining.is_empty(),
+                "Reword entry consumed before installing the pause",
+            );
+        });
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_stepper_handles_edit_pause() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit_with_message("onto1", "onto1 msg", &[("a.txt", "base\n")])
+            .commit_with_parent_message("c1", "onto1", "c1 msg", &[("a.txt", "c1\n")]);
+        install_git_host_global(vcx, git.clone());
+        install_full_globals(vcx, Arc::new(stoat::host::FakeFs::new()), git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![rebase_entry_with_op(
+                "c1",
+                "c1 summary",
+                RebaseTodoOp::Edit,
+            )]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
+
+        ws.read_with(vcx, |w, _| {
+            let active = w.rebase_active.as_ref().expect("rebase_active set");
+            assert!(matches!(
+                active.pause.as_ref(),
+                Some(RebasePause::Edit { .. })
+            ));
+        });
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_stepper_drops_then_reword_pauses() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit_with_message("onto1", "onto1 msg", &[("a.txt", "base\n")])
+            .commit_with_parent_message("c1", "onto1", "c1 msg", &[("a.txt", "c1\n")])
+            .commit_with_parent_message("c2", "c1", "c2 msg", &[("a.txt", "c2\n")]);
+        install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![
+                rebase_entry_with_op("c1", "c1 summary", RebaseTodoOp::Drop),
+                rebase_entry_with_op("c2", "c2 summary", RebaseTodoOp::Reword),
+            ]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
+
+        ws.read_with(vcx, |w, _| {
+            let active = w.rebase_active.as_ref().expect("rebase_active set");
+            assert!(matches!(
+                active.pause.as_ref(),
+                Some(RebasePause::Reword { .. }),
+            ));
+            assert!(
+                active.remaining.is_empty(),
+                "Drop + Reword consumed everything",
+            );
+        });
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_stepper_handles_conflict_mid_plan() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit_with_message("onto1", "onto1 msg", &[("a.txt", "base\n")])
+            .commit_with_parent_message("c1", "onto1", "c1 msg", &[("a.txt", "c1\n")])
+            .commit_with_parent_message("c2", "c1", "c2 msg", &[("a.txt", "c2\n")])
+            .simulate_conflict_at("c2");
+        install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![
+                rebase_entry_with_op("c1", "c1 summary", RebaseTodoOp::Pick),
+                rebase_entry_with_op("c2", "c2 summary", RebaseTodoOp::Edit),
+            ]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
+
+        let pause_sha = ws.read_with(vcx, |w, _| {
+            match w.rebase_active.as_ref()?.pause.as_ref()? {
+                RebasePause::Conflict { source_sha, .. } => Some(source_sha.clone()),
+                _ => None,
+            }
+        });
+        assert_eq!(pause_sha, Some("c2".to_string()));
+        assert!(
+            focused_pane_conflict_item_count(vcx, &ws) >= 1,
+            "conflict views must be opened when the stepper hits a conflict",
         );
     }
 
