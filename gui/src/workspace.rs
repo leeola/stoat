@@ -1075,6 +1075,16 @@ impl Workspace {
                 self.dispatch_query_move_relationships(window, cx)
             },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
+            ActionKind::OpenReviewCommit => {
+                if let Some(action) = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::OpenReviewCommit>()
+                {
+                    let workdir = action.workdir.clone();
+                    let sha = action.sha.clone();
+                    self.dispatch_open_review_commit(workdir, sha, cx);
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1664,19 +1674,44 @@ impl Workspace {
 
     fn dispatch_open_review(&mut self, cx: &mut Context<'_, Self>) {
         let workdir = self.git_root.clone();
-        let source = ReviewSource::WorkingTree {
-            workdir: workdir.clone(),
-        };
+        let source = ReviewSource::WorkingTree { workdir };
+        self.open_review_source(source, "OpenReview", cx);
+    }
+
+    fn dispatch_open_review_commit(
+        &mut self,
+        workdir: PathBuf,
+        sha: String,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let source = ReviewSource::Commit { workdir, sha };
+        self.open_review_source(source, "OpenReviewCommit", cx);
+    }
+
+    /// Build a [`ReviewItem`] for `source` and add it to the
+    /// focused pane. `action_label` is a human-readable name
+    /// used only for warn-level diagnostics when the scan
+    /// returns no inputs or extracts no hunks. Shared by every
+    /// `OpenReview*` dispatch arm.
+    fn open_review_source(
+        &mut self,
+        source: ReviewSource,
+        action_label: &'static str,
+        cx: &mut Context<'_, Self>,
+    ) {
         let inputs = review_inputs_for_source(&source, cx);
         if inputs.is_empty() {
-            tracing::warn!(?workdir, "OpenReview: no working-tree changes to review",);
+            tracing::warn!(
+                action = action_label,
+                "no inputs returned for review source"
+            );
             return;
         }
 
         let mut inner_session = stoat::review_session::ReviewSession::new(source);
         inner_session.add_files(inputs);
         if inner_session.order.is_empty() {
-            tracing::warn!(?workdir, "OpenReview: no diff hunks to display");
+            tracing::warn!(action = action_label, "no diff hunks to display");
             return;
         }
 
@@ -5151,5 +5186,86 @@ mod tests {
         vcx.run_until_parked();
 
         assert!(active_pane_review_item(vcx, &ws).is_none());
+    }
+
+    #[test]
+    fn dispatch_open_review_commit_opens_review_item_for_commit() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("p1", &[("a.txt", "a\nOLD\nc\n")])
+            .commit_with_parent("c1", "p1", &[("a.txt", "a\nNEW\nc\n")]);
+        install_full_globals(vcx, fs, git);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewCommit {
+                workdir: PathBuf::from("/tmp/repo"),
+                sha: "c1".to_string(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let item = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        item.read_with(vcx, |item, cx| {
+            assert_eq!(item.files().len(), 1);
+            assert_eq!(item.files()[0].rel_path, "a.txt");
+            assert!(matches!(
+                item.session().read(cx).inner().source,
+                ReviewSource::Commit { ref sha, .. } if sha == "c1"
+            ));
+        });
+    }
+
+    #[test]
+    fn dispatch_open_review_commit_with_unknown_sha_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_full_globals(vcx, fs, git);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewCommit {
+                workdir: PathBuf::from("/tmp/repo"),
+                sha: "ghost".to_string(),
+            },
+        );
+        vcx.run_until_parked();
+
+        assert!(active_pane_review_item(vcx, &ws).is_none());
+    }
+
+    #[test]
+    fn dispatch_open_review_commit_for_root_commit_diffs_against_empty_tree() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("root", &[("a.txt", "alpha\nbeta\n")]);
+        install_full_globals(vcx, fs, git);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewCommit {
+                workdir: PathBuf::from("/tmp/repo"),
+                sha: "root".to_string(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let item = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        item.read_with(vcx, |item, _| {
+            assert_eq!(item.files().len(), 1);
+            assert_eq!(item.files()[0].rel_path, "a.txt");
+        });
     }
 }
