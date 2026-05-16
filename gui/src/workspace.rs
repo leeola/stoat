@@ -41,7 +41,10 @@ use std::{
 };
 use stoat::{
     buffer::BufferId,
-    host::{CherryPickOutcome, GitApplyError, RebaseError, RebaseTodo, RebaseTodoOp, WatchToken},
+    host::{
+        CherryPickOutcome, ConflictedFile, GitApplyError, GitRepo, RebaseError, RebaseTodo,
+        RebaseTodoOp, WatchToken,
+    },
     pane::{Axis, Direction},
     rebase::{ActiveRebase, RebaseEntry, RebasePause},
     review::ReviewFileInput,
@@ -1625,12 +1628,15 @@ impl Workspace {
     }
 
     /// Drive the rebase forward after a `ConflictApply` resolves a
-    /// pause. With no remaining entries, finalize: point HEAD at the
-    /// conflict-resolved commit and clear `rebase_active`. Otherwise
-    /// re-invoke [`stoat::host::GitRepo::run_rebase`] atomically on
-    /// the remaining plan; a clean run finalizes the same way, and a
-    /// fresh conflict installs a new [`RebasePause::Conflict`] and
-    /// opens [`ConflictItem`] views in `pane` for the user to resolve.
+    /// pause, or kick off execution from `ExecuteRebase`. With no
+    /// remaining entries, finalize: point HEAD at `current_head` and
+    /// clear `rebase_active`. Otherwise spawn the
+    /// [`stoat::host::GitRepo::run_rebase`] call onto the executor so
+    /// the keyboard event loop stays responsive while libgit2 works;
+    /// when the task completes, route through
+    /// [`Self::apply_rebase_outcome`] on the main thread to mutate
+    /// `rebase_active`, finalize HEAD, or open new
+    /// [`ConflictItem`] views in `pane`.
     fn continue_rebase_atomic(&mut self, pane: Entity<Pane>, cx: &mut Context<'_, Self>) {
         let Some(active) = self.rebase_active.as_ref() else {
             return;
@@ -1653,7 +1659,7 @@ impl Workspace {
 
         let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
         let Some(repo) = git.discover(&workdir) else {
-            tracing::warn!("ConflictApply: no git repo at {}", workdir.display());
+            tracing::warn!("rebase: no git repo at {}", workdir.display());
             self.rebase_active = None;
             return;
         };
@@ -1664,31 +1670,45 @@ impl Workspace {
             return;
         }
 
-        match repo.run_rebase(&onto, &todo) {
-            Ok(new_head) => {
-                let _ = repo.update_head(&new_head);
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let weak_pane = pane.downgrade();
+        cx.spawn(async move |weak_self, cx| {
+            let outcome = executor
+                .spawn(async move { execute_rebase_plan(repo.as_ref(), &onto, &todo) })
+                .await;
+            let _ = weak_self.update(cx, |this, cx| {
+                let Some(pane) = weak_pane.upgrade() else {
+                    this.rebase_active = None;
+                    return;
+                };
+                this.apply_rebase_outcome(outcome, pane, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Land the result of an executor-backed [`run_rebase`] call.
+    /// Mutates `rebase_active` and installs `ConflictItem` views in
+    /// `pane` on conflict. Runs on the main thread, so it can touch
+    /// gpui state freely.
+    fn apply_rebase_outcome(
+        &mut self,
+        outcome: RebaseExecutionOutcome,
+        pane: Entity<Pane>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        match outcome {
+            RebaseExecutionOutcome::Clean { new_head } => {
+                let workdir = self.rebase_active.as_ref().map(|a| a.workdir.clone());
+                if let Some(workdir) = workdir {
+                    let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+                    if let Some(repo) = git.discover(&workdir) {
+                        let _ = repo.update_head(&new_head);
+                    }
+                }
                 self.rebase_active = None;
             },
-            Err(RebaseError::Conflict { at_sha, .. }) => {
-                let files = match repo.cherry_pick_tree(&at_sha, &onto) {
-                    Ok(CherryPickOutcome::Conflict { files }) => files,
-                    Ok(CherryPickOutcome::Clean { .. }) => {
-                        tracing::warn!(
-                            "ConflictApply: run_rebase reported a conflict at {at_sha} but \
-                             cherry_pick_tree is clean; aborting",
-                        );
-                        self.rebase_active = None;
-                        return;
-                    },
-                    Err(GitApplyError::Backend { reason, .. }) => {
-                        tracing::warn!(
-                            "ConflictApply: cherry_pick_tree({at_sha}) failed: {reason}",
-                        );
-                        self.rebase_active = None;
-                        return;
-                    },
-                };
-
+            RebaseExecutionOutcome::Conflict { at_sha, files } => {
                 if let Some(active) = self.rebase_active.as_mut() {
                     let pos = active.remaining.iter().position(|e| e.commit.sha == at_sha);
                     if let Some(pos) = pos {
@@ -1703,7 +1723,6 @@ impl Workspace {
                         resolutions: HashMap::new(),
                     });
                 }
-
                 pane.update(cx, |p, cx| {
                     for file in files {
                         let item = cx.new(|cx| ConflictItem::from_conflicted_file(file, cx));
@@ -1712,12 +1731,8 @@ impl Workspace {
                     }
                 });
             },
-            Err(RebaseError::Backend { reason, .. }) => {
-                tracing::warn!("ConflictApply: run_rebase failed: {reason}");
-                self.rebase_active = None;
-            },
-            Err(RebaseError::DirtyWorktree { .. }) => {
-                tracing::warn!("ConflictApply: run_rebase requires a clean worktree");
+            RebaseExecutionOutcome::Aborted(reason) => {
+                tracing::warn!("rebase: {reason}");
                 self.rebase_active = None;
             },
         }
@@ -2395,6 +2410,56 @@ enum CommitStep {
     PageUp,
     First,
     Last,
+}
+
+/// Result of a single executor-backed
+/// [`stoat::host::GitRepo::run_rebase`] invocation, normalized so the
+/// main-thread handler [`Workspace::apply_rebase_outcome`] does not
+/// need to touch git itself. `Aborted` collapses every host-side
+/// failure that should cancel the rebase (backend error, dirty
+/// worktree, or a conflict whose per-file recovery itself failed)
+/// into a single warn-and-clear path.
+enum RebaseExecutionOutcome {
+    Clean {
+        new_head: String,
+    },
+    Conflict {
+        at_sha: String,
+        files: Vec<ConflictedFile>,
+    },
+    Aborted(String),
+}
+
+/// Run the rebase plan on the executor thread and synthesize a
+/// [`RebaseExecutionOutcome`]. On `RebaseError::Conflict`, also call
+/// `cherry_pick_tree` to recover the per-file conflict list so the
+/// main-thread handler can install [`ConflictItem`] views without
+/// reaching back into the host.
+fn execute_rebase_plan(
+    repo: &dyn GitRepo,
+    onto: &str,
+    todo: &[RebaseTodo],
+) -> RebaseExecutionOutcome {
+    match repo.run_rebase(onto, todo) {
+        Ok(new_head) => RebaseExecutionOutcome::Clean { new_head },
+        Err(RebaseError::Conflict { at_sha, .. }) => match repo.cherry_pick_tree(&at_sha, onto) {
+            Ok(CherryPickOutcome::Conflict { files }) => {
+                RebaseExecutionOutcome::Conflict { at_sha, files }
+            },
+            Ok(CherryPickOutcome::Clean { .. }) => RebaseExecutionOutcome::Aborted(format!(
+                "run_rebase reported a conflict at {at_sha} but cherry_pick_tree is clean",
+            )),
+            Err(GitApplyError::Backend { reason, .. }) => RebaseExecutionOutcome::Aborted(format!(
+                "cherry_pick_tree({at_sha}) failed: {reason}",
+            )),
+        },
+        Err(RebaseError::Backend { reason, .. }) => {
+            RebaseExecutionOutcome::Aborted(format!("run_rebase failed: {reason}"))
+        },
+        Err(RebaseError::DirtyWorktree { .. }) => {
+            RebaseExecutionOutcome::Aborted("run_rebase requires a clean worktree".into())
+        },
+    }
 }
 
 /// Switch the active file's editor and editor cursor to point at
@@ -6946,6 +7011,7 @@ mod tests {
             .commit("head1", &[("a.txt", "ours-content\n")])
             .commit_with_parent("c2", "head1", &[("a.txt", "c2-content\n")]);
         install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
 
         let item = open_conflict_item_in_focused_pane(
             vcx,
@@ -6970,7 +7036,7 @@ mod tests {
         );
 
         dispatch(&ws, vcx, stoat_action::ConflictApply);
-        vcx.run_until_parked();
+        settle_rebase(&scheduler, vcx);
 
         let still_active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
         assert!(
@@ -6999,6 +7065,7 @@ mod tests {
             .commit_with_parent("c2", "head1", &[("b.txt", "c2-b-content\n")])
             .simulate_conflict_at("c2");
         install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
 
         let item = open_conflict_item_in_focused_pane(
             vcx,
@@ -7023,7 +7090,7 @@ mod tests {
         );
 
         dispatch(&ws, vcx, stoat_action::ConflictApply);
-        vcx.run_until_parked();
+        settle_rebase(&scheduler, vcx);
 
         let pause_sha = ws.read_with(vcx, |w, _| {
             match w.rebase_active.as_ref()?.pause.as_ref()? {
@@ -7154,6 +7221,25 @@ mod tests {
             head, "head1",
             "no rebase active: dispatch must not call update_head",
         );
+    }
+
+    fn install_executor_for_rebase(
+        vcx: &mut VisualTestContext,
+    ) -> Arc<stoat_scheduler::TestScheduler> {
+        use crate::globals::ExecutorGlobal;
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        let executor = scheduler.executor();
+        vcx.update(|_, cx| {
+            cx.set_global(ExecutorGlobal(executor));
+        });
+        scheduler
+    }
+
+    fn settle_rebase(scheduler: &Arc<stoat_scheduler::TestScheduler>, vcx: &mut VisualTestContext) {
+        for _ in 0..4 {
+            scheduler.run_until_parked();
+            vcx.run_until_parked();
+        }
     }
 
     fn open_rebase_item_in_focused_pane(
@@ -7347,6 +7433,7 @@ mod tests {
             .commit("onto1", &[("a.txt", "base\n")])
             .commit_with_parent("c1", "onto1", &[("a.txt", "c1\n")]);
         install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
 
         let _ = open_rebase_item_in_focused_pane(
             vcx,
@@ -7355,7 +7442,7 @@ mod tests {
         );
 
         dispatch(&ws, vcx, stoat_action::ExecuteRebase);
-        vcx.run_until_parked();
+        settle_rebase(&scheduler, vcx);
 
         let rebases = git.applied_rebases(Path::new("/tmp/repo"));
         assert_eq!(rebases.len(), 1);
@@ -7370,15 +7457,15 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_execute_rebase_opens_conflict_views_on_conflict() {
+    fn dispatch_execute_rebase_defers_run_rebase_to_executor() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let git = Arc::new(stoat::host::fake::FakeGit::new());
         git.add_repo("/tmp/repo")
             .commit("onto1", &[("a.txt", "base\n")])
-            .commit_with_parent("c1", "onto1", &[("a.txt", "c1\n")])
-            .simulate_conflict_at("c1");
+            .commit_with_parent("c1", "onto1", &[("a.txt", "c1\n")]);
         install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
 
         let _ = open_rebase_item_in_focused_pane(
             vcx,
@@ -7388,6 +7475,45 @@ mod tests {
 
         dispatch(&ws, vcx, stoat_action::ExecuteRebase);
         vcx.run_until_parked();
+
+        assert!(
+            ws.read_with(vcx, |w, _| w.rebase_active.is_some()),
+            "rebase_active stays installed until the executor task completes",
+        );
+        assert!(
+            git.applied_rebases(Path::new("/tmp/repo")).is_empty(),
+            "run_rebase has not run yet -- it's queued on the executor scheduler",
+        );
+
+        settle_rebase(&scheduler, vcx);
+
+        assert!(
+            !ws.read_with(vcx, |w, _| w.rebase_active.is_some()),
+            "rebase_active clears once the executor task lands its outcome",
+        );
+        assert_eq!(git.applied_rebases(Path::new("/tmp/repo")).len(), 1);
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_opens_conflict_views_on_conflict() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("onto1", &[("a.txt", "base\n")])
+            .commit_with_parent("c1", "onto1", &[("a.txt", "c1\n")])
+            .simulate_conflict_at("c1");
+        install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "c1 summary")]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
 
         let pause_sha = ws.read_with(vcx, |w, _| {
             match w.rebase_active.as_ref()?.pause.as_ref()? {
@@ -7511,6 +7637,7 @@ mod tests {
             .commit("head1", &[("a.txt", "x\n")])
             .commit_with_parent("c2", "head1", &[("a.txt", "y\n")]);
         install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
         install_edit_pause(
             vcx,
             &ws,
@@ -7521,7 +7648,7 @@ mod tests {
         );
 
         dispatch(&ws, vcx, stoat_action::RebaseContinue);
-        vcx.run_until_parked();
+        settle_rebase(&scheduler, vcx);
 
         let active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
         assert!(!active, "rebase_active must clear after clean continuation");
