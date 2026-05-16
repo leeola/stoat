@@ -1,6 +1,7 @@
 use crate::{
     buffer::Buffer,
     buffer_registry::{BufferRegistry, BufferRegistryEvent},
+    conflict_item::{ConflictItem, ConflictSide},
     diff_coordinator::DiffCoordinator,
     diff_map::DiffMap,
     display_map::DisplayMap,
@@ -1115,6 +1116,12 @@ impl Workspace {
             ActionKind::CommitsRefresh => self.dispatch_commits_refresh(cx),
             ActionKind::CommitsOpenReview => self.dispatch_commits_open_review(cx),
             ActionKind::CloseCommits => self.dispatch_close_commits(cx),
+            ActionKind::ConflictTakeOurs => {
+                self.dispatch_conflict_take_side(ConflictSide::Ours, cx)
+            },
+            ActionKind::ConflictTakeTheirs => {
+                self.dispatch_conflict_take_side(ConflictSide::Theirs, cx)
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1344,6 +1351,18 @@ impl Workspace {
                 .downcast::<crate::review_item::ReviewItem>()
                 .ok()
         })
+    }
+
+    fn active_conflict_item(&self, cx: &App) -> Option<Entity<ConflictItem>> {
+        self.active_pane_item(cx)
+            .and_then(|item| item.to_any_view().downcast::<ConflictItem>().ok())
+    }
+
+    fn dispatch_conflict_take_side(&mut self, side: ConflictSide, cx: &mut Context<'_, Self>) {
+        let Some(conflict_item) = self.active_conflict_item(cx) else {
+            return;
+        };
+        conflict_item.update(cx, |item, cx| item.take_side(side, cx));
     }
 
     fn dispatch_review_step(&mut self, dir: ReviewStepDir, cx: &mut Context<'_, Self>) {
@@ -5923,5 +5942,81 @@ mod tests {
             active_pane_commit_list(vcx, &ws).is_none(),
             "OpenCommits must skip when the workdir is not a git repo",
         );
+    }
+
+    fn open_conflict_item_in_focused_pane(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        file: stoat::host::ConflictedFile,
+    ) -> Entity<ConflictItem> {
+        let item = vcx.update(|_, cx| cx.new(|cx| ConflictItem::from_conflicted_file(file, cx)));
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            let handle: Box<dyn ItemHandle> = Box::new(item.clone());
+            pane.update(cx, |p, cx| {
+                p.add_item(handle, cx);
+            });
+        });
+        vcx.run_until_parked();
+        item
+    }
+
+    fn conflicted_file(path: &str, ours: &str, theirs: &str) -> stoat::host::ConflictedFile {
+        stoat::host::ConflictedFile {
+            path: PathBuf::from(path),
+            ancestor: None,
+            ours: Some(ours.to_string()),
+            theirs: Some(theirs.to_string()),
+        }
+    }
+
+    #[test]
+    fn dispatch_conflict_take_ours_replaces_result_buffer() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let item = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "alpha\n", "beta\n"),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictTakeOurs);
+        vcx.run_until_parked();
+
+        let text = item.read_with(vcx, |item, cx| item.result_buffer_text(cx));
+        assert_eq!(text, "alpha\n");
+    }
+
+    #[test]
+    fn dispatch_conflict_take_theirs_replaces_result_buffer() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let item = open_conflict_item_in_focused_pane(
+            vcx,
+            &ws,
+            conflicted_file("a.txt", "alpha\n", "beta\n"),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ConflictTakeTheirs);
+        vcx.run_until_parked();
+
+        let text = item.read_with(vcx, |item, cx| item.result_buffer_text(cx));
+        assert_eq!(text, "beta\n");
+    }
+
+    #[test]
+    fn dispatch_conflict_take_side_without_conflict_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ConflictTakeOurs);
+        vcx.run_until_parked();
+        // The focused pane has no ConflictItem; the dispatch is a no-op.
     }
 }

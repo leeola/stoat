@@ -12,10 +12,19 @@ use gpui::{
     Styled, Window,
 };
 use serde_json::Value;
-use std::path::PathBuf;
+use std::{ops::Range, path::PathBuf};
 use stoat::{buffer::BufferId, host::ConflictedFile};
 
 const MISSING_SIDE_PLACEHOLDER: &str = "(file not present)\n";
+
+/// Which side of a conflict block fills the resolution. Selected by
+/// `ConflictTakeOurs` / `ConflictTakeTheirs` on the workspace dispatch
+/// path; consumed by [`ConflictItem::take_side`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum ConflictSide {
+    Ours,
+    Theirs,
+}
 
 /// Pane-hosted 3-way merge view for one [`ConflictedFile`].
 ///
@@ -68,6 +77,124 @@ impl ConflictItem {
             result,
         }
     }
+
+    /// Replace the conflict block enclosing the result editor's
+    /// primary cursor with `side`'s content. The block must be a
+    /// well-formed `<<<<<<< / ======= / >>>>>>>` triple; mismatched
+    /// or absent markers leave the buffer untouched.
+    pub(crate) fn take_side(&self, side: ConflictSide, cx: &mut Context<'_, Self>) {
+        let cursor = {
+            let editor = self.result.editor.read(cx);
+            let snapshot = editor.multi_buffer().read(cx).snapshot();
+            let Some(primary) = editor
+                .selections()
+                .all_anchors()
+                .iter()
+                .max_by_key(|s| s.id)
+            else {
+                return;
+            };
+            snapshot.resolve_anchor(&primary.head())
+        };
+        let text = self.result_buffer_text(cx);
+        let Some(block) = find_enclosing_conflict_block(&text, cursor) else {
+            return;
+        };
+        let replacement_range = match side {
+            ConflictSide::Ours => block.ours,
+            ConflictSide::Theirs => block.theirs,
+        };
+        let replacement = text[replacement_range].to_owned();
+        self.result.buffer.update(cx, |buf, cx| {
+            buf.edit(block.range, &replacement, cx);
+        });
+    }
+
+    /// Snapshot of the result buffer's text -- the resolved content
+    /// the user has produced so far.
+    pub(crate) fn result_buffer_text(&self, cx: &App) -> String {
+        self.result.buffer.read(cx).text()
+    }
+}
+
+/// Byte offsets of a `<<<<<<< / ======= / >>>>>>>` block in a buffer.
+/// `range` covers the entire marker block; `ours` and `theirs` cover
+/// the content of each side, both bounded by `\n` line boundaries so
+/// the slices stay UTF-8 valid.
+struct ConflictBlock {
+    range: Range<usize>,
+    ours: Range<usize>,
+    theirs: Range<usize>,
+}
+
+fn find_enclosing_conflict_block(text: &str, cursor: usize) -> Option<ConflictBlock> {
+    enum State {
+        Outside,
+        InOurs {
+            block_start: usize,
+            ours_start: usize,
+        },
+        InTheirs {
+            block_start: usize,
+            ours: Range<usize>,
+            theirs_start: usize,
+        },
+    }
+
+    let mut state = State::Outside;
+    let mut pos = 0usize;
+    loop {
+        let nl = text[pos..].find('\n');
+        let line_end = nl.map(|p| pos + p).unwrap_or(text.len());
+        let next_line_start = nl.map(|_| line_end + 1).unwrap_or(text.len());
+        let line = &text[pos..line_end];
+
+        match &state {
+            State::Outside => {
+                if line.starts_with("<<<<<<<") {
+                    state = State::InOurs {
+                        block_start: pos,
+                        ours_start: next_line_start,
+                    };
+                }
+            },
+            State::InOurs {
+                block_start,
+                ours_start,
+            } => {
+                if line.starts_with("=======") {
+                    state = State::InTheirs {
+                        block_start: *block_start,
+                        ours: *ours_start..pos,
+                        theirs_start: next_line_start,
+                    };
+                }
+            },
+            State::InTheirs {
+                block_start,
+                ours,
+                theirs_start,
+            } => {
+                if line.starts_with(">>>>>>>") {
+                    let block_end = next_line_start;
+                    if (*block_start..block_end).contains(&cursor) {
+                        return Some(ConflictBlock {
+                            range: *block_start..block_end,
+                            ours: ours.clone(),
+                            theirs: *theirs_start..pos,
+                        });
+                    }
+                    state = State::Outside;
+                }
+            },
+        }
+
+        if nl.is_none() {
+            break;
+        }
+        pos = next_line_start;
+    }
+    None
 }
 
 fn build_side_editor(text: &str, cx: &mut Context<'_, ConflictItem>) -> SideView {
@@ -273,5 +400,127 @@ mod tests {
         });
         let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
         assert_eq!(text, "<<<<<<< ours\n=======\ntheirs-line\n>>>>>>> theirs\n",);
+    }
+
+    #[test]
+    fn find_enclosing_conflict_block_single_block_cursor_in_ours() {
+        let text = "<<<<<<< ours\nalpha\n=======\nbeta\n>>>>>>> theirs\n";
+        let cursor = text.find("alpha").expect("ours line present");
+        let block = find_enclosing_conflict_block(text, cursor).expect("cursor in block");
+        assert_eq!(&text[block.range.clone()], text);
+        assert_eq!(&text[block.ours], "alpha\n");
+        assert_eq!(&text[block.theirs], "beta\n");
+    }
+
+    #[test]
+    fn find_enclosing_conflict_block_no_marker_returns_none() {
+        assert!(find_enclosing_conflict_block("just plain text\nno markers\n", 4).is_none());
+    }
+
+    #[test]
+    fn find_enclosing_conflict_block_cursor_between_blocks_returns_none() {
+        let text = "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nbetween\n<<<<<<< ours\nc\n=======\nd\n>>>>>>> theirs\n";
+        let cursor = text.find("between").expect("between marker present");
+        assert!(find_enclosing_conflict_block(text, cursor).is_none());
+    }
+
+    #[test]
+    fn find_enclosing_conflict_block_returns_second_block_when_cursor_inside() {
+        let text = "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\nx\n<<<<<<< ours\nc\n=======\nd\n>>>>>>> theirs\n";
+        let cursor = text.find('c').expect("second-block ours present");
+        let block = find_enclosing_conflict_block(text, cursor).expect("cursor in second block");
+        assert_eq!(&text[block.ours], "c\n");
+        assert_eq!(&text[block.theirs], "d\n");
+    }
+
+    #[test]
+    fn find_enclosing_conflict_block_handles_branch_name_suffix() {
+        let text = "<<<<<<< feature-x\nfoo\n=======\nbar\n>>>>>>> main\n";
+        let cursor = text.find("foo").expect("ours line present");
+        let block = find_enclosing_conflict_block(text, cursor).expect("cursor in block");
+        assert_eq!(&text[block.ours], "foo\n");
+        assert_eq!(&text[block.theirs], "bar\n");
+    }
+
+    fn place_cursor_at(editor: &Entity<Editor>, offset: usize, cx: &mut TestAppContext) {
+        use stoat_text::{Bias, Selection, SelectionGoal};
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let anchor = snapshot.anchor_at(offset, Bias::Left);
+            ed.selections_mut().replace_with(
+                vec![Selection {
+                    id: 1,
+                    start: anchor,
+                    end: anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }],
+                &snapshot,
+            );
+            cx.notify();
+        });
+    }
+
+    #[test]
+    fn take_ours_replaces_block_with_ours_content() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", None, Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        let editor = item.read_with(&cx, |item, _| item.result.editor.clone());
+        place_cursor_at(&editor, 0, &mut cx);
+        item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Ours, cx));
+        let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
+        assert_eq!(text, "alpha\n");
+    }
+
+    #[test]
+    fn take_theirs_replaces_block_with_theirs_content() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", None, Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        let editor = item.read_with(&cx, |item, _| item.result.editor.clone());
+        place_cursor_at(&editor, 0, &mut cx);
+        item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Theirs, cx));
+        let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
+        assert_eq!(text, "beta\n");
+    }
+
+    #[test]
+    fn take_side_is_noop_when_cursor_outside_any_block() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", None, Some("a\n"), Some("b\n")),
+                    cx,
+                )
+            })
+        });
+        item.update(&mut cx, |item, cx| {
+            item.result.buffer.update(cx, |buf, cx| {
+                let text = buf.text();
+                buf.edit(0..text.len(), "no markers here\n", cx);
+            });
+        });
+        let editor = item.read_with(&cx, |item, _| item.result.editor.clone());
+        place_cursor_at(&editor, 0, &mut cx);
+        item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Ours, cx));
+        let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
+        assert_eq!(text, "no markers here\n");
     }
 }
