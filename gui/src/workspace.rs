@@ -824,6 +824,7 @@ impl Workspace {
                     }
                 }
             },
+            ActionKind::CodeAction => self.dispatch_code_action(window, cx),
             ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, false, cx),
             ActionKind::MoveRight => self.dispatch_move_horizontal(1, false, cx),
             ActionKind::MoveUp => self.dispatch_move_vertical(-1, false, cx),
@@ -2562,6 +2563,108 @@ impl Workspace {
         let workdir = self.git_root.clone();
         let source = ReviewSource::WorkingTree { workdir };
         self.open_review_source(source, "OpenReview", cx);
+    }
+
+    /// Open the LSP code action picker for the active editor's
+    /// selection range. Spawns a fresh LSP server through
+    /// `LspHostGlobal::launch`, fetches `textDocument/codeAction`,
+    /// translates the response into picker entries, and shows the
+    /// modal. No-op when no editor is active, the buffer has no
+    /// file path, or no language is registered for that path.
+    fn dispatch_code_action(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let Some(path) = editor.read(cx).file_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let registry = &cx.global::<crate::globals::LanguageRegistry>().0;
+        let Some(language) = registry.for_path(&path) else {
+            return;
+        };
+        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
+        let rope = mb_snapshot.rope().clone();
+        let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
+            return;
+        };
+        let start_offset = mb_snapshot.resolve_anchor(&primary.start);
+        let end_offset = mb_snapshot.resolve_anchor(&primary.end);
+        let (lo, hi) = if start_offset <= end_offset {
+            (start_offset, end_offset)
+        } else {
+            (end_offset, start_offset)
+        };
+        let Some(uri) = path.to_str().and_then(|s| {
+            <lsp_types::Uri as std::str::FromStr>::from_str(&format!("file://{s}")).ok()
+        }) else {
+            return;
+        };
+        let workspace_root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        let weak_editor = editor.downgrade();
+        let weak_workspace = cx.weak_entity();
+        cx.spawn_in(window, async move |_, cx| {
+            let server = match host.launch(&language, &workspace_root).await {
+                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::code_action",
+                        ?err,
+                        "failed to launch LSP server for code action"
+                    );
+                    return;
+                },
+            };
+            let _ = server.initialize(Some(uri.clone())).await;
+            if !server.supports_feature(stoat::host::LanguageServerFeature::CodeAction) {
+                return;
+            }
+            let encoding = server.offset_encoding();
+            let range = stoat::lsp::util::byte_range_to_lsp_range(&rope, lo..hi, encoding);
+            let params = lsp_types::CodeActionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                range,
+                context: lsp_types::CodeActionContext {
+                    diagnostics: Vec::new(),
+                    only: None,
+                    trigger_kind: None,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+            };
+            let response = match server.code_action(params).await {
+                Ok(Some(r)) => r,
+                Ok(None) | Err(_) => return,
+            };
+            let entries = crate::lsp::code_action::translate_actions(response);
+            if entries.is_empty() {
+                return;
+            }
+            let _ =
+                weak_workspace.update_in(cx, |workspace, window, cx| {
+                    workspace.toggle_modal::<
+                    crate::picker::Picker<crate::lsp::CodeActionPickerDelegate>,
+                    _,
+                >(window, cx, move |window, cx| {
+                    let delegate = crate::lsp::CodeActionPickerDelegate::new(
+                        entries,
+                        weak_editor,
+                        uri,
+                        rope,
+                        encoding,
+                        server,
+                        executor,
+                    );
+                    crate::picker::Picker::new(delegate, window, cx)
+                });
+                });
+        })
+        .detach();
     }
 
     fn dispatch_open_review_commit(
