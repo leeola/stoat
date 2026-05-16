@@ -16,6 +16,7 @@
 mod actions;
 mod buffer;
 mod buffer_registry;
+mod commit_list;
 mod diagnostics;
 mod diff_coordinator;
 mod diff_map;
@@ -51,6 +52,7 @@ mod workspace;
 pub use actions::{ClickAt, DragSelectTo, HoverAt, SetActivePane};
 pub use buffer::{Buffer, BufferEvent};
 pub use buffer_registry::{BufferRegistry, BufferRegistryEvent};
+pub use commit_list::{CommitListDelegate, CommitListItem, CommitListState, CommitListStateEvent};
 pub use diagnostics::{DiagnosticSet, DiagnosticSetEvent};
 pub use diff_coordinator::DiffCoordinator;
 pub use diff_map::{DiffMap, DiffMapEvent};

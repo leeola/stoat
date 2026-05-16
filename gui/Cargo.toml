@@ -34,4 +34,5 @@ stoat_host = { path = "../host", optional = true }
 stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
+time.workspace = true
 tracing.workspace = true
