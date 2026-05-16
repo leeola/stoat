@@ -15,18 +15,24 @@ use stoat::{
     lsp::util::lsp_range_to_byte_range,
 };
 
-/// One pickable code action. `Direct` carries the edit (and an
-/// optional follow-up command) the server returned eagerly;
-/// `Command` carries a server-side command the editor only
-/// dispatches. `NeedsResolve` is omitted: those entries are filtered
-/// out at translate time because v1 does not yet implement the
-/// `codeAction/resolve` follow-up.
+/// One pickable code action.
+///
+/// `Direct` carries the edit (and an optional follow-up command) the
+/// server returned eagerly. `Command` carries a server-side command
+/// the editor only dispatches. `NeedsResolve` carries an unresolved
+/// `CodeAction` whose `data` payload the server fills in on a
+/// follow-up `codeAction/resolve` request -- v1 servers that defer
+/// edits this way still flow through the picker.
 #[derive(Clone)]
 pub enum CodeActionEntry {
     Direct {
         title: String,
         edit: Box<WorkspaceEdit>,
         command: Option<LspCommand>,
+    },
+    NeedsResolve {
+        title: String,
+        action: Box<LspCodeAction>,
     },
     Command {
         title: String,
@@ -37,7 +43,9 @@ pub enum CodeActionEntry {
 impl CodeActionEntry {
     pub fn title(&self) -> &str {
         match self {
-            Self::Direct { title, .. } | Self::Command { title, .. } => title,
+            Self::Direct { title, .. }
+            | Self::NeedsResolve { title, .. }
+            | Self::Command { title, .. } => title,
         }
     }
 }
@@ -124,6 +132,7 @@ impl PickerDelegate for CodeActionPickerDelegate {
                     self.dispatch_command(command);
                 }
             },
+            CodeActionEntry::NeedsResolve { action, .. } => self.spawn_resolve(*action, cx),
             CodeActionEntry::Command { command, .. } => {
                 self.dispatch_command(command);
             },
@@ -158,40 +167,64 @@ impl CodeActionPickerDelegate {
         edit: &WorkspaceEdit,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> bool {
-        let text_edits = collect_text_edits_for_uri(edit, &self.uri);
-        if text_edits.is_empty() {
-            return false;
-        }
-        let Some(editor) = self.editor.upgrade() else {
-            return false;
-        };
-        let Some(buffer) = editor
-            .read(cx)
-            .multi_buffer()
-            .read(cx)
-            .as_singleton()
-            .cloned()
-        else {
-            return false;
-        };
-        let mut byte_edits: Vec<(std::ops::Range<usize>, String)> = text_edits
-            .into_iter()
-            .map(|te| {
-                (
-                    lsp_range_to_byte_range(&self.rope, te.range, self.encoding),
-                    te.new_text,
-                )
-            })
-            .collect();
-        // Reverse-byte order keeps earlier ranges stable as later
-        // edits land first.
-        byte_edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
-        buffer.update(cx, |b, cx| {
-            for (range, text) in byte_edits {
-                b.edit(range, &text, cx);
-            }
-        });
-        true
+        apply_workspace_edit_to_buffer(edit, &self.uri, &self.rope, self.encoding, &self.editor, cx)
+    }
+
+    /// Spawn a `codeAction/resolve` request for `action` and apply
+    /// the resolved edit / command to the active editor's buffer.
+    /// Server returned `Err` or a still-unresolved action -> log a
+    /// warning and drop. A resolved action that carries neither an
+    /// `edit` nor a `command` is silently dropped (the server told
+    /// us it had nothing to do).
+    fn spawn_resolve(&self, action: LspCodeAction, cx: &mut Context<'_, Picker<Self>>) {
+        let server = self.server.clone();
+        let uri = self.uri.clone();
+        let rope = self.rope.clone();
+        let encoding = self.encoding;
+        let editor = self.editor.clone();
+        let executor = self.executor.clone();
+        cx.spawn(async move |_, cx| {
+            let resolved = match server.code_action_resolve(action).await {
+                Ok(r) => r,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::code_action",
+                        ?err,
+                        "codeAction/resolve request failed",
+                    );
+                    return;
+                },
+            };
+            let edit = resolved.edit;
+            let command = resolved.command;
+            let _ = cx.update(|cx| {
+                if let Some(edit) = edit {
+                    apply_workspace_edit_to_buffer(&edit, &uri, &rope, encoding, &editor, cx);
+                }
+                if let Some(command) = command {
+                    let server = server.clone();
+                    let label = command.command.clone();
+                    let params = ExecuteCommandParams {
+                        command: command.command,
+                        arguments: command.arguments.unwrap_or_default(),
+                        work_done_progress_params: Default::default(),
+                    };
+                    executor
+                        .spawn(async move {
+                            if let Err(err) = server.execute_command(params).await {
+                                tracing::warn!(
+                                    target: "stoat_gui::lsp::code_action",
+                                    ?err,
+                                    command = %label,
+                                    "workspace/executeCommand request failed",
+                                );
+                            }
+                        })
+                        .detach();
+                }
+            });
+        })
+        .detach();
     }
 
     fn dispatch_command(&self, command: LspCommand) {
@@ -217,6 +250,52 @@ impl CodeActionPickerDelegate {
     }
 }
 
+/// Apply the text edits in `edit` whose target URI matches `uri` to
+/// the singleton buffer of `editor`. Multi-file edits are dropped
+/// for the v1 picker scope. Returns `true` when at least one
+/// `TextEdit` landed.
+fn apply_workspace_edit_to_buffer(
+    edit: &WorkspaceEdit,
+    uri: &Uri,
+    rope: &stoat_text::Rope,
+    encoding: OffsetEncoding,
+    editor: &WeakEntity<Editor>,
+    cx: &mut gpui::App,
+) -> bool {
+    let text_edits = collect_text_edits_for_uri(edit, uri);
+    if text_edits.is_empty() {
+        return false;
+    }
+    let Some(editor) = editor.upgrade() else {
+        return false;
+    };
+    let Some(buffer) = editor
+        .read(cx)
+        .multi_buffer()
+        .read(cx)
+        .as_singleton()
+        .cloned()
+    else {
+        return false;
+    };
+    let mut byte_edits: Vec<(std::ops::Range<usize>, String)> = text_edits
+        .into_iter()
+        .map(|te| {
+            (
+                lsp_range_to_byte_range(rope, te.range, encoding),
+                te.new_text,
+            )
+        })
+        .collect();
+    byte_edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+    buffer.update(cx, |b, cx| {
+        for (range, text) in byte_edits {
+            b.edit(range, &text, cx);
+        }
+    });
+    true
+}
+
 /// Translate raw LSP code-action items into the picker's enum.
 /// Filters out `CodeAction` entries that have neither a
 /// `WorkspaceEdit` nor a command (the resolve-pipeline is a v2
@@ -236,6 +315,12 @@ pub fn translate_actions(actions: Vec<CodeActionOrCommand>) -> Vec<CodeActionEnt
 }
 
 fn translate_code_action(ca: LspCodeAction) -> Option<CodeActionEntry> {
+    if ca.edit.is_none() && ca.command.is_none() && ca.data.is_some() {
+        return Some(CodeActionEntry::NeedsResolve {
+            title: ca.title.clone(),
+            action: Box::new(ca),
+        });
+    }
     match (ca.edit, ca.command) {
         (Some(edit), command) => Some(CodeActionEntry::Direct {
             title: ca.title,
@@ -310,12 +395,25 @@ mod tests {
     }
 
     #[test]
-    fn translate_drops_action_without_edit_or_command() {
+    fn translate_drops_action_without_edit_command_or_data() {
         let items = vec![CodeActionOrCommand::CodeAction(LspCodeAction {
             title: "no-op".into(),
             ..Default::default()
         })];
         assert!(translate_actions(items).is_empty());
+    }
+
+    #[test]
+    fn translate_data_only_action_yields_needs_resolve() {
+        let items = vec![CodeActionOrCommand::CodeAction(LspCodeAction {
+            title: "resolve-me".into(),
+            data: Some(serde_json::json!({"id": "abc"})),
+            ..Default::default()
+        })];
+        let entries = translate_actions(items);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].title(), "resolve-me");
+        assert!(matches!(entries[0], CodeActionEntry::NeedsResolve { .. }));
     }
 
     #[test]
