@@ -348,6 +348,7 @@ impl Workspace {
             editor.update(cx, |ed, cx| {
                 ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(absolute.clone()), cx);
+                ed.install_hover_popup(cx);
             });
             let pane_id = if index == 0 {
                 self.pane_tree.read(cx).focus()

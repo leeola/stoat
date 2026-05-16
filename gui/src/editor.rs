@@ -129,6 +129,7 @@ pub struct Editor {
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
     hover_debounce_task: Option<Task<()>>,
+    hover_popup: Option<Entity<crate::lsp::HoverPopup>>,
     expansion_history: Vec<std::ops::Range<usize>>,
     expansion_tip: Option<std::ops::Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
@@ -196,6 +197,7 @@ impl Editor {
             text_region_bounds: None,
             hover_position: None,
             hover_debounce_task: None,
+            hover_popup: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
             blame_state: None,
@@ -696,6 +698,25 @@ impl Editor {
         cx.notify();
     }
 
+    /// Construct the [`crate::lsp::HoverPopup`] entity that observes
+    /// this editor's `hover_position` transitions and renders the
+    /// floating LSP hover panel. Workspace wiring calls this once
+    /// after [`Self::set_workspace`] so production editors paint
+    /// hover content above the text region; tests that exercise the
+    /// popup directly skip this and construct the entity themselves.
+    pub fn install_hover_popup(&mut self, cx: &mut Context<'_, Self>) {
+        if self.hover_popup.is_some() {
+            return;
+        }
+        let editor = cx.entity();
+        let popup = cx.new(|popup_cx| crate::lsp::HoverPopup::new(editor, popup_cx));
+        self.hover_popup = Some(popup);
+    }
+
+    pub fn hover_popup(&self) -> Option<&Entity<crate::lsp::HoverPopup>> {
+        self.hover_popup.as_ref()
+    }
+
     /// Extend the primary selection's head to display-grid `(row, col)`,
     /// preserving its anchor (`start`). Mouse-drag uses this to grow
     /// the selection under the cursor while the user holds the left
@@ -1167,29 +1188,33 @@ impl Render for Editor {
         )
         .size_full();
 
-        div()
+        let hover_popup = self.hover_popup.clone();
+        let mut root = div()
             .relative()
             .size_full()
             .font_family(family)
             .text_size(px(size))
             .child(list)
-            .child(bounds_capture)
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.dispatch_click_at(event.position, window, cx);
-                }),
-            )
-            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if event.dragging() {
-                    this.dispatch_drag_select_to(event.position, window, cx);
-                } else {
-                    this.schedule_hover_at(event.position, window, cx);
-                }
-            }))
-            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
-                this.handle_scroll_wheel(event, window, cx);
-            }))
+            .child(bounds_capture);
+        if let Some(popup) = hover_popup {
+            root = root.child(popup);
+        }
+        root.on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                this.dispatch_click_at(event.position, window, cx);
+            }),
+        )
+        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+            if event.dragging() {
+                this.dispatch_drag_select_to(event.position, window, cx);
+            } else {
+                this.schedule_hover_at(event.position, window, cx);
+            }
+        }))
+        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+            this.handle_scroll_wheel(event, window, cx);
+        }))
     }
 }
 
