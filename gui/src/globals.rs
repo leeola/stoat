@@ -54,6 +54,10 @@ impl Global for ShellHostGlobal {}
 /// App-global wrapper for [`Arc<dyn LspHost>`]. The factory side of
 /// the LSP host split; entities resolve a per-language
 /// [`stoat::host::LspServer`] via [`stoat::host::LspHost::launch`].
+/// Production wires [`stoat::host::LocalLspHost`] constructed from a
+/// snapshot of `Settings::language_servers`; languages without a
+/// configured entry surface as [`std::io::ErrorKind::NotFound`] at
+/// launch time rather than a silent noop server.
 pub struct LspHostGlobal(pub Arc<dyn LspHost>);
 
 impl Global for LspHostGlobal {}

@@ -31,6 +31,7 @@ pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
     let claude_launcher = ClaudeCodeLauncher::new(fs_host.clone(), executor.clone());
 
     let (settings, theme) = load_default_settings_and_theme();
+    let language_servers = settings.resolved.language_servers.clone();
 
     let globals = Globals {
         settings,
@@ -40,7 +41,10 @@ pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
         fs_watch_host: FsWatchHostGlobal(Arc::new(fs_watcher)),
         env_host: EnvHostGlobal(Arc::new(LocalEnv)),
         shell_host: ShellHostGlobal(Arc::new(LocalShell)),
-        lsp_host: LspHostGlobal(Arc::new(LocalLspHost)),
+        lsp_host: LspHostGlobal(Arc::new(LocalLspHost::new(
+            language_servers,
+            executor.clone(),
+        ))),
         git_host: GitHostGlobal(Arc::new(LocalGit::new())),
         claude_code_host: ClaudeCodeHostGlobal(Arc::new(claude_launcher)),
         clipboard_host: ClipboardHostGlobal(Arc::new(LocalClipboard)),
