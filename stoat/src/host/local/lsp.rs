@@ -3,12 +3,17 @@ use async_trait::async_trait;
 use std::{io, path::Path};
 use stoat_language::Language;
 
+mod server;
+
+pub use server::LocalLsp;
+
 /// Production [`LspHost`] factory. Resolves the per-language server
 /// command from settings and spawns a stdio-backed [`LspServer`].
 ///
-/// FIXME: until the production stdio transport lands, [`Self::launch`]
-/// returns [`NoopLspServer`] unconditionally. The settings lookup and
-/// spawn body wire in alongside the `LocalLsp` server implementation.
+/// FIXME: until the settings-driven launch path lands,
+/// [`Self::launch`] returns [`NoopLspServer`] unconditionally. The
+/// `Settings::language_servers` lookup and [`LocalLsp::spawn`] wiring
+/// land in the follow-up sibling item.
 pub struct LocalLspHost;
 
 #[async_trait]
