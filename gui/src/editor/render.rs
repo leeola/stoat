@@ -1,4 +1,4 @@
-use crate::diagnostics::DiagnosticSet;
+use crate::{diagnostics::DiagnosticSet, git::blame};
 use gpui::{
     div, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, Pixels, SharedString,
     StrikethroughStyle, StyledText, UnderlineStyle,
@@ -8,6 +8,7 @@ use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
 use std::{collections::BTreeMap, ops::Range, path::Path};
 use stoat::{
     display_map::{Block, BlockContext, BlockId, HighlightStyle as StoatHighlightStyle},
+    host::BlameLine,
     review::MoveProvenance,
     review_session::ChunkStatus,
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
@@ -678,18 +679,31 @@ const DIAG_INFO_HEX: u32 = 0x29b6f6;
 const DIAG_HINT_HEX: u32 = 0x9e9e9e;
 const BLOCK_TEXT_HEX: u32 = 0xa0a0a0;
 
+/// Visible characters in the blame strip when active:
+/// `{short_sha:7} {first_name:<8} {age:>3} ` separator → 21 cells.
+pub(crate) const BLAME_STRIP_WIDTH: usize = 21;
+const BLAME_SHA_WIDTH: usize = 7;
+const BLAME_NAME_WIDTH: usize = 8;
+const BLAME_AGE_WIDTH: usize = 3;
+const BLAME_SHA_HEX: u32 = 0xc9b458;
+const BLAME_NAME_HEX: u32 = 0x73c991;
+const BLAME_AGE_HEX: u32 = 0x6796e6;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GutterMetrics {
     pub line_number_width: usize,
+    pub blame_width: usize,
     pub total_width: usize,
 }
 
-pub(crate) fn gutter_metrics(snapshot: &DisplaySnapshot) -> GutterMetrics {
+pub(crate) fn gutter_metrics(snapshot: &DisplaySnapshot, blame_visible: bool) -> GutterMetrics {
     let buffer_line_count = snapshot.buffer_line_count().max(1);
     let line_number_width = digit_count(buffer_line_count);
+    let blame_width = if blame_visible { BLAME_STRIP_WIDTH } else { 0 };
     GutterMetrics {
         line_number_width,
-        total_width: line_number_width + 1 + 1 + 1 + 1,
+        blame_width,
+        total_width: blame_width + line_number_width + 1 + 1 + 1 + 1,
     }
 }
 
@@ -770,8 +784,18 @@ pub(crate) struct GutterPaint<'a> {
     pub diagnostics: Option<&'a DiagnosticRowMap>,
     pub review_chunk_markers: &'a [(u32, ChunkStatus)],
     pub review_move_provenances: &'a [(u32, MoveProvenance)],
+    pub blame: Option<BlamePaint<'a>>,
     pub metrics: GutterMetrics,
     pub line_number_color: Hsla,
+}
+
+/// Per-row blame entries plus the `now` reference used to format
+/// relative ages. Carried on [`GutterPaint`] when the editor has its
+/// blame strip toggled visible and the per-buffer [`BlameState`]
+/// holds populated entries.
+pub(crate) struct BlamePaint<'a> {
+    pub lines: &'a [BlameLine],
+    pub now_seconds: i64,
 }
 
 struct RowSuffix {
@@ -866,6 +890,10 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     let show_line_number =
         buffer_row.is_some() && !paint.display_snapshot.is_wrap_continuation(display_row);
 
+    if let Some(blame) = paint.blame.as_ref() {
+        append_blame_strip(&mut text, &mut runs, buffer_row, show_line_number, blame);
+    }
+
     if let (Some(row), true) = (buffer_row, show_line_number) {
         let line_str = format!("{:>width$}", row + 1, width = width);
         let start = text.len();
@@ -950,6 +978,74 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     text.push(' ');
 
     GutterPrefix { text, runs }
+}
+
+/// Prepend the blame strip onto `text` / `runs`. When the row is a
+/// wrap continuation, has no buffer mapping, or no blame entry covers
+/// `buffer_row`, the strip is rendered as [`BLAME_STRIP_WIDTH`] blank
+/// cells so column alignment with neighbour rows is preserved.
+fn append_blame_strip(
+    text: &mut String,
+    runs: &mut Vec<(Range<usize>, gpui::HighlightStyle)>,
+    buffer_row: Option<u32>,
+    show_for_row: bool,
+    paint: &BlamePaint<'_>,
+) {
+    let entry = if show_for_row {
+        buffer_row.and_then(|row| paint.lines.iter().find(|line| line.line == row))
+    } else {
+        None
+    };
+    let Some(entry) = entry else {
+        for _ in 0..BLAME_STRIP_WIDTH {
+            text.push(' ');
+        }
+        return;
+    };
+
+    let start = text.len();
+    push_padded_chars(text, &entry.short_sha, BLAME_SHA_WIDTH, false);
+    runs.push((start..text.len(), color_style(BLAME_SHA_HEX)));
+    text.push(' ');
+
+    let first_name = blame::author_first_name(&entry.author_name, BLAME_NAME_WIDTH);
+    let start = text.len();
+    push_padded_chars(text, &first_name, BLAME_NAME_WIDTH, false);
+    runs.push((start..text.len(), color_style(BLAME_NAME_HEX)));
+    text.push(' ');
+
+    let age = blame::format_age_short(entry.time, paint.now_seconds);
+    let start = text.len();
+    push_padded_chars(text, &age, BLAME_AGE_WIDTH, true);
+    runs.push((start..text.len(), color_style(BLAME_AGE_HEX)));
+    text.push(' ');
+}
+
+fn push_padded_chars(text: &mut String, value: &str, width: usize, right_align: bool) {
+    let chars: Vec<char> = value.chars().take(width).collect();
+    let pad = width.saturating_sub(chars.len());
+    if right_align {
+        for _ in 0..pad {
+            text.push(' ');
+        }
+        for ch in chars {
+            text.push(ch);
+        }
+    } else {
+        for ch in chars {
+            text.push(ch);
+        }
+        for _ in 0..pad {
+            text.push(' ');
+        }
+    }
+}
+
+fn color_style(hex: u32) -> gpui::HighlightStyle {
+    gpui::HighlightStyle {
+        color: Some(rgb(hex).into()),
+        ..Default::default()
+    }
 }
 
 #[cfg(test)]
@@ -1185,7 +1281,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "x");
 
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         assert_eq!(metrics.line_number_width, 1);
         assert_eq!(metrics.total_width, 5);
     }
@@ -1199,7 +1295,7 @@ mod tests {
             .join("\n");
         let snapshot = test_snapshot(&mut cx, &text);
 
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         assert_eq!(metrics.line_number_width, 3);
         assert_eq!(metrics.total_width, 7);
     }
@@ -1257,13 +1353,14 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "hello\nworld");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1281,13 +1378,14 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1300,13 +1398,14 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1327,7 +1426,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let mut diagnostics: DiagnosticRowMap = BTreeMap::new();
         diagnostics.insert(0, DiagnosticSeverity::WARNING);
         let paint = GutterPaint {
@@ -1336,6 +1435,7 @@ mod tests {
             diagnostics: Some(&diagnostics),
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1371,7 +1471,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let markers = vec![(1, ChunkStatus::Staged)];
         let paint = GutterPaint {
             display_snapshot: &snapshot,
@@ -1379,6 +1479,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &markers,
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1392,7 +1493,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let markers = vec![(1, ChunkStatus::Staged)];
         let paint = GutterPaint {
             display_snapshot: &snapshot,
@@ -1400,6 +1501,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &markers,
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1421,12 +1523,122 @@ mod tests {
         assert_eq!(chunk_glyph_for(ChunkStatus::Skipped), ('x', DIAG_HINT_HEX));
     }
 
+    fn sample_blame_line(line: u32, sha: &str, author: &str, time: i64) -> BlameLine {
+        BlameLine {
+            line,
+            commit_sha: format!("{sha}deadbeef"),
+            short_sha: sha.to_string(),
+            author_name: author.to_string(),
+            time,
+        }
+    }
+
+    #[test]
+    fn gutter_metrics_adds_blame_strip_width_when_visible() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "x");
+
+        let off = gutter_metrics(&snapshot, false);
+        let on = gutter_metrics(&snapshot, true);
+        assert_eq!(off.blame_width, 0);
+        assert_eq!(on.blame_width, BLAME_STRIP_WIDTH);
+        assert_eq!(on.total_width, off.total_width + BLAME_STRIP_WIDTH);
+    }
+
+    #[test]
+    fn build_gutter_prefix_paints_blame_columns_when_entry_present() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot, true);
+        let now = 1_000_000_000i64;
+        let lines = vec![sample_blame_line(
+            0,
+            "abc1234",
+            "Ada Lovelace",
+            now - 5 * 24 * 60 * 60,
+        )];
+        let blame = BlamePaint {
+            lines: &lines,
+            now_seconds: now,
+        };
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            blame: Some(blame),
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(0, &paint);
+        let strip: String = prefix.text.chars().take(BLAME_STRIP_WIDTH).collect();
+        assert_eq!(strip, "abc1234 Ada       5d ");
+    }
+
+    #[test]
+    fn build_gutter_prefix_blanks_blame_columns_when_no_entry_for_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot, true);
+        let lines = vec![sample_blame_line(0, "abc1234", "Ada", 0)];
+        let blame = BlamePaint {
+            lines: &lines,
+            now_seconds: 1_000_000_000,
+        };
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            blame: Some(blame),
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(1, &paint);
+        let strip: String = prefix.text.chars().take(BLAME_STRIP_WIDTH).collect();
+        assert_eq!(strip, " ".repeat(BLAME_STRIP_WIDTH));
+    }
+
+    #[test]
+    fn build_gutter_prefix_truncates_long_first_names_in_blame_strip() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "x");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot, true);
+        let now = 0i64;
+        let lines = vec![sample_blame_line(0, "abcdef0", "Octocatherine Smith", now)];
+        let blame = BlamePaint {
+            lines: &lines,
+            now_seconds: now,
+        };
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            blame: Some(blame),
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+
+        let prefix = build_gutter_prefix(0, &paint);
+        let strip: String = prefix.text.chars().take(BLAME_STRIP_WIDTH).collect();
+        assert_eq!(strip, "abcdef0 Octocath now ");
+    }
+
     #[test]
     fn build_row_suffix_appends_chip_when_provenance_at_row() {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let provenances = vec![(
             1u32,
             MoveProvenance {
@@ -1440,6 +1652,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1459,7 +1672,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let provenances = vec![(
             5u32,
             MoveProvenance {
@@ -1473,6 +1686,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1489,7 +1703,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "a");
         let diff_map = stoat::DiffMap::default();
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let provenances = vec![(
             0u32,
             MoveProvenance {
@@ -1503,6 +1717,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1542,13 +1757,14 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map =
             stoat::DiffMap::from_hunks([deleted_after(0)], Some(Arc::new("gone\n".to_string())));
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1563,13 +1779,14 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "a\nb");
         let diff_map =
             stoat::DiffMap::from_hunks([deleted_after(0)], Some(Arc::new("gone\n".to_string())));
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };
@@ -1586,13 +1803,14 @@ mod tests {
             [deleted_after(0), added_rows(1..2)],
             Some(Arc::new("gone\n".to_string())),
         );
-        let metrics = gutter_metrics(&snapshot);
+        let metrics = gutter_metrics(&snapshot, false);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
         };

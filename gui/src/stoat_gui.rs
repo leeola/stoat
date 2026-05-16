@@ -27,6 +27,7 @@ mod editor;
 mod editor_input;
 mod executor;
 mod fs_watcher_driver;
+mod git;
 mod globals;
 mod input_state_machine;
 mod item;

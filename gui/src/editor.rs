@@ -131,9 +131,12 @@ pub struct Editor {
     hover_debounce_task: Option<Task<()>>,
     expansion_history: Vec<std::ops::Range<usize>>,
     expansion_tip: Option<std::ops::Range<usize>>,
+    blame_state: Option<Entity<crate::git::blame::BlameState>>,
+    blame_visible: bool,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
     _review_session_subscription: Option<Subscription>,
+    _blame_subscription: Option<Subscription>,
 }
 
 /// Single coalesced "editor changed" signal. Subscribers re-render on
@@ -195,9 +198,12 @@ impl Editor {
             hover_debounce_task: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
+            blame_state: None,
+            blame_visible: false,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
             _review_session_subscription: None,
+            _blame_subscription: None,
         }
     }
 
@@ -518,6 +524,53 @@ impl Editor {
             )
         });
         self.diagnostic_set = set;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn blame_state(&self) -> Option<&Entity<crate::git::blame::BlameState>> {
+        self.blame_state.as_ref()
+    }
+
+    pub fn blame_visible(&self) -> bool {
+        self.blame_visible
+    }
+
+    /// Attach (or clear) the per-buffer [`BlameState`] whose cached
+    /// [`stoat::host::BlameLine`] entries feed the optional left-side
+    /// gutter strip. The editor subscribes to the state so any
+    /// cache update or edit-driven invalidation re-renders the
+    /// gutter without polling. Toggling visibility on or off is a
+    /// separate switch ([`set_blame_visible`]); attaching a state
+    /// alone does not paint the strip.
+    pub fn set_blame_state(
+        &mut self,
+        state: Option<Entity<crate::git::blame::BlameState>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self._blame_subscription = state.as_ref().map(|entity| {
+            cx.subscribe(
+                entity,
+                |_, _, _event: &crate::git::blame::BlameStateEvent, cx| {
+                    cx.emit(EditorEvent::Changed);
+                    cx.notify();
+                },
+            )
+        });
+        self.blame_state = state;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Flip the per-editor blame-strip visibility flag. When `true`
+    /// and a [`BlameState`] is attached, the gutter prepends one
+    /// fixed-width column per row carrying short sha, first author
+    /// name, and short relative age.
+    pub fn set_blame_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
+        if self.blame_visible == visible {
+            return;
+        }
+        self.blame_visible = visible;
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -1028,7 +1081,12 @@ impl Editor {
             return rows.into_iter().map(render::render_row_element).collect();
         }
 
-        let metrics = render::gutter_metrics(&display_snapshot);
+        let blame_lines = match (self.blame_visible, self.blame_state.as_ref()) {
+            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
+            _ => None,
+        };
+        let blame_visible_with_data = blame_lines.as_ref().is_some_and(|v| !v.is_empty());
+        let metrics = render::gutter_metrics(&display_snapshot, blame_visible_with_data);
         let diff_map_inner = self.diff_map.read(cx).diff().clone();
         let diagnostic_row_map = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
             (Some(path), Some(set)) => {
@@ -1036,12 +1094,21 @@ impl Editor {
             },
             _ => None,
         };
+        let blame_paint =
+            blame_lines
+                .as_ref()
+                .filter(|v| !v.is_empty())
+                .map(|lines| render::BlamePaint {
+                    lines,
+                    now_seconds: now_unix_seconds(),
+                });
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
             review_chunk_markers: &review_data.chunk_markers,
             review_move_provenances: &review_data.provenances,
+            blame: blame_paint,
             metrics,
             line_number_color: theme::muted_text_color(cx),
         };
@@ -1132,6 +1199,17 @@ impl Render for Editor {
 /// default, so the cell-height measurement reproduces the constant
 /// rather than threading a `TextStyle` through the paint callback.
 const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
+
+/// Wall-clock reference seeded into the blame strip's `now_seconds`
+/// field so relative ages render against the user's current time.
+/// Pre-1970 clocks fall back to 0 so render still produces a defined
+/// (large negative-age folds to "now") output.
+fn now_unix_seconds() -> i64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0)
+}
 
 fn editor_font(cx: &App) -> (SharedString, f32) {
     let (family, size) = match cx.try_global::<Settings>() {
@@ -2344,6 +2422,74 @@ mod tests {
 
         let count = editor.update(vcx, |ed, cx| ed.render_visible_rows(0..1, cx).len());
         assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn set_blame_state_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hi");
+        let state =
+            cx.update(|cx| cx.new(|cx| crate::git::blame::BlameState::new(buffer.clone(), cx)));
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_blame_state(Some(state), cx));
+        cx.run_until_parked();
+
+        let observed = drain(&events);
+        assert!(
+            observed.contains(&EditorEvent::Changed),
+            "expected Changed event when blame state attaches, got {observed:?}",
+        );
+    }
+
+    #[test]
+    fn set_blame_visible_toggles_flag_and_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hi");
+
+        editor.read_with(&cx, |ed, _| assert!(!ed.blame_visible()));
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_blame_visible(true, cx));
+        cx.run_until_parked();
+        editor.read_with(&cx, |ed, _| assert!(ed.blame_visible()));
+        assert_eq!(drain(&events), vec![EditorEvent::Changed]);
+
+        editor.update(&mut cx, |ed, cx| ed.set_blame_visible(true, cx));
+        cx.run_until_parked();
+        assert_eq!(drain(&events), Vec::<EditorEvent>::new());
+    }
+
+    #[test]
+    fn blame_state_update_emits_editor_changed() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hi");
+        let state =
+            cx.update(|cx| cx.new(|cx| crate::git::blame::BlameState::new(buffer.clone(), cx)));
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_blame_state(Some(state.clone()), cx)
+        });
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        state.update(&mut cx, |s, cx| {
+            s.set_blame(
+                vec![stoat::host::BlameLine {
+                    line: 0,
+                    commit_sha: "abc".to_string(),
+                    short_sha: "abc".to_string(),
+                    author_name: "Ada".to_string(),
+                    time: 0,
+                }],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let observed = drain(&events);
+        assert!(
+            observed.contains(&EditorEvent::Changed),
+            "expected Changed from blame state mutation, got {observed:?}",
+        );
     }
 
     #[test]

@@ -41,7 +41,7 @@ pub use fake::{
     FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp, FakeLspHost, FakeRepoBuilder,
 };
 pub use git::{
-    ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
+    BlameLine, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
     ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
     RebaseTodoOp, RewriteResult,
 };
