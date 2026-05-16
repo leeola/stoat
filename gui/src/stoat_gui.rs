@@ -42,6 +42,7 @@ mod rebase_item;
 mod review_item;
 mod review_move_picker;
 mod review_session;
+mod reword_modal;
 mod settings;
 mod status_bar;
 mod stoat_app;

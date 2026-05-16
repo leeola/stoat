@@ -1132,7 +1132,7 @@ impl Workspace {
             ActionKind::ConflictNextFile => self.dispatch_conflict_nav(ConflictNavDir::Next, cx),
             ActionKind::ConflictPrevFile => self.dispatch_conflict_nav(ConflictNavDir::Prev, cx),
             ActionKind::ConflictSkipEntry => self.dispatch_conflict_skip_entry(cx),
-            ActionKind::ConflictApply => self.dispatch_conflict_apply(cx),
+            ActionKind::ConflictApply => self.dispatch_conflict_apply(window, cx),
             ActionKind::ConflictAbort => self.dispatch_conflict_abort(cx),
             ActionKind::EnterRebase => self.dispatch_enter_rebase(cx),
             ActionKind::RebaseNext => self.dispatch_rebase_move(RebaseMoveDir::Next, cx),
@@ -1145,9 +1145,9 @@ impl Workspace {
             ActionKind::SetRebaseOpDrop => self.dispatch_rebase_set_op(RebaseTodoOp::Drop, cx),
             ActionKind::SetRebaseOpReword => self.dispatch_rebase_set_op(RebaseTodoOp::Reword, cx),
             ActionKind::SetRebaseOpEdit => self.dispatch_rebase_set_op(RebaseTodoOp::Edit, cx),
-            ActionKind::ExecuteRebase => self.dispatch_execute_rebase(cx),
+            ActionKind::ExecuteRebase => self.dispatch_execute_rebase(window, cx),
             ActionKind::AbortRebase => self.dispatch_abort_rebase(cx),
-            ActionKind::RebaseContinue => self.dispatch_rebase_continue(cx),
+            ActionKind::RebaseContinue => self.dispatch_rebase_continue(window, cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1434,7 +1434,7 @@ impl Workspace {
         rebase_item.update(cx, |item, cx| item.handle_set_op(op, cx));
     }
 
-    fn dispatch_execute_rebase(&mut self, cx: &mut Context<'_, Self>) {
+    fn dispatch_execute_rebase(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         if self.rebase_active.is_some() {
             tracing::warn!("ExecuteRebase: a rebase is already in flight; ignoring");
             return;
@@ -1473,7 +1473,7 @@ impl Workspace {
             }
         });
 
-        self.continue_rebase_atomic(pane, cx);
+        self.continue_rebase_atomic(pane, window, cx);
     }
 
     fn dispatch_abort_rebase(&mut self, cx: &mut Context<'_, Self>) {
@@ -1497,7 +1497,7 @@ impl Workspace {
         });
     }
 
-    fn dispatch_rebase_continue(&mut self, cx: &mut Context<'_, Self>) {
+    fn dispatch_rebase_continue(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some(active) = self.rebase_active.as_ref() else {
             return;
         };
@@ -1512,7 +1512,96 @@ impl Workspace {
         let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
             return;
         };
-        self.continue_rebase_atomic(pane, cx);
+        self.continue_rebase_atomic(pane, window, cx);
+    }
+
+    /// Commit the rewritten message for an active
+    /// [`RebasePause::Reword`] and resume the stepper. Mirrors the
+    /// TUI's `reword_confirm` semantics: an empty (whitespace-only)
+    /// message auto-aborts; on git-backend failure the pause stays
+    /// installed so the modal can retry.
+    pub(crate) fn commit_reword(
+        &mut self,
+        new_message: String,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let trimmed = new_message.trim().to_string();
+        if trimmed.is_empty() {
+            self.abort_reword(cx);
+            return;
+        }
+
+        let (workdir, picked_sha, fallback_parent) = {
+            let Some(active) = self.rebase_active.as_ref() else {
+                return;
+            };
+            let Some(RebasePause::Reword {
+                cherry_picked_commit,
+                ..
+            }) = active.pause.as_ref()
+            else {
+                return;
+            };
+            (
+                active.workdir.clone(),
+                cherry_picked_commit.clone(),
+                active.current_head.clone(),
+            )
+        };
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("RewordConfirm: no git repo at {}", workdir.display());
+            return;
+        };
+        let Some(tree) = repo.commit_tree(&picked_sha) else {
+            tracing::warn!("RewordConfirm: commit tree unreadable for {picked_sha}");
+            return;
+        };
+        let parent = repo.parent_sha(&picked_sha).or(Some(fallback_parent));
+
+        let new_sha = match repo.create_commit(
+            parent.as_deref(),
+            &tree,
+            &trimmed,
+            "stoat",
+            "stoat@example.invalid",
+        ) {
+            Ok(sha) => sha,
+            Err(GitApplyError::Backend { reason, .. }) => {
+                tracing::warn!("RewordConfirm: create_commit failed: {reason}");
+                return;
+            },
+        };
+
+        if let Some(active) = self.rebase_active.as_mut() {
+            active.current_head = new_sha.clone();
+            active.last_pick_sha = Some(new_sha);
+            active.last_message = Some(trimmed);
+            active.pause = None;
+        }
+
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        self.continue_rebase_atomic(pane, window, cx);
+    }
+
+    /// Tear down an in-progress [`RebasePause::Reword`]: clear
+    /// `rebase_active` and leave HEAD where the stepper had last
+    /// advanced it. No-op when the active pause is not a Reword.
+    pub(crate) fn abort_reword(&mut self, cx: &mut Context<'_, Self>) {
+        let is_reword = matches!(
+            self.rebase_active.as_ref().and_then(|a| a.pause.as_ref()),
+            Some(RebasePause::Reword { .. })
+        );
+        if !is_reword {
+            return;
+        }
+        self.rebase_active = None;
+        cx.notify();
     }
 
     fn dispatch_conflict_take_side(&mut self, side: ConflictSide, cx: &mut Context<'_, Self>) {
@@ -1529,7 +1618,7 @@ impl Workspace {
         conflict_item.update(cx, |item, cx| item.skip_entry(cx));
     }
 
-    fn dispatch_conflict_apply(&mut self, cx: &mut Context<'_, Self>) {
+    fn dispatch_conflict_apply(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let Some(active) = self.rebase_active.as_ref() else {
             return;
         };
@@ -1624,7 +1713,7 @@ impl Workspace {
             }
         });
 
-        self.continue_rebase_atomic(pane, cx);
+        self.continue_rebase_atomic(pane, window, cx);
     }
 
     /// Drive the rebase forward after a `ConflictApply` resolves a
@@ -1638,7 +1727,12 @@ impl Workspace {
     /// - Otherwise spawn the atomic [`stoat::host::GitRepo::run_rebase`] call on the executor
     ///   ([`Self::apply_rebase_outcome`] for the main-thread landing) which finalizes the plan in
     ///   one shot.
-    fn continue_rebase_atomic(&mut self, pane: Entity<Pane>, cx: &mut Context<'_, Self>) {
+    fn continue_rebase_atomic(
+        &mut self,
+        pane: Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(active) = self.rebase_active.as_ref() else {
             return;
         };
@@ -1651,7 +1745,7 @@ impl Workspace {
             .iter()
             .any(|e| matches!(e.op, RebaseTodoOp::Reword | RebaseTodoOp::Edit))
         {
-            self.drive_rebase_step(pane, cx);
+            self.drive_rebase_step(pane, window, cx);
             return;
         }
 
@@ -1708,7 +1802,12 @@ impl Workspace {
     /// same way the atomic path does -- HEAD update + clear
     /// `rebase_active` -- so a stepper-driven plan finishes
     /// cleanly when its last entry was a clean Pick/Drop.
-    fn drive_rebase_step(&mut self, pane: Entity<Pane>, cx: &mut Context<'_, Self>) {
+    fn drive_rebase_step(
+        &mut self,
+        pane: Entity<Pane>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(active) = self.rebase_active.as_ref() else {
             return;
         };
@@ -1736,7 +1835,7 @@ impl Workspace {
 
         let executor = cx.global::<ExecutorGlobal>().0.clone();
         let weak_pane = pane.downgrade();
-        cx.spawn(async move |weak_self, cx| {
+        cx.spawn_in(window, async move |weak_self, cx| {
             let outcome = executor
                 .spawn(async move {
                     execute_rebase_step(
@@ -1748,12 +1847,12 @@ impl Workspace {
                     )
                 })
                 .await;
-            let _ = weak_self.update(cx, |this, cx| {
+            let _ = weak_self.update_in(cx, |this, window, cx| {
                 let Some(pane) = weak_pane.upgrade() else {
                     this.rebase_active = None;
                     return;
                 };
-                this.apply_step_outcome(outcome, pane, cx);
+                this.apply_step_outcome(outcome, pane, window, cx);
             });
         })
         .detach();
@@ -1767,16 +1866,18 @@ impl Workspace {
     /// (drop entries up to the failing sha, install pause, open
     /// [`ConflictItem`] views). `Aborted` warns and clears state.
     ///
-    /// For [`RebasePause::Edit`] this also opens a
-    /// [`ReviewSource::Commit`] review of the just-applied commit
-    /// in `pane` -- the user can dismiss or modify it before
-    /// dispatching `RebaseContinue` to resume. The Reword sub-modal
-    /// is .todo-plans/TODO.md line 3 (next iteration); for now the
-    /// pause sits installed and `AbortRebase` is the only escape.
+    /// For [`RebasePause::Reword`] this opens a [`RewordModal`]
+    /// seeded with the original commit message; the modal owns the
+    /// confirm/abort handoff back into the workspace. For
+    /// [`RebasePause::Edit`] this opens a [`ReviewSource::Commit`]
+    /// review of the just-applied commit in `pane` -- the user can
+    /// dismiss or modify it before dispatching `RebaseContinue` to
+    /// resume.
     fn apply_step_outcome(
         &mut self,
         outcome: RebaseStepOutcome,
         pane: Entity<Pane>,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
         match outcome {
@@ -1796,13 +1897,13 @@ impl Workspace {
                         active.last_message = Some(new_message);
                     }
                 }
-                self.drive_rebase_step(pane, cx);
+                self.drive_rebase_step(pane, window, cx);
             },
             RebaseStepOutcome::Drop => {
                 if let Some(active) = self.rebase_active.as_mut() {
                     active.remaining.pop_front();
                 }
-                self.drive_rebase_step(pane, cx);
+                self.drive_rebase_step(pane, window, cx);
             },
             RebaseStepOutcome::Reword {
                 cherry_picked_commit,
@@ -1815,9 +1916,25 @@ impl Workspace {
                     active.last_message = Some(original_message.clone());
                     active.pause = Some(RebasePause::Reword {
                         cherry_picked_commit,
-                        original_message,
+                        original_message: original_message.clone(),
                     });
+                } else {
+                    return;
                 }
+                let weak_workspace = cx.weak_entity();
+                self.toggle_modal::<crate::reword_modal::RewordModal, _>(
+                    window,
+                    cx,
+                    |window, cx| {
+                        crate::reword_modal::RewordModal::new(
+                            weak_workspace,
+                            &original_message,
+                            window,
+                            cx,
+                        )
+                    },
+                );
+                let _ = pane;
             },
             RebaseStepOutcome::Edit {
                 cherry_picked_commit,
@@ -7591,6 +7708,27 @@ mod tests {
         stoat::rebase::RebaseState::new(PathBuf::from("/tmp/repo"), "onto1".to_string(), entries)
     }
 
+    fn replace_reword_editor_text(
+        vcx: &mut VisualTestContext,
+        modal: &Entity<crate::reword_modal::RewordModal>,
+        text: &str,
+    ) {
+        let buffer = modal.read_with(vcx, |m, cx| {
+            m.editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("auto-height editor singleton buffer")
+                .clone()
+        });
+        buffer.update(vcx, |b, cx| {
+            let len = b.text().len();
+            b.edit(0..len, text, cx);
+        });
+        vcx.run_until_parked();
+    }
+
     fn pick_entry(sha: &str, summary: &str) -> RebaseEntry {
         rebase_entry_with_op(sha, summary, RebaseTodoOp::Pick)
     }
@@ -7878,7 +8016,7 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ExecuteRebase);
         settle_rebase(&scheduler, vcx);
 
-        ws.read_with(vcx, |w, _| {
+        ws.read_with(vcx, |w, cx| {
             let active = w.rebase_active.as_ref().expect("rebase_active set");
             assert!(matches!(
                 active.pause.as_ref(),
@@ -7887,6 +8025,161 @@ mod tests {
             assert!(
                 active.remaining.is_empty(),
                 "Reword entry consumed before installing the pause",
+            );
+            assert!(
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<crate::reword_modal::RewordModal>()
+                    .is_some(),
+                "Reword pause must open a RewordModal",
+            );
+        });
+    }
+
+    #[test]
+    fn dispatch_reword_confirm_creates_commit_and_advances_stepper() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit_with_message("onto1", "onto1 msg", &[("a.txt", "base\n")])
+            .commit_with_parent_message("c1", "onto1", "c1 msg", &[("a.txt", "c1\n")]);
+        install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![rebase_entry_with_op(
+                "c1",
+                "c1 summary",
+                RebaseTodoOp::Reword,
+            )]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
+
+        let modal = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<crate::reword_modal::RewordModal>()
+            })
+            .expect("RewordModal open after pause");
+        replace_reword_editor_text(vcx, &modal, "new message");
+
+        dispatch(&ws, vcx, stoat_action::RewordConfirm);
+        settle_rebase(&scheduler, vcx);
+
+        ws.read_with(vcx, |w, cx| {
+            assert!(
+                w.rebase_active.is_none(),
+                "rebase_active must clear after a clean reword confirm",
+            );
+            assert!(
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<crate::reword_modal::RewordModal>()
+                    .is_none(),
+                "RewordModal must dismiss after confirm",
+            );
+        });
+
+        let new_head = head_sha(&git, "/tmp/repo").expect("HEAD points at the rewritten commit");
+        let message = git.commit_message(Path::new("/tmp/repo"), &new_head);
+        assert_eq!(message, Some("new message".to_string()));
+    }
+
+    #[test]
+    fn dispatch_reword_confirm_with_empty_message_aborts() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit_with_message("onto1", "onto1 msg", &[("a.txt", "base\n")])
+            .commit_with_parent_message("c1", "onto1", "c1 msg", &[("a.txt", "c1\n")]);
+        install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![rebase_entry_with_op(
+                "c1",
+                "c1 summary",
+                RebaseTodoOp::Reword,
+            )]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
+
+        let modal = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<crate::reword_modal::RewordModal>()
+            })
+            .expect("RewordModal open after pause");
+        replace_reword_editor_text(vcx, &modal, "   \n  \t  ");
+
+        dispatch(&ws, vcx, stoat_action::RewordConfirm);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert!(
+                w.rebase_active.is_none(),
+                "whitespace-only confirm must auto-abort the rebase",
+            );
+            assert!(
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<crate::reword_modal::RewordModal>()
+                    .is_none(),
+                "RewordModal must dismiss after auto-abort",
+            );
+        });
+    }
+
+    #[test]
+    fn dispatch_reword_abort_clears_rebase_active() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit_with_message("onto1", "onto1 msg", &[("a.txt", "base\n")])
+            .commit_with_parent_message("c1", "onto1", "c1 msg", &[("a.txt", "c1\n")]);
+        install_git_host_global(vcx, git.clone());
+        let scheduler = install_executor_for_rebase(vcx);
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![rebase_entry_with_op(
+                "c1",
+                "c1 summary",
+                RebaseTodoOp::Reword,
+            )]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        settle_rebase(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::RewordAbort);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert!(
+                w.rebase_active.is_none(),
+                "RewordAbort must clear rebase_active",
+            );
+            assert!(
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<crate::reword_modal::RewordModal>()
+                    .is_none(),
+                "RewordAbort must dismiss the modal",
             );
         });
     }
