@@ -1,4 +1,5 @@
 use crate::{
+    globals::{ExecutorGlobal, GitHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemView},
     picker::{Picker, PickerDelegate, PickerSecondary},
     theme::statusbar_text_color,
@@ -8,13 +9,25 @@ use gpui::{
     Render, SharedString, Styled, Subscription, Task, Window,
 };
 use serde_json::Value;
+use std::{path::PathBuf, sync::Arc};
 use stoat::{
     commit_list::CommitListState as InnerCommitListState,
-    host::{CommitFileChange, CommitInfo},
+    host::{CommitFileChange, CommitInfo, GitHost},
 };
+use stoat_scheduler::Executor;
 use time::{format_description::FormatItem, macros::format_description, OffsetDateTime};
 
 const DATE_FORMAT: &[FormatItem<'_>] = format_description!("[year]-[month]-[day]");
+
+/// Number of commits requested per pagination call. Matches the TUI's
+/// `COMMITS_INITIAL_PAGE` so a fresh open lands the same first batch
+/// in both surfaces.
+const COMMITS_PAGE_LIMIT: usize = 64;
+
+/// Prefetch window: when the cursor lands within this many rows of
+/// the loaded tail, the delegate spawns the next page so navigation
+/// stays ahead of the user.
+const COMMITS_PREFETCH_GAP: usize = 8;
 
 /// Entity-shaped wrapper around [`stoat::commit_list::CommitListState`].
 /// Holds the underlying state and emits [`CommitListStateEvent`]s on
@@ -72,6 +85,20 @@ impl CommitListState {
         cx.emit(CommitListStateEvent::Changed);
         cx.notify();
     }
+
+    /// Append a freshly loaded page of commits to the tail. An empty
+    /// `page` flips `reached_end` because the underlying walker
+    /// returns `[]` only when it cannot produce another commit after
+    /// the last loaded sha (root commit or unknown anchor).
+    pub fn append_page(&mut self, page: Vec<CommitInfo>, cx: &mut Context<'_, Self>) {
+        if page.is_empty() {
+            self.inner.reached_end = true;
+        } else {
+            self.inner.commits.extend(page);
+        }
+        cx.emit(CommitListStateEvent::Changed);
+        cx.notify();
+    }
 }
 
 /// Pane-hosted commit-list surface. Wraps an [`Entity<CommitListState>`]
@@ -102,14 +129,15 @@ impl CommitListItem {
             cx.subscribe(
                 &state,
                 move |_this, state, _event: &CommitListStateEvent, cx| {
-                    let (count, selected) = {
+                    let (count, selected, reached_end) = {
                         let s = state.read(cx);
-                        (s.inner.commits.len(), s.inner.selected)
+                        (s.inner.commits.len(), s.inner.selected, s.inner.reached_end)
                     };
                     picker.update(cx, |p, _cx| {
                         let delegate = p.delegate_mut();
                         delegate.count = count;
                         delegate.selected = selected;
+                        delegate.reached_end = reached_end;
                     });
                     cx.notify();
                 },
@@ -137,28 +165,96 @@ impl CommitListItem {
 /// handlers, and (eventually) workspace persistence all observe the
 /// same `selected` index.
 ///
-/// `count` and `selected` are cached because the [`PickerDelegate`]
-/// trait's `match_count(&self)` / `selected_index(&self)` methods do
-/// not receive a context. The owning [`CommitListItem`] keeps them in
-/// sync with the inner state via a subscription on
-/// [`CommitListStateEvent::Changed`].
+/// `count`, `selected`, and `reached_end` are cached because the
+/// [`PickerDelegate`] trait's `match_count(&self)` /
+/// `selected_index(&self)` methods do not receive a context. The
+/// owning [`CommitListItem`] keeps them in sync with the inner state
+/// via a subscription on [`CommitListStateEvent::Changed`].
+///
+/// Pagination is driven by [`Self::maybe_spawn_next_page`], reached
+/// from both `update_matches` (used by tests and by the
+/// `OpenCommits` action handler to kick off the first page) and
+/// `set_selected_index` (the scroll trigger). The spawn closure runs
+/// `GitRepo::log_commits` on the background executor and posts the
+/// page back through `WeakEntity<CommitListState>::update` on
+/// completion.
 pub struct CommitListDelegate {
     state: Entity<CommitListState>,
+    workdir: PathBuf,
+    git_host: Arc<dyn GitHost>,
+    executor: Executor,
     count: usize,
     selected: usize,
+    reached_end: bool,
+    pending_load: bool,
 }
 
 impl CommitListDelegate {
     pub fn new(state: Entity<CommitListState>, cx: &App) -> Self {
-        let (count, selected) = {
+        let (count, selected, reached_end, workdir) = {
             let s = state.read(cx);
-            (s.inner.commits.len(), s.inner.selected)
+            (
+                s.inner.commits.len(),
+                s.inner.selected,
+                s.inner.reached_end,
+                s.inner.workdir.clone(),
+            )
         };
+        let git_host = cx.global::<GitHostGlobal>().0.clone();
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
         Self {
             state,
+            workdir,
+            git_host,
+            executor,
             count,
             selected,
+            reached_end,
+            pending_load: false,
         }
+    }
+
+    /// Spawn another commit-log page when the cursor is near the
+    /// loaded tail and no load is already in flight. The empty-state
+    /// case (`count == 0`) also satisfies the prefetch condition, so
+    /// the first call kicks off the initial page.
+    fn maybe_spawn_next_page(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        if self.pending_load || self.reached_end {
+            return;
+        }
+        if !(self.count == 0 || self.selected + COMMITS_PREFETCH_GAP >= self.count) {
+            return;
+        }
+
+        let after = self
+            .state
+            .read(cx)
+            .inner
+            .commits
+            .last()
+            .map(|c| c.sha.clone());
+        let workdir = self.workdir.clone();
+        let git_host = self.git_host.clone();
+        let executor = self.executor.clone();
+        let weak_state = self.state.downgrade();
+
+        self.pending_load = true;
+
+        cx.spawn(async move |weak_picker, cx| {
+            let page = executor
+                .spawn(async move {
+                    let Some(repo) = git_host.discover(&workdir) else {
+                        return Vec::new();
+                    };
+                    repo.log_commits(after.as_deref(), COMMITS_PAGE_LIMIT)
+                })
+                .await;
+            let _ = weak_state.update(cx, |s, cx| s.append_page(page, cx));
+            let _ = weak_picker.update(cx, |p, _cx| {
+                p.delegate_mut().pending_load = false;
+            });
+        })
+        .detach();
     }
 }
 
@@ -177,11 +273,15 @@ impl PickerDelegate for CommitListDelegate {
         }
         self.selected = ix;
         self.state.update(cx, |s, cx| s.set_selected(ix, cx));
+        self.maybe_spawn_next_page(cx);
     }
 
-    fn update_matches(&mut self, _query: String, _cx: &mut Context<'_, Picker<Self>>) -> Task<()> {
-        // FIXME: paginated walk against GitRepo::log_commits lands in
-        // TODO.md "Review pipeline: commit list ItemView" line 19.
+    fn update_matches(&mut self, _query: String, cx: &mut Context<'_, Picker<Self>>) -> Task<()> {
+        // FIXME: query-driven filtering (substring match against
+        // sha / summary / author) lands alongside the commit-list
+        // action handlers in TODO.md line 21; today the query is
+        // ignored and the picker shows every loaded commit.
+        self.maybe_spawn_next_page(cx);
         Task::ready(())
     }
 
@@ -309,16 +409,15 @@ fn format_commit_row(commit: &CommitInfo) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::globals::ExecutorGlobal;
     use gpui::{AppContext, TestAppContext, VisualTestContext};
-    use std::{path::PathBuf, sync::Arc};
-    use stoat_scheduler::{Executor, TestScheduler};
+    use stoat::host::fake::FakeGit;
+    use stoat_scheduler::TestScheduler;
 
-    fn install_executor(cx: &mut TestAppContext) {
+    fn install_globals(cx: &mut TestAppContext, git: Arc<FakeGit>, scheduler: Arc<TestScheduler>) {
+        let executor = scheduler.executor();
         cx.update(|cx| {
-            cx.set_global(ExecutorGlobal(Executor::new(
-                Arc::new(TestScheduler::new()),
-            )));
+            cx.set_global(ExecutorGlobal(executor));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
         });
     }
 
@@ -338,10 +437,34 @@ mod tests {
         item: Entity<CommitListItem>,
         state: Entity<CommitListState>,
         vcx: &'a mut VisualTestContext,
+        #[allow(dead_code)]
+        git: Arc<FakeGit>,
+        scheduler: Arc<TestScheduler>,
+    }
+
+    impl Harness<'_> {
+        /// Drive both the stoat scheduler and gpui's executor to a
+        /// fixed-point so pagination tasks (which hop between them)
+        /// finish before the test asserts.
+        fn settle(&mut self) {
+            for _ in 0..4 {
+                self.scheduler.run_until_parked();
+                self.vcx.run_until_parked();
+            }
+        }
     }
 
     fn new_item(cx: &mut TestAppContext, commits: Vec<CommitInfo>) -> Harness<'_> {
-        install_executor(cx);
+        new_item_with_git(cx, commits, Arc::new(FakeGit::new()))
+    }
+
+    fn new_item_with_git(
+        cx: &mut TestAppContext,
+        commits: Vec<CommitInfo>,
+        git: Arc<FakeGit>,
+    ) -> Harness<'_> {
+        let scheduler = Arc::new(TestScheduler::new());
+        install_globals(cx, git.clone(), scheduler.clone());
         let state = cx.update(|cx| {
             cx.new(|_| {
                 let mut inner = InnerCommitListState::new(PathBuf::from("/repo"));
@@ -354,7 +477,13 @@ mod tests {
             let state = state.clone();
             cx.new(|cx| CommitListItem::new(state, window, cx))
         });
-        Harness { item, state, vcx }
+        Harness {
+            item,
+            state,
+            vcx,
+            git,
+            scheduler,
+        }
     }
 
     #[test]
@@ -441,5 +570,148 @@ mod tests {
 
         let after = picker.read_with(h.vcx, |p, _| p.delegate().match_count());
         assert_eq!(after, 2);
+    }
+
+    fn seed_linear_history(git: &Arc<FakeGit>, workdir: &str, count: usize) {
+        let mut builder = git.add_repo(workdir);
+        let mut prev: Option<String> = None;
+        for i in 0..count {
+            let sha = format!("c{:04}", i);
+            match prev.as_deref() {
+                None => {
+                    builder.commit_with_message(
+                        &sha,
+                        &format!("commit {sha}"),
+                        &[("a.rs", "fn a() {}\n")],
+                    );
+                },
+                Some(parent) => {
+                    builder.commit_with_parent_message(
+                        &sha,
+                        parent,
+                        &format!("commit {sha}"),
+                        &[("a.rs", "fn a() {}\n")],
+                    );
+                },
+            };
+            prev = Some(sha);
+        }
+    }
+
+    #[test]
+    fn update_matches_first_call_loads_first_page() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        seed_linear_history(&git, "/repo", 3);
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+        let picker = h.item.read_with(h.vcx, |item, _| item.picker.clone());
+
+        picker.update(h.vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+        });
+        h.settle();
+
+        let state_count = h.state.read_with(h.vcx, |s, _| s.inner.commits.len());
+        let delegate_count = picker.read_with(h.vcx, |p, _| p.delegate().match_count());
+        assert_eq!((state_count, delegate_count), (3, 3));
+    }
+
+    #[test]
+    fn update_matches_empty_repo_sets_reached_end() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo");
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+        let picker = h.item.read_with(h.vcx, |item, _| item.picker.clone());
+
+        picker.update(h.vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+        });
+        h.settle();
+
+        let state_reached = h.state.read_with(h.vcx, |s, _| s.inner.reached_end);
+        let delegate_reached = picker.read_with(h.vcx, |p, _| p.delegate().reached_end);
+        assert!(state_reached, "state.reached_end should flip on empty page");
+        assert!(
+            delegate_reached,
+            "delegate.reached_end should mirror state.reached_end after settle"
+        );
+    }
+
+    #[test]
+    fn scroll_near_tail_spawns_next_page() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        // Two pages worth of commits so the second batch has somewhere to land.
+        seed_linear_history(&git, "/repo", COMMITS_PAGE_LIMIT + 10);
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+        let picker = h.item.read_with(h.vcx, |item, _| item.picker.clone());
+
+        picker.update(h.vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+        });
+        h.settle();
+        let after_first = h.state.read_with(h.vcx, |s, _| s.inner.commits.len());
+        assert_eq!(after_first, COMMITS_PAGE_LIMIT);
+
+        let tail_ix = COMMITS_PAGE_LIMIT - COMMITS_PREFETCH_GAP;
+        picker.update(h.vcx, |p, cx| p.set_selected_index(tail_ix, cx));
+        h.settle();
+
+        let after_second = h.state.read_with(h.vcx, |s, _| s.inner.commits.len());
+        assert_eq!(after_second, COMMITS_PAGE_LIMIT + 10);
+    }
+
+    #[test]
+    fn update_matches_no_op_while_pending() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        seed_linear_history(&git, "/repo", 3);
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+        let picker = h.item.read_with(h.vcx, |item, _| item.picker.clone());
+
+        picker.update(h.vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+            // Second call while the first is still pending must not spawn
+            // a duplicate load.
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+            assert!(
+                p.delegate().pending_load,
+                "first call should have marked pending_load=true",
+            );
+        });
+        h.settle();
+
+        let state_count = h.state.read_with(h.vcx, |s, _| s.inner.commits.len());
+        assert_eq!(
+            state_count, 3,
+            "exactly one page lands even after duplicate update_matches",
+        );
+    }
+
+    #[test]
+    fn reached_end_blocks_further_loads() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo");
+        let mut h = new_item_with_git(&mut cx, Vec::new(), git);
+        let picker = h.item.read_with(h.vcx, |item, _| item.picker.clone());
+
+        picker.update(h.vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+        });
+        h.settle();
+        assert!(picker.read_with(h.vcx, |p, _| p.delegate().reached_end));
+
+        let pending_before = picker.read_with(h.vcx, |p, _| p.delegate().pending_load);
+        picker.update(h.vcx, |p, cx| {
+            p.delegate_mut().update_matches(String::new(), cx).detach();
+        });
+        let pending_after = picker.read_with(h.vcx, |p, _| p.delegate().pending_load);
+        assert_eq!(
+            (pending_before, pending_after),
+            (false, false),
+            "reached_end must prevent another spawn",
+        );
     }
 }
