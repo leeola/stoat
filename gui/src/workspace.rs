@@ -1131,6 +1131,7 @@ impl Workspace {
             ActionKind::ConflictSkipEntry => self.dispatch_conflict_skip_entry(cx),
             ActionKind::ConflictApply => self.dispatch_conflict_apply(cx),
             ActionKind::ConflictAbort => self.dispatch_conflict_abort(cx),
+            ActionKind::EnterRebase => self.dispatch_enter_rebase(cx),
             ActionKind::RebaseNext => self.dispatch_rebase_move(RebaseMoveDir::Next, cx),
             ActionKind::RebasePrev => self.dispatch_rebase_move(RebaseMoveDir::Prev, cx),
             ActionKind::RebaseMoveUp => self.dispatch_rebase_move(RebaseMoveDir::SwapUp, cx),
@@ -1383,6 +1384,37 @@ impl Workspace {
     fn active_rebase_item(&self, cx: &App) -> Option<Entity<RebaseItem>> {
         self.active_pane_item(cx)
             .and_then(|item| item.to_any_view().downcast::<RebaseItem>().ok())
+    }
+
+    fn dispatch_enter_rebase(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(commit_list) = self.active_commit_list(cx) else {
+            return;
+        };
+        let plan = {
+            let state = commit_list.read(cx).state().read(cx);
+            let inner = state.inner();
+            if inner.selected == 0 || inner.selected >= inner.commits.len() {
+                tracing::warn!(
+                    action = "EnterRebase",
+                    selected = inner.selected,
+                    "nothing to rebase: select an older commit first"
+                );
+                return;
+            }
+            let entries: Vec<RebaseEntry> = inner.commits[..inner.selected]
+                .iter()
+                .rev()
+                .cloned()
+                .map(|commit| RebaseEntry {
+                    op: RebaseTodoOp::Pick,
+                    commit,
+                })
+                .collect();
+            let onto = inner.commits[inner.selected].sha.clone();
+            stoat::rebase::RebaseState::new(inner.workdir.clone(), onto, entries)
+        };
+        let item = cx.new(|cx| RebaseItem::new(plan, cx));
+        self.open_item(Box::new(item), cx);
     }
 
     fn dispatch_rebase_move(&mut self, dir: RebaseMoveDir, cx: &mut Context<'_, Self>) {
@@ -6252,6 +6284,102 @@ mod tests {
                 ReviewSource::Commit { .. },
             ));
         });
+    }
+
+    fn active_pane_rebase_item(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+    ) -> Option<Entity<RebaseItem>> {
+        ws.read_with(vcx, |w, cx| w.active_pane_item(cx))
+            .and_then(|handle| handle.to_any_view().downcast::<RebaseItem>().ok())
+    }
+
+    #[test]
+    fn dispatch_enter_rebase_opens_rebase_item_with_plan() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsNext);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::EnterRebase);
+        settle_commits(&scheduler, vcx);
+
+        let rebase = active_pane_rebase_item(vcx, &ws).expect("rebase item in focused pane");
+        rebase.read_with(vcx, |rebase, cx| {
+            let state = rebase.state().read(cx);
+            assert_eq!(state.onto, "c0001", "cursor commit becomes onto");
+            assert_eq!(state.todo.len(), 1, "only the newer commit is above");
+            assert_eq!(state.todo[0].commit.sha, "c0002");
+            assert_eq!(state.todo[0].op, RebaseTodoOp::Pick);
+        });
+    }
+
+    #[test]
+    fn dispatch_enter_rebase_oldest_loaded_commit_builds_full_plan_oldest_first() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsLast);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::EnterRebase);
+        settle_commits(&scheduler, vcx);
+
+        let rebase = active_pane_rebase_item(vcx, &ws).expect("rebase item in focused pane");
+        rebase.read_with(vcx, |rebase, cx| {
+            let state = rebase.state().read(cx);
+            assert_eq!(state.onto, "c0000");
+            let shas: Vec<_> = state.todo.iter().map(|e| e.commit.sha.clone()).collect();
+            assert_eq!(
+                shas,
+                vec!["c0001".to_string(), "c0002".to_string()],
+                "todo is oldest-first above onto",
+            );
+        });
+    }
+
+    #[test]
+    fn dispatch_enter_rebase_at_head_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::EnterRebase);
+        settle_commits(&scheduler, vcx);
+
+        assert!(
+            active_pane_rebase_item(vcx, &ws).is_none(),
+            "EnterRebase at HEAD must not install a RebaseItem",
+        );
+        assert!(
+            active_pane_commit_list(vcx, &ws).is_some(),
+            "commit list remains the active item",
+        );
+    }
+
+    #[test]
+    fn dispatch_enter_rebase_without_commit_list_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        let _scheduler = install_commit_list_globals(vcx, git);
+
+        dispatch(&ws, vcx, stoat_action::EnterRebase);
+        vcx.run_until_parked();
+
+        assert!(active_pane_rebase_item(vcx, &ws).is_none());
     }
 
     #[test]
