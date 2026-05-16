@@ -115,6 +115,12 @@ impl ConflictItem {
     pub(crate) fn result_buffer_text(&self, cx: &App) -> String {
         self.result.buffer.read(cx).text()
     }
+
+    /// True while the result buffer still carries at least one
+    /// complete `<<<<<<< / ======= / >>>>>>>` block.
+    pub(crate) fn has_unresolved_conflicts(&self, cx: &App) -> bool {
+        has_any_conflict_block(&self.result_buffer_text(cx))
+    }
 }
 
 /// Byte offsets of a `<<<<<<< / ======= / >>>>>>>` block in a buffer.
@@ -125,6 +131,24 @@ struct ConflictBlock {
     range: Range<usize>,
     ours: Range<usize>,
     theirs: Range<usize>,
+}
+
+fn has_any_conflict_block(text: &str) -> bool {
+    enum S {
+        Outside,
+        InOurs,
+        InTheirs,
+    }
+    let mut state = S::Outside;
+    for line in text.lines() {
+        match state {
+            S::Outside if line.starts_with("<<<<<<<") => state = S::InOurs,
+            S::InOurs if line.starts_with("=======") => state = S::InTheirs,
+            S::InTheirs if line.starts_with(">>>>>>>") => return true,
+            _ => {},
+        }
+    }
+    false
 }
 
 fn find_enclosing_conflict_block(text: &str, cursor: usize) -> Option<ConflictBlock> {
@@ -497,6 +521,68 @@ mod tests {
         item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Theirs, cx));
         let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
         assert_eq!(text, "beta\n");
+    }
+
+    #[test]
+    fn has_any_conflict_block_returns_true_for_complete_block() {
+        assert!(has_any_conflict_block(
+            "<<<<<<< ours\na\n=======\nb\n>>>>>>> theirs\n"
+        ));
+    }
+
+    #[test]
+    fn has_any_conflict_block_returns_false_without_markers() {
+        assert!(!has_any_conflict_block("just plain text\n"));
+    }
+
+    #[test]
+    fn has_any_conflict_block_returns_false_for_partial_markers() {
+        assert!(!has_any_conflict_block(
+            "<<<<<<< ours\na\n=======\nb\n(no end marker)\n"
+        ));
+        assert!(!has_any_conflict_block(
+            "<<<<<<< ours\na\n(no separator)\n>>>>>>> theirs\n"
+        ));
+        assert!(!has_any_conflict_block(
+            "(only end marker)\n>>>>>>> theirs\n"
+        ));
+    }
+
+    #[test]
+    fn has_unresolved_conflicts_is_true_for_fresh_item() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", None, Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        item.read_with(&cx, |item, cx| {
+            assert!(item.has_unresolved_conflicts(cx));
+        });
+    }
+
+    #[test]
+    fn has_unresolved_conflicts_is_false_after_take_side() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", None, Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        let editor = item.read_with(&cx, |item, _| item.result.editor.clone());
+        place_cursor_at(&editor, 0, &mut cx);
+        item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Ours, cx));
+        item.read_with(&cx, |item, cx| {
+            assert!(!item.has_unresolved_conflicts(cx));
+        });
     }
 
     #[test]

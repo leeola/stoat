@@ -1122,6 +1122,8 @@ impl Workspace {
             ActionKind::ConflictTakeTheirs => {
                 self.dispatch_conflict_take_side(ConflictSide::Theirs, cx)
             },
+            ActionKind::ConflictNextFile => self.dispatch_conflict_nav(ConflictNavDir::Next, cx),
+            ActionKind::ConflictPrevFile => self.dispatch_conflict_nav(ConflictNavDir::Prev, cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1363,6 +1365,48 @@ impl Workspace {
             return;
         };
         conflict_item.update(cx, |item, cx| item.take_side(side, cx));
+    }
+
+    fn dispatch_conflict_nav(&mut self, dir: ConflictNavDir, cx: &mut Context<'_, Self>) {
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        pane.update(cx, |p, cx| {
+            let unresolved: Vec<usize> = p
+                .items()
+                .iter()
+                .enumerate()
+                .filter_map(|(i, item)| {
+                    let conflict = item.to_any_view().downcast::<ConflictItem>().ok()?;
+                    if conflict.read(cx).has_unresolved_conflicts(cx) {
+                        Some(i)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            if unresolved.is_empty() {
+                return;
+            }
+            let current = p.active_index();
+            let target = match dir {
+                ConflictNavDir::Next => unresolved
+                    .iter()
+                    .find(|&&i| i > current)
+                    .copied()
+                    .or_else(|| unresolved.first().copied()),
+                ConflictNavDir::Prev => unresolved
+                    .iter()
+                    .rev()
+                    .find(|&&i| i < current)
+                    .copied()
+                    .or_else(|| unresolved.last().copied()),
+            };
+            if let Some(idx) = target {
+                p.activate(idx, cx);
+            }
+        });
     }
 
     fn dispatch_review_step(&mut self, dir: ReviewStepDir, cx: &mut Context<'_, Self>) {
@@ -2105,6 +2149,12 @@ fn review_inputs_from_commit_trees(
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ReviewStepDir {
+    Next,
+    Prev,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum ConflictNavDir {
     Next,
     Prev,
 }
@@ -6018,5 +6068,131 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ConflictTakeOurs);
         vcx.run_until_parked();
         // The focused pane has no ConflictItem; the dispatch is a no-op.
+    }
+
+    fn activate_focused_pane_index(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        index: usize,
+    ) {
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            pane.update(cx, |p, cx| {
+                p.activate(index, cx);
+            });
+        });
+        vcx.run_until_parked();
+    }
+
+    fn focused_pane_active_index(vcx: &mut VisualTestContext, ws: &Entity<Workspace>) -> usize {
+        ws.read_with(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            w.pane_tree
+                .read(cx)
+                .pane(focus)
+                .map(|p| p.read(cx).active_index())
+                .unwrap_or(0)
+        })
+    }
+
+    fn resolve_conflict_item_at(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        target_index: usize,
+    ) {
+        let original = focused_pane_active_index(vcx, ws);
+        activate_focused_pane_index(vcx, ws, target_index);
+        dispatch(ws, vcx, stoat_action::ConflictTakeOurs);
+        vcx.run_until_parked();
+        activate_focused_pane_index(vcx, ws, original);
+    }
+
+    #[test]
+    fn dispatch_conflict_next_file_activates_next_unresolved() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let _a =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("a.txt", "a1\n", "a2\n"));
+        let _b =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("b.txt", "b1\n", "b2\n"));
+        let _c =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("c.txt", "c1\n", "c2\n"));
+        activate_focused_pane_index(vcx, &ws, 0);
+
+        dispatch(&ws, vcx, stoat_action::ConflictNextFile);
+        vcx.run_until_parked();
+
+        assert_eq!(focused_pane_active_index(vcx, &ws), 1);
+    }
+
+    #[test]
+    fn dispatch_conflict_next_file_wraps_to_first() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let _a =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("a.txt", "a1\n", "a2\n"));
+        let _b =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("b.txt", "b1\n", "b2\n"));
+        let _c =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("c.txt", "c1\n", "c2\n"));
+        activate_focused_pane_index(vcx, &ws, 2);
+
+        dispatch(&ws, vcx, stoat_action::ConflictNextFile);
+        vcx.run_until_parked();
+
+        assert_eq!(focused_pane_active_index(vcx, &ws), 0);
+    }
+
+    #[test]
+    fn dispatch_conflict_next_file_skips_resolved() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let _a =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("a.txt", "a1\n", "a2\n"));
+        let _b =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("b.txt", "b1\n", "b2\n"));
+        let _c =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("c.txt", "c1\n", "c2\n"));
+        resolve_conflict_item_at(vcx, &ws, 1);
+        activate_focused_pane_index(vcx, &ws, 0);
+
+        dispatch(&ws, vcx, stoat_action::ConflictNextFile);
+        vcx.run_until_parked();
+
+        assert_eq!(focused_pane_active_index(vcx, &ws), 2);
+    }
+
+    #[test]
+    fn dispatch_conflict_prev_file_activates_previous_unresolved() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let _a =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("a.txt", "a1\n", "a2\n"));
+        let _b =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("b.txt", "b1\n", "b2\n"));
+        let _c =
+            open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("c.txt", "c1\n", "c2\n"));
+        activate_focused_pane_index(vcx, &ws, 2);
+
+        dispatch(&ws, vcx, stoat_action::ConflictPrevFile);
+        vcx.run_until_parked();
+
+        assert_eq!(focused_pane_active_index(vcx, &ws), 1);
+    }
+
+    #[test]
+    fn dispatch_conflict_next_file_without_any_conflict_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ConflictNextFile);
+        vcx.run_until_parked();
+        // The focused pane has no ConflictItems; the dispatch is a no-op.
     }
 }
