@@ -1124,6 +1124,7 @@ impl Workspace {
             },
             ActionKind::ConflictNextFile => self.dispatch_conflict_nav(ConflictNavDir::Next, cx),
             ActionKind::ConflictPrevFile => self.dispatch_conflict_nav(ConflictNavDir::Prev, cx),
+            ActionKind::ConflictSkipEntry => self.dispatch_conflict_skip_entry(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1365,6 +1366,13 @@ impl Workspace {
             return;
         };
         conflict_item.update(cx, |item, cx| item.take_side(side, cx));
+    }
+
+    fn dispatch_conflict_skip_entry(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(conflict_item) = self.active_conflict_item(cx) else {
+            return;
+        };
+        conflict_item.update(cx, |item, cx| item.skip_entry(cx));
     }
 
     fn dispatch_conflict_nav(&mut self, dir: ConflictNavDir, cx: &mut Context<'_, Self>) {
@@ -6194,5 +6202,24 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ConflictNextFile);
         vcx.run_until_parked();
         // The focused pane has no ConflictItems; the dispatch is a no-op.
+    }
+
+    #[test]
+    fn dispatch_conflict_skip_entry_resolves_with_ancestor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let file = stoat::host::ConflictedFile {
+            path: PathBuf::from("a.txt"),
+            ancestor: Some("base\n".to_string()),
+            ours: Some("alpha\n".to_string()),
+            theirs: Some("beta\n".to_string()),
+        };
+        let item = open_conflict_item_in_focused_pane(vcx, &ws, file);
+
+        dispatch(&ws, vcx, stoat_action::ConflictSkipEntry);
+        vcx.run_until_parked();
+
+        let text = item.read_with(vcx, |item, cx| item.result_buffer_text(cx));
+        assert_eq!(text, "base\n");
     }
 }

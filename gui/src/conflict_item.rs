@@ -36,6 +36,13 @@ pub(crate) enum ConflictSide {
 /// produce the final resolved content.
 pub struct ConflictItem {
     rel_path: PathBuf,
+    /// Original ancestor content from the [`ConflictedFile`]. Held
+    /// separately from the ancestor [`SideView`] buffer because the
+    /// buffer substitutes [`MISSING_SIDE_PLACEHOLDER`] when the
+    /// ancestor was `None` (so the side pane renders), while
+    /// resolutions that pull "ancestor" content need the real
+    /// original value (empty string for `None`).
+    ancestor_original: Option<String>,
     ancestor: SideView,
     ours: SideView,
     theirs: SideView,
@@ -71,6 +78,7 @@ impl ConflictItem {
 
         Self {
             rel_path: file.path,
+            ancestor_original: file.ancestor,
             ancestor,
             ours,
             theirs,
@@ -114,6 +122,17 @@ impl ConflictItem {
     /// the user has produced so far.
     pub(crate) fn result_buffer_text(&self, cx: &App) -> String {
         self.result.buffer.read(cx).text()
+    }
+
+    /// Resolve the file by replacing the entire result buffer with
+    /// the ancestor's content. Yields an empty buffer when the file
+    /// had no common ancestor (`ConflictedFile.ancestor = None`).
+    pub(crate) fn skip_entry(&self, cx: &mut Context<'_, Self>) {
+        let replacement = self.ancestor_original.clone().unwrap_or_default();
+        let result_len = self.result_buffer_text(cx).len();
+        self.result.buffer.update(cx, |buf, cx| {
+            buf.edit(0..result_len, &replacement, cx);
+        });
     }
 
     /// True while the result buffer still carries at least one
@@ -580,6 +599,58 @@ mod tests {
         let editor = item.read_with(&cx, |item, _| item.result.editor.clone());
         place_cursor_at(&editor, 0, &mut cx);
         item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Ours, cx));
+        item.read_with(&cx, |item, cx| {
+            assert!(!item.has_unresolved_conflicts(cx));
+        });
+    }
+
+    #[test]
+    fn skip_entry_replaces_result_with_ancestor_content() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", Some("base\n"), Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        item.update(&mut cx, |item, cx| item.skip_entry(cx));
+        let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
+        assert_eq!(text, "base\n");
+    }
+
+    #[test]
+    fn skip_entry_yields_empty_buffer_when_ancestor_is_none() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", None, Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        item.update(&mut cx, |item, cx| item.skip_entry(cx));
+        let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
+        assert_eq!(text, "");
+    }
+
+    #[test]
+    fn skip_entry_clears_unresolved_state() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", Some("base\n"), Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        item.update(&mut cx, |item, cx| item.skip_entry(cx));
         item.read_with(&cx, |item, cx| {
             assert!(!item.has_unresolved_conflicts(cx));
         });
