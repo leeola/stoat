@@ -834,6 +834,30 @@ impl Workspace {
                 }
             },
             ActionKind::CodeAction => self.dispatch_code_action(window, cx),
+            ActionKind::GotoDefinition => {
+                crate::lsp::goto::spawn_goto(
+                    self,
+                    crate::lsp::goto::LspGotoKind::Definition,
+                    window,
+                    cx,
+                );
+            },
+            ActionKind::GotoTypeDefinition => {
+                crate::lsp::goto::spawn_goto(
+                    self,
+                    crate::lsp::goto::LspGotoKind::TypeDefinition,
+                    window,
+                    cx,
+                );
+            },
+            ActionKind::GotoImplementation => {
+                crate::lsp::goto::spawn_goto(
+                    self,
+                    crate::lsp::goto::LspGotoKind::Implementation,
+                    window,
+                    cx,
+                );
+            },
             ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, false, cx),
             ActionKind::MoveRight => self.dispatch_move_horizontal(1, false, cx),
             ActionKind::MoveUp => self.dispatch_move_vertical(-1, false, cx),
