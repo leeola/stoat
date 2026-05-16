@@ -858,6 +858,7 @@ impl Workspace {
                     cx,
                 );
             },
+            ActionKind::GotoReferences => self.dispatch_goto_references(window, cx),
             ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, false, cx),
             ActionKind::MoveRight => self.dispatch_move_horizontal(1, false, cx),
             ActionKind::MoveUp => self.dispatch_move_vertical(-1, false, cx),
@@ -2590,6 +2591,102 @@ impl Workspace {
                 crate::review_move_picker::MoveRelationshipPickerDelegate::new(relationships, workspace);
             crate::picker::Picker::new(delegate, window, cx)
         });
+    }
+
+    /// Fetch `textDocument/references` for the active editor's
+    /// cursor and open a picker over the response. No-op when no
+    /// editor is active, the buffer has no path, no language is
+    /// registered, or the server does not advertise the references
+    /// capability.
+    fn dispatch_goto_references(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let Some(path) = editor.read(cx).file_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let registry = &cx.global::<crate::globals::LanguageRegistry>().0;
+        let Some(language) = registry.for_path(&path) else {
+            return;
+        };
+        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
+        let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
+        let rope = mb_snapshot.rope().clone();
+        let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
+            return;
+        };
+        let cursor_offset = mb_snapshot.resolve_anchor(&primary.head());
+        let Some(uri) = path.to_str().and_then(|s| {
+            <lsp_types::Uri as std::str::FromStr>::from_str(&format!("file://{s}")).ok()
+        }) else {
+            return;
+        };
+        let workspace_root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        let weak_workspace = cx.weak_entity();
+        cx.spawn_in(window, async move |_, cx| {
+            let server = match host.launch(&language, &workspace_root).await {
+                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::references",
+                        ?err,
+                        "failed to launch LSP server for references"
+                    );
+                    return;
+                },
+            };
+            let _ = server.initialize(Some(uri.clone())).await;
+            if !server.supports_feature(stoat::host::LanguageServerFeature::GotoReference) {
+                return;
+            }
+            let encoding = server.offset_encoding();
+            let position = stoat::lsp::util::byte_offset_to_lsp_pos(&rope, cursor_offset, encoding);
+            let params = lsp_types::ReferenceParams {
+                text_document_position: lsp_types::TextDocumentPositionParams {
+                    text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                    position,
+                },
+                work_done_progress_params: Default::default(),
+                partial_result_params: Default::default(),
+                context: lsp_types::ReferenceContext {
+                    include_declaration: true,
+                },
+            };
+            let locations = match server.references(params).await {
+                Ok(Some(locs)) if !locs.is_empty() => locs,
+                Ok(_) => return,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::references",
+                        ?err,
+                        "references request failed",
+                    );
+                    return;
+                },
+            };
+            let _ = weak_workspace
+                .clone()
+                .update_in(cx, |workspace, window, cx| {
+                    let weak_workspace_inner = cx.weak_entity();
+                    workspace
+                    .toggle_modal::<
+                        crate::picker::Picker<crate::lsp::ReferencesPickerDelegate>,
+                        _,
+                    >(window, cx, move |window, cx| {
+                        let delegate = crate::lsp::ReferencesPickerDelegate::new(
+                            locations,
+                            weak_workspace_inner,
+                            encoding,
+                        );
+                        crate::picker::Picker::new(delegate, window, cx)
+                    });
+                });
+        })
+        .detach();
     }
 
     fn dispatch_open_review(&mut self, cx: &mut Context<'_, Self>) {

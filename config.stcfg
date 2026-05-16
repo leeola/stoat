@@ -527,6 +527,7 @@ on key {
         j -> [GotoDefinition(), SetMode(normal)];
         k -> [GotoTypeDefinition(), SetMode(normal)];
         t -> [GotoImplementation(), SetMode(normal)];
+        e -> [GotoReferences(), SetMode(normal)];
         i -> [Hover(), SetMode(normal)];
         a -> [CodeAction(), SetMode(normal)];
         r -> [RenameSymbol(), SetMode(normal)];

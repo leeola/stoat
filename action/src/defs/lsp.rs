@@ -93,6 +93,20 @@ define_action!(
 );
 
 define_action!(
+    GotoReferencesDef,
+    GotoReferences,
+    "GotoReferences",
+    ActionKind::GotoReferences,
+    "list references to symbol",
+    "Issue an LSP `textDocument/references` request for the symbol under \
+     the cursor and present the response as a picker. Selecting an entry \
+     opens the target file in the focused pane (when not already open) \
+     and jumps to the reference. No-op when the server does not advertise \
+     the capability or returns nothing.",
+    ActionPriority::Common
+);
+
+define_action!(
     HoverDef,
     Hover,
     "Hover",

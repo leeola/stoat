@@ -208,6 +208,7 @@ pub enum ActionKind {
     GotoDefinition,
     GotoTypeDefinition,
     GotoImplementation,
+    GotoReferences,
     Hover,
     CodeAction,
     RenameSymbol,
