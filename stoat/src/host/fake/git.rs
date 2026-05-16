@@ -3,8 +3,9 @@ mod rebase;
 use crate::host::{
     fake::FakeFs,
     git::{
-        BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-        CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
+        BackendSnafu, BlameLine, ChangedFile, CherryPickOutcome, CommitFileChange,
+        CommitFileChangeKind, CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
+        RewriteResult,
     },
 };
 use std::{
@@ -781,6 +782,37 @@ impl GitRepo for FakeGitRepo {
         }
         out
     }
+
+    fn blame_path(&self, path: &Path) -> Vec<BlameLine> {
+        let Ok(rel) = path.strip_prefix(&self.workdir) else {
+            return Vec::new();
+        };
+        let state = self.state.lock().expect("fake git state lock");
+        let Some(head_sha) = state.head.as_ref() else {
+            return Vec::new();
+        };
+        let Some(commit) = state.commits.get(head_sha) else {
+            return Vec::new();
+        };
+        let Some(content) = commit.tree.get(rel) else {
+            return Vec::new();
+        };
+        if content.is_empty() {
+            return Vec::new();
+        }
+        let short_sha: String = head_sha.chars().take(7).collect();
+        content
+            .lines()
+            .enumerate()
+            .map(|(i, _)| BlameLine {
+                line: i as u32,
+                commit_sha: head_sha.clone(),
+                short_sha: short_sha.clone(),
+                author_name: commit.author_name.clone(),
+                time: commit.time,
+            })
+            .collect()
+    }
 }
 
 /// Crude add/delete counts for the fake git host: the total distinct
@@ -936,6 +968,74 @@ mod tests {
         host.add_repo(workdir()).head_file("a.rs", "v1");
         let repo = host.discover(&workdir()).unwrap();
         assert!(repo.head_content(Path::new("/elsewhere/a.rs")).is_none());
+    }
+
+    #[test]
+    fn blame_path_returns_head_commit_per_line() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c1", &[("a.rs", "first\nsecond\nthird\n")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        let blame = repo.blame_path(&workdir().join("a.rs"));
+        assert_eq!(
+            blame,
+            vec![
+                BlameLine {
+                    line: 0,
+                    commit_sha: "c1".into(),
+                    short_sha: "c1".into(),
+                    author_name: "fake".into(),
+                    time: 1_700_000_000,
+                },
+                BlameLine {
+                    line: 1,
+                    commit_sha: "c1".into(),
+                    short_sha: "c1".into(),
+                    author_name: "fake".into(),
+                    time: 1_700_000_000,
+                },
+                BlameLine {
+                    line: 2,
+                    commit_sha: "c1".into(),
+                    short_sha: "c1".into(),
+                    author_name: "fake".into(),
+                    time: 1_700_000_000,
+                },
+            ],
+        );
+    }
+
+    #[test]
+    fn blame_path_outside_workdir_is_empty() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).commit("c1", &[("a.rs", "x\n")]);
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.blame_path(Path::new("/elsewhere/a.rs")).is_empty());
+    }
+
+    #[test]
+    fn blame_path_unknown_path_is_empty() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).commit("c1", &[("a.rs", "x\n")]);
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.blame_path(&workdir().join("missing.rs")).is_empty());
+    }
+
+    #[test]
+    fn blame_path_with_no_head_is_empty() {
+        let host = FakeGit::new();
+        host.add_repo(workdir());
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.blame_path(&workdir().join("a.rs")).is_empty());
+    }
+
+    #[test]
+    fn blame_path_empty_file_is_empty() {
+        let host = FakeGit::new();
+        host.add_repo(workdir()).commit("c1", &[("a.rs", "")]);
+        let repo = host.discover(&workdir()).unwrap();
+        assert!(repo.blame_path(&workdir().join("a.rs")).is_empty());
     }
 
     #[test]

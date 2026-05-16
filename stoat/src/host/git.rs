@@ -86,6 +86,25 @@ pub struct CommitFileChange {
     pub deletions: u32,
 }
 
+/// One file row's blame attribution, populated by
+/// [`GitRepo::blame_path`].
+///
+/// `line` is 0-indexed; the host converts from libgit2's 1-indexed
+/// line numbers at the boundary so consumers can index directly
+/// against editor / buffer rows. `short_sha` is a 7-char prefix of
+/// `commit_sha`, pre-computed for the renderer that paints one row
+/// per line on every redraw.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlameLine {
+    pub line: u32,
+    pub commit_sha: String,
+    pub short_sha: String,
+    pub author_name: String,
+    /// Author time as unix epoch seconds. Consumers format for
+    /// display (typically as a short relative age).
+    pub time: i64,
+}
+
 /// Result of a [`GitRepo::rewrite_commit`] call.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct RewriteResult {
@@ -229,6 +248,14 @@ pub trait GitRepo: Send + Sync {
     /// stats while the heavier hunk-level preview loads in the
     /// background. Empty when the sha is unknown.
     fn commit_file_changes(&self, sha: &str) -> Vec<CommitFileChange>;
+
+    /// Per-line blame attribution for `path` (absolute, inside the
+    /// workdir). Returns one [`BlameLine`] per source line, ordered
+    /// by `BlameLine::line` ascending and 0-indexed. Returns an
+    /// empty `Vec` for any failure mode the renderer can treat as
+    /// "no blame available": path outside the workdir, file not in
+    /// HEAD, orphan branch, binary blob, or backend error.
+    fn blame_path(&self, path: &Path) -> Vec<BlameLine>;
 
     /// Replace HEAD's tree (and optionally its message) with the given
     /// values, creating a new commit and updating HEAD to point at it.

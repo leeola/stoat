@@ -2,8 +2,9 @@ mod rebase;
 mod tree;
 
 use crate::host::git::{
-    BackendSnafu, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind,
-    CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo, RewriteResult,
+    BackendSnafu, BlameLine, ChangedFile, CherryPickOutcome, CommitFileChange,
+    CommitFileChangeKind, CommitInfo, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
+    RewriteResult,
 };
 use git2::{ApplyLocation, Diff, DiffOptions, Repository, Sort, Status, StatusOptions};
 use std::{
@@ -494,6 +495,43 @@ impl GitRepo for LocalGitRepo {
                 additions,
                 deletions,
             });
+        }
+        out
+    }
+
+    fn blame_path(&self, path: &Path) -> Vec<BlameLine> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Some(workdir) = repo.workdir() else {
+            return Vec::new();
+        };
+        let Ok(rel) = path.strip_prefix(workdir) else {
+            return Vec::new();
+        };
+        let blame = match repo.blame_file(rel, None) {
+            Ok(b) => b,
+            Err(err) => {
+                tracing::warn!("blame_path({}): {}", rel.display(), err.message());
+                return Vec::new();
+            },
+        };
+
+        let mut out: Vec<BlameLine> = Vec::new();
+        for hunk in blame.iter() {
+            let sha = hunk.final_commit_id().to_string();
+            let short_sha: String = sha.chars().take(7).collect();
+            let signature = hunk.final_signature();
+            let author_name = signature.name().unwrap_or_default().to_string();
+            let time = signature.when().seconds();
+            let start = hunk.final_start_line().saturating_sub(1) as u32;
+            for i in 0..hunk.lines_in_hunk() as u32 {
+                out.push(BlameLine {
+                    line: start + i,
+                    commit_sha: sha.clone(),
+                    short_sha: short_sha.clone(),
+                    author_name: author_name.clone(),
+                    time,
+                });
+            }
         }
         out
     }
