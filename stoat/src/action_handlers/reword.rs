@@ -6,18 +6,18 @@ use crate::{
 
 pub(super) fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
     use crate::rebase::RebasePause;
-    let input = {
-        let ws = stoat.active_workspace();
-        ws.rebase_active
+    let is_reword = matches!(
+        stoat
+            .active_workspace()
+            .rebase_active
             .as_ref()
-            .and_then(|a| a.pause.as_ref())
-            .and_then(|p| match p {
-                RebasePause::Reword { input, .. } => Some(input.clone()),
-                _ => None,
-            })
-    };
-    if let Some(input) = input {
-        input.dispose(stoat.active_workspace_mut());
+            .and_then(|a| a.pause.as_ref()),
+        Some(RebasePause::Reword { .. })
+    );
+    if is_reword {
+        if let Some(input) = stoat.active_workspace_mut().reword_input.take() {
+            input.dispose(stoat.active_workspace_mut());
+        }
     }
     stoat.active_workspace_mut().rebase_active = None;
     emit_rebase_error(
@@ -36,16 +36,18 @@ pub(super) fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
 pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
     use crate::{host::GitApplyError, rebase::RebasePause};
 
-    let (workdir, picked_sha, new_message, fallback_parent, input) = {
+    let (workdir, picked_sha, new_message, fallback_parent) = {
         let Some(active) = stoat.active_workspace().rebase_active.as_ref() else {
             return UpdateEffect::None;
         };
         let Some(RebasePause::Reword {
             cherry_picked_commit,
-            input,
             ..
         }) = active.pause.as_ref()
         else {
+            return UpdateEffect::None;
+        };
+        let Some(input) = stoat.active_workspace().reword_input.as_ref() else {
             return UpdateEffect::None;
         };
         let buffer_text = input.text(stoat.active_workspace());
@@ -54,9 +56,13 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
             cherry_picked_commit.clone(),
             buffer_text,
             Some(active.current_head.clone()),
-            input.clone(),
         )
     };
+    let input = stoat
+        .active_workspace_mut()
+        .reword_input
+        .take()
+        .expect("reword_input set when Pause::Reword is active");
 
     // Empty (whitespace-only) message auto-aborts, matching git's
     // behaviour when the commit message file is emptied by the editor.
@@ -135,13 +141,16 @@ pub(super) fn install_reword_pause(
         u16::MAX,
     );
 
-    let Some(active) = ws.rebase_active.as_mut() else {
+    if ws.rebase_active.is_none() {
         input.dispose(ws);
         return;
-    };
-    active.pause = Some(RebasePause::Reword {
+    }
+    ws.reword_input = Some(input);
+    ws.rebase_active
+        .as_mut()
+        .expect("rebase_active present")
+        .pause = Some(RebasePause::Reword {
         cherry_picked_commit,
         original_message,
-        input,
     });
 }

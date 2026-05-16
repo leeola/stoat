@@ -200,15 +200,11 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                     RebasePause::Reword {
                         cherry_picked_commit,
                         original_message,
-                        input,
-                    } => Some((
-                        cherry_picked_commit.clone(),
-                        original_message.clone(),
-                        input.editor_id,
-                    )),
+                    } => Some((cherry_picked_commit.clone(), original_message.clone())),
                     _ => None,
                 });
-            if let Some((sha, orig, editor_id)) = reword_ctx {
+            let editor_id = ws.reword_input.as_ref().map(|i| i.editor_id);
+            if let (Some((sha, orig)), Some(editor_id)) = (reword_ctx, editor_id) {
                 if let Some(editor) = ws.editors.get_mut(editor_id) {
                     reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
                 }

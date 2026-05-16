@@ -122,23 +122,20 @@ pub struct ActiveRebase {
 }
 
 pub enum RebasePause {
-    /// Waiting for the user to edit a commit message. The user's
-    /// in-progress message lives in a real [`crate::editor_state::EditorState`]
-    /// backed by a scratch [`crate::buffer::TextBuffer`], so reword gets
-    /// the full modal-editing experience (normal/insert submodes,
-    /// motions, multi-line). The editor and buffer are owned by the
-    /// active workspace's slotmaps and are cleaned up by
+    /// Waiting for the user to edit a commit message. UI-layer
+    /// state (TUI's [`crate::input_view::InputView`] / GUI's
+    /// modal entity) lives separately on the workspace -- see
+    /// [`crate::workspace::Workspace::reword_input`] for the TUI's
+    /// scratch editor -- so the pause variant stays a pure data
+    /// shape constructible from any caller. Cleaned up by
     /// `reword_confirm` / `reword_abort`.
-    #[allow(private_interfaces)]
     Reword {
         /// The sha that was just cherry-picked and committed; will be
         /// replaced with a new commit carrying the user's message when
         /// `RewordConfirm` fires.
         cherry_picked_commit: String,
-        /// Original commit message, kept for the modal's reference line
-        /// (the editable copy lives in the buffer below).
+        /// Original commit message, kept for the modal's reference line.
         original_message: String,
-        input: crate::input_view::InputView,
     },
     /// Waiting for the user to modify the picked commit (typically via
     /// review-mode hunk removal). The review's current source sha at

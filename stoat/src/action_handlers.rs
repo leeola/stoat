@@ -666,16 +666,14 @@ pub(crate) fn focused_editor_mut(stoat: &mut Stoat) -> Option<&mut EditorState> 
     // While a reword pause is active, the "focused" editor for motion
     // and insertion purposes is the reword scratch editor, regardless
     // of which pane had focus when rebase started.
-    if let Some(editor_id) = ws
-        .rebase_active
-        .as_ref()
-        .and_then(|a| a.pause.as_ref())
-        .and_then(|p| match p {
-            RebasePause::Reword { input, .. } => Some(input.editor_id),
-            _ => None,
-        })
-    {
-        return ws.editors.get_mut(editor_id);
+    let in_reword = matches!(
+        ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()),
+        Some(RebasePause::Reword { .. })
+    );
+    if in_reword {
+        if let Some(editor_id) = ws.reword_input.as_ref().map(|i| i.editor_id) {
+            return ws.editors.get_mut(editor_id);
+        }
     }
 
     let view = match ws.focus {

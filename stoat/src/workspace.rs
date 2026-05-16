@@ -121,6 +121,12 @@ pub struct Workspace {
     /// paused on reword/edit/conflict and during final execution;
     /// dropped when the plan completes or aborts.
     pub(crate) rebase_active: Option<ActiveRebase>,
+    /// TUI scratch editor backing a [`crate::rebase::RebasePause::Reword`]
+    /// pause. Set by `install_reword_pause` alongside the pause variant
+    /// and disposed by `reword_confirm` / `reword_abort`. `None` in the
+    /// GUI -- which renders Reword via its own modal entity -- and
+    /// between rebases.
+    pub(crate) reword_input: Option<crate::input_view::InputView>,
     parse_jobs: HashMap<BufferId, ParseJob>,
     pub(crate) badges: BadgeTray,
 }
@@ -161,6 +167,7 @@ impl Workspace {
             commits: None,
             rebase: None,
             rebase_active: None,
+            reword_input: None,
             parse_jobs: HashMap::new(),
             badges: BadgeTray::new(),
         }

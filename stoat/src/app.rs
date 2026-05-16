@@ -2109,16 +2109,14 @@ impl Stoat {
             return Some((sh.input.editor_id, sh.input.buffer_id));
         }
 
-        if let Some((editor_id, buffer_id)) = ws
-            .rebase_active
-            .as_ref()
-            .and_then(|a| a.pause.as_ref())
-            .and_then(|p| match p {
-                RebasePause::Reword { input, .. } => Some((input.editor_id, input.buffer_id)),
-                _ => None,
-            })
-        {
-            return Some((editor_id, buffer_id));
+        let in_reword = matches!(
+            ws.rebase_active.as_ref().and_then(|a| a.pause.as_ref()),
+            Some(RebasePause::Reword { .. })
+        );
+        if in_reword {
+            if let Some(input) = ws.reword_input.as_ref() {
+                return Some((input.editor_id, input.buffer_id));
+            }
         }
 
         let view = match ws.focus {
