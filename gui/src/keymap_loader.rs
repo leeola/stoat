@@ -91,4 +91,38 @@ mod tests {
         assert_eq!(bindings.len(), 1);
         assert_eq!(bindings[0].0, "x");
     }
+
+    fn insert_state(claude_focused: bool) -> TestState {
+        let mut values = HashMap::new();
+        values.insert("mode".into(), StateValue::String("insert".into()));
+        values.insert("claude_focused".into(), StateValue::Bool(claude_focused));
+        TestState { values }
+    }
+
+    fn enter_event() -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Enter,
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    #[test]
+    fn default_keymap_enter_in_editor_insert_accepts_completion() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&insert_state(false), &enter_event())
+            .expect("Enter has a binding when claude is not focused");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "AcceptCompletion");
+    }
+
+    #[test]
+    fn default_keymap_enter_in_chat_insert_submits_to_claude() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&insert_state(true), &enter_event())
+            .expect("Enter has a binding when claude is focused");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "ClaudeSubmit");
+    }
 }

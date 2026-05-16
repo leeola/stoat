@@ -439,9 +439,12 @@ on key {
         r -> ReviewRefresh();
         : -> OpenCommandPalette();
     }
+    mode == insert && claude_focused {
+        Enter -> ClaudeSubmit();
+    }
     mode == insert {
         Escape -> SetMode(normal);
-        Enter -> ClaudeSubmit();
+        Enter -> AcceptCompletion();
         Tab -> SmartTab();
         Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
