@@ -12,6 +12,17 @@ use time::{format_description::FormatItem, macros::format_description, OffsetDat
 
 const DATE_FORMAT: &[FormatItem<'_>] = format_description!("[year]-[month]-[day]");
 
+/// Direction parameter for [`RebaseItem::handle_move`]. Picked at
+/// dispatch time from the four cursor / reorder rebase actions
+/// (`RebaseNext` / `RebasePrev` / `RebaseMoveUp` / `RebaseMoveDown`).
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub(crate) enum RebaseMoveDir {
+    Next,
+    Prev,
+    SwapUp,
+    SwapDown,
+}
+
 /// Pane-hosted view over an in-progress rebase plan.
 ///
 /// Renders [`RebaseState::todo`] as a scrollable [`uniform_list`]
@@ -40,6 +51,40 @@ impl RebaseItem {
 
     pub(crate) fn state(&self) -> &Entity<RebaseState> {
         &self.state
+    }
+
+    /// Apply a cursor or reorder mutation to the inner [`RebaseState`].
+    /// Notifies the inner entity so the outer item re-renders via the
+    /// `cx.observe` subscription installed in [`RebaseItem::new`].
+    pub(crate) fn handle_move(&self, dir: RebaseMoveDir, cx: &mut Context<'_, Self>) {
+        self.state.update(cx, |state, cx| {
+            let moved = match dir {
+                RebaseMoveDir::Next => state.move_down(),
+                RebaseMoveDir::Prev => state.move_up(),
+                RebaseMoveDir::SwapUp => state.swap_up(),
+                RebaseMoveDir::SwapDown => state.swap_down(),
+            };
+            if moved {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Set the operation on the cursor entry. No-op when the entry
+    /// already carries `op`.
+    pub(crate) fn handle_set_op(&self, op: RebaseTodoOp, cx: &mut Context<'_, Self>) {
+        self.state.update(cx, |state, cx| {
+            if state.set_op(op) {
+                cx.notify();
+            }
+        });
+    }
+
+    /// Snapshot the inner [`RebaseState`] for hand-off to
+    /// `ActiveRebase::new`. The state is cloned rather than taken so
+    /// the item stays renderable up until its caller closes it.
+    pub(crate) fn take_plan(&self, cx: &App) -> RebaseState {
+        self.state.read(cx).clone()
     }
 
     fn render_row(&self, ix: usize, selected: bool, cx: &App) -> AnyElement {
@@ -156,7 +201,7 @@ mod tests {
 
     #[test]
     fn tab_label_returns_rebase() {
-        let mut cx = TestAppContext::single();
+        let cx = TestAppContext::single();
         let item = cx.update(|cx| {
             let state = mk_state(vec![mk_entry(RebaseTodoOp::Pick, "abc1234", "first")]);
             cx.new(|cx| RebaseItem::new(state, cx))
@@ -168,7 +213,7 @@ mod tests {
 
     #[test]
     fn is_dirty_is_false_initially() {
-        let mut cx = TestAppContext::single();
+        let cx = TestAppContext::single();
         let item = cx.update(|cx| {
             let state = mk_state(vec![mk_entry(RebaseTodoOp::Pick, "abc1234", "first")]);
             cx.new(|cx| RebaseItem::new(state, cx))
@@ -180,7 +225,7 @@ mod tests {
 
     #[test]
     fn state_accessor_exposes_underlying_entity() {
-        let mut cx = TestAppContext::single();
+        let cx = TestAppContext::single();
         let item = cx.update(|cx| {
             let state = mk_state(vec![
                 mk_entry(RebaseTodoOp::Pick, "abc1234", "first"),

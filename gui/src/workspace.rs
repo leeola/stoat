@@ -18,6 +18,7 @@ use crate::{
     multi_buffer::MultiBuffer,
     pane::{Pane, PaneEvent},
     pane_tree::{PaneTree, PaneTreeEvent},
+    rebase_item::{RebaseItem, RebaseMoveDir},
     review_session::ReviewApplyResult,
     settings::Settings,
     status_bar::{
@@ -40,7 +41,7 @@ use std::{
 };
 use stoat::{
     buffer::BufferId,
-    host::{CherryPickOutcome, GitApplyError, RebaseError, RebaseTodo, WatchToken},
+    host::{CherryPickOutcome, GitApplyError, RebaseError, RebaseTodo, RebaseTodoOp, WatchToken},
     pane::{Axis, Direction},
     rebase::{ActiveRebase, RebaseEntry, RebasePause},
     review::ReviewFileInput,
@@ -1130,6 +1131,19 @@ impl Workspace {
             ActionKind::ConflictSkipEntry => self.dispatch_conflict_skip_entry(cx),
             ActionKind::ConflictApply => self.dispatch_conflict_apply(cx),
             ActionKind::ConflictAbort => self.dispatch_conflict_abort(cx),
+            ActionKind::RebaseNext => self.dispatch_rebase_move(RebaseMoveDir::Next, cx),
+            ActionKind::RebasePrev => self.dispatch_rebase_move(RebaseMoveDir::Prev, cx),
+            ActionKind::RebaseMoveUp => self.dispatch_rebase_move(RebaseMoveDir::SwapUp, cx),
+            ActionKind::RebaseMoveDown => self.dispatch_rebase_move(RebaseMoveDir::SwapDown, cx),
+            ActionKind::SetRebaseOpPick => self.dispatch_rebase_set_op(RebaseTodoOp::Pick, cx),
+            ActionKind::SetRebaseOpSquash => self.dispatch_rebase_set_op(RebaseTodoOp::Squash, cx),
+            ActionKind::SetRebaseOpFixup => self.dispatch_rebase_set_op(RebaseTodoOp::Fixup, cx),
+            ActionKind::SetRebaseOpDrop => self.dispatch_rebase_set_op(RebaseTodoOp::Drop, cx),
+            ActionKind::SetRebaseOpReword => self.dispatch_rebase_set_op(RebaseTodoOp::Reword, cx),
+            ActionKind::SetRebaseOpEdit => self.dispatch_rebase_set_op(RebaseTodoOp::Edit, cx),
+            ActionKind::ExecuteRebase => self.dispatch_execute_rebase(cx),
+            ActionKind::AbortRebase => self.dispatch_abort_rebase(cx),
+            ActionKind::RebaseContinue => self.dispatch_rebase_continue(cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1364,6 +1378,106 @@ impl Workspace {
     fn active_conflict_item(&self, cx: &App) -> Option<Entity<ConflictItem>> {
         self.active_pane_item(cx)
             .and_then(|item| item.to_any_view().downcast::<ConflictItem>().ok())
+    }
+
+    fn active_rebase_item(&self, cx: &App) -> Option<Entity<RebaseItem>> {
+        self.active_pane_item(cx)
+            .and_then(|item| item.to_any_view().downcast::<RebaseItem>().ok())
+    }
+
+    fn dispatch_rebase_move(&mut self, dir: RebaseMoveDir, cx: &mut Context<'_, Self>) {
+        let Some(rebase_item) = self.active_rebase_item(cx) else {
+            return;
+        };
+        rebase_item.update(cx, |item, cx| item.handle_move(dir, cx));
+    }
+
+    fn dispatch_rebase_set_op(&mut self, op: RebaseTodoOp, cx: &mut Context<'_, Self>) {
+        let Some(rebase_item) = self.active_rebase_item(cx) else {
+            return;
+        };
+        rebase_item.update(cx, |item, cx| item.handle_set_op(op, cx));
+    }
+
+    fn dispatch_execute_rebase(&mut self, cx: &mut Context<'_, Self>) {
+        if self.rebase_active.is_some() {
+            tracing::warn!("ExecuteRebase: a rebase is already in flight; ignoring");
+            return;
+        }
+        let Some(rebase_item) = self.active_rebase_item(cx) else {
+            return;
+        };
+        let plan = rebase_item.read(cx).take_plan(cx);
+        let workdir = plan.workdir.clone();
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("ExecuteRebase: no git repo at {}", workdir.display());
+            return;
+        };
+        if !repo.changed_files().is_empty() {
+            tracing::warn!("ExecuteRebase: working tree dirty; commit or stash first");
+            return;
+        }
+
+        self.rebase_active = Some(ActiveRebase::new(plan));
+
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        pane.update(cx, |p, cx| {
+            let idx = p.items().iter().position(|item| {
+                item.to_any_view()
+                    .downcast::<RebaseItem>()
+                    .ok()
+                    .is_some_and(|entity| entity == rebase_item)
+            });
+            if let Some(idx) = idx {
+                p.remove_item(idx, cx);
+            }
+        });
+
+        self.continue_rebase_atomic(pane, cx);
+    }
+
+    fn dispatch_abort_rebase(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(rebase_item) = self.active_rebase_item(cx) else {
+            return;
+        };
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        pane.update(cx, |p, cx| {
+            let idx = p.items().iter().position(|item| {
+                item.to_any_view()
+                    .downcast::<RebaseItem>()
+                    .ok()
+                    .is_some_and(|entity| entity == rebase_item)
+            });
+            if let Some(idx) = idx {
+                p.remove_item(idx, cx);
+            }
+        });
+    }
+
+    fn dispatch_rebase_continue(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(active) = self.rebase_active.as_ref() else {
+            return;
+        };
+        if !matches!(active.pause, Some(RebasePause::Edit { .. })) {
+            return;
+        }
+        if let Some(active) = self.rebase_active.as_mut() {
+            active.pause = None;
+        }
+
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        self.continue_rebase_atomic(pane, cx);
     }
 
     fn dispatch_conflict_take_side(&mut self, side: ConflictSide, cx: &mut Context<'_, Self>) {
@@ -6912,5 +7026,430 @@ mod tests {
             head, "head1",
             "no rebase active: dispatch must not call update_head",
         );
+    }
+
+    fn open_rebase_item_in_focused_pane(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        state: stoat::rebase::RebaseState,
+    ) -> Entity<RebaseItem> {
+        let item = vcx.update(|_, cx| cx.new(|cx| RebaseItem::new(state, cx)));
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            let handle: Box<dyn ItemHandle> = Box::new(item.clone());
+            pane.update(cx, |p, cx| {
+                p.add_item(handle, cx);
+            });
+        });
+        vcx.run_until_parked();
+        item
+    }
+
+    fn rebase_state_with(entries: Vec<RebaseEntry>) -> stoat::rebase::RebaseState {
+        stoat::rebase::RebaseState::new(PathBuf::from("/tmp/repo"), "onto1".to_string(), entries)
+    }
+
+    fn pick_entry(sha: &str, summary: &str) -> RebaseEntry {
+        RebaseEntry {
+            op: RebaseTodoOp::Pick,
+            commit: stoat::host::CommitInfo {
+                sha: sha.to_string(),
+                short_sha: sha.chars().take(7).collect(),
+                summary: summary.to_string(),
+                author_name: "Alice".to_string(),
+                author_email: "alice@example.invalid".to_string(),
+                time: 1_700_000_000,
+                parent_count: 1,
+            },
+        }
+    }
+
+    fn focused_pane_rebase_item_count(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+    ) -> usize {
+        ws.read_with(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let Some(pane) = w.pane_tree.read(cx).pane(focus) else {
+                return 0;
+            };
+            pane.read(cx)
+                .items()
+                .iter()
+                .filter(|item| item.to_any_view().downcast::<RebaseItem>().is_ok())
+                .count()
+        })
+    }
+
+    fn read_rebase_selected(vcx: &mut VisualTestContext, item: &Entity<RebaseItem>) -> usize {
+        item.read_with(vcx, |item, cx| item.state().read(cx).selected)
+    }
+
+    fn read_rebase_todo_shas(
+        vcx: &mut VisualTestContext,
+        item: &Entity<RebaseItem>,
+    ) -> Vec<String> {
+        item.read_with(vcx, |item, cx| {
+            item.state()
+                .read(cx)
+                .todo
+                .iter()
+                .map(|e| e.commit.sha.clone())
+                .collect()
+        })
+    }
+
+    fn read_rebase_op_at(
+        vcx: &mut VisualTestContext,
+        item: &Entity<RebaseItem>,
+        index: usize,
+    ) -> RebaseTodoOp {
+        item.read_with(vcx, |item, cx| item.state().read(cx).todo[index].op)
+    }
+
+    #[test]
+    fn dispatch_rebase_next_advances_selected() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let item = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![
+                pick_entry("c1", "one"),
+                pick_entry("c2", "two"),
+                pick_entry("c3", "three"),
+            ]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::RebaseNext);
+        vcx.run_until_parked();
+
+        assert_eq!(read_rebase_selected(vcx, &item), 1);
+    }
+
+    #[test]
+    fn dispatch_rebase_prev_decrements_selected() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let item = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "one"), pick_entry("c2", "two")]),
+        );
+        dispatch(&ws, vcx, stoat_action::RebaseNext);
+        vcx.run_until_parked();
+        assert_eq!(read_rebase_selected(vcx, &item), 1);
+
+        dispatch(&ws, vcx, stoat_action::RebasePrev);
+        vcx.run_until_parked();
+
+        assert_eq!(read_rebase_selected(vcx, &item), 0);
+    }
+
+    #[test]
+    fn dispatch_rebase_move_up_swaps_with_predecessor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let item = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "one"), pick_entry("c2", "two")]),
+        );
+        dispatch(&ws, vcx, stoat_action::RebaseNext);
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::RebaseMoveUp);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            read_rebase_todo_shas(vcx, &item),
+            vec!["c2".to_string(), "c1".to_string()],
+        );
+        assert_eq!(read_rebase_selected(vcx, &item), 0);
+    }
+
+    #[test]
+    fn dispatch_rebase_move_down_swaps_with_successor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let item = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "one"), pick_entry("c2", "two")]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::RebaseMoveDown);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            read_rebase_todo_shas(vcx, &item),
+            vec!["c2".to_string(), "c1".to_string()],
+        );
+        assert_eq!(read_rebase_selected(vcx, &item), 1);
+    }
+
+    #[test]
+    fn dispatch_set_rebase_op_changes_op() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let item = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "one")]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::SetRebaseOpDrop);
+        vcx.run_until_parked();
+
+        assert_eq!(read_rebase_op_at(vcx, &item, 0), RebaseTodoOp::Drop);
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_runs_clean_plan() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("onto1", &[("a.txt", "base\n")])
+            .commit_with_parent("c1", "onto1", &[("a.txt", "c1\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "c1 summary")]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        vcx.run_until_parked();
+
+        let rebases = git.applied_rebases(Path::new("/tmp/repo"));
+        assert_eq!(rebases.len(), 1);
+        assert_eq!(rebases[0].onto, "onto1");
+        let active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
+        assert!(!active, "rebase_active must clear on clean completion");
+        assert_eq!(
+            focused_pane_rebase_item_count(vcx, &ws),
+            0,
+            "RebaseItem must close after execute consumes the plan",
+        );
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_opens_conflict_views_on_conflict() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("onto1", &[("a.txt", "base\n")])
+            .commit_with_parent("c1", "onto1", &[("a.txt", "c1\n")])
+            .simulate_conflict_at("c1");
+        install_git_host_global(vcx, git.clone());
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "c1 summary")]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        vcx.run_until_parked();
+
+        let pause_sha = ws.read_with(vcx, |w, _| {
+            match w.rebase_active.as_ref()?.pause.as_ref()? {
+                RebasePause::Conflict { source_sha, .. } => Some(source_sha.clone()),
+                _ => None,
+            }
+        });
+        assert_eq!(pause_sha, Some("c1".to_string()));
+        assert!(
+            focused_pane_conflict_item_count(vcx, &ws) >= 1,
+            "conflict views must be opened on conflict outcome",
+        );
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_rejects_dirty_worktree() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("onto1", &[("a.txt", "base\n")])
+            .modified("a.txt", "base\n", "dirty\n");
+        install_git_host_global(vcx, git.clone());
+
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "c1 summary")]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        vcx.run_until_parked();
+
+        assert!(
+            git.applied_rebases(Path::new("/tmp/repo")).is_empty(),
+            "dirty worktree must reject the rebase before running",
+        );
+        let active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
+        assert!(
+            !active,
+            "rebase_active must not be installed on dirty reject"
+        );
+        assert_eq!(
+            focused_pane_rebase_item_count(vcx, &ws),
+            1,
+            "RebaseItem must remain open when execute is rejected",
+        );
+    }
+
+    #[test]
+    fn dispatch_execute_rebase_with_no_rebase_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("onto1", &[("a.txt", "base\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        dispatch(&ws, vcx, stoat_action::ExecuteRebase);
+        vcx.run_until_parked();
+
+        assert!(git.applied_rebases(Path::new("/tmp/repo")).is_empty());
+        let active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
+        assert!(!active);
+    }
+
+    #[test]
+    fn dispatch_abort_rebase_closes_active_rebase_item() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let _ = open_rebase_item_in_focused_pane(
+            vcx,
+            &ws,
+            rebase_state_with(vec![pick_entry("c1", "one")]),
+        );
+
+        dispatch(&ws, vcx, stoat_action::AbortRebase);
+        vcx.run_until_parked();
+
+        assert_eq!(focused_pane_rebase_item_count(vcx, &ws), 0);
+    }
+
+    #[test]
+    fn dispatch_abort_rebase_with_no_rebase_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::AbortRebase);
+        vcx.run_until_parked();
+    }
+
+    fn install_edit_pause(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        workdir: &str,
+        current_head: &str,
+        cherry_picked: &str,
+        remaining: Vec<RebaseEntry>,
+    ) {
+        ws.update(vcx, |w, _| {
+            w.rebase_active = Some(ActiveRebase {
+                workdir: PathBuf::from(workdir),
+                onto: current_head.to_string(),
+                remaining: remaining.into(),
+                current_head: current_head.to_string(),
+                last_pick_sha: None,
+                last_message: None,
+                pause: Some(RebasePause::Edit {
+                    cherry_picked_commit: cherry_picked.to_string(),
+                }),
+            });
+        });
+    }
+
+    #[test]
+    fn dispatch_rebase_continue_with_edit_pause_drives_forward() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "x\n")])
+            .commit_with_parent("c2", "head1", &[("a.txt", "y\n")]);
+        install_git_host_global(vcx, git.clone());
+        install_edit_pause(
+            vcx,
+            &ws,
+            "/tmp/repo",
+            "head1",
+            "edited-c1",
+            vec![pick_entry("c2", "c2")],
+        );
+
+        dispatch(&ws, vcx, stoat_action::RebaseContinue);
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, _| w.rebase_active.is_some());
+        assert!(!active, "rebase_active must clear after clean continuation");
+        assert_eq!(
+            git.applied_rebases(Path::new("/tmp/repo")).len(),
+            1,
+            "exactly one run_rebase invocation",
+        );
+    }
+
+    #[test]
+    fn dispatch_rebase_continue_without_pause_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "x\n")]);
+        install_git_host_global(vcx, git.clone());
+
+        dispatch(&ws, vcx, stoat_action::RebaseContinue);
+        vcx.run_until_parked();
+
+        assert!(git.applied_rebases(Path::new("/tmp/repo")).is_empty());
+    }
+
+    #[test]
+    fn dispatch_rebase_continue_with_conflict_pause_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("head1", &[("a.txt", "x\n")]);
+        install_git_host_global(vcx, git.clone());
+        install_conflict_rebase(
+            vcx,
+            &ws,
+            "/tmp/repo",
+            "src1",
+            "head1",
+            vec![conflicted_file("a.txt", "ours\n", "theirs\n")],
+            Vec::new(),
+        );
+
+        dispatch(&ws, vcx, stoat_action::RebaseContinue);
+        vcx.run_until_parked();
+
+        let pause_still_conflict = ws.read_with(vcx, |w, _| {
+            matches!(
+                w.rebase_active.as_ref().and_then(|a| a.pause.as_ref()),
+                Some(RebasePause::Conflict { .. }),
+            )
+        });
+        assert!(
+            pause_still_conflict,
+            "Conflict pause is resumed via ConflictApply, not RebaseContinue",
+        );
+        assert!(git.applied_rebases(Path::new("/tmp/repo")).is_empty());
     }
 }
