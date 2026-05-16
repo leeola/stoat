@@ -164,6 +164,7 @@ pub enum ActionKind {
     IndentSelection,
     UnindentSelection,
     ToggleComments,
+    ToggleBlame,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

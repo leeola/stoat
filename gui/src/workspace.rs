@@ -9,6 +9,7 @@ use crate::{
     editor::{Editor, EditorEvent, EditorMode},
     editor_input::EditorInput,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
+    git::coordinator::BlameCoordinator,
     globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
@@ -67,6 +68,7 @@ pub struct Workspace {
     pane_tree: Entity<PaneTree>,
     buffer_registry: Entity<BufferRegistry>,
     diff_coordinator: Entity<DiffCoordinator>,
+    blame_coordinator: Entity<BlameCoordinator>,
     docks: Vec<Entity<Dock>>,
     modal_layer: Entity<ModalLayer>,
     status_bar: Entity<StatusBar>,
@@ -123,6 +125,11 @@ impl Workspace {
             let registry = buffer_registry.clone();
             let git_root = git_root.clone();
             cx.new(|cx| DiffCoordinator::new(git_root, registry, cx))
+        };
+        let blame_coordinator = {
+            let registry = buffer_registry.clone();
+            let git_root = git_root.clone();
+            cx.new(|cx| BlameCoordinator::new(git_root, registry, cx))
         };
         let keymap = cx
             .try_global::<Settings>()
@@ -235,6 +242,7 @@ impl Workspace {
             pane_tree,
             buffer_registry,
             diff_coordinator,
+            blame_coordinator,
             docks: Vec::new(),
             modal_layer,
             status_bar,
@@ -285,6 +293,10 @@ impl Workspace {
 
     pub fn diff_coordinator(&self) -> &Entity<DiffCoordinator> {
         &self.diff_coordinator
+    }
+
+    pub fn blame_coordinator(&self) -> &Entity<BlameCoordinator> {
+        &self.blame_coordinator
     }
 
     /// Open every path in `paths` as an [`Entity<Editor>`] hosted in
@@ -1041,6 +1053,7 @@ impl Workspace {
             },
             ActionKind::SaveSelection => self.dispatch_save_selection(cx),
             ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
+            ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
             ActionKind::ReviewNextChunk => self.dispatch_review_step(ReviewStepDir::Next, cx),
@@ -1358,6 +1371,46 @@ impl Workspace {
             return;
         };
         buffer.update(cx, |b, cx| b.save(cx));
+    }
+
+    /// Flip the active editor's blame-strip visibility. On toggle-on,
+    /// ensures the editor has the workspace-shared
+    /// [`crate::git::blame::BlameState`] for its buffer attached and
+    /// schedules a [`stoat::host::GitRepo::blame_path`] refresh against
+    /// the workspace's git host. Scratch buffers (no file path) flip
+    /// the flag but skip the refresh: the host method has nothing to
+    /// blame outside the workdir.
+    fn dispatch_toggle_blame(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let new_visible = !editor.read(cx).blame_visible();
+        editor.update(cx, |ed, cx| ed.set_blame_visible(new_visible, cx));
+
+        if !new_visible {
+            return;
+        }
+
+        let Some(buffer) = editor
+            .read(cx)
+            .multi_buffer()
+            .read(cx)
+            .as_singleton()
+            .cloned()
+        else {
+            return;
+        };
+        let Some(path) = buffer.read(cx).file_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let buffer_id = buffer.read(cx).read(|b| b.buffer_id());
+
+        let state = self
+            .blame_coordinator
+            .update(cx, |coord, cx| coord.state_for(buffer_id, buffer, cx));
+        editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
+        self.blame_coordinator
+            .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
     }
 
     fn dispatch_jump(&mut self, dir: JumpDir, cx: &mut Context<'_, Self>) {
@@ -8471,5 +8524,107 @@ mod tests {
             "Conflict pause is resumed via ConflictApply, not RebaseContinue",
         );
         assert!(git.applied_rebases(Path::new("/tmp/repo")).is_empty());
+    }
+
+    fn open_editor_in_focused_pane(
+        vcx: &mut VisualTestContext,
+        ws: &Entity<Workspace>,
+        path: &Path,
+    ) -> Entity<Editor> {
+        ws.update(vcx, |w, cx| w.open_paths(&[path.to_path_buf()], cx));
+        vcx.run_until_parked();
+        let editor = ws.read_with(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .clone();
+            pane.read(cx)
+                .active_item()
+                .expect("editor active in pane")
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("active item is Editor")
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        editor
+    }
+
+    #[test]
+    fn dispatch_toggle_blame_flips_visibility_on_active_editor() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/main.rs", b"hi\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo").head_file("main.rs", "hi\n");
+        install_git_host_global(vcx, git);
+        let editor = open_editor_in_focused_pane(vcx, &ws, Path::new("/tmp/repo/main.rs"));
+
+        editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+        dispatch(&ws, vcx, stoat_action::ToggleBlame);
+        vcx.run_until_parked();
+        editor.read_with(vcx, |ed, _| assert!(ed.blame_visible()));
+
+        dispatch(&ws, vcx, stoat_action::ToggleBlame);
+        vcx.run_until_parked();
+        editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+    }
+
+    #[test]
+    fn dispatch_toggle_blame_populates_blame_state_on_toggle_on() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"l1\nl2\nl3\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let scheduler = install_executor_for_rebase(vcx);
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("c1", &[("a.rs", "l1\nl2\nl3\n")]);
+        install_git_host_global(vcx, git);
+        let editor = open_editor_in_focused_pane(vcx, &ws, Path::new("/tmp/repo/a.rs"));
+
+        dispatch(&ws, vcx, stoat_action::ToggleBlame);
+        settle_rebase(&scheduler, vcx);
+
+        let state = editor
+            .read_with(vcx, |ed, _| ed.blame_state().cloned())
+            .expect("BlameState attached on toggle-on");
+        let entries = state.read_with(vcx, |s, _| s.blame().to_vec());
+        assert_eq!(entries.len(), 3);
+        assert_eq!(entries[0].line, 0);
+        assert_eq!(entries[2].line, 2);
+    }
+
+    #[test]
+    fn dispatch_toggle_blame_with_no_file_path_flips_flag_but_skips_refresh() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"hi\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        install_git_host_global(vcx, Arc::new(stoat::host::fake::FakeGit::new()));
+        let editor = open_editor_in_focused_pane(vcx, &ws, Path::new("/tmp/repo/a.rs"));
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton buffer");
+        buffer.update(vcx, |b, cx| b.set_file_path(None, cx));
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::ToggleBlame);
+        vcx.run_until_parked();
+
+        editor.read_with(vcx, |ed, _| {
+            assert!(ed.blame_visible());
+            assert!(ed.blame_state().is_none());
+        });
     }
 }

@@ -46,8 +46,8 @@ pub use defs::{
         SelectTextobjectInner, SetMark, ShellAppendOutput, ShellInsertOutput, ShellKeepPipe,
         ShellPipe, ShellPipeTo, ShrinkSelection, SmartTab, SplitSelection, SurroundAdd,
         SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-        TillNextChar, TillPrevChar, ToggleComments, TriggerCompletion, TrimSelections, Undo,
-        UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+        TillNextChar, TillPrevChar, ToggleBlame, ToggleComments, TriggerCompletion, TrimSelections,
+        Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
     },
     file::OpenFile,
     file_finder::{

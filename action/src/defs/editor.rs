@@ -131,6 +131,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleBlameDef,
+    ToggleBlame,
+    "ToggleBlame",
+    ActionKind::ToggleBlame,
+    "toggle blame strip",
+    "Toggle the blame strip on the active editor's gutter. When visible, the strip shows the short sha, first-name of the author, and short relative age for the commit that last touched each source line. Toggling on triggers a refresh against the workspace's git host; toggling off hides the strip but keeps the cached entries until the next edit invalidates them. Buffers without an on-disk path (scratch, modal inputs) are a no-op.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",
