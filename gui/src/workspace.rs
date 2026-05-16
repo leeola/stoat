@@ -1096,6 +1096,15 @@ impl Workspace {
                     self.dispatch_open_review_commit_range(workdir, from, to, cx);
                 }
             },
+            ActionKind::OpenReviewAgentEdits => {
+                if let Some(action) = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::OpenReviewAgentEdits>()
+                {
+                    let edits = action.edits.clone();
+                    self.dispatch_open_review_agent_edits(edits, cx);
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1708,6 +1717,25 @@ impl Workspace {
     ) {
         let source = ReviewSource::CommitRange { workdir, from, to };
         self.open_review_source(source, "OpenReviewCommitRange", cx);
+    }
+
+    fn dispatch_open_review_agent_edits(
+        &mut self,
+        edits: Vec<stoat_action::AgentEdit>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let proposals: Vec<stoat::review_session::AgentEditProposal> = edits
+            .into_iter()
+            .map(|e| stoat::review_session::AgentEditProposal {
+                path: e.path,
+                base_text: e.base_text,
+                proposed_text: e.proposed_text,
+            })
+            .collect();
+        let source = ReviewSource::AgentEdits {
+            edits: Arc::new(proposals),
+        };
+        self.open_review_source(source, "OpenReviewAgentEdits", cx);
     }
 
     /// Build a [`ReviewItem`] for `source` and add it to the
@@ -5344,6 +5372,51 @@ mod tests {
                 from: "from".to_string(),
                 to: "ghost".to_string(),
             },
+        );
+        vcx.run_until_parked();
+
+        assert!(active_pane_review_item(vcx, &ws).is_none());
+    }
+
+    #[test]
+    fn dispatch_open_review_agent_edits_opens_review_item() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        install_language_registry_global(vcx);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewAgentEdits {
+                edits: vec![stoat_action::AgentEdit {
+                    path: PathBuf::from("agent/a.rs"),
+                    base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                    proposed_text: Arc::new("a\nNEW\nc\n".to_string()),
+                }],
+            },
+        );
+        vcx.run_until_parked();
+
+        let item = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        item.read_with(vcx, |item, cx| {
+            assert_eq!(item.files().len(), 1);
+            assert!(matches!(
+                item.session().read(cx).inner().source,
+                ReviewSource::AgentEdits { .. },
+            ));
+        });
+    }
+
+    #[test]
+    fn dispatch_open_review_agent_edits_with_empty_payload_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        install_language_registry_global(vcx);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewAgentEdits { edits: Vec::new() },
         );
         vcx.run_until_parked();
 
