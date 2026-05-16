@@ -349,6 +349,7 @@ impl Workspace {
                 ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(absolute.clone()), cx);
                 ed.install_hover_popup(cx);
+                ed.install_completion_popup(cx);
             });
             let pane_id = if index == 0 {
                 self.pane_tree.read(cx).focus()
@@ -809,6 +810,17 @@ impl Workspace {
                     if let Some(editor) = weak_editor.and_then(|w| w.upgrade()) {
                         let (row, col) = (hover.row, hover.col);
                         editor.update(cx, |ed, cx| ed.set_hover_position(Some((row, col)), cx));
+                    }
+                }
+            },
+            ActionKind::AcceptCompletion | ActionKind::SmartTab => {
+                let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+                if let Some(editor) = weak_editor.and_then(|w| w.upgrade()) {
+                    let popup = editor.read(cx).completion_popup().cloned();
+                    if let Some(popup) = popup {
+                        popup.update(cx, |p, cx| {
+                            p.accept(cx);
+                        });
                     }
                 }
             },

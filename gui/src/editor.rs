@@ -130,6 +130,7 @@ pub struct Editor {
     hover_position: Option<(u32, u32)>,
     hover_debounce_task: Option<Task<()>>,
     hover_popup: Option<Entity<crate::lsp::HoverPopup>>,
+    completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
     expansion_history: Vec<std::ops::Range<usize>>,
     expansion_tip: Option<std::ops::Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
@@ -198,6 +199,7 @@ impl Editor {
             hover_position: None,
             hover_debounce_task: None,
             hover_popup: None,
+            completion_popup: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
             blame_state: None,
@@ -717,6 +719,23 @@ impl Editor {
         self.hover_popup.as_ref()
     }
 
+    /// Construct the [`crate::lsp::CompletionPopup`] entity that
+    /// observes this editor's buffer edits and surfaces LSP
+    /// completion results while the workspace is in insert mode.
+    /// Production wiring calls this once after [`Self::set_workspace`].
+    pub fn install_completion_popup(&mut self, cx: &mut Context<'_, Self>) {
+        if self.completion_popup.is_some() {
+            return;
+        }
+        let editor = cx.entity();
+        let popup = cx.new(|popup_cx| crate::lsp::CompletionPopup::new(editor, popup_cx));
+        self.completion_popup = Some(popup);
+    }
+
+    pub fn completion_popup(&self) -> Option<&Entity<crate::lsp::CompletionPopup>> {
+        self.completion_popup.as_ref()
+    }
+
     /// Extend the primary selection's head to display-grid `(row, col)`,
     /// preserving its anchor (`start`). Mouse-drag uses this to grow
     /// the selection under the cursor while the user holds the left
@@ -1189,6 +1208,7 @@ impl Render for Editor {
         .size_full();
 
         let hover_popup = self.hover_popup.clone();
+        let completion_popup = self.completion_popup.clone();
         let mut root = div()
             .relative()
             .size_full()
@@ -1197,6 +1217,9 @@ impl Render for Editor {
             .child(list)
             .child(bounds_capture);
         if let Some(popup) = hover_popup {
+            root = root.child(popup);
+        }
+        if let Some(popup) = completion_popup {
             root = root.child(popup);
         }
         root.on_mouse_down(
