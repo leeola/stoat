@@ -17,6 +17,7 @@ mod actions;
 mod buffer;
 mod buffer_registry;
 mod commit_list;
+mod conflict_item;
 mod diagnostics;
 mod diff_coordinator;
 mod diff_map;
