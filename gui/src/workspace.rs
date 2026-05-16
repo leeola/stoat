@@ -859,6 +859,7 @@ impl Workspace {
                 );
             },
             ActionKind::GotoReferences => self.dispatch_goto_references(window, cx),
+            ActionKind::RenameSymbol => self.dispatch_rename_symbol(window, cx),
             ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, false, cx),
             ActionKind::MoveRight => self.dispatch_move_horizontal(1, false, cx),
             ActionKind::MoveUp => self.dispatch_move_vertical(-1, false, cx),
@@ -2693,6 +2694,106 @@ impl Workspace {
         let workdir = self.git_root.clone();
         let source = ReviewSource::WorkingTree { workdir };
         self.open_review_source(source, "OpenReview", cx);
+    }
+
+    /// Issue an LSP `textDocument/prepareRename` for the symbol under
+    /// the cursor and, on a non-null response, open
+    /// [`crate::lsp::rename::RenameModal`] seeded with the symbol's
+    /// placeholder text. No-op when no editor is active, the buffer
+    /// has no file path, no language is registered for that path, or
+    /// the server does not advertise
+    /// [`stoat::host::LanguageServerFeature::RenameSymbol`].
+    fn dispatch_rename_symbol(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let Some(path) = editor.read(cx).file_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let registry = &cx.global::<crate::globals::LanguageRegistry>().0;
+        let Some(language) = registry.for_path(&path) else {
+            return;
+        };
+        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
+        let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
+        let rope = mb_snapshot.rope().clone();
+        let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
+            return;
+        };
+        let cursor_offset = mb_snapshot.resolve_anchor(&primary.head());
+        let Some(uri) = path.to_str().and_then(|s| {
+            <lsp_types::Uri as std::str::FromStr>::from_str(&format!("file://{s}")).ok()
+        }) else {
+            return;
+        };
+        let workspace_root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        let weak_editor = editor.downgrade();
+        let weak_workspace = cx.weak_entity();
+        cx.spawn_in(window, async move |_, cx| {
+            let server = match host.launch(&language, &workspace_root).await {
+                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::rename",
+                        ?err,
+                        "failed to launch LSP server for rename"
+                    );
+                    return;
+                },
+            };
+            let _ = server.initialize(Some(uri.clone())).await;
+            if !server.supports_feature(stoat::host::LanguageServerFeature::RenameSymbol) {
+                return;
+            }
+            let encoding = server.offset_encoding();
+            let position = stoat::lsp::util::byte_offset_to_lsp_pos(&rope, cursor_offset, encoding);
+            let params = lsp_types::TextDocumentPositionParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                position,
+            };
+            let response = match server.prepare_rename(params).await {
+                Ok(Some(resp)) => resp,
+                Ok(None) => return,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::rename",
+                        ?err,
+                        "prepare_rename request failed",
+                    );
+                    return;
+                },
+            };
+            let placeholder =
+                crate::lsp::rename::placeholder_from_prepare(response, &rope, encoding);
+            let _ = weak_workspace
+                .clone()
+                .update_in(cx, |workspace, window, cx| {
+                    let weak_workspace_inner = cx.weak_entity();
+                    workspace.toggle_modal::<crate::lsp::rename::RenameModal, _>(
+                        window,
+                        cx,
+                        move |window, cx| {
+                            crate::lsp::rename::RenameModal::new(
+                                &placeholder,
+                                uri,
+                                position,
+                                encoding,
+                                server,
+                                weak_editor,
+                                weak_workspace_inner,
+                                rope,
+                                window,
+                                cx,
+                            )
+                        },
+                    );
+                });
+        })
+        .detach();
     }
 
     /// Open the LSP code action picker for the active editor's
