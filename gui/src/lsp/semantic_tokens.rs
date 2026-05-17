@@ -202,9 +202,7 @@ impl SemanticTokensRequest {
         if !server.supports_feature(LanguageServerFeature::SemanticTokens) {
             return None;
         }
-        let Some(legend) = legend_from_capabilities(&server.capabilities()) else {
-            return None;
-        };
+        let legend = legend_from_capabilities(&server.capabilities())?;
         let encoding = server.offset_encoding();
         let params = SemanticTokensParams {
             work_done_progress_params: Default::default(),
