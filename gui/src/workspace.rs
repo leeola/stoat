@@ -1248,6 +1248,9 @@ impl Workspace {
             ActionKind::OpenSymbolPicker => {
                 crate::symbol_picker::open_symbol_picker(self, window, cx)
             },
+            ActionKind::OpenWorkspaceSymbolPicker => {
+                crate::workspace_symbol_picker::open_workspace_symbol_picker(self, window, cx)
+            },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action

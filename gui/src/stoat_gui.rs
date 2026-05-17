@@ -57,6 +57,7 @@ mod tab_bar;
 pub mod test;
 mod theme;
 mod workspace;
+mod workspace_symbol_picker;
 
 pub use actions::{ClickAt, DragSelectTo, HoverAt, SetActivePane};
 pub use buffer::{Buffer, BufferEvent};
