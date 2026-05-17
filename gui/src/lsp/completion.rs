@@ -77,6 +77,23 @@ impl CompletionPopup {
         &self.items
     }
 
+    /// Whether the popup currently has items the user can
+    /// select. Used by SmartTab to decide between accepting
+    /// the popup and inserting an indent character.
+    pub fn is_visible(&self) -> bool {
+        !self.items.is_empty()
+    }
+
+    /// Force the next [`Self::reconcile`] to ignore the
+    /// signature cache and re-issue the LSP completion request.
+    /// Mirrors the TUI's `last_completion_signature = None` then
+    /// `request::trigger` pattern used by
+    /// [`stoat_action::TriggerCompletion`].
+    pub fn trigger_request(&mut self, cx: &mut Context<'_, Self>) {
+        self.last_signature = None;
+        self.reconcile(cx);
+    }
+
     pub fn selected_idx(&self) -> usize {
         self.selected_idx
     }

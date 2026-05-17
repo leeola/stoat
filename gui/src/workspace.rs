@@ -854,7 +854,7 @@ impl Workspace {
                     }
                 }
             },
-            ActionKind::AcceptCompletion | ActionKind::SmartTab => {
+            ActionKind::AcceptCompletion => {
                 let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
                 if let Some(editor) = weak_editor.and_then(|w| w.upgrade()) {
                     let popup = editor.read(cx).completion_popup().cloned();
@@ -864,6 +864,12 @@ impl Workspace {
                         });
                     }
                 }
+            },
+            ActionKind::SmartTab => {
+                crate::editor::actions::smart_tab::handle_smart_tab(self, cx);
+            },
+            ActionKind::TriggerCompletion => {
+                crate::editor::actions::smart_tab::handle_trigger_completion(self, cx);
             },
             ActionKind::CodeAction => self.dispatch_code_action(window, cx),
             ActionKind::GotoDefinition => {
@@ -5082,6 +5088,69 @@ mod tests {
         sm.read_with(vcx, |sm, _| assert!(sm.pending_macro_replay()));
         vcx.simulate_keystrokes("escape");
         sm.read_with(vcx, |sm, _| assert!(!sm.pending_macro_replay()));
+    }
+
+    #[test]
+    fn smart_tab_inserts_tab_at_column_zero() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::SmartTab);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "\thello");
+    }
+
+    #[test]
+    fn smart_tab_no_op_after_text_without_popup() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 3);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::SmartTab);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "hello");
+    }
+
+    #[test]
+    fn smart_tab_inserts_tab_after_existing_indent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "\thello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 1);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::SmartTab);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "\t\thello");
     }
 
     #[test]

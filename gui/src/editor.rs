@@ -804,6 +804,26 @@ impl Editor {
     /// Collapse every selection to a cursor at its head anchor
     /// (start if reversed, end otherwise). Mirrors the helix-style
     /// `CollapseSelection` action.
+    /// Whether the primary selection's head sits on its line
+    /// such that everything from the start of the line to the
+    /// head is whitespace (including the empty case when the
+    /// head is at column 0). Used by SmartTab's indent branch
+    /// to decide between inserting `\t` and falling through.
+    pub fn cursor_after_only_whitespace(&self, cx: &App) -> bool {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope();
+        let primary = self.selections.newest_anchor();
+        let head_offset = snapshot.resolve_anchor(&primary.head());
+        let head_point = rope.offset_to_point(head_offset);
+        let line_start = rope.point_to_offset(stoat_text::Point::new(head_point.row, 0));
+        if line_start >= head_offset {
+            return true;
+        }
+        rope.slice(line_start..head_offset)
+            .chars()
+            .all(char::is_whitespace)
+    }
+
     pub fn collapse_selection(&mut self, cx: &mut Context<'_, Self>) {
         let snapshot = self.multi_buffer.read(cx).snapshot();
         self.selections.transform(&snapshot, |sel| {
@@ -4406,5 +4426,46 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "a\"hello\"b");
+    }
+
+    #[test]
+    fn cursor_after_only_whitespace_true_at_column_zero() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        let result = editor.read_with(&cx, |ed, cx| ed.cursor_after_only_whitespace(cx));
+        assert!(result);
+    }
+
+    #[test]
+    fn cursor_after_only_whitespace_true_after_indent() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "\t\thello");
+        set_single_selection(&editor, &mut cx, 2, 2);
+
+        let result = editor.read_with(&cx, |ed, cx| ed.cursor_after_only_whitespace(cx));
+        assert!(result);
+    }
+
+    #[test]
+    fn cursor_after_only_whitespace_false_with_text_before() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+        set_single_selection(&editor, &mut cx, 3, 3);
+
+        let result = editor.read_with(&cx, |ed, cx| ed.cursor_after_only_whitespace(cx));
+        assert!(!result);
+    }
+
+    #[test]
+    fn cursor_after_only_whitespace_per_line() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc\n  def");
+        // Cursor after the two spaces on line 1 (offset = 4 + 2 = 6).
+        set_single_selection(&editor, &mut cx, 6, 6);
+
+        let result = editor.read_with(&cx, |ed, cx| ed.cursor_after_only_whitespace(cx));
+        assert!(result);
     }
 }
