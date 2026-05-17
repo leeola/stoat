@@ -86,6 +86,8 @@ pub struct Workspace {
     fs_watcher_driver: Entity<FsWatcherDriver>,
     fs_watch_tokens: HashMap<PathBuf, WatchToken>,
     buffer_paths: HashMap<BufferId, PathBuf>,
+    registers: stoat::register::RegisterStore,
+    selected_register: Option<stoat::register::Register>,
     rebase_active: Option<ActiveRebase>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
@@ -260,6 +262,8 @@ impl Workspace {
             fs_watcher_driver,
             fs_watch_tokens: HashMap::new(),
             buffer_paths: HashMap::new(),
+            registers: stoat::register::RegisterStore::new(),
+            selected_register: None,
             rebase_active: None,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
@@ -302,6 +306,32 @@ impl Workspace {
 
     pub fn diff_coordinator(&self) -> &Entity<DiffCoordinator> {
         &self.diff_coordinator
+    }
+
+    /// Per-workspace yank/paste register store. Backs the unnamed
+    /// register plus helix-style named registers; clipboard variants
+    /// route through [`crate::globals::ClipboardHostGlobal`] instead.
+    pub fn registers(&self) -> &stoat::register::RegisterStore {
+        &self.registers
+    }
+
+    pub fn registers_mut(&mut self) -> &mut stoat::register::RegisterStore {
+        &mut self.registers
+    }
+
+    /// Consume the pending [`stoat::register::Register`] target set
+    /// by a prior [`SelectRegister`]-style action, falling back to
+    /// [`stoat::register::Register::Unnamed`] when nothing is
+    /// pending. The pending state is cleared on read; chord-style
+    /// register selection is one-shot.
+    pub fn consume_selected_register(&mut self) -> stoat::register::Register {
+        self.selected_register
+            .take()
+            .unwrap_or(stoat::register::Register::Unnamed)
+    }
+
+    pub fn set_selected_register(&mut self, register: stoat::register::Register) {
+        self.selected_register = Some(register);
     }
 
     pub fn blame_coordinator(&self) -> &Entity<BlameCoordinator> {
