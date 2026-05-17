@@ -12,9 +12,13 @@
 //! to `pending_sends` when the session has not landed yet. The
 //! queue drains automatically when the session arrives.
 //!
-//! The recv path (converting [`AgentMessage`] events back into
-//! Assistant `ChatMessage`s) is intentionally not in this v1 file
-//! and is tracked separately under the Claude chat parent in TODO.
+//! Once the session is installed and `pending_sends` have drained,
+//! the same task awaits `ClaudeCodeSession::recv` in a loop and
+//! converts the `AgentMessage::{Text, Error}` variants into
+//! Assistant `ChatMessage`s on the scrollback. The richer variants
+//! (`Thinking`, `ToolUse`, `ToolResult`, `Usage`, ...) are routed by
+//! the sibling tool-card / usage / status items and remain no-ops in
+//! this file.
 
 use crate::{
     editor::Editor,
@@ -29,7 +33,7 @@ use gpui::{
 use std::sync::Arc;
 use stoat::{
     claude_chat::{ChatMessage, ChatMessageContent, ChatRole},
-    host::{ClaudeCodeHost, ClaudeCodeSession},
+    host::{AgentMessage, ClaudeCodeHost, ClaudeCodeSession},
 };
 
 pub struct ClaudeChat {
@@ -124,6 +128,52 @@ async fn install_session(
             );
             break;
         }
+    }
+    loop {
+        let Some(msg) = session.recv().await else {
+            break;
+        };
+        if this
+            .update(cx, |chat, cx| handle_recv_message(chat, &msg, cx))
+            .is_err()
+        {
+            break;
+        }
+    }
+}
+
+/// Per-message recv dispatch. Handles the two variants this v1 file
+/// owns -- assistant `Text` (trimmed; empty drops) and `Error` --
+/// and silently ignores every other variant. Sibling items hook in
+/// their own variants (tool cards, usage header, ...) without
+/// touching the existing arms here.
+fn handle_recv_message(
+    chat: &mut ClaudeChat,
+    message: &AgentMessage,
+    cx: &mut Context<'_, ClaudeChat>,
+) {
+    match message {
+        AgentMessage::Text { text } => {
+            let trimmed = text.trim();
+            if trimmed.is_empty() {
+                return;
+            }
+            chat.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                content: ChatMessageContent::Text(trimmed.to_string()),
+                checkpoint_sha: None,
+            });
+            cx.notify();
+        },
+        AgentMessage::Error { message } => {
+            chat.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                content: ChatMessageContent::Error(message.clone()),
+                checkpoint_sha: None,
+            });
+            cx.notify();
+        },
+        _ => {},
     }
 }
 
@@ -508,5 +558,131 @@ mod tests {
         let roles: Vec<ChatRole> =
             chat.read_with(h.vcx, |c, _| c.messages.iter().map(|m| m.role).collect());
         assert_eq!(roles, vec![ChatRole::Assistant]);
+    }
+
+    fn assistant_texts(chat: &Entity<ClaudeChat>, h: &Harness<'_>) -> Vec<String> {
+        chat.read_with(h.vcx, |c, _| {
+            c.messages
+                .iter()
+                .filter(|m| m.role == ChatRole::Assistant)
+                .filter_map(|m| match &m.content {
+                    ChatMessageContent::Text(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    fn assistant_errors(chat: &Entity<ClaudeChat>, h: &Harness<'_>) -> Vec<String> {
+        chat.read_with(h.vcx, |c, _| {
+            c.messages
+                .iter()
+                .filter(|m| m.role == ChatRole::Assistant)
+                .filter_map(|m| match &m.content {
+                    ChatMessageContent::Error(err) => Some(err.clone()),
+                    _ => None,
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn recv_text_appends_assistant_message() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        fake_session.push_text("hi from claude");
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            assistant_texts(&chat, &h),
+            vec!["hi from claude".to_string()]
+        );
+    }
+
+    #[test]
+    fn recv_error_appends_assistant_error() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        fake_session.push_error("something went wrong");
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            assistant_errors(&chat, &h),
+            vec!["something went wrong".to_string()]
+        );
+    }
+
+    #[test]
+    fn recv_text_trims_and_drops_empty() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        fake_session.push_text("\n   \n");
+        fake_session.push_text("  real reply  ");
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            assistant_texts(&chat, &h),
+            vec!["real reply".to_string()],
+            "whitespace-only frames drop; surviving text is trimmed",
+        );
+    }
+
+    #[test]
+    fn recv_tool_use_is_ignored() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        fake_session.push_tool_use("Bash", "{\"cmd\":\"ls\"}");
+        h.vcx.run_until_parked();
+
+        let count = chat.read_with(h.vcx, |c, _| c.messages.len());
+        assert_eq!(count, 0, "tool_use is owned by the tool-card sibling item");
+    }
+
+    #[test]
+    fn recv_partial_text_is_ignored() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        fake_session.push_partial_text("streaming chunk");
+        h.vcx.run_until_parked();
+
+        let count = chat.read_with(h.vcx, |c, _| c.messages.len());
+        assert_eq!(
+            count, 0,
+            "streaming projection is out of scope for the v1 recv loop"
+        );
+    }
+
+    #[test]
+    fn recv_stops_when_session_disconnects() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        fake_session.disconnect_on_recv(0);
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let _chat = open_chat(&mut h);
+
+        // The recv loop should drain to completion without panicking.
+        // No assertion on messages; this is a liveness check.
+        h.vcx.run_until_parked();
     }
 }
