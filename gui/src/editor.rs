@@ -132,6 +132,7 @@ pub struct Editor {
     hover_popup: Option<Entity<crate::lsp::HoverPopup>>,
     completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
     inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
+    semantic_tokens_manager: Option<Entity<crate::lsp::SemanticTokensManager>>,
     expansion_history: Vec<std::ops::Range<usize>>,
     expansion_tip: Option<std::ops::Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
@@ -202,6 +203,7 @@ impl Editor {
             hover_popup: None,
             completion_popup: None,
             inlay_hints_manager: None,
+            semantic_tokens_manager: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
             blame_state: None,
@@ -754,6 +756,24 @@ impl Editor {
 
     pub fn inlay_hints_manager(&self) -> Option<&Entity<crate::lsp::InlayHintsManager>> {
         self.inlay_hints_manager.as_ref()
+    }
+
+    /// Construct the [`crate::lsp::SemanticTokensManager`] entity
+    /// that drives `textDocument/semanticTokens/full` requests for
+    /// the active buffer into the editor's
+    /// [`crate::display_map::DisplayMap`]. Production wiring calls
+    /// this once after [`Self::set_workspace`].
+    pub fn install_semantic_tokens(&mut self, cx: &mut Context<'_, Self>) {
+        if self.semantic_tokens_manager.is_some() {
+            return;
+        }
+        let editor = cx.entity();
+        let manager = cx.new(|mgr_cx| crate::lsp::SemanticTokensManager::new(editor, mgr_cx));
+        self.semantic_tokens_manager = Some(manager);
+    }
+
+    pub fn semantic_tokens_manager(&self) -> Option<&Entity<crate::lsp::SemanticTokensManager>> {
+        self.semantic_tokens_manager.as_ref()
     }
 
     /// Extend the primary selection's head to display-grid `(row, col)`,
