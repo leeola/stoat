@@ -5,7 +5,9 @@ use crate::{
     theme::statusbar_text_color,
     workspace::Workspace,
 };
-use gpui::{div, AnyElement, Context, IntoElement, ParentElement, Styled, Task, WeakEntity};
+use gpui::{
+    div, AnyElement, Context, IntoElement, ParentElement, Styled, Task, WeakEntity, Window,
+};
 use lsp_types::{
     CodeAction as LspCodeAction, CodeActionOrCommand, Command as LspCommand, ExecuteCommandParams,
     Uri, WorkspaceEdit,
@@ -114,7 +116,12 @@ impl PickerDelegate for CodeActionPickerDelegate {
         Task::ready(())
     }
 
-    fn confirm(&mut self, _secondary: Option<PickerSecondary>, cx: &mut Context<'_, Picker<Self>>) {
+    fn confirm(
+        &mut self,
+        _secondary: Option<PickerSecondary>,
+        _window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) {
         let Some(entry) = self.entries.get(self.selected).cloned() else {
             return;
         };

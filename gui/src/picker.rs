@@ -181,7 +181,7 @@ impl<D: PickerDelegate> Picker<D> {
     pub fn handle_action(
         &mut self,
         action: &dyn stoat_action::Action,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         match action.kind() {
@@ -193,12 +193,12 @@ impl<D: PickerDelegate> Picker<D> {
                 self.move_selection(1, cx);
                 true
             },
-            ActionKind::PickerConfirm => self.confirm_selection(None, cx),
+            ActionKind::PickerConfirm => self.confirm_selection(None, window, cx),
             ActionKind::PickerConfirmSplitRight => {
-                self.confirm_selection(Some(PickerSecondary::OpenInRight), cx)
+                self.confirm_selection(Some(PickerSecondary::OpenInRight), window, cx)
             },
             ActionKind::PickerConfirmSplitDown => {
-                self.confirm_selection(Some(PickerSecondary::OpenInDown), cx)
+                self.confirm_selection(Some(PickerSecondary::OpenInDown), window, cx)
             },
             ActionKind::DismissModal => {
                 self.delegate.dismissed(cx);
@@ -226,12 +226,13 @@ impl<D: PickerDelegate> Picker<D> {
     fn confirm_selection(
         &mut self,
         secondary: Option<PickerSecondary>,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         if self.delegate.match_count() == 0 {
             return true;
         }
-        self.delegate.confirm(secondary, cx);
+        self.delegate.confirm(secondary, window, cx);
         true
     }
 }
@@ -353,6 +354,7 @@ mod tests {
         fn confirm(
             &mut self,
             secondary: Option<PickerSecondary>,
+            _window: &mut Window,
             _cx: &mut Context<'_, Picker<Self>>,
         ) {
             self.confirmed

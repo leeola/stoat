@@ -1,5 +1,5 @@
 use crate::picker::Picker;
-use gpui::{AnyElement, Context, Task};
+use gpui::{AnyElement, Context, Task, Window};
 
 /// Confirmation modifier carried by [`PickerDelegate::confirm`].
 ///
@@ -34,7 +34,12 @@ pub trait PickerDelegate: Sized + 'static {
 
     fn update_matches(&mut self, query: String, cx: &mut Context<'_, Picker<Self>>) -> Task<()>;
 
-    fn confirm(&mut self, secondary: Option<PickerSecondary>, cx: &mut Context<'_, Picker<Self>>);
+    fn confirm(
+        &mut self,
+        secondary: Option<PickerSecondary>,
+        window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    );
 
     fn dismissed(&mut self, cx: &mut Context<'_, Picker<Self>>);
 

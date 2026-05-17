@@ -5,7 +5,7 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, Context, Entity, IntoElement, ParentElement, Styled, Task, WeakEntity,
+    div, AnyElement, Context, Entity, IntoElement, ParentElement, Styled, Task, WeakEntity, Window,
 };
 use lsp_types::Location;
 use std::path::PathBuf;
@@ -61,7 +61,12 @@ impl PickerDelegate for ReferencesPickerDelegate {
         Task::ready(())
     }
 
-    fn confirm(&mut self, _secondary: Option<PickerSecondary>, cx: &mut Context<'_, Picker<Self>>) {
+    fn confirm(
+        &mut self,
+        _secondary: Option<PickerSecondary>,
+        _window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) {
         let Some(loc) = self.locations.get(self.selected).cloned() else {
             return;
         };

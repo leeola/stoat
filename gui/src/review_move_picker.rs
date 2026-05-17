@@ -3,7 +3,9 @@ use crate::{
     theme::statusbar_text_color,
     workspace::Workspace,
 };
-use gpui::{div, AnyElement, Context, IntoElement, ParentElement, Styled, Task, WeakEntity};
+use gpui::{
+    div, AnyElement, Context, IntoElement, ParentElement, Styled, Task, WeakEntity, Window,
+};
 use stoat::review_session::MoveRelationship;
 
 /// Picker delegate that lists every cross-file move in the active
@@ -74,7 +76,12 @@ impl PickerDelegate for MoveRelationshipPickerDelegate {
         Task::ready(())
     }
 
-    fn confirm(&mut self, _secondary: Option<PickerSecondary>, cx: &mut Context<'_, Picker<Self>>) {
+    fn confirm(
+        &mut self,
+        _secondary: Option<PickerSecondary>,
+        _window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) {
         let Some(rel) = self.selected_relationship().cloned() else {
             return;
         };

@@ -1199,6 +1199,9 @@ impl Workspace {
             ActionKind::QueryMoveRelationships => {
                 self.dispatch_query_move_relationships(window, cx)
             },
+            ActionKind::OpenCommandPalette => {
+                crate::command_palette::open_command_palette(self, window, cx)
+            },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action
@@ -5627,6 +5630,7 @@ mod tests {
             fn confirm(
                 &mut self,
                 _secondary: Option<PickerSecondary>,
+                _window: &mut Window,
                 _cx: &mut Context<'_, Picker<Self>>,
             ) {
             }

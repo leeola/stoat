@@ -547,6 +547,7 @@ impl PickerDelegate for CommitListDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
+        _window: &mut Window,
         _cx: &mut Context<'_, Picker<Self>>,
     ) {
         // FIXME: CommitsOpenReview handler is wired in TODO.md line 21.

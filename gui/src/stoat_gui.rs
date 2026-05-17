@@ -16,6 +16,7 @@
 mod actions;
 mod buffer;
 mod buffer_registry;
+mod command_palette;
 mod commit_list;
 mod conflict_item;
 mod diagnostics;
