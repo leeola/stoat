@@ -1294,6 +1294,17 @@ impl Workspace {
             ActionKind::InsertNewline => {
                 crate::editor::actions::edit::handle_insert_newline(self, cx)
             },
+            ActionKind::IndentSelection => {
+                let count = self.take_count(cx);
+                crate::editor::actions::indent::handle_indent_selection(self, count, cx);
+            },
+            ActionKind::UnindentSelection => {
+                let count = self.take_count(cx);
+                crate::editor::actions::indent::handle_unindent_selection(self, count, cx);
+            },
+            ActionKind::ToggleComments => {
+                crate::editor::actions::indent::handle_toggle_comments(self, cx)
+            },
             ActionKind::Undo => {
                 let count = self.take_count(cx);
                 crate::editor::actions::undo::handle_undo(self, count, cx);
@@ -5138,6 +5149,143 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "99");
+    }
+
+    #[test]
+    fn indent_selection_inserts_tab_on_touched_line() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 2);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::IndentSelection);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "\thello");
+    }
+
+    #[test]
+    fn unindent_selection_removes_leading_tab() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "\thello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 2);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::UnindentSelection);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "hello");
+    }
+
+    #[test]
+    fn unindent_selection_consumes_one_space_group() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "    hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 4);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::UnindentSelection);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "hello");
+    }
+
+    #[test]
+    fn toggle_comments_inserts_prefix_for_rust_path() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        vcx.update(|_, cx| cx.set_global(crate::globals::LanguageRegistry::standard()));
+        let editor = new_singleton_editor(vcx, "hello");
+        editor.update(vcx, |ed, cx| {
+            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/main.rs")), cx)
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::ToggleComments);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "// hello");
+    }
+
+    #[test]
+    fn toggle_comments_removes_prefix_when_present() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        vcx.update(|_, cx| cx.set_global(crate::globals::LanguageRegistry::standard()));
+        let editor = new_singleton_editor(vcx, "// hello");
+        editor.update(vcx, |ed, cx| {
+            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/main.rs")), cx)
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::ToggleComments);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "hello");
+    }
+
+    #[test]
+    fn toggle_comments_without_language_global_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        editor.update(vcx, |ed, cx| {
+            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/main.rs")), cx)
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::ToggleComments);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "hello");
     }
 
     #[test]

@@ -26,8 +26,8 @@ use gpui::{
 };
 use serde_json::Value;
 use stoat::{
-    buffer::BufferId, jumplist::JumpList, review_session::ChunkStatus,
-    selection::SelectionsCollection, DisplayPoint,
+    buffer::BufferId, jumplist::JumpList, multi_buffer::MultiBufferSnapshot,
+    review_session::ChunkStatus, selection::SelectionsCollection, DisplayPoint,
 };
 use stoat_text::{Anchor, Bias, OffsetUtf16, Selection, SelectionGoal};
 
@@ -257,6 +257,38 @@ fn step_char_backward(rope: &stoat_text::Rope, offset: usize) -> usize {
         probe -= 1;
     }
     probe
+}
+
+/// Sorted, deduplicated row indices touched by any selection in
+/// `selections`. A selection ending exactly at column 0 of a row
+/// (with non-zero extent) excludes that row, matching the
+/// convention shared by indent / unindent / line-comment
+/// operations.
+fn touched_rows(snapshot: &MultiBufferSnapshot, selections: &SelectionsCollection) -> Vec<u32> {
+    let rope = snapshot.rope();
+    let mut rows: Vec<u32> = Vec::new();
+    for sel in selections.all_anchors() {
+        let start_offset = snapshot.resolve_anchor(&sel.start);
+        let end_offset = snapshot.resolve_anchor(&sel.end);
+        let (lo, hi) = if start_offset <= end_offset {
+            (start_offset, end_offset)
+        } else {
+            (end_offset, start_offset)
+        };
+        let start_row = rope.offset_to_point(lo).row;
+        let end_point = rope.offset_to_point(hi);
+        let end_row = if hi > lo && end_point.column == 0 {
+            end_point.row.saturating_sub(1)
+        } else {
+            end_point.row
+        };
+        for row in start_row..=end_row {
+            rows.push(row);
+        }
+    }
+    rows.sort_unstable();
+    rows.dedup();
+    rows
 }
 
 #[derive(Default)]
@@ -1478,6 +1510,196 @@ impl Editor {
         pairs.sort_unstable();
         pairs.dedup();
         Some(pairs)
+    }
+
+    /// Prepend `count` tab characters at the start of every line
+    /// touched by any selection. The previous indent stays in
+    /// place; the new tabs are inserted at column 0. Multi-excerpt
+    /// buffers are logged and skipped, matching
+    /// [`Self::apply_text_to_all_cursors`].
+    pub fn indent_lines(&mut self, count: u32, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "indent_lines on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+        let count = count.max(1) as usize;
+
+        let edits: Vec<(usize, usize, String)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope().clone();
+            let rows = touched_rows(&snapshot, &self.selections);
+            rows.into_iter()
+                .map(|row| {
+                    let start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                    (start, start, "\t".repeat(count))
+                })
+                .collect()
+        };
+        if edits.is_empty() {
+            return;
+        }
+
+        for (start, end, text) in edits.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*start..*end, text, cx));
+        }
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| sel.clone());
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Remove up to `count` indent groups from the start of every
+    /// line touched by any selection. A tab counts as one group;
+    /// a run of up to four spaces counts as one group. Lines whose
+    /// first character is neither tab nor space are skipped.
+    /// Multi-excerpt buffers are logged and skipped, matching
+    /// [`Self::apply_text_to_all_cursors`].
+    pub fn unindent_lines(&mut self, count: u32, cx: &mut Context<'_, Self>) {
+        const INDENT_WIDTH: usize = 4;
+
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "unindent_lines on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+        let count = count.max(1) as usize;
+
+        let edits: Vec<(usize, usize, String)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope().clone();
+            let rows = touched_rows(&snapshot, &self.selections);
+            rows.into_iter()
+                .filter_map(|row| {
+                    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                    let head: Vec<char> = rope
+                        .chars_at(line_start)
+                        .take(count.saturating_mul(INDENT_WIDTH))
+                        .collect();
+                    let mut consumed = 0usize;
+                    let mut idx = 0usize;
+                    for _ in 0..count {
+                        if idx >= head.len() {
+                            break;
+                        }
+                        match head[idx] {
+                            '\t' => {
+                                idx += 1;
+                                consumed += 1;
+                            },
+                            ' ' => {
+                                let group_start = idx;
+                                while idx < head.len()
+                                    && head[idx] == ' '
+                                    && idx - group_start < INDENT_WIDTH
+                                {
+                                    idx += 1;
+                                }
+                                consumed += idx - group_start;
+                            },
+                            _ => break,
+                        }
+                    }
+                    (consumed > 0).then(|| (line_start, line_start + consumed, String::new()))
+                })
+                .collect()
+        };
+        if edits.is_empty() {
+            return;
+        }
+
+        for (start, end, text) in edits.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*start..*end, text, cx));
+        }
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| sel.clone());
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Toggle `prefix` at the first non-whitespace position of every
+    /// line touched by any selection. Lines where the prefix is
+    /// already present have it removed (along with one trailing
+    /// space when present); other lines get `"{prefix} "` inserted
+    /// at the first non-whitespace position. Blank / whitespace-only
+    /// lines are skipped. Multi-excerpt buffers are logged and
+    /// skipped, matching [`Self::apply_text_to_all_cursors`].
+    pub fn toggle_line_comments(&mut self, prefix: &str, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "toggle_line_comments on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+
+        let edits: Vec<(usize, usize, String)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope().clone();
+            let rows = touched_rows(&snapshot, &self.selections);
+            let prefix_chars = prefix.chars().count();
+            rows.into_iter()
+                .filter_map(|row| {
+                    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                    let line_end = line_start + rope.line_len(row) as usize;
+                    let mut content_start = line_start;
+                    for ch in rope.chars_at(line_start) {
+                        if content_start >= line_end || !ch.is_whitespace() {
+                            break;
+                        }
+                        content_start += ch.len_utf8();
+                    }
+                    if content_start >= line_end {
+                        return None;
+                    }
+
+                    let after_prefix = content_start + prefix.len();
+                    let prefix_matches = after_prefix <= line_end
+                        && rope
+                            .chars_at(content_start)
+                            .take(prefix_chars)
+                            .collect::<String>()
+                            == prefix;
+
+                    if prefix_matches {
+                        let drop_trailing_space =
+                            matches!(rope.chars_at(after_prefix).next(), Some(' '));
+                        let remove_end = if drop_trailing_space {
+                            after_prefix + 1
+                        } else {
+                            after_prefix
+                        };
+                        Some((content_start, remove_end, String::new()))
+                    } else {
+                        Some((content_start, content_start, format!("{prefix} ")))
+                    }
+                })
+                .collect()
+        };
+        if edits.is_empty() {
+            return;
+        }
+
+        for (start, end, text) in edits.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*start..*end, text, cx));
+        }
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| sel.clone());
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
     }
 
     /// Find the number near each selection head via

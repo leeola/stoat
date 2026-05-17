@@ -1,5 +1,6 @@
 pub mod edit;
 pub mod goto;
+pub mod indent;
 pub mod macros;
 pub mod marks;
 pub mod movement;
