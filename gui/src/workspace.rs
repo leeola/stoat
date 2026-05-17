@@ -1291,6 +1291,63 @@ impl Workspace {
             ActionKind::CommitUndoCheckpoint => {
                 crate::editor::actions::undo::handle_commit_checkpoint(self, cx)
             },
+            ActionKind::CollapseSelection => {
+                crate::editor::actions::multi_cursor::handle_collapse_selection(self, cx)
+            },
+            ActionKind::FlipSelections => {
+                crate::editor::actions::multi_cursor::handle_flip_selections(self, cx)
+            },
+            ActionKind::SelectAll => {
+                crate::editor::actions::multi_cursor::handle_select_all(self, cx)
+            },
+            ActionKind::SelectLineBelow => {
+                let count = self.take_count(cx);
+                crate::editor::actions::multi_cursor::handle_select_line_below(self, count, cx);
+            },
+            ActionKind::KeepPrimarySelection => {
+                crate::editor::actions::multi_cursor::handle_keep_primary_selection(self, cx)
+            },
+            ActionKind::RemovePrimarySelection => {
+                crate::editor::actions::multi_cursor::handle_remove_primary_selection(self, cx)
+            },
+            ActionKind::RotateSelectionsForward => {
+                let count = self.take_count(cx);
+                crate::editor::actions::multi_cursor::handle_rotate_selections_forward(
+                    self, count, cx,
+                );
+            },
+            ActionKind::RotateSelectionsBackward => {
+                let count = self.take_count(cx);
+                crate::editor::actions::multi_cursor::handle_rotate_selections_backward(
+                    self, count, cx,
+                );
+            },
+            ActionKind::TrimSelections => {
+                crate::editor::actions::multi_cursor::handle_trim_selections(self, cx)
+            },
+            ActionKind::SplitSelectionOnNewline => {
+                crate::editor::actions::multi_cursor::handle_split_selection_on_newline(self, cx)
+            },
+            ActionKind::AlignSelections => {
+                crate::editor::actions::multi_cursor::handle_align_selections(self, cx)
+            },
+            ActionKind::AddSelectionBelow => {
+                let count = self.take_count(cx);
+                crate::editor::actions::multi_cursor::handle_add_selection_below(self, count, cx);
+            },
+            ActionKind::AddSelectionAbove => {
+                let count = self.take_count(cx);
+                crate::editor::actions::multi_cursor::handle_add_selection_above(self, count, cx);
+            },
+            ActionKind::SplitSelection => {
+                crate::editor::actions::multi_cursor::handle_split_selection(self, window, cx)
+            },
+            ActionKind::KeepSelections => {
+                crate::editor::actions::multi_cursor::handle_keep_selections(self, window, cx)
+            },
+            ActionKind::RemoveSelections => {
+                crate::editor::actions::multi_cursor::handle_remove_selections(self, window, cx)
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },

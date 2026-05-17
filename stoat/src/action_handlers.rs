@@ -17,7 +17,7 @@ mod rebase;
 mod review;
 mod reword;
 mod run;
-pub(crate) mod search;
+pub mod search;
 pub(crate) mod shell;
 pub(crate) mod split_selection;
 pub(crate) mod surround;

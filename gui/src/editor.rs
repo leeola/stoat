@@ -1,5 +1,6 @@
 pub mod actions;
 pub mod mouse;
+pub mod regex_input_modal;
 pub mod render;
 pub mod scroll;
 pub mod search;
@@ -173,6 +174,17 @@ pub enum DeleteDirection {
     Backward,
 }
 
+/// Direction [`Editor::add_selection_step`] walks the display
+/// map when fanning a new cursor off the primary selection.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum AddDirection {
+    /// Walk toward row 0; primary cursor sits one row below.
+    Above,
+    /// Walk toward the last display row; primary cursor sits
+    /// one row above.
+    Below,
+}
+
 /// Step one UTF-8 character forward in `rope` starting at byte
 /// `offset`. Returns `offset` unchanged when at or past end-of-rope.
 fn step_char_forward(rope: &stoat_text::Rope, offset: usize) -> usize {
@@ -185,6 +197,53 @@ fn step_char_forward(rope: &stoat_text::Rope, offset: usize) -> usize {
         probe += 1;
     }
     probe
+}
+
+/// Per-selection alignment-input row/column metadata, populated
+/// in selection order. `align_selections` ranks these by their
+/// row-occurrence index before computing alignment padding.
+struct AlignEntry {
+    insert_offset: usize,
+    head_col: u32,
+    head_row: u32,
+}
+
+/// `AlignEntry` plus its rank (nth selection on the row) and
+/// stable row index. Decoupling the two passes keeps the
+/// max-column-per-rank scan straightforward.
+struct RankedEntry {
+    insert_offset: usize,
+    head_col: u32,
+    row_idx: usize,
+    rank: usize,
+}
+
+/// Trim leading and trailing whitespace from `[start, end)`,
+/// returning the narrowed range or `None` when the range is
+/// empty or all whitespace. Used by [`Editor::trim_selections`].
+fn trim_whitespace_in_rope(
+    rope: &stoat_text::Rope,
+    start: usize,
+    end: usize,
+) -> Option<(usize, usize)> {
+    if start >= end {
+        return None;
+    }
+    let mut new_start: Option<usize> = None;
+    let mut last_non_ws_end: Option<usize> = None;
+    let mut cursor = start;
+    for ch in rope.chars_at(start) {
+        if cursor >= end {
+            break;
+        }
+        let next_cursor = cursor + ch.len_utf8();
+        if !ch.is_whitespace() {
+            new_start.get_or_insert(cursor);
+            last_non_ws_end = Some(next_cursor);
+        }
+        cursor = next_cursor;
+    }
+    Some((new_start?, last_non_ws_end?))
 }
 
 /// Step one UTF-8 character backward in `rope` starting at byte
@@ -740,6 +799,485 @@ impl Editor {
         });
         cx.emit(EditorEvent::Changed);
         cx.notify();
+    }
+
+    /// Collapse every selection to a cursor at its head anchor
+    /// (start if reversed, end otherwise). Mirrors the helix-style
+    /// `CollapseSelection` action.
+    pub fn collapse_selection(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&snapshot, |sel| {
+            let mut new = sel.clone();
+            new.collapse_to(sel.head(), sel.goal);
+            new
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Toggle the `reversed` flag on every non-empty selection,
+    /// swapping which end is the head. Empty selections are left
+    /// untouched.
+    pub fn flip_selections(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&snapshot, |sel| {
+            let mut new = sel.clone();
+            if !new.is_empty() {
+                new.reversed = !new.reversed;
+            }
+            new
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Replace every selection with a single selection spanning
+    /// the entire buffer.
+    pub fn select_all(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let end_offset = snapshot.rope().len();
+        let start_anchor = snapshot.anchor_at(0, Bias::Left);
+        let end_anchor = snapshot.anchor_at(end_offset, Bias::Right);
+        self.selections
+            .set_single_range(start_anchor, end_anchor, SelectionGoal::None);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Extend every selection to cover full lines, then add `count`
+    /// additional lines below each. Selections that already cover
+    /// whole lines extend by `count` rows; partial selections
+    /// snap to full-line shape and extend by `count - 1` so a
+    /// single invocation always covers exactly `count` more
+    /// lines of text.
+    pub fn select_line_below(&mut self, count: u32, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope().clone();
+        let max_row = rope.max_point().row;
+        let rope_len = rope.len();
+        let count = count.max(1);
+        self.selections.transform(&snapshot, |sel| {
+            let line_start = |row: u32| -> usize {
+                if row > max_row {
+                    rope_len
+                } else {
+                    rope.point_to_offset(stoat_text::Point::new(row, 0))
+                }
+            };
+            let start_offset = snapshot.resolve_anchor(&sel.start);
+            let end_offset = snapshot.resolve_anchor(&sel.end);
+            let start_row = rope.offset_to_point(start_offset).row;
+            let end_point = rope.offset_to_point(end_offset);
+            let end_row = if end_offset > start_offset && end_point.column == 0 {
+                end_point.row.saturating_sub(1)
+            } else {
+                end_point.row
+            };
+            let current_line_start = line_start(start_row);
+            let current_line_end = line_start(end_row + 1);
+            let already_line_shaped =
+                start_offset == current_line_start && end_offset == current_line_end;
+            let extension_rows = if already_line_shaped {
+                count
+            } else {
+                count.saturating_sub(1)
+            };
+            let target_end_row = end_row.saturating_add(extension_rows);
+            let new_end_offset = line_start(target_end_row.saturating_add(1));
+            let start_anchor = snapshot.anchor_at(current_line_start, Bias::Left);
+            let end_anchor = snapshot.anchor_at(new_end_offset, Bias::Right);
+            Selection {
+                id: sel.id,
+                start: start_anchor,
+                end: end_anchor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Keep only the primary (newest) selection, dropping all
+    /// others.
+    pub fn keep_primary_selection(&mut self, cx: &mut Context<'_, Self>) {
+        self.selections.keep_primary();
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Remove the primary selection, keeping the rest. No-op when
+    /// fewer than two selections are present.
+    pub fn remove_primary_selection(&mut self, cx: &mut Context<'_, Self>) {
+        self.selections.remove_primary();
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Rotate which selection is primary by `count` positions
+    /// (`forward = true` advances; `false` retreats). No-op when
+    /// fewer than two selections are present.
+    pub fn rotate_selections(&mut self, forward: bool, count: u32, cx: &mut Context<'_, Self>) {
+        let count = count.max(1);
+        self.selections.rotate_primary_by(forward, count);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Trim leading and trailing whitespace from every selection.
+    /// Selections containing only whitespace collapse to a cursor
+    /// at their head; if every selection collapses, the result
+    /// keeps only the primary.
+    pub fn trim_selections(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope().clone();
+        let trimmed: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .filter_map(|sel| {
+                let start = snapshot.resolve_anchor(&sel.start);
+                let end = snapshot.resolve_anchor(&sel.end);
+                let (new_start, new_end) = trim_whitespace_in_rope(&rope, start, end)?;
+                let mut new = sel.clone();
+                new.start = snapshot.anchor_at(new_start, Bias::Left);
+                new.end = snapshot.anchor_at(new_end, Bias::Right);
+                Some(new)
+            })
+            .collect();
+        if trimmed.is_empty() {
+            self.selections.transform(&snapshot, |sel| {
+                let mut new = sel.clone();
+                new.collapse_to(sel.head(), sel.goal);
+                new
+            });
+            self.selections.keep_primary();
+        } else {
+            self.selections.replace_with(trimmed, &snapshot);
+        }
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Split every non-empty selection at each line-feed,
+    /// producing one piece per line. Selections without newlines
+    /// are left unchanged.
+    pub fn split_selection_on_newline(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope().clone();
+        self.selections.split_each(&snapshot, |sel| {
+            let start_offset = snapshot.resolve_anchor(&sel.start);
+            let end_offset = snapshot.resolve_anchor(&sel.end);
+            if start_offset == end_offset {
+                return Vec::new();
+            }
+            let mut newline_positions: Vec<usize> = Vec::new();
+            let mut byte_pos = start_offset;
+            for ch in rope.chars_at(start_offset) {
+                if byte_pos >= end_offset {
+                    break;
+                }
+                if ch == '\n' {
+                    newline_positions.push(byte_pos);
+                }
+                byte_pos += ch.len_utf8();
+            }
+            if newline_positions.is_empty() {
+                return Vec::new();
+            }
+            let mut pieces: Vec<Selection<Anchor>> =
+                Vec::with_capacity(newline_positions.len() + 1);
+            let mut prev = start_offset;
+            for nl in &newline_positions {
+                if *nl > prev {
+                    pieces.push(Selection {
+                        id: 0,
+                        start: snapshot.anchor_at(prev, Bias::Right),
+                        end: snapshot.anchor_at(*nl, Bias::Right),
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    });
+                }
+                prev = nl + 1;
+            }
+            if prev < end_offset {
+                pieces.push(Selection {
+                    id: 0,
+                    start: snapshot.anchor_at(prev, Bias::Right),
+                    end: snapshot.anchor_at(end_offset, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                });
+            }
+            pieces
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Insert spaces ahead of selections that share a buffer row
+    /// so each row's nth selection lands in the same display
+    /// column. No-op if any selection spans more than one row.
+    pub fn align_selections(&mut self, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "align_selections on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let buffer_snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = buffer_snapshot.rope().clone();
+
+        let mut entries: Vec<AlignEntry> = Vec::with_capacity(self.selections.all_anchors().len());
+        for sel in self.selections.all_anchors() {
+            let start_offset = buffer_snapshot.resolve_anchor(&sel.start);
+            let end_offset = buffer_snapshot.resolve_anchor(&sel.end);
+            let start_pt = rope.offset_to_point(start_offset);
+            let end_pt = rope.offset_to_point(end_offset);
+            if start_pt.row != end_pt.row {
+                return;
+            }
+            let head_pt = if sel.reversed { start_pt } else { end_pt };
+            let head_display = display_snapshot.buffer_to_display(head_pt);
+            entries.push(AlignEntry {
+                insert_offset: start_offset,
+                head_col: head_display.column,
+                head_row: head_display.row,
+            });
+        }
+        if entries.is_empty() {
+            return;
+        }
+
+        let mut row_indices: Vec<u32> = Vec::new();
+        let row_index_for = |row_indices: &mut Vec<u32>, row: u32| -> usize {
+            match row_indices.iter().position(|r| *r == row) {
+                Some(i) => i,
+                None => {
+                    row_indices.push(row);
+                    row_indices.len() - 1
+                },
+            }
+        };
+
+        let mut ranked: Vec<RankedEntry> = Vec::with_capacity(entries.len());
+        let mut last_row: Option<u32> = None;
+        let mut rank: usize = 0;
+        for entry in entries {
+            if Some(entry.head_row) == last_row {
+                rank += 1;
+            } else {
+                rank = 0;
+                last_row = Some(entry.head_row);
+            }
+            let row_idx = row_index_for(&mut row_indices, entry.head_row);
+            ranked.push(RankedEntry {
+                insert_offset: entry.insert_offset,
+                head_col: entry.head_col,
+                row_idx,
+                rank,
+            });
+        }
+
+        let max_rank = ranked
+            .iter()
+            .map(|e| e.rank)
+            .max()
+            .expect("entries non-empty");
+        let mut offs = vec![0u32; row_indices.len()];
+        let mut edits: Vec<(usize, String)> = Vec::new();
+        for current_rank in 0..=max_rank {
+            let max_col = ranked
+                .iter()
+                .filter(|e| e.rank == current_rank)
+                .map(|e| e.head_col + offs[e.row_idx])
+                .max();
+            let Some(max_col) = max_col else { continue };
+            for entry in ranked.iter().filter(|e| e.rank == current_rank) {
+                let actual = entry.head_col + offs[entry.row_idx];
+                if max_col > actual {
+                    let pad = (max_col - actual) as usize;
+                    edits.push((entry.insert_offset, " ".repeat(pad)));
+                    offs[entry.row_idx] += pad as u32;
+                }
+            }
+        }
+        if edits.is_empty() {
+            return;
+        }
+        edits.sort_by_key(|(offset, _)| *offset);
+        for (offset, text) in edits.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*offset..*offset, text, cx));
+        }
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| sel.clone());
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Split every non-empty selection at each match of
+    /// `pattern`. An invalid regex is a no-op and a warning is
+    /// logged. Selections without matches are left unchanged.
+    pub fn split_selection_by_pattern(&mut self, pattern: &str, cx: &mut Context<'_, Self>) {
+        let regex = match stoat::action_handlers::search::compile_search_regex(pattern) {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    ?err,
+                    %pattern,
+                    "split_selection_by_pattern: invalid regex",
+                );
+                return;
+            },
+        };
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope().clone();
+        self.selections.split_each(&snapshot, |sel| {
+            let start = snapshot.resolve_anchor(&sel.start);
+            let end = snapshot.resolve_anchor(&sel.end);
+            if start == end {
+                return Vec::new();
+            }
+            let text: String = rope.chunks_in_range(start..end).collect();
+            let mut pieces: Vec<Selection<Anchor>> = Vec::new();
+            let mut piece_start = start;
+            for m in regex.find_iter(&text) {
+                let match_start = start + m.start();
+                let match_end = start + m.end();
+                if match_start > piece_start {
+                    pieces.push(Selection {
+                        id: 0,
+                        start: snapshot.anchor_at(piece_start, Bias::Right),
+                        end: snapshot.anchor_at(match_start, Bias::Right),
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    });
+                }
+                piece_start = match_end;
+            }
+            if piece_start < end {
+                pieces.push(Selection {
+                    id: 0,
+                    start: snapshot.anchor_at(piece_start, Bias::Right),
+                    end: snapshot.anchor_at(end, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                });
+            }
+            pieces
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Keep (or remove, with `remove = true`) selections whose
+    /// covered text matches `pattern`. An invalid regex is a
+    /// no-op. When the filter produces an empty result the
+    /// selection set is left unchanged so the editor never lands
+    /// without any cursor.
+    pub fn filter_selections_by_pattern(
+        &mut self,
+        pattern: &str,
+        remove: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let regex = match stoat::action_handlers::search::compile_search_regex(pattern) {
+            Ok(r) => r,
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    ?err,
+                    %pattern,
+                    "filter_selections_by_pattern: invalid regex",
+                );
+                return;
+            },
+        };
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope().clone();
+        let kept: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .filter(|sel| {
+                let start = snapshot.resolve_anchor(&sel.start);
+                let end = snapshot.resolve_anchor(&sel.end);
+                let text: String = rope.chunks_in_range(start..end).collect();
+                regex.is_match(&text) ^ remove
+            })
+            .cloned()
+            .collect();
+        if kept.is_empty() {
+            return;
+        }
+        self.selections.replace_with(kept, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Insert a new cursor one display row above or below the
+    /// primary selection's head, clamping to the source's goal
+    /// column. Returns `true` when a cursor was added; returns
+    /// `false` when the primary is already at the top / bottom of
+    /// the display map and no further row is available. Callers
+    /// invoke this in a loop driven by the dispatch pending-count.
+    pub fn add_selection_step(
+        &mut self,
+        direction: AddDirection,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let buffer_snapshot = self.multi_buffer.read(cx).snapshot();
+
+        let source = self.selections.newest_anchor().clone();
+        let source_head = source.head();
+        let source_point = buffer_snapshot.point_for_anchor(&source_head);
+        let source_display = display_snapshot.buffer_to_display(source_point);
+        let goal_col = match source.goal {
+            SelectionGoal::Column(c) => c,
+            SelectionGoal::None => source_display.column,
+        };
+
+        let max_row = display_snapshot.max_point().row;
+        let mut row = source_display.row;
+        let target_anchor = loop {
+            match direction {
+                AddDirection::Below => {
+                    if row >= max_row {
+                        return false;
+                    }
+                    row += 1;
+                },
+                AddDirection::Above => {
+                    if row == 0 {
+                        return false;
+                    }
+                    row -= 1;
+                },
+            }
+            let clamped_col = goal_col.min(display_snapshot.line_len(row));
+            let raw = DisplayPoint::new(row, clamped_col);
+            let clipped = display_snapshot.clip_point(raw, Bias::Left);
+            let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+                continue;
+            };
+            let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
+            break buffer_snapshot.anchor_at(offset, Bias::Right);
+        };
+        self.selections.insert_cursor(
+            target_anchor,
+            SelectionGoal::Column(goal_col),
+            &buffer_snapshot,
+        );
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+        true
     }
 
     /// Pop up to `count` entries off the active buffer's undo
@@ -3367,5 +3905,236 @@ mod tests {
         assert!(first.is_some());
         assert!(second.is_some());
         assert_ne!(first, second);
+    }
+
+    #[test]
+    fn collapse_selection_collapses_to_head() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        editor.update(&mut cx, |ed, cx| ed.collapse_selection(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 5);
+            assert_eq!(snap.resolve_anchor(&sel.end), 5);
+        });
+    }
+
+    #[test]
+    fn flip_selections_toggles_reversed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        editor.update(&mut cx, |ed, cx| ed.flip_selections(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, _| {
+            assert!(ed.selections().all_anchors().first().unwrap().reversed);
+        });
+    }
+
+    #[test]
+    fn select_all_replaces_with_full_range() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+
+        editor.update(&mut cx, |ed, cx| ed.select_all(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 0);
+            assert_eq!(snap.resolve_anchor(&sel.end), 11);
+        });
+    }
+
+    #[test]
+    fn select_line_below_extends_through_newline() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc\ndef\nghi");
+        set_single_selection(&editor, &mut cx, 1, 1);
+
+        editor.update(&mut cx, |ed, cx| ed.select_line_below(1, cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 0);
+            assert_eq!(snap.resolve_anchor(&sel.end), 4);
+        });
+    }
+
+    #[test]
+    fn keep_primary_drops_others() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncd\nef");
+        set_single_selection(&editor, &mut cx, 0, 8);
+        editor.update(&mut cx, |ed, cx| ed.split_selection_on_newline(cx));
+        cx.run_until_parked();
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.selections().all_anchors().len(), 3);
+        });
+
+        editor.update(&mut cx, |ed, cx| ed.keep_primary_selection(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.selections().all_anchors().len(), 1);
+        });
+    }
+
+    #[test]
+    fn remove_primary_keeps_others() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncd\nef");
+        set_single_selection(&editor, &mut cx, 0, 8);
+        editor.update(&mut cx, |ed, cx| ed.split_selection_on_newline(cx));
+        cx.run_until_parked();
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.selections().all_anchors().len(), 3);
+        });
+
+        editor.update(&mut cx, |ed, cx| ed.remove_primary_selection(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.selections().all_anchors().len(), 2);
+        });
+    }
+
+    #[test]
+    fn rotate_selections_forward_advances_primary() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncd\nef");
+        set_single_selection(&editor, &mut cx, 0, 8);
+        editor.update(&mut cx, |ed, cx| ed.split_selection_on_newline(cx));
+        cx.run_until_parked();
+        let primary_before = editor.read_with(&cx, |ed, _| ed.selections().newest_anchor().id);
+
+        editor.update(&mut cx, |ed, cx| ed.rotate_selections(true, 1, cx));
+        cx.run_until_parked();
+
+        let primary_after = editor.read_with(&cx, |ed, _| ed.selections().newest_anchor().id);
+        assert_ne!(primary_before, primary_after);
+    }
+
+    #[test]
+    fn trim_selections_strips_surrounding_whitespace() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "  hello  ");
+        set_single_selection(&editor, &mut cx, 0, 9);
+
+        editor.update(&mut cx, |ed, cx| ed.trim_selections(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 2);
+            assert_eq!(snap.resolve_anchor(&sel.end), 7);
+        });
+    }
+
+    #[test]
+    fn split_selection_on_newline_splits_per_line() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "ab\ncd\nef");
+        set_single_selection(&editor, &mut cx, 0, 8);
+
+        editor.update(&mut cx, |ed, cx| ed.split_selection_on_newline(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.selections().all_anchors().len(), 3);
+        });
+    }
+
+    #[test]
+    fn split_selection_by_pattern_splits_on_each_match() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "foo, bar, baz");
+        set_single_selection(&editor, &mut cx, 0, 13);
+
+        editor.update(&mut cx, |ed, cx| ed.split_selection_by_pattern(", ", cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let anchors = ed.selections().all_anchors();
+            assert_eq!(anchors.len(), 3);
+            let texts: Vec<String> = anchors
+                .iter()
+                .map(|s| {
+                    let lo = snap.resolve_anchor(&s.start);
+                    let hi = snap.resolve_anchor(&s.end);
+                    snap.rope().slice(lo..hi).to_string()
+                })
+                .collect();
+            assert_eq!(texts, vec!["foo", "bar", "baz"]);
+        });
+    }
+
+    #[test]
+    fn filter_selections_by_pattern_keeps_matches() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha beta gamma");
+        // Split into three space-delimited selections so we can filter.
+        set_single_selection(&editor, &mut cx, 0, 16);
+        editor.update(&mut cx, |ed, cx| ed.split_selection_by_pattern(" ", cx));
+        cx.run_until_parked();
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.selections().all_anchors().len(), 3);
+        });
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.filter_selections_by_pattern("^a", false, cx)
+        });
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let anchors = ed.selections().all_anchors();
+            assert_eq!(anchors.len(), 1);
+            let sel = anchors.first().unwrap();
+            let lo = snap.resolve_anchor(&sel.start);
+            let hi = snap.resolve_anchor(&sel.end);
+            assert_eq!(snap.rope().slice(lo..hi).to_string(), "alpha");
+        });
+    }
+
+    #[test]
+    fn align_selections_pads_to_max_column() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "a\nbbb\nc");
+        // Cursors at each row's end:
+        // row 0 col 1 (offset 1)
+        // row 1 col 3 (offset 5)
+        // row 2 col 1 (offset 7)
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let mk = |off: usize| Selection {
+                id: 0,
+                start: snapshot.anchor_at(off, Bias::Right),
+                end: snapshot.anchor_at(off, Bias::Left),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections
+                .replace_with(vec![mk(1), mk(5), mk(7)], &snapshot);
+        });
+
+        editor.update(&mut cx, |ed, cx| ed.align_selections(cx));
+        cx.run_until_parked();
+
+        // After alignment, row 0 column 1 should be padded to column 3 (extra 2 spaces),
+        // row 2 column 1 should be padded to column 3 (extra 2 spaces), row 1 unchanged.
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "a  \nbbb\nc  ");
     }
 }

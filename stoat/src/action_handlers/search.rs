@@ -203,7 +203,7 @@ fn next_match_at_or_after(regex: &regex::Regex, text: &str, at: usize) -> Option
 
 /// Compile `pattern` into a [`regex::Regex`] with multiline mode on,
 /// so `^` and `$` match line boundaries inside the buffer text.
-pub(crate) fn compile_search_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
+pub fn compile_search_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
     regex::RegexBuilder::new(pattern).multi_line(true).build()
 }
 
