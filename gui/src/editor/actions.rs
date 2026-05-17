@@ -1,3 +1,4 @@
+pub mod edit;
 pub mod goto;
 pub mod marks;
 pub mod movement;

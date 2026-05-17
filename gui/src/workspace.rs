@@ -1251,6 +1251,35 @@ impl Workspace {
             ActionKind::ExecuteRebase => self.dispatch_execute_rebase(window, cx),
             ActionKind::AbortRebase => self.dispatch_abort_rebase(cx),
             ActionKind::RebaseContinue => self.dispatch_rebase_continue(window, cx),
+            ActionKind::Yank => crate::editor::actions::edit::handle_yank(self, cx),
+            ActionKind::PasteAfter => crate::editor::actions::edit::handle_paste_after(self, cx),
+            ActionKind::PasteBefore => crate::editor::actions::edit::handle_paste_before(self, cx),
+            ActionKind::YankToClipboard => {
+                crate::editor::actions::edit::handle_yank_to_clipboard(self, cx)
+            },
+            ActionKind::YankMainToClipboard => {
+                crate::editor::actions::edit::handle_yank_main_to_clipboard(self, cx)
+            },
+            ActionKind::PasteClipboardAfter => {
+                crate::editor::actions::edit::handle_paste_clipboard_after(self, cx)
+            },
+            ActionKind::PasteClipboardBefore => {
+                crate::editor::actions::edit::handle_paste_clipboard_before(self, cx)
+            },
+            ActionKind::DeleteSelection => {
+                crate::editor::actions::edit::handle_delete_selection(self, cx)
+            },
+            ActionKind::DeleteForward => {
+                crate::editor::actions::edit::handle_delete_forward(self, cx)
+            },
+            ActionKind::DeleteBackward => {
+                crate::editor::actions::edit::handle_delete_backward(self, cx)
+            },
+            ActionKind::Insert => crate::editor::actions::edit::handle_insert(self, window, cx),
+            ActionKind::Append => crate::editor::actions::edit::handle_append(self, window, cx),
+            ActionKind::InsertNewline => {
+                crate::editor::actions::edit::handle_insert_newline(self, cx)
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
