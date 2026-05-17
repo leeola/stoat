@@ -194,9 +194,16 @@ impl BufferRegistry {
         true
     }
 
-    #[allow(dead_code)]
-    pub(crate) fn path_for(&self, id: BufferId) -> Option<&Path> {
+    pub fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
+    }
+
+    /// Iterate the open [`BufferId`]s. Order matches the underlying
+    /// `HashMap` iteration order, which is not deterministic across
+    /// runs; callers that need a stable presentation sort by an
+    /// orthogonal key (e.g. path).
+    pub fn ids(&self) -> impl Iterator<Item = BufferId> + '_ {
+        self.buffers.keys().copied()
     }
 
     /// Returns paths of currently-open path-bound buffers in lexicographic

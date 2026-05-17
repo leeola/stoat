@@ -77,6 +77,18 @@ impl BufferRegistry {
     pub fn id_for_path(&self, path: &Path) -> Option<BufferId> {
         self.inner.id_for_path(path)
     }
+
+    pub fn path_for(&self, id: BufferId) -> Option<&Path> {
+        self.inner.path_for(id)
+    }
+
+    /// Iterate the open [`BufferId`]s. Order is not stable across
+    /// runs (see [`stoat::BufferRegistry::ids`]); callers that need
+    /// deterministic ordering sort by path or another orthogonal
+    /// key.
+    pub fn ids(&self) -> impl Iterator<Item = BufferId> + '_ {
+        self.inner.ids()
+    }
 }
 
 impl Default for BufferRegistry {
@@ -89,7 +101,10 @@ impl Default for BufferRegistry {
 mod tests {
     use super::*;
     use gpui::{AppContext, Entity, Subscription, TestAppContext};
-    use std::sync::{Arc, Mutex};
+    use std::{
+        path::PathBuf,
+        sync::{Arc, Mutex},
+    };
 
     struct Recorder {
         _subscription: Subscription,
@@ -194,6 +209,38 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(drain(&events), Vec::<BufferRegistryEvent>::new());
+    }
+
+    #[test]
+    fn ids_iterates_open_buffers() {
+        let mut cx = TestAppContext::single();
+        let registry = new_registry(&mut cx);
+        let (a, b) = registry.update(&mut cx, |r, cx| {
+            let a = r.open(Path::new("/a.txt"), "", cx).0;
+            let b = r.open(Path::new("/b.txt"), "", cx).0;
+            (a, b)
+        });
+        let mut ids: Vec<_> = registry.read_with(&cx, |r, _| r.ids().collect());
+        ids.sort();
+        assert_eq!(ids, vec![a, b]);
+    }
+
+    #[test]
+    fn path_for_returns_known_path() {
+        let mut cx = TestAppContext::single();
+        let registry = new_registry(&mut cx);
+        let id = registry.update(&mut cx, |r, cx| r.open(Path::new("/x.rs"), "", cx).0);
+        let path = registry.read_with(&cx, |r, _| r.path_for(id).map(|p| p.to_path_buf()));
+        assert_eq!(path, Some(PathBuf::from("/x.rs")));
+    }
+
+    #[test]
+    fn path_for_returns_none_for_scratch() {
+        let mut cx = TestAppContext::single();
+        let registry = new_registry(&mut cx);
+        let id = registry.update(&mut cx, |r, cx| r.new_scratch(cx).0);
+        let path = registry.read_with(&cx, |r, _| r.path_for(id).map(|p| p.to_path_buf()));
+        assert_eq!(path, None);
     }
 
     #[test]

@@ -15,6 +15,7 @@
 
 mod actions;
 mod buffer;
+mod buffer_picker;
 mod buffer_registry;
 mod command_palette;
 mod commit_list;
