@@ -611,7 +611,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::PickerConfirmSplitRight
         | ActionKind::PickerConfirmSplitDown
         | ActionKind::ToggleBlame
-        | ActionKind::GotoReferences => UpdateEffect::None,
+        | ActionKind::GotoReferences
+        | ActionKind::Insert
+        | ActionKind::Append
+        | ActionKind::InsertNewline
+        | ActionKind::DeleteForward
+        | ActionKind::DeleteBackward => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

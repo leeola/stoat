@@ -71,6 +71,56 @@ define_action!(
 );
 
 define_action!(
+    DeleteForwardDef,
+    DeleteForward,
+    "DeleteForward",
+    ActionKind::DeleteForward,
+    "delete char at or after each cursor",
+    "Delete a single UTF-8 character starting at each cursor's head and collapse the selection. Non-empty selections delegate to DeleteSelection. Typically bound to Delete in insert mode.",
+    ActionPriority::Common
+);
+
+define_action!(
+    DeleteBackwardDef,
+    DeleteBackward,
+    "DeleteBackward",
+    ActionKind::DeleteBackward,
+    "delete char before each cursor",
+    "Delete a single UTF-8 character ending at each cursor's head and collapse the selection to the position before the deletion. Non-empty selections delegate to DeleteSelection. Typically bound to Backspace in insert mode.",
+    ActionPriority::Common
+);
+
+define_action!(
+    InsertDef,
+    Insert,
+    "Insert",
+    ActionKind::Insert,
+    "enter insert mode at selection start",
+    "Collapse each selection to a cursor at its start offset and switch the workspace into insert mode. Subsequent characters typed flow through the IME path and append at each cursor.",
+    ActionPriority::Common
+);
+
+define_action!(
+    AppendDef,
+    Append,
+    "Append",
+    ActionKind::Append,
+    "enter insert mode at selection end",
+    "Collapse each selection to a cursor immediately past its end offset (or at the cursor for empty selections) and switch the workspace into insert mode.",
+    ActionPriority::Common
+);
+
+define_action!(
+    InsertNewlineDef,
+    InsertNewline,
+    "InsertNewline",
+    ActionKind::InsertNewline,
+    "insert a newline at each cursor",
+    "Insert the line-feed character at each cursor / selection range. Non-empty selections are replaced by the newline. Typically bound to Enter in insert mode.",
+    ActionPriority::Common
+);
+
+define_action!(
     UndoDef,
     Undo,
     "Undo",
