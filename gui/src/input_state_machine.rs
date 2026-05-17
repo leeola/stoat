@@ -138,6 +138,12 @@ pub struct InputStateMachine {
     /// chord-completing char keystroke is consumed and dispatched
     /// through [`ApplyTextobjectChar`] with the captured mode.
     pending_textobject_select: Option<TextobjectMode>,
+    /// Mode captured before a modal opened, restored when the modal
+    /// closes. Populated by
+    /// [`Self::capture_prev_mode_for_modal`] from the workspace's
+    /// modal-layer observer; drained by
+    /// [`Self::take_prev_mode_for_modal`] on the closing edge.
+    prev_mode_for_modal: Option<String>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -190,6 +196,7 @@ impl InputStateMachine {
             pending_surround_delete: false,
             pending_surround_replace: SurroundReplaceStage::Idle,
             pending_textobject_select: None,
+            prev_mode_for_modal: None,
             workspace,
             keymap,
         }
@@ -323,6 +330,46 @@ impl InputStateMachine {
             }
         }
         cx.notify();
+    }
+
+    /// Set the mode without focus side effects. Used by modal
+    /// lifecycle wiring that needs to update the keymap-state mode
+    /// flag (so predicates like `mode == prompt && palette_open`
+    /// fire) while the modal layer's own focus machinery handles
+    /// the focus transition independently.
+    pub fn set_mode(&mut self, mode: impl Into<String>, cx: &mut Context<'_, Self>) {
+        let new = StateValue::String(mode.into().into());
+        if self.mode != new {
+            self.mode = new;
+            cx.notify();
+        }
+    }
+
+    /// Set the `palette_open` keymap-state flag. No-ops on unchanged
+    /// value so observers don't see redundant notifications.
+    pub fn set_palette_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {
+        let new = StateValue::Bool(open);
+        if self.palette_open != new {
+            self.palette_open = new;
+            cx.notify();
+        }
+    }
+
+    /// Capture the current mode for restoration when a modal closes.
+    /// Idempotent: a subsequent call while the slot is still
+    /// occupied is a no-op, so nested-modal scenarios restore the
+    /// mode that existed before the *first* modal opened.
+    pub fn capture_prev_mode_for_modal(&mut self) {
+        if self.prev_mode_for_modal.is_none() {
+            self.prev_mode_for_modal = Some(self.mode().to_string());
+        }
+    }
+
+    /// Drain the captured prev-mode slot. Called when a modal
+    /// closes; returns the mode to restore via [`Self::set_mode`],
+    /// or `None` when nothing was captured.
+    pub fn take_prev_mode_for_modal(&mut self) -> Option<String> {
+        self.prev_mode_for_modal.take()
     }
 
     /// Save `handle` for later restoration via

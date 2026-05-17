@@ -203,6 +203,9 @@ impl Workspace {
                 workspace.dispatch_review_external_edit(path.clone(), cx);
             },
         );
+        let modal_layer_subscription = cx.observe(&modal_layer, |workspace, layer, cx| {
+            workspace.refresh_modal_keymap_state(&layer, cx);
+        });
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
             let focus = tree.focus();
@@ -275,6 +278,7 @@ impl Workspace {
                 pane_tree_subscription,
                 buffer_registry_subscription,
                 fs_watcher_subscription,
+                modal_layer_subscription,
             ],
         }
     }
@@ -293,6 +297,37 @@ impl Workspace {
 
     pub fn rebase_active(&self) -> Option<&ActiveRebase> {
         self.rebase_active.as_ref()
+    }
+
+    /// Propagate modal-layer transitions into the keymap-state
+    /// fields the [`InputStateMachine`] exposes to the keymap engine.
+    /// Driven by an `observe(&modal_layer, ...)` subscription wired
+    /// in [`Self::new`]; fires on every `show_modal` / `hide_modal`
+    /// / `dismiss_modal_by_id` because each of those calls
+    /// `cx.notify` on the modal-layer entity.
+    ///
+    /// When the command palette modal becomes the top of the stack,
+    /// captures the prior mode, flips `mode` to `prompt`, and sets
+    /// `palette_open = true`. When the palette is no longer on top
+    /// (closed or buried under another modal), restores the prior
+    /// mode and clears `palette_open`.
+    fn refresh_modal_keymap_state(&self, layer: &Entity<ModalLayer>, cx: &mut Context<'_, Self>) {
+        let palette_active = layer
+            .read(cx)
+            .active_modal::<crate::picker::Picker<crate::command_palette::CommandPaletteDelegate>>()
+            .is_some();
+        self.input_state_machine.update(cx, |sm, cx_sm| {
+            if palette_active {
+                sm.capture_prev_mode_for_modal();
+                sm.set_mode("prompt", cx_sm);
+                sm.set_palette_open(true, cx_sm);
+            } else if sm.palette_open() {
+                sm.set_palette_open(false, cx_sm);
+                if let Some(prev) = sm.take_prev_mode_for_modal() {
+                    sm.set_mode(prev, cx_sm);
+                }
+            }
+        });
     }
 
     pub fn buffer_registry(&self) -> &Entity<BufferRegistry> {
@@ -4320,6 +4355,73 @@ mod tests {
             w.modal_layer().read(cx).active_modal::<TestModal>()
         });
         assert!(active.is_some());
+    }
+
+    #[test]
+    fn opening_command_palette_sets_palette_open_and_prompt_mode() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+
+        let (palette_open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.palette_open(), sm.mode().to_string())
+        });
+        assert!(
+            palette_open,
+            "palette_open should be true while palette is the active modal"
+        );
+        assert_eq!(
+            mode, "prompt",
+            "mode should be prompt while palette is active"
+        );
+    }
+
+    #[test]
+    fn closing_command_palette_clears_palette_open_and_restores_mode() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.dismiss_modal(window, cx);
+        });
+        vcx.run_until_parked();
+
+        let (palette_open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.palette_open(), sm.mode().to_string())
+        });
+        assert!(
+            !palette_open,
+            "palette_open should clear after the palette closes"
+        );
+        assert_eq!(mode, "normal", "mode should restore to the prior value");
+    }
+
+    #[test]
+    fn toggling_command_palette_off_clears_palette_open() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+
+        let (palette_open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.palette_open(), sm.mode().to_string())
+        });
+        assert!(
+            !palette_open,
+            "second OpenCommandPalette toggles the modal off"
+        );
+        assert_eq!(mode, "normal");
     }
 
     #[test]
