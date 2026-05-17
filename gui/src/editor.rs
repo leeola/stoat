@@ -742,6 +742,65 @@ impl Editor {
         cx.notify();
     }
 
+    /// Pop up to `count` entries off the active buffer's undo
+    /// stack, applying each in reverse and re-anchoring selections
+    /// against the resulting snapshot. Stops early when the stack
+    /// is exhausted. Returns the number of operations actually
+    /// applied so callers can decide whether to redraw.
+    pub fn handle_undo(&mut self, count: u32, cx: &mut Context<'_, Self>) -> u32 {
+        self.apply_buffer_history(count, |buffer, cx| buffer.undo(cx), cx)
+    }
+
+    /// Pop up to `count` entries off the redo stack and re-apply
+    /// each. Symmetric to [`Self::handle_undo`].
+    pub fn handle_redo(&mut self, count: u32, cx: &mut Context<'_, Self>) -> u32 {
+        self.apply_buffer_history(count, |buffer, cx| buffer.redo(cx), cx)
+    }
+
+    /// Record an unlabeled checkpoint in the active buffer's op
+    /// log. Callers that need labeled checkpoints pass `Some(label)`.
+    pub fn commit_checkpoint(
+        &mut self,
+        label: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<stoat::buffer::CheckpointId> {
+        let buffer = self.multi_buffer.read(cx).as_singleton().cloned()?;
+        Some(buffer.update(cx, |b, _| b.checkpoint(label)))
+    }
+
+    fn apply_buffer_history<F>(&mut self, count: u32, mut op: F, cx: &mut Context<'_, Self>) -> u32
+    where
+        F: FnMut(&Buffer, &mut Context<'_, Buffer>) -> bool,
+    {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "buffer-history on multi-excerpt buffer is not yet supported",
+                );
+                return 0;
+            },
+        };
+        let target = count.max(1);
+        let mut applied = 0u32;
+        for _ in 0..target {
+            if buffer.update(cx, |b, cx| op(b, cx)) {
+                applied += 1;
+            } else {
+                break;
+            }
+        }
+        if applied == 0 {
+            return 0;
+        }
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&snapshot, |sel| sel.clone());
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+        applied
+    }
+
     /// Place a single cursor at display-grid `(row, col)`, replacing
     /// every existing selection. Off-buffer rows or columns clamp to
     /// the nearest valid display position via [`DisplaySnapshot::clip_point`].
@@ -3231,5 +3290,82 @@ mod tests {
             assert_eq!(snap.resolve_anchor(&sel.start), 5);
             assert_eq!(snap.resolve_anchor(&sel.end), 5);
         });
+    }
+
+    #[test]
+    fn handle_undo_reverts_a_buffer_edit() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+        buffer.update(&mut cx, |b, cx| b.edit(5..5, " world", cx));
+        cx.run_until_parked();
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello world");
+
+        let applied = editor.update(&mut cx, |ed, cx| ed.handle_undo(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(applied, 1);
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello");
+    }
+
+    #[test]
+    fn handle_undo_returns_zero_on_empty_history() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "");
+
+        let applied = editor.update(&mut cx, |ed, cx| ed.handle_undo(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(applied, 0);
+    }
+
+    #[test]
+    fn handle_redo_restores_undone_edit() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+        buffer.update(&mut cx, |b, cx| b.edit(5..5, " world", cx));
+        cx.run_until_parked();
+        editor.update(&mut cx, |ed, cx| ed.handle_undo(1, cx));
+        cx.run_until_parked();
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello");
+
+        let applied = editor.update(&mut cx, |ed, cx| ed.handle_redo(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(applied, 1);
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello world");
+    }
+
+    #[test]
+    fn handle_undo_applies_up_to_count_then_stops() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "");
+        buffer.update(&mut cx, |b, cx| b.edit(0..0, "a", cx));
+        buffer.update(&mut cx, |b, cx| b.edit(1..1, "b", cx));
+        buffer.update(&mut cx, |b, cx| b.edit(2..2, "c", cx));
+        cx.run_until_parked();
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "abc");
+
+        // Ask for 10 undos with only 3 entries in history.
+        let applied = editor.update(&mut cx, |ed, cx| ed.handle_undo(10, cx));
+        cx.run_until_parked();
+
+        assert_eq!(applied, 3);
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "");
+    }
+
+    #[test]
+    fn commit_checkpoint_returns_a_checkpoint_id() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+
+        let first = editor.update(&mut cx, |ed, cx| ed.commit_checkpoint(None, cx));
+        let second = editor.update(&mut cx, |ed, cx| {
+            ed.commit_checkpoint(Some("after".into()), cx)
+        });
+        cx.run_until_parked();
+
+        assert!(first.is_some());
+        assert!(second.is_some());
+        assert_ne!(first, second);
     }
 }

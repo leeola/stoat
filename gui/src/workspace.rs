@@ -1280,6 +1280,17 @@ impl Workspace {
             ActionKind::InsertNewline => {
                 crate::editor::actions::edit::handle_insert_newline(self, cx)
             },
+            ActionKind::Undo => {
+                let count = self.take_count(cx);
+                crate::editor::actions::undo::handle_undo(self, count, cx);
+            },
+            ActionKind::Redo => {
+                let count = self.take_count(cx);
+                crate::editor::actions::undo::handle_redo(self, count, cx);
+            },
+            ActionKind::CommitUndoCheckpoint => {
+                crate::editor::actions::undo::handle_commit_checkpoint(self, cx)
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },

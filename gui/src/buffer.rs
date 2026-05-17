@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use stoat::buffer::{BufferId, SharedBuffer, TextBuffer};
+use stoat::buffer::{BufferId, CheckpointId, SharedBuffer, TextBuffer};
 use stoat_language::SyntaxMap;
 use stoat_text::Anchor;
 
@@ -91,6 +91,42 @@ impl Buffer {
             .edit(range, text);
         cx.emit(BufferEvent::Edited);
         cx.notify();
+    }
+
+    /// Pop the most recent edit off the inner [`TextBuffer`]'s
+    /// undo stack, applying its reverse and pushing the timestamp
+    /// onto the redo stack. Returns `true` when the stack had an
+    /// entry to undo. Emits [`BufferEvent::Edited`] only on
+    /// success so subscribers refresh derived state.
+    pub fn undo(&self, cx: &mut Context<'_, Self>) -> bool {
+        let applied = self.inner.write().expect("buffer lock poisoned").undo();
+        if applied {
+            cx.emit(BufferEvent::Edited);
+            cx.notify();
+        }
+        applied
+    }
+
+    /// Symmetric to [`Self::undo`]: pop the most recent entry off
+    /// the redo stack and re-apply it.
+    pub fn redo(&self, cx: &mut Context<'_, Self>) -> bool {
+        let applied = self.inner.write().expect("buffer lock poisoned").redo();
+        if applied {
+            cx.emit(BufferEvent::Edited);
+            cx.notify();
+        }
+        applied
+    }
+
+    /// Record a named position in the buffer's op log and return
+    /// its [`CheckpointId`]. No event is emitted because the op log
+    /// is not user-visible state and no derived caches depend on
+    /// checkpoint membership.
+    pub fn checkpoint(&self, label: Option<String>) -> CheckpointId {
+        self.inner
+            .write()
+            .expect("buffer lock poisoned")
+            .checkpoint(label)
     }
 
     /// Write the buffer's rope text through [`FsHostGlobal`] when
@@ -294,6 +330,72 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(drain(&events), vec![BufferEvent::Reloaded]);
+    }
+
+    #[test]
+    fn undo_returns_false_and_does_not_emit_on_empty_history() {
+        let mut cx = TestAppContext::single();
+        // Buffer::with_text seeds history with the initial population edit
+        // when text is non-empty, so use the empty constructor to get a
+        // genuinely empty history.
+        let buffer = new_buffer(&mut cx, "");
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        let applied = buffer.update(&mut cx, |b, cx| b.undo(cx));
+        cx.run_until_parked();
+
+        assert!(!applied);
+        assert_eq!(drain(&events), Vec::<BufferEvent>::new());
+    }
+
+    #[test]
+    fn undo_then_redo_round_trips_an_edit() {
+        let mut cx = TestAppContext::single();
+        let buffer = new_buffer(&mut cx, "hello");
+        buffer.update(&mut cx, |b, cx| b.edit(5..5, " world", cx));
+        cx.run_until_parked();
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello world");
+
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        let undone = buffer.update(&mut cx, |b, cx| b.undo(cx));
+        cx.run_until_parked();
+        assert!(undone);
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello");
+        assert_eq!(drain(&events), vec![BufferEvent::Edited]);
+
+        let redone = buffer.update(&mut cx, |b, cx| b.redo(cx));
+        cx.run_until_parked();
+        assert!(redone);
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello world");
+        assert_eq!(drain(&events), vec![BufferEvent::Edited]);
+    }
+
+    #[test]
+    fn redo_returns_false_on_empty_history() {
+        let mut cx = TestAppContext::single();
+        let buffer = new_buffer(&mut cx, "hi");
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        let applied = buffer.update(&mut cx, |b, cx| b.redo(cx));
+        cx.run_until_parked();
+
+        assert!(!applied);
+        assert_eq!(drain(&events), Vec::<BufferEvent>::new());
+    }
+
+    #[test]
+    fn checkpoint_returns_distinct_ids() {
+        let mut cx = TestAppContext::single();
+        let buffer = new_buffer(&mut cx, "x");
+        let (_recorder, events) = Recorder::install(&mut cx, &buffer);
+
+        let first = buffer.update(&mut cx, |b, _| b.checkpoint(None));
+        let second = buffer.update(&mut cx, |b, _| b.checkpoint(Some("label".into())));
+        cx.run_until_parked();
+
+        assert_ne!(first, second);
+        assert_eq!(drain(&events), Vec::<BufferEvent>::new());
     }
 
     #[test]
