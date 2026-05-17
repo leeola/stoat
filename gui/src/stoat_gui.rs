@@ -27,6 +27,7 @@ mod dock;
 mod editor;
 mod editor_input;
 mod executor;
+mod file_finder;
 mod fs_watcher_driver;
 mod git;
 mod globals;

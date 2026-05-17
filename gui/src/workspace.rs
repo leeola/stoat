@@ -1241,6 +1241,7 @@ impl Workspace {
             ActionKind::OpenCommandPalette => {
                 crate::command_palette::open_command_palette(self, window, cx)
             },
+            ActionKind::OpenFileFinder => crate::file_finder::open_file_finder(self, window, cx),
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action

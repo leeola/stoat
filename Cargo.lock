@@ -6357,6 +6357,7 @@ dependencies = [
  "stoat_scheduler",
  "stoat_text",
  "time",
+ "tokio",
  "tracing",
 ]
 

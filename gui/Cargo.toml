@@ -35,4 +35,5 @@ stoat_language = { path = "../language" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
 time.workspace = true
+tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
