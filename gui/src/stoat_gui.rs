@@ -17,6 +17,7 @@ mod actions;
 mod buffer;
 mod buffer_picker;
 mod buffer_registry;
+mod claude_chat;
 mod command_palette;
 mod commit_list;
 mod conflict_item;

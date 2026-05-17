@@ -1274,6 +1274,8 @@ impl Workspace {
                 crate::global_search::open_global_search(self, window, cx)
             },
             ActionKind::OpenLastPicker => self.dispatch_open_last_picker(window, cx),
+            ActionKind::OpenClaude => crate::claude_chat::dispatch_open_claude(self, window, cx),
+            ActionKind::ClaudeSubmit => crate::claude_chat::dispatch_claude_submit(self, cx),
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action
