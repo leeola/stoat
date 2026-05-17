@@ -19,7 +19,7 @@ pub mod dump;
 mod editor_state;
 pub mod file_finder;
 pub mod fuzzy;
-pub(crate) mod global_search;
+pub mod global_search;
 pub(crate) mod goto_word;
 pub mod help;
 pub mod host;

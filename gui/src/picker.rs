@@ -33,6 +33,7 @@ pub(crate) fn is_picker_open_kind(kind: ActionKind) -> bool {
             | ActionKind::OpenDiagnosticsPicker
             | ActionKind::OpenWorkspaceDiagnosticsPicker
             | ActionKind::OpenJumplistPicker
+            | ActionKind::OpenGlobalSearch
     )
 }
 

@@ -32,6 +32,7 @@ mod executor;
 mod file_finder;
 mod fs_watcher_driver;
 mod git;
+mod global_search;
 mod globals;
 mod input_state_machine;
 mod item;
