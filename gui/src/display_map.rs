@@ -1,7 +1,12 @@
 use crate::buffer::{Buffer, BufferEvent};
 use gpui::{Context, Entity, EventEmitter, Subscription};
+use std::sync::Arc;
 use stoat::{
-    display_map::{BlockProperties, InlayId, InlayKind},
+    buffer::BufferId,
+    display_map::{
+        highlights::{HighlightStyleInterner, SemanticTokenHighlight},
+        BlockProperties, InlayId, InlayKind,
+    },
     multi_buffer::MultiBuffer as InnerMultiBuffer,
     DisplayMap as InnerDisplayMap, DisplaySnapshot,
 };
@@ -61,6 +66,33 @@ impl DisplayMap {
             return;
         }
         self.inner.insert_blocks(blocks);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+    }
+
+    /// Replace the semantic-token highlight set for `buffer_id`.
+    /// `tokens` and `interner` ride together so the per-token
+    /// [`stoat::display_map::highlights::HighlightStyleId`] indices
+    /// remain valid; the inner [`stoat::DisplayMap`] keeps both arcs
+    /// keyed by [`BufferId`]. Emits [`DisplayMapEvent::Changed`].
+    pub fn set_semantic_tokens(
+        &mut self,
+        buffer_id: BufferId,
+        tokens: Arc<[SemanticTokenHighlight]>,
+        interner: Arc<HighlightStyleInterner>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner
+            .set_semantic_token_highlights(buffer_id, tokens, interner);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+    }
+
+    /// Drop the semantic-token highlight set for `buffer_id`. Used
+    /// to clear stale tokens between LSP requests when the buffer
+    /// has been edited. Emits [`DisplayMapEvent::Changed`].
+    pub fn invalidate_semantic_tokens(&mut self, buffer_id: BufferId, cx: &mut Context<'_, Self>) {
+        self.inner.invalidate_semantic_highlights(buffer_id);
         cx.emit(DisplayMapEvent::Changed);
         cx.notify();
     }
@@ -280,5 +312,50 @@ mod tests {
         cx.run_until_parked();
         assert!(ids.is_empty());
         assert_eq!(drain(&events), Vec::<DisplayMapEvent>::new());
+    }
+
+    #[test]
+    fn set_semantic_tokens_emits_changed_and_invalidate_emits_changed() {
+        use stoat::display_map::highlights::{
+            HighlightStyle, HighlightStyleInterner, SemanticTokenHighlight,
+        };
+        use stoat_text::Bias;
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "hello world");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        let (range, mut interner) = display_map.update(&mut cx, |dm, _| {
+            let snap = dm.snapshot();
+            let buffer_snap = snap.buffer_snapshot();
+            let rope = buffer_snap.rope();
+            let start = buffer_snap.anchor_at(
+                rope.point_to_offset(stoat_text::Point::new(0, 0)),
+                Bias::Right,
+            );
+            let end = buffer_snap.anchor_at(
+                rope.point_to_offset(stoat_text::Point::new(0, 5)),
+                Bias::Left,
+            );
+            (start..end, HighlightStyleInterner::default())
+        });
+        let style_id = interner.intern(HighlightStyle::default());
+        let interner = Arc::new(interner);
+        let tokens: Arc<[SemanticTokenHighlight]> = Arc::from(vec![SemanticTokenHighlight {
+            range,
+            style: style_id,
+        }]);
+
+        let buffer_id = BufferId::new(0);
+        display_map.update(&mut cx, |dm, cx| {
+            dm.set_semantic_tokens(buffer_id, tokens.clone(), interner.clone(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+
+        display_map.update(&mut cx, |dm, cx| {
+            dm.invalidate_semantic_tokens(buffer_id, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
     }
 }
