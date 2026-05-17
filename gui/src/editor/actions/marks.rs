@@ -121,6 +121,21 @@ impl Editor {
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
+
+    /// Collapse the primary selection at jumplist entry `idx` and
+    /// position the jumplist's navigation cursor so the next
+    /// [`Self::handle_jump_backward`] walks from `idx`. No-op when
+    /// `idx` is out of range.
+    pub fn handle_jump_to_jumplist_entry(&mut self, idx: usize, cx: &mut Context<'_, Self>) {
+        let Some(&target) = self.jumplist.entries().get(idx) else {
+            return;
+        };
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        collapse_primary_to(self, &snapshot, target);
+        self.jumplist.set_cursor(idx);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
 }
 
 fn collapse_primary_to(

@@ -1267,6 +1267,9 @@ impl Workspace {
             ActionKind::OpenWorkspaceDiagnosticsPicker => {
                 crate::diagnostics_picker::open_workspace_diagnostics_picker(self, window, cx)
             },
+            ActionKind::OpenJumplistPicker => {
+                crate::jumplist_picker::open_jumplist_picker(self, window, cx)
+            },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action
