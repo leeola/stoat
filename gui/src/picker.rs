@@ -124,8 +124,9 @@ pub struct Picker<D: PickerDelegate> {
 }
 
 impl<D: PickerDelegate> Picker<D> {
-    pub fn new(delegate: D, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+    pub fn new(mut delegate: D, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let query_editor = cx.new(|cx| Editor::single_line(window, cx));
+        delegate.on_attach(&query_editor);
         let subscription =
             cx.subscribe(
                 &query_editor,

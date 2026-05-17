@@ -1,5 +1,5 @@
-use crate::picker::Picker;
-use gpui::{AnyElement, Context, Task, Window};
+use crate::{editor::Editor, picker::Picker};
+use gpui::{AnyElement, Context, Entity, Task, Window};
 
 /// Confirmation modifier carried by [`PickerDelegate::confirm`].
 ///
@@ -49,4 +49,11 @@ pub trait PickerDelegate: Sized + 'static {
         selected: bool,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> AnyElement;
+
+    /// Invoked once during [`Picker::new`] after the query editor is
+    /// constructed. Lets delegates that need to mutate the query
+    /// editor (e.g. multi-step argument collection) capture a weak
+    /// handle without reaching into the picker through its own
+    /// context, which is being mutated while the delegate runs.
+    fn on_attach(&mut self, _query_editor: &Entity<Editor>) {}
 }
