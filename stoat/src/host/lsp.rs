@@ -205,6 +205,7 @@ pub enum LanguageServerFeature {
     RenameSymbol,
     InlayHints,
     DocumentColors,
+    SemanticTokens,
 }
 
 #[async_trait]
@@ -318,6 +319,7 @@ pub trait LspServer: Send + Sync {
                         | ColorProviderCapability::Options(_),
                 )
             ),
+            LanguageServerFeature::SemanticTokens => caps.semantic_tokens_provider.is_some(),
         }
     }
 
