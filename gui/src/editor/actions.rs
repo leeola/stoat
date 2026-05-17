@@ -8,5 +8,6 @@ pub mod multi_cursor;
 pub mod numbers;
 pub mod smart_tab;
 pub mod surround;
+pub mod textobject;
 pub mod treesitter;
 pub mod undo;

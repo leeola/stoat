@@ -621,7 +621,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ApplyReplayMacroChar
         | ActionKind::ApplySurroundAddChar
         | ActionKind::ApplySurroundDeleteChar
-        | ActionKind::ApplySurroundReplaceChar => UpdateEffect::None,
+        | ActionKind::ApplySurroundReplaceChar
+        | ActionKind::ApplyTextobjectChar => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

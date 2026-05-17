@@ -1430,6 +1430,24 @@ impl Workspace {
                     }
                 }
             },
+            ActionKind::SelectTextobjectAround => {
+                crate::editor::actions::textobject::handle_select_textobject_around(self, cx)
+            },
+            ActionKind::SelectTextobjectInner => {
+                crate::editor::actions::textobject::handle_select_textobject_inner(self, cx)
+            },
+            ActionKind::ApplyTextobjectChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplyTextobjectChar>()
+                {
+                    let mode = apply.mode;
+                    let ch = apply.ch;
+                    crate::editor::actions::textobject::handle_apply_textobject_char(
+                        self, mode, ch, cx,
+                    );
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },

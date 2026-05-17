@@ -2,9 +2,10 @@ use crate::{
     actions::{
         ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplayMacroChar,
         ApplySurroundAddChar, ApplySurroundDeleteChar, ApplySurroundReplaceChar,
+        ApplyTextobjectChar,
     },
     editor::{
-        actions::{marks::MarkRequest, movement::FindKind},
+        actions::{marks::MarkRequest, movement::FindKind, textobject::TextobjectMode},
         Editor,
     },
     workspace::Workspace,
@@ -131,6 +132,12 @@ pub struct InputStateMachine {
     /// `AwaitTo(from)`; `AwaitTo(from)` captures the to-char and
     /// dispatches [`ApplySurroundReplaceChar { from, to }`].
     pending_surround_replace: SurroundReplaceStage,
+    /// Active after-key chord set by the
+    /// [`stoat_action::SelectTextobjectAround`] /
+    /// [`stoat_action::SelectTextobjectInner`] actions. The next
+    /// chord-completing char keystroke is consumed and dispatched
+    /// through [`ApplyTextobjectChar`] with the captured mode.
+    pending_textobject_select: Option<TextobjectMode>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -182,6 +189,7 @@ impl InputStateMachine {
             pending_surround_add: false,
             pending_surround_delete: false,
             pending_surround_replace: SurroundReplaceStage::Idle,
+            pending_textobject_select: None,
             workspace,
             keymap,
         }
@@ -546,6 +554,15 @@ impl InputStateMachine {
         cx.notify();
     }
 
+    pub fn pending_textobject_select(&self) -> Option<TextobjectMode> {
+        self.pending_textobject_select
+    }
+
+    pub fn arm_textobject_select(&mut self, mode: TextobjectMode, cx: &mut Context<'_, Self>) {
+        self.pending_textobject_select = Some(mode);
+        cx.notify();
+    }
+
     pub fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
     }
@@ -711,6 +728,18 @@ impl InputStateMachine {
                     cx.notify();
                 },
                 SurroundReplaceStage::Idle => {},
+            }
+        }
+
+        if count_active_mode {
+            if let Some(mode) = self.pending_textobject_select {
+                if let KeyCode::Char(ch) = event.code {
+                    self.pending_textobject_select = None;
+                    cx.notify();
+                    return vec![Box::new(ApplyTextobjectChar { mode, ch })];
+                }
+                self.pending_textobject_select = None;
+                cx.notify();
             }
         }
 

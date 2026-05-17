@@ -1,4 +1,4 @@
-use crate::editor::actions::{marks::MarkRequest, movement::FindKind};
+use crate::editor::actions::{marks::MarkRequest, movement::FindKind, textobject::TextobjectMode};
 use std::any::Any;
 use stoat_action::{Action, ActionDef, ActionKind, ActionPriority, ParamDef};
 
@@ -638,6 +638,66 @@ impl ApplySurroundReplaceChar {
 }
 
 impl Action for ApplySurroundReplaceChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Chord-completion action synthesized after a
+/// [`stoat_action::SelectTextobjectAround`] or
+/// [`stoat_action::SelectTextobjectInner`] arms the chord. Carries
+/// the captured mode plus the chord-completing character (the
+/// textobject type: `p`/`f`/`t`/`a`/`c`); workspace dispatch
+/// resolves the matching range and installs it as the primary
+/// selection.
+#[derive(Debug)]
+pub struct ApplyTextobjectChar {
+    pub mode: TextobjectMode,
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplyTextobjectCharDef;
+
+impl ActionDef for ApplyTextobjectCharDef {
+    fn name(&self) -> &'static str {
+        "ApplyTextobjectChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplyTextobjectChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending textobject-select chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending SelectTextobject chord with the chord-completing character; replaces every selection with the textobject range. Synthesized by the input pipeline after a `SelectTextobjectAround` / `SelectTextobjectInner` action arms the chord; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplyTextobjectChar {
+    pub const DEF: &ApplyTextobjectCharDef = &ApplyTextobjectCharDef;
+}
+
+impl Action for ApplyTextobjectChar {
     fn def(&self) -> &'static dyn ActionDef {
         Self::DEF
     }

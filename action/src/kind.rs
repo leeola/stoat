@@ -301,6 +301,7 @@ pub enum ActionKind {
     ApplySurroundAddChar,
     ApplySurroundDeleteChar,
     ApplySurroundReplaceChar,
+    ApplyTextobjectChar,
     PickerSelectPrev,
     PickerSelectNext,
     PickerConfirm,
