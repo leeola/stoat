@@ -3051,4 +3051,185 @@ mod tests {
         let err = outcome.expect("Editor::deserialize is unimplemented");
         assert!(matches!(err, ItemError::Deserialize { .. }));
     }
+
+    fn set_single_selection(
+        editor: &Entity<Editor>,
+        cx: &mut TestAppContext,
+        start: usize,
+        end: usize,
+    ) {
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let start_anchor = snapshot.anchor_at(start, Bias::Right);
+            let end_anchor = snapshot.anchor_at(end, Bias::Left);
+            let id = ed.selections.all_anchors().first().map_or(1, |s| s.id);
+            ed.selections.replace_with(
+                vec![Selection {
+                    id,
+                    start: start_anchor,
+                    end: end_anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }],
+                &snapshot,
+            );
+        });
+    }
+
+    #[test]
+    fn delete_selections_drops_non_empty_and_collapses_cursor() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello world");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        editor.update(&mut cx, |ed, cx| ed.delete_selections(cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), " world");
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 0);
+            assert_eq!(snap.resolve_anchor(&sel.end), 0);
+        });
+    }
+
+    #[test]
+    fn delete_selections_skips_empty_selections() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+        set_single_selection(&editor, &mut cx, 2, 2);
+
+        editor.update(&mut cx, |ed, cx| ed.delete_selections(cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello");
+    }
+
+    #[test]
+    fn delete_around_cursors_backward_removes_char_before_cursor() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "abc");
+        set_single_selection(&editor, &mut cx, 2, 2);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.delete_around_cursors(DeleteDirection::Backward, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "ac");
+    }
+
+    #[test]
+    fn delete_around_cursors_forward_removes_char_after_cursor() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "abc");
+        set_single_selection(&editor, &mut cx, 1, 1);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.delete_around_cursors(DeleteDirection::Forward, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "ac");
+    }
+
+    #[test]
+    fn delete_around_cursors_backward_respects_utf8_boundaries() {
+        let mut cx = TestAppContext::single();
+        // Each emoji is 4 bytes in UTF-8.
+        let (buffer, editor) = new_editor(&mut cx, "a\u{1F600}b");
+        let snap = editor.read_with(&cx, |ed, cx| ed.multi_buffer.read(cx).snapshot());
+        let after_emoji = snap.rope().point_to_offset(stoat_text::Point::new(0, 5));
+        set_single_selection(&editor, &mut cx, after_emoji, after_emoji);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.delete_around_cursors(DeleteDirection::Backward, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "ab");
+    }
+
+    #[test]
+    fn yank_payload_joins_selections_by_newline() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello world");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        let payload = editor.read_with(&cx, |ed, cx| ed.yank_payload(cx));
+        assert_eq!(payload, Some("hello".to_string()));
+    }
+
+    #[test]
+    fn yank_payload_returns_none_for_only_empty_selections() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        set_single_selection(&editor, &mut cx, 2, 2);
+
+        let payload = editor.read_with(&cx, |ed, cx| ed.yank_payload(cx));
+        assert_eq!(payload, None);
+    }
+
+    #[test]
+    fn paste_at_selections_after_inserts_at_selection_end() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello world");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.paste_at_selections("XYZ", PastePosition::After, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "helloXYZ world");
+    }
+
+    #[test]
+    fn paste_at_selections_before_inserts_at_selection_start() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello world");
+        set_single_selection(&editor, &mut cx, 6, 11);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.paste_at_selections("XYZ", PastePosition::Before, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello XYZworld");
+    }
+
+    #[test]
+    fn collapse_selections_to_start_pins_cursor_at_left() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        editor.update(&mut cx, |ed, cx| ed.collapse_selections_to_start(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 0);
+            assert_eq!(snap.resolve_anchor(&sel.end), 0);
+        });
+    }
+
+    #[test]
+    fn collapse_selections_to_end_pins_cursor_at_right() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        editor.update(&mut cx, |ed, cx| ed.collapse_selections_to_end(cx));
+        cx.run_until_parked();
+
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 5);
+            assert_eq!(snap.resolve_anchor(&sel.end), 5);
+        });
+    }
 }
