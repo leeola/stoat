@@ -1480,6 +1480,78 @@ impl Editor {
         Some(pairs)
     }
 
+    /// Find the number near each selection head via
+    /// [`stoat_text::find_number_seeking`], compute the new
+    /// value via
+    /// [`stoat::action_handlers::movement::compute_number_delta`],
+    /// and apply the edits. Cursors that land on the same
+    /// number range share one edit. Re-anchors affected
+    /// selections to span the new text. No-op when no cursor
+    /// has a number nearby on its line.
+    pub fn handle_number_delta(&mut self, delta: i64, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "handle_number_delta on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+        let mut edits: Vec<(usize, usize, usize, String)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope().clone();
+            let mut seen = std::collections::HashSet::<(usize, usize)>::new();
+            self.selections
+                .all_anchors()
+                .iter()
+                .filter_map(|sel| {
+                    let head_offset = snapshot.resolve_anchor(&sel.head());
+                    let num_match = stoat_text::find_number_seeking(&rope, head_offset)?;
+                    let key = (num_match.range.start, num_match.range.end);
+                    if !seen.insert(key) {
+                        return None;
+                    }
+                    let text = rope
+                        .slice(num_match.range.start..num_match.range.end)
+                        .to_string();
+                    let new_text = stoat::action_handlers::movement::compute_number_delta(
+                        &text,
+                        num_match.kind,
+                        delta,
+                    )?;
+                    if new_text == text {
+                        return None;
+                    }
+                    Some((sel.id, num_match.range.start, num_match.range.end, new_text))
+                })
+                .collect()
+        };
+        if edits.is_empty() {
+            return;
+        }
+        edits.sort_by_key(|(_, s, _, _)| *s);
+        for (_, s, e, new_text) in edits.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*s..*e, new_text, cx));
+        }
+        let edited_ranges: std::collections::HashMap<usize, (usize, usize)> = edits
+            .iter()
+            .map(|(id, s, _, new_text)| (*id, (*s, *s + new_text.len())))
+            .collect();
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| {
+            let mut new = sel.clone();
+            if let Some((s, e)) = edited_ranges.get(&sel.id) {
+                new.start = new_snapshot.anchor_at(*s, Bias::Left);
+                new.end = new_snapshot.anchor_at(*e, Bias::Right);
+            }
+            new
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     /// Pop up to `count` entries off the active buffer's undo
     /// stack, applying each in reverse and re-anchoring selections
     /// against the resulting snapshot. Stops early when the stack
@@ -4467,5 +4539,101 @@ mod tests {
 
         let result = editor.read_with(&cx, |ed, cx| ed.cursor_after_only_whitespace(cx));
         assert!(result);
+    }
+
+    #[test]
+    fn handle_number_delta_increments_decimal_at_cursor() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "x = 41");
+        set_single_selection(&editor, &mut cx, 4, 4);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "x = 42");
+    }
+
+    #[test]
+    fn handle_number_delta_decrements_decimal() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "5");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(-1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "4");
+    }
+
+    #[test]
+    fn handle_number_delta_walks_forward_to_first_digit() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "x = 9");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "x = 10");
+    }
+
+    #[test]
+    fn handle_number_delta_no_number_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "no digits here");
+        set_single_selection(&editor, &mut cx, 3, 3);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "no digits here");
+    }
+
+    #[test]
+    fn handle_number_delta_increments_hex_and_preserves_case() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "0xFF");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "0x100");
+    }
+
+    #[test]
+    fn handle_number_delta_increments_binary() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "0b0011");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "0b0100");
+    }
+
+    #[test]
+    fn handle_number_delta_increments_negative_decimal_toward_zero() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "-3");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(1, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "-2");
+    }
+
+    #[test]
+    fn handle_number_delta_count_three_adds_three() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "10");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_number_delta(3, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "13");
     }
 }

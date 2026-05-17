@@ -9,7 +9,7 @@ mod help;
 pub(crate) mod lsp;
 pub(crate) mod macro_recording;
 pub(crate) mod marks;
-pub(crate) mod movement;
+pub mod movement;
 mod palette;
 mod pane;
 mod prompt;

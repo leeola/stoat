@@ -871,6 +871,14 @@ impl Workspace {
             ActionKind::TriggerCompletion => {
                 crate::editor::actions::smart_tab::handle_trigger_completion(self, cx);
             },
+            ActionKind::Increment => {
+                let count = self.take_count(cx);
+                crate::editor::actions::numbers::handle_increment(self, count, cx);
+            },
+            ActionKind::Decrement => {
+                let count = self.take_count(cx);
+                crate::editor::actions::numbers::handle_decrement(self, count, cx);
+            },
             ActionKind::CodeAction => self.dispatch_code_action(window, cx),
             ActionKind::GotoDefinition => {
                 crate::lsp::goto::spawn_goto(
@@ -5088,6 +5096,48 @@ mod tests {
         sm.read_with(vcx, |sm, _| assert!(sm.pending_macro_replay()));
         vcx.simulate_keystrokes("escape");
         sm.read_with(vcx, |sm, _| assert!(!sm.pending_macro_replay()));
+    }
+
+    #[test]
+    fn increment_dispatch_adds_one_to_number_under_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "42");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::Increment);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "43");
+    }
+
+    #[test]
+    fn decrement_dispatch_subtracts_one_from_number() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "100");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 1);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::Decrement);
+        vcx.run_until_parked();
+
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "99");
     }
 
     #[test]

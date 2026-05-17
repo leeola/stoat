@@ -955,7 +955,7 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<String> {
+pub fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<String> {
     match kind {
         NumberKind::Decimal => {
             let parsed = text.parse::<i64>().ok()?;
