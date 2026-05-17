@@ -33,14 +33,14 @@ impl SelectionsCollection {
         &self.disjoint
     }
 
-    pub(crate) fn newest_anchor(&self) -> &Selection<Anchor> {
+    pub fn newest_anchor(&self) -> &Selection<Anchor> {
         self.disjoint
             .iter()
             .max_by_key(|s| s.id)
             .expect("SelectionsCollection invariant: at least one selection")
     }
 
-    pub(crate) fn insert_cursor(
+    pub fn insert_cursor(
         &mut self,
         head: Anchor,
         goal: SelectionGoal,
@@ -71,7 +71,7 @@ impl SelectionsCollection {
         self.disjoint.insert(pos, selection);
     }
 
-    pub(crate) fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
+    pub fn set_single_range(&mut self, start: Anchor, end: Anchor, goal: SelectionGoal) {
         let id = self.next_selection_id;
         self.next_selection_id += 1;
         self.disjoint = vec![Selection {
@@ -83,12 +83,12 @@ impl SelectionsCollection {
         }];
     }
 
-    pub(crate) fn keep_primary(&mut self) {
+    pub fn keep_primary(&mut self) {
         let primary = self.newest_anchor().clone();
         self.disjoint = vec![primary];
     }
 
-    pub(crate) fn remove_primary(&mut self) {
+    pub fn remove_primary(&mut self) {
         if self.disjoint.len() < 2 {
             return;
         }
@@ -96,7 +96,7 @@ impl SelectionsCollection {
         self.disjoint.retain(|s| s.id != primary_id);
     }
 
-    pub(crate) fn rotate_primary_by(&mut self, forward: bool, count: u32) {
+    pub fn rotate_primary_by(&mut self, forward: bool, count: u32) {
         if self.disjoint.len() < 2 || count == 0 {
             return;
         }
@@ -133,7 +133,7 @@ impl SelectionsCollection {
     /// an empty vec keeps the original selection unchanged; returning a
     /// non-empty vec replaces it with the pieces, each receiving a fresh id
     /// from this collection's allocator.
-    pub(crate) fn split_each<F>(&mut self, snapshot: &MultiBufferSnapshot, mut split: F)
+    pub fn split_each<F>(&mut self, snapshot: &MultiBufferSnapshot, mut split: F)
     where
         F: FnMut(&Selection<Anchor>) -> Vec<Selection<Anchor>>,
     {
