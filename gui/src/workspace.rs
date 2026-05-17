@@ -2,6 +2,7 @@ use crate::{
     buffer::Buffer,
     buffer_registry::{BufferRegistry, BufferRegistryEvent},
     conflict_item::{ConflictItem, ConflictSide},
+    diagnostics::DiagnosticSet,
     diff_coordinator::DiffCoordinator,
     diff_map::DiffMap,
     display_map::DisplayMap,
@@ -75,6 +76,7 @@ pub struct Workspace {
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
     lsp_state: Entity<LspState>,
+    diagnostics: Entity<DiagnosticSet>,
     workspace_label: Entity<WorkspaceLabel>,
     active_file_label: Entity<ActiveFileLabel>,
     cursor_position: Entity<CursorPosition>,
@@ -178,6 +180,7 @@ impl Workspace {
             .collect();
 
         let lsp_state = cx.new(|_| LspState::new());
+        let diagnostics = cx.new(|_| DiagnosticSet::new());
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
         let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
@@ -254,6 +257,7 @@ impl Workspace {
             input_state_machine,
             editor_input,
             lsp_state,
+            diagnostics,
             workspace_label,
             active_file_label,
             cursor_position,
@@ -421,11 +425,13 @@ impl Workspace {
                 cx.new(|cx| DiffMap::new(buffer, cx))
             };
             let workspace_handle = cx.weak_entity();
+            let workspace_diagnostics = self.diagnostics.clone();
             let editor = cx
                 .new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
             editor.update(cx, |ed, cx| {
                 ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(absolute.clone()), cx);
+                ed.set_diagnostic_set(Some(workspace_diagnostics), cx);
                 ed.install_hover_popup(cx);
                 ed.install_completion_popup(cx);
                 ed.install_inlay_hints(cx);
@@ -503,6 +509,10 @@ impl Workspace {
 
     pub fn lsp_state(&self) -> &Entity<LspState> {
         &self.lsp_state
+    }
+
+    pub fn diagnostics(&self) -> &Entity<DiagnosticSet> {
+        &self.diagnostics
     }
 
     pub fn lsp_progress(&self) -> &Entity<LspProgress> {
@@ -1250,6 +1260,12 @@ impl Workspace {
             },
             ActionKind::OpenWorkspaceSymbolPicker => {
                 crate::workspace_symbol_picker::open_workspace_symbol_picker(self, window, cx)
+            },
+            ActionKind::OpenDiagnosticsPicker => {
+                crate::diagnostics_picker::open_diagnostics_picker(self, window, cx)
+            },
+            ActionKind::OpenWorkspaceDiagnosticsPicker => {
+                crate::diagnostics_picker::open_workspace_diagnostics_picker(self, window, cx)
             },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {

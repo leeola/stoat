@@ -21,6 +21,7 @@ mod command_palette;
 mod commit_list;
 mod conflict_item;
 mod diagnostics;
+mod diagnostics_picker;
 mod diff_coordinator;
 mod diff_map;
 mod display_map;
