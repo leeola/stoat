@@ -35,7 +35,7 @@ pub mod paths;
 pub(crate) mod permission_prompt;
 pub(crate) mod quit_all_confirm;
 pub mod rebase;
-mod register;
+pub mod register;
 pub(crate) mod render;
 pub mod review;
 pub mod review_apply;

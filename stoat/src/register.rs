@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
-pub(crate) enum Register {
+pub enum Register {
     Unnamed,
     Named(char),
     /// System clipboard, addressed by `*` or `+` in the register
@@ -32,13 +32,13 @@ pub(crate) enum Register {
 }
 
 #[derive(Debug, Default)]
-pub(crate) struct RegisterStore {
+pub struct RegisterStore {
     unnamed: Option<String>,
     named: HashMap<char, String>,
 }
 
 impl RegisterStore {
-    pub(crate) fn new() -> Self {
+    pub fn new() -> Self {
         Self::default()
     }
 
@@ -46,7 +46,7 @@ impl RegisterStore {
     /// registers (clipboard, search, blackhole, selection index,
     /// last insert) are filtered by the action layer before
     /// reaching this store and silently no-op when passed through.
-    pub(crate) fn write(&mut self, register: Register, content: String) {
+    pub fn write(&mut self, register: Register, content: String) {
         match register {
             Register::Unnamed => self.unnamed = Some(content),
             Register::Named(c) => {
@@ -64,7 +64,7 @@ impl RegisterStore {
     /// registers are routed through the action layer to their
     /// backing state and bypass this store; reading them here
     /// always returns `None`.
-    pub(crate) fn read(&self, register: Register) -> Option<&str> {
+    pub fn read(&self, register: Register) -> Option<&str> {
         match register {
             Register::Unnamed => self.unnamed.as_deref(),
             Register::Named(c) => self.named.get(&c).map(String::as_str),
