@@ -153,6 +153,53 @@ pub enum EditorEvent {
 
 impl EventEmitter<EditorEvent> for Editor {}
 
+/// Side of each selection that
+/// [`Editor::paste_at_selections`] inserts at.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum PastePosition {
+    /// Insert at every selection's start offset.
+    Before,
+    /// Insert at every selection's end offset.
+    After,
+}
+
+/// Direction the cursor widens by one UTF-8 character before
+/// [`Editor::delete_around_cursors`] deletes the covered range.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DeleteDirection {
+    /// Cover the character at or immediately after the cursor.
+    Forward,
+    /// Cover the character immediately before the cursor.
+    Backward,
+}
+
+/// Step one UTF-8 character forward in `rope` starting at byte
+/// `offset`. Returns `offset` unchanged when at or past end-of-rope.
+fn step_char_forward(rope: &stoat_text::Rope, offset: usize) -> usize {
+    let len = rope.len();
+    if offset >= len {
+        return offset;
+    }
+    let mut probe = offset.saturating_add(1).min(len);
+    while probe < len && !rope.is_char_boundary(probe) {
+        probe += 1;
+    }
+    probe
+}
+
+/// Step one UTF-8 character backward in `rope` starting at byte
+/// `offset`. Returns `offset` unchanged when at start-of-rope.
+fn step_char_backward(rope: &stoat_text::Rope, offset: usize) -> usize {
+    if offset == 0 {
+        return 0;
+    }
+    let mut probe = offset - 1;
+    while probe > 0 && !rope.is_char_boundary(probe) {
+        probe -= 1;
+    }
+    probe
+}
+
 #[derive(Default)]
 struct ReviewRenderData {
     chunk_markers: Vec<(u32, ChunkStatus)>,
@@ -408,6 +455,289 @@ impl Editor {
         new_disjoint.sort_by_key(|s| s.id);
 
         self.selections.replace_with(new_disjoint, &new_snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Delete the contents of every non-empty selection and collapse
+    /// each affected selection to a cursor at the deletion's start.
+    /// Empty selections are left untouched. Multi-excerpt buffers
+    /// are logged and skipped, matching
+    /// [`Self::apply_text_to_all_cursors`].
+    pub fn delete_selections(&mut self, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "delete_selections on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+        let mut ascending: Vec<(usize, std::ops::Range<usize>)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            self.selections
+                .all_anchors()
+                .iter()
+                .filter_map(|sel| {
+                    let start = snapshot.resolve_anchor(&sel.start);
+                    let end = snapshot.resolve_anchor(&sel.end);
+                    let (lo, hi) = if start <= end {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    };
+                    (lo != hi).then_some((sel.id, lo..hi))
+                })
+                .collect()
+        };
+        if ascending.is_empty() {
+            return;
+        }
+        ascending.sort_by_key(|(_, range)| range.start);
+
+        let mut cumulative_shift: isize = 0;
+        let mut post_offsets: Vec<(usize, usize)> = Vec::with_capacity(ascending.len());
+        for (id, range) in &ascending {
+            let post = (range.start as isize + cumulative_shift) as usize;
+            post_offsets.push((*id, post));
+            cumulative_shift -= (range.end - range.start) as isize;
+        }
+
+        for (_id, range) in ascending.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(range.clone(), "", cx));
+        }
+
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        let deleted: std::collections::HashSet<usize> =
+            post_offsets.iter().map(|(id, _)| *id).collect();
+        let post_map: std::collections::HashMap<usize, usize> = post_offsets.into_iter().collect();
+        self.selections.transform(&new_snapshot, |sel| {
+            if !deleted.contains(&sel.id) {
+                return sel.clone();
+            }
+            let offset = post_map[&sel.id];
+            let anchor = new_snapshot.anchor_at(offset, Bias::Left);
+            Selection {
+                id: sel.id,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Widen each empty (cursor-only) selection by one UTF-8
+    /// character in `direction`, then delete the covered range and
+    /// collapse to a cursor at the resulting position. Selections
+    /// that already span text delegate to [`Self::delete_selections`].
+    /// No-op when the cursor sits at the boundary (start of buffer
+    /// for `Backward`, end of buffer for `Forward`).
+    pub fn delete_around_cursors(
+        &mut self,
+        direction: DeleteDirection,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let has_nonempty = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            self.selections
+                .all_anchors()
+                .iter()
+                .any(|sel| snapshot.resolve_anchor(&sel.start) != snapshot.resolve_anchor(&sel.end))
+        };
+        if has_nonempty {
+            self.delete_selections(cx);
+            return;
+        }
+        if self.multi_buffer.read(cx).as_singleton().is_none() {
+            tracing::warn!(
+                target: "stoat::editor",
+                "delete_around_cursors on multi-excerpt buffer is not yet supported",
+            );
+            return;
+        }
+
+        let widened: Vec<Selection<Anchor>> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope();
+            self.selections
+                .all_anchors()
+                .iter()
+                .map(|sel| {
+                    let head = snapshot.resolve_anchor(&sel.start);
+                    let (lo, hi) = match direction {
+                        DeleteDirection::Forward => {
+                            let next = step_char_forward(rope, head);
+                            (head, next)
+                        },
+                        DeleteDirection::Backward => {
+                            let prev = step_char_backward(rope, head);
+                            (prev, head)
+                        },
+                    };
+                    let start = snapshot.anchor_at(lo, Bias::Right);
+                    let end = snapshot.anchor_at(hi, Bias::Left);
+                    Selection {
+                        id: sel.id,
+                        start,
+                        end,
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    }
+                })
+                .collect()
+        };
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.replace_with(widened, &snapshot);
+        self.delete_selections(cx);
+    }
+
+    /// Build the join-by-newline yank payload from each selection's
+    /// covered text. Returns `None` when every selection is empty,
+    /// matching the TUI's yank no-op-on-empty contract; otherwise
+    /// the returned string contains the per-selection slices joined
+    /// by `"\n"` in selection order (`SelectionsCollection::all_anchors`).
+    pub fn yank_payload(&self, cx: &App) -> Option<String> {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope();
+        let mut pieces: Vec<String> = Vec::new();
+        let mut any_nonempty = false;
+        for sel in self.selections.all_anchors() {
+            let start = snapshot.resolve_anchor(&sel.start);
+            let end = snapshot.resolve_anchor(&sel.end);
+            let (lo, hi) = if start <= end {
+                (start, end)
+            } else {
+                (end, start)
+            };
+            if lo != hi {
+                any_nonempty = true;
+            }
+            pieces.push(rope.slice(lo..hi).to_string());
+        }
+        if !any_nonempty {
+            return None;
+        }
+        Some(pieces.join("\n"))
+    }
+
+    /// Insert `text` at a per-selection anchor side and collapse
+    /// each selection to a cursor at the end of the inserted text.
+    /// `position` selects whether the insert lands at every
+    /// selection's start (before) or end (after) offset.
+    pub fn paste_at_selections(
+        &mut self,
+        text: &str,
+        position: PastePosition,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "paste_at_selections on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+        let mut ascending: Vec<(usize, usize)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            self.selections
+                .all_anchors()
+                .iter()
+                .map(|sel| {
+                    let start = snapshot.resolve_anchor(&sel.start);
+                    let end = snapshot.resolve_anchor(&sel.end);
+                    let (lo, hi) = if start <= end {
+                        (start, end)
+                    } else {
+                        (end, start)
+                    };
+                    let insertion = match position {
+                        PastePosition::Before => lo,
+                        PastePosition::After => hi,
+                    };
+                    (sel.id, insertion)
+                })
+                .collect()
+        };
+        ascending.sort_by_key(|(_, offset)| *offset);
+
+        let text_len = text.len();
+        let mut cumulative_shift: isize = 0;
+        let mut post_offsets: Vec<(usize, usize)> = Vec::with_capacity(ascending.len());
+        for (id, offset) in &ascending {
+            let post = (*offset as isize + cumulative_shift) as usize + text_len;
+            post_offsets.push((*id, post));
+            cumulative_shift += text_len as isize;
+        }
+
+        for (_id, offset) in ascending.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*offset..*offset, text, cx));
+        }
+
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        let mut new_disjoint: Vec<Selection<Anchor>> = post_offsets
+            .into_iter()
+            .map(|(id, post)| {
+                let anchor = new_snapshot.anchor_at(post, Bias::Left);
+                Selection {
+                    id,
+                    start: anchor,
+                    end: anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }
+            })
+            .collect();
+        new_disjoint.sort_by_key(|s| s.id);
+        self.selections.replace_with(new_disjoint, &new_snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Collapse each selection to a cursor at its start anchor.
+    /// Used by the `Insert` action to enter insert mode at the
+    /// left side of every selection.
+    pub fn collapse_selections_to_start(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&snapshot, |sel| {
+            let anchor = sel.start;
+            Selection {
+                id: sel.id,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Collapse each selection to a cursor at its end anchor. Used
+    /// by the `Append` action to enter insert mode at the right
+    /// side of every selection.
+    pub fn collapse_selections_to_end(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&snapshot, |sel| {
+            let anchor = sel.end;
+            Selection {
+                id: sel.id,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: SelectionGoal::None,
+            }
+        });
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }

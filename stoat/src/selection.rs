@@ -121,7 +121,7 @@ impl SelectionsCollection {
         self.disjoint[new_idx].id = new_id;
     }
 
-    pub(crate) fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
+    pub fn transform<F>(&mut self, snapshot: &MultiBufferSnapshot, mut f: F)
     where
         F: FnMut(&Selection<Anchor>) -> Selection<Anchor>,
     {
