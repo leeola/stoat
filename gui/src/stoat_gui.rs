@@ -51,6 +51,7 @@ mod reword_modal;
 mod settings;
 mod status_bar;
 mod stoat_app;
+mod symbol_picker;
 mod tab_bar;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;

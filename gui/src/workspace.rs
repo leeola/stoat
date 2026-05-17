@@ -1245,6 +1245,9 @@ impl Workspace {
             ActionKind::OpenBufferPicker => {
                 crate::buffer_picker::open_buffer_picker(self, window, cx)
             },
+            ActionKind::OpenSymbolPicker => {
+                crate::symbol_picker::open_symbol_picker(self, window, cx)
+            },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action
