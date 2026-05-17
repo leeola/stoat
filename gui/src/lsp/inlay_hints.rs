@@ -39,7 +39,6 @@ const DEFAULT_VIEWPORT_ROWS: u32 = 80;
 /// launching a new child process per request.
 pub struct InlayHintsManager {
     editor: WeakEntity<Editor>,
-    display_map: WeakEntity<DisplayMap>,
     current_ids: Vec<InlayId>,
     last_signature: Option<RequestSignature>,
     pending_task: Option<Task<()>>,
@@ -57,13 +56,11 @@ struct RequestSignature {
 impl InlayHintsManager {
     pub fn new(editor: Entity<Editor>, cx: &mut Context<'_, Self>) -> Self {
         let weak_editor = editor.downgrade();
-        let weak_display = editor.read(cx).display_map().downgrade();
         let subscription = cx.subscribe(&editor, |this, _editor, _event: &EditorEvent, cx| {
             this.reconcile(cx);
         });
         Self {
             editor: weak_editor,
-            display_map: weak_display,
             current_ids: Vec::new(),
             last_signature: None,
             pending_task: None,
@@ -82,6 +79,7 @@ impl InlayHintsManager {
         if !editor.read(cx).mode().is_full() {
             return;
         }
+        let display_map = editor.read(cx).display_map().downgrade();
         let Some(request) = InlayHintsRequest::build(&editor, cx) else {
             return;
         };
@@ -89,7 +87,6 @@ impl InlayHintsManager {
             return;
         }
         self.last_signature = Some(request.signature.clone());
-        let display_map = self.display_map.clone();
         let signature = request.signature.clone();
         let task = cx.spawn(async move |this, cx| {
             let outcome = request.run().await;
@@ -135,9 +132,9 @@ struct InlayHintsRequest {
 
 impl InlayHintsRequest {
     fn build(editor: &Entity<Editor>, cx: &mut Context<'_, InlayHintsManager>) -> Option<Self> {
-        let host = cx.global::<LspHostGlobal>().0.clone();
         let path = editor.read(cx).file_path()?.to_path_buf();
-        let language = cx.global::<LanguageRegistry>().0.for_path(&path)?;
+        let host = cx.try_global::<LspHostGlobal>()?.0.clone();
+        let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
         let uri = path_to_uri(&path)?;
         let display_map = editor.read(cx).display_map().clone();
         let display_snapshot = display_map.update(cx, |dm, _| dm.snapshot());
