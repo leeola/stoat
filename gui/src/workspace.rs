@@ -1348,6 +1348,26 @@ impl Workspace {
             ActionKind::RemoveSelections => {
                 crate::editor::actions::multi_cursor::handle_remove_selections(self, window, cx)
             },
+            ActionKind::RecordMacro => self.dispatch_record_macro(cx),
+            ActionKind::ReplayMacro => self.dispatch_replay_macro(cx),
+            ActionKind::SelectRegister => self.dispatch_select_register(cx),
+            ActionKind::ApplyRegisterSelectChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplyRegisterSelectChar>()
+                {
+                    self.apply_register_select_char(apply.ch);
+                }
+            },
+            ActionKind::ApplyReplayMacroChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplyReplayMacroChar>()
+                {
+                    let ch = apply.ch;
+                    self.apply_replay_macro_char(ch, window, cx);
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1535,6 +1555,68 @@ impl Workspace {
     ) {
         self.input_state_machine
             .update(cx, |sm, cx| sm.set_pending_mark(request, cx));
+    }
+
+    /// `RecordMacro` toggles the input state machine's macro
+    /// recording. On Off->On, the register defaults to the
+    /// workspace's pending [`stoat::register::Register`] (or
+    /// `Unnamed`); on On->Off, the captured sequence lands in
+    /// the input state machine's macro store.
+    fn dispatch_record_macro(&mut self, cx: &mut Context<'_, Self>) {
+        let register = self.consume_selected_register();
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.toggle_macro_recording(register, cx));
+    }
+
+    fn dispatch_replay_macro(&mut self, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.arm_replay_macro(cx));
+    }
+
+    fn dispatch_select_register(&mut self, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.arm_select_register(cx));
+    }
+
+    fn apply_register_select_char(&mut self, ch: char) {
+        if let Some(register) = stoat::action_handlers::yank::register_for_char(ch) {
+            self.set_selected_register(register);
+        }
+    }
+
+    /// Re-feed each captured keystroke through the input state
+    /// machine and dispatch the resulting actions. Resolves the
+    /// chord-completing char to a [`stoat::register::Register`]
+    /// via [`stoat::action_handlers::yank::register_for_char`];
+    /// no-op when the char does not name a register or the
+    /// register has no stored macro.
+    ///
+    /// FIXME: nested replay loops are not guarded -- a macro that
+    /// arms ReplayMacro then types a register char will recurse.
+    fn apply_replay_macro_char(
+        &mut self,
+        ch: char,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(register) = stoat::action_handlers::yank::register_for_char(ch) else {
+            return;
+        };
+        let Some(keys) = self
+            .input_state_machine
+            .read(cx)
+            .macro_for_register(register)
+        else {
+            return;
+        };
+        for ks in keys {
+            let actions = self
+                .input_state_machine
+                .update(cx, |sm, cx| sm.feed(&ks, cx));
+            for action in actions {
+                self.dispatch_action(action, window, cx);
+            }
+        }
     }
 
     fn dispatch_save_selection(&mut self, cx: &mut Context<'_, Self>) {
@@ -4828,6 +4910,126 @@ mod tests {
 
         assert_eq!(cursor_offsets(vcx, &editor), vec![4]);
         sm.read_with(vcx, |sm, _| assert!(sm.pending_find().is_none()));
+    }
+
+    #[test]
+    fn record_macro_starts_and_stops_recording() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::RecordMacro);
+        sm.read_with(vcx, |sm, _| {
+            assert!(sm.macro_recording().is_some(), "recording armed");
+        });
+
+        dispatch(&ws, vcx, stoat_action::RecordMacro);
+        sm.read_with(vcx, |sm, _| {
+            assert!(sm.macro_recording().is_none(), "recording stopped");
+            assert!(sm
+                .macros()
+                .contains_key(&stoat::register::Register::Unnamed));
+        });
+    }
+
+    #[test]
+    fn record_then_replay_repeats_movement() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::RecordMacro);
+        vcx.simulate_keystrokes("l l l");
+        dispatch(&ws, vcx, stoat_action::RecordMacro);
+        assert_eq!(cursor_offsets(vcx, &editor), vec![3]);
+
+        dispatch(&ws, vcx, stoat_action::ReplayMacro);
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_macro_replay()));
+        vcx.simulate_keystrokes("\"");
+        sm.read_with(vcx, |sm, _| assert!(!sm.pending_macro_replay()));
+        assert_eq!(cursor_offsets(vcx, &editor), vec![6]);
+    }
+
+    #[test]
+    fn record_macro_excludes_record_keystroke() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::RecordMacro);
+        vcx.simulate_keystrokes("l");
+        dispatch(&ws, vcx, stoat_action::RecordMacro);
+
+        sm.read_with(vcx, |sm, _| {
+            let stored = sm
+                .macros()
+                .get(&stoat::register::Register::Unnamed)
+                .expect("macro stored");
+            assert_eq!(
+                stored.len(),
+                1,
+                "only the l keystroke captured, not the dispatched RecordMacro",
+            );
+        });
+    }
+
+    #[test]
+    fn select_register_chord_sets_named_register() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::SelectRegister);
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_register_select()));
+        vcx.simulate_keystrokes("a");
+        sm.read_with(vcx, |sm, _| assert!(!sm.pending_register_select()));
+        ws.read_with(vcx, |w, _| {
+            // consume_selected_register is &mut so we re-read by calling once via update.
+            let _ = w;
+        });
+        ws.update(vcx, |w, _| {
+            assert_eq!(
+                w.consume_selected_register(),
+                stoat::register::Register::Named('a'),
+            );
+        });
+    }
+
+    #[test]
+    fn replay_with_empty_register_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 1);
+
+        dispatch(&ws, vcx, stoat_action::ReplayMacro);
+        vcx.simulate_keystrokes("a");
+        sm.read_with(vcx, |sm, _| assert!(!sm.pending_macro_replay()));
+        assert_eq!(cursor_offsets(vcx, &editor), vec![1]);
+    }
+
+    #[test]
+    fn replay_chord_cleared_by_non_char_key() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::ReplayMacro);
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_macro_replay()));
+        vcx.simulate_keystrokes("escape");
+        sm.read_with(vcx, |sm, _| assert!(!sm.pending_macro_replay()));
     }
 
     #[test]

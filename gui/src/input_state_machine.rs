@@ -1,5 +1,5 @@
 use crate::{
-    actions::{ApplyFindChar, ApplyMarkChar},
+    actions::{ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplayMacroChar},
     editor::{
         actions::{marks::MarkRequest, movement::FindKind},
         Editor,
@@ -8,10 +8,11 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gpui::{Context, FocusHandle, Keystroke, WeakEntity, Window};
-use std::ops::Range;
+use std::{collections::HashMap, ops::Range};
 use stoat::{
     keymap::{Keymap, KeymapState, StateValue},
     keymap_state::{normalize_shift_event, resolve_action},
+    register::Register,
 };
 use stoat_config::KeyPart;
 
@@ -93,8 +94,36 @@ pub struct InputStateMachine {
     /// keystroke clears the chord and falls through to the normal
     /// keymap path.
     pending_mark: Option<MarkRequest>,
+    /// Active after-key chord set by the [`stoat_action::SelectRegister`]
+    /// action. The next chord-completing char keystroke is consumed
+    /// and dispatched through [`ApplyRegisterSelectChar`]; any
+    /// other keystroke clears the chord.
+    pending_register_select: bool,
+    /// Active after-key chord set by the [`stoat_action::ReplayMacro`]
+    /// action. The next chord-completing char keystroke is consumed
+    /// and dispatched through [`ApplyReplayMacroChar`].
+    pending_macro_replay: bool,
+    /// In-progress recording started by
+    /// [`stoat_action::RecordMacro`]. When `Some`, every keystroke
+    /// that does NOT resolve to `RecordMacro` is appended to
+    /// `keys`; toggling `RecordMacro` again moves the captured
+    /// sequence into `macros` keyed by `register`.
+    macro_recording: Option<MacroRecording>,
+    /// In-process macro store keyed by [`Register`]. Populated by
+    /// [`toggle_macro_recording`] when a recording ends; consumed
+    /// by [`ApplyReplayMacroChar`] dispatch.
+    macros: HashMap<Register, Vec<Keystroke>>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
+}
+
+/// In-progress macro recording. `keys` grows on every keystroke
+/// captured by [`InputStateMachine::feed`] that does not resolve
+/// to the [`stoat_action::RecordMacro`] toggle.
+#[derive(Debug)]
+pub struct MacroRecording {
+    pub register: Register,
+    pub keys: Vec<Keystroke>,
 }
 
 /// Chord state armed by the Find/Till priming actions
@@ -128,6 +157,10 @@ impl InputStateMachine {
             editor_focus_target: None,
             pending_find: None,
             pending_mark: None,
+            pending_register_select: false,
+            pending_macro_replay: false,
+            macro_recording: None,
+            macros: HashMap::new(),
             workspace,
             keymap,
         }
@@ -410,6 +443,61 @@ impl InputStateMachine {
         cx.notify();
     }
 
+    pub fn pending_register_select(&self) -> bool {
+        self.pending_register_select
+    }
+
+    /// Arm the after-key register-select chord. The next
+    /// chord-completing char keystroke produces a
+    /// [`crate::actions::ApplyRegisterSelectChar`] action.
+    pub fn arm_select_register(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_register_select = true;
+        cx.notify();
+    }
+
+    pub fn pending_macro_replay(&self) -> bool {
+        self.pending_macro_replay
+    }
+
+    /// Arm the after-key macro-replay chord. The next
+    /// chord-completing char keystroke produces a
+    /// [`crate::actions::ApplyReplayMacroChar`] action.
+    pub fn arm_replay_macro(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_macro_replay = true;
+        cx.notify();
+    }
+
+    pub fn macro_recording(&self) -> Option<&MacroRecording> {
+        self.macro_recording.as_ref()
+    }
+
+    pub fn macros(&self) -> &HashMap<Register, Vec<Keystroke>> {
+        &self.macros
+    }
+
+    /// Toggle macro recording. Off -> start recording into
+    /// `register`. On -> stop, move the captured keystroke
+    /// sequence into `macros[recording.register]` (the register
+    /// chosen when recording started, not the argument here).
+    pub fn toggle_macro_recording(&mut self, register: Register, cx: &mut Context<'_, Self>) {
+        if let Some(rec) = self.macro_recording.take() {
+            self.macros.insert(rec.register, rec.keys);
+        } else {
+            self.macro_recording = Some(MacroRecording {
+                register,
+                keys: Vec::new(),
+            });
+        }
+        cx.notify();
+    }
+
+    /// Look up a stored macro by `register`, returning a cloned
+    /// keystroke vector (or `None` when no macro is stored for
+    /// that register). Used by the replay-chord dispatch.
+    pub fn macro_for_register(&self, register: Register) -> Option<Vec<Keystroke>> {
+        self.macros.get(&register).cloned()
+    }
+
     pub fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
     }
@@ -513,6 +601,27 @@ impl InputStateMachine {
             self.pending_mark = None;
             cx.notify();
         }
+
+        if count_active_mode && self.pending_register_select {
+            if let KeyCode::Char(ch) = event.code {
+                self.pending_register_select = false;
+                cx.notify();
+                return vec![Box::new(ApplyRegisterSelectChar { ch })];
+            }
+            self.pending_register_select = false;
+            cx.notify();
+        }
+
+        if count_active_mode && self.pending_macro_replay {
+            if let KeyCode::Char(ch) = event.code {
+                self.pending_macro_replay = false;
+                cx.notify();
+                return vec![Box::new(ApplyReplayMacroChar { ch })];
+            }
+            self.pending_macro_replay = false;
+            cx.notify();
+        }
+
         let digit = unmodified_ascii_digit(&event);
 
         if count_active_mode && self.pending_count.is_some() {
@@ -548,6 +657,15 @@ impl InputStateMachine {
             .iter()
             .filter_map(|ra| resolve_action(&ra.name, &ra.args))
             .collect();
+
+        if self.macro_recording.is_some() {
+            let is_record_toggle = resolved.iter().any(|ra| ra.name == "RecordMacro");
+            if !is_record_toggle {
+                if let Some(rec) = self.macro_recording.as_mut() {
+                    rec.keys.push(keystroke.clone());
+                }
+            }
+        }
 
         if !actions.is_empty() && self.pending_count.is_some() {
             self.consumed_count = self.pending_count.take();

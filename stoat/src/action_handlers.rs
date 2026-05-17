@@ -24,7 +24,7 @@ pub(crate) mod surround;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
 mod workspace;
-pub(crate) mod yank;
+pub mod yank;
 
 use crate::{
     app::{Stoat, UpdateEffect},
@@ -616,7 +616,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::Append
         | ActionKind::InsertNewline
         | ActionKind::DeleteForward
-        | ActionKind::DeleteBackward => UpdateEffect::None,
+        | ActionKind::DeleteBackward
+        | ActionKind::ApplyRegisterSelectChar
+        | ActionKind::ApplyReplayMacroChar => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

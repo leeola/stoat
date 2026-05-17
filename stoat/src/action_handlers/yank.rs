@@ -75,7 +75,7 @@ pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
 /// and the `SelectRegister` chord. `"` -> `Unnamed`; ASCII
 /// letter -> `Named`; helix special chars route to the matching
 /// special variant; any other char returns `None`.
-pub(crate) fn register_for_char(ch: char) -> Option<Register> {
+pub fn register_for_char(ch: char) -> Option<Register> {
     match ch {
         '"' => Some(Register::Unnamed),
         '*' | '+' => Some(Register::Clipboard),

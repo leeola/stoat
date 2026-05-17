@@ -358,6 +358,123 @@ impl Action for ApplyMarkChar {
     }
 }
 
+/// Chord-completion action synthesized by
+/// [`crate::input_state_machine::InputStateMachine::feed`] after a
+/// [`stoat_action::SelectRegister`] action arms the chord. Carries
+/// the chord-completing character; the workspace dispatch resolves
+/// it through [`stoat::action_handlers::yank::register_for_char`]
+/// and stores the matching [`stoat::register::Register`] in
+/// `Workspace::selected_register` for the next yank/paste.
+#[derive(Debug)]
+pub struct ApplyRegisterSelectChar {
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplyRegisterSelectCharDef;
+
+impl ActionDef for ApplyRegisterSelectCharDef {
+    fn name(&self) -> &'static str {
+        "ApplyRegisterSelectChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplyRegisterSelectChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending register-select chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending SelectRegister chord with the chord-completing character; sets the workspace's pending register for the next yank/paste. Synthesized by the input pipeline after a `SelectRegister` action arms the chord; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplyRegisterSelectChar {
+    pub const DEF: &ApplyRegisterSelectCharDef = &ApplyRegisterSelectCharDef;
+}
+
+impl Action for ApplyRegisterSelectChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Chord-completion action synthesized by
+/// [`crate::input_state_machine::InputStateMachine::feed`] after a
+/// [`stoat_action::ReplayMacro`] action arms the chord. Carries the
+/// chord-completing character; workspace dispatch resolves the
+/// register and re-feeds the stored keystroke sequence through the
+/// input pipeline.
+#[derive(Debug)]
+pub struct ApplyReplayMacroChar {
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplyReplayMacroCharDef;
+
+impl ActionDef for ApplyReplayMacroCharDef {
+    fn name(&self) -> &'static str {
+        "ApplyReplayMacroChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplyReplayMacroChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending replay-macro chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending ReplayMacro chord with the chord-completing character; resolves the register, looks up its stored macro, and re-feeds each captured keystroke through the input pipeline. Synthesized by the input pipeline after a `ReplayMacro` action arms the chord; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplyReplayMacroChar {
+    pub const DEF: &ApplyReplayMacroCharDef = &ApplyReplayMacroCharDef;
+}
+
+impl Action for ApplyReplayMacroChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

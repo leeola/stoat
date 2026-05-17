@@ -296,6 +296,8 @@ pub enum ActionKind {
     HoverAt,
     ApplyFindChar,
     ApplyMarkChar,
+    ApplyRegisterSelectChar,
+    ApplyReplayMacroChar,
     PickerSelectPrev,
     PickerSelectNext,
     PickerConfirm,
