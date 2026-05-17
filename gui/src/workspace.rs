@@ -291,6 +291,10 @@ impl Workspace {
         &self.pane_tree
     }
 
+    pub fn rebase_active(&self) -> Option<&ActiveRebase> {
+        self.rebase_active.as_ref()
+    }
+
     pub fn buffer_registry(&self) -> &Entity<BufferRegistry> {
         &self.buffer_registry
     }

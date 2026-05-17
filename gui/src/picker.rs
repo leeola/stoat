@@ -185,6 +185,9 @@ impl<D: PickerDelegate> Picker<D> {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
+        if self.delegate.handle_action(action, window, cx) {
+            return true;
+        }
         match action.kind() {
             ActionKind::PickerSelectPrev => {
                 self.move_selection(-1, cx);

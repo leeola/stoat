@@ -1,5 +1,6 @@
 use crate::{editor::Editor, picker::Picker};
 use gpui::{AnyElement, Context, Entity, Task, Window};
+use stoat_action::Action;
 
 /// Confirmation modifier carried by [`PickerDelegate::confirm`].
 ///
@@ -56,4 +57,18 @@ pub trait PickerDelegate: Sized + 'static {
     /// handle without reaching into the picker through its own
     /// context, which is being mutated while the delegate runs.
     fn on_attach(&mut self, _query_editor: &Entity<Editor>) {}
+
+    /// Claim a delegate-specific action before the picker's generic
+    /// dispatch path inspects it. Returns `true` when the delegate
+    /// consumed the action so the picker skips its own arms. The
+    /// default no-op returns `false` so generic delegates inherit
+    /// the picker's standard handling untouched.
+    fn handle_action(
+        &mut self,
+        _action: &dyn Action,
+        _window: &mut Window,
+        _cx: &mut Context<'_, Picker<Self>>,
+    ) -> bool {
+        false
+    }
 }

@@ -9,18 +9,22 @@
 //! providing each parameter in sequence before dispatch.
 
 use crate::{
+    commit_list::CommitListItem,
     editor::Editor,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
+    rebase_item::RebaseItem,
+    review_item::ReviewItem,
     theme::statusbar_text_color,
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, Context, Entity, HighlightStyle, IntoElement, ParentElement, SharedString,
-    Styled, StyledText, Task, WeakEntity, Window,
+    div, AnyElement, App, Context, Entity, HighlightStyle, IntoElement, ParentElement,
+    SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
+use stoat::rebase::RebasePause;
 use stoat_action::{
     registry::{self, RegistryEntry},
-    ParamValue,
+    ActionKind, ParamValue,
 };
 
 pub struct CommandPaletteDelegate {
@@ -39,6 +43,154 @@ pub struct CommandPaletteDelegate {
     /// picker through its own context because the picker is being
     /// mutated while the delegate runs.
     query_editor: Option<WeakEntity<Editor>>,
+    /// Listing mode -- [`PaletteScope::Active`] hides actions whose
+    /// [`action_is_available`] reads `false` against the captured
+    /// [`Self::availability`] snapshot. Flipped by
+    /// [`Self::toggle_scope`] when the [`ActionKind::PaletteScopeToggle`]
+    /// action reaches [`Self::handle_action`].
+    scope: PaletteScope,
+    /// Frozen [`Availability`] snapshot derived at open time. The
+    /// palette is modal, so workspace state can't drift while it is
+    /// up; refiltering reads this directly instead of recomputing.
+    availability: Availability,
+}
+
+/// Listing mode for [`CommandPaletteDelegate`]. Toggled between
+/// values by [`PaletteScopeToggle`].
+///
+/// [`PaletteScopeToggle`]: stoat_action::PaletteScopeToggle
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PaletteScope {
+    /// Only actions applicable to the captured [`Availability`].
+    Active,
+    /// Every `palette_visible()` action, regardless of availability.
+    All,
+}
+
+/// Snapshot of workspace state relevant to per-action availability.
+/// Derived once at palette-open via [`Availability::from_workspace`]
+/// so the scope filter is a cheap lookup on every keystroke.
+///
+/// Mirrors the TUI `stoat::command_palette::Availability` shape.
+/// `claude_focused` / `run_focused` always read `false` until the
+/// corresponding `ClaudeChat` / `Run` items land in the GUI.
+#[derive(Debug, Clone, Copy, Default)]
+pub struct Availability {
+    /// A `RebaseItem` is open in some pane (editable rebase plan).
+    pub in_rebase_plan: bool,
+    /// `Workspace::rebase_active.is_some()`: a rebase is mid-execution.
+    pub in_rebase_exec: bool,
+    /// The in-flight rebase is paused on [`RebasePause::Reword`].
+    pub in_rebase_reword: bool,
+    /// The in-flight rebase is paused on [`RebasePause::Conflict`].
+    pub in_conflict: bool,
+    /// A `ReviewItem` is open in some pane.
+    pub review_open: bool,
+    /// A `CommitListItem` is open in some pane.
+    pub commits_open: bool,
+    /// Focused pane hosts a Claude chat. Always `false` until the
+    /// Claude chat item lands.
+    pub claude_focused: bool,
+    /// Focused pane hosts a Run terminal. Always `false` until the
+    /// Run pane item lands.
+    pub run_focused: bool,
+}
+
+impl Availability {
+    /// Derive the availability snapshot from the active GUI workspace.
+    pub fn from_workspace(workspace: &Workspace, cx: &App) -> Self {
+        let pane_tree = workspace.pane_tree().read(cx);
+        let mut in_rebase_plan = false;
+        let mut review_open = false;
+        let mut commits_open = false;
+        for pane_id in pane_tree.split_pane_ids() {
+            let Some(pane) = pane_tree.pane(pane_id) else {
+                continue;
+            };
+            pane.read(cx).items().iter().for_each(|item| {
+                let view = item.to_any_view();
+                if view.clone().downcast::<RebaseItem>().is_ok() {
+                    in_rebase_plan = true;
+                }
+                if view.clone().downcast::<ReviewItem>().is_ok() {
+                    review_open = true;
+                }
+                if view.downcast::<CommitListItem>().is_ok() {
+                    commits_open = true;
+                }
+            });
+        }
+
+        let (in_rebase_reword, in_conflict) = workspace
+            .rebase_active()
+            .and_then(|a| a.pause.as_ref())
+            .map(|p| {
+                (
+                    matches!(p, RebasePause::Reword { .. }),
+                    matches!(p, RebasePause::Conflict { .. }),
+                )
+            })
+            .unwrap_or((false, false));
+
+        Self {
+            in_rebase_plan,
+            in_rebase_exec: workspace.rebase_active().is_some(),
+            in_rebase_reword,
+            in_conflict,
+            review_open,
+            commits_open,
+            claude_focused: false,
+            run_focused: false,
+        }
+    }
+}
+
+/// Whether `kind` should appear in the palette's Active scope given
+/// `ctx`. Mirrors `stoat::command_palette::action_is_available`. All
+/// scope bypasses this function entirely; actions not listed here
+/// are always available (globally applicable like `Quit`,
+/// `FocusLeft`, etc.).
+pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool {
+    use ActionKind::*;
+
+    match kind {
+        AbortRebase | ExecuteRebase | RebaseNext | RebasePrev | RebaseMoveUp | RebaseMoveDown
+        | SetRebaseOpPick | SetRebaseOpSquash | SetRebaseOpFixup | SetRebaseOpDrop
+        | SetRebaseOpReword | SetRebaseOpEdit => ctx.in_rebase_plan,
+
+        EnterRebase => ctx.commits_open,
+
+        RebaseContinue => ctx.in_rebase_exec,
+        RewordConfirm | RewordAbort => ctx.in_rebase_reword,
+
+        ConflictTakeOurs | ConflictTakeTheirs | ConflictSkipEntry | ConflictNextFile
+        | ConflictPrevFile | ConflictApply | ConflictAbort => ctx.in_conflict,
+
+        ReviewNextChunk
+        | ReviewPrevChunk
+        | ReviewStageChunk
+        | ReviewUnstageChunk
+        | ReviewToggleStage
+        | ReviewSkipChunk
+        | ReviewRefresh
+        | ReviewApplyStaged
+        | CloseReview
+        | ReviewRemoveSelected
+        | JumpToMoveSource
+        | JumpToMoveTarget
+        | JumpToNextMoveSource
+        | JumpToPrevMoveSource
+        | QueryMoveRelationships => ctx.review_open,
+
+        CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
+        | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
+
+        ClaudeSubmit | ClaudeToPane | ClaudeToDockLeft | ClaudeToDockRight => ctx.claude_focused,
+
+        RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
+
+        _ => true,
+    }
 }
 
 /// Two-step state machine driving the palette's interaction model.
@@ -77,7 +229,7 @@ enum ConfirmStep {
 }
 
 impl CommandPaletteDelegate {
-    pub fn new(workspace: WeakEntity<Workspace>) -> Self {
+    pub fn new(workspace: WeakEntity<Workspace>, availability: Availability) -> Self {
         let entries: Vec<&'static RegistryEntry> = registry::all()
             .filter(|entry| entry.def.palette_visible())
             .collect();
@@ -88,18 +240,42 @@ impl CommandPaletteDelegate {
             workspace,
             phase: PalettePhase::Filter,
             query_editor: None,
+            scope: PaletteScope::Active,
+            availability,
         };
         delegate.set_matches_for_empty_query();
         delegate
     }
 
+    fn is_entry_visible(&self, entry: &RegistryEntry) -> bool {
+        match self.scope {
+            PaletteScope::All => true,
+            PaletteScope::Active => action_is_available(entry.def.kind(), &self.availability),
+        }
+    }
+
     fn set_matches_for_empty_query(&mut self) {
-        let mut indexed: Vec<usize> = (0..self.entries.len()).collect();
+        let mut indexed: Vec<usize> = (0..self.entries.len())
+            .filter(|&i| self.is_entry_visible(self.entries[i]))
+            .collect();
         indexed.sort_by_key(|&i| {
             let def = self.entries[i].def;
             (def.priority().ord(), def.name())
         });
         self.matches = indexed.into_iter().map(|i| (i, Vec::new())).collect();
+    }
+
+    /// Flip [`Self::scope`] between [`PaletteScope::Active`] and
+    /// [`PaletteScope::All`] and re-run the current filter against
+    /// the new scope.
+    pub fn toggle_scope(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        self.scope = match self.scope {
+            PaletteScope::Active => PaletteScope::All,
+            PaletteScope::All => PaletteScope::Active,
+        };
+        let query = self.query_editor_text(cx);
+        self.refilter(&query);
+        cx.notify();
     }
 
     fn selected_entry(&self) -> Option<&'static RegistryEntry> {
@@ -150,6 +326,7 @@ impl CommandPaletteDelegate {
             .entries
             .iter()
             .enumerate()
+            .filter(|(_, entry)| self.is_entry_visible(entry))
             .map(|(i, entry)| (i, entry.def.name().to_string()));
         let ranked = match rank_matches(trimmed, items) {
             Some(r) => r,
@@ -314,6 +491,19 @@ impl PickerDelegate for CommandPaletteDelegate {
     fn on_attach(&mut self, query_editor: &Entity<Editor>) {
         self.query_editor = Some(query_editor.downgrade());
     }
+
+    fn handle_action(
+        &mut self,
+        action: &dyn stoat_action::Action,
+        _window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) -> bool {
+        if action.kind() == ActionKind::PaletteScopeToggle {
+            self.toggle_scope(cx);
+            return true;
+        }
+        false
+    }
 }
 
 impl CommandPaletteDelegate {
@@ -418,8 +608,9 @@ pub fn open_command_palette(
     cx: &mut Context<'_, Workspace>,
 ) {
     let weak = cx.weak_entity();
+    let availability = Availability::from_workspace(workspace, cx);
     workspace.toggle_modal::<Picker<CommandPaletteDelegate>, _>(window, cx, move |window, cx| {
-        let delegate = CommandPaletteDelegate::new(weak);
+        let delegate = CommandPaletteDelegate::new(weak, availability);
         Picker::new(delegate, window, cx)
     });
 }
@@ -430,7 +621,14 @@ mod tests {
     use stoat_action::ActionKind;
 
     fn new_delegate() -> CommandPaletteDelegate {
-        CommandPaletteDelegate::new(WeakEntity::new_invalid())
+        CommandPaletteDelegate::new(WeakEntity::new_invalid(), Availability::default())
+    }
+
+    fn new_all_scope_delegate() -> CommandPaletteDelegate {
+        let mut d = new_delegate();
+        d.scope = PaletteScope::All;
+        d.set_matches_for_empty_query();
+        d
     }
 
     fn matched_names(delegate: &CommandPaletteDelegate) -> Vec<&'static str> {
@@ -530,6 +728,272 @@ mod tests {
         );
     }
 
+    mod availability {
+        use super::*;
+
+        #[test]
+        fn active_scope_default_hides_contextual_actions() {
+            let delegate = new_delegate();
+            let names = matched_names(&delegate);
+            for name in [
+                "AbortRebase",
+                "ExecuteRebase",
+                "RewordConfirm",
+                "RewordAbort",
+                "RebaseContinue",
+                "ConflictTakeOurs",
+                "ConflictApply",
+                "ReviewStageChunk",
+                "ReviewApplyStaged",
+                "CommitsNext",
+                "CommitsOpenReview",
+                "ClaudeSubmit",
+                "RunSubmit",
+                "EnterRebase",
+            ] {
+                assert!(
+                    !names.contains(&name),
+                    "{name} unexpectedly visible in Active scope with empty Availability",
+                );
+            }
+            for name in ["Quit", "OpenFile", "OpenReview", "OpenCommits", "FocusLeft"] {
+                assert!(
+                    names.contains(&name),
+                    "{name} missing from globally-applicable listing"
+                );
+            }
+        }
+
+        #[test]
+        fn all_scope_shows_contextual_actions_regardless_of_state() {
+            let delegate = new_all_scope_delegate();
+            let names = matched_names(&delegate);
+            for name in [
+                "AbortRebase",
+                "RewordConfirm",
+                "ConflictApply",
+                "ReviewStageChunk",
+                "CommitsNext",
+                "ClaudeSubmit",
+                "RunSubmit",
+            ] {
+                assert!(names.contains(&name), "{name} missing in All scope");
+            }
+        }
+
+        #[test]
+        fn active_scope_in_rebase_plan_surfaces_rebase_actions() {
+            let availability = Availability {
+                in_rebase_plan: true,
+                ..Availability::default()
+            };
+            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
+            let names = matched_names(&delegate);
+            for name in [
+                "AbortRebase",
+                "ExecuteRebase",
+                "SetRebaseOpPick",
+                "SetRebaseOpSquash",
+            ] {
+                assert!(names.contains(&name), "{name} missing when in_rebase_plan");
+            }
+            assert!(!names.contains(&"RewordConfirm"));
+            assert!(!names.contains(&"ConflictApply"));
+        }
+
+        #[test]
+        fn active_scope_in_reword_surfaces_reword_actions() {
+            let availability = Availability {
+                in_rebase_exec: true,
+                in_rebase_reword: true,
+                ..Availability::default()
+            };
+            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
+            let names = matched_names(&delegate);
+            for name in ["RewordConfirm", "RewordAbort", "RebaseContinue"] {
+                assert!(names.contains(&name), "{name} missing in reword");
+            }
+            assert!(!names.contains(&"AbortRebase"));
+        }
+
+        #[test]
+        fn active_scope_in_conflict_surfaces_conflict_actions() {
+            let availability = Availability {
+                in_rebase_exec: true,
+                in_conflict: true,
+                ..Availability::default()
+            };
+            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
+            let names = matched_names(&delegate);
+            for name in [
+                "ConflictTakeOurs",
+                "ConflictTakeTheirs",
+                "ConflictApply",
+                "ConflictAbort",
+            ] {
+                assert!(names.contains(&name), "{name} missing in conflict");
+            }
+            assert!(!names.contains(&"RewordConfirm"));
+        }
+
+        #[test]
+        fn active_scope_review_open_surfaces_review_actions() {
+            let availability = Availability {
+                review_open: true,
+                ..Availability::default()
+            };
+            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
+            let names = matched_names(&delegate);
+            for name in ["ReviewStageChunk", "ReviewApplyStaged", "CloseReview"] {
+                assert!(names.contains(&name), "{name} missing when review_open");
+            }
+            assert!(!names.contains(&"CommitsNext"));
+        }
+
+        #[test]
+        fn active_scope_commits_open_surfaces_commits_actions() {
+            let availability = Availability {
+                commits_open: true,
+                ..Availability::default()
+            };
+            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
+            let names = matched_names(&delegate);
+            for name in ["CommitsNext", "CommitsOpenReview", "EnterRebase"] {
+                assert!(names.contains(&name), "{name} missing when commits_open");
+            }
+            assert!(!names.contains(&"ReviewStageChunk"));
+        }
+
+        #[test]
+        fn every_registered_action_is_available_when_all_flags_set() {
+            let ctx = Availability {
+                in_rebase_plan: true,
+                in_rebase_exec: true,
+                in_rebase_reword: true,
+                in_conflict: true,
+                review_open: true,
+                commits_open: true,
+                claude_focused: true,
+                run_focused: true,
+            };
+            for entry in registry::all() {
+                assert!(
+                    action_is_available(entry.def.kind(), &ctx),
+                    "{} missing from availability predicate",
+                    entry.def.name(),
+                );
+            }
+        }
+
+        #[test]
+        fn refilter_in_active_scope_respects_availability() {
+            let mut delegate = new_delegate();
+            delegate.refilter("Abort");
+
+            let names = matched_names(&delegate);
+            assert!(
+                !names.contains(&"AbortRebase"),
+                "AbortRebase visible without in_rebase_plan: {names:?}",
+            );
+        }
+
+        #[test]
+        fn refilter_in_all_scope_lists_contextual_matches() {
+            let mut delegate = new_all_scope_delegate();
+            delegate.refilter("Abort");
+
+            let names = matched_names(&delegate);
+            assert!(
+                names.contains(&"AbortRebase"),
+                "AbortRebase missing in All scope: {names:?}",
+            );
+        }
+    }
+
+    mod scope_toggle {
+        use super::*;
+        use crate::globals::ExecutorGlobal;
+        use gpui::{AppContext, TestAppContext, VisualTestContext};
+        use std::sync::Arc;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        fn install_executor_global(cx: &mut TestAppContext) {
+            let executor = Executor::new(Arc::new(TestScheduler::new()));
+            cx.update(|cx| cx.set_global(ExecutorGlobal(executor)));
+        }
+
+        struct Harness<'a> {
+            picker: Entity<Picker<CommandPaletteDelegate>>,
+            vcx: &'a mut VisualTestContext,
+        }
+
+        fn new_harness(cx: &mut TestAppContext) -> Harness<'_> {
+            install_executor_global(cx);
+            let delegate =
+                CommandPaletteDelegate::new(WeakEntity::new_invalid(), Availability::default());
+            let vcx = cx.add_empty_window();
+            let picker = vcx.update(|window, cx| cx.new(|cx| Picker::new(delegate, window, cx)));
+            Harness { picker, vcx }
+        }
+
+        fn dispatch_scope_toggle(harness: &mut Harness<'_>) {
+            let picker = harness.picker.clone();
+            harness.vcx.update(|window, cx| {
+                picker.update(cx, |p, cx| {
+                    p.handle_action(&stoat_action::PaletteScopeToggle, window, cx)
+                });
+            });
+            harness.vcx.run_until_parked();
+        }
+
+        fn names(harness: &Harness<'_>) -> Vec<&'static str> {
+            harness.picker.read_with(harness.vcx, |p, _| {
+                p.delegate()
+                    .matches
+                    .iter()
+                    .map(|(i, _)| p.delegate().entries[*i].def.name())
+                    .collect()
+            })
+        }
+
+        #[test]
+        fn picker_starts_in_active_scope() {
+            let mut cx = TestAppContext::single();
+            let h = new_harness(&mut cx);
+            let scope = h.picker.read_with(h.vcx, |p, _| p.delegate().scope);
+            assert_eq!(scope, PaletteScope::Active);
+            let listed = names(&h);
+            assert!(
+                !listed.contains(&"AbortRebase"),
+                "Active scope should hide AbortRebase: {listed:?}",
+            );
+        }
+
+        #[test]
+        fn palette_scope_toggle_flips_scope_to_all() {
+            let mut cx = TestAppContext::single();
+            let mut h = new_harness(&mut cx);
+            dispatch_scope_toggle(&mut h);
+            let scope = h.picker.read_with(h.vcx, |p, _| p.delegate().scope);
+            assert_eq!(scope, PaletteScope::All);
+            let listed = names(&h);
+            assert!(
+                listed.contains(&"AbortRebase"),
+                "All scope should list AbortRebase: {listed:?}",
+            );
+        }
+
+        #[test]
+        fn palette_scope_toggle_round_trips_back_to_active() {
+            let mut cx = TestAppContext::single();
+            let mut h = new_harness(&mut cx);
+            dispatch_scope_toggle(&mut h);
+            dispatch_scope_toggle(&mut h);
+            let scope = h.picker.read_with(h.vcx, |p, _| p.delegate().scope);
+            assert_eq!(scope, PaletteScope::Active);
+        }
+    }
+
     mod param_collection {
         use super::*;
         use crate::globals::ExecutorGlobal;
@@ -550,7 +1014,8 @@ mod tests {
 
         fn new_harness(cx: &mut TestAppContext) -> Harness<'_> {
             install_executor_global(cx);
-            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid());
+            let delegate =
+                CommandPaletteDelegate::new(WeakEntity::new_invalid(), Availability::default());
             let vcx = cx.add_empty_window();
             let picker = vcx.update(|window, cx| cx.new(|cx| Picker::new(delegate, window, cx)));
             Harness { picker, vcx }
