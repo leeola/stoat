@@ -9,7 +9,7 @@ use stoat_text::{Bias, Rope, SelectionGoal};
 /// types the from-char, then back to [`SurroundReplaceStage::Idle`] after
 /// the to-char applies the edit.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub(crate) enum SurroundReplaceStage {
+pub enum SurroundReplaceStage {
     #[default]
     Idle,
     AwaitFrom,
@@ -114,7 +114,7 @@ pub(crate) fn execute_surround_add(stoat: &mut Stoat, ch: char) -> UpdateEffect 
     UpdateEffect::Redraw
 }
 
-fn surround_pair_for(ch: char) -> (char, char) {
+pub fn surround_pair_for(ch: char) -> (char, char) {
     match ch {
         '(' | ')' => ('(', ')'),
         '[' | ']' => ('[', ']'),
@@ -267,7 +267,7 @@ fn focused_buffer_id(stoat: &Stoat) -> Option<crate::buffer::BufferId> {
 /// syntax map. Used by `execute_surround_replace` and
 /// `execute_surround_delete` so `m r ( )` and `m d (` ignore
 /// brackets that happen to live inside string literals.
-pub(crate) fn find_surround_pair(
+pub fn find_surround_pair(
     rope: &Rope,
     cursor: usize,
     open: char,

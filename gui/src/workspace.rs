@@ -1368,6 +1368,43 @@ impl Workspace {
                     self.apply_replay_macro_char(ch, window, cx);
                 }
             },
+            ActionKind::SurroundAdd => self.dispatch_surround_add(cx),
+            ActionKind::SurroundDelete => self.dispatch_surround_delete(cx),
+            ActionKind::SurroundReplace => self.dispatch_surround_replace(cx),
+            ActionKind::ApplySurroundAddChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplySurroundAddChar>()
+                {
+                    if let Some(editor) = self.active_editor(cx) {
+                        let ch = apply.ch;
+                        editor.update(cx, |ed, cx| ed.handle_surround_add(ch, cx));
+                    }
+                }
+            },
+            ActionKind::ApplySurroundDeleteChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplySurroundDeleteChar>()
+                {
+                    if let Some(editor) = self.active_editor(cx) {
+                        let ch = apply.ch;
+                        editor.update(cx, |ed, cx| ed.handle_surround_delete(ch, cx));
+                    }
+                }
+            },
+            ActionKind::ApplySurroundReplaceChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplySurroundReplaceChar>()
+                {
+                    if let Some(editor) = self.active_editor(cx) {
+                        let from = apply.from;
+                        let to = apply.to;
+                        editor.update(cx, |ed, cx| ed.handle_surround_replace(from, to, cx));
+                    }
+                }
+            },
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
@@ -1582,6 +1619,21 @@ impl Workspace {
         if let Some(register) = stoat::action_handlers::yank::register_for_char(ch) {
             self.set_selected_register(register);
         }
+    }
+
+    fn dispatch_surround_add(&mut self, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.arm_surround_add(cx));
+    }
+
+    fn dispatch_surround_delete(&mut self, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.arm_surround_delete(cx));
+    }
+
+    fn dispatch_surround_replace(&mut self, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.arm_surround_replace(cx));
     }
 
     /// Re-feed each captured keystroke through the input state
@@ -5030,6 +5082,123 @@ mod tests {
         sm.read_with(vcx, |sm, _| assert!(sm.pending_macro_replay()));
         vcx.simulate_keystrokes("escape");
         sm.read_with(vcx, |sm, _| assert!(!sm.pending_macro_replay()));
+    }
+
+    #[test]
+    fn surround_add_chord_wraps_selection() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let start = snapshot.anchor_at(0, stoat_text::Bias::Right);
+            let end = snapshot.anchor_at(5, stoat_text::Bias::Left);
+            ed.selections_mut().replace_with(
+                vec![stoat_text::Selection {
+                    id: 1,
+                    start,
+                    end,
+                    reversed: false,
+                    goal: stoat_text::SelectionGoal::None,
+                }],
+                &snapshot,
+            );
+        });
+
+        dispatch(&ws, vcx, stoat_action::SurroundAdd);
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_surround_add()));
+        vcx.simulate_keystrokes("(");
+        sm.read_with(vcx, |sm, _| assert!(!sm.pending_surround_add()));
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "(hello) world");
+    }
+
+    #[test]
+    fn surround_delete_chord_removes_pair() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "a(hello)b");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 4);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::SurroundDelete);
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_surround_delete()));
+        vcx.simulate_keystrokes("(");
+        sm.read_with(vcx, |sm, _| assert!(!sm.pending_surround_delete()));
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "ahellob");
+    }
+
+    #[test]
+    fn surround_replace_two_stage_chord_swaps_pair() {
+        use stoat::action_handlers::surround::SurroundReplaceStage;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "a(hello)b");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 4);
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton");
+
+        dispatch(&ws, vcx, stoat_action::SurroundReplace);
+        sm.read_with(vcx, |sm, _| {
+            assert_eq!(
+                sm.pending_surround_replace(),
+                SurroundReplaceStage::AwaitFrom
+            );
+        });
+        vcx.simulate_keystrokes("(");
+        sm.read_with(vcx, |sm, _| {
+            assert_eq!(
+                sm.pending_surround_replace(),
+                SurroundReplaceStage::AwaitTo('('),
+            );
+        });
+        vcx.simulate_keystrokes("[");
+        sm.read_with(vcx, |sm, _| {
+            assert_eq!(sm.pending_surround_replace(), SurroundReplaceStage::Idle);
+        });
+        assert_eq!(buffer.read_with(vcx, |b, _| b.text()), "a[hello]b");
+    }
+
+    #[test]
+    fn surround_replace_non_char_clears_chord() {
+        use stoat::action_handlers::surround::SurroundReplaceStage;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abc");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::SurroundReplace);
+        sm.read_with(vcx, |sm, _| {
+            assert_eq!(
+                sm.pending_surround_replace(),
+                SurroundReplaceStage::AwaitFrom
+            );
+        });
+        vcx.simulate_keystrokes("escape");
+        sm.read_with(vcx, |sm, _| {
+            assert_eq!(sm.pending_surround_replace(), SurroundReplaceStage::Idle);
+        });
     }
 
     #[test]

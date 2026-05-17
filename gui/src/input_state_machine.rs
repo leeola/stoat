@@ -1,5 +1,8 @@
 use crate::{
-    actions::{ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplayMacroChar},
+    actions::{
+        ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplayMacroChar,
+        ApplySurroundAddChar, ApplySurroundDeleteChar, ApplySurroundReplaceChar,
+    },
     editor::{
         actions::{marks::MarkRequest, movement::FindKind},
         Editor,
@@ -10,6 +13,7 @@ use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gpui::{Context, FocusHandle, Keystroke, WeakEntity, Window};
 use std::{collections::HashMap, ops::Range};
 use stoat::{
+    action_handlers::surround::SurroundReplaceStage,
     keymap::{Keymap, KeymapState, StateValue},
     keymap_state::{normalize_shift_event, resolve_action},
     register::Register,
@@ -113,6 +117,20 @@ pub struct InputStateMachine {
     /// [`toggle_macro_recording`] when a recording ends; consumed
     /// by [`ApplyReplayMacroChar`] dispatch.
     macros: HashMap<Register, Vec<Keystroke>>,
+    /// Active after-key chord set by the [`stoat_action::SurroundAdd`]
+    /// action. The next chord-completing char keystroke is consumed
+    /// and dispatched through [`ApplySurroundAddChar`].
+    pending_surround_add: bool,
+    /// Active after-key chord set by the [`stoat_action::SurroundDelete`]
+    /// action. The next chord-completing char keystroke is consumed
+    /// and dispatched through [`ApplySurroundDeleteChar`].
+    pending_surround_delete: bool,
+    /// Two-stage chord state set by the
+    /// [`stoat_action::SurroundReplace`] action. `AwaitFrom`
+    /// captures the from-char and transitions to
+    /// `AwaitTo(from)`; `AwaitTo(from)` captures the to-char and
+    /// dispatches [`ApplySurroundReplaceChar { from, to }`].
+    pending_surround_replace: SurroundReplaceStage,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -161,6 +179,9 @@ impl InputStateMachine {
             pending_macro_replay: false,
             macro_recording: None,
             macros: HashMap::new(),
+            pending_surround_add: false,
+            pending_surround_delete: false,
+            pending_surround_replace: SurroundReplaceStage::Idle,
             workspace,
             keymap,
         }
@@ -498,6 +519,33 @@ impl InputStateMachine {
         self.macros.get(&register).cloned()
     }
 
+    pub fn pending_surround_add(&self) -> bool {
+        self.pending_surround_add
+    }
+
+    pub fn pending_surround_delete(&self) -> bool {
+        self.pending_surround_delete
+    }
+
+    pub fn pending_surround_replace(&self) -> SurroundReplaceStage {
+        self.pending_surround_replace
+    }
+
+    pub fn arm_surround_add(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_surround_add = true;
+        cx.notify();
+    }
+
+    pub fn arm_surround_delete(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_surround_delete = true;
+        cx.notify();
+    }
+
+    pub fn arm_surround_replace(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_surround_replace = SurroundReplaceStage::AwaitFrom;
+        cx.notify();
+    }
+
     pub fn workspace(&self) -> &WeakEntity<Workspace> {
         &self.workspace
     }
@@ -620,6 +668,50 @@ impl InputStateMachine {
             }
             self.pending_macro_replay = false;
             cx.notify();
+        }
+
+        if count_active_mode && self.pending_surround_add {
+            if let KeyCode::Char(ch) = event.code {
+                self.pending_surround_add = false;
+                cx.notify();
+                return vec![Box::new(ApplySurroundAddChar { ch })];
+            }
+            self.pending_surround_add = false;
+            cx.notify();
+        }
+
+        if count_active_mode && self.pending_surround_delete {
+            if let KeyCode::Char(ch) = event.code {
+                self.pending_surround_delete = false;
+                cx.notify();
+                return vec![Box::new(ApplySurroundDeleteChar { ch })];
+            }
+            self.pending_surround_delete = false;
+            cx.notify();
+        }
+
+        if count_active_mode {
+            match self.pending_surround_replace {
+                SurroundReplaceStage::AwaitFrom => {
+                    if let KeyCode::Char(ch) = event.code {
+                        self.pending_surround_replace = SurroundReplaceStage::AwaitTo(ch);
+                        cx.notify();
+                        return Vec::new();
+                    }
+                    self.pending_surround_replace = SurroundReplaceStage::Idle;
+                    cx.notify();
+                },
+                SurroundReplaceStage::AwaitTo(from) => {
+                    if let KeyCode::Char(to) = event.code {
+                        self.pending_surround_replace = SurroundReplaceStage::Idle;
+                        cx.notify();
+                        return vec![Box::new(ApplySurroundReplaceChar { from, to })];
+                    }
+                    self.pending_surround_replace = SurroundReplaceStage::Idle;
+                    cx.notify();
+                },
+                SurroundReplaceStage::Idle => {},
+            }
         }
 
         let digit = unmodified_ascii_digit(&event);

@@ -1280,6 +1280,186 @@ impl Editor {
         true
     }
 
+    /// Wrap every non-empty selection with the pair returned by
+    /// [`stoat::action_handlers::surround::surround_pair_for`].
+    /// Selections collapse direction is preserved. Empty
+    /// (cursor-only) selections are skipped.
+    pub fn handle_surround_add(&mut self, ch: char, cx: &mut Context<'_, Self>) {
+        let (open, close) = stoat::action_handlers::surround::surround_pair_for(ch);
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "handle_surround_add on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+        let mut entries: Vec<(usize, usize, usize, bool)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            self.selections
+                .all_anchors()
+                .iter()
+                .filter_map(|sel| {
+                    let s = snapshot.resolve_anchor(&sel.start);
+                    let e = snapshot.resolve_anchor(&sel.end);
+                    if s == e {
+                        return None;
+                    }
+                    Some((sel.id, s, e, sel.reversed))
+                })
+                .collect()
+        };
+        if entries.is_empty() {
+            return;
+        }
+        entries.sort_by_key(|(_, s, _, _)| *s);
+
+        let open_str = open.to_string();
+        let close_str = close.to_string();
+        for (_, s, e, _) in entries.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*e..*e, &close_str, cx));
+            buffer.update(cx, |b, cx| b.edit(*s..*s, &open_str, cx));
+        }
+
+        let open_len = open.len_utf8();
+        let close_len = close.len_utf8();
+        let mut id_to_range: std::collections::HashMap<usize, (usize, usize, bool)> =
+            std::collections::HashMap::with_capacity(entries.len());
+        let mut shift: i64 = 0;
+        for (id, s, e, reversed) in entries.iter() {
+            let new_start = (*s as i64 + shift) as usize + open_len;
+            let new_end = (*e as i64 + shift) as usize + open_len;
+            id_to_range.insert(*id, (new_start, new_end, *reversed));
+            shift += (open_len + close_len) as i64;
+        }
+
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| {
+            let mut new = sel.clone();
+            if let Some(&(start_off, end_off, reversed)) = id_to_range.get(&sel.id) {
+                new.start = new_snapshot.anchor_at(start_off, Bias::Left);
+                new.end = new_snapshot.anchor_at(end_off, Bias::Right);
+                new.reversed = reversed;
+                new.goal = SelectionGoal::None;
+            }
+            new
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Find the enclosing pair for `ch` around every selection
+    /// head via
+    /// [`stoat::action_handlers::surround::find_surround_pair`],
+    /// dedupe, and remove the pair. Tree-sitter-aware when the
+    /// active buffer carries a [`stoat_language::SyntaxMap`].
+    pub fn handle_surround_delete(&mut self, ch: char, cx: &mut Context<'_, Self>) {
+        let (open, close) = stoat::action_handlers::surround::surround_pair_for(ch);
+        let pairs = match self.collect_surround_pairs(open, close, cx) {
+            Some(p) if !p.is_empty() => p,
+            _ => return,
+        };
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let open_len = open.len_utf8();
+        let close_len = close.len_utf8();
+        for (open_off, close_off) in pairs.iter().rev() {
+            buffer.update(cx, |b, cx| {
+                b.edit(*close_off..*close_off + close_len, "", cx)
+            });
+            buffer.update(cx, |b, cx| b.edit(*open_off..*open_off + open_len, "", cx));
+        }
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| sel.clone());
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Replace the enclosing pair for `from` around every
+    /// selection head with the canonical pair for `to`.
+    /// Tree-sitter-aware when the active buffer carries a
+    /// [`stoat_language::SyntaxMap`].
+    pub fn handle_surround_replace(&mut self, from: char, to: char, cx: &mut Context<'_, Self>) {
+        let (old_open, old_close) = stoat::action_handlers::surround::surround_pair_for(from);
+        let (new_open, new_close) = stoat::action_handlers::surround::surround_pair_for(to);
+        let pairs = match self.collect_surround_pairs(old_open, old_close, cx) {
+            Some(p) if !p.is_empty() => p,
+            _ => return,
+        };
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => return,
+        };
+        let old_open_len = old_open.len_utf8();
+        let old_close_len = old_close.len_utf8();
+        let new_open_str = new_open.to_string();
+        let new_close_str = new_close.to_string();
+        for (open_off, close_off) in pairs.iter().rev() {
+            buffer.update(cx, |b, cx| {
+                b.edit(*close_off..*close_off + old_close_len, &new_close_str, cx)
+            });
+            buffer.update(cx, |b, cx| {
+                b.edit(*open_off..*open_off + old_open_len, &new_open_str, cx)
+            });
+        }
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        self.selections.transform(&new_snapshot, |sel| sel.clone());
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Walk every selection's primary cursor head and gather the
+    /// enclosing surround pair for `(open, close)`. Returns
+    /// deduped + sorted offsets; falls back to plain
+    /// non-tree-sitter search when the buffer has no
+    /// [`stoat_language::SyntaxMap`].
+    fn collect_surround_pairs(
+        &self,
+        open: char,
+        close: char,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Vec<(usize, usize)>> {
+        let singleton = self.multi_buffer.read(cx).as_singleton().cloned()?;
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope().clone();
+        let cursors: Vec<usize> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| snapshot.resolve_anchor(&sel.head()))
+            .collect();
+        let map_snapshot = singleton.read(cx).syntax_map().map(|m| m.snapshot());
+        let mut pairs: Vec<(usize, usize)> = cursors
+            .into_iter()
+            .filter_map(|head| {
+                let tree = map_snapshot.as_ref().and_then(|s| {
+                    s.iter_layers()
+                        .fold(None::<&stoat_language::SyntaxLayer>, |acc, layer| {
+                            let lstart = layer.start_offset as usize;
+                            let lend = layer.end_offset as usize;
+                            if lstart <= head && lend >= head {
+                                match acc {
+                                    Some(prev) if prev.depth >= layer.depth => acc,
+                                    _ => Some(layer),
+                                }
+                            } else {
+                                acc
+                            }
+                        })
+                        .map(|layer| &layer.tree)
+                });
+                stoat::action_handlers::surround::find_surround_pair(&rope, head, open, close, tree)
+            })
+            .collect();
+        pairs.sort_unstable();
+        pairs.dedup();
+        Some(pairs)
+    }
+
     /// Pop up to `count` entries off the active buffer's undo
     /// stack, applying each in reverse and re-anchoring selections
     /// against the resulting snapshot. Stops early when the stack
@@ -4136,5 +4316,95 @@ mod tests {
         // After alignment, row 0 column 1 should be padded to column 3 (extra 2 spaces),
         // row 2 column 1 should be padded to column 3 (extra 2 spaces), row 1 unchanged.
         assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "a  \nbbb\nc  ");
+    }
+
+    #[test]
+    fn handle_surround_add_wraps_non_empty_selection_with_brackets() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello world");
+        set_single_selection(&editor, &mut cx, 0, 5);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_surround_add('(', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "(hello) world");
+        editor.read_with(&cx, |ed, cx| {
+            let snap = ed.multi_buffer.read(cx).snapshot();
+            let sel = ed.selections().all_anchors().first().unwrap();
+            assert_eq!(snap.resolve_anchor(&sel.start), 1);
+            assert_eq!(snap.resolve_anchor(&sel.end), 6);
+        });
+    }
+
+    #[test]
+    fn handle_surround_add_doubles_for_quote_char() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hi");
+        set_single_selection(&editor, &mut cx, 0, 2);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_surround_add('"', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "\"hi\"");
+    }
+
+    #[test]
+    fn handle_surround_add_skips_empty_selection() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hi");
+        set_single_selection(&editor, &mut cx, 1, 1);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_surround_add('(', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hi");
+    }
+
+    #[test]
+    fn handle_surround_delete_removes_enclosing_brackets() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "a(hello)b");
+        set_single_selection(&editor, &mut cx, 4, 4);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_surround_delete('(', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "ahellob");
+    }
+
+    #[test]
+    fn handle_surround_delete_no_enclosing_pair_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello");
+        set_single_selection(&editor, &mut cx, 2, 2);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_surround_delete('(', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello");
+    }
+
+    #[test]
+    fn handle_surround_replace_swaps_pair() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "a(hello)b");
+        set_single_selection(&editor, &mut cx, 4, 4);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_surround_replace('(', '[', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "a[hello]b");
+    }
+
+    #[test]
+    fn handle_surround_replace_swaps_to_quote() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "a(hello)b");
+        set_single_selection(&editor, &mut cx, 4, 4);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_surround_replace('(', '"', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "a\"hello\"b");
     }
 }

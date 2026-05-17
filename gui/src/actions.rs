@@ -475,6 +475,178 @@ impl Action for ApplyReplayMacroChar {
     }
 }
 
+/// Chord-completion action synthesized by
+/// [`crate::input_state_machine::InputStateMachine::feed`] after a
+/// [`stoat_action::SurroundAdd`] action arms the chord. Carries the
+/// chord-completing character; workspace dispatch resolves the
+/// canonical [`open`, `close`] pair via
+/// [`stoat::action_handlers::surround::surround_pair_for`] and
+/// wraps every non-empty selection.
+#[derive(Debug)]
+pub struct ApplySurroundAddChar {
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplySurroundAddCharDef;
+
+impl ActionDef for ApplySurroundAddCharDef {
+    fn name(&self) -> &'static str {
+        "ApplySurroundAddChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplySurroundAddChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending surround-add chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending SurroundAdd chord with the chord-completing character; wraps every non-empty selection with the resolved pair. Synthesized by the input pipeline after a `SurroundAdd` action arms the chord; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplySurroundAddChar {
+    pub const DEF: &ApplySurroundAddCharDef = &ApplySurroundAddCharDef;
+}
+
+impl Action for ApplySurroundAddChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Chord-completion action synthesized after a
+/// [`stoat_action::SurroundDelete`] arms the chord. Carries the
+/// chord-completing character; workspace dispatch finds the
+/// nearest enclosing pair for each cursor and removes both ends.
+#[derive(Debug)]
+pub struct ApplySurroundDeleteChar {
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplySurroundDeleteCharDef;
+
+impl ActionDef for ApplySurroundDeleteCharDef {
+    fn name(&self) -> &'static str {
+        "ApplySurroundDeleteChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplySurroundDeleteChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending surround-delete chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending SurroundDelete chord with the chord-completing character; removes the nearest enclosing pair around each cursor. Synthesized by the input pipeline after a `SurroundDelete` action arms the chord; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplySurroundDeleteChar {
+    pub const DEF: &ApplySurroundDeleteCharDef = &ApplySurroundDeleteCharDef;
+}
+
+impl Action for ApplySurroundDeleteChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Chord-completion action synthesized after the two-stage
+/// [`stoat_action::SurroundReplace`] chord captures both
+/// chars. Workspace dispatch resolves the existing pair for
+/// `from` and replaces it with the canonical pair for `to`.
+#[derive(Debug)]
+pub struct ApplySurroundReplaceChar {
+    pub from: char,
+    pub to: char,
+}
+
+#[derive(Debug)]
+pub struct ApplySurroundReplaceCharDef;
+
+impl ActionDef for ApplySurroundReplaceCharDef {
+    fn name(&self) -> &'static str {
+        "ApplySurroundReplaceChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplySurroundReplaceChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending surround-replace chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending SurroundReplace chord with the two chord-completing characters (from then to); replaces the nearest enclosing pair around each cursor. Synthesized by the input pipeline after a `SurroundReplace` action arms the chord and both chars are captured; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplySurroundReplaceChar {
+    pub const DEF: &ApplySurroundReplaceCharDef = &ApplySurroundReplaceCharDef;
+}
+
+impl Action for ApplySurroundReplaceChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

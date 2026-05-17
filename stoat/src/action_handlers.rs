@@ -20,7 +20,7 @@ mod run;
 pub mod search;
 pub(crate) mod shell;
 pub(crate) mod split_selection;
-pub(crate) mod surround;
+pub mod surround;
 pub(crate) mod textobject;
 pub(crate) mod textobject_nav;
 mod workspace;
@@ -618,7 +618,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::DeleteForward
         | ActionKind::DeleteBackward
         | ActionKind::ApplyRegisterSelectChar
-        | ActionKind::ApplyReplayMacroChar => UpdateEffect::None,
+        | ActionKind::ApplyReplayMacroChar
+        | ActionKind::ApplySurroundAddChar
+        | ActionKind::ApplySurroundDeleteChar
+        | ActionKind::ApplySurroundReplaceChar => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());
