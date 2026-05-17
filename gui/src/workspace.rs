@@ -1270,6 +1270,7 @@ impl Workspace {
             ActionKind::OpenJumplistPicker => {
                 crate::jumplist_picker::open_jumplist_picker(self, window, cx)
             },
+            ActionKind::OpenLastPicker => self.dispatch_open_last_picker(window, cx),
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action
@@ -1523,6 +1524,36 @@ impl Workspace {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
         }
+
+        if crate::picker::is_picker_open_kind(action.kind())
+            && self.modal_layer.read(cx).has_active_modal()
+        {
+            let name = action.def().name();
+            self.input_state_machine
+                .update(cx, |sm, _| sm.set_last_picker_action(Some(name)));
+        }
+    }
+
+    /// Re-dispatch the most recently opened picker action. Reads
+    /// the action name recorded on
+    /// [`InputStateMachine::last_picker_action`], looks it up in
+    /// the `stoat_action::registry`, constructs a fresh action
+    /// instance, and routes it back through
+    /// [`Self::dispatch_action`]. The picker rebuilds from current
+    /// state -- prior query and selection are not restored. Silent
+    /// no-op when no picker has been recorded or the registry
+    /// lookup fails.
+    fn dispatch_open_last_picker(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(name) = self.input_state_machine.read(cx).last_picker_action() else {
+            return;
+        };
+        let Some(entry) = stoat_action::registry::lookup(name) else {
+            return;
+        };
+        let Ok(action) = (entry.create)(&[]) else {
+            return;
+        };
+        self.dispatch_action(action, window, cx);
     }
 
     fn dispatch_move_horizontal(&mut self, delta: i32, extend: bool, cx: &mut Context<'_, Self>) {
@@ -4451,6 +4482,82 @@ mod tests {
             "second OpenCommandPalette toggles the modal off"
         );
         assert_eq!(mode, "normal");
+    }
+
+    #[test]
+    fn dispatch_picker_open_records_last_picker_action() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+
+        let recorded = ws.read_with(vcx, |w, cx| {
+            w.input_state_machine().read(cx).last_picker_action()
+        });
+        assert_eq!(recorded, Some("OpenCommandPalette"));
+    }
+
+    #[test]
+    fn dispatch_picker_open_skips_recording_when_no_modal_opens() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenJumplistPicker);
+        vcx.run_until_parked();
+
+        let modal_active = ws.read_with(vcx, |w, cx| w.modal_layer().read(cx).has_active_modal());
+        let recorded = ws.read_with(vcx, |w, cx| {
+            w.input_state_machine().read(cx).last_picker_action()
+        });
+        assert!(
+            !modal_active,
+            "OpenJumplistPicker should no-op without an active editor"
+        );
+        assert_eq!(
+            recorded, None,
+            "recording must skip when the picker did not open a modal"
+        );
+    }
+
+    #[test]
+    fn dispatch_open_last_picker_with_no_history_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenLastPicker);
+        vcx.run_until_parked();
+
+        let modal_active = ws.read_with(vcx, |w, cx| w.modal_layer().read(cx).has_active_modal());
+        let recorded = ws.read_with(vcx, |w, cx| {
+            w.input_state_machine().read(cx).last_picker_action()
+        });
+        assert!(!modal_active);
+        assert_eq!(recorded, None);
+    }
+
+    #[test]
+    fn dispatch_open_last_picker_reopens_recorded_picker_after_dismiss() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+        ws.update_in(vcx, |w, window, cx| {
+            w.dismiss_modal(window, cx);
+        });
+        vcx.run_until_parked();
+        assert!(!ws.read_with(vcx, |w, cx| w.modal_layer().read(cx).has_active_modal()));
+
+        dispatch(&ws, vcx, stoat_action::OpenLastPicker);
+        vcx.run_until_parked();
+
+        let palette_open =
+            ws.read_with(vcx, |w, cx| w.input_state_machine().read(cx).palette_open());
+        assert!(
+            palette_open,
+            "OpenLastPicker should re-dispatch the recorded OpenCommandPalette and reopen the palette"
+        );
     }
 
     #[test]

@@ -144,6 +144,14 @@ pub struct InputStateMachine {
     /// modal-layer observer; drained by
     /// [`Self::take_prev_mode_for_modal`] on the closing edge.
     prev_mode_for_modal: Option<String>,
+    /// Name of the most recently opened picker action, recorded by
+    /// [`Workspace::dispatch_action`]'s tail when a picker-open
+    /// action successfully toggles a modal. Drives
+    /// [`stoat_action::OpenLastPicker`] recall: the handler looks
+    /// the name up in the action registry and re-dispatches a
+    /// fresh action instance, rebuilding the picker from current
+    /// state. `None` until the first picker opens.
+    last_picker_action: Option<&'static str>,
     workspace: WeakEntity<Workspace>,
     keymap: Keymap,
 }
@@ -197,6 +205,7 @@ impl InputStateMachine {
             pending_surround_replace: SurroundReplaceStage::Idle,
             pending_textobject_select: None,
             prev_mode_for_modal: None,
+            last_picker_action: None,
             workspace,
             keymap,
         }
@@ -370,6 +379,21 @@ impl InputStateMachine {
     /// or `None` when nothing was captured.
     pub fn take_prev_mode_for_modal(&mut self) -> Option<String> {
         self.prev_mode_for_modal.take()
+    }
+
+    /// Name of the most recently opened picker action, or `None`
+    /// when no picker has opened since the workspace started.
+    /// Consumed by [`stoat_action::OpenLastPicker`].
+    pub fn last_picker_action(&self) -> Option<&'static str> {
+        self.last_picker_action
+    }
+
+    /// Record `name` as the most recently opened picker action.
+    /// Called from [`Workspace::dispatch_action`]'s post-dispatch
+    /// tail when a picker-open action toggles a modal; `None`
+    /// clears the slot.
+    pub fn set_last_picker_action(&mut self, name: Option<&'static str>) {
+        self.last_picker_action = name;
     }
 
     /// Save `handle` for later restoration via
@@ -994,7 +1018,22 @@ mod tests {
             assert!(sm.pending_chord().is_empty());
             assert!(sm.pending_operator().is_none());
             assert!(sm.prev_focused().is_none());
+            assert_eq!(sm.last_picker_action(), None);
         });
+    }
+
+    #[test]
+    fn set_last_picker_action_round_trips() {
+        let mut cx = TestAppContext::single();
+        let sm = new_state_machine(&mut cx);
+        sm.update(&mut cx, |sm, _| {
+            sm.set_last_picker_action(Some("OpenJumplistPicker"))
+        });
+        sm.read_with(&cx, |sm, _| {
+            assert_eq!(sm.last_picker_action(), Some("OpenJumplistPicker"));
+        });
+        sm.update(&mut cx, |sm, _| sm.set_last_picker_action(None));
+        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_picker_action(), None));
     }
 
     #[test]

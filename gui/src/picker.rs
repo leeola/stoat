@@ -14,6 +14,28 @@ use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
 use stoat_action::ActionKind;
 
+/// Action kinds whose handlers open a top-level picker modal in
+/// the GUI. Used by [`Workspace::dispatch_action`]'s post-dispatch
+/// tail to record the most recently opened picker for
+/// [`stoat_action::OpenLastPicker`] recall, and by the recall
+/// handler itself to validate a candidate before re-dispatching.
+///
+/// The set covers every picker wired through `dispatch_action`'s
+/// match arms; future picker items extend it as they land.
+pub(crate) fn is_picker_open_kind(kind: ActionKind) -> bool {
+    matches!(
+        kind,
+        ActionKind::OpenCommandPalette
+            | ActionKind::OpenFileFinder
+            | ActionKind::OpenBufferPicker
+            | ActionKind::OpenSymbolPicker
+            | ActionKind::OpenWorkspaceSymbolPicker
+            | ActionKind::OpenDiagnosticsPicker
+            | ActionKind::OpenWorkspaceDiagnosticsPicker
+            | ActionKind::OpenJumplistPicker
+    )
+}
+
 /// Filter and rank `(item, haystack)` pairs against `query` using
 /// the shared nucleo matcher and the picker-side score-descending
 /// convention.
