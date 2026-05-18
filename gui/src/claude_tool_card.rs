@@ -15,6 +15,7 @@ use gpui::{
     div, AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled,
 };
+use std::collections::HashSet;
 use stoat::{
     claude_chat::{ChatMessage, ChatMessageContent, ToolCardStatus},
     host::ToolCallStatus,
@@ -22,9 +23,16 @@ use stoat::{
 
 /// Render-time classification of a tool card mirroring the TUI
 /// helper at `stoat/src/claude_chat.rs::tool_card_status`. The
-/// cancellation arm is owned by the sibling Ctrl-C item and is
-/// added here when that ships.
-pub(crate) fn tool_card_status(messages: &[ChatMessage], tool_id: &str) -> ToolCardStatus {
+/// cancelled set takes precedence over server status; absent
+/// results imply the tool is still running.
+pub(crate) fn tool_card_status(
+    messages: &[ChatMessage],
+    cancelled: &HashSet<String>,
+    tool_id: &str,
+) -> ToolCardStatus {
+    if cancelled.contains(tool_id) {
+        return ToolCardStatus::Cancelled;
+    }
     for msg in messages {
         if let ChatMessageContent::ToolResult { id, status, .. } = &msg.content {
             if id == tool_id {
@@ -50,7 +58,7 @@ pub(crate) fn render_tool_card(
     input: &str,
     cx: &mut Context<'_, ClaudeChat>,
 ) -> AnyElement {
-    let status = tool_card_status(&chat.messages, id);
+    let status = tool_card_status(&chat.messages, &chat.cancelled_tool_uses, id);
     let is_focused = chat.focused_tool_id.as_deref() == Some(id);
     let is_expanded = chat.expanded_tool_ids.contains(id);
     let result_content = find_result_content(&chat.messages, id);
@@ -289,21 +297,42 @@ mod tests {
 
     #[test]
     fn tool_card_status_returns_running_without_result() {
-        assert_eq!(tool_card_status(&[], "toolu_x"), ToolCardStatus::Running);
+        let cancelled = HashSet::new();
+        assert_eq!(
+            tool_card_status(&[], &cancelled, "toolu_x"),
+            ToolCardStatus::Running
+        );
     }
 
     #[test]
     fn tool_card_status_returns_done_for_completed_result() {
         let messages = vec![tool_result("toolu_x", ToolCallStatus::Completed)];
-        assert_eq!(tool_card_status(&messages, "toolu_x"), ToolCardStatus::Done);
+        let cancelled = HashSet::new();
+        assert_eq!(
+            tool_card_status(&messages, &cancelled, "toolu_x"),
+            ToolCardStatus::Done
+        );
     }
 
     #[test]
     fn tool_card_status_returns_failed_for_failed_result() {
         let messages = vec![tool_result("toolu_x", ToolCallStatus::Failed)];
+        let cancelled = HashSet::new();
         assert_eq!(
-            tool_card_status(&messages, "toolu_x"),
+            tool_card_status(&messages, &cancelled, "toolu_x"),
             ToolCardStatus::Failed
+        );
+    }
+
+    #[test]
+    fn tool_card_status_returns_cancelled_when_in_cancelled_set() {
+        let messages = vec![tool_result("toolu_x", ToolCallStatus::Completed)];
+        let mut cancelled = HashSet::new();
+        cancelled.insert("toolu_x".into());
+        assert_eq!(
+            tool_card_status(&messages, &cancelled, "toolu_x"),
+            ToolCardStatus::Cancelled,
+            "cancelled takes precedence over completed status",
         );
     }
 }

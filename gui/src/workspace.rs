@@ -1388,6 +1388,7 @@ impl Workspace {
             ActionKind::ClaudeToggleToolCardExpand => {
                 crate::claude_chat::dispatch_claude_toggle_tool_card_expand(self, cx)
             },
+            ActionKind::ClaudeInterrupt => crate::claude_chat::dispatch_claude_interrupt(self, cx),
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action

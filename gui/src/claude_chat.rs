@@ -61,6 +61,11 @@ pub struct ClaudeChat {
     /// cards; `ClaudeToggleToolCardExpand` flips
     /// [`Self::expanded_tool_ids`] membership for this id.
     pub(crate) focused_tool_id: Option<String>,
+    /// `ToolUse.id`s the user cancelled mid-flight via
+    /// [`stoat_action::ClaudeInterrupt`]. Drives the `cancelled`
+    /// badge on tool cards regardless of whether a server-side
+    /// `ToolResult` arrives later.
+    pub(crate) cancelled_tool_uses: HashSet<String>,
     /// Kept alive on the entity so the background task that asks the
     /// host for a session is dropped when the chat is dropped.
     _create_task: Option<Task<()>>,
@@ -85,8 +90,43 @@ impl ClaudeChat {
             pending_sends: Vec::new(),
             expanded_tool_ids: HashSet::new(),
             focused_tool_id: None,
+            cancelled_tool_uses: HashSet::new(),
             _create_task: Some(create_task),
         }
+    }
+
+    /// Cancel the in-flight Claude turn. Marks every `ToolUse`
+    /// without a matching `ToolResult` as cancelled (drives the
+    /// `cancelled` badge on the card) and fires
+    /// [`ClaudeCodeSession::interrupt`] when a session is live.
+    /// Mirrors the TUI's `claude_interrupt`
+    /// (`stoat/src/action_handlers/claude.rs:317`).
+    pub fn interrupt(&mut self, cx: &mut Context<'_, Self>) {
+        let completed: HashSet<&str> = self
+            .messages
+            .iter()
+            .filter_map(|m| match &m.content {
+                ChatMessageContent::ToolResult { id, .. } => Some(id.as_str()),
+                _ => None,
+            })
+            .collect();
+        let in_flight: Vec<String> = self
+            .messages
+            .iter()
+            .filter_map(|m| match &m.content {
+                ChatMessageContent::ToolUse { id, .. } if !completed.contains(id.as_str()) => {
+                    Some(id.clone())
+                },
+                _ => None,
+            })
+            .collect();
+        for id in in_flight {
+            self.cancelled_tool_uses.insert(id);
+        }
+        if let Some(session) = self.session.clone() {
+            spawn_interrupt(session, cx);
+        }
+        cx.notify();
     }
 
     /// Toggle expansion of the tool card identified by `id`. Powers
@@ -319,6 +359,19 @@ fn spawn_send(session: Arc<dyn ClaudeCodeSession>, text: String, cx: &mut Contex
     .detach();
 }
 
+fn spawn_interrupt(session: Arc<dyn ClaudeCodeSession>, cx: &mut Context<'_, ClaudeChat>) {
+    cx.spawn(async move |_, _| {
+        if let Err(err) = session.interrupt().await {
+            tracing::warn!(
+                target: "stoat_gui::claude_chat",
+                ?err,
+                "claude interrupt failed"
+            );
+        }
+    })
+    .detach();
+}
+
 fn read_input_text(input: &gpui::Entity<Editor>, cx: &App) -> String {
     let editor = input.read(cx);
     editor
@@ -516,6 +569,16 @@ pub fn dispatch_claude_toggle_tool_card_expand(
 ) {
     if let Some(chat) = focused_chat(workspace, cx) {
         chat.update(cx, |c, cx| c.toggle_focused_expansion(cx));
+    }
+}
+
+/// Dispatch the [`stoat_action::ClaudeInterrupt`] action. Cancels
+/// every in-flight tool call on the active chat and fires the
+/// session's `interrupt`; no-op when the active item is not a
+/// chat.
+pub fn dispatch_claude_interrupt(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(chat) = focused_chat(workspace, cx) {
+        chat.update(cx, |c, cx| c.interrupt(cx));
     }
 }
 
@@ -1226,5 +1289,133 @@ mod tests {
 
         let restored = h.git.restored_shas(&PathBuf::from("/ws-restore"));
         assert_eq!(restored, vec!["deadbeef".to_string()]);
+    }
+
+    fn push_tool_use_only(chat: &Entity<ClaudeChat>, h: &mut Harness<'_>, id: &str) {
+        chat.update(h.vcx, |c, cx| {
+            c.push_message(
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: ChatMessageContent::ToolUse {
+                        id: id.into(),
+                        name: "Bash".into(),
+                        input: "{}".into(),
+                    },
+                    checkpoint_sha: None,
+                },
+                cx,
+            );
+        });
+    }
+
+    fn push_tool_result(chat: &Entity<ClaudeChat>, h: &mut Harness<'_>, id: &str) {
+        chat.update(h.vcx, |c, cx| {
+            c.push_message(
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: ChatMessageContent::ToolResult {
+                        id: id.into(),
+                        content: String::new(),
+                        status: stoat::host::ToolCallStatus::Completed,
+                    },
+                    checkpoint_sha: None,
+                },
+                cx,
+            );
+        });
+    }
+
+    fn cancelled_ids(chat: &Entity<ClaudeChat>, h: &mut Harness<'_>) -> Vec<String> {
+        let mut ids: Vec<String> = chat.read_with(h.vcx, |c, _| {
+            c.cancelled_tool_uses.iter().cloned().collect()
+        });
+        ids.sort();
+        ids
+    }
+
+    #[test]
+    fn interrupt_marks_in_flight_tool_uses_cancelled() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use_only(&chat, &mut h, "toolu_open");
+        push_tool_use_only(&chat, &mut h, "toolu_done");
+        push_tool_result(&chat, &mut h, "toolu_done");
+
+        chat.update(h.vcx, |c, cx| c.interrupt(cx));
+        h.vcx.run_until_parked();
+
+        assert_eq!(cancelled_ids(&chat, &mut h), vec!["toolu_open".to_string()]);
+    }
+
+    #[test]
+    fn interrupt_skips_completed_tool_uses() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use_only(&chat, &mut h, "toolu_done");
+        push_tool_result(&chat, &mut h, "toolu_done");
+
+        chat.update(h.vcx, |c, cx| c.interrupt(cx));
+        h.vcx.run_until_parked();
+
+        assert!(
+            cancelled_ids(&chat, &mut h).is_empty(),
+            "completed tool calls stay out of the cancelled set",
+        );
+    }
+
+    #[test]
+    fn interrupt_calls_session_interrupt() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+
+        let chat = open_chat(&mut h);
+        h.vcx.run_until_parked();
+
+        chat.update(h.vcx, |c, cx| c.interrupt(cx));
+        h.vcx.run_until_parked();
+
+        assert!(
+            fake_session.interrupt_count() >= 1,
+            "interrupt should reach the host layer",
+        );
+    }
+
+    #[test]
+    fn interrupt_without_session_is_safe() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use_only(&chat, &mut h, "toolu_open");
+        chat.update(h.vcx, |c, cx| {
+            assert!(c.session.is_none(), "no session installed yet");
+            c.interrupt(cx);
+        });
+
+        assert_eq!(cancelled_ids(&chat, &mut h), vec!["toolu_open".to_string()]);
+    }
+
+    #[test]
+    fn dispatch_claude_interrupt_routes_to_focused_chat() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use_only(&chat, &mut h, "toolu_open");
+        h.workspace.update_in(h.vcx, |w, _window, cx| {
+            dispatch_claude_interrupt(w, cx);
+        });
+
+        assert_eq!(cancelled_ids(&chat, &mut h), vec!["toolu_open".to_string()]);
     }
 }
