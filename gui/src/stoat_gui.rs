@@ -50,6 +50,7 @@ mod pane;
 mod pane_tree;
 mod panic_hook;
 mod picker;
+mod quit_confirm;
 mod rebase_item;
 mod review_item;
 mod review_move_picker;

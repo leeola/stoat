@@ -974,6 +974,18 @@ impl Workspace {
         }
     }
 
+    /// Handle `QuitAll`: quit immediately when no buffer is dirty;
+    /// otherwise open the [`crate::quit_confirm::QuitConfirmModal`]
+    /// and wait for the user to confirm or cancel.
+    pub fn handle_quit_all(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let dirty = self.buffer_registry.read(cx).dirty_buffers();
+        if dirty.is_empty() {
+            cx.quit();
+            return;
+        }
+        crate::quit_confirm::open_quit_confirm(self, &dirty, window, cx);
+    }
+
     /// Dispatch a Stoat action resolved by the input state machine.
     /// Routes by [`ActionKind`]: pane-targeted variants update
     /// [`Entity<PaneTree>`], root-targeted variants mutate the
@@ -1002,7 +1014,7 @@ impl Workspace {
         }
         match action.kind() {
             ActionKind::Quit => self.handle_quit(cx),
-            ActionKind::QuitAll => cx.quit(),
+            ActionKind::QuitAll => self.handle_quit_all(window, cx),
             ActionKind::SplitRight => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.split(Axis::Vertical, cx);
@@ -4937,6 +4949,45 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn workspace_handle_quit_all_with_no_dirty_buffers_does_not_open_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update_in(vcx, |w, window, cx| w.handle_quit_all(window, cx));
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::quit_confirm::QuitConfirmModal>()
+        });
+        assert!(active.is_none());
+    }
+
+    #[test]
+    fn workspace_handle_quit_all_with_dirty_buffer_opens_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let shared = ws.update_in(vcx, |w, _window, cx| {
+            w.buffer_registry()
+                .update(cx, |r, cx| r.open(Path::new("/tmp/repo/foo.rs"), "x", cx))
+                .1
+        });
+        shared.write().expect("buffer poisoned").dirty = true;
+
+        ws.update_in(vcx, |w, window, cx| w.handle_quit_all(window, cx));
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::quit_confirm::QuitConfirmModal>()
+        });
+        assert!(active.is_some());
     }
 
     #[test]

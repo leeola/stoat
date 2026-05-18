@@ -24,7 +24,7 @@ pub(crate) struct CachedDiff {
 /// One entry surfaced by [`BufferRegistry::dirty_buffers`]. `path` is
 /// `Some` for file-backed buffers and `None` for scratch buffers.
 #[derive(Clone, Debug)]
-pub(crate) struct DirtyBuffer {
+pub struct DirtyBuffer {
     pub id: BufferId,
     pub path: Option<PathBuf>,
 }
@@ -218,7 +218,7 @@ impl BufferRegistry {
     /// Every buffer whose `dirty` flag is set: path-bound first sorted by
     /// path, scratch buffers after sorted by id. Used by `QuitAll` to drive
     /// the unsaved-buffers confirmation modal.
-    pub(crate) fn dirty_buffers(&self) -> Vec<DirtyBuffer> {
+    pub fn dirty_buffers(&self) -> Vec<DirtyBuffer> {
         let mut out: Vec<DirtyBuffer> = self
             .buffers
             .iter()

@@ -2,6 +2,7 @@ use gpui::{Context, EventEmitter};
 use std::path::Path;
 use stoat::{
     buffer::{BufferId, SharedBuffer},
+    buffer_registry::DirtyBuffer,
     BufferRegistry as InnerRegistry,
 };
 
@@ -88,6 +89,12 @@ impl BufferRegistry {
     /// key.
     pub fn ids(&self) -> impl Iterator<Item = BufferId> + '_ {
         self.inner.ids()
+    }
+
+    /// Every buffer whose dirty flag is set. Order: path-bound
+    /// first sorted by path, scratch buffers after sorted by id.
+    pub fn dirty_buffers(&self) -> Vec<DirtyBuffer> {
+        self.inner.dirty_buffers()
     }
 }
 
