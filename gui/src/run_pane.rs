@@ -15,25 +15,27 @@
 //! Once the session is installed and `pending_writes` have drained,
 //! the same background task awaits `TerminalSession::read` in a loop
 //! and routes each chunk back through [`Run::on_read`], which feeds
-//! the bytes into the active block's [`VtermGrid`]. The grid render
-//! is the dedicated sibling item; this file only ships a minimal
-//! text-row placeholder so the pane is usable before the vterm-grid
-//! paint lands.
+//! the bytes into the active block's [`VtermGrid`]. The styled-cell
+//! paint of those grids lives in the [`render`] submodule.
+
+mod render;
 
 use crate::{
     editor::Editor,
     globals::TerminalHostGlobal,
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemView},
+    settings::Settings,
+    theme::{DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
     workspace::Workspace,
 };
 use gpui::{
-    div, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled, Task,
-    WeakEntity, Window,
+    div, px, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled,
+    Task, WeakEntity, Window,
 };
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{OutputBlock, VtermGrid},
+    run::OutputBlock,
 };
 
 const SHELL_WIDTH: u16 = 80;
@@ -244,38 +246,39 @@ impl ItemView for Run {
 }
 
 impl Render for Run {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let cwd_label = SharedString::from(self.cwd.display().to_string());
+        let (font_family, font_size) = editor_font(cx);
         let mut body = div().flex().flex_col().flex_grow().w_full();
         for block in &self.blocks {
-            body = body.child(render_block_placeholder(&block.command, &block.grid));
+            body = body.child(render::render_block(block));
         }
         div()
             .flex()
             .flex_col()
             .size_full()
+            .font_family(font_family)
+            .text_size(px(font_size))
             .child(div().px_2().py_1().child(cwd_label))
             .child(body)
             .child(self.input.clone())
     }
 }
 
-fn render_block_placeholder(command: &str, grid: &VtermGrid) -> gpui::AnyElement {
-    let header = div()
-        .px_2()
-        .py_1()
-        .child(SharedString::from(format!("$ {command}")));
-    let mut block = div().flex().flex_col().w_full().child(header);
-    for row_idx in 0..grid.line_count() {
-        let row = grid.row(row_idx);
-        let text: String = row.iter().map(|cell| cell.ch).collect();
-        let text = text.trim_end_matches(' ').to_string();
-        if text.is_empty() {
-            continue;
-        }
-        block = block.child(div().px_2().child(SharedString::from(text)));
-    }
-    block.into_any_element()
+fn editor_font(cx: &App) -> (SharedString, f32) {
+    let (family, size) = match cx.try_global::<Settings>() {
+        Some(settings) => (
+            settings.resolved.editor_font_family.clone(),
+            settings.resolved.editor_font_size,
+        ),
+        None => (None, None),
+    };
+    (
+        family
+            .map(SharedString::from)
+            .unwrap_or_else(|| SharedString::from(DEFAULT_EDITOR_FONT_FAMILY)),
+        size.unwrap_or(DEFAULT_EDITOR_FONT_SIZE),
+    )
 }
 
 /// Dispatch the [`stoat_action::OpenRun`] action. Creates a fresh
