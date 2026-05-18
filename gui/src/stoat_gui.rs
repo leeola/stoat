@@ -18,6 +18,7 @@ mod buffer;
 mod buffer_picker;
 mod buffer_registry;
 mod claude_chat;
+mod claude_permission_modal;
 mod claude_tool_card;
 mod command_palette;
 mod commit_list;
@@ -84,7 +85,8 @@ pub use fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent};
 pub use globals::{
     install_production_globals, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal,
     ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry,
-    LspHostGlobal, ShellHostGlobal, TerminalHostGlobal,
+    LspHostGlobal, MpscPermissionPromptHost, PermissionPromptHost, PermissionPromptHostGlobal,
+    ShellHostGlobal, TerminalHostGlobal,
 };
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,

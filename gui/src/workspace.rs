@@ -1,6 +1,7 @@
 use crate::{
     buffer::Buffer,
     buffer_registry::{BufferRegistry, BufferRegistryEvent},
+    claude_permission_modal::PermissionModal,
     conflict_item::{ConflictItem, ConflictSide},
     diagnostics::DiagnosticSet,
     diff_coordinator::DiffCoordinator,
@@ -11,7 +12,7 @@ use crate::{
     editor_input::EditorInput,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
     git::coordinator::BlameCoordinator,
-    globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
+    globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, PermissionPromptHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
     keymap_loader::{compile_default_keymap, compile_from_settings},
@@ -32,14 +33,15 @@ use crate::{
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
-    deferred, div, px, App, AppContext, Context, Entity, EventEmitter, FocusHandle,
+    deferred, div, px, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Window,
+    Task, Window,
 };
 use std::{
-    collections::HashMap,
+    collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     sync::Arc,
+    time::Duration,
 };
 use stoat::{
     buffer::BufferId,
@@ -91,12 +93,27 @@ pub struct Workspace {
     registers: stoat::register::RegisterStore,
     selected_register: Option<stoat::register::Register>,
     rebase_active: Option<ActiveRebase>,
+    /// Pending Claude permission prompts waiting for the active
+    /// permission modal to close. FIFO so prompts surface in the
+    /// order the policy emits them, matching the TUI's
+    /// `permission_prompt_queue`.
+    permission_prompt_queue: VecDeque<stoat::host::PermissionPrompt>,
+    /// Background task that drains
+    /// [`PermissionPromptHostGlobal`] on a foreground tick. Dropped
+    /// when the workspace drops; absent when no global is
+    /// registered (most tests, headless runs).
+    _permission_prompt_poll: Option<Task<()>>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
     _pane_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
 }
+
+/// Period of the permission-prompt poll task. Matches
+/// [`FsWatcherDriver`]'s tick so the two background drainers share
+/// a uniform cadence.
+const PERMISSION_PROMPT_TICK: Duration = Duration::from_millis(50);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkspaceEvent {
@@ -272,6 +289,8 @@ impl Workspace {
             registers: stoat::register::RegisterStore::new(),
             selected_register: None,
             rebase_active: None,
+            permission_prompt_queue: VecDeque::new(),
+            _permission_prompt_poll: None,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -285,6 +304,63 @@ impl Workspace {
                 modal_layer_subscription,
             ],
         }
+    }
+
+    /// Push a Claude permission prompt onto the workspace's modal
+    /// pipeline. When no [`PermissionModal`] is currently active the
+    /// prompt opens one immediately; otherwise it queues FIFO and
+    /// surfaces when the active modal closes. Mirrors
+    /// [`stoat::Stoat::enqueue_permission_prompt`].
+    pub fn enqueue_permission_prompt(
+        &mut self,
+        prompt: stoat::host::PermissionPrompt,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        if self.permission_modal_active(cx) {
+            self.permission_prompt_queue.push_back(prompt);
+        } else {
+            self.show_permission_modal(prompt, window, cx);
+        }
+    }
+
+    fn permission_modal_active(&self, cx: &App) -> bool {
+        self.modal_layer
+            .read(cx)
+            .active_modal::<PermissionModal>()
+            .is_some()
+    }
+
+    fn show_permission_modal(
+        &mut self,
+        prompt: stoat::host::PermissionPrompt,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let weak_workspace = cx.weak_entity();
+        let modal = cx.new(|cx| PermissionModal::new(prompt, weak_workspace, cx));
+        let dismiss_subscription = cx.subscribe_in(
+            &modal,
+            window,
+            |workspace, _, _: &DismissEvent, window, cx| {
+                workspace.on_permission_modal_dismissed(window, cx);
+            },
+        );
+        self.modal_layer.update(cx, |layer, cx| {
+            layer.show_modal(modal, window, cx);
+        });
+        self._subscriptions.push(dismiss_subscription);
+    }
+
+    fn on_permission_modal_dismissed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        if let Some(next) = self.permission_prompt_queue.pop_front() {
+            self.show_permission_modal(next, window, cx);
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn permission_prompt_queue_len(&self) -> usize {
+        self.permission_prompt_queue.len()
     }
 
     pub fn name(&self) -> &SharedString {
@@ -3528,6 +3604,34 @@ impl Workspace {
     }
 }
 
+/// Spawn the background poll that drains
+/// [`PermissionPromptHostGlobal`] into the workspace's modal queue.
+/// Returns `None` when the global is not registered (most tests,
+/// headless runs) so the workspace does not park a no-op task. The
+/// task uses [`gpui::Context::spawn_in`] so its update hops land in
+/// window context for [`crate::modal_layer::ModalLayer::show_modal`].
+fn spawn_permission_prompt_poll(
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) -> Option<Task<()>> {
+    let host = cx
+        .try_global::<PermissionPromptHostGlobal>()
+        .map(|g| g.0.clone())?;
+    let executor = cx.try_global::<ExecutorGlobal>().map(|g| g.0.clone())?;
+    let task = cx.spawn_in(window, async move |weak_workspace, cx| loop {
+        executor.timer(PERMISSION_PROMPT_TICK).await;
+        let pumped = weak_workspace.update_in(cx, |workspace, window, cx| {
+            while let Some(prompt) = host.try_recv() {
+                workspace.enqueue_permission_prompt(prompt, window, cx);
+            }
+        });
+        if pumped.is_err() {
+            break;
+        }
+    });
+    Some(task)
+}
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum JumpMoveNav {
     First,
@@ -3950,6 +4054,9 @@ enum GotoKind {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if self._permission_prompt_poll.is_none() {
+            self._permission_prompt_poll = spawn_permission_prompt_poll(window, cx);
+        }
         let title = self.compute_window_title(cx);
         if self.last_window_title.as_ref() != Some(&title) {
             window.set_window_title(&title);
@@ -10051,5 +10158,131 @@ mod tests {
             assert!(ed.blame_visible());
             assert!(ed.blame_state().is_none());
         });
+    }
+
+    fn make_permission_prompt(
+        tool: &str,
+    ) -> (
+        stoat::host::PermissionPrompt,
+        tokio::sync::oneshot::Receiver<stoat::host::ApprovalDecision>,
+    ) {
+        let (tx, rx) = tokio::sync::oneshot::channel();
+        let prompt = stoat::host::PermissionPrompt {
+            tool: tool.to_string(),
+            input: "{}".to_string(),
+            response_tx: tx,
+        };
+        (prompt, rx)
+    }
+
+    fn active_permission_modal(
+        ws: &Entity<Workspace>,
+        vcx: &mut VisualTestContext,
+    ) -> Option<Entity<PermissionModal>> {
+        ws.read_with(vcx, |w, cx| {
+            w.modal_layer.read(cx).active_modal::<PermissionModal>()
+        })
+    }
+
+    #[test]
+    fn enqueue_permission_prompt_opens_modal_when_idle() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
+        let (prompt, _rx) = make_permission_prompt("Bash");
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.enqueue_permission_prompt(prompt, window, cx);
+        });
+        vcx.run_until_parked();
+
+        assert!(
+            active_permission_modal(&ws, vcx).is_some(),
+            "first enqueue opens modal immediately"
+        );
+        let len = ws.read_with(vcx, |w, _| w.permission_prompt_queue_len());
+        assert_eq!(len, 0, "no queue entries when modal opens directly");
+    }
+
+    #[test]
+    fn enqueue_permission_prompt_queues_when_modal_open() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
+        let (first, _rx1) = make_permission_prompt("Bash");
+        let (second, _rx2) = make_permission_prompt("Read");
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.enqueue_permission_prompt(first, window, cx);
+            w.enqueue_permission_prompt(second, window, cx);
+        });
+        vcx.run_until_parked();
+
+        let modal_active = active_permission_modal(&ws, vcx).is_some();
+        let queue_len = ws.read_with(vcx, |w, _| w.permission_prompt_queue_len());
+        assert!(modal_active, "first prompt opens the modal");
+        assert_eq!(queue_len, 1, "second prompt waits behind the active modal");
+    }
+
+    #[test]
+    fn dismissing_active_modal_opens_next_from_queue() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
+        let (first, _rx1) = make_permission_prompt("Bash");
+        let (second, _rx2) = make_permission_prompt("Read");
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.enqueue_permission_prompt(first, window, cx);
+            w.enqueue_permission_prompt(second, window, cx);
+        });
+        vcx.run_until_parked();
+
+        let active = active_permission_modal(&ws, vcx).expect("first modal active");
+        active.update(vcx, |_, cx| cx.emit(DismissEvent));
+        vcx.run_until_parked();
+
+        assert!(
+            active_permission_modal(&ws, vcx).is_some(),
+            "next queued prompt opens after dismiss"
+        );
+        let queue_len = ws.read_with(vcx, |w, _| w.permission_prompt_queue_len());
+        assert_eq!(queue_len, 0, "queue drained after dismiss promotes next");
+    }
+
+    #[test]
+    fn queue_drains_in_fifo_order() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
+        let (first, _rx1) = make_permission_prompt("First");
+        let (second, _rx2) = make_permission_prompt("Second");
+        let (third, _rx3) = make_permission_prompt("Third");
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.enqueue_permission_prompt(first, window, cx);
+            w.enqueue_permission_prompt(second, window, cx);
+            w.enqueue_permission_prompt(third, window, cx);
+        });
+        vcx.run_until_parked();
+
+        let initial_tool = active_permission_modal(&ws, vcx)
+            .expect("first modal")
+            .read_with(vcx, |m, _| m.tool().to_string());
+        assert_eq!(initial_tool, "First");
+
+        active_permission_modal(&ws, vcx)
+            .expect("first modal")
+            .update(vcx, |_, cx| cx.emit(DismissEvent));
+        vcx.run_until_parked();
+        let second_tool = active_permission_modal(&ws, vcx)
+            .expect("second modal")
+            .read_with(vcx, |m, _| m.tool().to_string());
+        assert_eq!(second_tool, "Second");
+
+        active_permission_modal(&ws, vcx)
+            .expect("second modal")
+            .update(vcx, |_, cx| cx.emit(DismissEvent));
+        vcx.run_until_parked();
+        let third_tool = active_permission_modal(&ws, vcx)
+            .expect("third modal")
+            .read_with(vcx, |m, _| m.tool().to_string());
+        assert_eq!(third_tool, "Third");
     }
 }
