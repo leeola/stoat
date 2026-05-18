@@ -495,15 +495,19 @@ impl Workspace {
     /// / `dismiss_modal_by_id` because each of those calls
     /// `cx.notify` on the modal-layer entity.
     ///
-    /// When the command palette modal becomes the top of the stack,
-    /// captures the prior mode, flips `mode` to `prompt`, and sets
-    /// `palette_open = true`. When the palette is no longer on top
-    /// (closed or buried under another modal), restores the prior
-    /// mode and clears `palette_open`.
+    /// When the command palette or help modal becomes the top of the
+    /// stack, captures the prior mode, flips `mode` to `prompt`, and
+    /// sets the matching `palette_open` / `help_open` flag. When that
+    /// modal is no longer on top (closed or buried under another
+    /// modal), restores the prior mode and clears the flag.
     fn refresh_modal_keymap_state(&self, layer: &Entity<ModalLayer>, cx: &mut Context<'_, Self>) {
         let palette_active = layer
             .read(cx)
             .active_modal::<crate::picker::Picker<crate::command_palette::CommandPaletteDelegate>>()
+            .is_some();
+        let help_active = layer
+            .read(cx)
+            .active_modal::<crate::help::HelpModal>()
             .is_some();
         self.input_state_machine.update(cx, |sm, cx_sm| {
             if palette_active {
@@ -512,6 +516,17 @@ impl Workspace {
                 sm.set_palette_open(true, cx_sm);
             } else if sm.palette_open() {
                 sm.set_palette_open(false, cx_sm);
+                if let Some(prev) = sm.take_prev_mode_for_modal() {
+                    sm.set_mode(prev, cx_sm);
+                }
+            }
+
+            if help_active {
+                sm.capture_prev_mode_for_modal();
+                sm.set_mode("prompt", cx_sm);
+                sm.set_help_open(true, cx_sm);
+            } else if sm.help_open() {
+                sm.set_help_open(false, cx_sm);
                 if let Some(prev) = sm.take_prev_mode_for_modal() {
                     sm.set_mode(prev, cx_sm);
                 }
@@ -1436,6 +1451,7 @@ impl Workspace {
             ActionKind::OpenCommandPalette => {
                 crate::command_palette::open_command_palette(self, window, cx)
             },
+            ActionKind::OpenHelp => crate::help::open_help(self, window, cx),
             ActionKind::OpenFileFinder => crate::file_finder::open_file_finder(self, window, cx),
             ActionKind::OpenBufferPicker => {
                 crate::buffer_picker::open_buffer_picker(self, window, cx)
@@ -4751,6 +4767,70 @@ mod tests {
             "second OpenCommandPalette toggles the modal off"
         );
         assert_eq!(mode, "normal");
+    }
+
+    #[test]
+    fn opening_help_sets_help_open_and_prompt_mode() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenHelp);
+        vcx.run_until_parked();
+
+        let (help_open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.help_open(), sm.mode().to_string())
+        });
+        assert!(
+            help_open,
+            "help_open should be true while help is the active modal"
+        );
+        assert_eq!(mode, "prompt", "mode should be prompt while help is active");
+    }
+
+    #[test]
+    fn closing_help_clears_help_open_and_restores_mode() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenHelp);
+        vcx.run_until_parked();
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.dismiss_modal(window, cx);
+        });
+        vcx.run_until_parked();
+
+        let (help_open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.help_open(), sm.mode().to_string())
+        });
+        assert!(
+            !help_open,
+            "help_open should clear after the help modal closes"
+        );
+        assert_eq!(mode, "normal", "mode should restore to the prior value");
+    }
+
+    #[test]
+    fn close_help_action_dismisses_help_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenHelp);
+        vcx.run_until_parked();
+        ws.update_in(vcx, |w, window, cx| {
+            w.dispatch_action(Box::new(stoat_action::CloseHelp), window, cx);
+        });
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::help::HelpModal>()
+                .is_some()
+        });
+        assert!(!active, "CloseHelp must dismiss the help modal");
     }
 
     #[test]

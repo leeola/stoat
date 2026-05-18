@@ -364,6 +364,16 @@ impl InputStateMachine {
         }
     }
 
+    /// Set the `help_open` keymap-state flag. No-ops on unchanged
+    /// value so observers don't see redundant notifications.
+    pub fn set_help_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {
+        let new = StateValue::Bool(open);
+        if self.help_open != new {
+            self.help_open = new;
+            cx.notify();
+        }
+    }
+
     /// Capture the current mode for restoration when a modal closes.
     /// Idempotent: a subsequent call while the slot is still
     /// occupied is a no-op, so nested-modal scenarios restore the

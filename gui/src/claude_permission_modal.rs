@@ -264,7 +264,10 @@ mod tests {
         let (prompt, rx) = new_prompt("Bash", "{}");
         let modal = build_modal(vcx, &workspace, prompt);
         modal.update(vcx, |m, cx| m.decide(ApprovalDecision::AllowOnce, cx));
-        assert_eq!(rx.blocking_recv().expect("decision delivered"), ApprovalDecision::AllowOnce);
+        assert_eq!(
+            rx.blocking_recv().expect("decision delivered"),
+            ApprovalDecision::AllowOnce
+        );
     }
 
     #[test]
@@ -274,7 +277,10 @@ mod tests {
         let (prompt, rx) = new_prompt("Bash", "{}");
         let modal = build_modal(vcx, &workspace, prompt);
         modal.update(vcx, |m, cx| m.decide(ApprovalDecision::AlwaysAllow, cx));
-        assert_eq!(rx.blocking_recv().expect("decision delivered"), ApprovalDecision::AlwaysAllow);
+        assert_eq!(
+            rx.blocking_recv().expect("decision delivered"),
+            ApprovalDecision::AlwaysAllow
+        );
     }
 
     #[test]
@@ -284,7 +290,10 @@ mod tests {
         let (prompt, rx) = new_prompt("Bash", "{}");
         let modal = build_modal(vcx, &workspace, prompt);
         modal.update(vcx, |m, cx| m.decide(ApprovalDecision::Deny, cx));
-        assert_eq!(rx.blocking_recv().expect("decision delivered"), ApprovalDecision::Deny);
+        assert_eq!(
+            rx.blocking_recv().expect("decision delivered"),
+            ApprovalDecision::Deny
+        );
     }
 
     #[test]
@@ -297,7 +306,10 @@ mod tests {
             let proceed = m.on_before_dismiss(window, cx);
             assert!(proceed, "modal should allow dismissal");
         });
-        assert_eq!(rx.blocking_recv().expect("decision delivered"), ApprovalDecision::Deny);
+        assert_eq!(
+            rx.blocking_recv().expect("decision delivered"),
+            ApprovalDecision::Deny
+        );
     }
 
     #[test]
@@ -315,7 +327,10 @@ mod tests {
                 "sender consumed by the explicit Allow decision",
             );
         });
-        assert_eq!(rx.blocking_recv().expect("decision delivered"), ApprovalDecision::Allow);
+        assert_eq!(
+            rx.blocking_recv().expect("decision delivered"),
+            ApprovalDecision::Allow
+        );
     }
 
     #[test]
@@ -328,6 +343,9 @@ mod tests {
             let consumed = m.handle_action(&stoat_action::DismissModal, window, cx);
             assert!(consumed);
         });
-        assert_eq!(rx.blocking_recv().expect("decision delivered"), ApprovalDecision::Deny);
+        assert_eq!(
+            rx.blocking_recv().expect("decision delivered"),
+            ApprovalDecision::Deny
+        );
     }
 }

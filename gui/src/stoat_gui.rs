@@ -37,6 +37,7 @@ mod fs_watcher_driver;
 mod git;
 mod global_search;
 mod globals;
+mod help;
 mod input_state_machine;
 mod item;
 mod jumplist_picker;
