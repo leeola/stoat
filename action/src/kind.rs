@@ -293,6 +293,8 @@ pub enum ActionKind {
     DismissModal,
     ClickAt,
     DragSelectTo,
+    RunClickAt,
+    RunDragSelectTo,
     HoverAt,
     ApplyFindChar,
     ApplyMarkChar,

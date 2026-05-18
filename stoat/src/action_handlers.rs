@@ -602,6 +602,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::DismissModal
         | ActionKind::ClickAt
         | ActionKind::DragSelectTo
+        | ActionKind::RunClickAt
+        | ActionKind::RunDragSelectTo
         | ActionKind::HoverAt
         | ActionKind::ApplyFindChar
         | ActionKind::ApplyMarkChar

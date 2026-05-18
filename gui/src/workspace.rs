@@ -1431,6 +1431,24 @@ impl Workspace {
             ActionKind::ClaudeSubmit => crate::claude_chat::dispatch_claude_submit(self, cx),
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
             ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
+            ActionKind::RunClickAt => {
+                if let Some(click) = action
+                    .as_any()
+                    .downcast_ref::<crate::run_pane::mouse::RunClickAt>()
+                {
+                    let (row, col) = (click.row, click.col);
+                    crate::run_pane::mouse::handle_run_click_at(self, row, col, cx);
+                }
+            },
+            ActionKind::RunDragSelectTo => {
+                if let Some(drag) = action
+                    .as_any()
+                    .downcast_ref::<crate::run_pane::mouse::RunDragSelectTo>()
+                {
+                    let (row, col) = (drag.row, drag.col);
+                    crate::run_pane::mouse::handle_run_drag_select_to(self, row, col, cx);
+                }
+            },
             ActionKind::ClaudeFocusNextToolCard => {
                 crate::claude_chat::dispatch_claude_focus_next_tool_card(self, cx)
             },

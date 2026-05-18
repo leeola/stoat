@@ -18,6 +18,7 @@
 //! the bytes into the active block's [`VtermGrid`]. The styled-cell
 //! paint of those grids lives in the [`render`] submodule.
 
+pub(crate) mod mouse;
 mod render;
 
 use crate::{
@@ -29,13 +30,14 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, px, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString, Styled,
-    Task, WeakEntity, Window,
+    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render,
+    SharedString, Size, Styled, Task, WeakEntity, Window,
 };
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::OutputBlock,
+    run::{GridSelection, OutputBlock},
 };
 
 const SHELL_WIDTH: u16 = 80;
@@ -53,8 +55,15 @@ pub struct Run {
     /// `tracing::warn` and the queue is dropped rather than
     /// retried).
     pub(crate) pending_writes: Vec<String>,
-    #[allow(dead_code)]
     workspace: WeakEntity<Workspace>,
+    /// Output-column pixel bounds captured by the canvas
+    /// prepaint each frame. Mouse handlers subtract the
+    /// origin to land in element-local coordinates before
+    /// dividing by [`Self::cell_size`].
+    output_bounds: Option<Bounds<Pixels>>,
+    /// Monospace cell metrics measured during the render's
+    /// canvas prepaint via `text_system().em_advance`.
+    cell_size: Option<Size<Pixels>>,
     _spawn_task: Option<Task<()>>,
 }
 
@@ -79,8 +88,67 @@ impl Run {
             session: None,
             pending_writes: Vec::new(),
             workspace,
+            output_bounds: None,
+            cell_size: None,
             _spawn_task: Some(spawn_task),
         }
+    }
+
+    pub fn set_output_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<'_, Self>) {
+        if self.output_bounds == Some(bounds) {
+            return;
+        }
+        self.output_bounds = Some(bounds);
+        cx.notify();
+    }
+
+    pub fn set_cell_size(&mut self, size: Size<Pixels>, cx: &mut Context<'_, Self>) {
+        if self.cell_size == Some(size) {
+            return;
+        }
+        self.cell_size = Some(size);
+        cx.notify();
+    }
+
+    fn dispatch_grid_click(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((row, col)) = self.position_to_grid(position) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |w, cx| {
+            w.dispatch_action(Box::new(mouse::RunClickAt { row, col }), window, cx);
+        });
+    }
+
+    fn dispatch_grid_drag(
+        &mut self,
+        position: Point<Pixels>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some((row, col)) = self.position_to_grid(position) else {
+            return;
+        };
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        workspace.update(cx, |w, cx| {
+            w.dispatch_action(Box::new(mouse::RunDragSelectTo { row, col }), window, cx);
+        });
+    }
+
+    fn position_to_grid(&self, position: Point<Pixels>) -> Option<(u32, u32)> {
+        let bounds = self.output_bounds?;
+        let cell = self.cell_size?;
+        let elem = point(position.x - bounds.origin.x, position.y - bounds.origin.y);
+        Some(mouse::point_to_grid(elem, cell))
     }
 
     pub fn submit(&mut self, cx: &mut Context<'_, Self>) {
@@ -116,6 +184,39 @@ impl Run {
             .last_mut()
             .expect("blocks non-empty after push above");
         active.grid.feed(chunk);
+        cx.notify();
+    }
+
+    /// Seed the active block's selection at `(col, row)`. No-op
+    /// when no block exists. Mirrors the TUI mouse-down arm in
+    /// `stoat/src/app.rs::handle_run_pane_mouse`.
+    pub fn handle_click_at(&mut self, row: u32, col: u32, cx: &mut Context<'_, Self>) {
+        let Some(active) = self.blocks.last_mut() else {
+            return;
+        };
+        let pos = (col as u16, row as u16);
+        active.selection = Some(GridSelection {
+            anchor: pos,
+            head: pos,
+        });
+        cx.notify();
+    }
+
+    /// Extend the active block's selection head to `(col, row)`.
+    /// No-op when no active block, no prior selection anchor, or
+    /// the head did not move. Mirrors the TUI mouse-drag arm.
+    pub fn handle_drag_select_to(&mut self, row: u32, col: u32, cx: &mut Context<'_, Self>) {
+        let Some(active) = self.blocks.last_mut() else {
+            return;
+        };
+        let Some(selection) = active.selection.as_mut() else {
+            return;
+        };
+        let pos = (col as u16, row as u16);
+        if selection.head == pos {
+            return;
+        }
+        selection.head = pos;
         cx.notify();
     }
 }
@@ -253,6 +354,48 @@ impl Render for Run {
         for block in &self.blocks {
             body = body.child(render::render_block(block));
         }
+        let bounds_handle = cx.weak_entity();
+        let cell_family = font_family.clone();
+        let bounds_capture = canvas(
+            move |bounds, window, cx| {
+                let font_id = window
+                    .text_system()
+                    .resolve_font(&font(cell_family.clone()));
+                let font_size_px = px(font_size);
+                let line_height = px((font_size * GPUI_DEFAULT_LINE_HEIGHT_RATIO).round());
+                let measured = window
+                    .text_system()
+                    .em_advance(font_id, font_size_px)
+                    .ok()
+                    .map(|width| size(width, line_height));
+                let _ = bounds_handle.update(cx, |run, cx| {
+                    run.set_output_bounds(bounds, cx);
+                    if let Some(cell) = measured {
+                        run.set_cell_size(cell, cx);
+                    }
+                });
+            },
+            |_, _, _, _| {},
+        )
+        .absolute()
+        .size_full();
+        let output_layer = div()
+            .relative()
+            .flex_grow()
+            .w_full()
+            .child(body)
+            .child(bounds_capture)
+            .on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.dispatch_grid_click(event.position, window, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if event.dragging() {
+                    this.dispatch_grid_drag(event.position, window, cx);
+                }
+            }));
         div()
             .flex()
             .flex_col()
@@ -260,10 +403,17 @@ impl Render for Run {
             .font_family(font_family)
             .text_size(px(font_size))
             .child(div().px_2().py_1().child(cwd_label))
-            .child(body)
+            .child(output_layer)
             .child(self.input.clone())
     }
 }
+
+/// Matches the GPUI `TextStyle::default` `line_height` (golden
+/// ratio) applied when no `with_text_style` refinement overrides
+/// it. The editor uses the same constant for cell-height math; the
+/// run pane mirrors it so cached cell rows line up with the
+/// rendered grid.
+const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
 
 fn editor_font(cx: &App) -> (SharedString, f32) {
     let (family, size) = match cx.try_global::<Settings>() {
