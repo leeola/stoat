@@ -1429,6 +1429,8 @@ impl Workspace {
             ActionKind::OpenLastPicker => self.dispatch_open_last_picker(window, cx),
             ActionKind::OpenClaude => crate::claude_chat::dispatch_open_claude(self, window, cx),
             ActionKind::ClaudeSubmit => crate::claude_chat::dispatch_claude_submit(self, cx),
+            ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
+            ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
             ActionKind::ClaudeFocusNextToolCard => {
                 crate::claude_chat::dispatch_claude_focus_next_tool_card(self, cx)
             },
