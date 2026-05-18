@@ -56,6 +56,7 @@ mod review_session;
 mod reword_modal;
 mod run_pane;
 mod settings;
+mod shell_input_modal;
 mod status_bar;
 mod stoat_app;
 mod symbol_picker;

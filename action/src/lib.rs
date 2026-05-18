@@ -74,7 +74,7 @@ pub use defs::{
     },
     prompt::{
         CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
-        PromptInsertNewline, SubmitPromptInput,
+        PromptInsertNewline, ShellInputSubmit, SubmitPromptInput,
     },
     rebase::{
         AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,

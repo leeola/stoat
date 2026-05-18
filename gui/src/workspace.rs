@@ -35,7 +35,7 @@ use crate::{
 use gpui::{
     deferred, div, px, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Task, Window,
+    Task, WeakEntity, Window,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -361,6 +361,38 @@ impl Workspace {
     #[cfg(test)]
     pub(crate) fn permission_prompt_queue_len(&self) -> usize {
         self.permission_prompt_queue.len()
+    }
+
+    /// Open the [`crate::shell_input_modal::ShellInputModal`] for
+    /// `action`, replacing any active modal. Confirm flows through
+    /// `ShellInputSubmit` to [`Self::run_shell_command`]; abort
+    /// flows through `DismissModal`.
+    pub fn show_shell_input_modal(
+        &mut self,
+        action: crate::editor::actions::shell::ShellAction,
+        weak_workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.modal_layer.update(cx, |layer, cx| {
+            let modal = cx.new(|cx| {
+                crate::shell_input_modal::ShellInputModal::new(weak_workspace, action, window, cx)
+            });
+            layer.show_modal(modal, window, cx);
+        });
+    }
+
+    /// Dispatch to [`crate::editor::actions::shell::apply`]. Public
+    /// so the modal can call back through its weak workspace handle.
+    pub fn run_shell_command(
+        &mut self,
+        action: crate::editor::actions::shell::ShellAction,
+        cmd: &str,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let _ = window;
+        crate::editor::actions::shell::apply(self, action, cmd, cx);
     }
 
     pub fn name(&self) -> &SharedString {
@@ -1692,6 +1724,21 @@ impl Workspace {
                         editor.update(cx, |ed, cx| ed.handle_surround_replace(from, to, cx));
                     }
                 }
+            },
+            ActionKind::ShellPipe => {
+                crate::editor::actions::shell::handle_shell_pipe(self, window, cx)
+            },
+            ActionKind::ShellPipeTo => {
+                crate::editor::actions::shell::handle_shell_pipe_to(self, window, cx)
+            },
+            ActionKind::ShellInsertOutput => {
+                crate::editor::actions::shell::handle_shell_insert_output(self, window, cx)
+            },
+            ActionKind::ShellAppendOutput => {
+                crate::editor::actions::shell::handle_shell_append_output(self, window, cx)
+            },
+            ActionKind::ShellKeepPipe => {
+                crate::editor::actions::shell::handle_shell_keep_pipe(self, window, cx)
             },
             ActionKind::SelectTextobjectAround => {
                 crate::editor::actions::textobject::handle_select_textobject_around(self, cx)

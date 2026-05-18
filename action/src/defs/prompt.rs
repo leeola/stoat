@@ -96,6 +96,54 @@ impl Action for CancelPromptInput {
 }
 
 #[derive(Debug)]
+pub struct ShellInputSubmitDef;
+
+impl ActionDef for ShellInputSubmitDef {
+    fn name(&self) -> &'static str {
+        "ShellInputSubmit"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ShellInputSubmit
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "submit shell input modal"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the typed shell command for the active ShellInputModal (Pipe, \
+         PipeTo, InsertOutput, AppendOutput, or KeepPipe) and dismiss the \
+         modal. Bypassed when no shell input modal is open."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+}
+
+#[derive(Debug)]
+pub struct ShellInputSubmit;
+
+impl ShellInputSubmit {
+    pub const DEF: &ShellInputSubmitDef = &ShellInputSubmitDef;
+}
+
+impl Action for ShellInputSubmit {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct PromptInsertNewlineDef;
 
 impl ActionDef for PromptInsertNewlineDef {

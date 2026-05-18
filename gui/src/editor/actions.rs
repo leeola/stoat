@@ -6,6 +6,7 @@ pub mod marks;
 pub mod movement;
 pub mod multi_cursor;
 pub mod numbers;
+pub mod shell;
 pub mod smart_tab;
 pub mod surround;
 pub mod textobject;

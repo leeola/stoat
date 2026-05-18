@@ -71,7 +71,7 @@ use crate::{
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
-            PromptInsertNewline, SubmitPromptInput,
+            PromptInsertNewline, ShellInputSubmit, SubmitPromptInput,
         },
         rebase::{
             AbortRebase, ConflictAbort, ConflictApply, ConflictNextFile, ConflictPrevFile,
@@ -616,6 +616,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
     add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
+    add(ShellInputSubmit::DEF, |_| Ok(Box::new(ShellInputSubmit)));
     add(PromptInsertNewline::DEF, |_| {
         Ok(Box::new(PromptInsertNewline))
     });
@@ -815,6 +816,7 @@ mod tests {
         "HelpJumpLast",
         "SubmitPromptInput",
         "CancelPromptInput",
+        "ShellInputSubmit",
         "PromptInsertNewline",
         "PaletteSelectPrev",
         "PaletteSelectNext",
@@ -984,7 +986,8 @@ mod tests {
         //   modal -> `Picker::handle_action`.
         // + 5 edit-action primitives (DeleteForward, DeleteBackward, Insert, Append, InsertNewline)
         //   the GUI dispatches via the per-handler edit-action module.
-        assert_eq!(all().count(), 289);
+        // + 1 ShellInputSubmit (palette-invisible: dismisses the active ShellInputModal).
+        assert_eq!(all().count(), 290);
     }
 
     #[test]
