@@ -379,6 +379,56 @@ impl Workspace {
         self.rebase_active.as_ref()
     }
 
+    /// Open the file referenced by the focused tool card on the
+    /// active [`crate::claude_chat::ClaudeChat`] and move the cursor
+    /// to the referenced line. Mirrors the TUI's
+    /// `claude_jump_to_focused_card` body in
+    /// `stoat/src/action_handlers/claude.rs:409`; silent no-op when
+    /// the active pane is not a chat, no card is focused, the
+    /// focused card has no `file_path`, or the resolved absolute
+    /// path falls outside the workspace's git root.
+    pub fn jump_to_focused_claude_card(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(chat) = crate::claude_chat::focused_chat(self, cx) else {
+            return;
+        };
+        let Some((path, line)) = chat.read(cx).focused_tool_card_location() else {
+            return;
+        };
+        let absolute = if path.is_absolute() {
+            path
+        } else {
+            self.git_root.join(path)
+        };
+        if !absolute.starts_with(&self.git_root) {
+            return;
+        }
+        let _ = window;
+        self.open_paths(&[absolute.clone()], cx);
+        let pane_id = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        let target_editor: Option<(usize, Entity<Editor>)> = pane
+            .read(cx)
+            .items()
+            .iter()
+            .enumerate()
+            .find_map(|(idx, item)| {
+                let editor = item.to_any_view().downcast::<Editor>().ok()?;
+                let path = editor.read(cx).file_path()?.to_path_buf();
+                (path == absolute).then_some((idx, editor))
+            });
+        let Some((index, editor)) = target_editor else {
+            return;
+        };
+        pane.update(cx, |p, cx| {
+            p.activate(index, cx);
+        });
+        if let Some(line) = line {
+            editor.update(cx, |ed, cx| ed.handle_goto_line_number(Some(line), cx));
+        }
+    }
+
     /// Restore the workspace's git working tree to the state
     /// captured at `sha`. Resolves the repo via
     /// [`GitHostGlobal`] and calls
@@ -1389,6 +1439,9 @@ impl Workspace {
                 crate::claude_chat::dispatch_claude_toggle_tool_card_expand(self, cx)
             },
             ActionKind::ClaudeInterrupt => crate::claude_chat::dispatch_claude_interrupt(self, cx),
+            ActionKind::ClaudeJumpToFocusedCard => {
+                crate::claude_chat::dispatch_claude_jump_to_focused_card(self, window, cx)
+            },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action

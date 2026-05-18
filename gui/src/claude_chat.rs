@@ -95,6 +95,30 @@ impl ClaudeChat {
         }
     }
 
+    /// Resolve the focused tool card to a `(path, line)` pair when
+    /// the tool's input JSON carries a `file_path`. Returns `None`
+    /// when no card is focused, the focused id no longer maps to a
+    /// `ToolUse` message, the input is not parseable JSON, or no
+    /// `file_path` is present. `line` is the 1-indexed offset from
+    /// the tool input when set, otherwise `None`. Mirrors the TUI
+    /// helper at
+    /// `stoat/src/action_handlers/claude.rs::focused_tool_card_location`.
+    pub fn focused_tool_card_location(&self) -> Option<(std::path::PathBuf, Option<u32>)> {
+        let focused = self.focused_tool_id.as_deref()?;
+        let input = self.messages.iter().find_map(|msg| match &msg.content {
+            ChatMessageContent::ToolUse { id, input, .. } if id == focused => Some(input.as_str()),
+            _ => None,
+        })?;
+        let value: serde_json::Value = serde_json::from_str(input).ok()?;
+        let obj = value.as_object()?;
+        let path = obj.get("file_path").and_then(|v| v.as_str())?;
+        let line = obj
+            .get("offset")
+            .and_then(|v| v.as_u64())
+            .and_then(|n| u32::try_from(n).ok());
+        Some((std::path::PathBuf::from(path), line))
+    }
+
     /// Cancel the in-flight Claude turn. Marks every `ToolUse`
     /// without a matching `ToolResult` as cancelled (drives the
     /// `cancelled` badge on the card) and fires
@@ -582,7 +606,21 @@ pub fn dispatch_claude_interrupt(workspace: &mut Workspace, cx: &mut Context<'_,
     }
 }
 
-fn focused_chat(
+/// Dispatch the [`stoat_action::ClaudeJumpToFocusedCard`] action.
+/// Opens the file referenced by the focused tool card in the
+/// active pane and moves the cursor to the referenced line.
+/// Silent no-op when the active item is not a chat, no card is
+/// focused, the focused card has no `file_path`, or the resolved
+/// path is outside the workspace's git root.
+pub fn dispatch_claude_jump_to_focused_card(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    workspace.jump_to_focused_claude_card(window, cx);
+}
+
+pub(crate) fn focused_chat(
     workspace: &Workspace,
     cx: &mut Context<'_, Workspace>,
 ) -> Option<gpui::Entity<ClaudeChat>> {
@@ -611,13 +649,17 @@ mod tests {
     use stoat_host::NoopFsWatcher;
     use stoat_scheduler::{Executor, TestScheduler};
 
-    fn install_globals(cx: &mut TestAppContext, host: Arc<dyn ClaudeCodeHost>, git: Arc<FakeGit>) {
+    fn install_globals(
+        cx: &mut TestAppContext,
+        host: Arc<dyn ClaudeCodeHost>,
+        git: Arc<FakeGit>,
+        fs: Arc<FakeFs>,
+    ) {
         let executor = Executor::new(Arc::new(TestScheduler::new()));
-        let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
         let clipboard: Arc<dyn ClipboardHost> = Arc::new(FakeClipboard::new());
         cx.update(|cx| {
             cx.set_global(ExecutorGlobal(executor));
-            cx.set_global(FsHostGlobal(fs));
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
             cx.set_global(FsWatchHostGlobal(
                 Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
             ));
@@ -630,6 +672,7 @@ mod tests {
     struct Harness<'a> {
         workspace: Entity<Workspace>,
         git: Arc<FakeGit>,
+        fs: Arc<FakeFs>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -643,7 +686,8 @@ mod tests {
         repo_root: &str,
     ) -> Harness<'a> {
         let git = Arc::new(FakeGit::new());
-        install_globals(cx, host, git.clone());
+        let fs = Arc::new(FakeFs::new());
+        install_globals(cx, host, git.clone(), fs.clone());
         let root = PathBuf::from(repo_root);
         let (workspace, vcx) = cx.add_window_view({
             let root = root.clone();
@@ -652,6 +696,7 @@ mod tests {
         Harness {
             workspace,
             git,
+            fs,
             vcx,
         }
     }
@@ -1417,5 +1462,177 @@ mod tests {
         });
 
         assert_eq!(cancelled_ids(&chat, &mut h), vec!["toolu_open".to_string()]);
+    }
+
+    fn push_read_tool_use(
+        chat: &Entity<ClaudeChat>,
+        h: &mut Harness<'_>,
+        id: &str,
+        path: &str,
+        offset: Option<u32>,
+    ) {
+        let input = match offset {
+            Some(o) => format!("{{\"file_path\":\"{path}\",\"offset\":{o}}}"),
+            None => format!("{{\"file_path\":\"{path}\"}}"),
+        };
+        chat.update(h.vcx, |c, cx| {
+            c.push_message(
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: ChatMessageContent::ToolUse {
+                        id: id.into(),
+                        name: "Read".into(),
+                        input,
+                    },
+                    checkpoint_sha: None,
+                },
+                cx,
+            );
+        });
+    }
+
+    fn focus_tool(chat: &Entity<ClaudeChat>, h: &mut Harness<'_>, id: &str) {
+        chat.update(h.vcx, |c, cx| {
+            c.focused_tool_id = Some(id.to_string());
+            cx.notify();
+        });
+    }
+
+    #[test]
+    fn focused_tool_card_location_returns_path_and_offset() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_read_tool_use(&chat, &mut h, "toolu_r", "/repo/src/lib.rs", Some(42));
+        focus_tool(&chat, &mut h, "toolu_r");
+
+        let location = chat.read_with(h.vcx, |c, _| c.focused_tool_card_location());
+        assert_eq!(
+            location,
+            Some((PathBuf::from("/repo/src/lib.rs"), Some(42))),
+        );
+    }
+
+    #[test]
+    fn focused_tool_card_location_returns_none_for_bash() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        chat.update(h.vcx, |c, cx| {
+            c.push_message(
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: ChatMessageContent::ToolUse {
+                        id: "toolu_b".into(),
+                        name: "Bash".into(),
+                        input: "{\"command\":\"ls\"}".into(),
+                    },
+                    checkpoint_sha: None,
+                },
+                cx,
+            );
+        });
+        focus_tool(&chat, &mut h, "toolu_b");
+
+        let location = chat.read_with(h.vcx, |c, _| c.focused_tool_card_location());
+        assert_eq!(location, None, "Bash has no file_path");
+    }
+
+    #[test]
+    fn focused_tool_card_location_returns_none_without_focus() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_read_tool_use(&chat, &mut h, "toolu_r", "/repo/src/lib.rs", Some(10));
+
+        let location = chat.read_with(h.vcx, |c, _| c.focused_tool_card_location());
+        assert_eq!(location, None);
+    }
+
+    fn focused_pane_editor_path(h: &mut Harness<'_>) -> Option<PathBuf> {
+        h.workspace.update(h.vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w.pane_tree().read(cx).pane(pane_id).cloned()?;
+            let view = pane.read(cx).active_item().map(ItemHandle::to_any_view)?;
+            let editor = view.downcast::<Editor>().ok()?;
+            editor
+                .read(cx)
+                .file_path()
+                .map(std::path::Path::to_path_buf)
+        })
+    }
+
+    fn focused_pane_cursor_row(h: &mut Harness<'_>) -> Option<u32> {
+        h.workspace.update(h.vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w.pane_tree().read(cx).pane(pane_id).cloned()?;
+            let view = pane.read(cx).active_item().map(ItemHandle::to_any_view)?;
+            let editor = view.downcast::<Editor>().ok()?;
+            let editor_ref = editor.read(cx);
+            let snapshot = editor_ref.multi_buffer().read(cx).snapshot();
+            let head = editor_ref.selections().newest_anchor().head();
+            let offset = snapshot.resolve_anchor(&head);
+            Some(snapshot.rope().offset_to_point(offset).row)
+        })
+    }
+
+    #[test]
+    fn jump_to_focused_card_opens_file_and_jumps_to_line() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness_with_root(&mut cx, host as Arc<dyn ClaudeCodeHost>, "/jump-repo");
+        h.fs.insert_file(
+            "/jump-repo/src/lib.rs",
+            b"alpha\nbeta\ngamma\ndelta\necho\n".as_slice(),
+        );
+        let chat = open_chat(&mut h);
+
+        push_read_tool_use(&chat, &mut h, "toolu_r", "/jump-repo/src/lib.rs", Some(3));
+        focus_tool(&chat, &mut h, "toolu_r");
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_claude_jump_to_focused_card(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let editor_path = focused_pane_editor_path(&mut h);
+        assert_eq!(
+            editor_path,
+            Some(PathBuf::from("/jump-repo/src/lib.rs")),
+            "focused pane now hosts the opened file"
+        );
+        let cursor_row = focused_pane_cursor_row(&mut h);
+        assert_eq!(
+            cursor_row,
+            Some(2),
+            "1-indexed offset 3 jumps to 0-indexed row 2"
+        );
+    }
+
+    #[test]
+    fn jump_to_focused_card_outside_workspace_is_noop() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness_with_root(&mut cx, host as Arc<dyn ClaudeCodeHost>, "/jump-repo");
+        let chat = open_chat(&mut h);
+
+        push_read_tool_use(&chat, &mut h, "toolu_r", "/etc/passwd", Some(1));
+        focus_tool(&chat, &mut h, "toolu_r");
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_claude_jump_to_focused_card(w, window, cx);
+        });
+
+        let editor_path = focused_pane_editor_path(&mut h);
+        assert!(
+            editor_path.as_ref().is_none_or(|p| !p.starts_with("/etc")),
+            "out-of-workspace path must not open in the focused pane: {editor_path:?}",
+        );
     }
 }
