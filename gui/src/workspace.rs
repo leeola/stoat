@@ -379,6 +379,33 @@ impl Workspace {
         self.rebase_active.as_ref()
     }
 
+    /// Restore the workspace's git working tree to the state
+    /// captured at `sha`. Resolves the repo via
+    /// [`GitHostGlobal`] and calls
+    /// [`GitRepo::restore_tree`]; failures log via `tracing::warn!`
+    /// but do not propagate -- there is no surface in the GUI yet
+    /// for a checkpoint-restore error toast. Mirrors the TUI
+    /// checkpoint marker mouse-handler at `stoat/src/app.rs:1259`.
+    pub fn restore_to_checkpoint(&mut self, sha: String, cx: &mut Context<'_, Self>) {
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&self.git_root) else {
+            tracing::warn!(
+                target: "stoat_gui::claude",
+                git_root = ?self.git_root,
+                "checkpoint restore skipped: no git repo at workspace root",
+            );
+            return;
+        };
+        if let Err(err) = repo.restore_tree(&sha) {
+            tracing::warn!(
+                target: "stoat_gui::claude",
+                ?err,
+                %sha,
+                "checkpoint restore via marker click failed",
+            );
+        }
+    }
+
     /// Propagate modal-layer transitions into the keymap-state
     /// fields the [`InputStateMachine`] exposes to the keymap engine.
     /// Driven by an `observe(&modal_layer, ...)` subscription wired

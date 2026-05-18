@@ -27,8 +27,9 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString,
-    Styled, Task, Window,
+    div, AnyElement, App, AppContext, Context, ElementId, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Task, WeakEntity,
+    Window,
 };
 use std::{collections::HashSet, sync::Arc};
 use stoat::{
@@ -39,6 +40,10 @@ use stoat::{
 pub struct ClaudeChat {
     pub(crate) input: gpui::Entity<Editor>,
     pub(crate) messages: Vec<ChatMessage>,
+    /// Weak handle to the owning workspace. Used by the
+    /// checkpoint-marker click handler to route a restore request
+    /// through [`Workspace::restore_to_checkpoint`].
+    pub(crate) workspace: WeakEntity<Workspace>,
     session: Option<Arc<dyn ClaudeCodeSession>>,
     /// User submissions that arrived before the host returned a live
     /// session. Drained in arrival order once [`Self::session`] is
@@ -62,7 +67,11 @@ pub struct ClaudeChat {
 }
 
 impl ClaudeChat {
-    pub fn new(window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+    pub fn new(
+        workspace: WeakEntity<Workspace>,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let input = cx.new(|cx| Editor::auto_height(1, 8, window, cx));
         let host = cx.global::<ClaudeCodeHostGlobal>().0.clone();
         let create_task = cx.spawn(async move |this, cx| {
@@ -71,6 +80,7 @@ impl ClaudeChat {
         Self {
             input,
             messages: Vec::new(),
+            workspace,
             session: None,
             pending_sends: Vec::new(),
             expanded_tool_ids: HashSet::new(),
@@ -383,13 +393,51 @@ fn render_message_row(
     }
     let text = message_text(message)?;
     let bubble = div().px_2().py_1().child(text);
-    Some(
-        match message.role {
-            ChatRole::User => div().flex().flex_row_reverse().w_full().child(bubble),
-            ChatRole::Assistant => div().flex().w_full().child(bubble),
-        }
-        .into_any_element(),
-    )
+    Some(match message.role {
+        ChatRole::User => {
+            let mut row = div().flex().flex_row_reverse().w_full().child(bubble);
+            if let Some(sha) = restorable_sha(message) {
+                row = row.child(render_checkpoint_marker(idx, sha.to_string(), cx));
+            }
+            row.into_any_element()
+        },
+        ChatRole::Assistant => div().flex().w_full().child(bubble).into_any_element(),
+    })
+}
+
+/// Restorable-message sha when the message originates from the user
+/// and the workspace captured a stash sha at submit time. Returns
+/// `None` for assistant messages and for user messages without a
+/// captured sha.
+fn restorable_sha(message: &ChatMessage) -> Option<&str> {
+    if !matches!(message.role, ChatRole::User) {
+        return None;
+    }
+    if !matches!(message.content, ChatMessageContent::Text(_)) {
+        return None;
+    }
+    message.checkpoint_sha.as_deref()
+}
+
+fn render_checkpoint_marker(
+    idx: usize,
+    sha: String,
+    cx: &mut Context<'_, ClaudeChat>,
+) -> AnyElement {
+    let element_id: ElementId = SharedString::from(format!("claude_checkpoint:{idx}")).into();
+    div()
+        .id(element_id)
+        .px_2()
+        .py_1()
+        .child(SharedString::from("o"))
+        .on_click(cx.listener(move |this, _event, _window, cx| {
+            let Some(workspace) = this.workspace.upgrade() else {
+                return;
+            };
+            let sha = sha.clone();
+            workspace.update(cx, |w, cx| w.restore_to_checkpoint(sha, cx));
+        }))
+        .into_any_element()
 }
 
 fn message_text(message: &ChatMessage) -> Option<SharedString> {
@@ -417,7 +465,8 @@ pub fn dispatch_open_claude(
     let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
         return;
     };
-    let chat = cx.new(|cx| ClaudeChat::new(window, cx));
+    let weak_workspace = cx.weak_entity();
+    let chat = cx.new(|cx| ClaudeChat::new(weak_workspace, window, cx));
     pane.update(cx, |p, cx| {
         p.add_item(Box::new(chat), cx);
     });
@@ -486,20 +535,20 @@ mod tests {
     use crate::{
         globals::{
             ClaudeCodeHostGlobal, ClipboardHostGlobal, ExecutorGlobal, FsHostGlobal,
-            FsWatchHostGlobal,
+            FsWatchHostGlobal, GitHostGlobal,
         },
         workspace::Workspace,
     };
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use std::{path::PathBuf, sync::Arc};
     use stoat::host::{
-        fake::{FakeClipboard, FakeFs},
-        ClipboardHost, FsHost, FsWatchHost,
+        fake::{FakeClipboard, FakeFs, FakeGit},
+        ClipboardHost, FsHost, FsWatchHost, GitHost,
     };
     use stoat_host::NoopFsWatcher;
     use stoat_scheduler::{Executor, TestScheduler};
 
-    fn install_globals(cx: &mut TestAppContext, host: Arc<dyn ClaudeCodeHost>) {
+    fn install_globals(cx: &mut TestAppContext, host: Arc<dyn ClaudeCodeHost>, git: Arc<FakeGit>) {
         let executor = Executor::new(Arc::new(TestScheduler::new()));
         let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
         let clipboard: Arc<dyn ClipboardHost> = Arc::new(FakeClipboard::new());
@@ -511,19 +560,37 @@ mod tests {
             ));
             cx.set_global(ClaudeCodeHostGlobal(host));
             cx.set_global(ClipboardHostGlobal(clipboard));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
         });
     }
 
     struct Harness<'a> {
         workspace: Entity<Workspace>,
+        git: Arc<FakeGit>,
         vcx: &'a mut VisualTestContext,
     }
 
     fn new_harness<'a>(cx: &'a mut TestAppContext, host: Arc<dyn ClaudeCodeHost>) -> Harness<'a> {
-        install_globals(cx, host);
-        let (workspace, vcx) =
-            cx.add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/repo"), cx));
-        Harness { workspace, vcx }
+        new_harness_with_root(cx, host, "/repo")
+    }
+
+    fn new_harness_with_root<'a>(
+        cx: &'a mut TestAppContext,
+        host: Arc<dyn ClaudeCodeHost>,
+        repo_root: &str,
+    ) -> Harness<'a> {
+        let git = Arc::new(FakeGit::new());
+        install_globals(cx, host, git.clone());
+        let root = PathBuf::from(repo_root);
+        let (workspace, vcx) = cx.add_window_view({
+            let root = root.clone();
+            move |_window, cx| Workspace::new("main", root, cx)
+        });
+        Harness {
+            workspace,
+            git,
+            vcx,
+        }
     }
 
     fn open_chat(h: &mut Harness<'_>) -> Entity<ClaudeChat> {
@@ -1053,5 +1120,111 @@ mod tests {
         // The recv loop should drain to completion without panicking.
         // No assertion on messages; this is a liveness check.
         h.vcx.run_until_parked();
+    }
+
+    fn seed_repo_with_sha(git: &FakeGit, workdir: &str, sha: &str) {
+        let workdir = PathBuf::from(workdir);
+        git.add_repo(&workdir).commit(sha, &[]);
+    }
+
+    fn push_user_text_with_checkpoint(
+        chat: &Entity<ClaudeChat>,
+        h: &mut Harness<'_>,
+        text: &str,
+        sha: Option<&str>,
+    ) {
+        chat.update(h.vcx, |c, cx| {
+            c.push_message(
+                ChatMessage {
+                    role: ChatRole::User,
+                    content: ChatMessageContent::Text(text.into()),
+                    checkpoint_sha: sha.map(String::from),
+                },
+                cx,
+            );
+        });
+    }
+
+    #[test]
+    fn restorable_user_message_click_invokes_restore_tree() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h =
+            new_harness_with_root(&mut cx, host as Arc<dyn ClaudeCodeHost>, "/checkpoint-repo");
+        seed_repo_with_sha(&h.git, "/checkpoint-repo", "stashsha");
+
+        let chat = open_chat(&mut h);
+        push_user_text_with_checkpoint(&chat, &mut h, "edit before submit", Some("stashsha"));
+
+        chat.update(h.vcx, |c, cx| {
+            let workspace = c.workspace.upgrade().expect("workspace live");
+            workspace.update(cx, |w, cx| w.restore_to_checkpoint("stashsha".into(), cx));
+        });
+
+        let restored = h.git.restored_shas(&PathBuf::from("/checkpoint-repo"));
+        assert_eq!(restored, vec!["stashsha".to_string()]);
+    }
+
+    #[test]
+    fn non_restorable_user_message_has_no_marker() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h =
+            new_harness_with_root(&mut cx, host as Arc<dyn ClaudeCodeHost>, "/no-checkpoint");
+        let chat = open_chat(&mut h);
+        push_user_text_with_checkpoint(&chat, &mut h, "clean tree submit", None);
+
+        let marker: Vec<String> = chat.read_with(h.vcx, |c, _| {
+            c.messages
+                .iter()
+                .filter_map(|m| restorable_sha(m).map(str::to_string))
+                .collect()
+        });
+        assert!(marker.is_empty(), "no marker for None checkpoint_sha");
+    }
+
+    #[test]
+    fn assistant_message_with_checkpoint_field_has_no_marker() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        chat.update(h.vcx, |c, cx| {
+            c.push_message(
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: ChatMessageContent::Text("assistant reply".into()),
+                    checkpoint_sha: Some("ignored".into()),
+                },
+                cx,
+            );
+        });
+
+        let marker: Vec<String> = chat.read_with(h.vcx, |c, _| {
+            c.messages
+                .iter()
+                .filter_map(|m| restorable_sha(m).map(str::to_string))
+                .collect()
+        });
+        assert!(
+            marker.is_empty(),
+            "assistant role excludes the checkpoint marker",
+        );
+    }
+
+    #[test]
+    fn workspace_restore_to_checkpoint_calls_git_host() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let h = new_harness_with_root(&mut cx, host as Arc<dyn ClaudeCodeHost>, "/ws-restore");
+        seed_repo_with_sha(&h.git, "/ws-restore", "deadbeef");
+
+        h.workspace.update_in(h.vcx, |w, _window, cx| {
+            w.restore_to_checkpoint("deadbeef".into(), cx);
+        });
+
+        let restored = h.git.restored_shas(&PathBuf::from("/ws-restore"));
+        assert_eq!(restored, vec!["deadbeef".to_string()]);
     }
 }
