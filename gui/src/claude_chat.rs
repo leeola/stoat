@@ -30,15 +30,15 @@ use gpui::{
     div, AnyElement, App, AppContext, Context, IntoElement, ParentElement, Render, SharedString,
     Styled, Task, Window,
 };
-use std::sync::Arc;
+use std::{collections::HashSet, sync::Arc};
 use stoat::{
     claude_chat::{ChatMessage, ChatMessageContent, ChatRole},
     host::{AgentMessage, ClaudeCodeHost, ClaudeCodeSession},
 };
 
 pub struct ClaudeChat {
-    input: gpui::Entity<Editor>,
-    messages: Vec<ChatMessage>,
+    pub(crate) input: gpui::Entity<Editor>,
+    pub(crate) messages: Vec<ChatMessage>,
     session: Option<Arc<dyn ClaudeCodeSession>>,
     /// User submissions that arrived before the host returned a live
     /// session. Drained in arrival order once [`Self::session`] is
@@ -46,6 +46,16 @@ pub struct ClaudeChat {
     /// failure is logged at `tracing::warn` and the queue is dropped
     /// rather than retried).
     pending_sends: Vec<String>,
+    /// `ToolUse.id`s whose card renders the full input + result body
+    /// instead of the collapsed preview. Set membership is the only
+    /// source of truth for expansion; clicks and the focused-card
+    /// keyboard path both flip the same set.
+    pub(crate) expanded_tool_ids: HashSet<String>,
+    /// `ToolUse.id` of the tool card currently focused for keyboard
+    /// navigation. `ClaudeFocusNext`/`PrevToolCard` move focus across
+    /// cards; `ClaudeToggleToolCardExpand` flips
+    /// [`Self::expanded_tool_ids`] membership for this id.
+    pub(crate) focused_tool_id: Option<String>,
     /// Kept alive on the entity so the background task that asks the
     /// host for a session is dropped when the chat is dropped.
     _create_task: Option<Task<()>>,
@@ -63,8 +73,74 @@ impl ClaudeChat {
             messages: Vec::new(),
             session: None,
             pending_sends: Vec::new(),
+            expanded_tool_ids: HashSet::new(),
+            focused_tool_id: None,
             _create_task: Some(create_task),
         }
+    }
+
+    /// Toggle expansion of the tool card identified by `id`. Powers
+    /// the header-click path.
+    pub fn toggle_expanded(&mut self, id: &str, cx: &mut Context<'_, Self>) {
+        if !self.expanded_tool_ids.remove(id) {
+            self.expanded_tool_ids.insert(id.to_string());
+        }
+        cx.notify();
+    }
+
+    /// Engage focus on the most-recent `ToolUse` when no card is
+    /// focused; otherwise advance focus toward older cards and wrap
+    /// back to the most-recent card after the oldest.
+    pub fn focus_next_tool_card(&mut self, cx: &mut Context<'_, Self>) {
+        let ids = tool_use_ids(&self.messages);
+        if ids.is_empty() {
+            return;
+        }
+        let next = match &self.focused_tool_id {
+            None => ids.last().cloned(),
+            Some(current) => {
+                let idx = ids.iter().position(|id| id == current);
+                match idx {
+                    Some(0) => ids.last().cloned(),
+                    Some(i) => Some(ids[i - 1].clone()),
+                    None => ids.last().cloned(),
+                }
+            },
+        };
+        self.focused_tool_id = next;
+        cx.notify();
+    }
+
+    /// Symmetric counterpart to [`Self::focus_next_tool_card`] that
+    /// cycles toward newer cards and wraps to the oldest after the
+    /// most-recent.
+    pub fn focus_prev_tool_card(&mut self, cx: &mut Context<'_, Self>) {
+        let ids = tool_use_ids(&self.messages);
+        if ids.is_empty() {
+            return;
+        }
+        let next = match &self.focused_tool_id {
+            None => ids.first().cloned(),
+            Some(current) => {
+                let idx = ids.iter().position(|id| id == current);
+                match idx {
+                    Some(i) if i + 1 == ids.len() => ids.first().cloned(),
+                    Some(i) => Some(ids[i + 1].clone()),
+                    None => ids.first().cloned(),
+                }
+            },
+        };
+        self.focused_tool_id = next;
+        cx.notify();
+    }
+
+    /// Toggle expansion of the focused tool card. No-op when no
+    /// card is focused.
+    pub fn toggle_focused_expansion(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(id) = self.focused_tool_id.clone() else {
+            return;
+        };
+        self.toggle_expanded(&id, cx);
     }
 
     pub fn submit(&mut self, cx: &mut Context<'_, Self>) {
@@ -92,6 +168,19 @@ impl ClaudeChat {
         self.messages.push(message);
         cx.notify();
     }
+}
+
+/// Collect every `ToolUse` id from the scrollback in arrival order
+/// (oldest first). Used by [`ClaudeChat`]'s focus-cycling methods to
+/// turn `focused_tool_id` walks into deterministic index motion.
+fn tool_use_ids(messages: &[ChatMessage]) -> Vec<String> {
+    messages
+        .iter()
+        .filter_map(|m| match &m.content {
+            ChatMessageContent::ToolUse { id, .. } => Some(id.clone()),
+            _ => None,
+        })
+        .collect()
 }
 
 async fn install_session(
@@ -142,11 +231,10 @@ async fn install_session(
     }
 }
 
-/// Per-message recv dispatch. Handles the two variants this v1 file
-/// owns -- assistant `Text` (trimmed; empty drops) and `Error` --
-/// and silently ignores every other variant. Sibling items hook in
-/// their own variants (tool cards, usage header, ...) without
-/// touching the existing arms here.
+/// Per-message recv dispatch. Owns assistant `Text` (trimmed;
+/// empty drops), `Error`, `ToolUse`, and `ToolResult`. Other
+/// variants (`Thinking`, `Usage`, ...) are routed by their own
+/// sibling items and remain no-ops here.
 fn handle_recv_message(
     chat: &mut ClaudeChat,
     message: &AgentMessage,
@@ -169,6 +257,37 @@ fn handle_recv_message(
             chat.messages.push(ChatMessage {
                 role: ChatRole::Assistant,
                 content: ChatMessageContent::Error(message.clone()),
+                checkpoint_sha: None,
+            });
+            cx.notify();
+        },
+        AgentMessage::ToolUse {
+            id, name, input, ..
+        } => {
+            chat.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                content: ChatMessageContent::ToolUse {
+                    id: id.clone(),
+                    name: name.clone(),
+                    input: input.clone(),
+                },
+                checkpoint_sha: None,
+            });
+            cx.notify();
+        },
+        AgentMessage::ToolResult {
+            id,
+            content,
+            status,
+            ..
+        } => {
+            chat.messages.push(ChatMessage {
+                role: ChatRole::Assistant,
+                content: ChatMessageContent::ToolResult {
+                    id: id.clone(),
+                    content: content.clone(),
+                    status: *status,
+                },
                 checkpoint_sha: None,
             });
             cx.notify();
@@ -235,10 +354,13 @@ impl ItemView for ClaudeChat {
 }
 
 impl Render for ClaudeChat {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let count = self.messages.len();
         let mut scrollback = div().flex().flex_col().flex_grow().w_full();
-        for message in &self.messages {
-            scrollback = scrollback.child(render_message_row(message));
+        for idx in 0..count {
+            if let Some(row) = render_message_row(self, idx, cx) {
+                scrollback = scrollback.child(row);
+            }
         }
         div()
             .flex()
@@ -249,26 +371,36 @@ impl Render for ClaudeChat {
     }
 }
 
-fn render_message_row(message: &ChatMessage) -> AnyElement {
-    let text = message_text(message);
-    let bubble = div().px_2().py_1().child(text);
-    match message.role {
-        ChatRole::User => div().flex().flex_row_reverse().w_full().child(bubble),
-        ChatRole::Assistant => div().flex().w_full().child(bubble),
+fn render_message_row(
+    chat: &ClaudeChat,
+    idx: usize,
+    cx: &mut Context<'_, ClaudeChat>,
+) -> Option<AnyElement> {
+    let message = chat.messages.get(idx)?;
+    if let ChatMessageContent::ToolUse { id, name, input } = &message.content {
+        let card = crate::claude_tool_card::render_tool_card(chat, id, name, input, cx);
+        return Some(div().flex().w_full().child(card).into_any_element());
     }
-    .into_any_element()
+    let text = message_text(message)?;
+    let bubble = div().px_2().py_1().child(text);
+    Some(
+        match message.role {
+            ChatRole::User => div().flex().flex_row_reverse().w_full().child(bubble),
+            ChatRole::Assistant => div().flex().w_full().child(bubble),
+        }
+        .into_any_element(),
+    )
 }
 
-fn message_text(message: &ChatMessage) -> SharedString {
+fn message_text(message: &ChatMessage) -> Option<SharedString> {
     match &message.content {
-        ChatMessageContent::Text(text) => SharedString::from(text.clone()),
-        ChatMessageContent::Thinking { text } => SharedString::from(format!("(thinking) {text}")),
-        ChatMessageContent::ToolUse { name, input, .. } => {
-            SharedString::from(format!("{name}({input})"))
+        ChatMessageContent::Text(text) => Some(SharedString::from(text.clone())),
+        ChatMessageContent::Thinking { text } => {
+            Some(SharedString::from(format!("(thinking) {text}")))
         },
-        ChatMessageContent::ToolResult { content, .. } => SharedString::from(content.clone()),
-        ChatMessageContent::Error(err) => SharedString::from(format!("error: {err}")),
-        ChatMessageContent::TurnComplete { .. } => SharedString::from("(turn complete)"),
+        ChatMessageContent::Error(err) => Some(SharedString::from(format!("error: {err}"))),
+        ChatMessageContent::TurnComplete { .. } => Some(SharedString::from("(turn complete)")),
+        ChatMessageContent::ToolUse { .. } | ChatMessageContent::ToolResult { .. } => None,
     }
 }
 
@@ -296,15 +428,56 @@ pub fn dispatch_open_claude(
 /// invokes `submit` on it. No-op when the active item is not a
 /// chat.
 pub fn dispatch_claude_submit(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(chat) = focused_chat(workspace, cx) {
+        chat.update(cx, |c, cx| c.submit(cx));
+    }
+}
+
+/// Dispatch the [`stoat_action::ClaudeFocusNextToolCard`] action.
+/// Advances the focused tool card on the active chat toward older
+/// cards; no-op when the active item is not a chat.
+pub fn dispatch_claude_focus_next_tool_card(
+    workspace: &mut Workspace,
+    cx: &mut Context<'_, Workspace>,
+) {
+    if let Some(chat) = focused_chat(workspace, cx) {
+        chat.update(cx, |c, cx| c.focus_next_tool_card(cx));
+    }
+}
+
+/// Dispatch the [`stoat_action::ClaudeFocusPrevToolCard`] action.
+/// Advances the focused tool card on the active chat toward newer
+/// cards; no-op when the active item is not a chat.
+pub fn dispatch_claude_focus_prev_tool_card(
+    workspace: &mut Workspace,
+    cx: &mut Context<'_, Workspace>,
+) {
+    if let Some(chat) = focused_chat(workspace, cx) {
+        chat.update(cx, |c, cx| c.focus_prev_tool_card(cx));
+    }
+}
+
+/// Dispatch the [`stoat_action::ClaudeToggleToolCardExpand`] action.
+/// Toggles expansion of the focused tool card on the active chat;
+/// no-op when the active item is not a chat or when no card is
+/// focused.
+pub fn dispatch_claude_toggle_tool_card_expand(
+    workspace: &mut Workspace,
+    cx: &mut Context<'_, Workspace>,
+) {
+    if let Some(chat) = focused_chat(workspace, cx) {
+        chat.update(cx, |c, cx| c.toggle_focused_expansion(cx));
+    }
+}
+
+fn focused_chat(
+    workspace: &Workspace,
+    cx: &mut Context<'_, Workspace>,
+) -> Option<gpui::Entity<ClaudeChat>> {
     let pane_id = workspace.pane_tree().read(cx).focus();
-    let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
-        return;
-    };
-    let active_view = pane.read(cx).active_item().map(ItemHandle::to_any_view);
-    let Some(chat) = active_view.and_then(|v| v.downcast::<ClaudeChat>().ok()) else {
-        return;
-    };
-    chat.update(cx, |c, cx| c.submit(cx));
+    let pane = workspace.pane_tree().read(cx).pane(pane_id).cloned()?;
+    let active_view = pane.read(cx).active_item().map(ItemHandle::to_any_view)?;
+    active_view.downcast::<ClaudeChat>().ok()
 }
 
 #[cfg(test)]
@@ -640,18 +813,214 @@ mod tests {
     }
 
     #[test]
-    fn recv_tool_use_is_ignored() {
+    fn recv_tool_use_appends_assistant_tool_card() {
         let mut cx = TestAppContext::single();
         let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
         let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
         let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
         let chat = open_chat(&mut h);
 
-        fake_session.push_tool_use("Bash", "{\"cmd\":\"ls\"}");
+        fake_session.push_tool_use("Bash", "{\"command\":\"ls\"}");
         h.vcx.run_until_parked();
 
-        let count = chat.read_with(h.vcx, |c, _| c.messages.len());
-        assert_eq!(count, 0, "tool_use is owned by the tool-card sibling item");
+        let cards: Vec<(String, String)> = chat.read_with(h.vcx, |c, _| {
+            c.messages
+                .iter()
+                .filter_map(|m| match &m.content {
+                    ChatMessageContent::ToolUse { name, input, .. } => {
+                        Some((name.clone(), input.clone()))
+                    },
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(
+            cards,
+            vec![("Bash".to_string(), "{\"command\":\"ls\"}".to_string())],
+        );
+    }
+
+    #[test]
+    fn recv_tool_result_appends_completion() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let fake_session = host.push_session(stoat::host::fake::FakeClaudeCode::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        fake_session.push_tool_use("Bash", "{\"command\":\"ls\"}");
+        fake_session.push_tool_result("toolu_Bash", "file1\nfile2\n");
+        h.vcx.run_until_parked();
+
+        let results: Vec<String> = chat.read_with(h.vcx, |c, _| {
+            c.messages
+                .iter()
+                .filter_map(|m| match &m.content {
+                    ChatMessageContent::ToolResult { content, .. } => Some(content.clone()),
+                    _ => None,
+                })
+                .collect()
+        });
+        assert_eq!(results, vec!["file1\nfile2\n".to_string()]);
+    }
+
+    fn push_tool_use(chat: &Entity<ClaudeChat>, h: &mut Harness<'_>, id: &str, name: &str) {
+        chat.update(h.vcx, |c, cx| {
+            c.push_message(
+                ChatMessage {
+                    role: ChatRole::Assistant,
+                    content: ChatMessageContent::ToolUse {
+                        id: id.into(),
+                        name: name.into(),
+                        input: "{}".into(),
+                    },
+                    checkpoint_sha: None,
+                },
+                cx,
+            );
+        });
+    }
+
+    #[test]
+    fn focus_next_tool_card_engages_then_cycles_older() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use(&chat, &mut h, "toolu_a", "Bash");
+        push_tool_use(&chat, &mut h, "toolu_b", "Bash");
+
+        chat.update(h.vcx, |c, cx| c.focus_next_tool_card(cx));
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused.as_deref(), Some("toolu_b"));
+
+        chat.update(h.vcx, |c, cx| c.focus_next_tool_card(cx));
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused.as_deref(), Some("toolu_a"));
+
+        chat.update(h.vcx, |c, cx| c.focus_next_tool_card(cx));
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused.as_deref(), Some("toolu_b"), "wraps to newest");
+    }
+
+    #[test]
+    fn focus_prev_tool_card_engages_then_cycles_newer() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use(&chat, &mut h, "toolu_a", "Bash");
+        push_tool_use(&chat, &mut h, "toolu_b", "Bash");
+
+        chat.update(h.vcx, |c, cx| c.focus_prev_tool_card(cx));
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused.as_deref(), Some("toolu_a"));
+
+        chat.update(h.vcx, |c, cx| c.focus_prev_tool_card(cx));
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused.as_deref(), Some("toolu_b"));
+
+        chat.update(h.vcx, |c, cx| c.focus_prev_tool_card(cx));
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused.as_deref(), Some("toolu_a"), "wraps to oldest");
+    }
+
+    #[test]
+    fn focus_next_on_empty_scrollback_is_noop() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        chat.update(h.vcx, |c, cx| c.focus_next_tool_card(cx));
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused, None);
+    }
+
+    #[test]
+    fn toggle_expanded_inserts_then_removes_by_id() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use(&chat, &mut h, "toolu_a", "Bash");
+        chat.update(h.vcx, |c, cx| c.toggle_expanded("toolu_a", cx));
+        let ids: Vec<String> =
+            chat.read_with(h.vcx, |c, _| c.expanded_tool_ids.iter().cloned().collect());
+        assert_eq!(ids, vec!["toolu_a".to_string()]);
+
+        chat.update(h.vcx, |c, cx| c.toggle_expanded("toolu_a", cx));
+        let ids: Vec<String> =
+            chat.read_with(h.vcx, |c, _| c.expanded_tool_ids.iter().cloned().collect());
+        assert!(ids.is_empty(), "second toggle removes the id");
+    }
+
+    #[test]
+    fn toggle_focused_expansion_is_noop_without_focus() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use(&chat, &mut h, "toolu_a", "Bash");
+        chat.update(h.vcx, |c, cx| c.toggle_focused_expansion(cx));
+        let ids: Vec<String> =
+            chat.read_with(h.vcx, |c, _| c.expanded_tool_ids.iter().cloned().collect());
+        assert!(ids.is_empty());
+    }
+
+    #[test]
+    fn toggle_focused_expansion_flips_focused_card() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use(&chat, &mut h, "toolu_a", "Bash");
+        chat.update(h.vcx, |c, cx| {
+            c.focus_next_tool_card(cx);
+            c.toggle_focused_expansion(cx);
+        });
+        let ids: Vec<String> =
+            chat.read_with(h.vcx, |c, _| c.expanded_tool_ids.iter().cloned().collect());
+        assert_eq!(ids, vec!["toolu_a".to_string()]);
+    }
+
+    #[test]
+    fn dispatch_focus_next_routes_to_focused_chat() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use(&chat, &mut h, "toolu_a", "Bash");
+        h.workspace.update_in(h.vcx, |w, _window, cx| {
+            dispatch_claude_focus_next_tool_card(w, cx);
+        });
+
+        let focused = chat.read_with(h.vcx, |c, _| c.focused_tool_id.clone());
+        assert_eq!(focused.as_deref(), Some("toolu_a"));
+    }
+
+    #[test]
+    fn dispatch_toggle_expand_routes_to_focused_chat() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        push_tool_use(&chat, &mut h, "toolu_a", "Bash");
+        chat.update(h.vcx, |c, cx| c.focus_next_tool_card(cx));
+        h.workspace.update_in(h.vcx, |w, _window, cx| {
+            dispatch_claude_toggle_tool_card_expand(w, cx);
+        });
+
+        let ids: Vec<String> =
+            chat.read_with(h.vcx, |c, _| c.expanded_tool_ids.iter().cloned().collect());
+        assert_eq!(ids, vec!["toolu_a".to_string()]);
     }
 
     #[test]

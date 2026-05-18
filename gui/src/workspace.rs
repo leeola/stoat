@@ -1276,6 +1276,15 @@ impl Workspace {
             ActionKind::OpenLastPicker => self.dispatch_open_last_picker(window, cx),
             ActionKind::OpenClaude => crate::claude_chat::dispatch_open_claude(self, window, cx),
             ActionKind::ClaudeSubmit => crate::claude_chat::dispatch_claude_submit(self, cx),
+            ActionKind::ClaudeFocusNextToolCard => {
+                crate::claude_chat::dispatch_claude_focus_next_tool_card(self, cx)
+            },
+            ActionKind::ClaudeFocusPrevToolCard => {
+                crate::claude_chat::dispatch_claude_focus_prev_tool_card(self, cx)
+            },
+            ActionKind::ClaudeToggleToolCardExpand => {
+                crate::claude_chat::dispatch_claude_toggle_tool_card_expand(self, cx)
+            },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
                 if let Some(action) = action
