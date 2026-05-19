@@ -7,7 +7,7 @@ use crate::{
     diff_coordinator::DiffCoordinator,
     diff_map::DiffMap,
     display_map::DisplayMap,
-    dock::{Dock, DockSide},
+    dock::{Dock, DockSide, DockVisibility},
     editor::{Editor, EditorEvent, EditorMode},
     editor_input::EditorInput,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
@@ -709,6 +709,15 @@ impl Workspace {
             pane_items.insert(id, snap);
         }
         let buffers = self.buffer_registry.read(cx).snapshot();
+        let docks: Vec<crate::workspace_persist::DockSnapV1> = self
+            .docks
+            .iter()
+            .enumerate()
+            .map(|(idx, dock_entity)| {
+                let dock = dock_entity.read(cx);
+                crate::workspace_persist::snapshot_dock(dock, cx, idx)
+            })
+            .collect();
         crate::workspace_persist::WorkspaceStateV1 {
             uid: self.uid,
             name: self.name.to_string(),
@@ -716,6 +725,7 @@ impl Workspace {
             panes: panes_inner,
             focused_pane,
             pane_items,
+            docks,
             buffers,
         }
     }
@@ -785,6 +795,23 @@ impl Workspace {
         }
         self.pane_tree
             .update(cx, |tree, cx| tree.set_focus(state.focused_pane, cx));
+
+        self.docks.clear();
+        for (idx, snap) in state.docks.into_iter().enumerate() {
+            let Some(path) = snap.editor_path else {
+                tracing::info!(
+                    dock_index = idx,
+                    "skipping dock with no editor_path during workspace restore v1"
+                );
+                continue;
+            };
+            let editor = self.build_editor_for_path(&path, cx);
+            self.add_dock(Box::new(editor), snap.side, snap.default_width, cx);
+            let dock = self.docks.last().cloned().expect("just-added dock present");
+            dock.update(cx, |d, cx| {
+                d.set_visibility(snap.visibility, cx);
+            });
+        }
     }
 
     /// Read and apply the persisted state at `path`.
@@ -10879,5 +10906,111 @@ mod tests {
         });
         let restored_uid = fresh_ws.read_with(vcx2, |w, _| w.uid());
         assert_eq!(restored_uid, original_uid);
+    }
+
+    #[test]
+    fn restore_rebuilds_dock_with_editor_item_at_saved_side() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/outline.rs", b"// outline\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/outline.rs")], cx);
+            let dock_editor = w.build_editor_for_path(Path::new("/tmp/repo/outline.rs"), cx);
+            w.add_dock(Box::new(dock_editor), DockSide::Left, 220, cx);
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/dock-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            assert_eq!(w.docks().len(), 1);
+            let dock = w.docks()[0].read(cx);
+            assert_eq!(dock.side(), DockSide::Left);
+            assert_eq!(dock.default_width(), 220);
+            let editor = dock
+                .item()
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("dock holds an Editor");
+            let path = editor.read(cx).file_path().map(Path::to_path_buf);
+            assert_eq!(path, Some(PathBuf::from("/tmp/repo/outline.rs")));
+        });
+    }
+
+    #[test]
+    fn restore_carries_dock_visibility() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/agent.rs", b"x\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            let item = w.build_editor_for_path(Path::new("/tmp/repo/agent.rs"), cx);
+            w.add_dock(Box::new(item), DockSide::Right, 240, cx);
+            w.docks()[0].update(cx, |d, cx| {
+                d.set_visibility(DockVisibility::Minimized, cx);
+            });
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/dock-visibility.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let dock = w.docks()[0].read(cx);
+            assert_eq!(dock.visibility(), DockVisibility::Minimized);
+        });
+    }
+
+    #[test]
+    fn restore_preserves_multi_dock_order_and_sides() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/left.rs", b"l\n");
+        fs.insert_file("/tmp/repo/right.rs", b"r\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            let left = w.build_editor_for_path(Path::new("/tmp/repo/left.rs"), cx);
+            w.add_dock(Box::new(left), DockSide::Left, 200, cx);
+            let right = w.build_editor_for_path(Path::new("/tmp/repo/right.rs"), cx);
+            w.add_dock(Box::new(right), DockSide::Right, 240, cx);
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/multi-dock.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let sides: Vec<DockSide> = w.docks().iter().map(|d| d.read(cx).side()).collect();
+            assert_eq!(sides, vec![DockSide::Left, DockSide::Right]);
+        });
     }
 }

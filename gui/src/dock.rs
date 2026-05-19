@@ -2,16 +2,17 @@ use crate::item::ItemHandle;
 use gpui::{
     div, px, rgb, Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Window,
 };
+use serde::{Deserialize, Serialize};
 
 /// Edge of the window where a dock is pinned.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockSide {
     Left,
     Right,
 }
 
 /// Whether a dock is rendered, and at what width when open.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum DockVisibility {
     Open { width: u16 },
     Minimized,

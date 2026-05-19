@@ -17,7 +17,10 @@
 //! (review status, claude scrollback, commit-list selection,
 //! multi-buffer excerpts).
 
-use crate::editor::Editor;
+use crate::{
+    dock::{DockSide, DockVisibility},
+    editor::Editor,
+};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
@@ -42,7 +45,29 @@ pub struct WorkspaceStateV1 {
     pub panes: InnerPaneTree,
     pub focused_pane: PaneId,
     pub pane_items: BTreeMap<PaneId, PaneItemsV1>,
+    /// Per-dock snapshot list ordered by `Workspace::docks`'s
+    /// vector order, so left/right pinning round-trips. Non-editor
+    /// items drop with a tracing line on save and the restored
+    /// dock comes back without an item until non-editor
+    /// persistence lands.
+    #[serde(default)]
+    pub docks: Vec<DockSnapV1>,
     pub buffers: BufferRegistrySnapshot,
+}
+
+/// V1 dock snapshot: position, current visibility (open width /
+/// minimized / hidden), default open width, and the file path of
+/// the hosted editor when the dock holds one.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct DockSnapV1 {
+    pub side: DockSide,
+    pub visibility: DockVisibility,
+    pub default_width: u16,
+    /// `Some` when the dock's item is an [`Editor`] with a file
+    /// path; `None` for editors without a path or non-editor items.
+    /// Non-`None` entries rebuild the editor via
+    /// `Workspace::build_editor_for_path` on restore.
+    pub editor_path: Option<PathBuf>,
 }
 
 /// Ordered list of editor file paths in a single pane, plus the
@@ -90,6 +115,40 @@ pub(crate) fn snapshot_pane_items(
     PaneItemsV1 {
         editor_paths,
         active_index: active_editor_index.unwrap_or(0),
+    }
+}
+
+/// Snapshot one dock for workspace persistence. Captures
+/// position + visibility + default width unconditionally; the
+/// hosted editor's file path lands in `editor_path` when the
+/// dock's item is an [`Editor`] with a path, otherwise the field
+/// is `None` and a tracing line records why.
+pub(crate) fn snapshot_dock(dock: &crate::dock::Dock, cx: &gpui::App, index: usize) -> DockSnapV1 {
+    let any = dock.item().to_any_view();
+    let editor_path = match any.downcast::<Editor>() {
+        Ok(editor) => {
+            let path = editor.read(cx).file_path().map(Path::to_path_buf);
+            if path.is_none() {
+                tracing::info!(
+                    dock_index = index,
+                    "skipping editor with no file_path in dock persistence v1"
+                );
+            }
+            path
+        },
+        Err(_) => {
+            tracing::info!(
+                dock_index = index,
+                "skipping non-editor item in dock persistence v1"
+            );
+            None
+        },
+    };
+    DockSnapV1 {
+        side: dock.side(),
+        visibility: dock.visibility(),
+        default_width: dock.default_width(),
+        editor_path,
     }
 }
 
