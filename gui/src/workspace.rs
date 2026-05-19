@@ -1777,6 +1777,15 @@ impl Workspace {
             },
             ActionKind::SearchNext => self.dispatch_search_step(SearchStep::Next, cx),
             ActionKind::SearchPrev => self.dispatch_search_step(SearchStep::Prev, cx),
+            ActionKind::GotoWord => self.dispatch_goto_word(cx),
+            ActionKind::GotoWordJump => {
+                if let Some(jump) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::GotoWordJump>()
+                {
+                    self.dispatch_goto_word_jump(jump.byte_offset, cx);
+                }
+            },
             ActionKind::ApplyTextobjectChar => {
                 if let Some(apply) = action
                     .as_any()
@@ -2922,6 +2931,39 @@ impl Workspace {
         editor.update(cx, |ed, cx| match step {
             SearchStep::Next => ed.search_next(cx),
             SearchStep::Prev => ed.search_prev(cx),
+        });
+    }
+
+    fn dispatch_goto_word(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let labels = editor.update(cx, |ed, cx| {
+            let display_snapshot = ed.display_map().update(cx, |dm, _| dm.snapshot());
+            let buffer_snapshot = display_snapshot.buffer_snapshot().clone();
+            let rope = buffer_snapshot.rope();
+            let scroll_row = ed.scroll_row();
+            let viewport = ed.viewport_rows_for_page().max(1);
+            let last_row = scroll_row.saturating_add(viewport.saturating_sub(1));
+            let max_targets = stoat::goto_word::ALPHABET.len() * stoat::goto_word::ALPHABET.len();
+            let targets =
+                stoat::goto_word::find_word_starts(rope, scroll_row, last_row, max_targets);
+            stoat::goto_word::assign_labels(&targets, stoat::goto_word::ALPHABET)
+        });
+        if labels.is_empty() {
+            editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
+            return;
+        }
+        editor.update(cx, |ed, cx| ed.arm_pending_goto_word(labels, cx));
+    }
+
+    fn dispatch_goto_word_jump(&mut self, offset: usize, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| {
+            ed.clear_pending_goto_word(cx);
+            ed.jump_to_offset(offset, cx);
         });
     }
 

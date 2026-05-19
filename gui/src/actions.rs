@@ -707,6 +707,63 @@ impl Action for ApplyTextobjectChar {
     }
 }
 
+/// Synthesized by [`crate::input_state_machine::InputStateMachine::feed`]
+/// when an in-progress `goto_word` chord resolves to a unique label.
+/// Carries the absolute byte offset of the labelled word's start;
+/// workspace dispatch routes it to the active editor's primary
+/// cursor.
+#[derive(Debug)]
+pub struct GotoWordJump {
+    pub byte_offset: usize,
+}
+
+#[derive(Debug)]
+pub struct GotoWordJumpDef;
+
+impl ActionDef for GotoWordJumpDef {
+    fn name(&self) -> &'static str {
+        "GotoWordJump"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::GotoWordJump
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "jump cursor to labelled goto_word target"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Resolve the pending `GotoWord` chord by jumping every selection's primary cursor to the matched label's byte offset. Synthesized by the input pipeline after the typed label fully matches; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl GotoWordJump {
+    pub const DEF: &GotoWordJumpDef = &GotoWordJumpDef;
+}
+
+impl Action for GotoWordJump {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

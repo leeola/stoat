@@ -675,6 +675,137 @@ pub(crate) fn apply_review_moved_overlay(
     }
 }
 
+/// Overlay one- or two-character `goto_word` jump labels at the
+/// buffer offset each label points at. Each label character
+/// replaces the underlying glyph in the rendered row's text and
+/// gets a background+foreground run drawn on top of any earlier
+/// runs. Characters of the label that already match the user's
+/// typed prefix (`input`) paint in `prefix_color`; remaining
+/// characters paint in `label_color`. Labels whose target falls
+/// outside `range` are skipped.
+pub(crate) fn apply_goto_word_overlay(
+    rows: &mut [RenderedRow],
+    snapshot: &DisplaySnapshot,
+    range: Range<u32>,
+    labels: &std::collections::BTreeMap<String, usize>,
+    input: &str,
+    label_color: Hsla,
+    prefix_color: Hsla,
+) {
+    if labels.is_empty() || rows.is_empty() {
+        return;
+    }
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let rope_len = rope.len();
+    for (label, &offset) in labels {
+        if !label.starts_with(input) {
+            continue;
+        }
+        if offset > rope_len {
+            continue;
+        }
+        let point = rope.offset_to_point(offset);
+        let display = snapshot.buffer_to_display(point);
+        if display.row < range.start || display.row >= range.end {
+            continue;
+        }
+        let row_idx = (display.row - range.start) as usize;
+        paint_goto_word_label(
+            &mut rows[row_idx],
+            display.column,
+            label,
+            input.len(),
+            label_color,
+            prefix_color,
+        );
+    }
+}
+
+fn paint_goto_word_label(
+    row: &mut RenderedRow,
+    start_column: u32,
+    label: &str,
+    input_len: usize,
+    label_color: Hsla,
+    prefix_color: Hsla,
+) {
+    let mut text_owned: String = row.text.as_ref().to_string();
+    for (i, ch) in label.chars().enumerate() {
+        let column = start_column + i as u32;
+        let cell_start = column_to_byte_offset(&text_owned, column);
+        let cell_next = column_to_byte_offset(&text_owned, column + 1);
+        if cell_start >= text_owned.len() {
+            let appended_start = text_owned.len();
+            text_owned.push(ch);
+            push_label_run(
+                &mut row.runs,
+                appended_start..text_owned.len(),
+                i < input_len,
+                label_color,
+                prefix_color,
+            );
+            continue;
+        }
+        let cell_end = if cell_next > cell_start {
+            cell_next
+        } else {
+            cell_start
+                + text_owned[cell_start..]
+                    .chars()
+                    .next()
+                    .map(|c| c.len_utf8())
+                    .unwrap_or(0)
+        };
+        let new_bytes = ch.encode_utf8(&mut [0u8; 4]).to_string();
+        text_owned.replace_range(cell_start..cell_end, &new_bytes);
+        let new_end = cell_start + new_bytes.len();
+        let delta = new_end as isize - cell_end as isize;
+        shift_existing_runs(&mut row.runs, cell_start, delta);
+        push_label_run(
+            &mut row.runs,
+            cell_start..new_end,
+            i < input_len,
+            label_color,
+            prefix_color,
+        );
+    }
+    row.text = SharedString::from(text_owned);
+}
+
+fn shift_existing_runs(
+    runs: &mut [(Range<usize>, gpui::HighlightStyle)],
+    after: usize,
+    delta: isize,
+) {
+    if delta == 0 {
+        return;
+    }
+    for (range, _) in runs.iter_mut() {
+        if range.start >= after {
+            range.start = (range.start as isize + delta).max(0) as usize;
+        }
+        if range.end >= after {
+            range.end = (range.end as isize + delta).max(0) as usize;
+        }
+    }
+}
+
+fn push_label_run(
+    runs: &mut Vec<(Range<usize>, gpui::HighlightStyle)>,
+    range: Range<usize>,
+    is_prefix: bool,
+    label_color: Hsla,
+    prefix_color: Hsla,
+) {
+    let style = gpui::HighlightStyle {
+        background_color: Some(if is_prefix { prefix_color } else { label_color }),
+        font_weight: Some(FontWeight::BOLD),
+        ..Default::default()
+    };
+    runs.push((range, style));
+}
+
 fn append_run(
     text: &mut String,
     runs: &mut Vec<(Range<usize>, gpui::HighlightStyle)>,
@@ -3010,5 +3141,160 @@ mod tests {
             row1.iter().any(|(r, _)| r.start == 0 && r.end == 2),
             "row 1 should paint `fn`"
         );
+    }
+
+    fn label_color() -> Hsla {
+        hsla(0.15, 1.0, 0.5, 1.0)
+    }
+
+    fn prefix_color() -> Hsla {
+        hsla(0.15, 1.0, 0.25, 1.0)
+    }
+
+    fn labels(entries: &[(&str, usize)]) -> std::collections::BTreeMap<String, usize> {
+        entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
+    }
+
+    #[test]
+    fn goto_word_overlay_paints_single_char_label_at_target_column() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha beta");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_goto_word_overlay(
+            &mut rows,
+            &snapshot,
+            0..1,
+            &labels(&[("a", 0), ("b", 6)]),
+            "",
+            label_color(),
+            prefix_color(),
+        );
+
+        let runs = bg_runs(&rows[0].runs);
+        assert_eq!(runs.len(), 2);
+        let first = runs
+            .iter()
+            .find(|(r, _)| r.start == 0)
+            .expect("label at offset 0");
+        assert_eq!(first.0.end - first.0.start, 1);
+        let second = runs
+            .iter()
+            .find(|(r, _)| r.start == 6)
+            .expect("label at offset 6");
+        assert_eq!(second.0.end - second.0.start, 1);
+        let row_text: &str = rows[0].text.as_ref();
+        assert_eq!(&row_text[0..1], "a");
+        assert_eq!(&row_text[6..7], "b");
+    }
+
+    #[test]
+    fn goto_word_overlay_paints_two_char_label() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abcdef");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_goto_word_overlay(
+            &mut rows,
+            &snapshot,
+            0..1,
+            &labels(&[("xy", 0)]),
+            "",
+            label_color(),
+            prefix_color(),
+        );
+
+        let row_text: &str = rows[0].text.as_ref();
+        assert_eq!(&row_text[0..2], "xy");
+        let runs = bg_runs(&rows[0].runs);
+        assert_eq!(runs.len(), 2);
+    }
+
+    #[test]
+    fn goto_word_overlay_dim_color_for_prefix_match() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abcdef");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_goto_word_overlay(
+            &mut rows,
+            &snapshot,
+            0..1,
+            &labels(&[("xy", 0)]),
+            "x",
+            label_color(),
+            prefix_color(),
+        );
+
+        let runs = bg_runs(&rows[0].runs);
+        let prefix = runs
+            .iter()
+            .find(|(r, _)| r.start == 0 && r.end == 1)
+            .expect("prefix run");
+        assert_eq!(prefix.1, Some(prefix_color()));
+        let remaining = runs
+            .iter()
+            .find(|(r, _)| r.start == 1 && r.end == 2)
+            .expect("remaining run");
+        assert_eq!(remaining.1, Some(label_color()));
+    }
+
+    #[test]
+    fn goto_word_overlay_skips_label_not_matching_prefix() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha beta");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_goto_word_overlay(
+            &mut rows,
+            &snapshot,
+            0..1,
+            &labels(&[("a", 0), ("b", 6)]),
+            "a",
+            label_color(),
+            prefix_color(),
+        );
+
+        let runs = bg_runs(&rows[0].runs);
+        assert_eq!(runs.len(), 1, "only the prefix-matching label paints");
+        assert_eq!(runs[0].0, 0..1);
+    }
+
+    #[test]
+    fn goto_word_overlay_skips_label_outside_visible_range() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha\nbeta");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_goto_word_overlay(
+            &mut rows,
+            &snapshot,
+            0..1,
+            &labels(&[("a", 6)]),
+            "",
+            label_color(),
+            prefix_color(),
+        );
+
+        assert!(bg_runs(&rows[0].runs).is_empty());
+    }
+
+    #[test]
+    fn goto_word_overlay_empty_labels_is_noop() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_goto_word_overlay(
+            &mut rows,
+            &snapshot,
+            0..1,
+            &labels(&[]),
+            "",
+            label_color(),
+            prefix_color(),
+        );
+
+        assert!(bg_runs(&rows[0].runs).is_empty());
     }
 }

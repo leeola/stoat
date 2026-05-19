@@ -12,7 +12,7 @@ use stoat_text::Rope;
 
 /// Label alphabet, lowercase only. 26 letters yields 676 two-char
 /// labels which is more than enough for any practical viewport.
-pub(crate) const ALPHABET: &[char] = &[
+pub const ALPHABET: &[char] = &[
     'a', 'b', 'c', 'd', 'e', 'f', 'g', 'h', 'i', 'j', 'k', 'l', 'm', 'n', 'o', 'p', 'q', 'r', 's',
     't', 'u', 'v', 'w', 'x', 'y', 'z',
 ];
@@ -22,12 +22,7 @@ pub(crate) const ALPHABET: &[char] = &[
 /// more word characters (alphanumerics or underscore), matching
 /// Helix's filter. The returned offsets are in document order, capped
 /// at `max` entries.
-pub(crate) fn find_word_starts(
-    rope: &Rope,
-    first_row: u32,
-    last_row: u32,
-    max: usize,
-) -> Vec<usize> {
+pub fn find_word_starts(rope: &Rope, first_row: u32, last_row: u32, max: usize) -> Vec<usize> {
     if max == 0 {
         return Vec::new();
     }
@@ -81,7 +76,7 @@ fn is_word_char(ch: char) -> bool {
 ///
 /// Returns a [`BTreeMap`] (rather than a [`HashMap`]) so iteration
 /// order is deterministic for snapshot tests and label rendering.
-pub(crate) fn assign_labels(targets: &[usize], alphabet: &[char]) -> BTreeMap<String, usize> {
+pub fn assign_labels(targets: &[usize], alphabet: &[char]) -> BTreeMap<String, usize> {
     let mut map = BTreeMap::new();
     if alphabet.is_empty() || targets.is_empty() {
         return map;
@@ -111,7 +106,7 @@ pub(crate) fn assign_labels(targets: &[usize], alphabet: &[char]) -> BTreeMap<St
 }
 
 /// Result of feeding one character into an in-progress jump.
-pub(crate) enum JumpStep {
+pub enum JumpStep {
     /// Label fully typed; the cursor should jump to the byte offset.
     Jump(usize),
     /// Input prefix still has multiple matching labels - keep waiting.
@@ -123,7 +118,7 @@ pub(crate) enum JumpStep {
 /// Step the in-progress jump: append `ch` to `input` and look up
 /// `input` in the label map. Caller is responsible for clearing /
 /// updating its own state based on the returned [`JumpStep`].
-pub(crate) fn step_jump(labels: &BTreeMap<String, usize>, input: &str, ch: char) -> JumpStep {
+pub fn step_jump(labels: &BTreeMap<String, usize>, input: &str, ch: char) -> JumpStep {
     let mut next = String::with_capacity(input.len() + 1);
     next.push_str(input);
     next.push(ch);

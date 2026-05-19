@@ -80,6 +80,17 @@ pub const DEFAULT_SEARCH_MATCH_HEX: u32 = 0x665500;
 /// installed.
 pub const DEFAULT_LINE_HIGHLIGHT_HEX: u32 = 0x2a2a2a;
 
+/// Fallback for the goto-word label cell when no theme overrides
+/// `ui.goto_word.label`. Bright yellow so label characters stand out
+/// against editor text without requiring a theme.
+pub const DEFAULT_GOTO_WORD_LABEL_HEX: u32 = 0xeeee00;
+
+/// Fallback for label characters already matched by the user's typed
+/// prefix when no theme overrides `ui.goto_word.prefix`. Dim yellow
+/// so the matched characters fade visually while the unmatched
+/// remainder stays bright.
+pub const DEFAULT_GOTO_WORD_PREFIX_HEX: u32 = 0x666600;
+
 /// Fallback for muted-text scopes (gutter line numbers, dimmed
 /// chrome text) when no theme overrides `ui.text.muted`. Medium gray
 /// so muted text reads against dark editor backgrounds without
@@ -235,6 +246,21 @@ pub fn search_match_color(cx: &App) -> Hsla {
         stoat::theme::scope::UI_SEARCH_MATCH,
         DEFAULT_SEARCH_MATCH_HEX,
     )
+}
+
+/// Resolve the goto-word label cell color. Returns
+/// [`DEFAULT_GOTO_WORD_LABEL_HEX`] directly -- there is no
+/// `ui.goto_word.label` theme scope today; callers paint labels
+/// with this constant until a scope is added.
+pub fn goto_word_label_color(_cx: &App) -> Hsla {
+    rgb(DEFAULT_GOTO_WORD_LABEL_HEX).into()
+}
+
+/// Resolve the goto-word matched-prefix color. Same direct-constant
+/// path as [`goto_word_label_color`] using
+/// [`DEFAULT_GOTO_WORD_PREFIX_HEX`].
+pub fn goto_word_prefix_color(_cx: &App) -> Hsla {
+    rgb(DEFAULT_GOTO_WORD_PREFIX_HEX).into()
 }
 
 /// Resolve the muted-text color (gutter line numbers, dimmed chrome

@@ -305,6 +305,7 @@ pub enum ActionKind {
     ApplySurroundDeleteChar,
     ApplySurroundReplaceChar,
     ApplyTextobjectChar,
+    GotoWordJump,
     PickerSelectPrev,
     PickerSelectNext,
     PickerConfirm,

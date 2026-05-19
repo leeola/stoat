@@ -2,7 +2,7 @@ use crate::{
     actions::{
         ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplayMacroChar,
         ApplySurroundAddChar, ApplySurroundDeleteChar, ApplySurroundReplaceChar,
-        ApplyTextobjectChar,
+        ApplyTextobjectChar, GotoWordJump,
     },
     editor::{
         actions::{marks::MarkRequest, movement::FindKind, textobject::TextobjectMode},
@@ -821,6 +821,44 @@ impl InputStateMachine {
                 }
                 self.pending_textobject_select = None;
                 cx.notify();
+            }
+        }
+
+        if count_active_mode {
+            if let Some(editor) = self.active_editor.as_ref().and_then(WeakEntity::upgrade) {
+                let has_labels = editor.read(cx).pending_goto_word_labels().is_some();
+                if has_labels {
+                    if let KeyCode::Char(ch) = event.code {
+                        let step = editor.read(cx).pending_goto_word_labels().map(|labels| {
+                            stoat::goto_word::step_jump(
+                                labels,
+                                editor.read(cx).pending_goto_word_input(),
+                                ch,
+                            )
+                        });
+                        match step {
+                            Some(stoat::goto_word::JumpStep::Jump(offset)) => {
+                                editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
+                                cx.notify();
+                                return vec![Box::new(GotoWordJump {
+                                    byte_offset: offset,
+                                })];
+                            },
+                            Some(stoat::goto_word::JumpStep::Continue) => {
+                                editor.update(cx, |ed, cx| ed.push_pending_goto_word_input(ch, cx));
+                                cx.notify();
+                                return Vec::new();
+                            },
+                            Some(stoat::goto_word::JumpStep::Cancel) | None => {
+                                editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
+                                cx.notify();
+                                return Vec::new();
+                            },
+                        }
+                    }
+                    editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
+                    cx.notify();
+                }
             }
         }
 

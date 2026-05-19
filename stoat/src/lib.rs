@@ -20,7 +20,7 @@ mod editor_state;
 pub mod file_finder;
 pub mod fuzzy;
 pub mod global_search;
-pub(crate) mod goto_word;
+pub mod goto_word;
 pub mod help;
 pub mod host;
 mod input_view;

@@ -135,6 +135,8 @@ pub struct Editor {
     inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
     semantic_tokens_manager: Option<Entity<crate::lsp::SemanticTokensManager>>,
     syntax_map_updater: Option<Entity<crate::syntax_updater::SyntaxMapUpdater>>,
+    pending_goto_word_labels: Option<std::collections::BTreeMap<String, usize>>,
+    pending_goto_word_input: String,
     expansion_history: Vec<std::ops::Range<usize>>,
     expansion_tip: Option<std::ops::Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
@@ -344,6 +346,8 @@ impl Editor {
             inlay_hints_manager: None,
             semantic_tokens_manager: None,
             syntax_map_updater: None,
+            pending_goto_word_labels: None,
+            pending_goto_word_input: String::new(),
             expansion_history: Vec::new(),
             expansion_tip: None,
             blame_state: None,
@@ -2232,6 +2236,70 @@ impl Editor {
         self.syntax_map_updater.as_ref()
     }
 
+    /// Arm a `goto_word` jump: store the label set and clear any
+    /// in-progress typed prefix so the next character keystrokes
+    /// step through [`stoat::goto_word::step_jump`]. The render
+    /// overlay observes [`Self::pending_goto_word_labels`] on the
+    /// next frame.
+    pub fn arm_pending_goto_word(
+        &mut self,
+        labels: std::collections::BTreeMap<String, usize>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.pending_goto_word_labels = Some(labels);
+        self.pending_goto_word_input.clear();
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn pending_goto_word_labels(&self) -> Option<&std::collections::BTreeMap<String, usize>> {
+        self.pending_goto_word_labels.as_ref()
+    }
+
+    pub fn pending_goto_word_input(&self) -> &str {
+        &self.pending_goto_word_input
+    }
+
+    /// Append `ch` to the typed prefix for an in-progress
+    /// `goto_word` jump. Called by
+    /// [`crate::input_state_machine::InputStateMachine::feed`] on
+    /// every [`stoat::goto_word::JumpStep::Continue`] step so the
+    /// overlay can dim the matched prefix on the next frame.
+    pub fn push_pending_goto_word_input(&mut self, ch: char, cx: &mut Context<'_, Self>) {
+        self.pending_goto_word_input.push(ch);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Clear the pending `goto_word` chord. No-op when no chord is
+    /// armed.
+    pub fn clear_pending_goto_word(&mut self, cx: &mut Context<'_, Self>) {
+        if self.pending_goto_word_labels.is_none() && self.pending_goto_word_input.is_empty() {
+            return;
+        }
+        self.pending_goto_word_labels = None;
+        self.pending_goto_word_input.clear();
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Collapse every selection's primary cursor to a left-biased
+    /// anchor at the buffer byte `offset`. Offsets past the buffer
+    /// end clamp to the rope's length. Mirrors the TUI's
+    /// `stoat::action_handlers::movement::jump_to_offset`.
+    pub fn jump_to_offset(&mut self, offset: usize, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let clamped = offset.min(snapshot.rope().len());
+        let anchor = snapshot.anchor_at(clamped, Bias::Left);
+        self.selections.transform(&snapshot, |sel| {
+            let mut new = sel.clone();
+            new.collapse_to(anchor, SelectionGoal::None);
+            new
+        });
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     /// Extend the primary selection's head to display-grid `(row, col)`,
     /// preserving its anchor (`start`). Mouse-drag uses this to grow
     /// the selection under the cursor while the user holds the left
@@ -2618,6 +2686,21 @@ impl Editor {
                 start as u32..end as u32,
                 query,
                 color,
+            );
+        }
+
+        if let Some(labels) = self.pending_goto_word_labels.as_ref() {
+            let input = self.pending_goto_word_input.clone();
+            let label_color = theme::goto_word_label_color(cx);
+            let prefix_color = theme::goto_word_prefix_color(cx);
+            render::apply_goto_word_overlay(
+                &mut rows,
+                &display_snapshot,
+                start as u32..end as u32,
+                labels,
+                &input,
+                label_color,
+                prefix_color,
             );
         }
 
@@ -5062,5 +5145,61 @@ mod tests {
         editor.update(&mut cx, |ed, cx| ed.search_next(cx));
 
         assert!(drain(&events).contains(&EditorEvent::Changed));
+    }
+
+    fn arm_labels(editor: &Entity<Editor>, cx: &mut TestAppContext, entries: &[(&str, usize)]) {
+        let labels: std::collections::BTreeMap<String, usize> =
+            entries.iter().map(|(k, v)| (k.to_string(), *v)).collect();
+        editor.update(cx, |ed, cx| ed.arm_pending_goto_word(labels, cx));
+    }
+
+    #[test]
+    fn arm_pending_goto_word_stores_labels_and_clears_input() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha beta");
+        editor.update(&mut cx, |ed, cx| ed.push_pending_goto_word_input('z', cx));
+        arm_labels(&editor, &mut cx, &[("a", 0)]);
+
+        editor.read_with(&cx, |ed, _| {
+            assert_eq!(ed.pending_goto_word_labels().map(|m| m.len()), Some(1));
+            assert_eq!(ed.pending_goto_word_input(), "");
+        });
+    }
+
+    #[test]
+    fn clear_pending_goto_word_drops_labels_and_input() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha");
+        arm_labels(&editor, &mut cx, &[("a", 0)]);
+        editor.update(&mut cx, |ed, cx| ed.push_pending_goto_word_input('a', cx));
+
+        editor.update(&mut cx, |ed, cx| ed.clear_pending_goto_word(cx));
+
+        editor.read_with(&cx, |ed, _| {
+            assert!(ed.pending_goto_word_labels().is_none());
+            assert_eq!(ed.pending_goto_word_input(), "");
+        });
+    }
+
+    #[test]
+    fn jump_to_offset_collapses_primary_cursor() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha beta gamma");
+        seed_cursors(&editor, &mut cx, &[0]);
+
+        editor.update(&mut cx, |ed, cx| ed.jump_to_offset(11, cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![11]);
+    }
+
+    #[test]
+    fn jump_to_offset_clamps_past_buffer_end() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc");
+        seed_cursors(&editor, &mut cx, &[0]);
+
+        editor.update(&mut cx, |ed, cx| ed.jump_to_offset(9999, cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![3]);
     }
 }

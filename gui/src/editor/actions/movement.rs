@@ -477,7 +477,7 @@ impl Editor {
         cx.notify();
     }
 
-    fn viewport_rows_for_page(&self) -> u32 {
+    pub fn viewport_rows_for_page(&self) -> u32 {
         let Some(bounds) = self.text_region_bounds else {
             return DEFAULT_VIEWPORT_ROWS;
         };
