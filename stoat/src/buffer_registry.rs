@@ -371,7 +371,7 @@ impl BufferRegistry {
     /// full [`BufferHistory`] so replay on restore reconstructs identical
     /// fragment trees and anchors. Scratch buffers (no path) are included so
     /// their edit history also round-trips.
-    pub(crate) fn snapshot(&self) -> BufferRegistrySnapshot {
+    pub fn snapshot(&self) -> BufferRegistrySnapshot {
         let mut entries: Vec<BufferEntrySnap> = self
             .buffers
             .iter()
@@ -398,7 +398,7 @@ impl BufferRegistry {
     /// we'd have to choose between it and the saved edits, and the saved edits
     /// win unconditionally since persistence represents the user's explicit
     /// last-known state.
-    pub(crate) fn restore_from(&mut self, snap: BufferRegistrySnapshot) {
+    pub fn restore_from(&mut self, snap: BufferRegistrySnapshot) {
         self.buffers.clear();
         self.path_to_id.clear();
         self.next_id = snap.next_id.max(1);
@@ -438,13 +438,13 @@ impl Default for BufferRegistry {
 /// fragment tree, anchors, undo stack, and dirty state exactly. Syntax and
 /// diff caches are regenerable and deliberately not persisted.
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct BufferRegistrySnapshot {
+pub struct BufferRegistrySnapshot {
     pub entries: Vec<BufferEntrySnap>,
     pub next_id: u64,
 }
 
 #[derive(Debug, Serialize, Deserialize)]
-pub(crate) struct BufferEntrySnap {
+pub struct BufferEntrySnap {
     pub id: BufferId,
     pub path: Option<PathBuf>,
     pub history: BufferHistory,

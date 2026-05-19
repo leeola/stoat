@@ -2,7 +2,7 @@ use gpui::{Context, EventEmitter};
 use std::path::Path;
 use stoat::{
     buffer::{BufferId, SharedBuffer},
-    buffer_registry::DirtyBuffer,
+    buffer_registry::{BufferRegistrySnapshot, DirtyBuffer},
     BufferRegistry as InnerRegistry,
 };
 
@@ -95,6 +95,30 @@ impl BufferRegistry {
     /// first sorted by path, scratch buffers after sorted by id.
     pub fn dirty_buffers(&self) -> Vec<DirtyBuffer> {
         self.inner.dirty_buffers()
+    }
+
+    /// Snapshot every buffer's history for workspace persistence.
+    /// Forwards to [`stoat::BufferRegistry::snapshot`]; scratch and
+    /// path-bound entries are both captured so the op-log round-trips
+    /// across restart via [`stoat::buffer::TextBuffer::from_history`].
+    pub fn snapshot(&self) -> BufferRegistrySnapshot {
+        self.inner.snapshot()
+    }
+
+    /// Replace the registry contents with `snap`, emitting one
+    /// [`BufferRegistryEvent::BufferAdded`] per rehydrated entry so
+    /// existing subscribers (file-watcher driver, buffer picker)
+    /// see the restored set. Must be paired with a workspace state
+    /// restore that re-installs the matching editor entities; calling
+    /// this in isolation leaves the registry populated but with no
+    /// panes referencing the buffers.
+    pub fn restore_from(&mut self, snap: BufferRegistrySnapshot, cx: &mut Context<'_, Self>) {
+        let ids: Vec<BufferId> = snap.entries.iter().map(|e| e.id).collect();
+        self.inner.restore_from(snap);
+        for id in ids {
+            cx.emit(BufferRegistryEvent::BufferAdded(id));
+        }
+        cx.notify();
     }
 }
 

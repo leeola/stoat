@@ -128,6 +128,33 @@ impl PaneTree {
         }
     }
 
+    /// Clone the inner [`stoat::pane::PaneTree`] for workspace
+    /// persistence. The inner type already has serde; the wrapper's
+    /// parallel `panes: BTreeMap<PaneId, Entity<Pane>>` is rebuilt
+    /// on restore via [`Self::apply_state`].
+    pub fn inner_clone(&self) -> InnerTree {
+        let body = ron::ser::to_string(&self.inner).expect("pane tree round-trips through serde");
+        ron::from_str(&body).expect("pane tree round-trips through serde")
+    }
+
+    /// Replace the inner [`stoat::pane::PaneTree`] with `inner`,
+    /// rebuilding the parallel pane-entity map so every leaf in the
+    /// new tree gets a fresh empty [`Pane`]. Callers re-populate pane
+    /// content afterward (the persistence layer walks the per-pane
+    /// editor snapshots and adds editor items to each).
+    pub fn apply_state(&mut self, inner: InnerTree, cx: &mut Context<'_, Self>) {
+        let mut panes = BTreeMap::new();
+        for id in inner.split_pane_ids() {
+            let workspace = self.workspace.clone();
+            let pane = cx.new(|cx| Pane::new(id, workspace, cx));
+            panes.insert(id, pane);
+        }
+        self.inner = inner;
+        self.panes = panes;
+        cx.emit(PaneTreeEvent::Changed);
+        cx.notify();
+    }
+
     /// Close every split pane except the currently focused one.
     /// Returns the count of panes actually closed; emits a single
     /// `Changed` event when at least one pane was closed.

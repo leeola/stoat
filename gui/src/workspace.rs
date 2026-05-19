@@ -67,6 +67,8 @@ use stoat_action::ActionKind;
 /// foundation parents in `.todo-plans/TODO.md`.
 pub struct Workspace {
     name: SharedString,
+    uid: stoat::workspace::WorkspaceUid,
+    is_fresh: bool,
     git_root: PathBuf,
     pane_tree: Entity<PaneTree>,
     buffer_registry: Entity<BufferRegistry>,
@@ -261,8 +263,14 @@ impl Workspace {
         search_indicator.update(cx, |item, cx| {
             item.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
+        let uid = cx
+            .try_global::<ExecutorGlobal>()
+            .map(|exec| stoat::workspace::WorkspaceUid::now(&exec.0))
+            .unwrap_or_default();
         Self {
             name,
+            uid,
+            is_fresh: true,
             git_root,
             pane_tree,
             buffer_registry,
@@ -604,40 +612,7 @@ impl Workspace {
         let cwd = std::env::current_dir().ok();
         for (index, path) in paths.iter().enumerate() {
             let absolute = absolute_path(path, cwd.as_deref());
-            let text = read_path_or_empty(&absolute, cx);
-            let (buffer_id, shared) = self
-                .buffer_registry
-                .update(cx, |registry, cx| registry.open(&absolute, &text, cx));
-            let buffer = cx.new(|_| Buffer::from_shared(shared));
-            buffer.update(cx, |b, cx| b.set_file_path(Some(absolute.clone()), cx));
-            self.register_buffer_watch(buffer_id, absolute.clone(), buffer.clone(), cx);
-            let executor = cx.global::<ExecutorGlobal>().0.clone();
-            let multi_buffer = {
-                let buffer = buffer.clone();
-                cx.new(|cx| MultiBuffer::singleton(buffer, cx))
-            };
-            let display_map = {
-                let buffer = buffer.clone();
-                cx.new(|cx| DisplayMap::new(buffer, executor, cx))
-            };
-            let diff_map = {
-                let buffer = buffer.clone();
-                cx.new(|cx| DiffMap::new(buffer, cx))
-            };
-            let workspace_handle = cx.weak_entity();
-            let workspace_diagnostics = self.diagnostics.clone();
-            let editor = cx
-                .new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
-            editor.update(cx, |ed, cx| {
-                ed.set_workspace(Some(workspace_handle));
-                ed.set_file_path(Some(absolute.clone()), cx);
-                ed.set_diagnostic_set(Some(workspace_diagnostics), cx);
-                ed.install_hover_popup(cx);
-                ed.install_completion_popup(cx);
-                ed.install_inlay_hints(cx);
-                ed.install_semantic_tokens(cx);
-                ed.install_syntax_map_updater(cx);
-            });
+            let editor = self.build_editor_for_path(&absolute, cx);
             let pane_id = if index == 0 {
                 self.pane_tree.read(cx).focus()
             } else {
@@ -654,6 +629,179 @@ impl Workspace {
                 p.add_item(Box::new(editor), cx);
             });
         }
+    }
+
+    /// Construct a fully-wired [`Entity<Editor>`] for `absolute`,
+    /// opening (or reusing) the matching buffer in the registry and
+    /// installing the LSP / syntax / completion managers. Does not
+    /// add the editor to any pane; the caller decides where it lands.
+    fn build_editor_for_path(
+        &mut self,
+        absolute: &Path,
+        cx: &mut Context<'_, Self>,
+    ) -> Entity<Editor> {
+        let text = read_path_or_empty(absolute, cx);
+        let (buffer_id, shared) = self
+            .buffer_registry
+            .update(cx, |registry, cx| registry.open(absolute, &text, cx));
+        let buffer = cx.new(|_| Buffer::from_shared(shared));
+        buffer.update(cx, |b, cx| {
+            b.set_file_path(Some(absolute.to_path_buf()), cx)
+        });
+        self.register_buffer_watch(buffer_id, absolute.to_path_buf(), buffer.clone(), cx);
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            cx.new(|cx| MultiBuffer::singleton(buffer, cx))
+        };
+        let display_map = {
+            let buffer = buffer.clone();
+            cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+        };
+        let diff_map = {
+            let buffer = buffer.clone();
+            cx.new(|cx| DiffMap::new(buffer, cx))
+        };
+        let workspace_handle = cx.weak_entity();
+        let workspace_diagnostics = self.diagnostics.clone();
+        let editor =
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+        editor.update(cx, |ed, cx| {
+            ed.set_workspace(Some(workspace_handle));
+            ed.set_file_path(Some(absolute.to_path_buf()), cx);
+            ed.set_diagnostic_set(Some(workspace_diagnostics), cx);
+            ed.install_hover_popup(cx);
+            ed.install_completion_popup(cx);
+            ed.install_inlay_hints(cx);
+            ed.install_semantic_tokens(cx);
+            ed.install_syntax_map_updater(cx);
+        });
+        editor
+    }
+
+    pub fn uid(&self) -> stoat::workspace::WorkspaceUid {
+        self.uid
+    }
+
+    pub fn is_fresh(&self) -> bool {
+        self.is_fresh
+    }
+
+    /// Mark the workspace as no longer fresh. Persistence skips
+    /// fresh workspaces so abandoned sessions never write state.
+    pub fn mark_dirty(&mut self) {
+        self.is_fresh = false;
+    }
+
+    /// Build the serializable v1 snapshot of every part of the
+    /// workspace this iteration knows how to round-trip.
+    pub fn to_state(&self, cx: &App) -> crate::workspace_persist::WorkspaceStateV1 {
+        let pane_tree = self.pane_tree.read(cx);
+        let panes_inner = pane_tree.inner_clone();
+        let focused_pane = pane_tree.focus();
+        let mut pane_items = std::collections::BTreeMap::new();
+        for id in pane_tree.split_pane_ids() {
+            let Some(pane_entity) = pane_tree.pane(id) else {
+                continue;
+            };
+            let pane_ref = pane_entity.read(cx);
+            let snap = crate::workspace_persist::snapshot_pane_items(pane_ref, cx, id);
+            pane_items.insert(id, snap);
+        }
+        let buffers = self.buffer_registry.read(cx).snapshot();
+        crate::workspace_persist::WorkspaceStateV1 {
+            uid: self.uid,
+            name: self.name.to_string(),
+            git_root: self.git_root.clone(),
+            panes: panes_inner,
+            focused_pane,
+            pane_items,
+            buffers,
+        }
+    }
+
+    /// Serialize the workspace and write it atomically to `path`.
+    /// No-op when [`Self::is_fresh`] is true so untouched workspaces
+    /// don't leave files on disk. Parent directory is created if
+    /// missing.
+    pub fn save_state(
+        &self,
+        path: &Path,
+        fs: &dyn stoat::host::FsHost,
+        cx: &App,
+    ) -> std::io::Result<()> {
+        if self.is_fresh {
+            return Ok(());
+        }
+        if let Some(parent) = path.parent() {
+            fs.create_dir_all(parent)?;
+        }
+        let state = self.to_state(cx);
+        let body = ron::ser::to_string_pretty(&state, ron::ser::PrettyConfig::default())
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let tmp = path.with_extension("ron.tmp");
+        fs.write(&tmp, body.as_bytes())?;
+        fs.rename(&tmp, path)?;
+        Ok(())
+    }
+
+    /// Replace `self`'s persistable state with `state`. Buffers
+    /// rehydrate via [`stoat::buffer::TextBuffer::from_history`]; the
+    /// pane tree shape rebuilds with empty panes, then per-pane
+    /// editor file paths re-open via [`Self::build_editor_for_path`]
+    /// which reuses the rehydrated buffers in the registry.
+    pub fn apply_state(
+        &mut self,
+        state: crate::workspace_persist::WorkspaceStateV1,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.uid = state.uid;
+        self.git_root = state.git_root.clone();
+        self.name = SharedString::from(state.name.clone());
+        self.is_fresh = false;
+        self.buffer_registry
+            .update(cx, |registry, cx| registry.restore_from(state.buffers, cx));
+        self.pane_tree
+            .update(cx, |tree, cx| tree.apply_state(state.panes, cx));
+        for (pane_id, items) in state.pane_items {
+            let pane = match self.pane_tree.read(cx).pane(pane_id).cloned() {
+                Some(p) => p,
+                None => continue,
+            };
+            for path in &items.editor_paths {
+                let editor = self.build_editor_for_path(path, cx);
+                pane.update(cx, |p, cx| {
+                    p.add_item(Box::new(editor), cx);
+                });
+            }
+            let active = items
+                .active_index
+                .min(items.editor_paths.len().saturating_sub(1));
+            if !items.editor_paths.is_empty() {
+                pane.update(cx, |p, cx| {
+                    p.activate(active, cx);
+                });
+            }
+        }
+        self.pane_tree
+            .update(cx, |tree, cx| tree.set_focus(state.focused_pane, cx));
+    }
+
+    /// Read and apply the persisted state at `path`.
+    pub fn restore_state(
+        &mut self,
+        path: &Path,
+        fs: &dyn stoat::host::FsHost,
+        cx: &mut Context<'_, Self>,
+    ) -> std::io::Result<()> {
+        let mut buf = Vec::new();
+        fs.read(path, &mut buf)?;
+        let body = String::from_utf8(buf)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        let state: crate::workspace_persist::WorkspaceStateV1 = ron::from_str(&body)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e.to_string()))?;
+        self.apply_state(state, cx);
+        Ok(())
     }
 
     pub fn docks(&self) -> &[Entity<Dock>] {
@@ -10624,5 +10772,112 @@ mod tests {
             .expect("third modal")
             .read_with(vcx, |m, _| m.tool().to_string());
         assert_eq!(third_tool, "Third");
+    }
+
+    #[test]
+    fn fresh_workspace_does_not_write_state() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let path = PathBuf::from("/tmp/state/fresh.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+        assert!(
+            !fs_dyn.exists(&path),
+            "fresh workspace must not write state"
+        );
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_pane_tree_and_editor_paths() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello foo\n");
+        fs.insert_file("/tmp/repo/bar.rs", b"hello bar\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(
+                &[
+                    PathBuf::from("/tmp/repo/foo.rs"),
+                    PathBuf::from("/tmp/repo/bar.rs"),
+                ],
+                cx,
+            );
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let pane_count_before = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count());
+        let path = PathBuf::from("/tmp/state/round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+        assert!(fs_dyn.exists(&path), "dirty workspace must write");
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            assert_eq!(w.git_root(), Path::new("/tmp/repo"));
+            assert_eq!(w.pane_tree().read(cx).pane_count(), pane_count_before);
+            let mut paths_seen: Vec<PathBuf> = Vec::new();
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if let Ok(editor) = item.to_any_view().downcast::<Editor>() {
+                        if let Some(p) = editor.read(cx).file_path() {
+                            paths_seen.push(p.to_path_buf());
+                        }
+                    }
+                }
+            }
+            paths_seen.sort();
+            assert_eq!(
+                paths_seen,
+                vec![
+                    PathBuf::from("/tmp/repo/bar.rs"),
+                    PathBuf::from("/tmp/repo/foo.rs"),
+                ]
+            );
+        });
+    }
+
+    #[test]
+    fn restore_carries_uid_across_save_load() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"x\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let original_uid = ws.read_with(vcx, |w, _| w.uid());
+        let path = PathBuf::from("/tmp/state/uid.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        let restored_uid = fresh_ws.read_with(vcx2, |w, _| w.uid());
+        assert_eq!(restored_uid, original_uid);
     }
 }

@@ -1,5 +1,5 @@
 mod name;
-mod persist;
+pub mod persist;
 
 use crate::{
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
@@ -48,7 +48,7 @@ new_key_type! {
 pub struct WorkspaceUid(pub u64);
 
 impl WorkspaceUid {
-    pub(crate) fn now(executor: &Executor) -> Self {
+    pub fn now(executor: &Executor) -> Self {
         let nanos = executor
             .system_now()
             .duration_since(UNIX_EPOCH)

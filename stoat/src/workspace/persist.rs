@@ -78,7 +78,7 @@ pub(crate) struct WorkspaceStateV1 {
 /// by the workspace's [`WorkspaceUid`]. Canonical form of `git_root` is
 /// hashed with the stdlib's [`DefaultHasher`] (stable within a Rust release;
 /// acceptable here because a hash mismatch just falls back to a fresh session).
-pub(crate) fn workspace_dir_for(git_root: &Path, fs: &dyn FsHost) -> io::Result<PathBuf> {
+pub fn workspace_dir_for(git_root: &Path, fs: &dyn FsHost) -> io::Result<PathBuf> {
     Ok(anchor_state_dir(
         &stoat_log::workspace_state_dir()?,
         git_root,
@@ -101,18 +101,14 @@ fn anchor_state_dir(state_dir: &Path, anchor: &Path, fs: &dyn FsHost) -> PathBuf
 }
 
 /// Resolve the on-disk state file path for a specific workspace.
-pub(crate) fn state_path_for(
-    git_root: &Path,
-    uid: WorkspaceUid,
-    fs: &dyn FsHost,
-) -> io::Result<PathBuf> {
+pub fn state_path_for(git_root: &Path, uid: WorkspaceUid, fs: &dyn FsHost) -> io::Result<PathBuf> {
     Ok(workspace_dir_for(git_root, fs)?.join(format!("{uid}.ron")))
 }
 
 /// List every persisted workspace file for a git root, newest first by
 /// filesystem mtime. Returns an empty vec (not an error) if the directory
 /// does not exist.
-pub(crate) fn list_workspace_files(git_root: &Path, fs: &dyn FsHost) -> io::Result<Vec<PathBuf>> {
+pub fn list_workspace_files(git_root: &Path, fs: &dyn FsHost) -> io::Result<Vec<PathBuf>> {
     list_ron_files_by_mtime_desc(&workspace_dir_for(git_root, fs)?, fs)
 }
 
