@@ -2,6 +2,7 @@ use crate::{
     host::{ClaudeSessionId, TokenUsage, ToolCallStatus},
     input_view::InputView,
 };
+use serde::{Deserialize, Serialize};
 use std::{collections::HashSet, time::Instant};
 
 // FIXME: Claude session state not persisted across workspace save/load. On
@@ -64,13 +65,13 @@ pub struct ClaudeChatState {
     pub expanded_tool_ids: HashSet<String>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChatRole {
     User,
     Assistant,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub enum ChatMessageContent {
     Text(String),
     Thinking {
@@ -105,7 +106,7 @@ pub enum ToolCardStatus {
     Cancelled,
 }
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ChatMessage {
     pub role: ChatRole,
     pub content: ChatMessageContent,
