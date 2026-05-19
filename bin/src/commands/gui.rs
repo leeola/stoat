@@ -8,8 +8,8 @@ use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_gui::{
     install_panic_hook, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal,
     FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry, LspHostGlobal,
-    MpscPermissionPromptHost, PermissionPromptHost, PermissionPromptHostGlobal, Settings,
-    ShellHostGlobal, TerminalHostGlobal, Theme,
+    MpscPermissionPromptHost, PermissionPromptHost, PermissionPromptHostGlobal, RestoreMode,
+    Settings, ShellHostGlobal, TerminalHostGlobal, Theme,
 };
 use stoat_scheduler::TokioScheduler;
 use tokio::sync::mpsc;
@@ -23,7 +23,7 @@ const PERMISSION_PROMPT_CAPACITY: usize = 8;
 
 const DEFAULT_CONFIG: &str = include_str!("../../../config.stcfg");
 
-pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
+pub fn run(files: Vec<PathBuf>, restore: RestoreMode) -> Result<(), Whatever> {
     install_panic_hook();
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
@@ -69,7 +69,7 @@ pub fn run(files: Vec<PathBuf>) -> Result<(), Whatever> {
         executor: ExecutorGlobal(executor),
     };
 
-    stoat_gui::run(globals, files);
+    stoat_gui::run(globals, files, restore);
     Ok(())
 }
 

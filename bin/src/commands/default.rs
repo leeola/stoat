@@ -73,13 +73,30 @@ enum Command {
 }
 
 pub fn run() -> Result<(), Whatever> {
-    let Args { command, files, .. } = Args::parse();
+    let Args {
+        command,
+        files,
+        continue_,
+        resume,
+        ..
+    } = Args::parse();
+
+    let restore = if continue_ {
+        stoat_gui::RestoreMode::Continue
+    } else if resume {
+        stoat_gui::RestoreMode::Resume
+    } else {
+        stoat_gui::RestoreMode::None
+    };
 
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
-        Some(Command::Gui) => crate::commands::gui::run(files),
-        Some(Command::Review) | None => print_gui_hint(),
+        Some(Command::Gui) => crate::commands::gui::run(files, restore),
+        Some(Command::Review) | None => {
+            let _ = restore;
+            print_gui_hint()
+        },
     }
 }
 

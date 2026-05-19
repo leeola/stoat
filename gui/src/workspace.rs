@@ -854,6 +854,25 @@ impl Workspace {
         Ok(())
     }
 
+    /// Discover the most-recently-modified persisted workspace
+    /// under `anchor` and apply it. Returns `Ok(true)` when a
+    /// workspace was restored, `Ok(false)` when the anchor has no
+    /// persisted state, and surfaces the underlying IO / parse
+    /// error otherwise. Backs the `--continue` binary flag.
+    pub fn restore_most_recent(
+        &mut self,
+        anchor: &Path,
+        fs: &dyn stoat::host::FsHost,
+        cx: &mut Context<'_, Self>,
+    ) -> std::io::Result<bool> {
+        let files = crate::workspace_persist::list_workspace_files(anchor, fs)?;
+        let Some(newest) = files.into_iter().next() else {
+            return Ok(false);
+        };
+        self.restore_state(&newest, fs, cx)?;
+        Ok(true)
+    }
+
     pub fn docks(&self) -> &[Entity<Dock>] {
         &self.docks
     }
@@ -11123,6 +11142,54 @@ mod tests {
                 .expect("editor item");
             let editor_path = editor.read(cx).file_path().map(Path::to_path_buf);
             assert_eq!(editor_path, Some(PathBuf::from("/tmp/repo/foo.rs")));
+        });
+    }
+
+    #[test]
+    fn restore_most_recent_with_no_persisted_state_returns_false() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+
+        let restored = ws.update(vcx, |w, cx| {
+            w.restore_most_recent(Path::new("/tmp/repo"), &*fs_dyn, cx)
+                .expect("restore")
+        });
+        assert!(!restored);
+    }
+
+    #[test]
+    fn restore_most_recent_picks_newest_persisted_file() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hi\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let state_dir =
+            stoat::workspace::persist::workspace_dir_for(Path::new("/tmp/repo"), &*fs_dyn)
+                .expect("state dir");
+        let uid = ws.read_with(vcx, |w, _| w.uid());
+        let state_path = state_dir.join(format!("{uid}.ron"));
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&state_path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        let restored = fresh_ws.update(vcx2, |w, cx| {
+            w.restore_most_recent(Path::new("/tmp/repo"), &*fs_dyn, cx)
+                .expect("restore")
+        });
+        assert!(restored);
+        fresh_ws.read_with(vcx2, |w, _| {
+            assert_eq!(w.uid(), uid);
         });
     }
 }

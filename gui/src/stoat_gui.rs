@@ -94,6 +94,23 @@ pub use globals::{
     LspHostGlobal, MpscPermissionPromptHost, PermissionPromptHost, PermissionPromptHostGlobal,
     ShellHostGlobal, TerminalHostGlobal,
 };
+
+/// Selects whether [`run`] starts in a fresh workspace or rehydrates
+/// a previously persisted one. Mirrors the binary's `--continue` /
+/// `--resume` flags from `bin/src/commands/default.rs`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreMode {
+    /// Default: a fresh workspace anchored at the current
+    /// directory. Files passed alongside are opened normally.
+    None,
+    /// Restore the most-recently-modified workspace whose
+    /// `git_root` matches the current directory.
+    Continue,
+    /// Walk cwd ancestors and restore the most-recently-modified
+    /// workspace under any of them. Falls back to a fresh
+    /// workspace anchored at cwd when no ancestor has any state.
+    Resume,
+}
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
@@ -118,7 +135,7 @@ pub use tab_bar::{render_tab_bar, DraggedTab};
 pub use theme::Theme;
 pub use workspace::{Workspace, WorkspaceEvent};
 
-pub fn run(globals: Globals, files: Vec<std::path::PathBuf>) {
+pub fn run(globals: Globals, files: Vec<std::path::PathBuf>, restore: RestoreMode) {
     Application::new().run(move |cx: &mut App| {
         tracing::info!("stoat gui starting");
         install_production_globals(cx, globals);
@@ -132,7 +149,7 @@ pub fn run(globals: Globals, files: Vec<std::path::PathBuf>) {
                 }),
                 ..Default::default()
             },
-            move |_window, cx| cx.new(|cx| StoatApp::new(files, cx)),
+            move |_window, cx| cx.new(|cx| StoatApp::new(files, restore, cx)),
         )
         .expect("open root window");
         cx.on_window_closed(|cx| {
