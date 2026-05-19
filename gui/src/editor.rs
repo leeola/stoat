@@ -134,6 +134,7 @@ pub struct Editor {
     completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
     inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
     semantic_tokens_manager: Option<Entity<crate::lsp::SemanticTokensManager>>,
+    syntax_map_updater: Option<Entity<crate::syntax_updater::SyntaxMapUpdater>>,
     expansion_history: Vec<std::ops::Range<usize>>,
     expansion_tip: Option<std::ops::Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
@@ -342,6 +343,7 @@ impl Editor {
             completion_popup: None,
             inlay_hints_manager: None,
             semantic_tokens_manager: None,
+            syntax_map_updater: None,
             expansion_history: Vec::new(),
             expansion_tip: None,
             blame_state: None,
@@ -2197,6 +2199,39 @@ impl Editor {
         self.semantic_tokens_manager.as_ref()
     }
 
+    /// Construct the [`crate::syntax_updater::SyntaxMapUpdater`] entity
+    /// that observes this editor's buffer edits and rebuilds the
+    /// multi-layer parse tree on each change. Resolves the buffer's
+    /// language from its `file_path` via the global
+    /// [`crate::globals::LanguageRegistry`]; no-op when the buffer has
+    /// no file path, no language matches the extension, or the
+    /// underlying multi-buffer is not a singleton (the buffer the
+    /// updater would observe is ambiguous in the multi-excerpt case).
+    pub fn install_syntax_map_updater(&mut self, cx: &mut Context<'_, Self>) {
+        if self.syntax_map_updater.is_some() {
+            return;
+        }
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        let Some(language) = cx
+            .try_global::<crate::globals::LanguageRegistry>()
+            .and_then(|reg| reg.0.for_path(&path))
+        else {
+            return;
+        };
+        let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() else {
+            return;
+        };
+        let updater =
+            cx.new(|upd_cx| crate::syntax_updater::SyntaxMapUpdater::new(buffer, language, upd_cx));
+        self.syntax_map_updater = Some(updater);
+    }
+
+    pub fn syntax_map_updater(&self) -> Option<&Entity<crate::syntax_updater::SyntaxMapUpdater>> {
+        self.syntax_map_updater.as_ref()
+    }
+
     /// Extend the primary selection's head to display-grid `(row, col)`,
     /// preserving its anchor (`start`). Mouse-drag uses this to grow
     /// the selection under the cursor while the user holds the left
@@ -2551,6 +2586,24 @@ impl Editor {
             start as u32..end as u32,
             &review_data.moved_spans,
         );
+
+        if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
+            let syntax_snapshot = buffer.read(cx).syntax_map().map(|m| m.snapshot().clone());
+            if let Some(syntax_snapshot) = syntax_snapshot {
+                let theme = cx
+                    .try_global::<theme::Theme>()
+                    .map(|t| t.0.clone())
+                    .unwrap_or_else(stoat::theme::Theme::empty);
+                let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
+                render::apply_syntax_overlay(
+                    &mut rows,
+                    &display_snapshot,
+                    start as u32..end as u32,
+                    &syntax_snapshot,
+                    &styles,
+                );
+            }
+        }
 
         if let Some(query) = self
             .search_state

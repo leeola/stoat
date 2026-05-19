@@ -636,6 +636,7 @@ impl Workspace {
                 ed.install_completion_popup(cx);
                 ed.install_inlay_hints(cx);
                 ed.install_semantic_tokens(cx);
+                ed.install_syntax_map_updater(cx);
             });
             let pane_id = if index == 0 {
                 self.pane_tree.read(cx).focus()

@@ -155,6 +155,7 @@ pub struct Globals {
 
 /// Register the production set of app globals on `cx`.
 pub fn install_production_globals(cx: &mut App, globals: Globals) {
+    seed_language_highlight_maps(&globals.language_registry.0);
     cx.set_global(globals.settings);
     cx.set_global(globals.theme);
     cx.set_global(globals.language_registry);
@@ -169,4 +170,25 @@ pub fn install_production_globals(cx: &mut App, globals: Globals) {
     cx.set_global(globals.clipboard_host);
     cx.set_global(globals.terminal_host);
     cx.set_global(globals.executor);
+}
+
+/// Install a [`stoat_language::HighlightMap`] on every language in
+/// `registry`, keyed by the static syntax-theme key list from
+/// [`stoat::display_map::syntax_theme::SyntaxStyles`]. The keys are
+/// `&'static`, so this is a one-time setup that survives theme
+/// reloads -- only the style table changes when the active theme
+/// changes; the capture-index -> [`stoat_language::HighlightId`]
+/// mapping does not.
+///
+/// Without this setup every capture resolves to
+/// [`stoat_language::HighlightId::DEFAULT`] and the renderer paints
+/// no syntax color.
+pub fn seed_language_highlight_maps(registry: &stoat_language::LanguageRegistry) {
+    let styles =
+        stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&stoat::theme::Theme::empty());
+    let theme_keys = styles.theme_keys();
+    for lang in registry.languages() {
+        let map = stoat_language::HighlightMap::new(lang.highlight_capture_names(), theme_keys);
+        lang.set_highlight_map(map);
+    }
 }

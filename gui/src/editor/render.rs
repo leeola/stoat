@@ -511,6 +511,124 @@ fn flush_search_run(
     rows[row_idx].runs.push((start_byte..end_byte, style));
 }
 
+/// Overlay tree-sitter syntax-highlight runs on every visible row
+/// in `rows`. Walks the multi-layer [`stoat_language::SyntaxSnapshot`]
+/// for captures whose byte range intersects the visible buffer
+/// window, resolves each capture's [`stoat_language::HighlightId`]
+/// via the originating language's pre-installed
+/// [`stoat_language::HighlightMap`] (seeded once by
+/// [`crate::globals::seed_language_highlight_maps`]), looks the id
+/// up in `styles.id_for_highlight`, and pushes a run per visible
+/// character. Captures that resolve to
+/// [`stoat_language::HighlightId::DEFAULT`] are skipped (the
+/// capture has no theme entry and the renderer leaves it unstyled).
+///
+/// Multi-row captures clamp per-row; captures whose row falls
+/// outside `range` are skipped.
+pub(crate) fn apply_syntax_overlay(
+    rows: &mut [RenderedRow],
+    snapshot: &DisplaySnapshot,
+    range: Range<u32>,
+    syntax_snapshot: &stoat_language::SyntaxSnapshot,
+    styles: &stoat::display_map::syntax_theme::SyntaxStyles,
+) {
+    if rows.is_empty() || syntax_snapshot.is_empty() {
+        return;
+    }
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let visible_byte_range = visible_byte_range(snapshot, &range, rope.len());
+    if visible_byte_range.is_empty() {
+        return;
+    }
+    let captures =
+        syntax_snapshot.captures(visible_byte_range, rope, |lang| Some(&lang.highlight_query));
+    for capture in captures {
+        let highlight_id = capture.language.highlight_map().get(capture.index);
+        let Some(style_id) = styles.id_for_highlight(highlight_id) else {
+            continue;
+        };
+        let stoat_style = &styles.interner[style_id];
+        let gpui_style = convert_highlight_style(stoat_style);
+        let node_range = capture.node.byte_range();
+        push_syntax_runs(rows, snapshot, &range, rope, node_range, gpui_style);
+    }
+}
+
+fn visible_byte_range(
+    snapshot: &DisplaySnapshot,
+    range: &Range<u32>,
+    rope_len: usize,
+) -> Range<usize> {
+    let start_pt = snapshot
+        .display_to_buffer(DisplayPoint::new(range.start, 0))
+        .unwrap_or(stoat_text::Point::zero());
+    let end_pt = snapshot
+        .display_to_buffer(DisplayPoint::new(range.end, 0))
+        .unwrap_or_else(|| snapshot.buffer_snapshot().rope().max_point());
+    let rope = snapshot.buffer_snapshot().rope();
+    let start = rope.point_to_offset(start_pt).min(rope_len);
+    let end = rope.point_to_offset(end_pt).min(rope_len);
+    if end < start {
+        return start..start;
+    }
+    start..end
+}
+
+fn push_syntax_runs(
+    rows: &mut [RenderedRow],
+    snapshot: &DisplaySnapshot,
+    range: &Range<u32>,
+    rope: &stoat_text::Rope,
+    node_range: Range<usize>,
+    style: gpui::HighlightStyle,
+) {
+    if node_range.is_empty() {
+        return;
+    }
+    let mut current: Option<(u32, usize, usize)> = None;
+    let mut offset = node_range.start;
+    let mut chars = rope.chars_at(offset);
+    while offset < node_range.end {
+        let Some(ch) = chars.next() else {
+            break;
+        };
+        let ch_len = ch.len_utf8();
+        if ch == '\n' {
+            flush_search_run(rows, range.start, current.take(), style);
+            offset += ch_len;
+            continue;
+        }
+        let point = rope.offset_to_point(offset);
+        let display = snapshot.buffer_to_display(point);
+        if display.row < range.start || display.row >= range.end {
+            flush_search_run(rows, range.start, current.take(), style);
+            offset += ch_len;
+            continue;
+        }
+        let row_idx = (display.row - range.start) as usize;
+        let row_text: &str = rows[row_idx].text.as_ref();
+        let cell_start = column_to_byte_offset(row_text, display.column);
+        let cell_end = column_to_byte_offset(row_text, display.column + 1);
+        if cell_start == cell_end {
+            flush_search_run(rows, range.start, current.take(), style);
+            offset += ch_len;
+            continue;
+        }
+        match current {
+            Some((row, start, end)) if row == display.row && end == cell_start => {
+                current = Some((row, start, cell_end));
+            },
+            _ => {
+                flush_search_run(rows, range.start, current.take(), style);
+                current = Some((display.row, cell_start, cell_end));
+            },
+        }
+        offset += ch_len;
+    }
+    flush_search_run(rows, range.start, current.take(), style);
+}
+
 /// Overlay the move-highlight underline on byte ranges within
 /// review rows. Each `(buffer_row, range)` entry corresponds to a
 /// [`stoat::review::ReviewSide::moved_spans`] range on that buffer
@@ -2782,5 +2900,115 @@ mod tests {
         apply_search_overlay(&mut rows, &snapshot, 0..1, "^", search_overlay_color());
 
         assert!(bg_runs(&rows[0].runs).is_empty());
+    }
+
+    fn fg_runs(runs: &[(Range<usize>, gpui::HighlightStyle)]) -> Vec<(Range<usize>, Option<Hsla>)> {
+        runs.iter()
+            .filter(|(_, s)| s.color.is_some())
+            .map(|(r, s)| (r.clone(), s.color))
+            .collect()
+    }
+
+    fn install_rust_with_themed_keywords() -> (
+        Arc<stoat_language::Language>,
+        stoat::display_map::syntax_theme::SyntaxStyles,
+    ) {
+        let registry = stoat_language::LanguageRegistry::standard();
+        let language = registry
+            .languages()
+            .iter()
+            .find(|l| l.name == "rust")
+            .expect("rust language registered")
+            .clone();
+        let theme = {
+            use stoat_config::parse;
+            let (config, _) = parse("theme t { syntax.keyword.fg = blue; }");
+            stoat::theme::Theme::from_config(&config.expect("parse"), "t").expect("theme")
+        };
+        let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
+        let map = stoat_language::HighlightMap::new(
+            language.highlight_capture_names(),
+            styles.theme_keys(),
+        );
+        language.set_highlight_map(map);
+        (language, styles)
+    }
+
+    fn build_rust_syntax_snapshot(text: &str) -> stoat_language::SyntaxSnapshot {
+        let (language, _styles) = install_rust_with_themed_keywords();
+        let rope = stoat_text::Rope::from(text);
+        let mut map = stoat_language::SyntaxMap::new();
+        let _ = map.reparse(&rope, language, 1);
+        map.snapshot().clone()
+    }
+
+    #[test]
+    fn syntax_overlay_paints_keyword() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "fn main() {}");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let syntax = build_rust_syntax_snapshot("fn main() {}");
+        let (_, styles) = install_rust_with_themed_keywords();
+
+        apply_syntax_overlay(&mut rows, &snapshot, 0..1, &syntax, &styles);
+
+        let runs = fg_runs(&rows[0].runs);
+        let keyword_run = runs
+            .iter()
+            .find(|(r, _)| r.start == 0 && r.end == 2)
+            .expect("`fn` keyword run");
+        assert!(keyword_run.1.is_some(), "keyword should have a color");
+    }
+
+    #[test]
+    fn syntax_overlay_empty_snapshot_is_noop() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "fn main() {}");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let empty = stoat_language::SyntaxSnapshot::default();
+        let (_, styles) = install_rust_with_themed_keywords();
+
+        apply_syntax_overlay(&mut rows, &snapshot, 0..1, &empty, &styles);
+
+        assert!(rows[0].runs.is_empty());
+    }
+
+    #[test]
+    fn syntax_overlay_skips_captures_outside_visible_range() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "let x = 1;\nfn main() {}");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let syntax = build_rust_syntax_snapshot("let x = 1;\nfn main() {}");
+        let (_, styles) = install_rust_with_themed_keywords();
+
+        apply_syntax_overlay(&mut rows, &snapshot, 0..1, &syntax, &styles);
+
+        let runs = fg_runs(&rows[0].runs);
+        assert!(
+            !runs.iter().any(|(r, _)| r.start >= 11),
+            "row 0 should not paint runs whose offset belongs to row 1"
+        );
+    }
+
+    #[test]
+    fn syntax_overlay_paints_across_visible_rows() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "fn a() {}\nfn b() {}");
+        let mut rows = build_rendered_rows(&snapshot, 0..2);
+        let syntax = build_rust_syntax_snapshot("fn a() {}\nfn b() {}");
+        let (_, styles) = install_rust_with_themed_keywords();
+
+        apply_syntax_overlay(&mut rows, &snapshot, 0..2, &syntax, &styles);
+
+        let row0 = fg_runs(&rows[0].runs);
+        let row1 = fg_runs(&rows[1].runs);
+        assert!(
+            row0.iter().any(|(r, _)| r.start == 0 && r.end == 2),
+            "row 0 should paint `fn`"
+        );
+        assert!(
+            row1.iter().any(|(r, _)| r.start == 0 && r.end == 2),
+            "row 1 should paint `fn`"
+        );
     }
 }
