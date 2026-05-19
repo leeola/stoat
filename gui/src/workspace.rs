@@ -778,16 +778,39 @@ impl Workspace {
                 Some(p) => p,
                 None => continue,
             };
-            for path in &items.editor_paths {
-                let editor = self.build_editor_for_path(path, cx);
-                pane.update(cx, |p, cx| {
-                    p.add_item(Box::new(editor), cx);
-                });
+            let mut materialized: usize = 0;
+            for snap in &items.items {
+                match snap.kind {
+                    crate::item::ItemKind::Editor => {
+                        let path = snap
+                            .blob
+                            .get("file_path")
+                            .and_then(|v| v.as_str())
+                            .map(PathBuf::from);
+                        let Some(path) = path else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping editor item with no file_path during restore"
+                            );
+                            continue;
+                        };
+                        let editor = self.build_editor_for_path(&path, cx);
+                        pane.update(cx, |p, cx| {
+                            p.add_item(Box::new(editor), cx);
+                        });
+                        materialized += 1;
+                    },
+                    other => {
+                        tracing::info!(
+                            pane_id = ?pane_id,
+                            kind = ?other,
+                            "skipping non-editor item during workspace restore v1"
+                        );
+                    },
+                }
             }
-            let active = items
-                .active_index
-                .min(items.editor_paths.len().saturating_sub(1));
-            if !items.editor_paths.is_empty() {
+            if materialized > 0 {
+                let active = items.active_index.min(materialized - 1);
                 pane.update(cx, |p, cx| {
                     p.activate(active, cx);
                 });
@@ -11011,6 +11034,95 @@ mod tests {
         fresh_ws.read_with(vcx2, |w, cx| {
             let sides: Vec<DockSide> = w.docks().iter().map(|d| d.read(cx).side()).collect();
             assert_eq!(sides, vec![DockSide::Left, DockSide::Right]);
+        });
+    }
+
+    #[test]
+    fn to_state_records_non_editor_item_kinds() {
+        use crate::{item::ItemKind, rebase_item::RebaseItem};
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hi\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            let rebase_state =
+                stoat::rebase::RebaseState::new(PathBuf::from("/tmp/repo"), "HEAD".into(), vec![]);
+            let rebase = cx.new(|cx| RebaseItem::new(rebase_state, cx));
+            let focus = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(focus)
+                .cloned()
+                .expect("focused pane");
+            pane.update(cx, |p, cx| {
+                p.add_item(Box::new(rebase), cx);
+            });
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let state = ws.read_with(vcx, |w, cx| w.to_state(cx));
+        let focus = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).focus());
+        let pane_items = state.pane_items.get(&focus).expect("focused pane snapshot");
+        let kinds: Vec<ItemKind> = pane_items.items.iter().map(|s| s.kind).collect();
+        assert_eq!(kinds, vec![ItemKind::Editor, ItemKind::Rebase]);
+    }
+
+    #[test]
+    fn restore_drops_non_editor_items_but_preserves_editor_neighbors() {
+        use crate::rebase_item::RebaseItem;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hi\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            let rebase_state =
+                stoat::rebase::RebaseState::new(PathBuf::from("/tmp/repo"), "HEAD".into(), vec![]);
+            let rebase = cx.new(|cx| RebaseItem::new(rebase_state, cx));
+            let focus = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(focus)
+                .cloned()
+                .expect("focused pane");
+            pane.update(cx, |p, cx| {
+                p.add_item(Box::new(rebase), cx);
+            });
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/mixed-items.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let focus = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .read(cx);
+            assert_eq!(pane.len(), 1, "only the editor materializes on restore");
+            let item = pane.active_item().expect("active item");
+            let editor = item
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("editor item");
+            let editor_path = editor.read(cx).file_path().map(Path::to_path_buf);
+            assert_eq!(editor_path, Some(PathBuf::from("/tmp/repo/foo.rs")));
         });
     }
 }

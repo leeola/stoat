@@ -2920,6 +2920,19 @@ impl ItemView for Editor {
         }
         .fail()
     }
+
+    fn item_kind(&self) -> crate::item::ItemKind {
+        crate::item::ItemKind::Editor
+    }
+
+    fn serialize(&self, _cx: &App) -> Value {
+        let file_path = self
+            .file_path
+            .as_deref()
+            .and_then(|p| p.to_str())
+            .map(String::from);
+        serde_json::json!({ "file_path": file_path })
+    }
 }
 
 #[cfg(test)]

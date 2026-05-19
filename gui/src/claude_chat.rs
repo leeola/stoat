@@ -438,6 +438,10 @@ impl ItemView for ClaudeChat {
         }
         .fail()
     }
+
+    fn item_kind(&self) -> crate::item::ItemKind {
+        crate::item::ItemKind::Claude
+    }
 }
 
 impl Render for ClaudeChat {

@@ -631,6 +631,10 @@ impl ItemView for CommitListItem {
         }
         .fail()
     }
+
+    fn item_kind(&self) -> crate::item::ItemKind {
+        crate::item::ItemKind::CommitList
+    }
 }
 
 fn render_summary_strip(summary: Option<&[CommitFileChange]>) -> impl IntoElement {

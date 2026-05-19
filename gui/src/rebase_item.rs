@@ -146,6 +146,10 @@ impl ItemView for RebaseItem {
         }
         .fail()
     }
+
+    fn item_kind(&self) -> crate::item::ItemKind {
+        crate::item::ItemKind::Rebase
+    }
 }
 
 fn format_rebase_row(entry: &stoat::rebase::RebaseEntry) -> String {

@@ -333,6 +333,16 @@ impl ItemView for ConflictItem {
         }
         .fail()
     }
+
+    fn item_kind(&self) -> crate::item::ItemKind {
+        crate::item::ItemKind::Conflict
+    }
+
+    fn serialize(&self, _cx: &App) -> Value {
+        serde_json::json!({
+            "rel_path": self.rel_path.to_string_lossy(),
+        })
+    }
 }
 
 #[cfg(test)]

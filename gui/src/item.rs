@@ -1,5 +1,24 @@
 use gpui::{AnyView, App, Context, Entity, EntityId, Render, SharedString, Task};
+use serde::{Deserialize, Serialize};
 use snafu::Snafu;
+
+/// Discriminator carried alongside each pane item's serialized
+/// blob so the workspace-persistence layer can dispatch to the
+/// right materialization helper on restore. Concrete
+/// [`ItemView`] impls override [`ItemView::item_kind`] to declare
+/// their variant; the default [`ItemKind::Unknown`] is reserved
+/// for transient items that don't need to round-trip.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ItemKind {
+    Editor,
+    Run,
+    Claude,
+    Conflict,
+    Rebase,
+    Review,
+    CommitList,
+    Unknown,
+}
 
 /// Contract every pane-hosted item satisfies. Concrete impls
 /// (`Editor`, `Run`, `ClaudeChat`, `CommitList`, `Rebase`, `Review`)
@@ -57,6 +76,14 @@ pub trait ItemView: Render + 'static {
     fn deserialize(value: serde_json::Value, cx: &mut Context<'_, Self>) -> Result<Self, ItemError>
     where
         Self: Sized;
+
+    /// Discriminator used by workspace persistence to dispatch on
+    /// item type at restore time. Default returns
+    /// [`ItemKind::Unknown`] so transient or test-only items do
+    /// not need to opt into the persistence schema.
+    fn item_kind(&self) -> ItemKind {
+        ItemKind::Unknown
+    }
 }
 
 /// Object-safe wrapper over an `Entity<T: ItemView>` so a pane's
@@ -78,6 +105,7 @@ pub trait ItemHandle: Send + 'static {
     fn tab_icon(&self, cx: &App) -> Option<SharedString>;
     fn is_dirty(&self, cx: &App) -> bool;
     fn serialize(&self, cx: &App) -> serde_json::Value;
+    fn item_kind(&self, cx: &App) -> ItemKind;
     fn save(&self, cx: &mut App) -> Task<Result<(), ItemError>>;
 }
 
@@ -108,6 +136,10 @@ impl<T: ItemView> ItemHandle for Entity<T> {
 
     fn serialize(&self, cx: &App) -> serde_json::Value {
         self.read(cx).serialize(cx)
+    }
+
+    fn item_kind(&self, cx: &App) -> ItemKind {
+        self.read(cx).item_kind()
     }
 
     fn save(&self, cx: &mut App) -> Task<Result<(), ItemError>> {

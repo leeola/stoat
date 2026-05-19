@@ -20,6 +20,7 @@
 use crate::{
     dock::{DockSide, DockVisibility},
     editor::Editor,
+    item::ItemKind,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -70,51 +71,51 @@ pub struct DockSnapV1 {
     pub editor_path: Option<PathBuf>,
 }
 
-/// Ordered list of editor file paths in a single pane, plus the
-/// index of the active editor (0 when the pane has no editors).
+/// Per-pane snapshot: every item recorded with its
+/// [`ItemKind`] discriminator + the item's `serialize()` JSON
+/// payload. The active-index is preserved as-is from the pane's
+/// own counter so restoration can put the right item back on top.
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct PaneItemsV1 {
-    pub editor_paths: Vec<PathBuf>,
+    #[serde(default)]
+    pub items: Vec<ItemSnap>,
     pub active_index: usize,
 }
 
-/// Walk every editor in `pane` and collect its file path. Items
-/// that are not [`Editor`]s, or editors with no file path, drop
-/// with a tracing line so the user can audit what failed to
-/// persist.
+/// Versioned per-item snapshot: a [`ItemKind`] discriminator and
+/// the JSON blob produced by the item's
+/// [`crate::item::ItemView::serialize`] impl. The restoration
+/// dispatch lives in [`crate::workspace::Workspace::apply_state`]
+/// because materializing each kind requires workspace-level state
+/// (buffer registry, hosts) that `Context<'_, Self>` does not
+/// expose.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ItemSnap {
+    pub kind: ItemKind,
+    #[serde(default)]
+    pub blob: serde_json::Value,
+}
+
+/// Walk every item in `pane` and record its kind + serialized
+/// blob. Pane order is preserved so the restore path adds items
+/// in the same sequence; the `active_index` carries over from the
+/// pane's own active-item counter.
 pub(crate) fn snapshot_pane_items(
     pane: &crate::pane::Pane,
     cx: &gpui::App,
-    pane_id: PaneId,
+    _pane_id: PaneId,
 ) -> PaneItemsV1 {
-    let mut editor_paths = Vec::new();
-    let mut active_editor_index: Option<usize> = None;
-    for (idx, item) in pane.items().iter().enumerate() {
-        let any = item.to_any_view();
-        let Ok(editor) = any.downcast::<Editor>() else {
-            tracing::info!(
-                pane_id = ?pane_id,
-                item_index = idx,
-                "skipping non-editor item in workspace persistence v1"
-            );
-            continue;
-        };
-        let Some(path) = editor.read(cx).file_path() else {
-            tracing::info!(
-                pane_id = ?pane_id,
-                item_index = idx,
-                "skipping editor with no file_path in workspace persistence v1"
-            );
-            continue;
-        };
-        if idx == pane.active_index() {
-            active_editor_index = Some(editor_paths.len());
-        }
-        editor_paths.push(path.to_path_buf());
-    }
+    let items: Vec<ItemSnap> = pane
+        .items()
+        .iter()
+        .map(|item| ItemSnap {
+            kind: item.item_kind(cx),
+            blob: item.serialize(cx),
+        })
+        .collect();
     PaneItemsV1 {
-        editor_paths,
-        active_index: active_editor_index.unwrap_or(0),
+        items,
+        active_index: pane.active_index(),
     }
 }
 

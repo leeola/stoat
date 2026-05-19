@@ -364,6 +364,10 @@ impl ItemView for ReviewItem {
         }
         .fail()
     }
+
+    fn item_kind(&self) -> crate::item::ItemKind {
+        crate::item::ItemKind::Review
+    }
 }
 
 fn review_source_label(source: &ReviewSource, commit_summary: Option<&str>) -> String {

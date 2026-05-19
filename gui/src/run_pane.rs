@@ -344,6 +344,16 @@ impl ItemView for Run {
         }
         .fail()
     }
+
+    fn item_kind(&self) -> crate::item::ItemKind {
+        crate::item::ItemKind::Run
+    }
+
+    fn serialize(&self, _cx: &App) -> serde_json::Value {
+        serde_json::json!({
+            "cwd": self.cwd.to_string_lossy(),
+        })
+    }
 }
 
 impl Render for Run {
