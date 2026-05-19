@@ -221,6 +221,10 @@ pub struct DisplayMap {
 }
 
 impl DisplayMap {
+    pub(crate) fn multi_buffer(&self) -> &MultiBuffer {
+        &self.multi_buffer
+    }
+
     pub fn new(multi_buffer: MultiBuffer, executor: Executor) -> Self {
         let buffer_snapshot = multi_buffer.snapshot();
         let version = buffer_snapshot.version();

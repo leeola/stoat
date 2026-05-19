@@ -302,7 +302,12 @@ impl Workspace {
                 );
                 continue;
             };
-            let new_id = editors.insert(EditorState::restore(snap, buffer, executor.clone()));
+            let new_id = editors.insert(EditorState::restore(
+                snap,
+                buffer,
+                |bid| self.buffers.get(bid),
+                executor.clone(),
+            ));
             editor_id_map.insert(old_id, new_id);
         }
         self.editors = editors;
@@ -880,6 +885,66 @@ mod tests {
         );
         assert!(fresh.chats.is_empty());
         assert_eq!(fresh.claude_chat, None);
+    }
+
+    #[test]
+    fn editor_with_multi_buffer_round_trips_through_apply_state() {
+        use crate::multi_buffer::{ExcerptId, MultiBuffer};
+
+        let fake = FakeFs::new();
+        let ws_dir = PathBuf::from("/test");
+        let exec = executor();
+
+        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
+        let (id_primary, buf_primary) = ws.buffers.open(&ws_dir.join("primary.txt"), "alpha\n");
+        let (id_other, buf_other) = ws
+            .buffers
+            .open(&ws_dir.join("other.txt"), "bravo charlie\n");
+
+        let mut multi = MultiBuffer::singleton(id_primary, buf_primary.clone());
+        let inserted = multi.insert_excerpts(id_other, buf_other, vec![0..5, 6..13]);
+        assert_eq!(inserted.len(), 2);
+        let original_ids: Vec<_> = inserted.iter().copied().collect();
+
+        let editor_id = ws.editors.insert(EditorState::from_multi_buffer(
+            id_primary,
+            multi,
+            exec.clone(),
+        ));
+        let root = ws.panes.focus();
+        ws.panes.pane_mut(root).view = View::Editor(editor_id);
+
+        let state_path = ws_dir.join("state.ron");
+        ws.save_state(&state_path, &fake).unwrap();
+
+        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
+        fresh.restore_state(&state_path, &fake, &exec).unwrap();
+
+        let restored_editor_id = fresh
+            .panes
+            .split_pane_ids()
+            .into_iter()
+            .find_map(|pid| match fresh.panes.pane(pid).view {
+                View::Editor(eid) => Some(eid),
+                _ => None,
+            })
+            .expect("editor pane must survive restore");
+        let restored = &fresh.editors[restored_editor_id];
+        let restored_multi = restored.display_map.multi_buffer();
+        assert!(
+            !restored_multi.is_singleton(),
+            "multi-buffer shape must persist"
+        );
+        let snap = restored_multi
+            .live_excerpts_snapshot()
+            .expect("non-singleton snapshot");
+        let mut got_ids: Vec<_> = snap.excerpts.iter().map(|e| e.id).collect();
+        got_ids.sort();
+        let mut want_ids: Vec<_> = std::iter::once(ExcerptId::min())
+            .chain(original_ids.iter().copied())
+            .collect();
+        want_ids.sort();
+        assert_eq!(got_ids, want_ids);
     }
 
     fn buffer_text(ws: &Workspace, id: crate::buffer::BufferId) -> String {

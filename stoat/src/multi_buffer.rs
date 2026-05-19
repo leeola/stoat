@@ -254,13 +254,28 @@ struct LiveExcerpt {
     buffer: SharedBuffer,
 }
 
-// FIXME: Live MultiBuffer excerpt state not persisted across workspace
-// save/load. [`ExcerptId`] and [`MultiBufferAnchor`] already serialize; the
-// anchor-stability blocker (fragment-tree identity across restart) is resolved
-// by the op-log replay in [`crate::buffer::TextBuffer::from_history`]. What
-// remains is plumbing: multi-excerpt mode is only used by `ReviewSession`
-// today, and that session itself is not persisted yet, so wiring live excerpt
-// state into `EditorStateSnapshot` is deferred until review persistence lands.
+/// Serializable per-excerpt entry. Combined with
+/// [`MultiBufferStateV1`] this round-trips the live-excerpt
+/// vector through workspace persistence. The range is anchor-based
+/// rather than byte-offset so concurrent edits between save and
+/// restore do not shift an excerpt off its intended span.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct LiveExcerptSnapshot {
+    pub id: ExcerptId,
+    pub buffer_id: BufferId,
+    pub range: Range<Anchor>,
+}
+
+/// Versioned on-disk representation of the live-excerpt portion of
+/// a [`MultiBuffer`]. `excerpts` is empty for the singleton case;
+/// non-singleton restoration goes through
+/// [`MultiBuffer::restore_from_excerpts`].
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct MultiBufferStateV1 {
+    pub excerpts: Vec<LiveExcerptSnapshot>,
+    pub next_excerpt_id: u64,
+}
+
 pub struct MultiBuffer {
     live_excerpts: Vec<LiveExcerpt>,
     excerpt_tree: SumTree<ExcerptEntry>,
@@ -502,6 +517,95 @@ impl MultiBuffer {
             None
         }
     }
+
+    /// Snapshot the live-excerpt vector for persistence. Returns
+    /// `None` for the singleton case so the caller can skip the
+    /// round-trip entirely. Excerpts are emitted in their on-screen
+    /// (locator) order, which matches what
+    /// [`Self::restore_from_excerpts`] expects.
+    pub fn live_excerpts_snapshot(&self) -> Option<MultiBufferStateV1> {
+        if self.singleton {
+            return None;
+        }
+        let excerpts = self
+            .excerpt_tree
+            .items(())
+            .into_iter()
+            .map(|entry| LiveExcerptSnapshot {
+                id: entry.id,
+                buffer_id: entry.buffer_id,
+                range: entry.range.clone(),
+            })
+            .collect();
+        Some(MultiBufferStateV1 {
+            excerpts,
+            next_excerpt_id: self.next_excerpt_id,
+        })
+    }
+
+    /// Rebuild a non-singleton multi-buffer from a persisted
+    /// [`MultiBufferStateV1`]. Returns `None` when the state is
+    /// empty or when `resolve_buffer` cannot produce a buffer for
+    /// any excerpt's `buffer_id`; the caller is expected to fall
+    /// back to a singleton built from whichever buffer it does have.
+    pub fn restore_from_excerpts(
+        state: MultiBufferStateV1,
+        mut resolve_buffer: impl FnMut(BufferId) -> Option<SharedBuffer>,
+    ) -> Option<Self> {
+        if state.excerpts.is_empty() {
+            return None;
+        }
+        let cx = ();
+        let mut live = Vec::with_capacity(state.excerpts.len());
+        let mut tree = SumTree::new(cx);
+        let mut ids = SumTree::new(cx);
+
+        let mut prev_locator = Locator::min();
+        let last = state.excerpts.len() - 1;
+        for (i, snap) in state.excerpts.into_iter().enumerate() {
+            let buffer = resolve_buffer(snap.buffer_id)?;
+            let locator = Locator::between(&prev_locator, Locator::max_ref());
+            let (buffer_snapshot, text_summary) = {
+                let buf = buffer.read().expect("buffer lock poisoned");
+                let summary = buf.snapshot.visible_text.summary().clone();
+                (buf.snapshot.clone(), summary)
+            };
+            let has_trailing_newline = i < last;
+            tree.push(
+                ExcerptEntry {
+                    id: snap.id,
+                    locator: locator.clone(),
+                    buffer_id: snap.buffer_id,
+                    buffer_snapshot,
+                    range: snap.range,
+                    text_summary,
+                    has_trailing_newline,
+                },
+                cx,
+            );
+            ids.push(
+                ExcerptIdMapping {
+                    id: snap.id,
+                    locator: locator.clone(),
+                },
+                cx,
+            );
+            live.push(LiveExcerpt {
+                id: snap.id,
+                buffer_id: snap.buffer_id,
+                buffer,
+            });
+            prev_locator = locator;
+        }
+
+        Some(Self {
+            live_excerpts: live,
+            excerpt_tree: tree,
+            excerpt_ids: ids,
+            next_excerpt_id: state.next_excerpt_id,
+            singleton: false,
+        })
+    }
 }
 
 #[derive(Clone)]
@@ -706,7 +810,7 @@ impl Iterator for ExcerptBoundaryIter {
 
 #[cfg(test)]
 mod tests {
-    use super::{MultiBuffer, MultiBufferAnchor, MultiBufferPoint};
+    use super::{ExcerptId, MultiBuffer, MultiBufferAnchor, MultiBufferPoint};
     use crate::buffer::{BufferId, TextBuffer};
     use std::sync::{Arc, RwLock};
     use stoat_text::Point;
@@ -991,5 +1095,70 @@ mod tests {
         multi.remove_excerpts(&new_ids);
         assert_eq!(multi.live_excerpts.len(), 1);
         assert!(multi.is_singleton());
+    }
+
+    #[test]
+    fn live_excerpts_snapshot_returns_none_for_singleton() {
+        let (id, buffer) = create_test_buffer("hello");
+        let multi = MultiBuffer::singleton(id, buffer);
+        assert!(multi.live_excerpts_snapshot().is_none());
+    }
+
+    #[test]
+    fn live_excerpts_snapshot_round_trips_through_restore() {
+        let id1 = BufferId::new(1);
+        let buf1 = Arc::new(RwLock::new(TextBuffer::with_text(id1, "alpha")));
+        let id2 = BufferId::new(2);
+        let buf2 = Arc::new(RwLock::new(TextBuffer::with_text(id2, "bravo charlie")));
+
+        let mut multi = MultiBuffer::singleton(id1, buf1.clone());
+        let new_ids = multi.insert_excerpts(id2, buf2.clone(), vec![0..5, 6..13]);
+        assert_eq!(new_ids.len(), 2);
+
+        let snap = multi
+            .live_excerpts_snapshot()
+            .expect("non-singleton should snapshot");
+        assert_eq!(snap.excerpts.len(), 3);
+        assert_eq!(snap.next_excerpt_id, multi.next_excerpt_id);
+
+        let lookups = [(id1, buf1.clone()), (id2, buf2.clone())];
+        let rebuilt = MultiBuffer::restore_from_excerpts(snap, |bid| {
+            lookups
+                .iter()
+                .find_map(|(want, buf)| (*want == bid).then(|| buf.clone()))
+        })
+        .expect("restore should succeed");
+
+        assert!(!rebuilt.is_singleton());
+        assert_eq!(rebuilt.live_excerpts.len(), 3);
+        assert_eq!(rebuilt.next_excerpt_id, multi.next_excerpt_id);
+        let ids_before: Vec<ExcerptId> = multi.live_excerpts.iter().map(|e| e.id).collect();
+        let ids_after: Vec<ExcerptId> = rebuilt.live_excerpts.iter().map(|e| e.id).collect();
+        assert_eq!(ids_before, ids_after);
+    }
+
+    #[test]
+    fn restore_from_excerpts_returns_none_when_buffer_missing() {
+        let id1 = BufferId::new(1);
+        let buf1 = Arc::new(RwLock::new(TextBuffer::with_text(id1, "alpha")));
+        let id2 = BufferId::new(2);
+        let buf2 = Arc::new(RwLock::new(TextBuffer::with_text(id2, "bravo")));
+
+        let mut multi = MultiBuffer::singleton(id1, buf1);
+        multi.insert_excerpts(id2, buf2, vec![0..5]);
+
+        let snap = multi.live_excerpts_snapshot().unwrap();
+        let rebuilt = MultiBuffer::restore_from_excerpts(snap, |_bid| None);
+        assert!(rebuilt.is_none());
+    }
+
+    #[test]
+    fn restore_from_excerpts_returns_none_for_empty_state() {
+        let empty = super::MultiBufferStateV1::default();
+        let rebuilt = MultiBuffer::restore_from_excerpts(empty, |_bid| {
+            let (_, buf) = create_test_buffer("");
+            Some(buf)
+        });
+        assert!(rebuilt.is_none());
     }
 }

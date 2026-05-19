@@ -2,7 +2,7 @@ use crate::{
     buffer::{BufferId, SharedBuffer},
     display_map::DisplayMap,
     jumplist::JumpList,
-    multi_buffer::MultiBuffer,
+    multi_buffer::{MultiBuffer, MultiBufferStateV1},
     review_session::ReviewViewState,
     selection::SelectionsCollection,
 };
@@ -62,6 +62,12 @@ pub(crate) struct EditorStateSnapshot {
     pub(crate) scroll_row: u32,
     pub(crate) selections: SelectionsCollection,
     pub(crate) move_source_cursor: Option<(u32, usize)>,
+    /// Live-excerpt state for non-singleton multi-buffers. `None`
+    /// for singletons and for legacy on-disk files written before
+    /// this field existed; restore falls back to building a
+    /// singleton from `buffer_id` in those cases.
+    #[serde(default)]
+    pub(crate) multi_buffer: Option<MultiBufferStateV1>,
 }
 
 impl EditorState {
@@ -107,15 +113,22 @@ impl EditorState {
             scroll_row: self.scroll_row,
             selections: self.selections.clone(),
             move_source_cursor: self.move_source_cursor,
+            multi_buffer: self.display_map.multi_buffer().live_excerpts_snapshot(),
         }
     }
 
     pub(crate) fn restore(
         snap: EditorStateSnapshot,
-        buffer: SharedBuffer,
+        primary_buffer: SharedBuffer,
+        resolve_buffer: impl FnMut(BufferId) -> Option<SharedBuffer>,
         executor: Executor,
     ) -> Self {
-        let mut state = Self::new(snap.buffer_id, buffer, executor);
+        let multi_buffer = snap
+            .multi_buffer
+            .clone()
+            .and_then(|state| MultiBuffer::restore_from_excerpts(state, resolve_buffer))
+            .unwrap_or_else(|| MultiBuffer::singleton(snap.buffer_id, primary_buffer));
+        let mut state = Self::from_multi_buffer(snap.buffer_id, multi_buffer, executor);
         state.scroll_row = snap.scroll_row;
         state.selections = snap.selections;
         state.move_source_cursor = snap.move_source_cursor;
