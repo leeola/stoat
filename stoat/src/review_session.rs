@@ -6,6 +6,7 @@ use crate::{
         ReviewFileInput, ReviewHunk, ReviewRow,
     },
 };
+use serde::{Deserialize, Serialize};
 use std::{
     collections::{hash_map::DefaultHasher, HashMap},
     hash::{Hash, Hasher},
@@ -18,7 +19,17 @@ use stoat_language::Language;
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
 pub struct ReviewChunkId(u32);
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+/// Content-derived identifier for a [`ReviewChunk`] that survives
+/// across session boundaries. Workspace persistence keys the
+/// `Staged` / `Unstaged` / `Skipped` decision map by fingerprint
+/// so reopening the session re-applies decisions to chunks whose
+/// content still matches, while chunks whose content drifted
+/// (underlying file edited externally) come back as
+/// [`ChunkStatus::Pending`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub struct ChunkFingerprint(pub [u8; 32]);
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum ChunkStatus {
     Pending,
     Staged,
@@ -102,6 +113,55 @@ pub struct ReviewChunk {
     pub buffer_byte_range: Range<usize>,
     pub base_byte_range: Range<usize>,
     pub status: ChunkStatus,
+}
+
+impl ReviewChunk {
+    /// Stable content-derived identifier for workspace
+    /// persistence. Hashes each row's left + right text with
+    /// presence markers + variant tags + a `\0` delimiter, then
+    /// mixes in [`Self::base_line_range`]'s start and end as
+    /// little-endian `u32`s. The buffer-side ranges are
+    /// deliberately excluded -- they shift when neighbouring
+    /// chunks change, while the base side stays pinned to the
+    /// pre-image until the source actually changes.
+    pub fn fingerprint(&self) -> ChunkFingerprint {
+        let mut hasher = blake3::Hasher::new();
+        for row in &self.hunk.rows {
+            match row {
+                ReviewRow::Context { left, right } => {
+                    hasher.update(b"\x01");
+                    hasher.update(left.text.as_bytes());
+                    hasher.update(b"\x00");
+                    hasher.update(right.text.as_bytes());
+                },
+                ReviewRow::Changed { left, right } => {
+                    hasher.update(b"\x02");
+                    match left {
+                        Some(side) => {
+                            hasher.update(b"L");
+                            hasher.update(side.text.as_bytes());
+                        },
+                        None => {
+                            hasher.update(b"l");
+                        },
+                    }
+                    hasher.update(b"\x00");
+                    match right {
+                        Some(side) => {
+                            hasher.update(b"R");
+                            hasher.update(side.text.as_bytes());
+                        },
+                        None => {
+                            hasher.update(b"r");
+                        },
+                    }
+                },
+            }
+        }
+        hasher.update(&self.base_line_range.start.to_le_bytes());
+        hasher.update(&self.base_line_range.end.to_le_bytes());
+        ChunkFingerprint(hasher.finalize().into())
+    }
 }
 
 #[derive(Clone)]
@@ -378,6 +438,43 @@ impl ReviewSession {
     #[allow(dead_code)]
     pub fn chunk(&self, id: ReviewChunkId) -> Option<&ReviewChunk> {
         self.chunks.get(&id)
+    }
+
+    /// Snapshot every non-Pending chunk's status keyed by stable
+    /// [`ChunkFingerprint`] for workspace persistence. Pending
+    /// chunks are dropped from the snapshot so the on-disk map
+    /// only records explicit user decisions; loading is then a
+    /// best-effort re-application via [`Self::apply_statuses`].
+    pub fn snapshot_statuses(&self) -> HashMap<ChunkFingerprint, ChunkStatus> {
+        self.chunks
+            .values()
+            .filter(|c| c.status != ChunkStatus::Pending)
+            .map(|c| (c.fingerprint(), c.status))
+            .collect()
+    }
+
+    /// Apply persisted statuses keyed by [`ChunkFingerprint`].
+    /// Chunks whose fingerprint is in `statuses` adopt the saved
+    /// status; chunks whose fingerprint is absent (underlying
+    /// file edited externally since the snapshot was taken) stay
+    /// at [`ChunkStatus::Pending`]. Bumps [`Self::version`] when
+    /// at least one chunk was updated so derived caches refresh.
+    /// Returns the count of chunks whose status was restored.
+    pub fn apply_statuses(&mut self, statuses: &HashMap<ChunkFingerprint, ChunkStatus>) -> usize {
+        let mut applied = 0usize;
+        for chunk in self.chunks.values_mut() {
+            let fp = chunk.fingerprint();
+            if let Some(&status) = statuses.get(&fp) {
+                if chunk.status != status {
+                    chunk.status = status;
+                    applied += 1;
+                }
+            }
+        }
+        if applied > 0 {
+            self.version += 1;
+        }
+        applied
     }
 
     /// Resolve an in-buffer byte offset to the chunk that should
@@ -2029,5 +2126,127 @@ mod tests {
             session.chunks[&session.order[0]].status,
             ChunkStatus::Staged
         );
+    }
+
+    #[test]
+    fn fingerprint_stable_for_repeated_sessions() {
+        let mut a = in_memory_session();
+        let mut b = in_memory_session();
+        let ids_a = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        let ids_b = add(&mut b, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        assert_eq!(ids_a.len(), 1);
+        assert_eq!(ids_b.len(), 1);
+        let fa = a.chunks[&ids_a[0]].fingerprint();
+        let fb = b.chunks[&ids_b[0]].fingerprint();
+        assert_eq!(fa, fb);
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_buffer_text() {
+        let mut a = in_memory_session();
+        let mut b = in_memory_session();
+        let ids_a = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        let ids_b = add(&mut b, "x.txt", "a\nb\nc\n", "a\nQ\nc\n");
+        let fa = a.chunks[&ids_a[0]].fingerprint();
+        let fb = b.chunks[&ids_b[0]].fingerprint();
+        assert_ne!(fa, fb);
+    }
+
+    #[test]
+    fn fingerprint_differs_for_different_base_line_range() {
+        let mut a = in_memory_session();
+        let mut b = in_memory_session();
+        add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        add(&mut b, "x.txt", "z\nz\nz\na\nb\nc\n", "z\nz\nz\na\nB\nc\n");
+        let fa = a.chunks.values().next().expect("chunk").fingerprint();
+        let fb = b.chunks.values().next().expect("chunk").fingerprint();
+        assert_ne!(fa, fb);
+    }
+
+    #[test]
+    fn snapshot_statuses_drops_pending() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        assert_eq!(ids.len(), 2);
+        s.chunks.get_mut(&ids[0]).unwrap().status = ChunkStatus::Staged;
+        // ids[1] stays Pending
+        let snap = s.snapshot_statuses();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.values().copied().next(), Some(ChunkStatus::Staged));
+    }
+
+    #[test]
+    fn apply_statuses_restores_matching_chunks() {
+        let mut a = in_memory_session();
+        let ids = add(
+            &mut a,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        a.chunks.get_mut(&ids[0]).unwrap().status = ChunkStatus::Staged;
+        a.chunks.get_mut(&ids[1]).unwrap().status = ChunkStatus::Skipped;
+        let snap = a.snapshot_statuses();
+
+        let mut b = in_memory_session();
+        let new_ids = add(
+            &mut b,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        let applied = b.apply_statuses(&snap);
+        assert_eq!(applied, 2);
+        assert_eq!(b.chunks[&new_ids[0]].status, ChunkStatus::Staged);
+        assert_eq!(b.chunks[&new_ids[1]].status, ChunkStatus::Skipped);
+    }
+
+    #[test]
+    fn apply_statuses_leaves_unmatched_chunks_pending() {
+        let mut a = in_memory_session();
+        let ids = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        a.chunks.get_mut(&ids[0]).unwrap().status = ChunkStatus::Staged;
+        let snap = a.snapshot_statuses();
+
+        let mut b = in_memory_session();
+        let new_ids = add(&mut b, "x.txt", "a\nb\nc\n", "a\nQ\nc\n");
+        let applied = b.apply_statuses(&snap);
+        assert_eq!(applied, 0);
+        assert_eq!(b.chunks[&new_ids[0]].status, ChunkStatus::Pending);
+    }
+
+    #[test]
+    fn apply_statuses_bumps_version_when_any_chunk_updated() {
+        let mut a = in_memory_session();
+        let ids = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        a.chunks.get_mut(&ids[0]).unwrap().status = ChunkStatus::Staged;
+        let snap = a.snapshot_statuses();
+
+        let mut b = in_memory_session();
+        add(&mut b, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        let before = b.version;
+        b.apply_statuses(&snap);
+        assert!(b.version > before);
+    }
+
+    #[test]
+    fn apply_statuses_skips_version_bump_when_status_unchanged() {
+        let mut a = in_memory_session();
+        let ids = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        a.chunks.get_mut(&ids[0]).unwrap().status = ChunkStatus::Staged;
+        let snap = a.snapshot_statuses();
+
+        let mut b = in_memory_session();
+        let new_ids = add(&mut b, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        b.chunks.get_mut(&new_ids[0]).unwrap().status = ChunkStatus::Staged;
+        let before = b.version;
+        let applied = b.apply_statuses(&snap);
+        assert_eq!(applied, 0);
+        assert_eq!(b.version, before);
     }
 }
