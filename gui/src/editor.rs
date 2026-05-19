@@ -2552,6 +2552,22 @@ impl Editor {
             &review_data.moved_spans,
         );
 
+        if let Some(query) = self
+            .search_state
+            .as_ref()
+            .map(|s| s.query())
+            .filter(|q| !q.is_empty())
+        {
+            let color = theme::search_match_color(cx);
+            render::apply_search_overlay(
+                &mut rows,
+                &display_snapshot,
+                start as u32..end as u32,
+                query,
+                color,
+            );
+        }
+
         let selection_paint = render::compute_selection_paint(
             &display_snapshot,
             self.selections.all_anchors(),
@@ -4857,5 +4873,141 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "13");
+    }
+
+    fn set_search(
+        editor: &Entity<Editor>,
+        cx: &mut TestAppContext,
+        query: &str,
+        dir: search::SearchDirection,
+    ) {
+        editor.update(cx, |ed, cx| {
+            ed.set_search_state(Some(search::SearchState::new(query, dir)), cx);
+        });
+    }
+
+    #[test]
+    fn search_next_jumps_to_first_match_after_cursor() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc def abc");
+        seed_cursors(&editor, &mut cx, &[0]);
+        set_search(&editor, &mut cx, "abc", search::SearchDirection::Forward);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![8]);
+    }
+
+    #[test]
+    fn search_next_wraps_when_no_match_after_cursor() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc def");
+        seed_cursors(&editor, &mut cx, &[5]);
+        set_search(&editor, &mut cx, "abc", search::SearchDirection::Forward);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![0]);
+    }
+
+    #[test]
+    fn search_next_in_reverse_direction_goes_backward() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc def abc");
+        seed_cursors(&editor, &mut cx, &[10]);
+        set_search(&editor, &mut cx, "abc", search::SearchDirection::Reverse);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![8]);
+    }
+
+    #[test]
+    fn search_prev_flips_direction() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc def abc xyz");
+        seed_cursors(&editor, &mut cx, &[8]);
+        set_search(&editor, &mut cx, "abc", search::SearchDirection::Forward);
+
+        editor.update(&mut cx, |ed, cx| ed.search_prev(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![0]);
+    }
+
+    #[test]
+    fn search_next_without_state_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc");
+        seed_cursors(&editor, &mut cx, &[1]);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![1]);
+    }
+
+    #[test]
+    fn search_next_with_empty_query_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc");
+        seed_cursors(&editor, &mut cx, &[1]);
+        set_search(&editor, &mut cx, "", search::SearchDirection::Forward);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![1]);
+    }
+
+    #[test]
+    fn search_next_with_no_match_leaves_cursor_unchanged() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc");
+        seed_cursors(&editor, &mut cx, &[1]);
+        set_search(&editor, &mut cx, "zzz", search::SearchDirection::Forward);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![1]);
+    }
+
+    #[test]
+    fn search_next_with_invalid_regex_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc");
+        seed_cursors(&editor, &mut cx, &[1]);
+        set_search(
+            &editor,
+            &mut cx,
+            "[unclosed",
+            search::SearchDirection::Forward,
+        );
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![1]);
+    }
+
+    #[test]
+    fn search_next_collapses_every_selection_onto_match() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc def abc");
+        seed_cursors(&editor, &mut cx, &[0, 5]);
+        set_search(&editor, &mut cx, "abc", search::SearchDirection::Forward);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![8]);
+    }
+
+    #[test]
+    fn search_next_emits_changed_event() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "abc def abc");
+        seed_cursors(&editor, &mut cx, &[0]);
+        set_search(&editor, &mut cx, "abc", search::SearchDirection::Forward);
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.search_next(cx));
+
+        assert!(drain(&events).contains(&EditorEvent::Changed));
     }
 }

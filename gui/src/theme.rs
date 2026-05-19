@@ -68,6 +68,12 @@ pub const DEFAULT_TAB_LABEL_HEX: u32 = 0xcccccc;
 /// backgrounds without a theme installed.
 pub const DEFAULT_CURSOR_HEX: u32 = 0xc8d6ff;
 
+/// Fallback for the search-match highlight when no theme overrides
+/// `ui.search.match`. Dim amber so highlighted match cells stand out
+/// against the workspace background without competing with the
+/// selection band's blue.
+pub const DEFAULT_SEARCH_MATCH_HEX: u32 = 0x665500;
+
 /// Fallback for the active-line row highlight when no theme overrides
 /// `ui.line_highlight`. Slightly lighter than the workspace background
 /// so the cursor's row reads against neighboring rows without a theme
@@ -215,6 +221,19 @@ pub fn active_line_color(cx: &App) -> Hsla {
         cx,
         stoat::theme::scope::UI_LINE_HIGHLIGHT,
         DEFAULT_LINE_HIGHLIGHT_HEX,
+    )
+}
+
+/// Resolve the search-match highlight from the active [`Theme`]
+/// global, falling back to [`DEFAULT_SEARCH_MATCH_HEX`] when no
+/// theme is installed or the scope is unset. Reads the scope's `bg`
+/// channel because matches paint as a background band behind the
+/// matched characters.
+pub fn search_match_color(cx: &App) -> Hsla {
+    theme_bg_or(
+        cx,
+        stoat::theme::scope::UI_SEARCH_MATCH,
+        DEFAULT_SEARCH_MATCH_HEX,
     )
 }
 
@@ -491,6 +510,25 @@ mod tests {
             active_line_color(cx)
         });
         assert_ne!(resolved, rgb(DEFAULT_LINE_HIGHLIGHT_HEX).into());
+    }
+
+    #[test]
+    fn search_match_color_falls_back_when_theme_missing() {
+        let cx = TestAppContext::single();
+        let resolved = cx.update(|cx| search_match_color(cx));
+        assert_eq!(resolved, rgb(DEFAULT_SEARCH_MATCH_HEX).into());
+    }
+
+    #[test]
+    fn search_match_color_resolves_bg_from_theme() {
+        let cx = TestAppContext::single();
+        let theme =
+            Theme::load_from_source("theme custom { ui.search.match = { bg: blue }; }", "custom");
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme);
+            search_match_color(cx)
+        });
+        assert_ne!(resolved, rgb(DEFAULT_SEARCH_MATCH_HEX).into());
     }
 
     #[test]

@@ -419,6 +419,98 @@ fn apply_token_overlay(
     }
 }
 
+/// Overlay a background highlight on every visible regex match of
+/// `query` in the active buffer text. Pushed runs paint a
+/// `background_color: Some(highlight_color)` band behind matched
+/// characters; matches that span multiple display rows or cross
+/// the visible row range are split per-row and clamped to the
+/// visible window. Invalid regex and empty queries are silent
+/// no-ops, matching the TUI's
+/// [`stoat::action_handlers::search`] behaviour.
+pub(crate) fn apply_search_overlay(
+    rows: &mut [RenderedRow],
+    snapshot: &DisplaySnapshot,
+    range: Range<u32>,
+    query: &str,
+    highlight_color: Hsla,
+) {
+    if query.is_empty() || rows.is_empty() {
+        return;
+    }
+    let Ok(regex) = stoat::action_handlers::search::compile_search_regex(query) else {
+        return;
+    };
+    let buffer_snapshot = snapshot.buffer_snapshot();
+    let rope = buffer_snapshot.rope();
+    let text = rope.to_string();
+    let style = gpui::HighlightStyle {
+        background_color: Some(highlight_color),
+        ..Default::default()
+    };
+    for m in regex.find_iter(&text) {
+        if m.start() == m.end() {
+            continue;
+        }
+        let mut current: Option<(u32, usize, usize)> = None;
+        let mut offset = m.start();
+        let mut chars = rope.chars_at(offset);
+        while offset < m.end() {
+            let Some(ch) = chars.next() else {
+                break;
+            };
+            let ch_len = ch.len_utf8();
+            if ch == '\n' {
+                flush_search_run(rows, range.start, current.take(), style);
+                offset += ch_len;
+                continue;
+            }
+            let point = rope.offset_to_point(offset);
+            let display = snapshot.buffer_to_display(point);
+            if display.row < range.start || display.row >= range.end {
+                flush_search_run(rows, range.start, current.take(), style);
+                offset += ch_len;
+                continue;
+            }
+            let row_idx = (display.row - range.start) as usize;
+            let row_text: &str = rows[row_idx].text.as_ref();
+            let cell_start = column_to_byte_offset(row_text, display.column);
+            let cell_end = column_to_byte_offset(row_text, display.column + 1);
+            if cell_start == cell_end {
+                flush_search_run(rows, range.start, current.take(), style);
+                offset += ch_len;
+                continue;
+            }
+            match current {
+                Some((row, start, end)) if row == display.row && end == cell_start => {
+                    current = Some((row, start, cell_end));
+                },
+                _ => {
+                    flush_search_run(rows, range.start, current.take(), style);
+                    current = Some((display.row, cell_start, cell_end));
+                },
+            }
+            offset += ch_len;
+        }
+        flush_search_run(rows, range.start, current.take(), style);
+    }
+}
+
+fn flush_search_run(
+    rows: &mut [RenderedRow],
+    start_row: u32,
+    pending: Option<(u32, usize, usize)>,
+    style: gpui::HighlightStyle,
+) {
+    let Some((row, start_byte, end_byte)) = pending else {
+        return;
+    };
+    if start_byte >= end_byte {
+        return;
+    }
+    let row_idx = (row - start_row) as usize;
+    rows[row_idx].runs.push((start_byte..end_byte, style));
+}
+
 /// Overlay the move-highlight underline on byte ranges within
 /// review rows. Each `(buffer_row, range)` entry corresponds to a
 /// [`stoat::review::ReviewSide::moved_spans`] range on that buffer
@@ -2570,5 +2662,125 @@ mod tests {
         apply_review_moved_overlay(&mut rows, &snapshot, 0..1, &[(5, 0..2)]);
 
         assert!(rows[0].runs.is_empty());
+    }
+
+    fn search_overlay_color() -> Hsla {
+        hsla(0.1, 0.5, 0.5, 1.0)
+    }
+
+    fn bg_runs(runs: &[(Range<usize>, gpui::HighlightStyle)]) -> Vec<(Range<usize>, Option<Hsla>)> {
+        runs.iter()
+            .filter(|(_, s)| s.background_color.is_some())
+            .map(|(r, s)| (r.clone(), s.background_color))
+            .collect()
+    }
+
+    #[test]
+    fn search_overlay_paints_single_match() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abc def abc");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let color = search_overlay_color();
+
+        apply_search_overlay(&mut rows, &snapshot, 0..1, "def", color);
+
+        assert_eq!(bg_runs(&rows[0].runs), vec![(4..7, Some(color))]);
+    }
+
+    #[test]
+    fn search_overlay_paints_multiple_matches_on_same_row() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abc abc abc");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let color = search_overlay_color();
+
+        apply_search_overlay(&mut rows, &snapshot, 0..1, "abc", color);
+
+        assert_eq!(
+            bg_runs(&rows[0].runs),
+            vec![
+                (0..3, Some(color)),
+                (4..7, Some(color)),
+                (8..11, Some(color)),
+            ]
+        );
+    }
+
+    #[test]
+    fn search_overlay_paints_matches_across_rows() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abc\nabc");
+        let mut rows = build_rendered_rows(&snapshot, 0..2);
+        let color = search_overlay_color();
+
+        apply_search_overlay(&mut rows, &snapshot, 0..2, "abc", color);
+
+        assert_eq!(bg_runs(&rows[0].runs), vec![(0..3, Some(color))]);
+        assert_eq!(bg_runs(&rows[1].runs), vec![(0..3, Some(color))]);
+    }
+
+    #[test]
+    fn search_overlay_skips_matches_outside_visible_range() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abc\ndef\nabc");
+        let mut rows = build_rendered_rows(&snapshot, 0..2);
+        let color = search_overlay_color();
+
+        apply_search_overlay(&mut rows, &snapshot, 0..2, "abc", color);
+
+        assert_eq!(bg_runs(&rows[0].runs), vec![(0..3, Some(color))]);
+        assert!(bg_runs(&rows[1].runs).is_empty());
+    }
+
+    #[test]
+    fn search_overlay_handles_regex_anchors() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "xfoo\nfoo");
+        let mut rows = build_rendered_rows(&snapshot, 0..2);
+        let color = search_overlay_color();
+
+        apply_search_overlay(&mut rows, &snapshot, 0..2, "^foo", color);
+
+        assert!(bg_runs(&rows[0].runs).is_empty());
+        assert_eq!(bg_runs(&rows[1].runs), vec![(0..3, Some(color))]);
+    }
+
+    #[test]
+    fn search_overlay_empty_query_is_noop() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abc");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_search_overlay(&mut rows, &snapshot, 0..1, "", search_overlay_color());
+
+        assert!(bg_runs(&rows[0].runs).is_empty());
+    }
+
+    #[test]
+    fn search_overlay_invalid_regex_is_noop() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abc");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_search_overlay(
+            &mut rows,
+            &snapshot,
+            0..1,
+            "[unclosed",
+            search_overlay_color(),
+        );
+
+        assert!(bg_runs(&rows[0].runs).is_empty());
+    }
+
+    #[test]
+    fn search_overlay_zero_width_match_is_noop() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "abc");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+
+        apply_search_overlay(&mut rows, &snapshot, 0..1, "^", search_overlay_color());
+
+        assert!(bg_runs(&rows[0].runs).is_empty());
     }
 }

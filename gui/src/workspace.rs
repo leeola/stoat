@@ -1774,6 +1774,8 @@ impl Workspace {
             ActionKind::SelectTextobjectInner => {
                 crate::editor::actions::textobject::handle_select_textobject_inner(self, cx)
             },
+            ActionKind::SearchNext => self.dispatch_search_step(SearchStep::Next, cx),
+            ActionKind::SearchPrev => self.dispatch_search_step(SearchStep::Prev, cx),
             ActionKind::ApplyTextobjectChar => {
                 if let Some(apply) = action
                     .as_any()
@@ -2909,6 +2911,16 @@ impl Workspace {
             if let Some(idx) = target {
                 p.activate(idx, cx);
             }
+        });
+    }
+
+    fn dispatch_search_step(&mut self, step: SearchStep, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| match step {
+            SearchStep::Next => ed.search_next(cx),
+            SearchStep::Prev => ed.search_prev(cx),
         });
     }
 
@@ -4167,6 +4179,12 @@ fn review_inputs_from_commit_trees(
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 enum ReviewStepDir {
+    Next,
+    Prev,
+}
+
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum SearchStep {
     Next,
     Prev,
 }

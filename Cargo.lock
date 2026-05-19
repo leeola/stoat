@@ -6346,6 +6346,7 @@ dependencies = [
  "insta",
  "lsp-types",
  "ratatui",
+ "regex",
  "serde",
  "serde_json",
  "snafu",
