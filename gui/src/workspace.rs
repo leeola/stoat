@@ -1536,7 +1536,7 @@ impl Workspace {
             ActionKind::GotoFileStart => self.dispatch_simple_goto(GotoKind::FileStart, false, cx),
             ActionKind::GotoLastLine => self.dispatch_simple_goto(GotoKind::LastLine, false, cx),
             ActionKind::GotoLineNumber => self.dispatch_goto_line_number(cx),
-            ActionKind::GotoColumn => self.dispatch_goto_column(cx),
+            ActionKind::GotoColumn => self.dispatch_goto_column(false, cx),
             ActionKind::ExpandSelection => self.dispatch_expand_selection(cx),
             ActionKind::AlignViewTop => {
                 if let Some(editor) = self.active_editor(cx) {
@@ -1732,6 +1732,16 @@ impl Workspace {
                 self.dispatch_simple_goto(GotoKind::FileStart, true, cx)
             },
             ActionKind::ExtendToLastLine => self.dispatch_simple_goto(GotoKind::LastLine, true, cx),
+            ActionKind::ExtendGotoFirstNonwhitespace => {
+                self.dispatch_simple_goto(GotoKind::FirstNonwhitespace, true, cx)
+            },
+            ActionKind::ExtendGotoFileStart => {
+                self.dispatch_simple_goto(GotoKind::FileStart, true, cx)
+            },
+            ActionKind::ExtendGotoLastLine => {
+                self.dispatch_simple_goto(GotoKind::LastLine, true, cx)
+            },
+            ActionKind::ExtendGotoColumn => self.dispatch_goto_column(true, cx),
             ActionKind::ExtendSelectNextSibling => self.dispatch_select_sibling(
                 crate::editor::actions::treesitter::SiblingDir::Next,
                 true,
@@ -2384,12 +2394,12 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.handle_goto_line_number(count, cx));
     }
 
-    fn dispatch_goto_column(&mut self, cx: &mut Context<'_, Self>) {
+    fn dispatch_goto_column(&mut self, extend: bool, cx: &mut Context<'_, Self>) {
         let Some(editor) = self.active_editor(cx) else {
             return;
         };
         let count = self.take_count(cx);
-        editor.update(cx, |ed, cx| ed.handle_goto_column(count, false, cx));
+        editor.update(cx, |ed, cx| ed.handle_goto_column(count, extend, cx));
     }
 
     fn dispatch_expand_selection(&mut self, cx: &mut Context<'_, Self>) {
@@ -6946,6 +6956,69 @@ mod tests {
         assert_eq!(sel, vec![(0, 7)]);
         let reversed = editor.read_with(vcx, |ed, _| ed.selections().all_anchors()[0].reversed);
         assert!(reversed);
+    }
+
+    #[test]
+    fn dispatch_extend_goto_first_nonwhitespace_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "  foo bar");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+
+        dispatch(&ws, vcx, stoat_action::ExtendGotoFirstNonwhitespace);
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 2)]);
+    }
+
+    #[test]
+    fn dispatch_extend_goto_file_start_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 7);
+
+        dispatch(&ws, vcx, stoat_action::ExtendGotoFileStart);
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 7)]);
+        let reversed = editor.read_with(vcx, |ed, _| ed.selections().all_anchors()[0].reversed);
+        assert!(reversed);
+    }
+
+    #[test]
+    fn dispatch_extend_goto_last_line_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "row0\nrow1\nrow2");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+
+        dispatch(&ws, vcx, stoat_action::ExtendGotoLastLine);
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 10)]);
+    }
+
+    #[test]
+    fn dispatch_extend_goto_column_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 0);
+        sm.update(vcx, |sm, _| sm.set_consumed_count_for_test(Some(5)));
+
+        dispatch(&ws, vcx, stoat_action::ExtendGotoColumn);
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 4)]);
     }
 
     #[test]
