@@ -1589,6 +1589,72 @@ impl Workspace {
                     });
                 }
             },
+            ActionKind::GotoWindowTop => {
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_goto_window(
+                            crate::editor::actions::movement::WindowPos::Top,
+                            false,
+                            cx,
+                        )
+                    });
+                }
+            },
+            ActionKind::GotoWindowCenter => {
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_goto_window(
+                            crate::editor::actions::movement::WindowPos::Center,
+                            false,
+                            cx,
+                        )
+                    });
+                }
+            },
+            ActionKind::GotoWindowBottom => {
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_goto_window(
+                            crate::editor::actions::movement::WindowPos::Bottom,
+                            false,
+                            cx,
+                        )
+                    });
+                }
+            },
+            ActionKind::ExtendGotoWindowTop => {
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_goto_window(
+                            crate::editor::actions::movement::WindowPos::Top,
+                            true,
+                            cx,
+                        )
+                    });
+                }
+            },
+            ActionKind::ExtendGotoWindowCenter => {
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_goto_window(
+                            crate::editor::actions::movement::WindowPos::Center,
+                            true,
+                            cx,
+                        )
+                    });
+                }
+            },
+            ActionKind::ExtendGotoWindowBottom => {
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_goto_window(
+                            crate::editor::actions::movement::WindowPos::Bottom,
+                            true,
+                            cx,
+                        )
+                    });
+                }
+            },
             ActionKind::MatchBrackets => {
                 if let Some(editor) = self.active_editor(cx) {
                     editor.update(cx, |ed, cx| ed.handle_match_brackets(cx));
@@ -6335,6 +6401,36 @@ mod tests {
             crate::editor::search::SearchDirection::Forward
         );
         assert_eq!(cursor_offsets(vcx, &editor), vec![8]);
+    }
+
+    #[test]
+    fn dispatch_goto_window_center_moves_cursor_to_viewport_midpoint() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let body = (0..30)
+            .map(|i| format!("row{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let editor = new_singleton_editor(vcx, &body);
+        editor.update(vcx, |ed, cx| {
+            ed.set_cell_size(size(px(8.0), px(16.0)), cx);
+            ed.set_text_region_bounds(
+                Bounds {
+                    origin: Point::new(px(0.0), px(0.0)),
+                    size: size(px(160.0), px(160.0)),
+                },
+                cx,
+            );
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::GotoWindowCenter);
+        vcx.run_until_parked();
+
+        // Buffer rows 0-9 = 5 bytes each (row0..row9 + \n).
+        let expected = 5 * 5;
+        assert_eq!(cursor_offsets(vcx, &editor), vec![expected]);
     }
 
     #[test]

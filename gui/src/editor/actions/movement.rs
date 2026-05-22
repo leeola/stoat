@@ -54,6 +54,16 @@ pub enum ScrollDir {
     Down,
 }
 
+/// Window-relative target row for [`Editor::handle_goto_window`].
+/// `Top` lands the cursor on the row at the viewport top;
+/// `Bottom` on the last visible row; `Center` at the midpoint.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WindowPos {
+    Top,
+    Center,
+    Bottom,
+}
+
 /// Direction + landing offset for the after-key
 /// [`Editor::handle_find_char`] chord. `Next`/`Prev` land on the
 /// matched character; `TillNext`/`TillPrev` land one position
@@ -532,6 +542,52 @@ impl Editor {
             ScrollDir::Down => self.scroll_row().saturating_add(count).min(max_scroll),
         };
         self.set_scroll_row(new_scroll, cx);
+    }
+
+    /// Move every selection to the start of the buffer row at
+    /// the requested viewport position (`Top`, `Center`, or
+    /// `Bottom`), clamped to the buffer's last row. With
+    /// `extend = false`, collapses every selection to a cursor
+    /// at the target; with `extend = true`, each selection's
+    /// head jumps to the target while its anchor stays in
+    /// place.
+    pub fn handle_goto_window(&mut self, pos: WindowPos, extend: bool, cx: &mut Context<'_, Self>) {
+        let viewport = self.viewport_rows_for_page().max(1);
+        let scroll_row = self.scroll_row();
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope();
+        let max_row = rope.max_point().row;
+        let offset_in_window = match pos {
+            WindowPos::Top => 0,
+            WindowPos::Center => viewport / 2,
+            WindowPos::Bottom => viewport.saturating_sub(1),
+        };
+        let target_row = scroll_row.saturating_add(offset_in_window).min(max_row);
+        let target_offset = rope.point_to_offset(stoat_text::Point::new(target_row, 0));
+        let target_anchor = snapshot.anchor_at(target_offset, Bias::Right);
+        let new_disjoint: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                if extend {
+                    extend_head(
+                        sel,
+                        target_anchor,
+                        target_offset,
+                        SelectionGoal::None,
+                        &snapshot,
+                    )
+                } else {
+                    let mut new = sel.clone();
+                    new.collapse_to(target_anchor, SelectionGoal::None);
+                    new
+                }
+            })
+            .collect();
+        self.selections.replace_with(new_disjoint, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
     }
 
     pub fn handle_align_view(&mut self, align: ViewAlign, cx: &mut Context<'_, Self>) {
@@ -1202,6 +1258,107 @@ mod tests {
         editor.update(&mut cx, |ed, cx| ed.handle_align_view(ViewAlign::Top, cx));
 
         assert_eq!(scroll_row(&editor, &mut cx), 2);
+    }
+
+    fn buffer_row_offset(rows_before: u32) -> usize {
+        // "rowN" lines: rows 0-9 are 4 chars + \n = 5 each, rows 10+ are 5 + \n = 6.
+        let mut offset = 0usize;
+        for r in 0..rows_before {
+            offset += if r < 10 { 5 } else { 6 };
+        }
+        offset
+    }
+
+    fn selection_span_tuple(editor: &Entity<Editor>, cx: &mut TestAppContext) -> (usize, usize) {
+        editor.read_with(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = ed
+                .selections()
+                .all_anchors()
+                .iter()
+                .max_by_key(|s| s.id)
+                .expect("selection");
+            (
+                snapshot.resolve_anchor(&sel.start),
+                snapshot.resolve_anchor(&sel.end),
+            )
+        })
+    }
+
+    #[test]
+    fn goto_window_top_lands_cursor_at_scroll_row() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_scroll_row(5, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_window(WindowPos::Top, false, cx)
+        });
+
+        let expected = buffer_row_offset(5);
+        assert_eq!(selection_span_tuple(&editor, &mut cx), (expected, expected));
+    }
+
+    #[test]
+    fn goto_window_center_lands_cursor_at_viewport_midpoint() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_scroll_row(5, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_window(WindowPos::Center, false, cx)
+        });
+
+        let expected = buffer_row_offset(10);
+        assert_eq!(selection_span_tuple(&editor, &mut cx), (expected, expected));
+    }
+
+    #[test]
+    fn goto_window_bottom_lands_cursor_at_viewport_last_row() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_scroll_row(5, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_window(WindowPos::Bottom, false, cx)
+        });
+
+        let expected = buffer_row_offset(14);
+        assert_eq!(selection_span_tuple(&editor, &mut cx), (expected, expected));
+    }
+
+    #[test]
+    fn goto_window_clamps_to_max_buffer_row() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(8));
+        set_viewport(&editor, &mut cx, 30);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_window(WindowPos::Bottom, false, cx)
+        });
+
+        let expected = buffer_row_offset(7);
+        assert_eq!(selection_span_tuple(&editor, &mut cx), (expected, expected));
+    }
+
+    #[test]
+    fn goto_window_extend_grows_selection_from_anchor() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_window(WindowPos::Bottom, true, cx)
+        });
+
+        let expected_end = buffer_row_offset(9);
+        let (start, end) = selection_span_tuple(&editor, &mut cx);
+        assert_eq!(start, 0);
+        assert_eq!(end, expected_end);
     }
 
     #[test]
