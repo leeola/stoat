@@ -112,9 +112,38 @@ pub struct Workspace {
     _periodic_save: Option<Task<()>>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
+    last_motion: Option<LastMotion>,
     _active_editor_subscription: Option<Subscription>,
     _pane_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
+}
+
+/// Last motion dispatched through one of `Workspace`'s
+/// `dispatch_move_*` helpers. Captured by intent at the top of
+/// each helper so `RepeatLastMotion` (`Alt-.`) can replay it.
+/// Session-local: not persisted across workspace reloads.
+#[derive(Copy, Clone, Debug)]
+enum LastMotion {
+    Horizontal {
+        delta: i32,
+        extend: bool,
+    },
+    Vertical {
+        delta: i32,
+        extend: bool,
+    },
+    Word {
+        target: crate::editor::actions::movement::WordTarget,
+        extend: bool,
+    },
+    Page {
+        dir: crate::editor::actions::movement::PageDir,
+        half: bool,
+    },
+    ParentBound {
+        bound: crate::editor::actions::treesitter::NodeBound,
+        extend: bool,
+    },
 }
 
 /// Period of the permission-prompt poll task. Matches
@@ -314,6 +343,7 @@ impl Workspace {
             _periodic_save: None,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
+            last_motion: None,
             _active_editor_subscription: None,
             _pane_subscriptions: initial_pane_subscriptions,
             _subscriptions: vec![
@@ -1439,6 +1469,7 @@ impl Workspace {
             },
             ActionKind::GotoReferences => self.dispatch_goto_references(window, cx),
             ActionKind::RenameSymbol => self.dispatch_rename_symbol(window, cx),
+            ActionKind::RepeatLastMotion => self.dispatch_repeat_last_motion(cx),
             ActionKind::MoveLeft => self.dispatch_move_horizontal(-1, false, cx),
             ActionKind::MoveRight => self.dispatch_move_horizontal(1, false, cx),
             ActionKind::MoveUp => self.dispatch_move_vertical(-1, false, cx),
@@ -2133,6 +2164,7 @@ impl Workspace {
     }
 
     fn dispatch_move_horizontal(&mut self, delta: i32, extend: bool, cx: &mut Context<'_, Self>) {
+        self.last_motion = Some(LastMotion::Horizontal { delta, extend });
         let Some(editor) = self.active_editor(cx) else {
             return;
         };
@@ -2143,6 +2175,7 @@ impl Workspace {
     }
 
     fn dispatch_move_vertical(&mut self, delta: i32, extend: bool, cx: &mut Context<'_, Self>) {
+        self.last_motion = Some(LastMotion::Vertical { delta, extend });
         let Some(editor) = self.active_editor(cx) else {
             return;
         };
@@ -2158,6 +2191,7 @@ impl Workspace {
         half: bool,
         cx: &mut Context<'_, Self>,
     ) {
+        self.last_motion = Some(LastMotion::Page { dir, half });
         let Some(editor) = self.active_editor(cx) else {
             return;
         };
@@ -2171,6 +2205,7 @@ impl Workspace {
         extend: bool,
         cx: &mut Context<'_, Self>,
     ) {
+        self.last_motion = Some(LastMotion::Word { target, extend });
         let Some(editor) = self.active_editor(cx) else {
             return;
         };
@@ -2260,6 +2295,7 @@ impl Workspace {
         extend: bool,
         cx: &mut Context<'_, Self>,
     ) {
+        self.last_motion = Some(LastMotion::ParentBound { bound, extend });
         let Some(editor) = self.active_editor(cx) else {
             return;
         };
@@ -2267,6 +2303,29 @@ impl Workspace {
         editor.update(cx, |ed, cx| {
             ed.handle_move_parent_bound(bound, extend, count, cx)
         });
+    }
+
+    fn dispatch_repeat_last_motion(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(motion) = self.last_motion else {
+            return;
+        };
+        match motion {
+            LastMotion::Horizontal { delta, extend } => {
+                self.dispatch_move_horizontal(delta, extend, cx);
+            },
+            LastMotion::Vertical { delta, extend } => {
+                self.dispatch_move_vertical(delta, extend, cx);
+            },
+            LastMotion::Word { target, extend } => {
+                self.dispatch_move_word(target, extend, cx);
+            },
+            LastMotion::Page { dir, half } => {
+                self.dispatch_page_motion(dir, half, cx);
+            },
+            LastMotion::ParentBound { bound, extend } => {
+                self.dispatch_move_parent_bound(bound, extend, cx);
+            },
+        }
     }
 
     fn dispatch_goto_textobject(
@@ -5952,6 +6011,37 @@ mod tests {
             editor.read_with(vcx, |ed, _| ed.hover_position()),
             Some((0, 4))
         );
+    }
+
+    #[test]
+    fn dispatch_repeat_last_motion_replays_word_advance() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo bar baz");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::MoveNextWordStart);
+        vcx.run_until_parked();
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 3)]);
+
+        dispatch(&ws, vcx, stoat_action::RepeatLastMotion);
+        vcx.run_until_parked();
+        assert_eq!(selection_offsets(vcx, &editor), vec![(3, 7)]);
+    }
+
+    #[test]
+    fn dispatch_repeat_last_motion_with_no_prior_motion_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::RepeatLastMotion);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![0]);
     }
 
     #[test]
