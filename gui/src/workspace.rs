@@ -2121,6 +2121,22 @@ impl Workspace {
             },
             ActionKind::SearchNext => self.dispatch_search_step(SearchStep::Next, cx),
             ActionKind::SearchPrev => self.dispatch_search_step(SearchStep::Prev, cx),
+            ActionKind::OpenSearchInput => {
+                crate::editor::regex_input_modal::handle_open_search_input(
+                    self,
+                    crate::editor::search::SearchDirection::Forward,
+                    window,
+                    cx,
+                )
+            },
+            ActionKind::OpenReverseSearchInput => {
+                crate::editor::regex_input_modal::handle_open_search_input(
+                    self,
+                    crate::editor::search::SearchDirection::Reverse,
+                    window,
+                    cx,
+                )
+            },
             ActionKind::GotoWord => self.dispatch_goto_word(cx),
             ActionKind::GotoWordJump => {
                 if let Some(jump) = action
@@ -6188,6 +6204,86 @@ mod tests {
             ed.multi_buffer().read(cx).snapshot().text().to_string()
         });
         assert_eq!(text, "fOO bAR");
+    }
+
+    #[test]
+    fn dispatch_open_search_input_opens_regex_input_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo bar foo");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::OpenSearchInput);
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::editor::regex_input_modal::RegexInputModal>()
+                .is_some()
+        });
+        assert!(active, "OpenSearchInput should open the regex input modal");
+    }
+
+    #[test]
+    fn dispatch_open_reverse_search_input_opens_regex_input_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo bar foo");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::OpenReverseSearchInput);
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::editor::regex_input_modal::RegexInputModal>()
+                .is_some()
+        });
+        assert!(
+            active,
+            "OpenReverseSearchInput should open the regex input modal"
+        );
+    }
+
+    #[test]
+    fn dispatch_open_search_input_confirm_sets_search_state_and_jumps() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo bar foo");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::OpenSearchInput);
+        vcx.run_until_parked();
+
+        let modal = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<crate::editor::regex_input_modal::RegexInputModal>()
+            })
+            .expect("modal opened");
+        let input = modal.read_with(vcx, |m, _| m.input_editor_for_test());
+        input.update(vcx, |ed, cx| ed.apply_text_to_all_cursors("foo", cx));
+        vcx.run_until_parked();
+
+        modal.update_in(vcx, |m, window, cx| {
+            m.handle_action(&stoat_action::PickerConfirm, window, cx);
+        });
+        vcx.run_until_parked();
+
+        let state = editor.read_with(vcx, |ed, _| ed.search_state().cloned());
+        let state = state.expect("search_state set after confirm");
+        assert_eq!(state.query(), "foo");
+        assert_eq!(
+            state.direction(),
+            crate::editor::search::SearchDirection::Forward
+        );
+        assert_eq!(cursor_offsets(vcx, &editor), vec![8]);
     }
 
     #[test]
