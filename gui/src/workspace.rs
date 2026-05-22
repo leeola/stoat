@@ -1383,14 +1383,18 @@ impl Workspace {
                 }
             },
             ActionKind::AcceptCompletion => {
-                let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
-                if let Some(editor) = weak_editor.and_then(|w| w.upgrade()) {
-                    let popup = editor.read(cx).completion_popup().cloned();
-                    if let Some(popup) = popup {
-                        popup.update(cx, |p, cx| {
-                            p.accept(cx);
-                        });
-                    }
+                let popup = self
+                    .input_state_machine
+                    .read(cx)
+                    .active_editor()
+                    .cloned()
+                    .and_then(|w| w.upgrade())
+                    .and_then(|editor| editor.read(cx).completion_popup().cloned())
+                    .filter(|p| p.read(cx).is_visible());
+                if let Some(popup) = popup {
+                    popup.update(cx, |p, cx| p.accept(cx));
+                } else {
+                    crate::editor::actions::edit::handle_insert_newline(self, cx);
                 }
             },
             ActionKind::SmartTab => {
@@ -5683,6 +5687,28 @@ mod tests {
             ed.multi_buffer().read(cx).snapshot().text().to_string()
         });
         assert_eq!(text, "a");
+    }
+
+    #[test]
+    fn enter_in_insert_mode_inserts_newline_when_no_completion_popup() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "ab");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 2 });
+        vcx.run_until_parked();
+
+        let window = vcx.window_handle();
+        cx.simulate_keystrokes(window, "i");
+        cx.simulate_keystrokes(window, "enter");
+        cx.run_until_parked();
+
+        let text = editor.read_with(&cx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        });
+        assert_eq!(text, "ab\n");
     }
 
     fn selection_offsets(
