@@ -568,6 +568,101 @@ impl Editor {
         cx.notify();
     }
 
+    /// Replace every character of each non-empty selection with
+    /// `ch`. Selections that are collapsed cursors (`start ==
+    /// end`) are skipped. The replacement preserves char count
+    /// per selection -- a 3-char selection becomes 3 copies of
+    /// `ch` regardless of UTF-8 byte width -- so the
+    /// post-replacement byte length may grow or shrink. After
+    /// the edit, each affected selection spans the newly written
+    /// range. Multi-excerpt buffers are logged and skipped,
+    /// matching [`Self::apply_text_to_all_cursors`].
+    pub fn replace_char_in_selections(&mut self, ch: char, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "replace_char_in_selections on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+
+        let mut entries: Vec<(usize, usize, usize, String)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope();
+            self.selections
+                .all_anchors()
+                .iter()
+                .filter_map(|sel| {
+                    let s = snapshot.resolve_anchor(&sel.start);
+                    let e = snapshot.resolve_anchor(&sel.end);
+                    let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
+                    if lo == hi {
+                        return None;
+                    }
+                    let mut char_count = 0usize;
+                    let mut byte_pos = lo;
+                    for c in rope.chars_at(lo) {
+                        if byte_pos >= hi {
+                            break;
+                        }
+                        byte_pos += c.len_utf8();
+                        char_count += 1;
+                    }
+                    let mut replacement = String::with_capacity(char_count * ch.len_utf8());
+                    for _ in 0..char_count {
+                        replacement.push(ch);
+                    }
+                    Some((sel.id, lo, hi, replacement))
+                })
+                .collect()
+        };
+
+        if entries.is_empty() {
+            return;
+        }
+
+        entries.sort_by_key(|(_, s, _, _)| *s);
+
+        for (_, s, e, text) in entries.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*s..*e, text.as_str(), cx));
+        }
+
+        let mut id_to_post: std::collections::HashMap<usize, (usize, usize)> =
+            std::collections::HashMap::with_capacity(entries.len());
+        let mut shift: isize = 0;
+        for (id, s, e, text) in entries.iter() {
+            let post_start = (*s as isize + shift) as usize;
+            let post_end = post_start + text.len();
+            id_to_post.insert(*id, (post_start, post_end));
+            shift += text.len() as isize - (*e as isize - *s as isize);
+        }
+
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        let mut new_selections: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| match id_to_post.get(&sel.id) {
+                Some(&(post_start, post_end)) => Selection {
+                    id: sel.id,
+                    start: new_snapshot.anchor_at(post_start, Bias::Left),
+                    end: new_snapshot.anchor_at(post_end, Bias::Right),
+                    reversed: sel.reversed,
+                    goal: SelectionGoal::None,
+                },
+                None => sel.clone(),
+            })
+            .collect();
+        new_selections.sort_by_key(|s| s.id);
+
+        self.selections.replace_with(new_selections, &new_snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     /// Insert a blank line above or below each selection's head
     /// row and collapse every selection to a cursor on that new
     /// blank line. Cursors that share a row collapse to a single
@@ -3585,6 +3680,76 @@ mod tests {
             "unexpected event in {observed:?}",
         );
         assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
+    #[test]
+    fn replace_char_in_selections_replaces_each_char() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "abcdef");
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = Selection {
+                id: 300,
+                start: snapshot.anchor_at(0, Bias::Left),
+                end: snapshot.anchor_at(3, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+
+        editor.update(&mut cx, |ed, cx| ed.replace_char_in_selections('X', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "XXXdef");
+        let ranges = editor.read_with(&cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            ed.selections()
+                .all_anchors()
+                .iter()
+                .map(|s| {
+                    (
+                        snapshot.resolve_anchor(&s.start),
+                        snapshot.resolve_anchor(&s.end),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(ranges, vec![(0, 3)]);
+    }
+
+    #[test]
+    fn replace_char_in_selections_collapsed_cursor_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "abc");
+
+        editor.update(&mut cx, |ed, cx| ed.replace_char_in_selections('X', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "abc");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![0]);
+    }
+
+    #[test]
+    fn replace_char_in_selections_multibyte_grows_buffer() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "abc");
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = Selection {
+                id: 301,
+                start: snapshot.anchor_at(0, Bias::Left),
+                end: snapshot.anchor_at(2, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+
+        editor.update(&mut cx, |ed, cx| ed.replace_char_in_selections('é', cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "ééc");
     }
 
     #[test]

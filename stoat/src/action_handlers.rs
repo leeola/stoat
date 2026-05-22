@@ -621,6 +621,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::DeleteForward
         | ActionKind::DeleteBackward
         | ActionKind::ApplyRegisterSelectChar
+        | ActionKind::ApplyReplaceChar
         | ActionKind::ApplyReplayMacroChar
         | ActionKind::ApplySurroundAddChar
         | ActionKind::ApplySurroundDeleteChar

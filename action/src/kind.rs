@@ -301,6 +301,7 @@ pub enum ActionKind {
     ApplyFindChar,
     ApplyMarkChar,
     ApplyRegisterSelectChar,
+    ApplyReplaceChar,
     ApplyReplayMacroChar,
     ApplySurroundAddChar,
     ApplySurroundDeleteChar,

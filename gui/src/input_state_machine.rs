@@ -1,8 +1,8 @@
 use crate::{
     actions::{
-        ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplayMacroChar,
-        ApplySurroundAddChar, ApplySurroundDeleteChar, ApplySurroundReplaceChar,
-        ApplyTextobjectChar, GotoWordJump,
+        ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplaceChar,
+        ApplyReplayMacroChar, ApplySurroundAddChar, ApplySurroundDeleteChar,
+        ApplySurroundReplaceChar, ApplyTextobjectChar, GotoWordJump,
     },
     editor::{
         actions::{marks::MarkRequest, movement::FindKind, textobject::TextobjectMode},
@@ -104,6 +104,11 @@ pub struct InputStateMachine {
     /// and dispatched through [`ApplyRegisterSelectChar`]; any
     /// other keystroke clears the chord.
     pending_register_select: bool,
+    /// Active after-key chord set by the [`stoat_action::ReplaceChar`]
+    /// action. The next chord-completing char keystroke is consumed
+    /// and dispatched through [`ApplyReplaceChar`]; any other
+    /// keystroke clears the chord.
+    pending_replace: bool,
     /// Active after-key chord set by the [`stoat_action::ReplayMacro`]
     /// action. The next chord-completing char keystroke is consumed
     /// and dispatched through [`ApplyReplayMacroChar`].
@@ -197,6 +202,7 @@ impl InputStateMachine {
             pending_find: None,
             pending_mark: None,
             pending_register_select: false,
+            pending_replace: false,
             pending_macro_replay: false,
             macro_recording: None,
             macros: HashMap::new(),
@@ -565,6 +571,18 @@ impl InputStateMachine {
         cx.notify();
     }
 
+    pub fn pending_replace(&self) -> bool {
+        self.pending_replace
+    }
+
+    /// Arm the after-key replace-char chord. The next
+    /// chord-completing char keystroke produces a
+    /// [`crate::actions::ApplyReplaceChar`] action.
+    pub fn arm_replace_char(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_replace = true;
+        cx.notify();
+    }
+
     pub fn pending_macro_replay(&self) -> bool {
         self.pending_macro_replay
     }
@@ -762,6 +780,16 @@ impl InputStateMachine {
                 return vec![Box::new(ApplyRegisterSelectChar { ch })];
             }
             self.pending_register_select = false;
+            cx.notify();
+        }
+
+        if count_active_mode && self.pending_replace {
+            if let KeyCode::Char(ch) = event.code {
+                self.pending_replace = false;
+                cx.notify();
+                return vec![Box::new(ApplyReplaceChar { ch })];
+            }
+            self.pending_replace = false;
             cx.notify();
         }
 

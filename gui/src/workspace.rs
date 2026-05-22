@@ -1986,6 +1986,18 @@ impl Workspace {
                     self.apply_register_select_char(apply.ch);
                 }
             },
+            ActionKind::ReplaceChar => self.dispatch_replace_char(cx),
+            ActionKind::ApplyReplaceChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplyReplaceChar>()
+                {
+                    if let Some(editor) = self.active_editor(cx) {
+                        let ch = apply.ch;
+                        editor.update(cx, |ed, cx| ed.replace_char_in_selections(ch, cx));
+                    }
+                }
+            },
             ActionKind::ApplyReplayMacroChar => {
                 if let Some(apply) = action
                     .as_any()
@@ -2314,6 +2326,11 @@ impl Workspace {
     fn dispatch_select_register(&mut self, cx: &mut Context<'_, Self>) {
         self.input_state_machine
             .update(cx, |sm, cx| sm.arm_select_register(cx));
+    }
+
+    fn dispatch_replace_char(&mut self, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.arm_replace_char(cx));
     }
 
     fn apply_register_select_char(&mut self, ch: char) {
@@ -5832,6 +5849,38 @@ mod tests {
             editor.read_with(vcx, |ed, _| ed.hover_position()),
             Some((0, 4))
         );
+    }
+
+    #[test]
+    fn dispatch_replace_char_then_apply_replaces_selection_chars() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "abcdef");
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = stoat_text::Selection {
+                id: 400,
+                start: snapshot.anchor_at(0, stoat_text::Bias::Left),
+                end: snapshot.anchor_at(3, stoat_text::Bias::Right),
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::ReplaceChar);
+        vcx.run_until_parked();
+        assert!(sm.read_with(vcx, |sm, _| sm.pending_replace()));
+
+        dispatch(&ws, vcx, crate::actions::ApplyReplaceChar { ch: 'X' });
+        vcx.run_until_parked();
+
+        let text = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        });
+        assert_eq!(text, "XXXdef");
     }
 
     #[test]

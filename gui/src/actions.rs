@@ -419,6 +419,65 @@ impl Action for ApplyRegisterSelectChar {
 
 /// Chord-completion action synthesized by
 /// [`crate::input_state_machine::InputStateMachine::feed`] after a
+/// [`stoat_action::ReplaceChar`] action arms the chord. Carries
+/// the chord-completing character; the workspace dispatch routes
+/// it to the active editor's
+/// [`crate::editor::Editor::replace_char_in_selections`] which
+/// replaces every char in each non-empty selection with `ch`.
+#[derive(Debug)]
+pub struct ApplyReplaceChar {
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplyReplaceCharDef;
+
+impl ActionDef for ApplyReplaceCharDef {
+    fn name(&self) -> &'static str {
+        "ApplyReplaceChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplyReplaceChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending replace-char chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending ReplaceChar chord with the chord-completing character; replaces every char of each non-empty selection on the active editor with that character. Synthesized by the input pipeline after a `ReplaceChar` action arms the chord; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplyReplaceChar {
+    pub const DEF: &ApplyReplaceCharDef = &ApplyReplaceCharDef;
+}
+
+impl Action for ApplyReplaceChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Chord-completion action synthesized by
+/// [`crate::input_state_machine::InputStateMachine::feed`] after a
 /// [`stoat_action::ReplayMacro`] action arms the chord. Carries the
 /// chord-completing character; workspace dispatch resolves the
 /// register and re-feeds the stored keystroke sequence through the
