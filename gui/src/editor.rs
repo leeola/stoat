@@ -20,9 +20,9 @@ use crate::{
 };
 use gpui::{
     canvas, div, font, px, size as gpui_size, uniform_list, App, AppContext, Bounds, Context, Div,
-    Entity, EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
-    MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size,
-    Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    ElementInputHandler, Entity, EventEmitter, InteractiveElement, IntoElement, MouseButton,
+    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, Size, Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{
@@ -2797,6 +2797,11 @@ impl Render for Editor {
 
         let (family, size) = editor_font(cx);
         let cell_family = family.clone();
+        let editor_input = self
+            .workspace
+            .as_ref()
+            .and_then(|ws| ws.upgrade())
+            .map(|ws| ws.read(cx).editor_input().clone());
         let bounds_capture = canvas(
             move |bounds, window, cx| {
                 let font_id = window
@@ -2815,8 +2820,18 @@ impl Render for Editor {
                         ed.set_cell_size(cell, cx);
                     }
                 });
+                bounds
             },
-            |_, _, _, _| {},
+            move |_bounds, prepaint_bounds, window, cx| {
+                if let Some(editor_input) = editor_input {
+                    let focus_handle = editor_input.read(cx).focus_handle().clone();
+                    window.handle_input(
+                        &focus_handle,
+                        ElementInputHandler::new(prepaint_bounds, editor_input),
+                        cx,
+                    );
+                }
+            },
         )
         .size_full();
 

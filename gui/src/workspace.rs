@@ -1168,6 +1168,14 @@ impl Workspace {
         &self.input_state_machine
     }
 
+    /// IME / typed-character bridge into [`InputStateMachine::text_input`].
+    /// Editor render paths register it with the platform input handler via
+    /// `Window::handle_input` against [`EditorInput::focus_handle`] so the
+    /// OS text-input pipeline routes through the workspace's state machine.
+    pub fn editor_input(&self) -> &Entity<EditorInput> {
+        &self.editor_input
+    }
+
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
     }
@@ -4810,6 +4818,16 @@ mod tests {
             assert!(!sm.claude_focused());
             assert_eq!(sm.pending_count(), None);
         });
+    }
+
+    #[test]
+    fn editor_input_getter_returns_workspace_editor_input_entity() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        let (via_getter, via_field) = ws.read_with(&cx, |w, _| {
+            (w.editor_input().clone(), w.editor_input.clone())
+        });
+        assert_eq!(via_getter.entity_id(), via_field.entity_id());
     }
 
     #[test]
