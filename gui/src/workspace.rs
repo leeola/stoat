@@ -2037,6 +2037,16 @@ impl Workspace {
                     }
                 }
             },
+            ActionKind::InsertRegister => self.dispatch_insert_register(cx),
+            ActionKind::ApplyInsertRegisterChar => {
+                if let Some(apply) = action
+                    .as_any()
+                    .downcast_ref::<crate::actions::ApplyInsertRegisterChar>()
+                {
+                    let ch = apply.ch;
+                    crate::editor::actions::edit::handle_insert_register_char(self, ch, cx);
+                }
+            },
             ActionKind::ApplyReplayMacroChar => {
                 if let Some(apply) = action
                     .as_any()
@@ -2398,6 +2408,11 @@ impl Workspace {
     fn dispatch_replace_char(&mut self, cx: &mut Context<'_, Self>) {
         self.input_state_machine
             .update(cx, |sm, cx| sm.arm_replace_char(cx));
+    }
+
+    fn dispatch_insert_register(&mut self, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx| sm.arm_insert_register(cx));
     }
 
     fn apply_register_select_char(&mut self, ch: char) {
@@ -6168,6 +6183,48 @@ mod tests {
             ed.multi_buffer().read(cx).snapshot().text().to_string()
         });
         assert_eq!(text, "fOO bAR");
+    }
+
+    #[test]
+    fn dispatch_insert_register_then_apply_inserts_named_register_text() {
+        use stoat::register::Register;
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "bar");
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = stoat_text::Selection {
+                id: 700,
+                start: snapshot.anchor_at(3, stoat_text::Bias::Left),
+                end: snapshot.anchor_at(3, stoat_text::Bias::Left),
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+        ws.update(vcx, |w, _| {
+            w.registers_mut()
+                .write(Register::Named('a'), "foo".to_string())
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::InsertRegister);
+        vcx.run_until_parked();
+        assert!(sm.read_with(vcx, |sm, _| sm.pending_insert_register()));
+
+        dispatch(
+            &ws,
+            vcx,
+            crate::actions::ApplyInsertRegisterChar { ch: 'a' },
+        );
+        vcx.run_until_parked();
+
+        let text = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        });
+        assert_eq!(text, "barfoo");
     }
 
     #[test]

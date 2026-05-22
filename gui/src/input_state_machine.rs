@@ -1,7 +1,7 @@
 use crate::{
     actions::{
-        ApplyFindChar, ApplyMarkChar, ApplyRegisterSelectChar, ApplyReplaceChar,
-        ApplyReplayMacroChar, ApplySurroundAddChar, ApplySurroundDeleteChar,
+        ApplyFindChar, ApplyInsertRegisterChar, ApplyMarkChar, ApplyRegisterSelectChar,
+        ApplyReplaceChar, ApplyReplayMacroChar, ApplySurroundAddChar, ApplySurroundDeleteChar,
         ApplySurroundReplaceChar, ApplyTextobjectChar, GotoWordJump,
     },
     editor::{
@@ -109,6 +109,12 @@ pub struct InputStateMachine {
     /// and dispatched through [`ApplyReplaceChar`]; any other
     /// keystroke clears the chord.
     pending_replace: bool,
+    /// Active after-key chord set by the [`stoat_action::InsertRegister`]
+    /// action in insert mode. The next chord-completing char
+    /// keystroke is consumed and dispatched through
+    /// [`ApplyInsertRegisterChar`]; any other keystroke clears the
+    /// chord.
+    pending_insert_register: bool,
     /// Active after-key chord set by the [`stoat_action::ReplayMacro`]
     /// action. The next chord-completing char keystroke is consumed
     /// and dispatched through [`ApplyReplayMacroChar`].
@@ -203,6 +209,7 @@ impl InputStateMachine {
             pending_mark: None,
             pending_register_select: false,
             pending_replace: false,
+            pending_insert_register: false,
             pending_macro_replay: false,
             macro_recording: None,
             macros: HashMap::new(),
@@ -583,6 +590,18 @@ impl InputStateMachine {
         cx.notify();
     }
 
+    pub fn pending_insert_register(&self) -> bool {
+        self.pending_insert_register
+    }
+
+    /// Arm the after-key insert-register chord. The next
+    /// chord-completing char keystroke in insert mode produces a
+    /// [`crate::actions::ApplyInsertRegisterChar`] action.
+    pub fn arm_insert_register(&mut self, cx: &mut Context<'_, Self>) {
+        self.pending_insert_register = true;
+        cx.notify();
+    }
+
     pub fn pending_macro_replay(&self) -> bool {
         self.pending_macro_replay
     }
@@ -790,6 +809,16 @@ impl InputStateMachine {
                 return vec![Box::new(ApplyReplaceChar { ch })];
             }
             self.pending_replace = false;
+            cx.notify();
+        }
+
+        if self.mode() == "insert" && self.pending_insert_register {
+            if let KeyCode::Char(ch) = event.code {
+                self.pending_insert_register = false;
+                cx.notify();
+                return vec![Box::new(ApplyInsertRegisterChar { ch })];
+            }
+            self.pending_insert_register = false;
             cx.notify();
         }
 

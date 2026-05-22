@@ -478,6 +478,67 @@ impl Action for ApplyReplaceChar {
 
 /// Chord-completion action synthesized by
 /// [`crate::input_state_machine::InputStateMachine::feed`] after a
+/// [`stoat_action::InsertRegister`] action arms the chord in
+/// insert mode. Carries the chord-completing character; the
+/// workspace dispatch resolves the matching
+/// [`stoat::register::Register`] via
+/// [`stoat::action_handlers::yank::register_for_char`] and
+/// inserts the register's content at every cursor on the active
+/// editor.
+#[derive(Debug)]
+pub struct ApplyInsertRegisterChar {
+    pub ch: char,
+}
+
+#[derive(Debug)]
+pub struct ApplyInsertRegisterCharDef;
+
+impl ActionDef for ApplyInsertRegisterCharDef {
+    fn name(&self) -> &'static str {
+        "ApplyInsertRegisterChar"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::ApplyInsertRegisterChar
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "apply pending insert-register chord"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Run the pending InsertRegister chord with the chord-completing character; inserts the resolved register's text at every cursor on the active editor. Synthesized by the input pipeline after an `InsertRegister` action arms the chord in insert mode; not user-bindable."
+    }
+
+    fn palette_visible(&self) -> bool {
+        false
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Rare
+    }
+}
+
+impl ApplyInsertRegisterChar {
+    pub const DEF: &ApplyInsertRegisterCharDef = &ApplyInsertRegisterCharDef;
+}
+
+impl Action for ApplyInsertRegisterChar {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+/// Chord-completion action synthesized by
+/// [`crate::input_state_machine::InputStateMachine::feed`] after a
 /// [`stoat_action::ReplayMacro`] action arms the chord. Carries the
 /// chord-completing character; workspace dispatch resolves the
 /// register and re-feeds the stored keystroke sequence through the

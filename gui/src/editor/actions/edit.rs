@@ -273,6 +273,30 @@ pub fn handle_switch_to_lowercase(workspace: &mut Workspace, cx: &mut Context<'_
     }
 }
 
+/// `ApplyInsertRegisterChar` action: resolve `ch` to a register
+/// via [`stoat::action_handlers::yank::register_for_char`] and
+/// insert that register's text at every cursor on the active
+/// editor. No-op when the char does not map to a register or the
+/// register has no readable content.
+pub fn handle_insert_register_char(
+    workspace: &mut Workspace,
+    ch: char,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let Some(register) = stoat::action_handlers::yank::register_for_char(ch) else {
+        return;
+    };
+    let Some(text) = read_register(workspace, register, cx) else {
+        return;
+    };
+    if text.is_empty() {
+        return;
+    }
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&text, cx));
+    }
+}
+
 fn toggle_case(s: &str) -> String {
     s.chars()
         .flat_map(|c| {

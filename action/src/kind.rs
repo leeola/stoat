@@ -299,6 +299,7 @@ pub enum ActionKind {
     RunDragSelectTo,
     HoverAt,
     ApplyFindChar,
+    ApplyInsertRegisterChar,
     ApplyMarkChar,
     ApplyRegisterSelectChar,
     ApplyReplaceChar,
