@@ -12,7 +12,7 @@
 //! `ActionKind::Yank` / `PasteAfter` / etc. branches.
 
 use crate::{
-    editor::{DeleteDirection, Editor, PastePosition},
+    editor::{DeleteDirection, Editor, OpenLineDir, PastePosition},
     globals::ClipboardHostGlobal,
     workspace::Workspace,
 };
@@ -221,6 +221,26 @@ pub fn handle_append(
 pub fn handle_insert_newline(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
     if let Some(editor) = active_editor(workspace, cx) {
         editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors("\n", cx));
+    }
+}
+
+/// `OpenBelow` action: insert a blank line after each selection's
+/// head row and collapse every selection to a cursor on that new
+/// blank line. The keymap's `SetMode(insert)` step that follows
+/// switches the workspace into insert mode.
+pub fn handle_open_below(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| ed.open_line(OpenLineDir::Below, cx));
+    }
+}
+
+/// `OpenAbove` action: insert a blank line before each selection's
+/// head row and collapse every selection to a cursor on that new
+/// blank line. The keymap's `SetMode(insert)` step that follows
+/// switches the workspace into insert mode.
+pub fn handle_open_above(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| ed.open_line(OpenLineDir::Above, cx));
     }
 }
 

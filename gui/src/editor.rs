@@ -188,6 +188,18 @@ pub enum AddDirection {
     Below,
 }
 
+/// Direction [`Editor::open_line`] inserts a blank line relative
+/// to each selection's head row.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum OpenLineDir {
+    /// Insert at the row's start, so the new blank line sits
+    /// above the original row.
+    Above,
+    /// Insert at the row's end, so the new blank line sits
+    /// below the original row.
+    Below,
+}
+
 /// Step one UTF-8 character forward in `rope` starting at byte
 /// `offset`. Returns `offset` unchanged when at or past end-of-rope.
 fn step_char_forward(rope: &stoat_text::Rope, offset: usize) -> usize {
@@ -552,6 +564,88 @@ impl Editor {
         new_disjoint.sort_by_key(|s| s.id);
 
         self.selections.replace_with(new_disjoint, &new_snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Insert a blank line above or below each selection's head
+    /// row and collapse every selection to a cursor on that new
+    /// blank line. Cursors that share a row collapse to a single
+    /// insert: only one blank line is opened per row, and all of
+    /// the row's cursors land at the same offset on it.
+    /// Multi-excerpt buffers are skipped with a `tracing::warn`,
+    /// matching [`Self::apply_text_to_all_cursors`].
+    pub fn open_line(&mut self, dir: OpenLineDir, cx: &mut Context<'_, Self>) {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "open_line on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+
+        let (selection_rows, row_to_pre_offset) = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope();
+            let mut selection_rows: Vec<(usize, u32)> = Vec::new();
+            let mut row_to_pre_offset: std::collections::HashMap<u32, usize> =
+                std::collections::HashMap::new();
+            for sel in self.selections.all_anchors().iter() {
+                let row = snapshot.point_for_anchor(&sel.head()).row;
+                selection_rows.push((sel.id, row));
+                row_to_pre_offset.entry(row).or_insert_with(|| match dir {
+                    OpenLineDir::Above => rope.point_to_offset(stoat_text::Point::new(row, 0)),
+                    OpenLineDir::Below => {
+                        rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)))
+                    },
+                });
+            }
+            (selection_rows, row_to_pre_offset)
+        };
+
+        if row_to_pre_offset.is_empty() {
+            return;
+        }
+
+        let mut sorted_offsets: Vec<usize> = row_to_pre_offset.values().copied().collect();
+        sorted_offsets.sort_unstable();
+
+        for offset in sorted_offsets.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*offset..*offset, "\n", cx));
+        }
+
+        let bias = match dir {
+            OpenLineDir::Above => Bias::Left,
+            OpenLineDir::Below => Bias::Right,
+        };
+        let cursor_delta: usize = match dir {
+            OpenLineDir::Above => 0,
+            OpenLineDir::Below => 1,
+        };
+
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        let mut new_selections: Vec<Selection<Anchor>> = selection_rows
+            .into_iter()
+            .map(|(id, row)| {
+                let pre_offset = row_to_pre_offset[&row];
+                let earlier_inserts = sorted_offsets.iter().filter(|o| **o < pre_offset).count();
+                let cursor_offset = pre_offset + earlier_inserts + cursor_delta;
+                let anchor = new_snapshot.anchor_at(cursor_offset, bias);
+                Selection {
+                    id,
+                    start: anchor,
+                    end: anchor,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                }
+            })
+            .collect();
+        new_selections.sort_by_key(|s| s.id);
+
+        self.selections.replace_with(new_selections, &new_snapshot);
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -3491,6 +3585,45 @@ mod tests {
             "unexpected event in {observed:?}",
         );
         assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
+    #[test]
+    fn open_line_below_inserts_blank_line_after_cursor_row() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "line0\nline1\n");
+        seed_cursors(&editor, &mut cx, &[2]);
+
+        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Below, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "line0\n\nline1\n");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![6]);
+    }
+
+    #[test]
+    fn open_line_above_inserts_blank_line_before_cursor_row() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "line0\nline1\n");
+        seed_cursors(&editor, &mut cx, &[8]);
+
+        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Above, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "line0\n\nline1\n");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![6]);
+    }
+
+    #[test]
+    fn open_line_below_dedupes_cursors_on_same_row() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "hello\n");
+        seed_cursors(&editor, &mut cx, &[1, 3]);
+
+        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Below, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello\n\n");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![6]);
     }
 
     fn install_executor_global(cx: &mut TestAppContext) {

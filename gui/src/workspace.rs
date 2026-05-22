@@ -1894,6 +1894,8 @@ impl Workspace {
             ActionKind::InsertNewline => {
                 crate::editor::actions::edit::handle_insert_newline(self, cx)
             },
+            ActionKind::OpenBelow => crate::editor::actions::edit::handle_open_below(self, cx),
+            ActionKind::OpenAbove => crate::editor::actions::edit::handle_open_above(self, cx),
             ActionKind::IndentSelection => {
                 let count = self.take_count(cx);
                 crate::editor::actions::indent::handle_indent_selection(self, count, cx);
@@ -5830,6 +5832,24 @@ mod tests {
             editor.read_with(vcx, |ed, _| ed.hover_position()),
             Some((0, 4))
         );
+    }
+
+    #[test]
+    fn dispatch_open_below_inserts_blank_line_after_cursor_row_on_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "line0\nline1\n");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::OpenBelow);
+        vcx.run_until_parked();
+
+        let text = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        });
+        assert_eq!(text, "line0\n\nline1\n");
+        assert_eq!(cursor_offsets(vcx, &editor), vec![6]);
     }
 
     #[test]
