@@ -2466,6 +2466,28 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Find the matching bracket for the character at `head_offset`
+/// in `rope`. Returns the byte offset of the matched bracket, or
+/// `None` when the char at `head_offset` is not a bracket, the
+/// cursor sits inside a string/comment node (when `tree` is
+/// provided), or no matching bracket exists in the requested
+/// direction. Bracket characters inside string/comment nodes are
+/// skipped during the scan when `tree` is provided.
+pub fn match_bracket_target(
+    rope: &stoat_text::Rope,
+    head_offset: usize,
+    tree: Option<&stoat_language::Tree>,
+) -> Option<usize> {
+    let ch = rope.chars_at(head_offset).next()?;
+    let (open, close, forward) = bracket_pair(ch)?;
+    if let Some(t) = tree {
+        if is_in_string_or_comment(t, head_offset) {
+            return None;
+        }
+    }
+    scan_bracket_match(rope, head_offset, ch, open, close, forward, tree)
+}
+
 fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
     match ch {
         '(' => Some(('(', ')', true)),

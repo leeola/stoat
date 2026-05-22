@@ -1538,6 +1538,11 @@ impl Workspace {
             ActionKind::GotoLineNumber => self.dispatch_goto_line_number(cx),
             ActionKind::GotoColumn => self.dispatch_goto_column(cx),
             ActionKind::ExpandSelection => self.dispatch_expand_selection(cx),
+            ActionKind::MatchBrackets => {
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| ed.handle_match_brackets(cx));
+                }
+            },
             ActionKind::ShrinkSelection => self.dispatch_shrink_selection(cx),
             ActionKind::SelectNextSibling => self.dispatch_select_sibling(
                 crate::editor::actions::treesitter::SiblingDir::Next,
@@ -6183,6 +6188,32 @@ mod tests {
             ed.multi_buffer().read(cx).snapshot().text().to_string()
         });
         assert_eq!(text, "fOO bAR");
+    }
+
+    #[test]
+    fn dispatch_match_brackets_jumps_to_matching_bracket() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "foo ( bar )");
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let anchor = snapshot.anchor_at(4, stoat_text::Bias::Left);
+            let sel = stoat_text::Selection {
+                id: 800,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::MatchBrackets);
+        vcx.run_until_parked();
+
+        assert_eq!(cursor_offsets(vcx, &editor), vec![10]);
     }
 
     #[test]

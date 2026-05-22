@@ -353,6 +353,52 @@ impl Editor {
         cx.notify();
     }
 
+    /// Jump the primary selection to the bracket that matches the
+    /// one under the cursor's head, collapsing every selection to
+    /// that target. No-op when the cursor is not on a bracket
+    /// character (`()[]{}`), the cursor is inside a string or
+    /// comment node (when a syntax tree is available), no match
+    /// exists in the requested direction, or the buffer is
+    /// multi-excerpt. Bracket characters inside string/comment
+    /// nodes are skipped during the scan when the syntax tree is
+    /// available.
+    pub fn handle_match_brackets(&mut self, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let sel = newest_selection(&self.selections, &snapshot);
+        let head = snapshot.resolve_anchor(&sel.head());
+
+        let Some(singleton) = self.multi_buffer.read(cx).as_singleton().cloned() else {
+            return;
+        };
+
+        let target = {
+            let buffer = singleton.read(cx);
+            let rope = buffer.read(|b| b.rope().clone());
+            let tree = buffer
+                .syntax_map()
+                .and_then(|map| deepest_containing_layer(map, head, head).map(|layer| &layer.tree));
+            stoat::action_handlers::movement::match_bracket_target(&rope, head, tree)
+        };
+        let Some(target) = target else {
+            return;
+        };
+
+        let target_anchor = snapshot.anchor_at(target, Bias::Right);
+        let new_disjoint: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let mut new = sel.clone();
+                new.collapse_to(target_anchor, SelectionGoal::None);
+                new
+            })
+            .collect();
+        self.selections.replace_with(new_disjoint, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     /// Jump the primary selection to the next or previous textobject
     /// of `kind` (function or class). No-op when the buffer's language
     /// has no `textobjects.scm` query or no match exists in the
@@ -827,6 +873,50 @@ mod tests {
         editor.update(&mut cx, |ed, cx| {
             ed.handle_goto_textobject(NavKind::Function, NavDirection::Next, cx)
         });
+
+        assert_eq!(primary_range(&editor, &mut cx), (0, 0));
+    }
+
+    #[test]
+    fn match_brackets_jumps_open_to_close() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor_with_syntax(&mut cx, "foo ( bar )", None);
+        seed_cursor(&editor, &mut cx, 4);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_match_brackets(cx));
+
+        assert_eq!(primary_range(&editor, &mut cx), (10, 10));
+    }
+
+    #[test]
+    fn match_brackets_jumps_close_to_open() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor_with_syntax(&mut cx, "foo ( bar )", None);
+        seed_cursor(&editor, &mut cx, 10);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_match_brackets(cx));
+
+        assert_eq!(primary_range(&editor, &mut cx), (4, 4));
+    }
+
+    #[test]
+    fn match_brackets_non_bracket_char_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor_with_syntax(&mut cx, "foo ( bar )", None);
+        seed_cursor(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_match_brackets(cx));
+
+        assert_eq!(primary_range(&editor, &mut cx), (0, 0));
+    }
+
+    #[test]
+    fn match_brackets_unmatched_open_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor_with_syntax(&mut cx, "(((", None);
+        seed_cursor(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_match_brackets(cx));
 
         assert_eq!(primary_range(&editor, &mut cx), (0, 0));
     }
