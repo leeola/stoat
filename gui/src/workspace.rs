@@ -205,6 +205,7 @@ impl Workspace {
             .map(|pane| {
                 cx.subscribe(&pane, |workspace, _, _event: &PaneEvent, cx| {
                     workspace.broadcast_active_pane_item(cx);
+                    workspace.broadcast_active_editor(cx);
                 })
             })
             .collect();
@@ -1124,6 +1125,7 @@ impl Workspace {
             .map(|pane| {
                 cx.subscribe(&pane, |workspace, _, _event: &PaneEvent, cx| {
                     workspace.broadcast_active_pane_item(cx);
+                    workspace.broadcast_active_editor(cx);
                 })
             })
             .collect();
@@ -5623,6 +5625,42 @@ mod tests {
 
         dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 2 });
         vcx.run_until_parked();
+    }
+
+    #[test]
+    fn pane_add_item_broadcasts_active_editor_to_input_state_machine() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "");
+
+        ws.update(vcx, |w, cx| {
+            let focus = w.pane_tree.read(cx).focus();
+            let pane = w
+                .pane_tree
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane")
+                .clone();
+            pane.update(cx, |p, cx| {
+                p.add_item(Box::new(editor.clone()), cx);
+            });
+        });
+        vcx.run_until_parked();
+
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        let (focus_target_present, active_editor_id) = sm.read_with(vcx, |sm, _| {
+            (
+                sm.editor_focus_target().is_some(),
+                sm.active_editor()
+                    .and_then(|weak| weak.upgrade())
+                    .map(|e| e.entity_id()),
+            )
+        });
+        assert!(
+            focus_target_present,
+            "editor_focus_target must populate after pane.add_item(editor) so insert mode can focus the editor input handler"
+        );
+        assert_eq!(active_editor_id, Some(editor.entity_id()));
     }
 
     fn selection_offsets(
