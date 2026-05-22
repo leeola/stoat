@@ -568,6 +568,94 @@ impl Editor {
         cx.notify();
     }
 
+    /// Apply `transform` to the text of every non-empty selection
+    /// and replace each selection's range with the transformed
+    /// text. Collapsed cursors and selections whose transform is
+    /// a no-op are skipped. After the edit, each affected
+    /// selection spans the new range. Multi-excerpt buffers are
+    /// logged and skipped, matching
+    /// [`Self::apply_text_to_all_cursors`].
+    pub fn transform_selections_text<F>(&mut self, transform: F, cx: &mut Context<'_, Self>)
+    where
+        F: Fn(&str) -> String,
+    {
+        let buffer = match self.multi_buffer.read(cx).as_singleton() {
+            Some(b) => b.clone(),
+            None => {
+                tracing::warn!(
+                    target: "stoat::editor",
+                    "transform_selections_text on multi-excerpt buffer is not yet supported",
+                );
+                return;
+            },
+        };
+
+        let mut edits: Vec<(usize, usize, usize, String)> = {
+            let snapshot = self.multi_buffer.read(cx).snapshot();
+            let rope = snapshot.rope();
+            self.selections
+                .all_anchors()
+                .iter()
+                .filter_map(|sel| {
+                    let s = snapshot.resolve_anchor(&sel.start);
+                    let e = snapshot.resolve_anchor(&sel.end);
+                    let (lo, hi) = if s <= e { (s, e) } else { (e, s) };
+                    if lo == hi {
+                        return None;
+                    }
+                    let text = rope.slice(lo..hi).to_string();
+                    let new_text = transform(&text);
+                    if new_text == text {
+                        return None;
+                    }
+                    Some((sel.id, lo, hi, new_text))
+                })
+                .collect()
+        };
+
+        if edits.is_empty() {
+            return;
+        }
+
+        edits.sort_by_key(|(_, s, _, _)| *s);
+
+        for (_, s, e, text) in edits.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(*s..*e, text.as_str(), cx));
+        }
+
+        let mut id_to_post: std::collections::HashMap<usize, (usize, usize)> =
+            std::collections::HashMap::with_capacity(edits.len());
+        let mut shift: isize = 0;
+        for (id, s, e, text) in edits.iter() {
+            let post_start = (*s as isize + shift) as usize;
+            let post_end = post_start + text.len();
+            id_to_post.insert(*id, (post_start, post_end));
+            shift += text.len() as isize - (*e as isize - *s as isize);
+        }
+
+        let new_snapshot = self.multi_buffer.read(cx).snapshot();
+        let mut new_selections: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| match id_to_post.get(&sel.id) {
+                Some(&(post_start, post_end)) => Selection {
+                    id: sel.id,
+                    start: new_snapshot.anchor_at(post_start, Bias::Left),
+                    end: new_snapshot.anchor_at(post_end, Bias::Right),
+                    reversed: sel.reversed,
+                    goal: SelectionGoal::None,
+                },
+                None => sel.clone(),
+            })
+            .collect();
+        new_selections.sort_by_key(|s| s.id);
+
+        self.selections.replace_with(new_selections, &new_snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     /// Replace every character of each non-empty selection with
     /// `ch`. Selections that are collapsed cursors (`start ==
     /// end`) are skipped. The replacement preserves char count
@@ -3680,6 +3768,92 @@ mod tests {
             "unexpected event in {observed:?}",
         );
         assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
+    #[test]
+    fn transform_selections_text_uppercases_selection() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "foo bar");
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = Selection {
+                id: 500,
+                start: snapshot.anchor_at(0, Bias::Left),
+                end: snapshot.anchor_at(7, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.transform_selections_text(|s: &str| s.to_uppercase(), cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "FOO BAR");
+        let ranges = editor.read_with(&cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            ed.selections()
+                .all_anchors()
+                .iter()
+                .map(|s| {
+                    (
+                        snapshot.resolve_anchor(&s.start),
+                        snapshot.resolve_anchor(&s.end),
+                    )
+                })
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(ranges, vec![(0, 7)]);
+    }
+
+    #[test]
+    fn transform_selections_text_toggles_case_per_char() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "Foo Bar");
+        editor.update(&mut cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = Selection {
+                id: 501,
+                start: snapshot.anchor_at(0, Bias::Left),
+                end: snapshot.anchor_at(7, Bias::Right),
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+
+        let toggle = |s: &str| -> String {
+            s.chars()
+                .flat_map(|c| {
+                    if c.is_lowercase() {
+                        c.to_uppercase().collect::<Vec<_>>()
+                    } else if c.is_uppercase() {
+                        c.to_lowercase().collect::<Vec<_>>()
+                    } else {
+                        vec![c]
+                    }
+                })
+                .collect()
+        };
+        editor.update(&mut cx, |ed, cx| ed.transform_selections_text(toggle, cx));
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "fOO bAR");
+    }
+
+    #[test]
+    fn transform_selections_text_collapsed_cursor_is_noop() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "abc");
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.transform_selections_text(|s: &str| s.to_uppercase(), cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "abc");
     }
 
     #[test]

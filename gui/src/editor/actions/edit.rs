@@ -244,6 +244,49 @@ pub fn handle_open_above(workspace: &mut Workspace, cx: &mut Context<'_, Workspa
     }
 }
 
+/// `SwitchCase` action: flip the case of every alphabetic char in
+/// each non-empty selection (lowercase to uppercase and vice
+/// versa). Selections that are collapsed cursors are skipped.
+pub fn handle_switch_case(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| ed.transform_selections_text(toggle_case, cx));
+    }
+}
+
+/// `SwitchToUppercase` action: uppercase the text of every
+/// non-empty selection.
+pub fn handle_switch_to_uppercase(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| {
+            ed.transform_selections_text(|s: &str| s.to_uppercase(), cx)
+        });
+    }
+}
+
+/// `SwitchToLowercase` action: lowercase the text of every
+/// non-empty selection.
+pub fn handle_switch_to_lowercase(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| {
+            ed.transform_selections_text(|s: &str| s.to_lowercase(), cx)
+        });
+    }
+}
+
+fn toggle_case(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| {
+            if c.is_lowercase() {
+                c.to_uppercase().collect::<Vec<_>>()
+            } else if c.is_uppercase() {
+                c.to_lowercase().collect::<Vec<_>>()
+            } else {
+                vec![c]
+            }
+        })
+        .collect()
+}
+
 /// Resolve `register` to its backing text and return a copy
 /// suitable for paste. Clipboard reads route through the global
 /// clipboard host; in-process registers (unnamed, named) come

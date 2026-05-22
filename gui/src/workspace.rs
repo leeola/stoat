@@ -1896,6 +1896,13 @@ impl Workspace {
             },
             ActionKind::OpenBelow => crate::editor::actions::edit::handle_open_below(self, cx),
             ActionKind::OpenAbove => crate::editor::actions::edit::handle_open_above(self, cx),
+            ActionKind::SwitchCase => crate::editor::actions::edit::handle_switch_case(self, cx),
+            ActionKind::SwitchToUppercase => {
+                crate::editor::actions::edit::handle_switch_to_uppercase(self, cx)
+            },
+            ActionKind::SwitchToLowercase => {
+                crate::editor::actions::edit::handle_switch_to_lowercase(self, cx)
+            },
             ActionKind::IndentSelection => {
                 let count = self.take_count(cx);
                 crate::editor::actions::indent::handle_indent_selection(self, count, cx);
@@ -5849,6 +5856,34 @@ mod tests {
             editor.read_with(vcx, |ed, _| ed.hover_position()),
             Some((0, 4))
         );
+    }
+
+    #[test]
+    fn dispatch_switch_case_toggles_case_in_selection() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "Foo Bar");
+        editor.update(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let sel = stoat_text::Selection {
+                id: 600,
+                start: snapshot.anchor_at(0, stoat_text::Bias::Left),
+                end: snapshot.anchor_at(7, stoat_text::Bias::Right),
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![sel], &snapshot);
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::SwitchCase);
+        vcx.run_until_parked();
+
+        let text = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        });
+        assert_eq!(text, "fOO bAR");
     }
 
     #[test]
