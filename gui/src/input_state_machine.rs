@@ -959,6 +959,22 @@ fn keystroke_to_key_event(keystroke: &Keystroke) -> Option<KeyEvent> {
         modifiers |= KeyModifiers::SUPER;
     }
 
+    if keystroke.modifiers.shift {
+        if let Some(typed) = keystroke
+            .key_char
+            .as_deref()
+            .filter(|c| *c != keystroke.key.as_str())
+        {
+            let mut chars = typed.chars();
+            if let Some(first) = chars.next() {
+                if chars.next().is_none() {
+                    modifiers.remove(KeyModifiers::SHIFT);
+                    return Some(KeyEvent::new(KeyCode::Char(first), modifiers));
+                }
+            }
+        }
+    }
+
     let code = match keystroke.key.as_str() {
         "space" => KeyCode::Char(' '),
         "enter" => KeyCode::Enter,
@@ -1057,6 +1073,14 @@ mod tests {
             modifiers,
             key: name.into(),
             key_char: None,
+        }
+    }
+
+    fn key_with_char(name: &str, typed: &str, modifiers: Modifiers) -> Keystroke {
+        Keystroke {
+            modifiers,
+            key: name.into(),
+            key_char: Some(typed.into()),
         }
     }
 
@@ -1654,6 +1678,53 @@ mod tests {
         assert!(keystroke_to_key_event(&stroke).is_none());
     }
 
+    #[test]
+    fn keystroke_to_key_event_uses_key_char_for_shifted_symbols() {
+        let shift = Modifiers {
+            shift: true,
+            ..Modifiers::default()
+        };
+        for (unshifted, shifted) in [(";", ":"), ("/", "?"), ("1", "!"), ("2", "@"), ("`", "~")] {
+            let stroke = key_with_char(unshifted, shifted, shift);
+            let event = keystroke_to_key_event(&stroke).expect("translate");
+            let expected_char = shifted.chars().next().expect("shifted is single-char");
+            assert_eq!(
+                event.code,
+                KeyCode::Char(expected_char),
+                "code for shift+{unshifted} should be {shifted}",
+            );
+            assert_eq!(
+                event.modifiers,
+                KeyModifiers::empty(),
+                "shift should be dropped for shift+{unshifted}",
+            );
+        }
+    }
+
+    #[test]
+    fn keystroke_to_key_event_falls_back_to_key_when_key_char_matches() {
+        let stroke = key_with_char("a", "a", Modifiers::default());
+        let event = keystroke_to_key_event(&stroke).expect("translate");
+        assert_eq!(event.code, KeyCode::Char('a'));
+        assert_eq!(event.modifiers, KeyModifiers::empty());
+    }
+
+    #[test]
+    fn keystroke_to_key_event_keeps_modifiers_with_key_char_branch() {
+        let stroke = key_with_char(
+            ";",
+            ":",
+            Modifiers {
+                control: true,
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+        let event = keystroke_to_key_event(&stroke).expect("translate");
+        assert_eq!(event.code, KeyCode::Char(':'));
+        assert_eq!(event.modifiers, KeyModifiers::CONTROL);
+    }
+
     /// Anchor entity that owns its own focus handle. Used to seed
     /// focus targets in the focus-output tests so we can verify
     /// `transition_mode` and `restore_prev_focus` move focus to the
@@ -1818,6 +1889,27 @@ mod tests {
             "SetMode(normal) should not surface as a dispatched action"
         );
         sm.read_with(vcx, |sm, _| assert_eq!(sm.mode(), "normal"));
+    }
+
+    #[test]
+    fn feed_shifted_symbol_dispatches_bound_action() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { : -> Quit(); }");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        let stroke = key_with_char(
+            ";",
+            ":",
+            Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+        );
+
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
+            quit_kinds(sm.feed(&stroke, window, cx))
+        });
+
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
 
     #[test]
