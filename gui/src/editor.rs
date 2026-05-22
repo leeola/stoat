@@ -2425,9 +2425,9 @@ impl Editor {
             return;
         };
         let executor = cx.global::<ExecutorGlobal>().0.clone();
-        let task = cx.spawn_in(window, async move |this, cx| {
+        let task = cx.spawn_in(window, async move |_, cx| {
             executor.timer(std::time::Duration::from_millis(50)).await;
-            let _ = this.update_in(cx, |_, window, cx| {
+            let _ = cx.update(|window, cx| {
                 let Some(workspace) = weak_workspace.upgrade() else {
                     return;
                 };

@@ -5833,6 +5833,40 @@ mod tests {
     }
 
     #[test]
+    fn schedule_hover_debounce_from_editor_listener_path_sets_hover_position_without_panic() {
+        let mut cx = TestAppContext::single();
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        cx.update(|cx| cx.set_global(ExecutorGlobal(scheduler.executor())));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        editor.update(vcx, |ed, cx| {
+            ed.set_workspace(Some(ws.downgrade()));
+            ed.set_cell_size(size(px(10.0), px(20.0)), cx);
+            ed.set_text_region_bounds(
+                Bounds {
+                    origin: Point::default(),
+                    size: size(px(800.0), px(600.0)),
+                },
+                cx,
+            );
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.schedule_hover_debounce(3, 5, window, cx);
+        });
+        vcx.run_until_parked();
+        scheduler.advance_clock(std::time::Duration::from_millis(60));
+        vcx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.hover_position()),
+            Some((3, 5))
+        );
+    }
+
+    #[test]
     fn dispatch_hover_at_without_active_editor_is_silent() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
