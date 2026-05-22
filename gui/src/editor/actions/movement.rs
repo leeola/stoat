@@ -35,6 +35,16 @@ pub enum WordTarget {
 /// (`stoat::action_handlers::movement::DEFAULT_VIEWPORT_ROWS`).
 pub const DEFAULT_VIEWPORT_ROWS: u32 = 20;
 
+/// Alignment target for [`Editor::handle_align_view`]. `Top`
+/// places the primary cursor's row at the viewport top, `Bottom`
+/// at the viewport bottom, and `Center` at the midpoint.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ViewAlign {
+    Top,
+    Center,
+    Bottom,
+}
+
 /// Direction + landing offset for the after-key
 /// [`Editor::handle_find_char`] chord. `Next`/`Prev` land on the
 /// matched character; `TillNext`/`TillPrev` land one position
@@ -490,6 +500,29 @@ impl Editor {
         }
         let rows = (f32::from(bounds.size.height) / line_height).floor() as u32;
         rows.max(1)
+    }
+
+    /// Scroll the viewport so the primary cursor's buffer row
+    /// lands at the requested alignment (`Top`, `Center`, or
+    /// `Bottom`). Clamps the resulting scroll row against the
+    /// buffer's last row so the viewport never advances past the
+    /// end. The cursor itself does not move.
+    pub fn handle_align_view(&mut self, align: ViewAlign, cx: &mut Context<'_, Self>) {
+        let viewport = self.viewport_rows_for_page().max(1);
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope();
+        let max_row = rope.max_point().row;
+        let Some(primary) = self.selections().all_anchors().iter().max_by_key(|s| s.id) else {
+            return;
+        };
+        let cursor_row = snapshot.point_for_anchor(&primary.head()).row;
+        let desired_scroll = match align {
+            ViewAlign::Top => cursor_row,
+            ViewAlign::Center => cursor_row.saturating_sub(viewport / 2),
+            ViewAlign::Bottom => cursor_row.saturating_sub(viewport.saturating_sub(1)),
+        };
+        let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+        self.set_scroll_row(desired_scroll.min(max_scroll), cx);
     }
 }
 
@@ -1086,5 +1119,74 @@ mod tests {
         let (start, end, reversed) = selection_span(&editor, &mut cx);
         assert_eq!((start, end), (0, 4));
         assert!(!reversed);
+    }
+
+    fn scroll_row(editor: &Entity<Editor>, cx: &mut TestAppContext) -> u32 {
+        editor.read_with(cx, |ed, _| ed.scroll_row())
+    }
+
+    #[test]
+    fn align_view_top_sets_scroll_row_to_cursor_row() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(15, cx));
+
+        editor.update(&mut cx, |ed, cx| ed.handle_align_view(ViewAlign::Top, cx));
+
+        assert_eq!(scroll_row(&editor, &mut cx), 15);
+    }
+
+    #[test]
+    fn align_view_center_centers_cursor_in_viewport() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(15, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_align_view(ViewAlign::Center, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 10);
+    }
+
+    #[test]
+    fn align_view_bottom_puts_cursor_at_viewport_bottom() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(15, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_align_view(ViewAlign::Bottom, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 6);
+    }
+
+    #[test]
+    fn align_view_clamps_when_cursor_near_end_of_buffer() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(12));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(11, cx));
+
+        editor.update(&mut cx, |ed, cx| ed.handle_align_view(ViewAlign::Top, cx));
+
+        assert_eq!(scroll_row(&editor, &mut cx), 2);
+    }
+
+    #[test]
+    fn align_view_center_falls_back_to_default_viewport() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(50));
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_row(25, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_align_view(ViewAlign::Center, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 25 - DEFAULT_VIEWPORT_ROWS / 2);
     }
 }
