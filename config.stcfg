@@ -446,6 +446,8 @@ on key {
         Escape -> SetMode(normal);
         Enter -> AcceptCompletion();
         Tab -> SmartTab();
+        Backspace -> DeleteBackward();
+        Delete -> DeleteForward();
         Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();

@@ -5663,6 +5663,28 @@ mod tests {
         assert_eq!(active_editor_id, Some(editor.entity_id()));
     }
 
+    #[test]
+    fn backspace_in_insert_mode_shrinks_active_editor_buffer() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "ab");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, crate::actions::ClickAt { row: 0, col: 2 });
+        vcx.run_until_parked();
+
+        let window = vcx.window_handle();
+        cx.simulate_keystrokes(window, "i");
+        cx.simulate_keystrokes(window, "backspace");
+        cx.run_until_parked();
+
+        let text = editor.read_with(&cx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        });
+        assert_eq!(text, "a");
+    }
+
     fn selection_offsets(
         vcx: &mut VisualTestContext,
         editor: &Entity<crate::editor::Editor>,
