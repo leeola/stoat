@@ -176,7 +176,7 @@ impl Workspace {
         let keystroke_subscription = cx.observe_keystrokes(|workspace, event, window, cx| {
             let sm = workspace.input_state_machine.clone();
             let keystroke = event.keystroke.clone();
-            let actions = sm.update(cx, |sm, cx| sm.feed(&keystroke, cx));
+            let actions = sm.update(cx, |sm, cx| sm.feed(&keystroke, window, cx));
             for action in actions {
                 workspace.dispatch_action(action, window, cx);
             }
@@ -2349,7 +2349,7 @@ impl Workspace {
         for ks in keys {
             let actions = self
                 .input_state_machine
-                .update(cx, |sm, cx| sm.feed(&ks, cx));
+                .update(cx, |sm, cx| sm.feed(&ks, window, cx));
             for action in actions {
                 self.dispatch_action(action, window, cx);
             }

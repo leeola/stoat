@@ -88,7 +88,7 @@ pub fn normalize_shift_event(key: KeyEvent) -> KeyEvent {
     }
 }
 
-pub(crate) fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
+pub fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
     match &arg.value {
         stoat_config::Value::String(s) => Some(s.clone()),
         stoat_config::Value::Ident(s) => Some(s.clone()),

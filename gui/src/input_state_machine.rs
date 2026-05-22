@@ -16,7 +16,7 @@ use std::{collections::HashMap, ops::Range};
 use stoat::{
     action_handlers::surround::SurroundReplaceStage,
     keymap::{Keymap, KeymapState, StateValue},
-    keymap_state::{normalize_shift_event, resolve_action},
+    keymap_state::{arg_as_str, normalize_shift_event, resolve_action},
     register::Register,
 };
 use stoat_config::KeyPart;
@@ -683,6 +683,12 @@ impl InputStateMachine {
     /// composite Action type, so the caller dispatches each child
     /// individually via `Workspace::dispatch_action`.
     ///
+    /// `SetMode` bindings are handled inline by calling
+    /// [`Self::transition_mode`] on `self` and do not appear in the
+    /// returned action list. `SetMode` is intentionally absent from
+    /// the action registry (see `stoat_action::registry`), so the
+    /// downstream `resolve_action` path cannot dispatch it.
+    ///
     /// On macOS, a single keypress in a text-input mode can fire
     /// both an IME commit (via [`text_input`]) and a raw key event.
     /// `feed` consumes the duplicate-drop marker armed by the prior
@@ -705,6 +711,7 @@ impl InputStateMachine {
     pub fn feed(
         &mut self,
         keystroke: &Keystroke,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Vec<Box<dyn stoat_action::Action>> {
         let Some(event) = keystroke_to_key_event(keystroke) else {
@@ -893,6 +900,14 @@ impl InputStateMachine {
             return Vec::new();
         }
 
+        for ra in &resolved {
+            if ra.name == "SetMode" {
+                if let Some(mode_name) = ra.args.first().and_then(arg_as_str) {
+                    self.transition_mode(mode_name, window, cx);
+                }
+            }
+        }
+
         let actions: Vec<Box<dyn stoat_action::Action>> = resolved
             .iter()
             .filter_map(|ra| resolve_action(&ra.name, &ra.args))
@@ -1012,19 +1027,20 @@ mod tests {
         Keymap::compile(&config.expect("expected config"))
     }
 
-    fn new_workspace(cx: &mut TestAppContext) -> Entity<Workspace> {
-        cx.update(|cx| cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx)))
-    }
-
     fn new_state_machine_with_keymap(
         cx: &mut TestAppContext,
         keymap: Keymap,
-    ) -> Entity<InputStateMachine> {
-        let workspace = new_workspace(cx);
-        cx.update(|cx| cx.new(|_| InputStateMachine::new(workspace.downgrade(), keymap)))
+    ) -> (Entity<InputStateMachine>, &mut VisualTestContext) {
+        let (workspace, vcx) =
+            cx.add_window_view(|_, cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+        let weak = workspace.downgrade();
+        let sm = vcx.update(|_, cx| cx.new(|_| InputStateMachine::new(weak, keymap)));
+        (sm, vcx)
     }
 
-    fn new_state_machine(cx: &mut TestAppContext) -> Entity<InputStateMachine> {
+    fn new_state_machine(
+        cx: &mut TestAppContext,
+    ) -> (Entity<InputStateMachine>, &mut VisualTestContext) {
         new_state_machine_with_keymap(cx, empty_keymap())
     }
 
@@ -1045,18 +1061,18 @@ mod tests {
     }
 
     fn feed_in_app<R>(
-        cx: &mut TestAppContext,
+        vcx: &mut VisualTestContext,
         sm: &Entity<InputStateMachine>,
-        f: impl FnOnce(&mut InputStateMachine, &mut Context<'_, InputStateMachine>) -> R,
+        f: impl FnOnce(&mut InputStateMachine, &mut Window, &mut Context<'_, InputStateMachine>) -> R,
     ) -> R {
-        sm.update(cx, f)
+        sm.update_in(vcx, f)
     }
 
     #[test]
     fn defaults() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        sm.read_with(&cx, |sm, _| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.mode(), "normal");
             assert!(!sm.palette_open());
             assert!(!sm.finder_open());
@@ -1073,22 +1089,22 @@ mod tests {
     #[test]
     fn set_last_picker_action_round_trips() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        sm.update(&mut cx, |sm, _| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        sm.update(vcx, |sm, _| {
             sm.set_last_picker_action(Some("OpenJumplistPicker"))
         });
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.last_picker_action(), Some("OpenJumplistPicker"));
         });
-        sm.update(&mut cx, |sm, _| sm.set_last_picker_action(None));
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_picker_action(), None));
+        sm.update(vcx, |sm, _| sm.set_last_picker_action(None));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.last_picker_action(), None));
     }
 
     #[test]
     fn keymap_state_get_returns_predicate_fields() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        sm.read_with(&cx, |sm, _| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.get("mode"), Some(&StateValue::String("normal".into())));
             assert_eq!(sm.get("palette_open"), Some(&StateValue::Bool(false)));
             assert_eq!(sm.get("finder_open"), Some(&StateValue::Bool(false)));
@@ -1101,45 +1117,45 @@ mod tests {
     #[test]
     fn feed_digit_seeds_pending_count() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let stroke = key("5");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx);
         });
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), Some(5)));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.pending_count(), Some(5)));
     }
 
     #[test]
     fn feed_digit_extends_pending_count() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let first = key("5");
         let second = key("2");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&first, cx);
-            sm.feed(&second, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&first, window, cx);
+            sm.feed(&second, window, cx);
         });
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), Some(52)));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.pending_count(), Some(52)));
     }
 
     #[test]
     fn feed_digit_in_insert_mode_does_not_seed_count() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        sm.update(&mut cx, |sm, _| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        sm.update(vcx, |sm, _| {
             sm.mode = StateValue::String("insert".into());
         });
         let stroke = key("5");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx);
         });
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
     #[test]
     fn feed_modified_digit_does_not_seed_count() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let stroke = key_with(
             "5",
             Modifiers {
@@ -1147,47 +1163,47 @@ mod tests {
                 ..Modifiers::default()
             },
         );
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx);
         });
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
     #[test]
     fn feed_unmapped_key_is_no_op() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let stroke = key("q");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx);
         });
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
     #[test]
     fn feed_matched_action_clears_pending_count() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { q -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        sm.update(&mut cx, |sm, _| sm.pending_count = Some(3));
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        sm.update(vcx, |sm, _| sm.pending_count = Some(3));
         let stroke = key("q");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx);
         });
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
     #[test]
     fn feed_matched_action_moves_pending_count_into_consumed() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { q -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        sm.update(&mut cx, |sm, _| sm.pending_count = Some(5));
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        sm.update(vcx, |sm, _| sm.pending_count = Some(5));
         let stroke = key("q");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx);
         });
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.pending_count(), None);
             assert_eq!(sm.consumed_count(), Some(5));
         });
@@ -1196,19 +1212,19 @@ mod tests {
     #[test]
     fn take_consumed_count_returns_and_clears() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        sm.update(&mut cx, |sm, _| sm.consumed_count = Some(7));
-        let taken = sm.update(&mut cx, |sm, _| sm.take_consumed_count());
+        let (sm, vcx) = new_state_machine(&mut cx);
+        sm.update(vcx, |sm, _| sm.consumed_count = Some(7));
+        let taken = sm.update(vcx, |sm, _| sm.take_consumed_count());
         assert_eq!(taken, Some(7));
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.consumed_count(), None));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.consumed_count(), None));
     }
 
     #[test]
     fn feed_uppercase_letter_normalizes_shift() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { G -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        sm.update(&mut cx, |sm, _| sm.pending_count = Some(3));
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        sm.update(vcx, |sm, _| sm.pending_count = Some(3));
         let stroke = key_with(
             "g",
             Modifiers {
@@ -1216,20 +1232,20 @@ mod tests {
                 ..Modifiers::default()
             },
         );
-        feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx);
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx);
         });
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.pending_count(), None));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.pending_count(), None));
     }
 
     #[test]
     fn feed_lowers_sequence_binding_in_order() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { s -> [SplitRight(), Quit()]; }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let stroke = key("s");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
-            sm.feed(&stroke, cx)
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&stroke, window, cx)
                 .iter()
                 .map(|a| a.kind())
                 .collect::<Vec<_>>()
@@ -1243,9 +1259,9 @@ mod tests {
         );
     }
 
-    fn set_mode(cx: &mut TestAppContext, sm: &Entity<InputStateMachine>, mode: &str) {
+    fn set_mode(vcx: &mut VisualTestContext, sm: &Entity<InputStateMachine>, mode: &str) {
         let mode = mode.to_string();
-        sm.update(cx, |sm, _| {
+        sm.update(vcx, |sm, _| {
             sm.mode = StateValue::String(mode.into());
         });
     }
@@ -1253,10 +1269,10 @@ mod tests {
     #[test]
     fn text_input_in_insert_mode_records_input() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
-        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("hi", None, cx));
-        sm.read_with(&cx, |sm, _| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("hi", None, cx));
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.last_text_input(), Some("hi"));
             assert_eq!(sm.marked_text(), None);
             assert_eq!(sm.marked_range(), None);
@@ -1266,24 +1282,24 @@ mod tests {
     #[test]
     fn text_input_in_normal_mode_is_dropped() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("hi", None, cx));
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_text_input(), None));
+        let (sm, vcx) = new_state_machine(&mut cx);
+        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("hi", None, cx));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.last_text_input(), None));
     }
 
     #[test]
     fn text_input_allowed_for_each_mode() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         for mode in ["insert", "reword_insert", "prompt", "run"] {
-            set_mode(&mut cx, &sm, mode);
-            sm.read_with(&cx, |sm, _| {
+            set_mode(vcx, &sm, mode);
+            sm.read_with(vcx, |sm, _| {
                 assert!(sm.text_input_allowed(), "expected {mode} to allow input");
             });
         }
         for mode in ["normal", "select"] {
-            set_mode(&mut cx, &sm, mode);
-            sm.read_with(&cx, |sm, _| {
+            set_mode(vcx, &sm, mode);
+            sm.read_with(vcx, |sm, _| {
                 assert!(!sm.text_input_allowed(), "expected {mode} to drop input");
             });
         }
@@ -1292,12 +1308,12 @@ mod tests {
     #[test]
     fn composition_update_sets_marked_state_in_insert() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        feed_in_app(vcx, &sm, |sm, _window, cx| {
             sm.composition_update("ka", Some(0..2), None, cx)
         });
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.marked_text(), Some("ka"));
             assert_eq!(sm.marked_range(), Some(0..2));
         });
@@ -1306,11 +1322,11 @@ mod tests {
     #[test]
     fn composition_update_dropped_in_normal() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        feed_in_app(&mut cx, &sm, |sm, cx| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        feed_in_app(vcx, &sm, |sm, _window, cx| {
             sm.composition_update("ka", Some(0..2), None, cx)
         });
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.marked_text(), None);
             assert_eq!(sm.marked_range(), None);
         });
@@ -1319,13 +1335,13 @@ mod tests {
     #[test]
     fn composition_commit_clears_marked_state() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        feed_in_app(vcx, &sm, |sm, _window, cx| {
             sm.composition_update("ka", Some(0..2), None, cx);
             sm.composition_commit(cx);
         });
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.marked_text(), None);
             assert_eq!(sm.marked_range(), None);
         });
@@ -1334,14 +1350,14 @@ mod tests {
     #[test]
     fn composition_commit_clears_even_in_normal_mode() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        feed_in_app(vcx, &sm, |sm, _window, cx| {
             sm.composition_update("ka", Some(0..2), None, cx);
         });
-        set_mode(&mut cx, &sm, "normal");
-        feed_in_app(&mut cx, &sm, |sm, cx| sm.composition_commit(cx));
-        sm.read_with(&cx, |sm, _| {
+        set_mode(vcx, &sm, "normal");
+        feed_in_app(vcx, &sm, |sm, _window, cx| sm.composition_commit(cx));
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.marked_text(), None);
             assert_eq!(sm.marked_range(), None);
         });
@@ -1350,13 +1366,13 @@ mod tests {
     #[test]
     fn text_input_clears_marked_state() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
-        feed_in_app(&mut cx, &sm, |sm, cx| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        feed_in_app(vcx, &sm, |sm, _window, cx| {
             sm.composition_update("ka", Some(0..2), None, cx);
             sm.text_input("か", None, cx);
         });
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.last_text_input(), Some("か"));
             assert_eq!(sm.marked_text(), None);
             assert_eq!(sm.marked_range(), None);
@@ -1371,12 +1387,12 @@ mod tests {
     fn text_input_then_feed_drops_raw_duplicate_in_insert() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
         let stroke = key("a");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("a", None, cx);
-            quit_kinds(sm.feed(&stroke, cx))
+            quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert!(kinds.is_empty(), "raw duplicate should drop, got {kinds:?}");
     }
@@ -1385,13 +1401,13 @@ mod tests {
     fn feed_after_text_input_only_drops_one_event() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
         let stroke = key("a");
-        let (first, second) = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let (first, second) = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("a", None, cx);
-            let first = quit_kinds(sm.feed(&stroke, cx));
-            let second = quit_kinds(sm.feed(&stroke, cx));
+            let first = quit_kinds(sm.feed(&stroke, window, cx));
+            let second = quit_kinds(sm.feed(&stroke, window, cx));
             (first, second)
         });
         assert!(first.is_empty(), "first feed should drop duplicate");
@@ -1402,11 +1418,11 @@ mod tests {
     fn text_input_in_normal_mode_does_not_set_marker() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let stroke = key("a");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("a", None, cx);
-            quit_kinds(sm.feed(&stroke, cx))
+            quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
@@ -1415,12 +1431,14 @@ mod tests {
     fn mode_change_after_text_input_clears_drop() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
-        sm.update(&mut cx, |sm, cx| sm.text_input("a", None, cx));
-        set_mode(&mut cx, &sm, "normal");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
+        sm.update(vcx, |sm, cx| sm.text_input("a", None, cx));
+        set_mode(vcx, &sm, "normal");
         let stroke = key("a");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
+            quit_kinds(sm.feed(&stroke, window, cx))
+        });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
 
@@ -1428,12 +1446,12 @@ mod tests {
     fn text_input_with_multi_char_does_not_set_marker() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
         let stroke = key("a");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("ka", None, cx);
-            quit_kinds(sm.feed(&stroke, cx))
+            quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
@@ -1442,14 +1460,14 @@ mod tests {
     fn non_matching_feed_clears_marker() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); b -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
         let a = key("a");
         let b = key("b");
-        let (first, second) = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let (first, second) = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("a", None, cx);
-            let first = quit_kinds(sm.feed(&b, cx));
-            let second = quit_kinds(sm.feed(&a, cx));
+            let first = quit_kinds(sm.feed(&b, window, cx));
+            let second = quit_kinds(sm.feed(&a, window, cx));
             (first, second)
         });
         assert_eq!(
@@ -1468,13 +1486,13 @@ mod tests {
     fn composition_update_clears_pending_duplicate() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
         let stroke = key("a");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("a", None, cx);
             sm.composition_update("k", Some(0..1), None, cx);
-            quit_kinds(sm.feed(&stroke, cx))
+            quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
@@ -1483,13 +1501,13 @@ mod tests {
     fn composition_commit_clears_pending_duplicate() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
         let stroke = key("a");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("a", None, cx);
             sm.composition_commit(cx);
-            quit_kinds(sm.feed(&stroke, cx))
+            quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
@@ -1498,8 +1516,8 @@ mod tests {
     fn feed_with_modifier_is_not_a_duplicate() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { C-a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
         let stroke = key_with(
             "a",
             Modifiers {
@@ -1507,14 +1525,14 @@ mod tests {
                 ..Modifiers::default()
             },
         );
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| {
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input("a", None, cx);
-            quit_kinds(sm.feed(&stroke, cx))
+            quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
     }
 
-    fn new_singleton_editor(cx: &mut TestAppContext, text: &str) -> Entity<Editor> {
+    fn new_singleton_editor(vcx: &mut VisualTestContext, text: &str) -> Entity<Editor> {
         use crate::{
             buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
             multi_buffer::MultiBuffer,
@@ -1523,24 +1541,24 @@ mod tests {
         use stoat::buffer::BufferId;
         use stoat_scheduler::{Executor, TestScheduler};
 
-        let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
+        let buffer = vcx.update(|_, cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
         let executor = Executor::new(Arc::new(TestScheduler::new()));
         let multi_buffer = {
             let buffer = buffer.clone();
-            cx.update(|cx| cx.new(|cx| MultiBuffer::singleton(buffer, cx)))
+            vcx.update(|_, cx| cx.new(|cx| MultiBuffer::singleton(buffer, cx)))
         };
         let display_map = {
             let buffer = buffer.clone();
-            cx.update(|cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
+            vcx.update(|_, cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
         };
-        let diff_map = cx.update(|cx| cx.new(|cx| DiffMap::new(buffer, cx)));
-        cx.update(|cx| {
+        let diff_map = vcx.update(|_, cx| cx.new(|cx| DiffMap::new(buffer, cx)));
+        vcx.update(|_, cx| {
             cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
         })
     }
 
-    fn editor_text(cx: &mut TestAppContext, editor: &Entity<Editor>) -> String {
-        editor.update(cx, |ed, cx| {
+    fn editor_text(vcx: &mut VisualTestContext, editor: &Entity<Editor>) -> String {
+        editor.update(vcx, |ed, cx| {
             ed.multi_buffer().read(cx).snapshot().text().to_string()
         })
     }
@@ -1548,47 +1566,43 @@ mod tests {
     #[test]
     fn text_input_with_active_editor_dispatches_to_apply() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
-        let editor = new_singleton_editor(&mut cx, "hello");
-        sm.update(&mut cx, |sm, _| {
-            sm.set_active_editor(Some(editor.downgrade()))
-        });
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        let editor = new_singleton_editor(vcx, "hello");
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
 
-        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("a", None, cx));
-        cx.run_until_parked();
+        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("a", None, cx));
+        vcx.run_until_parked();
 
-        assert_eq!(editor_text(&mut cx, &editor), "ahello");
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
+        assert_eq!(editor_text(vcx, &editor), "ahello");
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
     }
 
     #[test]
     fn text_input_without_active_editor_only_records() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
 
-        feed_in_app(&mut cx, &sm, |sm, cx| sm.text_input("a", None, cx));
+        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("a", None, cx));
 
-        sm.read_with(&cx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
     }
 
     #[test]
     fn composition_update_does_not_dispatch_to_editor() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "insert");
-        let editor = new_singleton_editor(&mut cx, "hello");
-        sm.update(&mut cx, |sm, _| {
-            sm.set_active_editor(Some(editor.downgrade()))
-        });
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        let editor = new_singleton_editor(vcx, "hello");
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
 
-        feed_in_app(&mut cx, &sm, |sm, cx| {
+        feed_in_app(vcx, &sm, |sm, _window, cx| {
             sm.composition_update("k", Some(0..1), None, cx)
         });
-        cx.run_until_parked();
+        vcx.run_until_parked();
 
-        assert_eq!(editor_text(&mut cx, &editor), "hello");
+        assert_eq!(editor_text(vcx, &editor), "hello");
     }
 
     #[test]
@@ -1640,16 +1654,6 @@ mod tests {
         assert!(keystroke_to_key_event(&stroke).is_none());
     }
 
-    fn new_state_machine_in_window(
-        cx: &mut TestAppContext,
-    ) -> (Entity<InputStateMachine>, &mut VisualTestContext) {
-        let (workspace, vcx) =
-            cx.add_window_view(|_, cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
-        let weak = workspace.downgrade();
-        let sm = vcx.update(|_, cx| cx.new(|_| InputStateMachine::new(weak, empty_keymap())));
-        (sm, vcx)
-    }
-
     /// Anchor entity that owns its own focus handle. Used to seed
     /// focus targets in the focus-output tests so we can verify
     /// `transition_mode` and `restore_prev_focus` move focus to the
@@ -1684,7 +1688,7 @@ mod tests {
     #[test]
     fn transition_mode_into_insert_focuses_editor_target() {
         let mut cx = TestAppContext::single();
-        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let target = make_focus_handle(vcx);
         sm.update(vcx, |sm, _| {
             sm.set_editor_focus_target(Some(target.clone()));
@@ -1704,7 +1708,7 @@ mod tests {
     #[test]
     fn transition_mode_into_insert_without_target_is_no_op() {
         let mut cx = TestAppContext::single();
-        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
 
         sm.update_in(vcx, |sm, window, cx| {
             sm.transition_mode("insert", window, cx);
@@ -1716,7 +1720,7 @@ mod tests {
     #[test]
     fn transition_between_input_modes_does_not_refocus() {
         let mut cx = TestAppContext::single();
-        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let editor_target = make_focus_handle(vcx);
         let other_handle = make_focus_handle(vcx);
         sm.update(vcx, |sm, _| {
@@ -1743,7 +1747,7 @@ mod tests {
     #[test]
     fn transition_into_non_input_mode_does_not_focus_editor() {
         let mut cx = TestAppContext::single();
-        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let editor_target = make_focus_handle(vcx);
         let other_handle = make_focus_handle(vcx);
         sm.update(vcx, |sm, _| {
@@ -1763,9 +1767,63 @@ mod tests {
     }
 
     #[test]
+    fn set_mode_dispatches_set_mode_binding_to_transition_mode() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { i -> SetMode(insert); }");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        let stroke = key("i");
+
+        let actions = feed_in_app(vcx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+
+        assert!(actions.is_empty(), "SetMode is intercepted, not dispatched");
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.mode(), "insert"));
+    }
+
+    #[test]
+    fn set_mode_focuses_editor_target_on_entry() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap("on key { i -> SetMode(insert); }");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        let target = make_focus_handle(vcx);
+        sm.update(vcx, |sm, _| {
+            sm.set_editor_focus_target(Some(target.clone()));
+        });
+        let stroke = key("i");
+
+        feed_in_app(vcx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+
+        let focused = vcx.update(|window, _| target.is_focused(window));
+        assert!(
+            focused,
+            "editor target should be focused after SetMode(insert) fires"
+        );
+    }
+
+    #[test]
+    fn set_mode_from_set_mode_does_not_appear_in_dispatched_actions() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap(
+            "on key {\
+                mode == insert { Escape -> SetMode(normal); }\
+            }",
+        );
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
+        let stroke = key("escape");
+
+        let actions = feed_in_app(vcx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
+
+        assert!(
+            actions.is_empty(),
+            "SetMode(normal) should not surface as a dispatched action"
+        );
+        sm.read_with(vcx, |sm, _| assert_eq!(sm.mode(), "normal"));
+    }
+
+    #[test]
     fn capture_then_restore_round_trips() {
         let mut cx = TestAppContext::single();
-        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let original = make_focus_handle(vcx);
         let other = make_focus_handle(vcx);
         vcx.update(|window, _| window.focus(&original));
@@ -1787,7 +1845,7 @@ mod tests {
     #[test]
     fn restore_prev_focus_without_capture_is_no_op() {
         let mut cx = TestAppContext::single();
-        let (sm, vcx) = new_state_machine_in_window(&mut cx);
+        let (sm, vcx) = new_state_machine(&mut cx);
         let original = make_focus_handle(vcx);
         vcx.update(|window, _| window.focus(&original));
 
@@ -1800,14 +1858,14 @@ mod tests {
     #[test]
     fn set_pending_find_arms_chord() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "normal");
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "normal");
 
-        sm.update(&mut cx, |sm, cx| {
+        sm.update(vcx, |sm, cx| {
             sm.set_pending_find(FindKind::NextChar, false, 1, cx)
         });
 
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(
                 sm.pending_find().copied(),
                 Some(PendingFind {
@@ -1822,14 +1880,14 @@ mod tests {
     #[test]
     fn char_keystroke_consumes_chord_and_emits_apply_action() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "normal");
-        sm.update(&mut cx, |sm, cx| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "normal");
+        sm.update(vcx, |sm, cx| {
             sm.set_pending_find(FindKind::TillNextChar, true, 3, cx)
         });
 
         let stroke = key("x");
-        let actions = feed_in_app(&mut cx, &sm, |sm, cx| sm.feed(&stroke, cx));
+        let actions = feed_in_app(vcx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
 
         assert_eq!(actions.len(), 1);
         let apply = actions[0]
@@ -1840,35 +1898,37 @@ mod tests {
         assert_eq!(apply.ch, 'x');
         assert!(apply.extend);
         assert_eq!(apply.count, 3);
-        sm.read_with(&cx, |sm, _| assert!(sm.pending_find().is_none()));
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_find().is_none()));
     }
 
     #[test]
     fn non_char_keystroke_clears_chord_and_falls_through() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { Escape -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "normal");
-        sm.update(&mut cx, |sm, cx| {
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "normal");
+        sm.update(vcx, |sm, cx| {
             sm.set_pending_find(FindKind::NextChar, false, 1, cx)
         });
 
         let stroke = key("escape");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
+            quit_kinds(sm.feed(&stroke, window, cx))
+        });
 
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
-        sm.read_with(&cx, |sm, _| assert!(sm.pending_find().is_none()));
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_find().is_none()));
     }
 
     #[test]
     fn set_pending_mark_arms_chord() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "normal");
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "normal");
 
-        sm.update(&mut cx, |sm, cx| sm.set_pending_mark(MarkRequest::Set, cx));
+        sm.update(vcx, |sm, cx| sm.set_pending_mark(MarkRequest::Set, cx));
 
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.pending_mark(), Some(MarkRequest::Set));
         });
     }
@@ -1876,14 +1936,14 @@ mod tests {
     #[test]
     fn char_keystroke_consumes_mark_chord_and_emits_apply_action() {
         let mut cx = TestAppContext::single();
-        let sm = new_state_machine(&mut cx);
-        set_mode(&mut cx, &sm, "normal");
-        sm.update(&mut cx, |sm, cx| {
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "normal");
+        sm.update(vcx, |sm, cx| {
             sm.set_pending_mark(MarkRequest::GotoExact, cx)
         });
 
         let stroke = key("m");
-        let actions = feed_in_app(&mut cx, &sm, |sm, cx| sm.feed(&stroke, cx));
+        let actions = feed_in_app(vcx, &sm, |sm, window, cx| sm.feed(&stroke, window, cx));
 
         assert_eq!(actions.len(), 1);
         let apply = actions[0]
@@ -1892,39 +1952,43 @@ mod tests {
             .expect("ApplyMarkChar");
         assert_eq!(apply.request, MarkRequest::GotoExact);
         assert_eq!(apply.ch, 'm');
-        sm.read_with(&cx, |sm, _| assert!(sm.pending_mark().is_none()));
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_mark().is_none()));
     }
 
     #[test]
     fn non_char_keystroke_clears_mark_chord_and_falls_through() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { Escape -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "normal");
-        sm.update(&mut cx, |sm, cx| sm.set_pending_mark(MarkRequest::Set, cx));
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "normal");
+        sm.update(vcx, |sm, cx| sm.set_pending_mark(MarkRequest::Set, cx));
 
         let stroke = key("escape");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
+            quit_kinds(sm.feed(&stroke, window, cx))
+        });
 
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
-        sm.read_with(&cx, |sm, _| assert!(sm.pending_mark().is_none()));
+        sm.read_with(vcx, |sm, _| assert!(sm.pending_mark().is_none()));
     }
 
     #[test]
     fn pending_find_outside_normal_or_select_is_inert() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); }");
-        let sm = new_state_machine_with_keymap(&mut cx, keymap);
-        set_mode(&mut cx, &sm, "insert");
-        sm.update(&mut cx, |sm, cx| {
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "insert");
+        sm.update(vcx, |sm, cx| {
             sm.set_pending_find(FindKind::NextChar, false, 1, cx)
         });
 
         let stroke = key("a");
-        let kinds = feed_in_app(&mut cx, &sm, |sm, cx| quit_kinds(sm.feed(&stroke, cx)));
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
+            quit_kinds(sm.feed(&stroke, window, cx))
+        });
 
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
-        sm.read_with(&cx, |sm, _| {
+        sm.read_with(vcx, |sm, _| {
             assert_eq!(
                 sm.pending_find().copied(),
                 Some(PendingFind {

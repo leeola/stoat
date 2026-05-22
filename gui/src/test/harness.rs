@@ -144,7 +144,7 @@ impl TestHarness {
                     let actions = w
                         .input_state_machine()
                         .clone()
-                        .update(cx, |sm, cx| sm.feed(&keystroke, cx));
+                        .update(cx, |sm, cx| sm.feed(&keystroke, window, cx));
                     for action in actions {
                         w.dispatch_action(action, window, cx);
                     }
