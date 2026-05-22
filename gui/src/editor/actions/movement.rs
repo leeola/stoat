@@ -45,6 +45,15 @@ pub enum ViewAlign {
     Bottom,
 }
 
+/// Direction for [`Editor::handle_scroll_view`]. `Up` slides
+/// the viewport toward row 0; `Down` slides toward the buffer's
+/// last row.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ScrollDir {
+    Up,
+    Down,
+}
+
 /// Direction + landing offset for the after-key
 /// [`Editor::handle_find_char`] chord. `Next`/`Prev` land on the
 /// matched character; `TillNext`/`TillPrev` land one position
@@ -507,6 +516,24 @@ impl Editor {
     /// `Bottom`). Clamps the resulting scroll row against the
     /// buffer's last row so the viewport never advances past the
     /// end. The cursor itself does not move.
+    /// Scroll the viewport `count` rows in `dir` without moving
+    /// any selections. Clamps `Down` to the buffer's last
+    /// visible scroll row so the viewport never advances past
+    /// the end; `Up` clamps to row 0 via
+    /// `scroll_row.saturating_sub`.
+    pub fn handle_scroll_view(&mut self, dir: ScrollDir, count: u32, cx: &mut Context<'_, Self>) {
+        let count = count.max(1);
+        let viewport = self.viewport_rows_for_page().max(1);
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let max_row = snapshot.rope().max_point().row;
+        let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
+        let new_scroll = match dir {
+            ScrollDir::Up => self.scroll_row().saturating_sub(count),
+            ScrollDir::Down => self.scroll_row().saturating_add(count).min(max_scroll),
+        };
+        self.set_scroll_row(new_scroll, cx);
+    }
+
     pub fn handle_align_view(&mut self, align: ViewAlign, cx: &mut Context<'_, Self>) {
         let viewport = self.viewport_rows_for_page().max(1);
         let snapshot = self.multi_buffer.read(cx).snapshot();
@@ -1175,6 +1202,74 @@ mod tests {
         editor.update(&mut cx, |ed, cx| ed.handle_align_view(ViewAlign::Top, cx));
 
         assert_eq!(scroll_row(&editor, &mut cx), 2);
+    }
+
+    #[test]
+    fn scroll_view_down_advances_scroll_row_by_one() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_scroll_view(ScrollDir::Down, 1, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 1);
+    }
+
+    #[test]
+    fn scroll_view_up_decreases_scroll_row() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.set_scroll_row(5, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_scroll_view(ScrollDir::Up, 2, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 3);
+    }
+
+    #[test]
+    fn scroll_view_up_at_top_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_scroll_view(ScrollDir::Up, 1, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 0);
+    }
+
+    #[test]
+    fn scroll_view_down_clamps_at_buffer_end() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(12));
+        set_viewport(&editor, &mut cx, 10);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_scroll_view(ScrollDir::Down, 50, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 2);
+    }
+
+    #[test]
+    fn scroll_view_does_not_move_cursor() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(30));
+        set_viewport(&editor, &mut cx, 10);
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_scroll_view(ScrollDir::Down, 5, cx)
+        });
+
+        assert_eq!(scroll_row(&editor, &mut cx), 5);
+        assert_eq!(cursor_display_row(&editor, &mut cx), 0);
     }
 
     #[test]

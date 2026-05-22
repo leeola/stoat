@@ -1565,6 +1565,30 @@ impl Workspace {
                     });
                 }
             },
+            ActionKind::ScrollUp => {
+                let count = self.take_count(cx);
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_scroll_view(
+                            crate::editor::actions::movement::ScrollDir::Up,
+                            count,
+                            cx,
+                        )
+                    });
+                }
+            },
+            ActionKind::ScrollDown => {
+                let count = self.take_count(cx);
+                if let Some(editor) = self.active_editor(cx) {
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_scroll_view(
+                            crate::editor::actions::movement::ScrollDir::Down,
+                            count,
+                            cx,
+                        )
+                    });
+                }
+            },
             ActionKind::MatchBrackets => {
                 if let Some(editor) = self.active_editor(cx) {
                     editor.update(cx, |ed, cx| ed.handle_match_brackets(cx));
@@ -6311,6 +6335,35 @@ mod tests {
             crate::editor::search::SearchDirection::Forward
         );
         assert_eq!(cursor_offsets(vcx, &editor), vec![8]);
+    }
+
+    #[test]
+    fn dispatch_scroll_down_advances_scroll_row_without_moving_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let body = (0..30)
+            .map(|i| format!("row{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let editor = new_singleton_editor(vcx, &body);
+        editor.update(vcx, |ed, cx| {
+            ed.set_cell_size(size(px(8.0), px(16.0)), cx);
+            ed.set_text_region_bounds(
+                Bounds {
+                    origin: Point::new(px(0.0), px(0.0)),
+                    size: size(px(160.0), px(160.0)),
+                },
+                cx,
+            );
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::ScrollDown);
+        vcx.run_until_parked();
+
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 1);
+        assert_eq!(cursor_offsets(vcx, &editor), vec![0]);
     }
 
     #[test]
