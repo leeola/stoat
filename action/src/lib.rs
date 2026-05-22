@@ -91,7 +91,10 @@ pub use defs::{
         ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
-    workspace::{CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace},
+    workspace::{
+        CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
+        SwitchWorkspace,
+    },
 };
 pub use kind::ActionKind;
 pub use param::{ParamDef, ParamError, ParamKind, ParamValue};

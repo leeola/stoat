@@ -1701,6 +1701,9 @@ impl Workspace {
             ActionKind::OpenJumplistPicker => {
                 crate::jumplist_picker::open_jumplist_picker(self, window, cx)
             },
+            ActionKind::OpenWorkspacePicker => {
+                crate::workspace_picker::open_workspace_picker(self, window, cx)
+            },
             ActionKind::OpenGlobalSearch => {
                 crate::global_search::open_global_search(self, window, cx)
             },

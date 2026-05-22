@@ -44,6 +44,16 @@ define_action!(
     ActionPriority::Normal
 );
 
+define_action!(
+    OpenWorkspacePickerDef,
+    OpenWorkspacePicker,
+    "OpenWorkspacePicker",
+    ActionKind::OpenWorkspacePicker,
+    "resume a saved workspace",
+    "Open a picker listing every persisted workspace under the current git root. Confirm rehydrates the chosen workspace into the active window, replacing the current panes, buffers, docks, and Claude session.",
+    ActionPriority::Common
+);
+
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,
@@ -113,6 +123,8 @@ mod tests {
         assert_eq!(SwitchWorkspace.def().name(), "SwitchWorkspace");
         assert_eq!(CloseWorkspace.kind(), ActionKind::CloseWorkspace);
         assert_eq!(CloseWorkspace.def().name(), "CloseWorkspace");
+        assert_eq!(OpenWorkspacePicker.kind(), ActionKind::OpenWorkspacePicker);
+        assert_eq!(OpenWorkspacePicker.def().name(), "OpenWorkspacePicker");
         let rename = RenameWorkspace {
             name: "x".to_string(),
         };
@@ -126,6 +138,7 @@ mod tests {
         assert!(CopyWorkspace.def().params().is_empty());
         assert!(SwitchWorkspace.def().params().is_empty());
         assert!(CloseWorkspace.def().params().is_empty());
+        assert!(OpenWorkspacePicker.def().params().is_empty());
     }
 
     #[test]

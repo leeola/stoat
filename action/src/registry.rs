@@ -89,7 +89,8 @@ use crate::{
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         workspace::{
-            CloseWorkspace, CopyWorkspace, NewWorkspace, RenameWorkspace, SwitchWorkspace,
+            CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
+            SwitchWorkspace,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -601,6 +602,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CopyWorkspace::DEF, |_| Ok(Box::new(CopyWorkspace)));
     add(SwitchWorkspace::DEF, |_| Ok(Box::new(SwitchWorkspace)));
     add(CloseWorkspace::DEF, |_| Ok(Box::new(CloseWorkspace)));
+    add(OpenWorkspacePicker::DEF, |_| {
+        Ok(Box::new(OpenWorkspacePicker))
+    });
     add(RenameWorkspace::DEF, |params| {
         let raw = params
             .first()
@@ -807,6 +811,7 @@ mod tests {
         "CopyWorkspace",
         "SwitchWorkspace",
         "CloseWorkspace",
+        "OpenWorkspacePicker",
         "HelpSelectPrev",
         "HelpSelectNext",
         "HelpScopeToggle",
@@ -987,7 +992,7 @@ mod tests {
         // + 5 edit-action primitives (DeleteForward, DeleteBackward, Insert, Append, InsertNewline)
         //   the GUI dispatches via the per-handler edit-action module.
         // + 1 ShellInputSubmit (palette-invisible: dismisses the active ShellInputModal).
-        assert_eq!(all().count(), 290);
+        assert_eq!(all().count(), 291);
     }
 
     #[test]
