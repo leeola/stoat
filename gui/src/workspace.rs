@@ -1412,6 +1412,7 @@ impl Workspace {
                 crate::editor::actions::numbers::handle_decrement(self, count, cx);
             },
             ActionKind::CodeAction => self.dispatch_code_action(window, cx),
+            ActionKind::FormatSelections => self.dispatch_format_selections(window, cx),
             ActionKind::GotoDefinition => {
                 crate::lsp::goto::spawn_goto(
                     self,
@@ -3833,6 +3834,101 @@ impl Workspace {
     /// translates the response into picker entries, and shows the
     /// modal. No-op when no editor is active, the buffer has no
     /// file path, or no language is registered for that path.
+    fn dispatch_format_selections(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
+        let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
+            return;
+        };
+        let Some(path) = editor.read(cx).file_path().map(Path::to_path_buf) else {
+            return;
+        };
+        let registry = &cx.global::<crate::globals::LanguageRegistry>().0;
+        let Some(language) = registry.for_path(&path) else {
+            return;
+        };
+        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
+        let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
+        let rope = mb_snapshot.rope().clone();
+        let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
+            return;
+        };
+        let start_offset = mb_snapshot.resolve_anchor(&primary.start);
+        let end_offset = mb_snapshot.resolve_anchor(&primary.end);
+        let (lo, hi) = if start_offset <= end_offset {
+            (start_offset, end_offset)
+        } else {
+            (end_offset, start_offset)
+        };
+        let Some(uri) = path.to_str().and_then(|s| {
+            <lsp_types::Uri as std::str::FromStr>::from_str(&format!("file://{s}")).ok()
+        }) else {
+            return;
+        };
+        let workspace_root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        let weak_editor = editor.downgrade();
+        let weak_workspace = cx.weak_entity();
+        cx.spawn_in(window, async move |_, cx| {
+            let server = match host.launch(&language, &workspace_root).await {
+                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::format",
+                        ?err,
+                        "failed to launch LSP server for format",
+                    );
+                    return;
+                },
+            };
+            let _ = server.initialize(Some(uri.clone())).await;
+            if !server.supports_feature(stoat::host::LanguageServerFeature::Format) {
+                return;
+            }
+            let encoding = server.offset_encoding();
+            let range = stoat::lsp::util::byte_range_to_lsp_range(&rope, lo..hi, encoding);
+            let params = lsp_types::DocumentRangeFormattingParams {
+                text_document: lsp_types::TextDocumentIdentifier { uri: uri.clone() },
+                range,
+                options: lsp_types::FormattingOptions::default(),
+                work_done_progress_params: Default::default(),
+            };
+            let edits = match server.range_formatting(params).await {
+                Ok(Some(edits)) if !edits.is_empty() => edits,
+                Ok(_) => return,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat_gui::lsp::format",
+                        ?err,
+                        "range_formatting request failed",
+                    );
+                    return;
+                },
+            };
+            #[allow(clippy::mutable_key_type)]
+            let mut changes: HashMap<lsp_types::Uri, Vec<lsp_types::TextEdit>> = HashMap::new();
+            changes.insert(uri.clone(), edits);
+            let edit = lsp_types::WorkspaceEdit {
+                changes: Some(changes),
+                document_changes: None,
+                change_annotations: None,
+            };
+            let _ = weak_workspace.clone().update_in(cx, |_, _, cx| {
+                crate::lsp::edit_apply::apply_workspace_edit_to_buffer(
+                    &edit,
+                    &uri,
+                    &rope,
+                    encoding,
+                    &weak_editor,
+                    &weak_workspace,
+                    cx,
+                );
+            });
+        })
+        .detach();
+    }
+
     fn dispatch_code_action(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let weak_editor = self.input_state_machine.read(cx).active_editor().cloned();
         let Some(editor) = weak_editor.and_then(|w| w.upgrade()) else {
@@ -5856,6 +5952,104 @@ mod tests {
             editor.read_with(vcx, |ed, _| ed.hover_position()),
             Some((0, 4))
         );
+    }
+
+    #[test]
+    fn dispatch_format_selections_applies_range_edits_from_lsp() {
+        use crate::globals::{FsHostGlobal, FsWatchHostGlobal, LspHostGlobal};
+        use stoat::host::{
+            fake::{FakeLsp, FakeLspHost},
+            LspHost,
+        };
+        use stoat_host::NoopFsWatcher;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let mut cx = TestAppContext::single();
+        let lsp = Arc::new(FakeLsp::new());
+        lsp.set_capabilities(lsp_types::ServerCapabilities {
+            document_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+            document_range_formatting_provider: Some(lsp_types::OneOf::Left(true)),
+            ..Default::default()
+        });
+        lsp.set_range_formatting(
+            "/repo/main.rs",
+            vec![lsp_types::TextEdit {
+                range: lsp_types::Range {
+                    start: lsp_types::Position {
+                        line: 1,
+                        character: 0,
+                    },
+                    end: lsp_types::Position {
+                        line: 1,
+                        character: 4,
+                    },
+                },
+                new_text: String::new(),
+            }],
+        );
+
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/repo/main.rs", b"fn main() {\n    let x = 1;\n}\n");
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn stoat::host::FsHost>));
+            cx.set_global(FsWatchHostGlobal(
+                Arc::new(NoopFsWatcher::new()) as Arc<dyn stoat::host::FsWatchHost>
+            ));
+            cx.set_global(ExecutorGlobal(Executor::new(
+                Arc::new(TestScheduler::new()),
+            )));
+            cx.set_global(LspHostGlobal(
+                Arc::new(FakeLspHost::new(lsp.clone())) as Arc<dyn LspHost>
+            ));
+            cx.set_global(crate::globals::LanguageRegistry(
+                stoat_language::LanguageRegistry::standard(),
+            ));
+        });
+        let (ws, vcx) =
+            cx.add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/repo"), cx));
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/repo/main.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let editor = ws
+            .read_with(vcx, |w, cx| {
+                w.buffer_for_path(Path::new("/repo/main.rs"), cx)
+                    .and_then(|buffer| {
+                        let target = buffer.entity_id();
+                        let pane_tree = w.pane_tree().read(cx);
+                        for pane_id in pane_tree.split_pane_ids() {
+                            let pane = pane_tree.pane(pane_id)?;
+                            for item in pane.read(cx).items() {
+                                if let Ok(editor) =
+                                    item.to_any_view().downcast::<crate::editor::Editor>()
+                                {
+                                    let singleton = editor
+                                        .read(cx)
+                                        .multi_buffer()
+                                        .read(cx)
+                                        .as_singleton()
+                                        .cloned();
+                                    if singleton.as_ref().map(Entity::entity_id) == Some(target) {
+                                        return Some(editor);
+                                    }
+                                }
+                            }
+                        }
+                        None
+                    })
+            })
+            .expect("editor for opened file");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::FormatSelections);
+        vcx.run_until_parked();
+
+        let text = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer().read(cx).snapshot().text().to_string()
+        });
+        assert_eq!(text, "fn main() {\nlet x = 1;\n}\n");
     }
 
     #[test]
