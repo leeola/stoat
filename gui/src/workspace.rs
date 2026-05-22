@@ -5788,6 +5788,34 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_drag_select_to_from_editor_listener_path_extends_selection_without_panic() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        editor.update(vcx, |ed, cx| {
+            ed.set_workspace(Some(ws.downgrade()));
+            ed.set_cell_size(size(px(10.0), px(20.0)), cx);
+            ed.set_text_region_bounds(
+                Bounds {
+                    origin: Point::default(),
+                    size: size(px(800.0), px(600.0)),
+                },
+                cx,
+            );
+            ed.set_cursor_at_grid(0, 2, cx);
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.dispatch_drag_select_to(Point::new(px(70.0), px(0.0)), window, cx);
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(selection_offsets(vcx, &editor), vec![(2, 7)]);
+    }
+
+    #[test]
     fn dispatch_hover_at_sets_position_on_active_editor() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");

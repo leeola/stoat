@@ -2378,7 +2378,7 @@ impl Editor {
         });
     }
 
-    fn dispatch_drag_select_to(
+    pub(crate) fn dispatch_drag_select_to(
         &mut self,
         position: Point<Pixels>,
         window: &mut Window,
@@ -2390,12 +2390,14 @@ impl Editor {
         let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
             return;
         };
-        workspace.update(cx, |w, cx| {
-            w.dispatch_action(
-                Box::new(crate::actions::DragSelectTo { row, col }),
-                window,
-                cx,
-            );
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.dispatch_action(
+                    Box::new(crate::actions::DragSelectTo { row, col }),
+                    window,
+                    cx,
+                );
+            });
         });
     }
 
