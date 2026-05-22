@@ -1704,6 +1704,9 @@ impl Workspace {
             ActionKind::OpenWorkspacePicker => {
                 crate::workspace_picker::open_workspace_picker(self, window, cx)
             },
+            ActionKind::OpenCheckpointPicker => {
+                crate::claude_checkpoint_picker::open_claude_checkpoint_picker(self, window, cx)
+            },
             ActionKind::OpenGlobalSearch => {
                 crate::global_search::open_global_search(self, window, cx)
             },

@@ -18,6 +18,7 @@ mod buffer;
 mod buffer_picker;
 mod buffer_registry;
 mod claude_chat;
+mod claude_checkpoint_picker;
 mod claude_permission_modal;
 mod claude_tool_card;
 mod command_palette;
