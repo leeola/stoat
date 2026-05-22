@@ -448,6 +448,10 @@ on key {
         Tab -> SmartTab();
         Backspace -> DeleteBackward();
         Delete -> DeleteForward();
+        Left -> MoveLeft();
+        Right -> MoveRight();
+        Up -> MoveUp();
+        Down -> MoveDown();
         Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();
