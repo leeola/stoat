@@ -2359,7 +2359,7 @@ impl Editor {
         Some(mouse::point_to_grid(elem, cell))
     }
 
-    fn dispatch_click_at(
+    pub(crate) fn dispatch_click_at(
         &mut self,
         position: Point<Pixels>,
         window: &mut Window,
@@ -2371,8 +2371,10 @@ impl Editor {
         let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
             return;
         };
-        workspace.update(cx, |w, cx| {
-            w.dispatch_action(Box::new(crate::actions::ClickAt { row, col }), window, cx);
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |w, cx| {
+                w.dispatch_action(Box::new(crate::actions::ClickAt { row, col }), window, cx);
+            });
         });
     }
 
