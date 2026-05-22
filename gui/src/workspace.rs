@@ -105,6 +105,11 @@ pub struct Workspace {
     /// when the workspace drops; absent when no global is
     /// registered (most tests, headless runs).
     _permission_prompt_poll: Option<Task<()>>,
+    /// Background task that periodically writes the workspace state
+    /// to its default path. Lazy-started on first [`Render`] so the
+    /// workspace is fully constructed before saves begin; dropped
+    /// when the workspace drops.
+    _periodic_save: Option<Task<()>>,
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     _active_editor_subscription: Option<Subscription>,
@@ -116,6 +121,12 @@ pub struct Workspace {
 /// [`FsWatcherDriver`]'s tick so the two background drainers share
 /// a uniform cadence.
 const PERMISSION_PROMPT_TICK: Duration = Duration::from_millis(50);
+
+/// Interval between periodic workspace state saves. Trades off
+/// snapshot freshness against IO churn; 30 s keeps an unclean
+/// shutdown's data loss bounded to half a minute of session work
+/// without pounding the disk while the user types.
+const PERIODIC_SAVE_INTERVAL: Duration = Duration::from_secs(30);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum WorkspaceEvent {
@@ -299,6 +310,7 @@ impl Workspace {
             rebase_active: None,
             permission_prompt_queue: VecDeque::new(),
             _permission_prompt_poll: None,
+            _periodic_save: None,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             _active_editor_subscription: None,
@@ -727,6 +739,33 @@ impl Workspace {
             pane_items,
             docks,
             buffers,
+        }
+    }
+
+    /// Save the workspace's state to its canonical
+    /// `<XDG_STATE_HOME>/stoat/workspaces/<git_root_hash>/<uid>.ron`
+    /// path. Silent no-op when no [`FsHostGlobal`] is installed
+    /// (headless tests) or [`Self::is_fresh`] is true. IO and path
+    /// resolution failures are logged via `tracing::warn!` and
+    /// swallowed -- this is invoked from background lifecycle
+    /// triggers (periodic timer, release observer) where there is
+    /// no surface to propagate an error to.
+    pub fn save_state_to_default_path(&self, cx: &App) {
+        if self.is_fresh {
+            return;
+        }
+        let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
+        let path = match crate::workspace_persist::state_path(&self.git_root, self.uid, &*fs) {
+            Ok(path) => path,
+            Err(err) => {
+                tracing::warn!(?err, git_root = ?self.git_root, "resolve workspace state path failed");
+                return;
+            },
+        };
+        if let Err(err) = self.save_state(&path, &*fs, cx) {
+            tracing::warn!(?err, ?path, "workspace save_state failed");
         }
     }
 
@@ -4064,6 +4103,29 @@ impl Workspace {
 /// headless runs) so the workspace does not park a no-op task. The
 /// task uses [`gpui::Context::spawn_in`] so its update hops land in
 /// window context for [`crate::modal_layer::ModalLayer::show_modal`].
+/// Spawn the periodic save loop that flushes the workspace's
+/// state every [`PERIODIC_SAVE_INTERVAL`]. The loop exits when the
+/// workspace's weak handle no longer upgrades (i.e. the workspace
+/// has been dropped); the returned task should be stored on the
+/// workspace so it dies with it.
+///
+/// Returns `None` when the [`ExecutorGlobal`] is absent, which
+/// makes the save loop a silent no-op in headless test contexts
+/// that have not installed an executor.
+fn spawn_periodic_save(cx: &mut Context<'_, Workspace>) -> Option<Task<()>> {
+    let executor = cx.try_global::<ExecutorGlobal>().map(|g| g.0.clone())?;
+    let task = cx.spawn(async move |weak_workspace, cx| loop {
+        executor.timer(PERIODIC_SAVE_INTERVAL).await;
+        let live = weak_workspace.read_with(cx, |workspace, app| {
+            workspace.save_state_to_default_path(app);
+        });
+        if live.is_err() {
+            break;
+        }
+    });
+    Some(task)
+}
+
 fn spawn_permission_prompt_poll(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
@@ -4516,6 +4578,9 @@ impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         if self._permission_prompt_poll.is_none() {
             self._permission_prompt_poll = spawn_permission_prompt_poll(window, cx);
+        }
+        if self._periodic_save.is_none() {
+            self._periodic_save = spawn_periodic_save(cx);
         }
         let title = self.compute_window_title(cx);
         if self.last_window_title.as_ref() != Some(&title) {
@@ -11164,6 +11229,92 @@ mod tests {
                 .expect("restore")
         });
         assert!(!restored);
+    }
+
+    #[test]
+    fn save_state_to_default_path_writes_to_canonical_path() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.update(vcx, |w, _| w.mark_dirty());
+
+        let uid = ws.read_with(vcx, |w, _| w.uid());
+        let expected_path =
+            stoat::workspace::persist::state_path_for(Path::new("/tmp/repo"), uid, &*fs_dyn)
+                .expect("state path");
+
+        ws.read_with(vcx, |w, cx| w.save_state_to_default_path(cx));
+
+        assert!(
+            stoat::host::FsHost::exists(&*fs, &expected_path),
+            "state file should exist",
+        );
+    }
+
+    #[test]
+    fn save_state_to_default_path_no_op_when_fresh() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        let uid = ws.read_with(vcx, |w, _| w.uid());
+        let expected_path =
+            stoat::workspace::persist::state_path_for(Path::new("/tmp/repo"), uid, &*fs_dyn)
+                .expect("state path");
+
+        ws.read_with(vcx, |w, cx| w.save_state_to_default_path(cx));
+
+        assert!(
+            !stoat::host::FsHost::exists(&*fs, &expected_path),
+            "fresh workspace should not produce a state file",
+        );
+    }
+
+    #[test]
+    fn save_state_to_default_path_no_op_without_fs_host() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, _| w.mark_dirty());
+
+        ws.read_with(vcx, |w, cx| w.save_state_to_default_path(cx));
+    }
+
+    #[test]
+    fn periodic_save_writes_state_after_interval() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let scheduler = Arc::new(stoat_scheduler::TestScheduler::new());
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn stoat::host::FsHost>));
+            cx.set_global(FsWatchHostGlobal(
+                Arc::new(stoat_host::NoopFsWatcher::new()) as Arc<dyn stoat::host::FsWatchHost>,
+            ));
+            cx.set_global(ExecutorGlobal(scheduler.executor()));
+        });
+        let (ws, vcx) = cx
+            .add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+        ws.update(vcx, |w, _| w.mark_dirty());
+        let uid = ws.read_with(vcx, |w, _| w.uid());
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        let expected_path =
+            stoat::workspace::persist::state_path_for(Path::new("/tmp/repo"), uid, &*fs_dyn)
+                .expect("state path");
+
+        let task = ws.update(vcx, |_, cx| spawn_periodic_save(cx));
+        assert!(task.is_some(), "expected task when ExecutorGlobal is set");
+        ws.update(vcx, |w, _| w._periodic_save = task);
+        vcx.run_until_parked();
+
+        scheduler.advance_clock(PERIODIC_SAVE_INTERVAL);
+        vcx.run_until_parked();
+
+        assert!(
+            stoat::host::FsHost::exists(&*fs, &expected_path),
+            "periodic save should have written the state file",
+        );
     }
 
     #[test]

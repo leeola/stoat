@@ -10,7 +10,7 @@ use crate::{
 };
 use gpui::{
     div, AppContext, Context, Entity, FocusHandle, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window,
+    SharedString, Styled, Subscription, Window,
 };
 use std::path::{Path, PathBuf};
 use stoat::buffer::BufferId;
@@ -19,6 +19,11 @@ pub(crate) struct StoatApp {
     workspace: Entity<Workspace>,
     #[allow(dead_code)]
     focus_handle: FocusHandle,
+    /// Drops with the app; keeps the workspace's release observer
+    /// registered for as long as the workspace is hosted in this
+    /// view so window close flushes a final save before the
+    /// workspace entity is dropped.
+    _workspace_release: Subscription,
 }
 
 impl StoatApp {
@@ -58,9 +63,13 @@ impl StoatApp {
             workspace.update(cx, |w, cx| w.open_paths(&files, cx));
         }
 
+        let _workspace_release =
+            gpui::App::observe_release(cx, &workspace, |ws, cx| ws.save_state_to_default_path(cx));
+
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
+            _workspace_release,
         }
     }
 }
@@ -181,6 +190,39 @@ mod tests {
                 .expect("scratch editor active in focused pane");
             assert_eq!(editor.tab_label(cx), SharedString::from("(scratch)"));
         });
+    }
+
+    #[test]
+    fn release_observer_writes_workspace_state_on_release() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let fs_global: Arc<dyn stoat::host::FsHost> = fs.clone();
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs_global.clone())));
+
+        let cwd = std::env::current_dir().expect("current_dir");
+        let workspace = cx.update(|cx| cx.new(|cx| Workspace::new("main", cwd.clone(), cx)));
+        workspace.update(&mut cx, |w, _| w.mark_dirty());
+        let uid = workspace.read_with(&cx, |w, _| w.uid());
+        let expected_path =
+            stoat::workspace::persist::state_path_for(&cwd, uid, &*fs_global).expect("state path");
+
+        let _subscription = cx.update(|cx| {
+            gpui::App::observe_release(cx, &workspace, |ws, cx| {
+                ws.save_state_to_default_path(cx);
+            })
+        });
+
+        assert!(!stoat::host::FsHost::exists(&*fs_global, &expected_path));
+
+        drop(workspace);
+        cx.update(|_| {});
+
+        assert!(
+            stoat::host::FsHost::exists(&*fs_global, &expected_path),
+            "release observer should have saved state at {}",
+            expected_path.display(),
+        );
     }
 
     #[test]
