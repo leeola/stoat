@@ -1363,6 +1363,7 @@ impl Workspace {
                     tree.close(focus, cx);
                 });
             },
+            ActionKind::CloseBuffer => self.close_active_buffer(cx),
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.close_others(cx);
@@ -2772,6 +2773,21 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
         self.blame_coordinator
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
+    }
+
+    /// Remove the active tab from the focused pane, leaving the
+    /// pane in place (even when it becomes empty). The pane's own
+    /// `remove_item` clamps the active index to the remaining
+    /// items. No-op when the focused pane is already empty.
+    fn close_active_buffer(&mut self, cx: &mut Context<'_, Self>) {
+        let focus = self.pane_tree.read(cx).focus();
+        let Some(pane) = self.pane_tree.read(cx).pane(focus).cloned() else {
+            return;
+        };
+        let index = pane.read(cx).active_index();
+        pane.update(cx, |p, cx| {
+            p.remove_item(index, cx);
+        });
     }
 
     /// Split the focused pane along `axis` and open a freshly
@@ -5954,6 +5970,69 @@ mod tests {
             1,
             "new pane should contain exactly one scratch editor",
         );
+    }
+
+    fn workspace_item(vcx: &mut VisualTestContext, label: &str) -> Box<dyn ItemHandle> {
+        let label = SharedString::from(label.to_string());
+        let entity = vcx.update(|_, cx| cx.new(|_| WorkspaceItem { label }));
+        Box::new(entity)
+    }
+
+    #[test]
+    fn dispatch_close_buffer_removes_active_tab_keeping_pane() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let pane = pane_tree
+            .read_with(vcx, |t, _| t.pane(t.focus()).cloned())
+            .expect("focused pane registered");
+
+        let alpha = workspace_item(vcx, "alpha");
+        let beta = workspace_item(vcx, "beta");
+        pane.update(vcx, |p, cx| {
+            p.add_item(alpha, cx);
+            p.add_item(beta, cx);
+        });
+        assert_eq!(pane.read_with(vcx, |p, _| p.items().len()), 2);
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+
+        assert_eq!(pane.read_with(vcx, |p, _| p.items().len()), 1);
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn dispatch_close_buffer_on_single_item_pane_empties_pane() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let pane = pane_tree
+            .read_with(vcx, |t, _| t.pane(t.focus()).cloned())
+            .expect("focused pane registered");
+
+        let alpha = workspace_item(vcx, "alpha");
+        pane.update(vcx, |p, cx| {
+            p.add_item(alpha, cx);
+        });
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+
+        assert_eq!(pane.read_with(vcx, |p, _| p.items().len()), 0);
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn dispatch_close_buffer_on_empty_pane_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
     }
 
     #[test]
