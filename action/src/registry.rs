@@ -613,14 +613,13 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspacePicker))
     });
     add(RenameWorkspace::DEF, |params| {
-        let raw = params
-            .first()
-            .context(MissingSnafu { name: "name" })?
-            .as_string()
-            .context(WrongKindSnafu {
+        let raw = match params.first() {
+            Some(p) => p.as_string().context(WrongKindSnafu {
                 name: "name",
                 expected: ParamKind::String,
-            })?;
+            })?,
+            None => "",
+        };
         Ok(Box::new(RenameWorkspace {
             name: raw.to_owned(),
         }))

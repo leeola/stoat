@@ -57,8 +57,8 @@ define_action!(
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,
-    required: true,
-    description: "New display name for the active workspace. Empty string re-engages the default basename fallback.",
+    required: false,
+    description: "New display name for the active workspace. Empty string re-engages the default basename fallback. Parameterless invocation routes through a name-input modal in the GUI.",
 }];
 
 #[derive(Debug)]
@@ -147,7 +147,7 @@ mod tests {
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].name, "name");
         assert_eq!(params[0].kind, ParamKind::String);
-        assert!(params[0].required);
+        assert!(!params[0].required);
     }
 
     #[test]

@@ -1395,6 +1395,18 @@ impl Workspace {
             ActionKind::NewWorkspace => self.dispatch_new_workspace(cx),
             ActionKind::CopyWorkspace => self.dispatch_copy_workspace(cx),
             ActionKind::CloseWorkspace => self.handle_close_workspace(window, cx),
+            ActionKind::RenameWorkspace => {
+                let name = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::RenameWorkspace>()
+                    .map(|a| a.name.clone())
+                    .unwrap_or_default();
+                if name.is_empty() {
+                    crate::rename_workspace_modal::open_rename_workspace(self, window, cx);
+                } else {
+                    self.set_name(name, cx);
+                }
+            },
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.close_others(cx);
@@ -6211,6 +6223,48 @@ mod tests {
             vcx.update(|_, cx| cx.windows().len()),
             1,
             "window stays open while the modal is up",
+        );
+    }
+
+    #[test]
+    fn dispatch_rename_workspace_with_name_sets_name_directly() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::RenameWorkspace { name: "foo".into() },
+        );
+        vcx.run_until_parked();
+
+        let name = ws.read_with(vcx, |w, _| w.name().clone());
+        assert_eq!(name.as_ref(), "foo");
+        let label_name = ws.read_with(vcx, |w, cx| w.workspace_label().read(cx).name().clone());
+        assert_eq!(label_name.as_ref(), "foo");
+    }
+
+    #[test]
+    fn dispatch_rename_workspace_with_empty_name_opens_modal() {
+        use crate::rename_workspace_modal::RenameWorkspaceModal;
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::RenameWorkspace { name: "".into() });
+        vcx.run_until_parked();
+
+        let modal_active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<RenameWorkspaceModal>()
+                .is_some()
+        });
+        assert!(modal_active, "empty-name RenameWorkspace opens the modal");
+        let name = ws.read_with(vcx, |w, _| w.name().clone());
+        assert_eq!(
+            name.as_ref(),
+            "main",
+            "workspace name should remain unchanged"
         );
     }
 

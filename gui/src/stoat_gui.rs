@@ -55,6 +55,7 @@ mod panic_hook;
 mod picker;
 mod quit_confirm;
 mod rebase_item;
+mod rename_workspace_modal;
 mod review_item;
 mod review_move_picker;
 mod review_session;
