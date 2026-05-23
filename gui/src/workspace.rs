@@ -1920,6 +1920,9 @@ impl Workspace {
             ActionKind::OpenBufferPicker => {
                 crate::buffer_picker::open_buffer_picker(self, window, cx)
             },
+            ActionKind::OpenGitStatus => {
+                crate::git_status_picker::open_git_status_picker(self, window, cx)
+            },
             ActionKind::OpenSymbolPicker => {
                 crate::symbol_picker::open_symbol_picker(self, window, cx)
             },

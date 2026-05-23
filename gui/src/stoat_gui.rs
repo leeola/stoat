@@ -36,6 +36,7 @@ mod executor;
 mod file_finder;
 mod fs_watcher_driver;
 mod git;
+mod git_status_picker;
 mod global_search;
 mod globals;
 mod help;
