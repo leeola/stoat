@@ -214,11 +214,15 @@ impl<D: PickerDelegate> Picker<D> {
             return true;
         }
         match action.kind() {
-            ActionKind::PickerSelectPrev => {
+            ActionKind::PickerSelectPrev
+            | ActionKind::PaletteSelectPrev
+            | ActionKind::FileFinderSelectPrev => {
                 self.move_selection(-1, cx);
                 true
             },
-            ActionKind::PickerSelectNext => {
+            ActionKind::PickerSelectNext
+            | ActionKind::PaletteSelectNext
+            | ActionKind::FileFinderSelectNext => {
                 self.move_selection(1, cx);
                 true
             },
@@ -506,6 +510,28 @@ mod tests {
         });
         assert!(handled);
         assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 1);
+    }
+
+    #[test]
+    fn handle_action_palette_and_finder_select_aliases_move_selection() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        let picker = h.picker.clone();
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                assert!(p.handle_action(&stoat_action::PaletteSelectNext, window, cx));
+                assert!(p.handle_action(&stoat_action::FileFinderSelectNext, window, cx));
+            });
+        });
+        assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 2);
+
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                assert!(p.handle_action(&stoat_action::FileFinderSelectPrev, window, cx));
+                assert!(p.handle_action(&stoat_action::PaletteSelectPrev, window, cx));
+            });
+        });
+        assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 0);
     }
 
     #[test]
