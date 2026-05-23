@@ -22,6 +22,7 @@ use crate::{
     pane::{Pane, PaneEvent},
     pane_tree::{PaneTree, PaneTreeEvent},
     rebase_item::{RebaseItem, RebaseMoveDir},
+    render_stats::{render_stats_enabled, FrameTimer, RenderStatsOverlay},
     review_session::ReviewApplyResult,
     settings::Settings,
     status_bar::{
@@ -38,10 +39,12 @@ use gpui::{
     Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions,
 };
 use std::{
+    cell::RefCell,
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
+    rc::Rc,
     sync::Arc,
-    time::Duration,
+    time::{Duration, Instant},
 };
 use stoat::{
     buffer::BufferId,
@@ -128,6 +131,7 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     last_motion: Option<LastMotion>,
+    frame_timer: Rc<RefCell<FrameTimer>>,
     _active_editor_subscription: Option<Subscription>,
     _pane_subscriptions: Vec<Subscription>,
     _subscriptions: Vec<Subscription>,
@@ -362,6 +366,7 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             last_motion: None,
+            frame_timer: Rc::new(RefCell::new(FrameTimer::new())),
             _active_editor_subscription: None,
             _pane_subscriptions: initial_pane_subscriptions,
             _subscriptions: vec![
@@ -1345,6 +1350,9 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if render_stats_enabled(cx) {
+            self.frame_timer.borrow_mut().start_frame(Instant::now());
+        }
         let handled_by_modal = self
             .modal_layer
             .update(cx, |layer, cx| layer.handle_action(&*action, window, cx));
@@ -5301,7 +5309,7 @@ impl Render for Workspace {
             Vec::new()
         };
         let (ui_family, ui_size) = ui_font(cx);
-        div()
+        let body = div()
             .flex()
             .flex_row()
             .size_full()
@@ -5319,7 +5327,14 @@ impl Render for Workspace {
                     .child(self.status_bar.clone()),
             )
             .children(right_docks)
-            .child(deferred(self.modal_layer.clone()))
+            .child(deferred(self.modal_layer.clone()));
+        if render_stats_enabled(cx) {
+            body.child(deferred(
+                RenderStatsOverlay::new(self.frame_timer.clone()).element(),
+            ))
+        } else {
+            body
+        }
     }
 }
 
