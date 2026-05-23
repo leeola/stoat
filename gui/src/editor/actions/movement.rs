@@ -77,6 +77,13 @@ pub enum FindKind {
     TillPrevChar,
 }
 
+/// Direction passed to [`Editor::handle_goto_paragraph`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ParagraphDir {
+    Next,
+    Prev,
+}
+
 impl Editor {
     /// Move every selection's head by `count * delta` characters
     /// along the buffer. Negative `delta` walks backward.
@@ -606,6 +613,89 @@ impl Editor {
         };
         let max_scroll = max_row.saturating_sub(viewport.saturating_sub(1));
         self.set_scroll_row(desired_scroll.min(max_scroll), cx);
+    }
+
+    /// Jump every selection to the start of the next or previous
+    /// paragraph. A paragraph is a run of non-blank lines bounded
+    /// by blank lines (or by the buffer ends); blank lines are
+    /// rows whose `line_len` is zero. No-op when no further
+    /// paragraph exists on the requested side.
+    pub fn handle_goto_paragraph(&mut self, dir: ParagraphDir, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let rope = snapshot.rope();
+        let Some(primary) = self
+            .selections
+            .all_anchors()
+            .iter()
+            .max_by_key(|s| s.id)
+            .cloned()
+        else {
+            return;
+        };
+        let cursor_row = snapshot.point_for_anchor(&primary.head()).row;
+
+        let mut last_content_row = rope.max_point().row;
+        if last_content_row > 0 && rope.line_len(last_content_row) == 0 {
+            last_content_row -= 1;
+        }
+        let is_empty = |r: u32| rope.line_len(r) == 0;
+
+        let target_row = match dir {
+            ParagraphDir::Next => {
+                if cursor_row >= last_content_row {
+                    return;
+                }
+                let mut row = cursor_row;
+                while row <= last_content_row && !is_empty(row) {
+                    row += 1;
+                }
+                if row > last_content_row {
+                    return;
+                }
+                while row <= last_content_row && is_empty(row) {
+                    row += 1;
+                }
+                if row > last_content_row {
+                    return;
+                }
+                row
+            },
+            ParagraphDir::Prev => {
+                if cursor_row == 0 {
+                    return;
+                }
+                let mut row = cursor_row - 1;
+                while row > 0 && is_empty(row) {
+                    row -= 1;
+                }
+                while row > 0 && !is_empty(row) {
+                    row -= 1;
+                }
+                if is_empty(row) && row < last_content_row {
+                    row += 1;
+                }
+                if row == cursor_row {
+                    return;
+                }
+                row
+            },
+        };
+
+        let target_offset = rope.point_to_offset(stoat_text::Point::new(target_row, 0));
+        let target_anchor = snapshot.anchor_at(target_offset, Bias::Right);
+        let new_disjoint: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let mut new = sel.clone();
+                new.collapse_to(target_anchor, SelectionGoal::None);
+                new
+            })
+            .collect();
+        self.selections.replace_with(new_disjoint, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
     }
 }
 
@@ -1440,5 +1530,74 @@ mod tests {
         });
 
         assert_eq!(scroll_row(&editor, &mut cx), 25 - DEFAULT_VIEWPORT_ROWS / 2);
+    }
+
+    #[test]
+    fn goto_next_paragraph_jumps_to_start_of_following_paragraph() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "para1\npara1 line 2\n\npara2\npara2 line 2");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_paragraph(ParagraphDir::Next, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 20);
+    }
+
+    #[test]
+    fn goto_next_paragraph_walks_to_third_paragraph_on_repeat() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\n\nbeta\n\ngamma");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_paragraph(ParagraphDir::Next, cx)
+        });
+        assert_eq!(cursor_offset(&editor, &mut cx), 7);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_paragraph(ParagraphDir::Next, cx)
+        });
+        assert_eq!(cursor_offset(&editor, &mut cx), 13);
+    }
+
+    #[test]
+    fn goto_next_paragraph_at_last_paragraph_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "para1\n\npara2");
+        seed_at_offset(&editor, &mut cx, 7);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_paragraph(ParagraphDir::Next, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 7);
+    }
+
+    #[test]
+    fn goto_prev_paragraph_jumps_to_start_of_preceding_paragraph() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "para1\npara1 line 2\n\npara2\npara2 line 2");
+        seed_at_offset(&editor, &mut cx, 20);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_paragraph(ParagraphDir::Prev, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 0);
+    }
+
+    #[test]
+    fn goto_prev_paragraph_from_buffer_start_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "para1\n\npara2");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_paragraph(ParagraphDir::Prev, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 0);
     }
 }

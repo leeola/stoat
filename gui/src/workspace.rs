@@ -1715,6 +1715,10 @@ impl Workspace {
             ActionKind::GotoPrevChange => {
                 self.dispatch_goto_change(crate::editor::actions::goto::ChangeDir::Prev, cx)
             },
+            ActionKind::GotoNextParagraph => self
+                .dispatch_goto_paragraph(crate::editor::actions::movement::ParagraphDir::Next, cx),
+            ActionKind::GotoPrevParagraph => self
+                .dispatch_goto_paragraph(crate::editor::actions::movement::ParagraphDir::Prev, cx),
             ActionKind::ExtendLeft => self.dispatch_move_horizontal(-1, true, cx),
             ActionKind::ExtendRight => self.dispatch_move_horizontal(1, true, cx),
             ActionKind::ExtendUp => self.dispatch_move_vertical(-1, true, cx),
@@ -2530,6 +2534,17 @@ impl Workspace {
             return;
         };
         editor.update(cx, |ed, cx| ed.handle_goto_change(dir, cx));
+    }
+
+    fn dispatch_goto_paragraph(
+        &mut self,
+        dir: crate::editor::actions::movement::ParagraphDir,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| ed.handle_goto_paragraph(dir, cx));
     }
 
     fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<crate::editor::Editor>> {
