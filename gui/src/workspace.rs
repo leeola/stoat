@@ -1329,6 +1329,8 @@ impl Workspace {
                     tree.split(Axis::Horizontal, cx);
                 });
             },
+            ActionKind::SplitNewRight => self.dispatch_split_new(Axis::Vertical, cx),
+            ActionKind::SplitNewDown => self.dispatch_split_new(Axis::Horizontal, cx),
             ActionKind::FocusLeft => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.focus_direction(Direction::Left, cx);
@@ -2764,6 +2766,44 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
         self.blame_coordinator
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
+    }
+
+    /// Split the focused pane along `axis` and open a freshly
+    /// allocated scratch buffer in the new (now-focused) pane.
+    fn dispatch_split_new(&mut self, axis: Axis, cx: &mut Context<'_, Self>) {
+        let new_pane_id = self.pane_tree.update(cx, |tree, cx| tree.split(axis, cx));
+        self.open_scratch_in_pane(new_pane_id, cx);
+    }
+
+    /// Allocate a fresh scratch buffer through the workspace's
+    /// [`BufferRegistry`] and add a backing editor to the pane at
+    /// `pane_id`. No-op when the pane id is unknown.
+    fn open_scratch_in_pane(&mut self, pane_id: stoat::pane::PaneId, cx: &mut Context<'_, Self>) {
+        let weak_workspace = cx.weak_entity();
+        let (_buffer_id, shared) = self
+            .buffer_registry
+            .update(cx, |reg, cx| reg.new_scratch(cx));
+        let buffer = cx.new(|_| Buffer::from_shared(shared));
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            cx.new(|cx| MultiBuffer::singleton(buffer, cx))
+        };
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let display_map = {
+            let buffer = buffer.clone();
+            cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+        };
+        let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
+        let editor =
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+        editor.update(cx, |ed, _| ed.set_workspace(Some(weak_workspace)));
+
+        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
+            return;
+        };
+        pane.update(cx, |p, cx| {
+            p.add_item(Box::new(editor), cx);
+        });
     }
 
     /// Toggle the right-side `DiffHunkPanel`. When the panel is open,
@@ -5860,6 +5900,54 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+    }
+
+    #[test]
+    fn dispatch_split_new_right_adds_pane_with_fresh_scratch_editor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let registry_size_before = ws.read_with(vcx, |w, cx| w.buffer_registry().read(cx).len());
+
+        dispatch(&ws, vcx, stoat_action::SplitNewRight);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+        assert_eq!(
+            ws.read_with(vcx, |w, cx| w.buffer_registry().read(cx).len()),
+            registry_size_before + 1,
+            "a new scratch buffer should be registered",
+        );
+        let focused_id = pane_tree.read_with(vcx, |t, _| t.focus());
+        let focused_pane = pane_tree
+            .read_with(vcx, |t, _| t.pane(focused_id).cloned())
+            .expect("focused pane registered");
+        assert_eq!(
+            focused_pane.read_with(vcx, |p, _| p.items().len()),
+            1,
+            "new pane should contain exactly one scratch editor",
+        );
+    }
+
+    #[test]
+    fn dispatch_split_new_down_adds_pane_with_fresh_scratch_editor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::SplitNewDown);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+        let focused_id = pane_tree.read_with(vcx, |t, _| t.focus());
+        let focused_pane = pane_tree
+            .read_with(vcx, |t, _| t.pane(focused_id).cloned())
+            .expect("focused pane registered");
+        assert_eq!(
+            focused_pane.read_with(vcx, |p, _| p.items().len()),
+            1,
+            "new pane should contain exactly one scratch editor",
+        );
     }
 
     #[test]
