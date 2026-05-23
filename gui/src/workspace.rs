@@ -1378,6 +1378,7 @@ impl Workspace {
             ActionKind::ToggleDockLeft => self.toggle_dock(DockSide::Left, cx),
             ActionKind::ToggleDockRight => self.toggle_dock(DockSide::Right, cx),
             ActionKind::NewWorkspace => self.dispatch_new_workspace(cx),
+            ActionKind::CopyWorkspace => self.dispatch_copy_workspace(cx),
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.close_others(cx);
@@ -2787,6 +2788,42 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
         self.blame_coordinator
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
+    }
+
+    /// Open a new gpui window hosting a clone of the current
+    /// workspace's state: same pane tree, items, docks, and
+    /// buffers. Refreshes the snapshot's `uid` so the copy
+    /// does not collide with the source workspace's persistence
+    /// file. No-op when [`ExecutorGlobal`] is absent (the uid
+    /// generator depends on it); errors from `cx.open_window`
+    /// are logged.
+    fn dispatch_copy_workspace(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(executor) = cx.try_global::<ExecutorGlobal>().map(|g| g.0.clone()) else {
+            tracing::warn!("CopyWorkspace: ExecutorGlobal missing, cannot refresh uid");
+            return;
+        };
+        let mut state = self.to_state(cx);
+        let mut new_uid = stoat::workspace::WorkspaceUid::now(&executor);
+        if new_uid == state.uid {
+            new_uid = stoat::workspace::WorkspaceUid(new_uid.0.wrapping_add(1));
+        }
+        state.uid = new_uid;
+
+        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+        let result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(SharedString::from("Stoat")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            move |_window, cx| cx.new(|cx| crate::stoat_app::StoatApp::new_with_state(state, cx)),
+        );
+        if let Err(err) = result {
+            tracing::warn!(?err, "CopyWorkspace: failed to open window");
+        }
     }
 
     /// Spawn a fresh `StoatApp` in a new gpui window. The new
@@ -6044,6 +6081,59 @@ mod tests {
         let label = SharedString::from(label.to_string());
         let entity = vcx.update(|_, cx| cx.new(|_| WorkspaceItem { label }));
         Box::new(entity)
+    }
+
+    #[test]
+    fn dispatch_copy_workspace_opens_window_with_matching_state() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"alpha");
+        fs.insert_file("/tmp/repo/b.rs", b"beta");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(
+                &[
+                    PathBuf::from("/tmp/repo/a.rs"),
+                    PathBuf::from("/tmp/repo/b.rs"),
+                ],
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        let source_uid = ws.read_with(vcx, |w, _| w.uid());
+        let source_pane_count = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count());
+        assert_eq!(source_pane_count, 2, "source has two panes");
+
+        dispatch(&ws, vcx, stoat_action::CopyWorkspace);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            vcx.update(|_, cx| cx.windows().len()),
+            2,
+            "CopyWorkspace opens a second window",
+        );
+
+        let new_handle = vcx
+            .update(|_, cx| {
+                cx.windows()
+                    .into_iter()
+                    .find_map(|h| h.downcast::<crate::stoat_app::StoatApp>())
+            })
+            .expect("copied StoatApp window present");
+
+        let new_workspace = new_handle
+            .read_with(vcx, |app, _| app.workspace().clone())
+            .expect("copy window's workspace entity");
+        let (new_pane_count, new_uid) =
+            new_workspace.read_with(vcx, |w, cx| (w.pane_tree().read(cx).pane_count(), w.uid()));
+        assert_eq!(
+            new_pane_count, source_pane_count,
+            "copy preserves pane tree shape",
+        );
+        assert_ne!(new_uid, source_uid, "copy gets a fresh uid",);
     }
 
     #[test]

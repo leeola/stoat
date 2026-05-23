@@ -105,6 +105,40 @@ fn try_restore_workspace(
 }
 
 impl StoatApp {
+    /// Borrow the hosted workspace entity. Used by tests that
+    /// need to introspect a window opened through the
+    /// `CopyWorkspace` / `NewWorkspace` dispatch paths.
+    pub(crate) fn workspace(&self) -> &Entity<Workspace> {
+        &self.workspace
+    }
+
+    /// Construct a [`StoatApp`] that hosts a workspace
+    /// reconstructed from a previously captured
+    /// [`crate::workspace_persist::WorkspaceStateV1`]. The
+    /// workspace's name and git root come from `state`; pane
+    /// tree, items, docks, and buffers all rehydrate via
+    /// [`Workspace::apply_state`]. Used by the `CopyWorkspace`
+    /// dispatch path to clone the current workspace into a new
+    /// window.
+    pub(crate) fn new_with_state(
+        state: crate::workspace_persist::WorkspaceStateV1,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let name = SharedString::from(state.name.clone());
+        let git_root = state.git_root.clone();
+        let workspace = cx.new(|cx| Workspace::new(name, git_root, cx));
+        workspace.update(cx, |w, cx| w.apply_state(state, cx));
+
+        let _workspace_release =
+            gpui::App::observe_release(cx, &workspace, |ws, cx| ws.save_state_to_default_path(cx));
+
+        Self {
+            workspace,
+            focus_handle: cx.focus_handle(),
+            _workspace_release,
+        }
+    }
+
     fn open_scratch(workspace: &Entity<Workspace>, cx: &mut Context<'_, Self>) {
         let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), ""));
         let multi_buffer = cx.new({
