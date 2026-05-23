@@ -186,6 +186,28 @@ pub fn handle_delete_backward(workspace: &mut Workspace, cx: &mut Context<'_, Wo
     }
 }
 
+/// `DeleteWordForward` action: delete from each cursor forward to the
+/// next word boundary. Non-empty selections delegate to
+/// `DeleteSelection`.
+pub fn handle_delete_word_forward(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| {
+            ed.delete_word_around_cursors(DeleteDirection::Forward, cx)
+        });
+    }
+}
+
+/// `DeleteWordBackward` action: delete from each cursor back to the
+/// previous word boundary. Non-empty selections delegate to
+/// `DeleteSelection`.
+pub fn handle_delete_word_backward(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(editor) = active_editor(workspace, cx) {
+        editor.update(cx, |ed, cx| {
+            ed.delete_word_around_cursors(DeleteDirection::Backward, cx)
+        });
+    }
+}
+
 /// `Insert` action: collapse selections to their start anchor and
 /// switch the workspace into insert mode.
 pub fn handle_insert(

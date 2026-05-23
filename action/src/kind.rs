@@ -160,6 +160,8 @@ pub enum ActionKind {
     DeleteSelection,
     DeleteForward,
     DeleteBackward,
+    DeleteWordForward,
+    DeleteWordBackward,
     Insert,
     Append,
     InsertNewline,

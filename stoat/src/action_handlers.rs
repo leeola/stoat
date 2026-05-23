@@ -620,6 +620,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::InsertNewline
         | ActionKind::DeleteForward
         | ActionKind::DeleteBackward
+        | ActionKind::DeleteWordForward
+        | ActionKind::DeleteWordBackward
         | ActionKind::ApplyInsertRegisterChar
         | ActionKind::ApplyRegisterSelectChar
         | ActionKind::ApplyReplaceChar

@@ -91,6 +91,26 @@ define_action!(
 );
 
 define_action!(
+    DeleteWordForwardDef,
+    DeleteWordForward,
+    "DeleteWordForward",
+    ActionKind::DeleteWordForward,
+    "delete word at or after each cursor",
+    "Delete from each cursor forward to the next word boundary and collapse the selection. Non-empty selections delegate to DeleteSelection. Typically bound to Alt-Delete in insert mode.",
+    ActionPriority::Common
+);
+
+define_action!(
+    DeleteWordBackwardDef,
+    DeleteWordBackward,
+    "DeleteWordBackward",
+    ActionKind::DeleteWordBackward,
+    "delete word before each cursor",
+    "Delete from each cursor back to the previous word boundary and collapse the selection. Non-empty selections delegate to DeleteSelection. Typically bound to Alt-Backspace in insert mode.",
+    ActionPriority::Common
+);
+
+define_action!(
     InsertDef,
     Insert,
     "Insert",

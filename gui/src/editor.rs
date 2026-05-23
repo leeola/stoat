@@ -30,7 +30,9 @@ use stoat::{
     buffer::BufferId, jumplist::JumpList, multi_buffer::MultiBufferSnapshot,
     review_session::ChunkStatus, selection::SelectionsCollection, DisplayPoint,
 };
-use stoat_text::{Anchor, Bias, OffsetUtf16, Selection, SelectionGoal};
+use stoat_text::{
+    next_word_start, prev_word_start, Anchor, Bias, OffsetUtf16, Selection, SelectionGoal,
+};
 
 /// Sizing / behavior classification carried on each [`Editor`].
 /// The future render, scroll, and mouse paths consult these to
@@ -939,6 +941,39 @@ impl Editor {
         direction: DeleteDirection,
         cx: &mut Context<'_, Self>,
     ) {
+        self.delete_widened_around_cursors(cx, |rope, head| match direction {
+            DeleteDirection::Forward => (head, step_char_forward(rope, head)),
+            DeleteDirection::Backward => (step_char_backward(rope, head), head),
+        });
+    }
+
+    /// Widen each empty (cursor-only) selection from the cursor to the
+    /// next/previous word boundary in `direction`, delete the covered
+    /// range, and collapse to a cursor. Selections that already span
+    /// text delegate to [`Self::delete_selections`]. No-op when the
+    /// cursor already sits at the boundary.
+    pub fn delete_word_around_cursors(
+        &mut self,
+        direction: DeleteDirection,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.delete_widened_around_cursors(cx, |rope, head| match direction {
+            DeleteDirection::Forward => (head, next_word_start(rope, head)),
+            DeleteDirection::Backward => (prev_word_start(rope, head), head),
+        });
+    }
+
+    /// Shared core for the cursor-relative deletes. For each empty
+    /// selection, `widen` maps the cursor offset to the `(lo, hi)` byte
+    /// range to remove; the ranges are deleted and each selection
+    /// collapses to a cursor at the resulting position. Any non-empty
+    /// selection short-circuits to [`Self::delete_selections`].
+    /// Restricted to singleton buffers.
+    fn delete_widened_around_cursors(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+        widen: impl Fn(&stoat_text::Rope, usize) -> (usize, usize),
+    ) {
         let has_nonempty = {
             let snapshot = self.multi_buffer.read(cx).snapshot();
             self.selections
@@ -966,16 +1001,7 @@ impl Editor {
                 .iter()
                 .map(|sel| {
                     let head = snapshot.resolve_anchor(&sel.start);
-                    let (lo, hi) = match direction {
-                        DeleteDirection::Forward => {
-                            let next = step_char_forward(rope, head);
-                            (head, next)
-                        },
-                        DeleteDirection::Backward => {
-                            let prev = step_char_backward(rope, head);
-                            (prev, head)
-                        },
-                    };
+                    let (lo, hi) = widen(rope, head);
                     let start = snapshot.anchor_at(lo, Bias::Right);
                     let end = snapshot.anchor_at(hi, Bias::Left);
                     Selection {
@@ -5530,6 +5556,34 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "ab");
+    }
+
+    #[test]
+    fn delete_word_around_cursors_backward_removes_word_before_cursor() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "foo bar");
+        set_single_selection(&editor, &mut cx, 7, 7);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.delete_word_around_cursors(DeleteDirection::Backward, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "foo ");
+    }
+
+    #[test]
+    fn delete_word_around_cursors_forward_removes_word_after_cursor() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "foo bar");
+        set_single_selection(&editor, &mut cx, 0, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.delete_word_around_cursors(DeleteDirection::Forward, cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "bar");
     }
 
     #[test]

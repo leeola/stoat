@@ -182,4 +182,30 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "MoveNextWordStart");
     }
+
+    #[test]
+    fn default_keymap_alt_backspace_in_insert_deletes_word_backward() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(
+                &insert_state(false),
+                &alt_event(crossterm::event::KeyCode::Backspace),
+            )
+            .expect("Alt-Backspace has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "DeleteWordBackward");
+    }
+
+    #[test]
+    fn default_keymap_alt_delete_in_insert_deletes_word_forward() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(
+                &insert_state(false),
+                &alt_event(crossterm::event::KeyCode::Delete),
+            )
+            .expect("Alt-Delete has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "DeleteWordForward");
+    }
 }

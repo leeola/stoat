@@ -454,6 +454,8 @@ on key {
         Down -> MoveDown();
         Alt-Left -> MovePrevWordStart();
         Alt-Right -> MoveNextWordStart();
+        Alt-Backspace -> DeleteWordBackward();
+        Alt-Delete -> DeleteWordForward();
         Ctrl-a -> GotoLineStart();
         Ctrl-e -> GotoLineEnd();
         Ctrl-Space -> TriggerCompletion();

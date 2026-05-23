@@ -2192,6 +2192,12 @@ impl Workspace {
             ActionKind::DeleteBackward => {
                 crate::editor::actions::edit::handle_delete_backward(self, cx)
             },
+            ActionKind::DeleteWordForward => {
+                crate::editor::actions::edit::handle_delete_word_forward(self, cx)
+            },
+            ActionKind::DeleteWordBackward => {
+                crate::editor::actions::edit::handle_delete_word_backward(self, cx)
+            },
             ActionKind::Insert => crate::editor::actions::edit::handle_insert(self, window, cx),
             ActionKind::Append => crate::editor::actions::edit::handle_append(self, window, cx),
             ActionKind::InsertNewline => {

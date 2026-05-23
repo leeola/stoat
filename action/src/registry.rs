@@ -15,19 +15,19 @@ use crate::{
             AcceptCompletion, AddSelectionAbove, AddSelectionBelow, AlignSelections,
             AlignViewBottom, AlignViewCenter, AlignViewTop, Append, CloseBuffer, CollapseSelection,
             CommitUndoCheckpoint, Decrement, DeleteBackward, DeleteForward, DeleteSelection,
-            ExpandSelection, ExtendDown, ExtendFindNextChar, ExtendFindPrevChar, ExtendGotoColumn,
-            ExtendGotoFileStart, ExtendGotoFirstNonwhitespace, ExtendGotoLastLine,
-            ExtendGotoWindowBottom, ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft,
-            ExtendMoveParentNodeEnd, ExtendMoveParentNodeStart, ExtendNextWordEnd,
-            ExtendNextWordStart, ExtendPrevWordEnd, ExtendPrevWordStart, ExtendRight,
-            ExtendSelectNextSibling, ExtendSelectPrevSibling, ExtendTillNextChar,
-            ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd,
-            ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar, FlipSelections, GotoColumn,
-            GotoFileStart, GotoFirstNonwhitespace, GotoLastLine, GotoLineEnd, GotoLineNumber,
-            GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange, GotoNextClass,
-            GotoNextFunction, GotoNextParagraph, GotoPrevChange, GotoPrevClass, GotoPrevFunction,
-            GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop, GotoWord,
-            HalfPageDown, HalfPageUp, Increment, IndentSelection, Insert, InsertNewline,
+            DeleteWordBackward, DeleteWordForward, ExpandSelection, ExtendDown, ExtendFindNextChar,
+            ExtendFindPrevChar, ExtendGotoColumn, ExtendGotoFileStart,
+            ExtendGotoFirstNonwhitespace, ExtendGotoLastLine, ExtendGotoWindowBottom,
+            ExtendGotoWindowCenter, ExtendGotoWindowTop, ExtendLeft, ExtendMoveParentNodeEnd,
+            ExtendMoveParentNodeStart, ExtendNextWordEnd, ExtendNextWordStart, ExtendPrevWordEnd,
+            ExtendPrevWordStart, ExtendRight, ExtendSelectNextSibling, ExtendSelectPrevSibling,
+            ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
+            ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
+            FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
+            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange,
+            GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange, GotoPrevClass,
+            GotoPrevFunction, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
+            GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, Insert, InsertNewline,
             InsertRegister, JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections,
             MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
             MoveNextWordEnd, MoveNextWordStart, MoveParentNodeEnd, MoveParentNodeStart,
@@ -452,6 +452,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(DeleteSelection::DEF, |_| Ok(Box::new(DeleteSelection)));
     add(DeleteForward::DEF, |_| Ok(Box::new(DeleteForward)));
     add(DeleteBackward::DEF, |_| Ok(Box::new(DeleteBackward)));
+    add(DeleteWordForward::DEF, |_| Ok(Box::new(DeleteWordForward)));
+    add(DeleteWordBackward::DEF, |_| {
+        Ok(Box::new(DeleteWordBackward))
+    });
     add(Insert::DEF, |_| Ok(Box::new(Insert)));
     add(Append::DEF, |_| Ok(Box::new(Append)));
     add(InsertNewline::DEF, |_| Ok(Box::new(InsertNewline)));
@@ -725,6 +729,8 @@ mod tests {
         "InsertRegister",
         "DeleteForward",
         "DeleteBackward",
+        "DeleteWordForward",
+        "DeleteWordBackward",
         "Insert",
         "Append",
         "InsertNewline",
@@ -997,12 +1003,13 @@ mod tests {
         // + 5 Picker actions (SelectPrev/SelectNext/Confirm/ConfirmSplitRight/ ConfirmSplitDown)
         //   that the GUI's `Picker<D>` primitive routes via `Workspace::dispatch_action` -> active
         //   modal -> `Picker::handle_action`.
-        // + 5 edit-action primitives (DeleteForward, DeleteBackward, Insert, Append, InsertNewline)
-        //   the GUI dispatches via the per-handler edit-action module.
+        // + 7 edit-action primitives (DeleteForward, DeleteBackward, DeleteWordForward,
+        //   DeleteWordBackward, Insert, Append, InsertNewline) the GUI dispatches via the
+        //   per-handler edit-action module.
         // + 1 ShellInputSubmit (palette-invisible: dismisses the active ShellInputModal).
         // + 3 ToggleBlame / ToggleDiffHunkPanel / OpenGitStatus for the space_git submode.
         // + 1 ToggleMinimap for the space_workspace submode.
-        assert_eq!(all().count(), 295);
+        assert_eq!(all().count(), 297);
     }
 
     #[test]
