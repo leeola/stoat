@@ -33,9 +33,9 @@ use crate::{
     theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
-    deferred, div, px, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    Task, WeakEntity, Window,
+    deferred, div, px, size, App, AppContext, Bounds, Context, DismissEvent, Entity, EventEmitter,
+    FocusHandle, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions,
 };
 use std::{
     collections::{HashMap, VecDeque},
@@ -1377,6 +1377,7 @@ impl Workspace {
             ActionKind::CloseBuffer => self.close_active_buffer(cx),
             ActionKind::ToggleDockLeft => self.toggle_dock(DockSide::Left, cx),
             ActionKind::ToggleDockRight => self.toggle_dock(DockSide::Right, cx),
+            ActionKind::NewWorkspace => self.dispatch_new_workspace(cx),
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.close_others(cx);
@@ -2786,6 +2787,32 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
         self.blame_coordinator
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
+    }
+
+    /// Spawn a fresh `StoatApp` in a new gpui window. The new
+    /// window is independent of the current one: it anchors at
+    /// the current working directory and seeds a scratch editor.
+    /// Errors from `cx.open_window` are logged but do not propagate.
+    fn dispatch_new_workspace(&mut self, cx: &mut Context<'_, Self>) {
+        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+        let result = cx.open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(SharedString::from("Stoat")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            |_window, cx| {
+                cx.new(|cx| {
+                    crate::stoat_app::StoatApp::new(Vec::new(), crate::RestoreMode::None, cx)
+                })
+            },
+        );
+        if let Err(err) = result {
+            tracing::warn!(?err, "NewWorkspace: failed to open window");
+        }
     }
 
     /// Whether `side`'s dock group is currently rendered. Each
@@ -6017,6 +6044,20 @@ mod tests {
         let label = SharedString::from(label.to_string());
         let entity = vcx.update(|_, cx| cx.new(|_| WorkspaceItem { label }));
         Box::new(entity)
+    }
+
+    #[test]
+    fn dispatch_new_workspace_opens_additional_gpui_window() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let before = vcx.update(|_, cx| cx.windows().len());
+        assert_eq!(before, 1, "harness opens one window before dispatch");
+
+        dispatch(&ws, vcx, stoat_action::NewWorkspace);
+        vcx.run_until_parked();
+
+        let after = vcx.update(|_, cx| cx.windows().len());
+        assert_eq!(after, 2, "NewWorkspace opens a second gpui window");
     }
 
     #[test]
