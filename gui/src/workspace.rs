@@ -1301,6 +1301,21 @@ impl Workspace {
         crate::quit_confirm::open_quit_confirm(self, &dirty, window, cx);
     }
 
+    /// Handle `CloseWorkspace`: close the current window when no
+    /// buffer is dirty; otherwise open the same
+    /// [`crate::quit_confirm::QuitConfirmModal`] used by `QuitAll`,
+    /// configured to close the window on confirm instead of
+    /// quitting the app. The workspace's release observer persists
+    /// state when the entity drops as the window closes.
+    pub fn handle_close_workspace(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let dirty = self.buffer_registry.read(cx).dirty_buffers();
+        if dirty.is_empty() {
+            window.remove_window();
+            return;
+        }
+        crate::quit_confirm::open_close_workspace_confirm(self, &dirty, window, cx);
+    }
+
     /// Dispatch a Stoat action resolved by the input state machine.
     /// Routes by [`ActionKind`]: pane-targeted variants update
     /// [`Entity<PaneTree>`], root-targeted variants mutate the
@@ -1379,6 +1394,7 @@ impl Workspace {
             ActionKind::ToggleDockRight => self.toggle_dock(DockSide::Right, cx),
             ActionKind::NewWorkspace => self.dispatch_new_workspace(cx),
             ActionKind::CopyWorkspace => self.dispatch_copy_workspace(cx),
+            ActionKind::CloseWorkspace => self.handle_close_workspace(window, cx),
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.close_others(cx);
@@ -6137,6 +6153,65 @@ mod tests {
             "copy preserves pane tree shape",
         );
         assert_ne!(new_uid, source_uid, "copy gets a fresh uid",);
+    }
+
+    #[test]
+    fn dispatch_close_workspace_removes_window_when_clean() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        assert_eq!(vcx.update(|_, cx| cx.windows().len()), 1);
+
+        dispatch(&ws, vcx, stoat_action::CloseWorkspace);
+        vcx.run_until_parked();
+
+        let remaining = vcx.cx.read(|app| app.windows().len());
+        assert_eq!(
+            remaining, 0,
+            "clean CloseWorkspace removes the hosting window",
+        );
+    }
+
+    #[test]
+    fn dispatch_close_workspace_with_dirty_buffer_opens_confirm_modal() {
+        use crate::quit_confirm::QuitConfirmModal;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"alpha");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/a.rs")], cx);
+        });
+        vcx.run_until_parked();
+        ws.update(vcx, |w, cx| {
+            let registry = w.buffer_registry().clone();
+            registry.update(cx, |r, _| {
+                let id = r.ids().next().expect("a.rs registered");
+                let shared = r.get(id).expect("buffer shared").clone();
+                shared.write().expect("buffer lock").edit(0..0, "x");
+            });
+        });
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::CloseWorkspace);
+        vcx.run_until_parked();
+
+        let modal_active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<QuitConfirmModal>()
+                .is_some()
+        });
+        assert!(
+            modal_active,
+            "dirty CloseWorkspace should open the quit-confirm modal",
+        );
+        assert_eq!(
+            vcx.update(|_, cx| cx.windows().len()),
+            1,
+            "window stays open while the modal is up",
+        );
     }
 
     #[test]

@@ -18,13 +18,24 @@ use std::path::Path;
 use stoat::{buffer_registry::DirtyBuffer, paths::display_relative};
 use stoat_action::ActionKind;
 
-/// Modal listing the dirty buffers staged for discard on `QuitAll`.
-/// Display strings are captured at construction so the render path
-/// does not need to walk back into the workspace.
+/// Action taken when the user confirms the modal. `QuitApp`
+/// closes the whole gpui app; `CloseWindow` removes only the
+/// hosting window (the workspace's release observer then runs
+/// `save_state_to_default_path` as the entity drops).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ConfirmAction {
+    QuitApp,
+    CloseWindow,
+}
+
+/// Modal listing the dirty buffers staged for discard on `QuitAll`
+/// or `CloseWorkspace`. Display strings are captured at construction
+/// so the render path does not need to walk back into the workspace.
 pub struct QuitConfirmModal {
     entries: Vec<String>,
     focus_handle: FocusHandle,
     workspace: WeakEntity<Workspace>,
+    action: ConfirmAction,
 }
 
 impl QuitConfirmModal {
@@ -32,6 +43,7 @@ impl QuitConfirmModal {
         workspace: WeakEntity<Workspace>,
         dirty: &[DirtyBuffer],
         git_root: &Path,
+        action: ConfirmAction,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let entries = dirty
@@ -45,14 +57,19 @@ impl QuitConfirmModal {
             entries,
             focus_handle: cx.focus_handle(),
             workspace,
+            action,
         }
     }
 
     fn confirm(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
         let workspace = self.workspace.clone();
-        window.defer(cx, move |_, cx| {
+        let action = self.action;
+        window.defer(cx, move |window, cx| {
             if let Some(_ws) = workspace.upgrade() {
-                cx.quit();
+                match action {
+                    ConfirmAction::QuitApp => cx.quit(),
+                    ConfirmAction::CloseWindow => window.remove_window(),
+                }
             }
         });
         cx.emit(DismissEvent);
@@ -124,11 +141,32 @@ pub fn open_quit_confirm(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
+    open_with_action(workspace, dirty, ConfirmAction::QuitApp, window, cx);
+}
+
+/// Open the same modal in close-window mode: confirm removes the
+/// hosting window instead of quitting the app.
+pub fn open_close_workspace_confirm(
+    workspace: &mut Workspace,
+    dirty: &[DirtyBuffer],
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    open_with_action(workspace, dirty, ConfirmAction::CloseWindow, window, cx);
+}
+
+fn open_with_action(
+    workspace: &mut Workspace,
+    dirty: &[DirtyBuffer],
+    action: ConfirmAction,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
     let weak = cx.weak_entity();
     let git_root = workspace.git_root().clone();
     let dirty = dirty.to_vec();
     workspace.toggle_modal::<QuitConfirmModal, _>(window, cx, move |_window, cx| {
-        QuitConfirmModal::new(weak, &dirty, &git_root, cx)
+        QuitConfirmModal::new(weak, &dirty, &git_root, action, cx)
     });
 }
 
@@ -164,7 +202,9 @@ mod tests {
     ) -> Entity<QuitConfirmModal> {
         let weak = workspace.downgrade();
         vcx.update(|_window, cx| {
-            cx.new(|cx| QuitConfirmModal::new(weak, &dirty, Path::new("/r"), cx))
+            cx.new(|cx| {
+                QuitConfirmModal::new(weak, &dirty, Path::new("/r"), ConfirmAction::QuitApp, cx)
+            })
         })
     }
 
