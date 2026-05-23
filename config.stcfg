@@ -515,6 +515,7 @@ on key {
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
+        e -> [ToggleProjectTree(), SetMode(normal)];
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];

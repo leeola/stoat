@@ -8,7 +8,6 @@ mode: space
 size: 80x24
 ---
 [0m[7m [0m
-
                                   [0m[33m┌ space ─────────────────────────────────────┐[0m
                                   [0m[33m│[0m[36m  ?[0m[97m   open the help modal[0m                   [0m[33m│[0m
                                   [0m[33m│[0m[36mEsc[0m[97m   normal mode[0m                           [0m[33m│[0m
@@ -23,6 +22,7 @@ size: 80x24
                                   [0m[33m│[0m[36m  "[0m[97m   space_clipboard mode[0m                  [0m[33m│[0m
                                   [0m[33m│[0m[36m  p[0m[97m   open the file finder[0m                  [0m[33m│[0m
                                   [0m[33m│[0m[36m  g[0m[97m   open the changed-file picker[0m          [0m[33m│[0m
+                                  [0m[33m│[0m[36m  e[0m[97m   toggle the project file tree[0m          [0m[33m│[0m
                                   [0m[33m│[0m[36m  s[0m[97m   save current position to jumplist[0m     [0m[33m│[0m
                                   [0m[33m│[0m[36m  j[0m[97m   jump backward in jumplist[0m             [0m[33m│[0m
                                   [0m[33m│[0m[36m  k[0m[97m   jump forward in jumplist[0m              [0m[33m│[0m

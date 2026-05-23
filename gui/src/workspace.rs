@@ -1963,6 +1963,7 @@ impl Workspace {
             ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
             ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
+            ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
             ActionKind::ToggleDiffHunkPanel => self.dispatch_toggle_diff_hunk_panel(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
@@ -3055,6 +3056,24 @@ impl Workspace {
         let panel_id = panel.entity_id();
         self.add_dock(Box::new(panel), DockSide::Right, 240, cx);
         self.diff_hunk_panel = Some(panel_id);
+    }
+
+    /// Toggle the left-side project file tree dock. When a project tree
+    /// dock is open, remove it; otherwise build one listing the
+    /// workspace root and add it as a left-side dock.
+    fn dispatch_toggle_project_tree(&mut self, cx: &mut Context<'_, Self>) {
+        let existing = self
+            .docks
+            .iter()
+            .position(|d| d.read(cx).item().item_kind(cx) == crate::item::ItemKind::ProjectTree);
+        if let Some(idx) = existing {
+            self.remove_dock(idx, cx);
+            return;
+        }
+        let git_root = self.git_root().clone();
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        let tree = cx.new(|cx| crate::project_tree::ProjectTree::new(git_root, fs, cx));
+        self.add_dock(Box::new(tree), DockSide::Left, 240, cx);
     }
 
     fn dispatch_jump(&mut self, dir: JumpDir, cx: &mut Context<'_, Self>) {
@@ -6250,6 +6269,40 @@ mod tests {
             Some(4),
             "toggling back returns to all files"
         );
+    }
+
+    #[test]
+    fn dispatch_toggle_project_tree_opens_and_closes_left_dock() {
+        use crate::{globals::FsHostGlobal, item::ItemKind};
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/a.rs", "");
+        fs.insert_dir("/repo/src");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        let project_tree_docks = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.docks()
+                    .iter()
+                    .filter(|d| d.read(cx).item().item_kind(cx) == ItemKind::ProjectTree)
+                    .count()
+            })
+        };
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        assert_eq!(
+            project_tree_docks(vcx),
+            1,
+            "toggle opens a project tree dock"
+        );
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        assert_eq!(project_tree_docks(vcx), 0, "toggling again removes it");
     }
 
     #[test]

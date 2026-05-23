@@ -53,6 +53,7 @@ mod pane;
 mod pane_tree;
 mod panic_hook;
 mod picker;
+mod project_tree;
 mod quit_confirm;
 mod rebase_item;
 mod rename_workspace_modal;

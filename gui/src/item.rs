@@ -17,6 +17,7 @@ pub enum ItemKind {
     Rebase,
     Review,
     CommitList,
+    ProjectTree,
     Unknown,
 }
 
