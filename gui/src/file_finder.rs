@@ -8,13 +8,13 @@
 //! [`Workspace::open_paths`].
 
 use crate::{
-    globals::{ExecutorGlobal, FsHostGlobal},
+    globals::{ExecutorGlobal, FsHostGlobal, GitHostGlobal},
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     theme::statusbar_text_color,
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
+    div, AnyElement, App, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
     SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use std::{
@@ -23,6 +23,17 @@ use std::{
 };
 use stoat::{host::FsHost, pane::Axis};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
+
+/// Which subset of workspace files the finder lists when it opens.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FinderScope {
+    /// Every non-ignored file under the workspace root, streamed in
+    /// from a background walk.
+    All,
+    /// Files carrying uncommitted git changes (modified, staged, or
+    /// untracked), snapshotted from the repository at open time.
+    Modified,
+}
 
 pub struct FileFinderDelegate {
     workspace: WeakEntity<Workspace>,
@@ -233,7 +244,7 @@ pub fn open_file_finder(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
-    open_file_finder_internal(workspace, None, window, cx);
+    open_file_finder_internal(workspace, FinderScope::All, None, window, cx);
 }
 
 /// Open the file finder with a default split-on-confirm axis. The
@@ -245,22 +256,46 @@ pub fn open_file_finder_split(
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
-    open_file_finder_internal(workspace, Some(axis), window, cx);
+    open_file_finder_internal(workspace, FinderScope::All, Some(axis), window, cx);
+}
+
+/// Open the file finder scoped to files with uncommitted git changes.
+/// The changed-file set is snapshotted at open time; the chosen file
+/// replaces the focused pane's content on confirm. Lists nothing when
+/// the workspace root is not inside a discoverable repository.
+pub fn open_changed_file_finder(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    open_file_finder_internal(workspace, FinderScope::Modified, None, window, cx);
 }
 
 fn open_file_finder_internal(
     workspace: &mut Workspace,
+    scope: FinderScope,
     intended_split: Option<Axis>,
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
     let git_root = workspace.git_root().clone();
     let weak_workspace = cx.weak_entity();
-    let fs_host = cx.global::<FsHostGlobal>().0.clone();
-    let executor = cx.global::<ExecutorGlobal>().0.clone();
 
-    let (walk_tx, walk_rx) = unbounded_channel();
-    let walk_task = spawn_walker(executor.clone(), fs_host, git_root.clone(), walk_tx);
+    let walk_rx = match scope {
+        FinderScope::All => {
+            let fs_host = cx.global::<FsHostGlobal>().0.clone();
+            let executor = cx.global::<ExecutorGlobal>().0.clone();
+            let (walk_tx, walk_rx) = unbounded_channel();
+            spawn_walker(executor, fs_host, git_root.clone(), walk_tx).detach();
+            Some(walk_rx)
+        },
+        FinderScope::Modified => None,
+    };
+
+    let initial_paths = match scope {
+        FinderScope::All => Vec::new(),
+        FinderScope::Modified => collect_changed_paths(&git_root, cx),
+    };
 
     workspace.toggle_modal::<Picker<FileFinderDelegate>, _>(window, cx, move |window, cx| {
         let delegate = match intended_split {
@@ -269,7 +304,7 @@ fn open_file_finder_internal(
         };
         Picker::new(delegate, window, cx)
     });
-    walk_task.detach();
+
     let Some(picker) = workspace
         .modal_layer()
         .read(cx)
@@ -277,13 +312,23 @@ fn open_file_finder_internal(
     else {
         return;
     };
-    let weak_picker = picker.downgrade();
-    let drain_task = cx.spawn(async move |_workspace, async_cx| {
-        drain_walker_batches(weak_picker, walk_rx, async_cx).await;
-    });
-    picker.update(cx, |p, _| {
-        p.delegate_mut().set_drain_task(drain_task);
-    });
+
+    if !initial_paths.is_empty() {
+        picker.update(cx, |p, cx| {
+            p.delegate_mut().extend_paths(initial_paths);
+            cx.notify();
+        });
+    }
+
+    if let Some(walk_rx) = walk_rx {
+        let weak_picker = picker.downgrade();
+        let drain_task = cx.spawn(async move |_workspace, async_cx| {
+            drain_walker_batches(weak_picker, walk_rx, async_cx).await;
+        });
+        picker.update(cx, |p, _| {
+            p.delegate_mut().set_drain_task(drain_task);
+        });
+    }
 }
 
 fn spawn_walker(
@@ -315,6 +360,20 @@ async fn drain_walker_batches(
             break;
         }
     }
+}
+
+/// Snapshot the absolute paths of every file with uncommitted git
+/// changes in the workspace repository, sorted and deduplicated.
+/// Empty when `git_root` is not inside a discoverable repository.
+fn collect_changed_paths(git_root: &Path, cx: &App) -> Vec<PathBuf> {
+    let git = cx.global::<GitHostGlobal>().0.clone();
+    let Some(repo) = git.discover(git_root) else {
+        return Vec::new();
+    };
+    let mut paths: Vec<PathBuf> = repo.changed_files().into_iter().map(|c| c.path).collect();
+    paths.sort();
+    paths.dedup();
+    paths
 }
 
 #[cfg(test)]

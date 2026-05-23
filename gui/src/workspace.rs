@@ -2016,6 +2016,9 @@ impl Workspace {
             ActionKind::OpenFileFinderVSplit => {
                 crate::file_finder::open_file_finder_split(self, Axis::Vertical, window, cx)
             },
+            ActionKind::OpenChangedFilePicker => {
+                crate::file_finder::open_changed_file_finder(self, window, cx)
+            },
             ActionKind::OpenBufferPicker => {
                 crate::buffer_picker::open_buffer_picker(self, window, cx)
             },
@@ -6137,6 +6140,48 @@ mod tests {
                 .is_some()
         });
         assert!(opened, "Run should open a run modal overlay");
+    }
+
+    #[test]
+    fn dispatch_open_changed_file_picker_lists_changed_files() {
+        use crate::{
+            file_finder::FileFinderDelegate,
+            globals::{FsHostGlobal, GitHostGlobal},
+            picker::{Picker, PickerDelegate},
+        };
+        use stoat::host::{fake::FakeGit, FakeFs, FsHost, GitHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        {
+            let mut builder = git.add_repo("/repo").with_fs(&fs);
+            builder.modified("a.rs", "v1\n", "v2\n");
+            builder.modified("b.rs", "v1\n", "v2\n");
+            builder.unstaged_file("c.rs", "c\n");
+            builder.unstaged_file("d.rs", "d\n");
+            builder.unstaged_file("e.rs", "e\n");
+        }
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenChangedFilePicker);
+        vcx.run_until_parked();
+
+        let count = ws.read_with(vcx, |w, cx| {
+            w.modal_layer
+                .read(cx)
+                .active_modal::<Picker<FileFinderDelegate>>()
+                .map(|picker| picker.read(cx).delegate().match_count())
+        });
+        assert_eq!(
+            count,
+            Some(5),
+            "changed-file picker should list the two modified and three untracked files",
+        );
     }
 
     #[test]
