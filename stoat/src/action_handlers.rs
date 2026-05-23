@@ -635,6 +635,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ToggleDiffHunkPanel
         | ActionKind::ToggleMinimap
         | ActionKind::ToggleProjectTree
+        | ActionKind::ProjectTreeSelectNext
+        | ActionKind::ProjectTreeSelectPrev
+        | ActionKind::ProjectTreeCollapse
+        | ActionKind::ProjectTreeExpand
+        | ActionKind::ProjectTreeConfirm
+        | ActionKind::ProjectTreeRefresh
         | ActionKind::OpenGitStatus => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {

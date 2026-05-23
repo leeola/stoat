@@ -74,6 +74,10 @@ pub use defs::{
         PickerConfirm, PickerConfirmSplitDown, PickerConfirmSplitRight, PickerSelectNext,
         PickerSelectPrev,
     },
+    project_tree::{
+        ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand, ProjectTreeRefresh,
+        ProjectTreeSelectNext, ProjectTreeSelectPrev,
+    },
     prompt::{
         CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
         PromptInsertNewline, ShellInputSubmit, SubmitPromptInput,

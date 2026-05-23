@@ -1,0 +1,84 @@
+use crate::{action::define_action, ActionKind, ActionPriority};
+
+define_action!(
+    ProjectTreeSelectNextDef,
+    ProjectTreeSelectNext,
+    "ProjectTreeSelectNext",
+    ActionKind::ProjectTreeSelectNext,
+    "select the next tree row",
+    "Move the project tree selection one visible row down.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ProjectTreeSelectPrevDef,
+    ProjectTreeSelectPrev,
+    "ProjectTreeSelectPrev",
+    ActionKind::ProjectTreeSelectPrev,
+    "select the previous tree row",
+    "Move the project tree selection one visible row up.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ProjectTreeCollapseDef,
+    ProjectTreeCollapse,
+    "ProjectTreeCollapse",
+    ActionKind::ProjectTreeCollapse,
+    "collapse the selected directory",
+    "Collapse the selected directory if it is expanded. No-op when the \
+     selected row is a file or an already-collapsed directory.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ProjectTreeExpandDef,
+    ProjectTreeExpand,
+    "ProjectTreeExpand",
+    ActionKind::ProjectTreeExpand,
+    "expand the selected directory",
+    "Expand the selected directory if it is collapsed, listing its \
+     contents inline. No-op when the selected row is a file or an \
+     already-expanded directory.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ProjectTreeConfirmDef,
+    ProjectTreeConfirm,
+    "ProjectTreeConfirm",
+    ActionKind::ProjectTreeConfirm,
+    "open the selected tree row",
+    "Toggle expansion when the selected row is a directory, or open the \
+     file in the focused pane when it is a file.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ProjectTreeRefreshDef,
+    ProjectTreeRefresh,
+    "ProjectTreeRefresh",
+    ActionKind::ProjectTreeRefresh,
+    "rescan the project tree",
+    "Re-read the workspace directory contents from disk, preserving the \
+     set of expanded directories.",
+    ActionPriority::Rare
+);
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::action::Action;
+
+    #[test]
+    fn kinds_and_names_match() {
+        assert_eq!(
+            ProjectTreeSelectNext.kind(),
+            ActionKind::ProjectTreeSelectNext
+        );
+        assert_eq!(ProjectTreeSelectNext.def().name(), "ProjectTreeSelectNext");
+        assert_eq!(ProjectTreeCollapse.kind(), ActionKind::ProjectTreeCollapse);
+        assert_eq!(ProjectTreeConfirm.def().name(), "ProjectTreeConfirm");
+        assert_eq!(ProjectTreeRefresh.kind(), ActionKind::ProjectTreeRefresh);
+    }
+}

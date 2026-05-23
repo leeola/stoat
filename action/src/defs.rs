@@ -10,6 +10,7 @@ pub mod lsp;
 pub mod palette;
 pub mod pane;
 pub mod picker;
+pub mod project_tree;
 pub mod prompt;
 pub mod rebase;
 pub mod review;

@@ -71,6 +71,10 @@ use crate::{
             PickerConfirm, PickerConfirmSplitDown, PickerConfirmSplitRight, PickerSelectNext,
             PickerSelectPrev,
         },
+        project_tree::{
+            ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand, ProjectTreeRefresh,
+            ProjectTreeSelectNext, ProjectTreeSelectPrev,
+        },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
             PromptInsertNewline, ShellInputSubmit, SubmitPromptInput,
@@ -618,6 +622,22 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspacePicker))
     });
     add(ToggleProjectTree::DEF, |_| Ok(Box::new(ToggleProjectTree)));
+    add(ProjectTreeSelectNext::DEF, |_| {
+        Ok(Box::new(ProjectTreeSelectNext))
+    });
+    add(ProjectTreeSelectPrev::DEF, |_| {
+        Ok(Box::new(ProjectTreeSelectPrev))
+    });
+    add(ProjectTreeCollapse::DEF, |_| {
+        Ok(Box::new(ProjectTreeCollapse))
+    });
+    add(ProjectTreeExpand::DEF, |_| Ok(Box::new(ProjectTreeExpand)));
+    add(ProjectTreeConfirm::DEF, |_| {
+        Ok(Box::new(ProjectTreeConfirm))
+    });
+    add(ProjectTreeRefresh::DEF, |_| {
+        Ok(Box::new(ProjectTreeRefresh))
+    });
     add(RenameWorkspace::DEF, |params| {
         let raw = match params.first() {
             Some(p) => p.as_string().context(WrongKindSnafu {
@@ -828,6 +848,12 @@ mod tests {
         "CloseWorkspace",
         "OpenWorkspacePicker",
         "ToggleProjectTree",
+        "ProjectTreeSelectNext",
+        "ProjectTreeSelectPrev",
+        "ProjectTreeCollapse",
+        "ProjectTreeExpand",
+        "ProjectTreeConfirm",
+        "ProjectTreeRefresh",
         "HelpSelectPrev",
         "HelpSelectNext",
         "HelpScopeToggle",
@@ -1012,7 +1038,9 @@ mod tests {
         // + 3 ToggleBlame / ToggleDiffHunkPanel / OpenGitStatus for the space_git submode.
         // + 1 ToggleMinimap for the space_workspace submode.
         // + 1 ToggleProjectTree (opens the project file tree in a dock).
-        assert_eq!(all().count(), 298);
+        // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
+        //   routed to the focused project tree dock.
+        assert_eq!(all().count(), 304);
     }
 
     #[test]
