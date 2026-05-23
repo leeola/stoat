@@ -23,7 +23,7 @@
 use crate::{
     editor::Editor,
     globals::ClaudeCodeHostGlobal,
-    item::{DeserializeSnafu, ItemError, ItemHandle, ItemView},
+    item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
     workspace::Workspace,
 };
 use gpui::{
@@ -35,6 +35,7 @@ use std::{collections::HashSet, sync::Arc};
 use stoat::{
     claude_chat::{ChatMessage, ChatMessageContent, ChatRole},
     host::{AgentMessage, ClaudeCodeHost, ClaudeCodeSession},
+    pane::PaneId,
 };
 
 pub struct ClaudeChat {
@@ -563,6 +564,64 @@ pub fn dispatch_claude_submit(workspace: &mut Workspace, cx: &mut Context<'_, Wo
     }
 }
 
+/// Dispatch the [`stoat_action::ClaudeToPane`] action. Moves the
+/// chat out of any dock into the focused pane and activates it.
+/// If a chat already lives in a split pane, focus that pane
+/// instead. No-op when no chat exists in either place.
+pub fn dispatch_claude_to_pane(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some((pane_id, index)) = find_claude_in_panes(workspace, cx) {
+        workspace
+            .pane_tree()
+            .clone()
+            .update(cx, |tree, cx| tree.set_focus(pane_id, cx));
+        if let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() {
+            pane.update(cx, |p, cx| {
+                p.activate(index, cx);
+            });
+        }
+        return;
+    }
+
+    let Some(dock_index) = find_claude_in_docks(workspace, cx) else {
+        return;
+    };
+    let item = workspace.docks()[dock_index].read(cx).item().boxed_clone();
+    workspace.remove_dock(dock_index, cx);
+
+    let pane_id = workspace.pane_tree().read(cx).focus();
+    let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
+        return;
+    };
+    pane.update(cx, |p, cx| {
+        let new_index = p.add_item(item, cx);
+        p.activate(new_index, cx);
+    });
+}
+
+fn find_claude_in_panes(
+    workspace: &Workspace,
+    cx: &Context<'_, Workspace>,
+) -> Option<(PaneId, usize)> {
+    let tree = workspace.pane_tree().read(cx);
+    for pane_id in tree.split_pane_ids() {
+        let pane = tree.pane(pane_id)?;
+        let items = pane.read(cx).items();
+        for (index, item) in items.iter().enumerate() {
+            if item.item_kind(cx) == ItemKind::Claude {
+                return Some((pane_id, index));
+            }
+        }
+    }
+    None
+}
+
+fn find_claude_in_docks(workspace: &Workspace, cx: &Context<'_, Workspace>) -> Option<usize> {
+    workspace
+        .docks()
+        .iter()
+        .position(|dock| dock.read(cx).item().item_kind(cx) == ItemKind::Claude)
+}
+
 /// Dispatch the [`stoat_action::ClaudeFocusNextToolCard`] action.
 /// Advances the focused tool card on the active chat toward older
 /// cards; no-op when the active item is not a chat.
@@ -638,6 +697,7 @@ pub(crate) fn focused_chat(
 mod tests {
     use super::*;
     use crate::{
+        dock::DockSide,
         globals::{
             ClaudeCodeHostGlobal, ClipboardHostGlobal, ExecutorGlobal, FsHostGlobal,
             FsWatchHostGlobal, GitHostGlobal,
@@ -1617,6 +1677,94 @@ mod tests {
             Some(2),
             "1-indexed offset 3 jumps to 0-indexed row 2"
         );
+    }
+
+    fn dock_claude(h: &mut Harness<'_>, side: DockSide) -> Entity<ClaudeChat> {
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            let weak = cx.weak_entity();
+            let chat = cx.new(|cx| ClaudeChat::new(weak, window, cx));
+            w.add_dock(Box::new(chat.clone()), side, 40, cx);
+            chat
+        })
+    }
+
+    fn dock_item_kinds(h: &mut Harness<'_>) -> Vec<ItemKind> {
+        h.workspace.read_with(h.vcx, |w, cx| {
+            w.docks()
+                .iter()
+                .map(|d| d.read(cx).item().item_kind(cx))
+                .collect()
+        })
+    }
+
+    fn pane_item_kinds(h: &mut Harness<'_>) -> Vec<Vec<ItemKind>> {
+        h.workspace.read_with(h.vcx, |w, cx| {
+            let tree = w.pane_tree().read(cx);
+            tree.split_pane_ids()
+                .into_iter()
+                .filter_map(|id| tree.pane(id).cloned())
+                .map(|p| p.read(cx).items().iter().map(|i| i.item_kind(cx)).collect())
+                .collect()
+        })
+    }
+
+    #[test]
+    fn claude_to_pane_moves_dock_chat_into_focused_pane() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        dock_claude(&mut h, DockSide::Left);
+        assert_eq!(dock_item_kinds(&mut h), vec![ItemKind::Claude]);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_to_pane(w, cx);
+        });
+
+        assert!(
+            dock_item_kinds(&mut h).is_empty(),
+            "dock should be removed once Claude lands in the pane"
+        );
+        assert!(
+            focused_chat(&mut h).is_some(),
+            "focused pane's active item should be Claude"
+        );
+    }
+
+    #[test]
+    fn claude_to_pane_focuses_existing_pane_chat() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+        let docks_before = dock_item_kinds(&mut h);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_to_pane(w, cx);
+        });
+
+        let active = focused_chat(&mut h).expect("Claude tab remains the focused active item");
+        assert_eq!(active.entity_id(), chat.entity_id());
+        assert_eq!(
+            dock_item_kinds(&mut h),
+            docks_before,
+            "no dock should be touched when Claude already lives in a pane"
+        );
+    }
+
+    #[test]
+    fn claude_to_pane_no_op_when_no_chat_exists() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let panes_before = pane_item_kinds(&mut h);
+        let docks_before = dock_item_kinds(&mut h);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_to_pane(w, cx);
+        });
+
+        assert_eq!(pane_item_kinds(&mut h), panes_before);
+        assert_eq!(dock_item_kinds(&mut h), docks_before);
     }
 
     #[test]
