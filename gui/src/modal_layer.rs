@@ -4,7 +4,7 @@ use gpui::{
     FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView, MouseButton,
     ParentElement, Render, Styled, Subscription, WeakEntity, Window,
 };
-use stoat_action::DismissModal;
+use stoat_action::{ActionKind, DismissModal};
 
 /// Modal entity hosted by a [`ModalLayer`]. Builds on gpui's
 /// [`ManagedView`] (focus handle + dismiss event + render) and adds a
@@ -38,6 +38,34 @@ pub trait ModalView: ManagedView {
     ) -> bool {
         false
     }
+
+    /// Hook for [`stoat_action::SubmitPromptInput`]. Called by
+    /// [`ModalLayer::handle_action`] when this modal is on top of
+    /// the stack. Returns `true` when the modal consumed the action.
+    /// Default returns `false`; prompt-style modals override to run
+    /// their submit flow (confirm picker selection, run the typed
+    /// shell command, apply the rename, and so on).
+    fn submit_prompt(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
+        false
+    }
+
+    /// Hook for [`stoat_action::CancelPromptInput`]. Called by
+    /// [`ModalLayer::handle_action`] when this modal is on top of
+    /// the stack. Returns `true` when the modal consumed the action.
+    /// Default returns `false`; prompt-style modals override to
+    /// dismiss themselves (emit [`DismissEvent`] after any cleanup).
+    fn cancel_prompt(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
+        false
+    }
+
+    /// Hook for [`stoat_action::PromptInsertNewline`]. Called by
+    /// [`ModalLayer::handle_action`] when this modal is on top of
+    /// the stack. Returns `true` when the modal consumed the action.
+    /// Default returns `false`; multi-line prompt modals override to
+    /// insert `\n` at the cursor of their input editor.
+    fn insert_newline(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
+        false
+    }
 }
 
 trait ModalViewHandle {
@@ -49,6 +77,9 @@ trait ModalViewHandle {
         window: &mut Window,
         cx: &mut App,
     ) -> bool;
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut App) -> bool;
+    fn cancel_prompt(&mut self, window: &mut Window, cx: &mut App) -> bool;
+    fn insert_newline(&mut self, window: &mut Window, cx: &mut App) -> bool;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -67,6 +98,18 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
         cx: &mut App,
     ) -> bool {
         self.update(cx, |modal, cx| modal.handle_action(action, window, cx))
+    }
+
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.update(cx, |modal, cx| modal.submit_prompt(window, cx))
+    }
+
+    fn cancel_prompt(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.update(cx, |modal, cx| modal.cancel_prompt(window, cx))
+    }
+
+    fn insert_newline(&mut self, window: &mut Window, cx: &mut App) -> bool {
+        self.update(cx, |modal, cx| modal.insert_newline(window, cx))
     }
 }
 
@@ -245,7 +288,17 @@ impl ModalLayer {
     /// `true` when the top modal consumed the action so the caller
     /// (typically [`Workspace::dispatch_action`]) can short-circuit
     /// its own dispatch; returns `false` when no modal is active or
-    /// the top modal's [`ModalView::handle_action`] returned `false`.
+    /// the top modal's hook returned `false`.
+    ///
+    /// The three prompt-lifecycle action kinds
+    /// ([`ActionKind::SubmitPromptInput`], [`ActionKind::CancelPromptInput`],
+    /// [`ActionKind::PromptInsertNewline`]) route into the
+    /// [`ModalView::submit_prompt`], [`ModalView::cancel_prompt`], and
+    /// [`ModalView::insert_newline`] hooks respectively so prompt-style
+    /// modals can share submit / cancel / newline-insert semantics
+    /// without each duplicating an `ActionKind` match arm. Every other
+    /// action falls through to the generic
+    /// [`ModalView::handle_action`].
     pub fn handle_action(
         &mut self,
         action: &dyn stoat_action::Action,
@@ -255,7 +308,12 @@ impl ModalLayer {
         let Some(top) = self.active_modals.last_mut() else {
             return false;
         };
-        top.modal.handle_action(action, window, cx)
+        match action.kind() {
+            ActionKind::SubmitPromptInput => top.modal.submit_prompt(window, cx),
+            ActionKind::CancelPromptInput => top.modal.cancel_prompt(window, cx),
+            ActionKind::PromptInsertNewline => top.modal.insert_newline(window, cx),
+            _ => top.modal.handle_action(action, window, cx),
+        }
     }
 }
 
@@ -676,6 +734,99 @@ mod tests {
         ) -> impl IntoElement {
             div().size_full().child(self.layer.clone())
         }
+    }
+
+    /// Modal that records which prompt hooks were invoked so the
+    /// dispatch test can assert routing without driving a real
+    /// modal's submit / cancel flow.
+    struct RecordingPromptModal {
+        focus_handle: FocusHandle,
+        submitted: usize,
+        cancelled: usize,
+        newlines: usize,
+    }
+
+    impl RecordingPromptModal {
+        fn new(cx: &mut Context<'_, Self>) -> Self {
+            Self {
+                focus_handle: cx.focus_handle(),
+                submitted: 0,
+                cancelled: 0,
+                newlines: 0,
+            }
+        }
+    }
+
+    impl Render for RecordingPromptModal {
+        fn render(
+            &mut self,
+            _window: &mut Window,
+            _cx: &mut Context<'_, Self>,
+        ) -> impl IntoElement {
+            div().size_full()
+        }
+    }
+
+    impl Focusable for RecordingPromptModal {
+        fn focus_handle(&self, _cx: &App) -> FocusHandle {
+            self.focus_handle.clone()
+        }
+    }
+
+    impl EventEmitter<DismissEvent> for RecordingPromptModal {}
+
+    impl ModalView for RecordingPromptModal {
+        fn submit_prompt(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
+            self.submitted += 1;
+            true
+        }
+
+        fn cancel_prompt(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
+            self.cancelled += 1;
+            true
+        }
+
+        fn insert_newline(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
+            self.newlines += 1;
+            true
+        }
+    }
+
+    #[test]
+    fn handle_action_routes_prompt_kinds_to_prompt_hooks() {
+        let mut cx = TestAppContext::single();
+        let (layer, vcx) = new_layer(&mut cx);
+        let modal = push_modal::<RecordingPromptModal>(&layer, vcx, RecordingPromptModal::new);
+        vcx.run_until_parked();
+
+        let submitted = layer.update_in(vcx, |l, window, cx| {
+            l.handle_action(&stoat_action::SubmitPromptInput, window, cx)
+        });
+        let cancelled = layer.update_in(vcx, |l, window, cx| {
+            l.handle_action(&stoat_action::CancelPromptInput, window, cx)
+        });
+        let newline = layer.update_in(vcx, |l, window, cx| {
+            l.handle_action(&stoat_action::PromptInsertNewline, window, cx)
+        });
+
+        assert!(submitted, "SubmitPromptInput should be consumed");
+        assert!(cancelled, "CancelPromptInput should be consumed");
+        assert!(newline, "PromptInsertNewline should be consumed");
+        modal.read_with(vcx, |m, _| {
+            assert_eq!(m.submitted, 1, "submit_prompt called exactly once");
+            assert_eq!(m.cancelled, 1, "cancel_prompt called exactly once");
+            assert_eq!(m.newlines, 1, "insert_newline called exactly once");
+        });
+    }
+
+    #[test]
+    fn handle_action_returns_false_for_prompt_kinds_when_no_modal_active() {
+        let mut cx = TestAppContext::single();
+        let (layer, vcx) = new_layer(&mut cx);
+        let consumed = layer.update_in(vcx, |l, window, cx| {
+            l.handle_action(&stoat_action::SubmitPromptInput, window, cx)
+        });
+        assert!(!consumed, "empty stack must not consume prompt actions");
     }
 
     #[test]

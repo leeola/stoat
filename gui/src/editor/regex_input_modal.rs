@@ -186,4 +186,14 @@ impl ModalView for RegexInputModal {
             _ => false,
         }
     }
+
+    fn submit_prompt(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.confirm(cx);
+        true
+    }
+
+    fn cancel_prompt(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        cx.emit(DismissEvent);
+        true
+    }
 }

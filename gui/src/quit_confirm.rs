@@ -121,14 +121,21 @@ impl ModalView for QuitConfirmModal {
     fn handle_action(
         &mut self,
         action: &dyn stoat_action::Action,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         match action.kind() {
-            ActionKind::SubmitPromptInput => self.confirm(window, cx),
             ActionKind::DismissModal => self.cancel(cx),
             _ => false,
         }
+    }
+
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.confirm(window, cx)
+    }
+
+    fn cancel_prompt(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.cancel(cx)
     }
 }
 
@@ -239,9 +246,7 @@ mod tests {
         let (ws, vcx) = new_workspace(&mut cx);
         let modal = open_modal(vcx, &ws, vec![dirty(1, Some("/r/a.rs"))]);
 
-        let handled = modal.update_in(vcx, |m, window, cx| {
-            m.handle_action(&stoat_action::SubmitPromptInput, window, cx)
-        });
+        let handled = modal.update_in(vcx, |m, window, cx| m.submit_prompt(window, cx));
         assert!(handled, "SubmitPromptInput must be handled");
     }
 

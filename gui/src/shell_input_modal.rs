@@ -103,6 +103,20 @@ impl ModalView for ShellInputModal {
             _ => false,
         }
     }
+
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.confirm(window, cx)
+    }
+
+    fn cancel_prompt(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.abort(cx)
+    }
+
+    fn insert_newline(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        let editor = self.editor.clone();
+        editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors("\n", cx));
+        true
+    }
 }
 
 #[cfg(test)]
@@ -224,5 +238,59 @@ mod tests {
         });
 
         assert!(!handled, "Unrelated actions must not be intercepted");
+    }
+
+    #[test]
+    fn submit_prompt_runs_confirm_path() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (workspace, vcx) = new_workspace_in_window(&mut cx);
+        let modal = open_modal(vcx, &workspace, ShellAction::Pipe);
+        let modal_editor = modal.read_with(vcx, |m, _| m.editor().clone());
+        type_into_editor(&modal_editor, vcx, "echo hi");
+        vcx.run_until_parked();
+
+        let handled = modal.update_in(vcx, |m, window, cx| m.submit_prompt(window, cx));
+        vcx.run_until_parked();
+
+        assert!(handled, "submit_prompt must be handled");
+    }
+
+    #[test]
+    fn cancel_prompt_aborts_without_running() {
+        let mut cx = TestAppContext::single();
+        let fake = install_globals(&mut cx);
+        let (workspace, vcx) = new_workspace_in_window(&mut cx);
+        let modal = open_modal(vcx, &workspace, ShellAction::Pipe);
+        let modal_editor = modal.read_with(vcx, |m, _| m.editor().clone());
+        type_into_editor(&modal_editor, vcx, "echo hi");
+        vcx.run_until_parked();
+
+        let handled = modal.update_in(vcx, |m, window, cx| m.cancel_prompt(window, cx));
+        vcx.run_until_parked();
+
+        assert!(handled, "cancel_prompt must be handled");
+        assert!(fake.invocations().is_empty(), "no command should run");
+    }
+
+    #[test]
+    fn insert_newline_appends_line_feed_to_editor() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (workspace, vcx) = new_workspace_in_window(&mut cx);
+        let modal = open_modal(vcx, &workspace, ShellAction::Pipe);
+        let modal_editor = modal.read_with(vcx, |m, _| m.editor().clone());
+        type_into_editor(&modal_editor, vcx, "echo hi");
+        vcx.run_until_parked();
+
+        let handled = modal.update_in(vcx, |m, window, cx| m.insert_newline(window, cx));
+        vcx.run_until_parked();
+
+        assert!(handled, "insert_newline must be handled");
+        let text = vcx.read(|cx| editor_text(&modal_editor, cx));
+        assert!(
+            text.contains('\n'),
+            "editor text must contain newline, got {text:?}"
+        );
     }
 }

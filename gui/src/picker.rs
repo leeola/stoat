@@ -275,6 +275,16 @@ impl<D: PickerDelegate> ModalView for Picker<D> {
     ) -> bool {
         Picker::handle_action(self, action, window, cx)
     }
+
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.confirm_selection(None, window, cx)
+    }
+
+    fn cancel_prompt(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.delegate.dismissed(cx);
+        cx.emit(DismissEvent);
+        true
+    }
 }
 
 fn current_query<D: PickerDelegate>(

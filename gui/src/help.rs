@@ -499,7 +499,7 @@ impl ModalView for HelpModal {
     fn handle_action(
         &mut self,
         action: &dyn stoat_action::Action,
-        window: &mut Window,
+        _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> bool {
         match action.kind() {
@@ -539,10 +539,17 @@ impl ModalView for HelpModal {
                 cx.notify();
                 true
             },
-            ActionKind::SubmitPromptInput => self.confirm(window, cx),
             ActionKind::CloseHelp | ActionKind::DismissModal => self.close(cx),
             _ => false,
         }
+    }
+
+    fn submit_prompt(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.confirm(window, cx)
+    }
+
+    fn cancel_prompt(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        self.close(cx)
     }
 }
 
