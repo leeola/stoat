@@ -1924,6 +1924,7 @@ impl Workspace {
             ActionKind::SaveSelection => self.dispatch_save_selection(cx),
             ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
+            ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
             ActionKind::ToggleDiffHunkPanel => self.dispatch_toggle_diff_hunk_panel(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
@@ -2832,6 +2833,18 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
         self.blame_coordinator
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
+    }
+
+    /// Flip the active editor's minimap visibility and repaint. The
+    /// minimap is a reduced-scale mirror column painted alongside the
+    /// editor by sibling work; this only toggles the visibility flag.
+    /// No-op when no editor is focused.
+    fn dispatch_toggle_minimap(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let new_visible = !editor.read(cx).minimap_visible();
+        editor.update(cx, |ed, cx| ed.set_minimap_visible(new_visible, cx));
     }
 
     /// Open a new gpui window hosting a clone of the current
@@ -12493,6 +12506,24 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleBlame);
         vcx.run_until_parked();
         editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+    }
+
+    #[test]
+    fn dispatch_toggle_minimap_flips_visibility_on_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        editor.read_with(vcx, |ed, _| assert!(!ed.minimap_visible()));
+        dispatch(&ws, vcx, stoat_action::ToggleMinimap);
+        vcx.run_until_parked();
+        editor.read_with(vcx, |ed, _| assert!(ed.minimap_visible()));
+
+        dispatch(&ws, vcx, stoat_action::ToggleMinimap);
+        vcx.run_until_parked();
+        editor.read_with(vcx, |ed, _| assert!(!ed.minimap_visible()));
     }
 
     #[test]

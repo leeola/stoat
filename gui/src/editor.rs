@@ -141,6 +141,7 @@ pub struct Editor {
     expansion_tip: Option<std::ops::Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
     blame_visible: bool,
+    minimap_visible: bool,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
     _review_session_subscription: Option<Subscription>,
@@ -364,6 +365,7 @@ impl Editor {
             expansion_tip: None,
             blame_state: None,
             blame_visible: false,
+            minimap_visible: false,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
             _review_session_subscription: None,
@@ -2283,6 +2285,23 @@ impl Editor {
             return;
         }
         self.blame_visible = visible;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    pub fn minimap_visible(&self) -> bool {
+        self.minimap_visible
+    }
+
+    /// Flip the per-editor minimap-visibility flag. When `true`, the
+    /// render path paints a reduced-scale mirror column alongside the
+    /// editor (constructed and painted by sibling work). Toggling does
+    /// not affect the editor's own viewport or selections.
+    pub fn set_minimap_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
+        if self.minimap_visible == visible {
+            return;
+        }
+        self.minimap_visible = visible;
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }

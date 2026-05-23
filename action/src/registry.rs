@@ -44,8 +44,8 @@ use crate::{
             ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
             SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleBlame, ToggleComments, ToggleDiffHunkPanel,
-            TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
-            YankToClipboard,
+            ToggleMinimap, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
+            YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -464,6 +464,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
     add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
+    add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
     add(ToggleDiffHunkPanel::DEF, |_| {
         Ok(Box::new(ToggleDiffHunkPanel))
     });
@@ -1000,7 +1001,8 @@ mod tests {
         //   the GUI dispatches via the per-handler edit-action module.
         // + 1 ShellInputSubmit (palette-invisible: dismisses the active ShellInputModal).
         // + 3 ToggleBlame / ToggleDiffHunkPanel / OpenGitStatus for the space_git submode.
-        assert_eq!(all().count(), 294);
+        // + 1 ToggleMinimap for the space_workspace submode.
+        assert_eq!(all().count(), 295);
     }
 
     #[test]

@@ -201,6 +201,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleMinimapDef,
+    ToggleMinimap,
+    "ToggleMinimap",
+    ActionKind::ToggleMinimap,
+    "toggle minimap",
+    "Toggle the minimap on the active editor. The minimap is a reduced-scale mirror of the buffer painted as a narrow right-aligned column for at-a-glance navigation and scrolling. Toggling off hides the column; the active editor's own view is unaffected.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

@@ -170,6 +170,7 @@ pub enum ActionKind {
     UnindentSelection,
     ToggleComments,
     ToggleBlame,
+    ToggleMinimap,
     ToggleDiffHunkPanel,
     OpenGitStatus,
     ExtendToLineStart,

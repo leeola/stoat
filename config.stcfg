@@ -562,6 +562,7 @@ on key {
         r -> [RenameWorkspace(), SetMode(normal)];
         Shift-L -> [ToggleDockLeft(), SetMode(normal)];
         Shift-R -> [ToggleDockRight(), SetMode(normal)];
+        m -> [ToggleMinimap(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == run {
