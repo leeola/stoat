@@ -19,9 +19,9 @@ use crate::{
     theme::{self, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
 };
 use gpui::{
-    canvas, div, font, px, relative, size as gpui_size, uniform_list, App, AppContext, Bounds,
-    Context, Div, ElementInputHandler, Entity, EventEmitter, InteractiveElement, IntoElement,
-    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render,
+    canvas, div, fill, font, px, relative, size as gpui_size, uniform_list, App, AppContext,
+    Bounds, Context, Div, ElementInputHandler, Entity, EventEmitter, Hsla, InteractiveElement,
+    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render,
     ScrollWheelEvent, SharedString, Size, Styled, Subscription, Task, UniformListScrollHandle,
     WeakEntity, Window,
 };
@@ -3120,16 +3120,16 @@ impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.apply_pending_autoscroll(cx);
         let is_minimap = self.mode.is_minimap();
-        let total_rows = self
+        let document_rows = self
             .display_map
             .update(cx, |dm, _| dm.snapshot())
             .max_point()
             .row as usize
             + 1;
         let total_rows = if is_minimap {
-            total_rows.min(MAX_MINIMAP_LINES)
+            document_rows.min(MAX_MINIMAP_LINES)
         } else {
-            total_rows
+            document_rows
         };
         let handle = cx.entity().downgrade();
         let bounds_handle = handle.clone();
@@ -3222,6 +3222,39 @@ impl Render for Editor {
                     .child(minimap),
             );
         }
+        if let EditorMode::Minimap { parent } = &self.mode {
+            let parent = parent.clone();
+            let total_lines = document_rows as f64;
+            root = root.child(
+                canvas(
+                    |_, _, _| {},
+                    move |bounds, _, window, cx| {
+                        let Some(parent) = parent.upgrade() else {
+                            return;
+                        };
+                        let parent = parent.read(cx);
+                        let (Some(region), Some(cell)) =
+                            (parent.text_region_bounds(), parent.cell_size())
+                        else {
+                            return;
+                        };
+                        let line_height = f32::from(cell.height) as f64;
+                        if line_height <= 0.0 {
+                            return;
+                        }
+                        let visible_lines = f32::from(region.size.height) as f64 / line_height;
+                        let scroll_y = parent.scroll_manager().anchor().offset.y;
+                        if let Some(thumb) =
+                            minimap_thumb_bounds(bounds, total_lines, visible_lines, scroll_y)
+                        {
+                            window.paint_quad(fill(thumb, MINIMAP_THUMB_COLOR));
+                        }
+                    },
+                )
+                .absolute()
+                .size_full(),
+            );
+        }
         root.on_mouse_down(
             MouseButton::Left,
             cx.listener(|this, event: &MouseDownEvent, window, cx| {
@@ -3265,6 +3298,54 @@ const MAX_MINIMAP_LINES: usize = 200;
 /// at [`MINIMAP_FONT_SIZE`]) so it stays visible in a narrow pane.
 const MINIMAP_WIDTH_FRACTION: f32 = 0.15;
 const MINIMAP_MIN_WIDTH: f32 = 24.0;
+
+/// Fill color of the minimap viewport thumb: white at low opacity, so the
+/// overlay marks the editor's visible region without hiding the minimap
+/// text beneath it.
+const MINIMAP_THUMB_COLOR: Hsla = Hsla {
+    h: 0.0,
+    s: 0.0,
+    l: 1.0,
+    a: 0.3,
+};
+
+/// Bounds of the minimap viewport thumb within `minimap_bounds`: the
+/// overlay rectangle marking which slice of the document the parent
+/// editor currently shows. Returns [`None`] when the whole document fits
+/// the viewport (`total_lines <= visible_editor_lines`), where no thumb
+/// is drawn.
+///
+/// The thumb height is `minimap_height * visible_editor_lines /
+/// total_lines`; its top slides down the leftover track in proportion to
+/// how far the editor has scrolled, so a fully scrolled editor pins the
+/// thumb to the minimap's bottom edge.
+fn minimap_thumb_bounds(
+    minimap_bounds: Bounds<Pixels>,
+    total_lines: f64,
+    visible_editor_lines: f64,
+    editor_scroll_y: f64,
+) -> Option<Bounds<Pixels>> {
+    if total_lines <= visible_editor_lines {
+        return None;
+    }
+
+    let minimap_height = minimap_bounds.size.height;
+    let thumb_height_ratio = (visible_editor_lines / total_lines).clamp(0.0, 1.0);
+    let thumb_height = minimap_height * thumb_height_ratio as f32;
+
+    let max_scroll = (total_lines - visible_editor_lines).max(0.0);
+    let scroll_ratio = if max_scroll > 0.0 {
+        (editor_scroll_y / max_scroll).clamp(0.0, 1.0)
+    } else {
+        0.0
+    };
+    let thumb_y = minimap_bounds.origin.y + (minimap_height - thumb_height) * scroll_ratio as f32;
+
+    Some(Bounds {
+        origin: Point::new(minimap_bounds.origin.x, thumb_y),
+        size: gpui_size(minimap_bounds.size.width, thumb_height),
+    })
+}
 
 /// Wall-clock reference seeded into the blame strip's `now_seconds`
 /// field so relative ages render against the user's current time.
@@ -4637,6 +4718,28 @@ mod tests {
             true
         });
         assert!(parent_built && minimap_built);
+    }
+
+    #[test]
+    fn minimap_thumb_bounds_none_when_document_fits() {
+        let minimap = Bounds {
+            origin: Point::new(px(0.0), px(0.0)),
+            size: gpui_size(px(20.0), px(200.0)),
+        };
+        assert_eq!(minimap_thumb_bounds(minimap, 40.0, 50.0, 0.0), None);
+    }
+
+    #[test]
+    fn minimap_thumb_bounds_half_scroll_centers_thumb() {
+        let minimap = Bounds {
+            origin: Point::new(px(0.0), px(0.0)),
+            size: gpui_size(px(20.0), px(200.0)),
+        };
+        let thumb = minimap_thumb_bounds(minimap, 500.0, 50.0, 225.0)
+            .expect("thumb present when document exceeds viewport");
+
+        assert_eq!(thumb.size, gpui_size(px(20.0), px(20.0)));
+        assert_eq!(thumb.origin, Point::new(px(0.0), px(90.0)));
     }
 
     #[test]
