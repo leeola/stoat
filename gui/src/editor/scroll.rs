@@ -140,6 +140,51 @@ pub enum ScrollbarThumbState {
     Dragging,
 }
 
+/// In-progress eased scroll animation. The scroll position interpolates
+/// from `start` to `target` over `duration` along a cubic ease-in-out
+/// curve; [`position_at`](Self::position_at) samples it. Times come from
+/// the editor's executor clock, so the animation is deterministic under a
+/// test scheduler.
+#[derive(Clone, Copy, Debug)]
+pub struct ScrollAnimation {
+    pub start: Point<f64>,
+    pub target: Point<f64>,
+    pub start_time: Instant,
+    pub duration: Duration,
+}
+
+impl ScrollAnimation {
+    /// Interpolated scroll position at `now`, clamped to `target` once the
+    /// duration has elapsed.
+    pub fn position_at(&self, now: Instant) -> Point<f64> {
+        let elapsed = now.saturating_duration_since(self.start_time);
+        if elapsed >= self.duration {
+            return self.target;
+        }
+        let eased = ease_in_out_cubic(elapsed.as_secs_f64() / self.duration.as_secs_f64());
+        Point::new(
+            self.start.x + (self.target.x - self.start.x) * eased,
+            self.start.y + (self.target.y - self.start.y) * eased,
+        )
+    }
+
+    /// Whether the animation has run for at least its `duration`.
+    pub fn is_complete(&self, now: Instant) -> bool {
+        now.saturating_duration_since(self.start_time) >= self.duration
+    }
+}
+
+/// Cubic ease-in-out over `t` in `[0, 1]` (clamped): slow start, quick
+/// middle, slow settle. The standard curve for UI motion.
+fn ease_in_out_cubic(t: f64) -> f64 {
+    let t = t.clamp(0.0, 1.0);
+    if t < 0.5 {
+        4.0 * t * t * t
+    } else {
+        1.0 - (-2.0 * t + 2.0).powi(3) / 2.0
+    }
+}
+
 /// Per-editor scroll state. Owns the active [`ScrollAnchor`], the
 /// in-progress [`OngoingScroll`] gesture, a cached visible-line count
 /// the render path fills in during paint, the minimap thumb state,
@@ -152,6 +197,7 @@ pub struct ScrollManager {
     visible_line_count: Option<f64>,
     minimap_thumb_state: Option<ScrollbarThumbState>,
     autoscroll_request: Option<AutoscrollStrategy>,
+    animation: Option<ScrollAnimation>,
 }
 
 impl ScrollManager {
@@ -162,6 +208,7 @@ impl ScrollManager {
             visible_line_count: None,
             minimap_thumb_state: None,
             autoscroll_request: None,
+            animation: None,
         }
     }
 
@@ -210,6 +257,31 @@ impl ScrollManager {
     /// strategy, so a request never re-fires across frames.
     pub fn take_autoscroll_request(&mut self) -> Option<AutoscrollStrategy> {
         self.autoscroll_request.take()
+    }
+
+    pub fn animation(&self) -> Option<&ScrollAnimation> {
+        self.animation.as_ref()
+    }
+
+    /// Begin an eased scroll from `start` to `target` over `duration`,
+    /// timed from `start_time`. Replaces any animation already running.
+    pub fn start_scroll_animation(
+        &mut self,
+        start: Point<f64>,
+        target: Point<f64>,
+        start_time: Instant,
+        duration: Duration,
+    ) {
+        self.animation = Some(ScrollAnimation {
+            start,
+            target,
+            start_time,
+            duration,
+        });
+    }
+
+    pub fn clear_animation(&mut self) {
+        self.animation = None;
     }
 
     /// Apply a wheel or trackpad event to the fractional scroll
@@ -280,6 +352,56 @@ mod tests {
 
     fn epoch() -> Instant {
         Instant::now()
+    }
+
+    #[test]
+    fn ease_in_out_cubic_endpoints_and_midpoint() {
+        assert_eq!(ease_in_out_cubic(0.0), 0.0);
+        assert_eq!(ease_in_out_cubic(0.5), 0.5);
+        assert_eq!(ease_in_out_cubic(1.0), 1.0);
+        assert_eq!(ease_in_out_cubic(-1.0), 0.0);
+        assert_eq!(ease_in_out_cubic(2.0), 1.0);
+    }
+
+    #[test]
+    fn position_at_interpolates_then_clamps_to_target() {
+        let start = epoch();
+        let anim = ScrollAnimation {
+            start: Point::new(0.0, 0.0),
+            target: Point::new(0.0, 100.0),
+            start_time: start,
+            duration: Duration::from_millis(150),
+        };
+
+        assert_eq!(anim.position_at(start), Point::new(0.0, 0.0));
+        assert_eq!(
+            anim.position_at(start + Duration::from_millis(150)),
+            Point::new(0.0, 100.0),
+        );
+        assert_eq!(
+            anim.position_at(start + Duration::from_millis(500)),
+            Point::new(0.0, 100.0),
+        );
+
+        let mid = anim.position_at(start + Duration::from_millis(75)).y;
+        assert!((mid - 50.0).abs() < 0.01, "midpoint y was {mid}");
+        let early = anim.position_at(start + Duration::from_millis(30)).y;
+        assert!(early > 0.0 && early < mid, "eased early y was {early}");
+    }
+
+    #[test]
+    fn is_complete_after_duration_elapses() {
+        let start = epoch();
+        let anim = ScrollAnimation {
+            start: Point::new(0.0, 0.0),
+            target: Point::new(0.0, 10.0),
+            start_time: start,
+            duration: Duration::from_millis(150),
+        };
+        assert!(!anim.is_complete(start));
+        assert!(!anim.is_complete(start + Duration::from_millis(149)));
+        assert!(anim.is_complete(start + Duration::from_millis(150)));
+        assert!(anim.is_complete(start + Duration::from_millis(300)));
     }
 
     #[test]

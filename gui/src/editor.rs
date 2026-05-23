@@ -159,6 +159,7 @@ pub struct Editor {
     minimap_visible: bool,
     minimap: Option<Entity<Editor>>,
     minimap_drag: Option<MinimapDrag>,
+    scroll_animation_task: Option<Task<()>>,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
     _review_session_subscription: Option<Subscription>,
@@ -385,6 +386,7 @@ impl Editor {
             minimap_visible: false,
             minimap: None,
             minimap_drag: None,
+            scroll_animation_task: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
             _review_session_subscription: None,
@@ -2489,6 +2491,47 @@ impl Editor {
         cx.notify();
     }
 
+    /// Begin an eased scroll to fractional row `target_y`, spawning a task
+    /// that steps the animation each frame until it completes. The task is
+    /// retained on the editor; starting a new animation replaces (and so
+    /// cancels) any prior one.
+    fn animate_scroll_to(&mut self, target_y: f64, cx: &mut Context<'_, Self>) {
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let start = self.scroll_manager.anchor().offset;
+        self.scroll_manager.start_scroll_animation(
+            start,
+            Point::new(start.x, target_y),
+            executor.now(),
+            SCROLL_ANIMATION_DURATION,
+        );
+        self.scroll_animation_task = Some(cx.spawn(async move |editor, cx| loop {
+            executor.timer(SCROLL_ANIMATION_FRAME).await;
+            let still_animating = editor
+                .update(cx, |editor, cx| editor.step_scroll_animation(cx))
+                .unwrap_or(false);
+            if !still_animating {
+                break;
+            }
+        }));
+    }
+
+    /// Apply one frame of the active scroll animation, sampling the
+    /// executor clock. Returns whether the animation is still running;
+    /// clears it and returns `false` once complete or absent.
+    fn step_scroll_animation(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let Some(animation) = self.scroll_manager.animation().copied() else {
+            return false;
+        };
+        let now = cx.global::<ExecutorGlobal>().0.now();
+        self.set_scroll_position_y(animation.position_at(now).y, cx);
+        if animation.is_complete(now) {
+            self.scroll_manager.clear_animation();
+            false
+        } else {
+            true
+        }
+    }
+
     pub fn review_session(&self) -> Option<&Entity<crate::review_session::ReviewSession>> {
         self.review_session.as_ref()
     }
@@ -3038,17 +3081,15 @@ impl Editor {
         if new_y == current_y {
             return;
         }
-        let mut anchor = *self.scroll_manager.anchor();
-        anchor.offset.y = new_y;
-        self.scroll_manager.set_anchor(anchor);
-        let pixel_offset_y = render::scroll_position_to_pixel_offset_y(new_y, cell.height);
-        self.scroll_handle
-            .0
-            .borrow()
-            .base_handle
-            .set_offset(Point::new(px(0.0), pixel_offset_y));
-        let new_row = new_y.floor().max(0.0) as u32;
-        self.set_scroll_row(new_row, cx);
+        let animate = matches!(
+            strategy,
+            AutoscrollStrategy::Center | AutoscrollStrategy::Top | AutoscrollStrategy::Bottom
+        ) && (new_y - current_y).abs() >= MIN_ANIMATED_SCROLL_ROWS;
+        if animate {
+            self.animate_scroll_to(new_y, cx);
+        } else {
+            self.set_scroll_position_y(new_y, cx);
+        }
     }
 
     /// Translate a buffer UTF-16 offset to the pixel rectangle of the
@@ -3480,6 +3521,14 @@ const MAX_MINIMAP_LINES: usize = 200;
 const MINIMAP_WIDTH_FRACTION: f32 = 0.15;
 const MINIMAP_MIN_WIDTH: f32 = 24.0;
 
+/// Duration of an eased programmatic-jump scroll animation.
+const SCROLL_ANIMATION_DURATION: std::time::Duration = std::time::Duration::from_millis(150);
+/// Wake interval of the scroll-animation task (~60 fps).
+const SCROLL_ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
+/// Jumps shorter than this many display rows snap instantly; only larger
+/// programmatic jumps are worth animating.
+const MIN_ANIMATED_SCROLL_ROWS: f64 = 3.0;
+
 /// Fill color of the minimap viewport thumb: white at low opacity, so the
 /// overlay marks the editor's visible region without hiding the minimap
 /// text beneath it.
@@ -3908,7 +3957,7 @@ mod tests {
     #[test]
     fn apply_pending_autoscroll_top_places_cursor_at_top() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
+        let scheduler = install_executor_global_returning_scheduler(&mut cx);
         let vcx = cx.add_empty_window();
         let text = multiline_text(30);
         let (_buffer, editor) = editor_with_viewport(vcx, &text);
@@ -3917,7 +3966,9 @@ mod tests {
             ed.request_autoscroll(AutoscrollStrategy::Top, cx);
             ed.apply_pending_autoscroll(cx);
         });
+        // A 10-row jump animates; drive the animation to completion.
         vcx.run_until_parked();
+        advance(&scheduler, vcx, 300);
 
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
@@ -3944,7 +3995,7 @@ mod tests {
     #[test]
     fn apply_pending_autoscroll_pushes_pixel_offset_to_scroll_handle() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
+        let scheduler = install_executor_global_returning_scheduler(&mut cx);
         let vcx = cx.add_empty_window();
         let text = multiline_text(30);
         let (_buffer, editor) = editor_with_viewport(vcx, &text);
@@ -3953,12 +4004,70 @@ mod tests {
             ed.request_autoscroll(AutoscrollStrategy::Top, cx);
             ed.apply_pending_autoscroll(cx);
         });
+        // A 10-row jump animates; drive it to completion before reading the
+        // settled pixel offset.
         vcx.run_until_parked();
+        advance(&scheduler, vcx, 300);
 
         let offset = editor.read_with(vcx, |ed, _| {
             ed.scroll_handle().0.borrow().base_handle.offset()
         });
         assert_eq!(offset.y, px(-160.0));
+    }
+
+    #[test]
+    fn apply_pending_autoscroll_animates_large_jump() {
+        let mut cx = TestAppContext::single();
+        let scheduler = install_executor_global_returning_scheduler(&mut cx);
+        let vcx = cx.add_empty_window();
+        let text = multiline_text(1000);
+        let (_buffer, editor) = editor_with_viewport(vcx, &text);
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.set_cursor_at_grid(500, 0, cx);
+            ed.request_autoscroll(AutoscrollStrategy::Top, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+
+        // The jump animates rather than snapping: an animation is stored and
+        // the position has not yet moved.
+        editor.read_with(vcx, |ed, _| {
+            assert!(ed.scroll_manager().animation().is_some());
+            assert_eq!(ed.scroll_manager().anchor().offset.y, 0.0);
+        });
+
+        // Partway through, the position interpolates strictly between the
+        // start and the target row 500.
+        vcx.run_until_parked();
+        advance(&scheduler, vcx, 75);
+        let mid = editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y);
+        assert!(mid > 0.0 && mid < 500.0, "midpoint y was {mid}");
+
+        // After the duration elapses it settles on the target and clears.
+        advance(&scheduler, vcx, 300);
+        editor.read_with(vcx, |ed, _| {
+            assert_eq!(ed.scroll_manager().anchor().offset.y, 500.0);
+            assert!(ed.scroll_manager().animation().is_none());
+        });
+    }
+
+    #[test]
+    fn apply_pending_autoscroll_small_jump_does_not_animate() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let text = multiline_text(30);
+        let (_buffer, editor) = editor_with_viewport(vcx, &text);
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.set_cursor_at_grid(2, 0, cx);
+            ed.request_autoscroll(AutoscrollStrategy::Top, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+
+        // A 2-row jump (< 3) snaps instantly with no animation stored.
+        editor.read_with(vcx, |ed, _| {
+            assert!(ed.scroll_manager().animation().is_none());
+            assert_eq!(ed.scroll_manager().anchor().offset.y, 2.0);
+        });
     }
 
     #[test]
@@ -4339,6 +4448,26 @@ mod tests {
     fn install_executor_global(cx: &mut TestAppContext) {
         let executor = test_executor();
         cx.update(|cx| cx.set_global(ExecutorGlobal(executor)));
+    }
+
+    /// Install the executor global and return the [`TestScheduler`] so the
+    /// test can drive its clock (`advance_clock`) to step scroll animations.
+    fn install_executor_global_returning_scheduler(cx: &mut TestAppContext) -> Arc<TestScheduler> {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+        cx.update(|cx| cx.set_global(ExecutorGlobal(executor)));
+        scheduler
+    }
+
+    /// Advance both the gpui and stoat clocks by `ms` and pump the queues,
+    /// stepping any in-flight scroll-animation task. The task must already
+    /// have been polled once (via a prior `run_until_parked`) so its first
+    /// timer is registered.
+    fn advance(scheduler: &Arc<TestScheduler>, vcx: &mut VisualTestContext, ms: u64) {
+        let step = std::time::Duration::from_millis(ms);
+        vcx.executor().advance_clock(step);
+        scheduler.advance_clock(step);
+        vcx.run_until_parked();
     }
 
     fn assert_inline_editor_state(
