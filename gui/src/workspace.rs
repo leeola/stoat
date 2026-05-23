@@ -1350,6 +1350,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        let _span = tracing::trace_span!("workspace.dispatch_action").entered();
         if render_stats_enabled(cx) {
             self.frame_timer.borrow_mut().start_frame(Instant::now());
         }

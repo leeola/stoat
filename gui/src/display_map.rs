@@ -54,6 +54,7 @@ impl DisplayMap {
     /// the first call after each buffer/diff version bump. Callers
     /// invoke this via `entity.update(cx, |dm, _| dm.snapshot())`.
     pub fn snapshot(&mut self) -> DisplaySnapshot {
+        let _span = tracing::trace_span!("display_map.snapshot").entered();
         self.inner.snapshot()
     }
 

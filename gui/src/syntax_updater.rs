@@ -44,6 +44,7 @@ impl SyntaxMapUpdater {
     }
 
     fn reparse(&mut self, cx: &mut Context<'_, Self>) {
+        let _span = tracing::trace_span!("syntax.reparse").entered();
         let Some(buffer) = self.buffer.upgrade() else {
             return;
         };

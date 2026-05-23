@@ -3165,6 +3165,7 @@ impl Editor {
         range: std::ops::Range<usize>,
         cx: &mut Context<'_, Self>,
     ) -> Vec<Div> {
+        let _span = tracing::trace_span!("editor.render_visible_rows").entered();
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
         let total_rows = (display_snapshot.max_point().row + 1) as usize;
         let end = range.end.min(total_rows);
@@ -3301,6 +3302,7 @@ impl Editor {
 
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let _span = tracing::trace_span!("editor.render").entered();
         self.apply_pending_autoscroll(cx);
         let is_minimap = self.mode.is_minimap();
         let document_rows = self

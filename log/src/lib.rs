@@ -80,6 +80,7 @@ pub fn init(
         .with_context(|_| OpenLogFileSnafu {
             path: log_path.clone(),
         })?;
+    #[cfg(not(feature = "profiling"))]
     fmt()
         .with_env_filter(filter)
         .with_writer(file)
@@ -87,6 +88,25 @@ pub fn init(
         .finish()
         .try_init()
         .context(SetGlobalSubscriberSnafu)?;
+
+    // Under `profiling`, layer the file logger with a `tracing-tracy` layer
+    // that streams spans to the Tracy profiler. The file layer keeps its
+    // env filter; the Tracy layer is unfiltered so it captures the
+    // `Level::TRACE` hot-path spans regardless of the log level.
+    #[cfg(feature = "profiling")]
+    {
+        use tracing_subscriber::{layer::SubscriberExt, Layer};
+        let fmt_layer = fmt::layer()
+            .with_writer(file)
+            .with_ansi(false)
+            .with_filter(filter);
+        tracing_subscriber::registry()
+            .with(fmt_layer)
+            .with(tracing_tracy::TracyLayer::default())
+            .try_init()
+            .context(SetGlobalSubscriberSnafu)?;
+    }
+
     Ok(())
 }
 

@@ -18,6 +18,11 @@ path = "src/lib.rs"
 [lints]
 workspace = true
 
+# `cargo build --features profiling` streams hot-path spans to the Tracy
+# profiler; run with `TRACY_NO_EXIT=1` to keep the client connected.
+[features]
+profiling = ["stoat_log/profiling"]
+
 [dependencies]
 stoat = { path = "../stoat" }
 stoat_agent_claude_code = { path = "../agent/claude_code" }

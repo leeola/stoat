@@ -7,11 +7,18 @@ publish.workspace = true
 [lints]
 workspace = true
 
+# Build with `cargo build --features profiling` to capture `tracing` spans
+# in the Tracy profiler, then run with `TRACY_NO_EXIT=1` to keep the client
+# connected for the live Tracy GUI.
+[features]
+profiling = ["dep:tracing-tracy"]
+
 [dependencies]
 etcetera.workspace = true
 snafu.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+tracing-tracy = { version = "0.11", optional = true }
 
 [dev-dependencies]
 tempfile = "3"
