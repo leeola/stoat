@@ -80,6 +80,15 @@ pub struct PaneItemsV1 {
     #[serde(default)]
     pub items: Vec<ItemSnap>,
     pub active_index: usize,
+    /// Minimap visibility for the pane, taken from its active editor.
+    /// Defaults to `true` so workspaces saved before minimaps were
+    /// persisted restore with the overview column shown.
+    #[serde(default = "default_true")]
+    pub minimap_visible: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 /// Versioned per-item snapshot: a [`ItemKind`] discriminator and
@@ -99,7 +108,9 @@ pub struct ItemSnap {
 /// Walk every item in `pane` and record its kind + serialized
 /// blob. Pane order is preserved so the restore path adds items
 /// in the same sequence; the `active_index` carries over from the
-/// pane's own active-item counter.
+/// pane's own active-item counter. `minimap_visible` is read from
+/// the active item when it is an [`Editor`], else defaults to
+/// `true`.
 pub(crate) fn snapshot_pane_items(
     pane: &crate::pane::Pane,
     cx: &gpui::App,
@@ -113,9 +124,15 @@ pub(crate) fn snapshot_pane_items(
             blob: item.serialize(cx),
         })
         .collect();
+    let minimap_visible = pane
+        .active_item()
+        .and_then(|item| item.to_any_view().downcast::<Editor>().ok())
+        .map(|editor| editor.read(cx).minimap_visible())
+        .unwrap_or(true);
     PaneItemsV1 {
         items,
         active_index: pane.active_index(),
+        minimap_visible,
     }
 }
 

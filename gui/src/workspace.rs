@@ -903,6 +903,15 @@ impl Workspace {
                     p.activate(active, cx);
                 });
             }
+            let active_editor = pane
+                .read(cx)
+                .active_item()
+                .and_then(|item| item.to_any_view().downcast::<Editor>().ok());
+            if let Some(editor) = active_editor {
+                editor.update(cx, |ed, cx| {
+                    ed.set_minimap_visible(items.minimap_visible, cx)
+                });
+            }
         }
         self.pane_tree
             .update(cx, |tree, cx| tree.set_focus(state.focused_pane, cx));
@@ -12877,6 +12886,54 @@ mod tests {
                 ]
             );
         });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_minimap_visibility() {
+        fn focused_editor(
+            ws: &Entity<Workspace>,
+            vcx: &mut VisualTestContext,
+        ) -> Option<Entity<Editor>> {
+            ws.read_with(vcx, |w, cx| {
+                let tree = w.pane_tree().read(cx);
+                let pane = tree.pane(tree.focus()).expect("focused pane").read(cx);
+                pane.active_item()
+                    .and_then(|item| item.to_any_view().downcast::<Editor>().ok())
+            })
+        }
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello foo\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+
+        focused_editor(&ws, vcx)
+            .expect("active editor")
+            .update(vcx, |ed, cx| ed.set_minimap_visible(true, cx));
+
+        let path = PathBuf::from("/tmp/state/minimap.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        let restored = focused_editor(&fresh_ws, vcx2).expect("restored editor");
+        assert!(
+            restored.read_with(vcx2, |ed, _| ed.minimap_visible()),
+            "minimap visibility must round-trip as visible"
+        );
     }
 
     #[test]
