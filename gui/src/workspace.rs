@@ -2015,6 +2015,8 @@ impl Workspace {
             ActionKind::ClaudeSubmit => crate::claude_chat::dispatch_claude_submit(self, cx),
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
             ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
+            ActionKind::RunHistoryPrev => crate::run_pane::dispatch_run_history_prev(self, cx),
+            ActionKind::RunHistoryNext => crate::run_pane::dispatch_run_history_next(self, cx),
             ActionKind::RunClickAt => {
                 if let Some(click) = action
                     .as_any()

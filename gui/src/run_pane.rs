@@ -47,6 +47,12 @@ pub struct Run {
     pub(crate) blocks: Vec<OutputBlock>,
     cwd: PathBuf,
     pub(crate) history: Vec<String>,
+    /// Recall position into [`Self::history`]. `None` means the
+    /// input editor holds live user text; `Some(i)` means it
+    /// currently shows `history[i]`, walked back via
+    /// [`Self::history_prev`] / [`Self::history_next`]. Reset
+    /// to `None` whenever a new command is submitted.
+    pub(crate) history_idx: Option<usize>,
     pub(crate) session: Option<Arc<dyn TerminalSession>>,
     /// Submits that arrived before the host returned a live
     /// session. Drained in arrival order once
@@ -85,6 +91,7 @@ impl Run {
             blocks: Vec::new(),
             cwd,
             history: Vec::new(),
+            history_idx: None,
             session: None,
             pending_writes: Vec::new(),
             workspace,
@@ -160,12 +167,52 @@ impl Run {
         let command = trimmed.to_string();
         clear_input(&self.input, cx);
         self.history.push(command.clone());
+        self.history_idx = None;
         self.blocks
             .push(OutputBlock::new(command.clone(), SHELL_WIDTH));
         let line = format!("{command}\n");
         match self.session.as_ref() {
             Some(session) => spawn_write(session.clone(), line, cx),
             None => self.pending_writes.push(line),
+        }
+        cx.notify();
+    }
+
+    /// Walk one step back through the recall cursor into
+    /// [`Self::history`], populating the input editor with that
+    /// entry. No-op when history is empty or the cursor is
+    /// already at the oldest entry.
+    pub fn history_prev(&mut self, cx: &mut Context<'_, Self>) {
+        if self.history.is_empty() {
+            return;
+        }
+        let next = match self.history_idx {
+            Some(0) => return,
+            Some(i) => i - 1,
+            None => self.history.len() - 1,
+        };
+        self.history_idx = Some(next);
+        let entry = self.history[next].clone();
+        set_input_text(&self.input, &entry, cx);
+        cx.notify();
+    }
+
+    /// Walk one step forward through the recall cursor. Past the
+    /// newest entry the cursor returns to `None` and the input
+    /// clears, restoring the live editing position. No-op when no
+    /// entry is currently recalled.
+    pub fn history_next(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(idx) = self.history_idx else {
+            return;
+        };
+        if idx + 1 < self.history.len() {
+            let next = idx + 1;
+            self.history_idx = Some(next);
+            let entry = self.history[next].clone();
+            set_input_text(&self.input, &entry, cx);
+        } else {
+            self.history_idx = None;
+            clear_input(&self.input, cx);
         }
         cx.notify();
     }
@@ -313,6 +360,10 @@ fn read_input_text(input: &gpui::Entity<Editor>, cx: &App) -> String {
 }
 
 fn clear_input(input: &gpui::Entity<Editor>, cx: &mut Context<'_, Run>) {
+    set_input_text(input, "", cx);
+}
+
+fn set_input_text(input: &gpui::Entity<Editor>, text: &str, cx: &mut Context<'_, Run>) {
     let Some(buffer) = input
         .read(cx)
         .multi_buffer()
@@ -324,9 +375,10 @@ fn clear_input(input: &gpui::Entity<Editor>, cx: &mut Context<'_, Run>) {
     };
     buffer.update(cx, |b, cx| {
         let len = b.text().len();
-        if len > 0 {
-            b.edit(0..len, "", cx);
+        if len == 0 && text.is_empty() {
+            return;
         }
+        b.edit(0..len, text, cx);
     });
 }
 
@@ -465,6 +517,29 @@ pub fn dispatch_open_run(
 /// pane's active item, downcasts to [`Run`], and invokes `submit`.
 /// No-op when the active item is not a Run pane.
 pub fn dispatch_run_submit(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    with_focused_run(workspace, cx, |r, cx| r.submit(cx));
+}
+
+/// Dispatch [`stoat_action::RunHistoryPrev`]. Replaces the focused
+/// run pane's input with the previous command in history; no-op
+/// when the focused pane is not a run pane or history is exhausted.
+pub fn dispatch_run_history_prev(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    with_focused_run(workspace, cx, |r, cx| r.history_prev(cx));
+}
+
+/// Dispatch [`stoat_action::RunHistoryNext`]. Walks the run pane's
+/// history cursor forward; past the newest entry the input clears
+/// and the cursor returns to the live editing position. No-op when
+/// the focused pane is not a run pane or no entry is recalled.
+pub fn dispatch_run_history_next(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    with_focused_run(workspace, cx, |r, cx| r.history_next(cx));
+}
+
+fn with_focused_run(
+    workspace: &mut Workspace,
+    cx: &mut Context<'_, Workspace>,
+    f: impl FnOnce(&mut Run, &mut Context<'_, Run>),
+) {
     let pane_id = workspace.pane_tree().read(cx).focus();
     let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
         return;
@@ -473,7 +548,7 @@ pub fn dispatch_run_submit(workspace: &mut Workspace, cx: &mut Context<'_, Works
     let Some(run) = active_view.and_then(|v| v.downcast::<Run>().ok()) else {
         return;
     };
-    run.update(cx, |r, cx| r.submit(cx));
+    run.update(cx, f);
 }
 
 #[cfg(test)]
@@ -664,5 +739,123 @@ mod tests {
                 .unwrap_or_default()
         });
         assert_eq!(first_row, "hello");
+    }
+
+    fn input_text(run: &Entity<Run>, h: &mut Harness<'_>) -> String {
+        run.read_with(h.vcx, |r, cx| read_input_text(&r.input, cx))
+    }
+
+    fn submit(run: &Entity<Run>, h: &mut Harness<'_>, text: &str) {
+        type_into_input(run, h, text);
+        run.update(h.vcx, |r, cx| r.submit(cx));
+    }
+
+    fn history_state(run: &Entity<Run>, h: &mut Harness<'_>) -> (Vec<String>, Option<usize>) {
+        run.read_with(h.vcx, |r, _| (r.history.clone(), r.history_idx))
+    }
+
+    #[test]
+    fn history_prev_walks_back_newest_first() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        submit(&run, &mut h, "ls");
+        submit(&run, &mut h, "pwd");
+
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+        assert_eq!(input_text(&run, &mut h), "pwd");
+        assert_eq!(history_state(&run, &mut h).1, Some(1));
+
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+        assert_eq!(input_text(&run, &mut h), "ls");
+        assert_eq!(history_state(&run, &mut h).1, Some(0));
+    }
+
+    #[test]
+    fn history_prev_at_oldest_is_noop() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        submit(&run, &mut h, "only");
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+
+        assert_eq!(input_text(&run, &mut h), "only");
+        assert_eq!(history_state(&run, &mut h).1, Some(0));
+    }
+
+    #[test]
+    fn history_prev_empty_history_is_noop() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        type_into_input(&run, &mut h, "draft");
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+
+        assert_eq!(input_text(&run, &mut h), "draft");
+        assert_eq!(history_state(&run, &mut h), (vec![], None));
+    }
+
+    #[test]
+    fn history_next_walks_forward_and_returns_to_live() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        submit(&run, &mut h, "ls");
+        submit(&run, &mut h, "pwd");
+
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+        assert_eq!(input_text(&run, &mut h), "ls");
+
+        run.update(h.vcx, |r, cx| r.history_next(cx));
+        assert_eq!(input_text(&run, &mut h), "pwd");
+        assert_eq!(history_state(&run, &mut h).1, Some(1));
+
+        run.update(h.vcx, |r, cx| r.history_next(cx));
+        assert_eq!(input_text(&run, &mut h), "");
+        assert_eq!(history_state(&run, &mut h).1, None);
+    }
+
+    #[test]
+    fn history_next_at_live_is_noop() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        submit(&run, &mut h, "ls");
+        type_into_input(&run, &mut h, "draft");
+        run.update(h.vcx, |r, cx| r.history_next(cx));
+
+        assert_eq!(input_text(&run, &mut h), "draft");
+        assert_eq!(history_state(&run, &mut h).1, None);
+    }
+
+    #[test]
+    fn submit_resets_history_cursor() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        submit(&run, &mut h, "ls");
+        submit(&run, &mut h, "pwd");
+        run.update(h.vcx, |r, cx| r.history_prev(cx));
+        assert_eq!(history_state(&run, &mut h).1, Some(1));
+
+        submit(&run, &mut h, "echo");
+        assert_eq!(
+            history_state(&run, &mut h),
+            (vec!["ls".into(), "pwd".into(), "echo".into()], None)
+        );
     }
 }
