@@ -1973,6 +1973,9 @@ impl Workspace {
             ActionKind::OpenWorkspacePicker => {
                 crate::workspace_picker::open_workspace_picker(self, window, cx)
             },
+            ActionKind::SwitchWorkspace => {
+                crate::workspace_picker::open_workspace_picker(self, window, cx)
+            },
             ActionKind::OpenCheckpointPicker => {
                 crate::claude_checkpoint_picker::open_claude_checkpoint_picker(self, window, cx)
             },
@@ -6134,6 +6137,44 @@ mod tests {
             "copy preserves pane tree shape",
         );
         assert_ne!(new_uid, source_uid, "copy gets a fresh uid",);
+    }
+
+    #[test]
+    fn dispatch_switch_workspace_opens_picker_modal() {
+        use crate::workspace_picker::WorkspacePickerDelegate;
+        use stoat::host::FsHost;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        let dir = stoat::workspace::persist::workspace_dir_for(Path::new("/tmp/repo"), &*fs_dyn)
+            .expect("workspace dir");
+        let current_uid = ws.read_with(vcx, |w, _| w.uid());
+        let other_uid = stoat::workspace::WorkspaceUid(current_uid.0.wrapping_add(1));
+        let mut sibling_state = ws.read_with(vcx, |w, cx| w.to_state(cx));
+        sibling_state.uid = other_uid;
+        sibling_state.name = "sibling".to_string();
+        let body = ron::ser::to_string_pretty(&sibling_state, ron::ser::PrettyConfig::default())
+            .expect("serialize");
+        fs.create_dir_all(&dir).expect("create state dir");
+        fs.write(&dir.join(format!("{other_uid}.ron")), body.as_bytes())
+            .expect("write state file");
+
+        dispatch(&ws, vcx, stoat_action::SwitchWorkspace);
+        vcx.run_until_parked();
+
+        let has_modal = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::picker::Picker<WorkspacePickerDelegate>>()
+                .is_some()
+        });
+        assert!(
+            has_modal,
+            "SwitchWorkspace should open the workspace picker modal"
+        );
     }
 
     #[test]
