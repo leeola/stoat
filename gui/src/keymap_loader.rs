@@ -152,4 +152,34 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "GotoLineEnd");
     }
+
+    fn alt_event(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT)
+    }
+
+    #[test]
+    fn default_keymap_alt_left_in_insert_moves_to_prev_word() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(
+                &insert_state(false),
+                &alt_event(crossterm::event::KeyCode::Left),
+            )
+            .expect("Alt-Left has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "MovePrevWordStart");
+    }
+
+    #[test]
+    fn default_keymap_alt_right_in_insert_moves_to_next_word() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(
+                &insert_state(false),
+                &alt_event(crossterm::event::KeyCode::Right),
+            )
+            .expect("Alt-Right has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "MoveNextWordStart");
+    }
 }

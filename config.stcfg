@@ -452,6 +452,8 @@ on key {
         Right -> MoveRight();
         Up -> MoveUp();
         Down -> MoveDown();
+        Alt-Left -> MovePrevWordStart();
+        Alt-Right -> MoveNextWordStart();
         Ctrl-a -> GotoLineStart();
         Ctrl-e -> GotoLineEnd();
         Ctrl-Space -> TriggerCompletion();
