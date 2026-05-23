@@ -452,6 +452,8 @@ on key {
         Right -> MoveRight();
         Up -> MoveUp();
         Down -> MoveDown();
+        Ctrl-a -> GotoLineStart();
+        Ctrl-e -> GotoLineEnd();
         Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();

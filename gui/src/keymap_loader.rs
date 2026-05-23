@@ -125,4 +125,31 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "ClaudeSubmit");
     }
+
+    fn ctrl_event(c: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::CONTROL,
+        )
+    }
+
+    #[test]
+    fn default_keymap_ctrl_a_in_insert_goes_to_line_start() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&insert_state(false), &ctrl_event('a'))
+            .expect("Ctrl-a has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "GotoLineStart");
+    }
+
+    #[test]
+    fn default_keymap_ctrl_e_in_insert_goes_to_line_end() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&insert_state(false), &ctrl_event('e'))
+            .expect("Ctrl-e has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "GotoLineEnd");
+    }
 }
