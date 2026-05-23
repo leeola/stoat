@@ -178,6 +178,18 @@ impl Run {
         cx.notify();
     }
 
+    /// Send the ETX byte (`\x03`) to the PTY so the terminal
+    /// line discipline raises SIGINT against the foreground
+    /// process group, interrupting the running command without
+    /// killing the shell. No-op when the session has not landed
+    /// yet -- nothing is running to interrupt.
+    pub fn interrupt(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(session) = self.session.as_ref() else {
+            return;
+        };
+        spawn_write(session.clone(), "\x03".into(), cx);
+    }
+
     /// Walk one step back through the recall cursor into
     /// [`Self::history`], populating the input editor with that
     /// entry. No-op when history is empty or the cursor is
@@ -535,6 +547,14 @@ pub fn dispatch_run_history_next(workspace: &mut Workspace, cx: &mut Context<'_,
     with_focused_run(workspace, cx, |r, cx| r.history_next(cx));
 }
 
+/// Dispatch [`stoat_action::RunInterrupt`]. Sends Ctrl-C to the
+/// focused run pane's PTY, interrupting the foreground command.
+/// No-op when the focused pane is not a run pane or no session
+/// has installed yet.
+pub fn dispatch_run_interrupt(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    with_focused_run(workspace, cx, |r, cx| r.interrupt(cx));
+}
+
 fn with_focused_run(
     workspace: &mut Workspace,
     cx: &mut Context<'_, Workspace>,
@@ -857,5 +877,29 @@ mod tests {
             history_state(&run, &mut h),
             (vec!["ls".into(), "pwd".into(), "echo".into()], None)
         );
+    }
+
+    #[test]
+    fn interrupt_sends_etx_byte_to_session() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        run.update(h.vcx, |r, cx| r.interrupt(cx));
+        h.vcx.run_until_parked();
+
+        assert_eq!(h.terminal.sent_bytes(), vec![vec![0x03u8]]);
+    }
+
+    #[test]
+    fn interrupt_before_session_is_noop() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+
+        run.update(h.vcx, |r, cx| r.interrupt(cx));
+
+        assert!(h.terminal.sent_bytes().is_empty());
     }
 }

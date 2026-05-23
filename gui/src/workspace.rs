@@ -2017,6 +2017,7 @@ impl Workspace {
             ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
             ActionKind::RunHistoryPrev => crate::run_pane::dispatch_run_history_prev(self, cx),
             ActionKind::RunHistoryNext => crate::run_pane::dispatch_run_history_next(self, cx),
+            ActionKind::RunInterrupt => crate::run_pane::dispatch_run_interrupt(self, cx),
             ActionKind::RunClickAt => {
                 if let Some(click) = action
                     .as_any()

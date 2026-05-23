@@ -569,6 +569,7 @@ on key {
         Enter -> RunSubmit();
         Up -> RunHistoryPrev();
         Down -> RunHistoryNext();
+        Ctrl-c -> RunInterrupt();
     }
     mode == space_pane_nav {
         Escape -> SetMode(normal);
