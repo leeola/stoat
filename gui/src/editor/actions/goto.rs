@@ -9,6 +9,13 @@ pub enum LineBoundary {
     End,
 }
 
+/// Direction passed to [`Editor::handle_goto_diagnostic`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum DiagnosticDir {
+    Next,
+    Prev,
+}
+
 impl Editor {
     /// Move every selection's head to the start or end of its
     /// current line. With `extend = false`, each selection
@@ -251,6 +258,75 @@ impl Editor {
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
+
+    /// Jump every selection to the next or previous LSP diagnostic in
+    /// the active buffer. No-op when the editor has no
+    /// [`Editor::file_path`], no attached [`crate::diagnostics::DiagnosticSet`],
+    /// or no diagnostic on the requested side of the primary cursor.
+    pub fn handle_goto_diagnostic(&mut self, dir: DiagnosticDir, cx: &mut Context<'_, Self>) {
+        let Some(path) = self.file_path.clone() else {
+            return;
+        };
+        let Some(diagnostic_set) = self.diagnostic_set.clone() else {
+            return;
+        };
+
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let mut offsets: Vec<usize> = diagnostic_set
+            .read(cx)
+            .get(&path)
+            .iter()
+            .map(|diag| diagnostic_start_offset(diag, &snapshot))
+            .collect();
+        offsets.sort_unstable();
+        offsets.dedup();
+
+        let Some(newest) = self
+            .selections
+            .all_anchors()
+            .iter()
+            .max_by_key(|s| s.id)
+            .cloned()
+        else {
+            return;
+        };
+        let cursor = snapshot.resolve_anchor(&newest.head());
+
+        let target = match dir {
+            DiagnosticDir::Next => offsets.into_iter().find(|&o| o > cursor),
+            DiagnosticDir::Prev => offsets.into_iter().rev().find(|&o| o < cursor),
+        };
+        let Some(target_offset) = target else {
+            return;
+        };
+
+        let target_anchor = snapshot.anchor_at(target_offset, Bias::Right);
+        let new_disjoint: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let mut new = sel.clone();
+                new.collapse_to(target_anchor, SelectionGoal::None);
+                new
+            })
+            .collect();
+        self.selections.replace_with(new_disjoint, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+}
+
+fn diagnostic_start_offset(
+    diag: &lsp_types::Diagnostic,
+    snapshot: &stoat::multi_buffer::MultiBufferSnapshot,
+) -> usize {
+    let rope = snapshot.rope();
+    let max_row = rope.max_point().row;
+    let row = diag.range.start.line.min(max_row);
+    let line_len = rope.line_len(row);
+    let col = diag.range.start.character.min(line_len);
+    rope.point_to_offset(Point::new(row, col))
 }
 
 #[cfg(test)]
@@ -449,5 +525,160 @@ mod tests {
             assert_eq!(snapshot.resolve_anchor(&sel.end), 6);
             assert!(!sel.reversed);
         });
+    }
+
+    fn diag_at(line: u32, character: u32) -> lsp_types::Diagnostic {
+        lsp_types::Diagnostic {
+            range: lsp_types::Range::new(
+                lsp_types::Position::new(line, character),
+                lsp_types::Position::new(line, character + 1),
+            ),
+            severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+            code: None,
+            code_description: None,
+            source: None,
+            message: String::new(),
+            related_information: None,
+            tags: None,
+            data: None,
+        }
+    }
+
+    fn editor_with_diagnostics(
+        cx: &mut TestAppContext,
+        text: &str,
+        path: &std::path::Path,
+        diagnostics: Vec<lsp_types::Diagnostic>,
+    ) -> Entity<Editor> {
+        let editor = new_editor(cx, text);
+        let diag_set = cx.update(|cx| cx.new(|_| crate::diagnostics::DiagnosticSet::new()));
+        diag_set.update(cx, |s, cx| {
+            s.replace_for_path(path.to_path_buf(), diagnostics, cx)
+        });
+        editor.update(cx, |ed, cx| {
+            ed.set_file_path(Some(path.to_path_buf()), cx);
+            ed.set_diagnostic_set(Some(diag_set), cx);
+        });
+        cx.run_until_parked();
+        editor
+    }
+
+    #[test]
+    fn goto_next_diagnostic_jumps_forward_then_to_second() {
+        let mut cx = TestAppContext::single();
+        let path = std::path::PathBuf::from("/ws/a.rs");
+        let editor = editor_with_diagnostics(
+            &mut cx,
+            "alpha\nbeta\ngamma",
+            &path,
+            vec![diag_at(0, 2), diag_at(2, 1)],
+        );
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Next, cx)
+        });
+        assert_eq!(cursor_offset(&editor, &mut cx), 2);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Next, cx)
+        });
+        assert_eq!(cursor_offset(&editor, &mut cx), 12);
+    }
+
+    #[test]
+    fn goto_next_diagnostic_past_last_is_noop() {
+        let mut cx = TestAppContext::single();
+        let path = std::path::PathBuf::from("/ws/a.rs");
+        let editor = editor_with_diagnostics(
+            &mut cx,
+            "alpha\nbeta\ngamma",
+            &path,
+            vec![diag_at(0, 2), diag_at(2, 1)],
+        );
+        seed_at_offset(&editor, &mut cx, 14);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Next, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 14);
+    }
+
+    #[test]
+    fn goto_prev_diagnostic_jumps_backward() {
+        let mut cx = TestAppContext::single();
+        let path = std::path::PathBuf::from("/ws/a.rs");
+        let editor = editor_with_diagnostics(
+            &mut cx,
+            "alpha\nbeta\ngamma",
+            &path,
+            vec![diag_at(0, 2), diag_at(2, 1)],
+        );
+        seed_at_offset(&editor, &mut cx, 14);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Prev, cx)
+        });
+        assert_eq!(cursor_offset(&editor, &mut cx), 12);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Prev, cx)
+        });
+        assert_eq!(cursor_offset(&editor, &mut cx), 2);
+    }
+
+    #[test]
+    fn goto_prev_diagnostic_before_first_is_noop() {
+        let mut cx = TestAppContext::single();
+        let path = std::path::PathBuf::from("/ws/a.rs");
+        let editor = editor_with_diagnostics(
+            &mut cx,
+            "alpha\nbeta\ngamma",
+            &path,
+            vec![diag_at(0, 2), diag_at(2, 1)],
+        );
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Prev, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 0);
+    }
+
+    #[test]
+    fn goto_diagnostic_without_file_path_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\nbeta");
+        let diag_set = cx.update(|cx| cx.new(|_| crate::diagnostics::DiagnosticSet::new()));
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_diagnostic_set(Some(diag_set), cx);
+        });
+        cx.run_until_parked();
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Next, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 0);
+    }
+
+    #[test]
+    fn goto_diagnostic_without_diagnostic_set_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\nbeta");
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_file_path(Some(std::path::PathBuf::from("/ws/a.rs")), cx);
+        });
+        cx.run_until_parked();
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_goto_diagnostic(DiagnosticDir::Next, cx)
+        });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 0);
     }
 }
