@@ -1709,6 +1709,12 @@ impl Workspace {
             ActionKind::GotoPrevDiagnostic => {
                 self.dispatch_goto_diagnostic(crate::editor::actions::goto::DiagnosticDir::Prev, cx)
             },
+            ActionKind::GotoNextChange => {
+                self.dispatch_goto_change(crate::editor::actions::goto::ChangeDir::Next, cx)
+            },
+            ActionKind::GotoPrevChange => {
+                self.dispatch_goto_change(crate::editor::actions::goto::ChangeDir::Prev, cx)
+            },
             ActionKind::ExtendLeft => self.dispatch_move_horizontal(-1, true, cx),
             ActionKind::ExtendRight => self.dispatch_move_horizontal(1, true, cx),
             ActionKind::ExtendUp => self.dispatch_move_vertical(-1, true, cx),
@@ -2513,6 +2519,17 @@ impl Workspace {
             return;
         };
         editor.update(cx, |ed, cx| ed.handle_goto_diagnostic(dir, cx));
+    }
+
+    fn dispatch_goto_change(
+        &mut self,
+        dir: crate::editor::actions::goto::ChangeDir,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| ed.handle_goto_change(dir, cx));
     }
 
     fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<crate::editor::Editor>> {

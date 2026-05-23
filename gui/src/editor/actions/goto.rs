@@ -16,6 +16,13 @@ pub enum DiagnosticDir {
     Prev,
 }
 
+/// Direction passed to [`Editor::handle_goto_change`].
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum ChangeDir {
+    Next,
+    Prev,
+}
+
 impl Editor {
     /// Move every selection's head to the start or end of its
     /// current line. With `extend = false`, each selection
@@ -300,6 +307,62 @@ impl Editor {
             return;
         };
 
+        let target_anchor = snapshot.anchor_at(target_offset, Bias::Right);
+        let new_disjoint: Vec<Selection<Anchor>> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                let mut new = sel.clone();
+                new.collapse_to(target_anchor, SelectionGoal::None);
+                new
+            })
+            .collect();
+        self.selections.replace_with(new_disjoint, &snapshot);
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Jump every selection to the start of the next or previous diff
+    /// hunk in the active buffer. No-op when the buffer has no diff
+    /// hunks or no hunk lies on the requested side of the primary
+    /// cursor's row.
+    pub fn handle_goto_change(&mut self, dir: ChangeDir, cx: &mut Context<'_, Self>) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+
+        let mut rows: Vec<u32> = self
+            .diff_map
+            .read(cx)
+            .diff()
+            .hunks_in_range(0..u32::MAX)
+            .iter()
+            .map(|h| h.buffer_start_line)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+
+        let Some(newest) = self
+            .selections
+            .all_anchors()
+            .iter()
+            .max_by_key(|s| s.id)
+            .cloned()
+        else {
+            return;
+        };
+        let cursor_row = snapshot.point_for_anchor(&newest.head()).row;
+
+        let target_row = match dir {
+            ChangeDir::Next => rows.into_iter().find(|&r| r > cursor_row),
+            ChangeDir::Prev => rows.into_iter().rev().find(|&r| r < cursor_row),
+        };
+        let Some(target_row) = target_row else {
+            return;
+        };
+
+        let max_row = snapshot.rope().max_point().row;
+        let target_row = target_row.min(max_row);
+        let target_offset = snapshot.rope().point_to_offset(Point::new(target_row, 0));
         let target_anchor = snapshot.anchor_at(target_offset, Bias::Right);
         let new_disjoint: Vec<Selection<Anchor>> = self
             .selections
@@ -678,6 +741,108 @@ mod tests {
         editor.update(&mut cx, |ed, cx| {
             ed.handle_goto_diagnostic(DiagnosticDir::Next, cx)
         });
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 0);
+    }
+
+    fn added_hunk_at(lines: std::ops::Range<u32>) -> stoat::diff_map::DiffHunk {
+        stoat::diff_map::DiffHunk {
+            status: stoat::diff_map::DiffHunkStatus::Added,
+            buffer_start_line: lines.start,
+            buffer_line_range: lines,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        }
+    }
+
+    fn seed_hunks(
+        editor: &Entity<Editor>,
+        cx: &mut TestAppContext,
+        hunks: Vec<stoat::diff_map::DiffHunk>,
+    ) {
+        editor.update(cx, |ed, cx| {
+            let new = stoat::DiffMap::from_hunks(hunks, None);
+            ed.diff_map().update(cx, |dm, cx| dm.set_diff(new, cx));
+        });
+        cx.run_until_parked();
+    }
+
+    #[test]
+    fn goto_next_change_jumps_forward_then_to_second() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
+        seed_hunks(
+            &editor,
+            &mut cx,
+            vec![added_hunk_at(1..2), added_hunk_at(3..4)],
+        );
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
+        assert_eq!(cursor_offset(&editor, &mut cx), 6);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
+        assert_eq!(cursor_offset(&editor, &mut cx), 17);
+    }
+
+    #[test]
+    fn goto_next_change_past_last_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
+        seed_hunks(
+            &editor,
+            &mut cx,
+            vec![added_hunk_at(1..2), added_hunk_at(3..4)],
+        );
+        seed_at_offset(&editor, &mut cx, 25);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 25);
+    }
+
+    #[test]
+    fn goto_prev_change_jumps_backward() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
+        seed_hunks(
+            &editor,
+            &mut cx,
+            vec![added_hunk_at(1..2), added_hunk_at(3..4)],
+        );
+        seed_at_offset(&editor, &mut cx, 25);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Prev, cx));
+        assert_eq!(cursor_offset(&editor, &mut cx), 17);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Prev, cx));
+        assert_eq!(cursor_offset(&editor, &mut cx), 6);
+    }
+
+    #[test]
+    fn goto_prev_change_before_first_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
+        seed_hunks(
+            &editor,
+            &mut cx,
+            vec![added_hunk_at(1..2), added_hunk_at(3..4)],
+        );
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Prev, cx));
+
+        assert_eq!(cursor_offset(&editor, &mut cx), 0);
+    }
+
+    #[test]
+    fn goto_change_with_empty_diff_is_noop() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "alpha\nbeta\ngamma");
+        seed_at_offset(&editor, &mut cx, 0);
+
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
 
         assert_eq!(cursor_offset(&editor, &mut cx), 0);
     }
