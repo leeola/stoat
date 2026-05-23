@@ -21,6 +21,7 @@
 //! this file.
 
 use crate::{
+    dock::{DockSide, DockVisibility},
     editor::Editor,
     globals::ClaudeCodeHostGlobal,
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
@@ -597,6 +598,52 @@ pub fn dispatch_claude_to_pane(workspace: &mut Workspace, cx: &mut Context<'_, W
         p.activate(new_index, cx);
     });
 }
+
+/// Dispatch [`stoat_action::ClaudeToDockLeft`] /
+/// [`stoat_action::ClaudeToDockRight`]. Moves the chat into the
+/// requested dock side, or flips an already-docked chat to that
+/// side. Hidden docks reopen at their default width. No-op when no
+/// chat exists in either place.
+pub fn dispatch_claude_to_dock(
+    workspace: &mut Workspace,
+    side: DockSide,
+    cx: &mut Context<'_, Workspace>,
+) {
+    if let Some(dock_index) = find_claude_in_docks(workspace, cx) {
+        let dock = workspace.docks()[dock_index].clone();
+        dock.update(cx, |d, cx| {
+            d.set_side(side, cx);
+            if matches!(d.visibility(), DockVisibility::Hidden) {
+                d.set_visibility(
+                    DockVisibility::Open {
+                        width: d.default_width(),
+                    },
+                    cx,
+                );
+            }
+        });
+        return;
+    }
+
+    let Some((pane_id, item_index)) = find_claude_in_panes(workspace, cx) else {
+        return;
+    };
+    let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
+        return;
+    };
+    let item = pane.update(cx, |p, cx| {
+        let item = p.items()[item_index].boxed_clone();
+        p.remove_item(item_index, cx);
+        item
+    });
+    workspace.add_dock(item, side, CLAUDE_DOCK_DEFAULT_WIDTH, cx);
+}
+
+/// Default width for a Claude dock added via
+/// [`dispatch_claude_to_dock`]. Matches the TUI's
+/// `place_claude_in_dock` at
+/// `stoat/src/action_handlers/claude.rs:118-133`.
+const CLAUDE_DOCK_DEFAULT_WIDTH: u16 = 40;
 
 fn find_claude_in_panes(
     workspace: &Workspace,
@@ -1761,6 +1808,92 @@ mod tests {
 
         h.workspace.update(h.vcx, |w, cx| {
             dispatch_claude_to_pane(w, cx);
+        });
+
+        assert_eq!(pane_item_kinds(&mut h), panes_before);
+        assert_eq!(dock_item_kinds(&mut h), docks_before);
+    }
+
+    fn dock_sides(h: &mut Harness<'_>) -> Vec<DockSide> {
+        h.workspace.read_with(h.vcx, |w, cx| {
+            w.docks().iter().map(|d| d.read(cx).side()).collect()
+        })
+    }
+
+    fn dock_visibilities(h: &mut Harness<'_>) -> Vec<DockVisibility> {
+        h.workspace.read_with(h.vcx, |w, cx| {
+            w.docks().iter().map(|d| d.read(cx).visibility()).collect()
+        })
+    }
+
+    #[test]
+    fn claude_to_dock_moves_pane_chat_into_dock() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        open_chat(&mut h);
+        assert_eq!(dock_item_kinds(&mut h), Vec::<ItemKind>::new());
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_to_dock(w, DockSide::Left, cx);
+        });
+
+        assert_eq!(dock_item_kinds(&mut h), vec![ItemKind::Claude]);
+        assert_eq!(dock_sides(&mut h), vec![DockSide::Left]);
+        assert!(
+            focused_chat(&mut h).is_none(),
+            "Claude tab must leave the focused pane after moving to a dock"
+        );
+    }
+
+    #[test]
+    fn claude_to_dock_flips_side_when_already_docked() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        dock_claude(&mut h, DockSide::Right);
+        assert_eq!(dock_sides(&mut h), vec![DockSide::Right]);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_to_dock(w, DockSide::Left, cx);
+        });
+
+        assert_eq!(dock_sides(&mut h), vec![DockSide::Left]);
+        assert_eq!(dock_item_kinds(&mut h), vec![ItemKind::Claude]);
+    }
+
+    #[test]
+    fn claude_to_dock_reopens_hidden_dock() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let _ = dock_claude(&mut h, DockSide::Left);
+        let dock = h.workspace.read_with(h.vcx, |w, _| w.docks()[0].clone());
+        dock.update(h.vcx, |d, cx| {
+            d.set_visibility(DockVisibility::Hidden, cx);
+        });
+        assert_eq!(dock_visibilities(&mut h), vec![DockVisibility::Hidden]);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_to_dock(w, DockSide::Left, cx);
+        });
+
+        assert!(matches!(
+            dock_visibilities(&mut h).as_slice(),
+            [DockVisibility::Open { .. }]
+        ));
+    }
+
+    #[test]
+    fn claude_to_dock_no_op_when_no_chat_exists() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let panes_before = pane_item_kinds(&mut h);
+        let docks_before = dock_item_kinds(&mut h);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_to_dock(w, DockSide::Left, cx);
         });
 
         assert_eq!(pane_item_kinds(&mut h), panes_before);

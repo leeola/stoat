@@ -2014,6 +2014,12 @@ impl Workspace {
             ActionKind::OpenClaude => crate::claude_chat::dispatch_open_claude(self, window, cx),
             ActionKind::ClaudeSubmit => crate::claude_chat::dispatch_claude_submit(self, cx),
             ActionKind::ClaudeToPane => crate::claude_chat::dispatch_claude_to_pane(self, cx),
+            ActionKind::ClaudeToDockLeft => {
+                crate::claude_chat::dispatch_claude_to_dock(self, DockSide::Left, cx)
+            },
+            ActionKind::ClaudeToDockRight => {
+                crate::claude_chat::dispatch_claude_to_dock(self, DockSide::Right, cx)
+            },
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
             ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
             ActionKind::RunHistoryPrev => crate::run_pane::dispatch_run_history_prev(self, cx),

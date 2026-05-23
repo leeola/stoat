@@ -110,6 +110,16 @@ impl Dock {
         true
     }
 
+    pub fn set_side(&mut self, side: DockSide, cx: &mut Context<'_, Self>) -> bool {
+        if self.side == side {
+            return false;
+        }
+        self.side = side;
+        cx.emit(DockEvent::ItemChanged);
+        cx.notify();
+        true
+    }
+
     /// Flip between `Open { default_width }` and `Minimized`.
     /// Hidden docks resurface at `Open { default_width }` so the
     /// toggle always lands the dock in a visible state.
