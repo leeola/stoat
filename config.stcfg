@@ -461,6 +461,8 @@ on key {
         Ctrl-Space -> TriggerCompletion();
         Ctrl-r -> InsertRegister();
         Ctrl-s -> CommitUndoCheckpoint();
+        Ctrl-z -> Undo();
+        Ctrl-Z -> Redo();
     }
     mode == prompt && finder_open {
         Up -> FileFinderSelectPrev();

@@ -45,7 +45,10 @@ pub fn compile_from_settings(settings: &Settings) -> Keymap {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use stoat::keymap::{KeymapState, StateValue};
+    use stoat::{
+        keymap::{KeymapState, StateValue},
+        keymap_state,
+    };
 
     struct TestState {
         values: HashMap<String, StateValue>,
@@ -207,5 +210,32 @@ mod tests {
             .expect("Alt-Delete has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "DeleteWordForward");
+    }
+
+    #[test]
+    fn default_keymap_ctrl_z_in_insert_undoes() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&insert_state(false), &ctrl_event('z'))
+            .expect("Ctrl-z has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "Undo");
+    }
+
+    #[test]
+    fn default_keymap_ctrl_shift_z_in_insert_redoes() {
+        let keymap = compile_default_keymap();
+        // Ctrl+Shift+z reaches lookup as {Char('Z'), CONTROL}: the input
+        // pipeline uppercases shifted letters and drops SHIFT, so the redo
+        // binding is Ctrl-Z, mirroring normal mode's `U -> Redo()`.
+        let event = keymap_state::normalize_shift_event(crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char('z'),
+            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+        ));
+        let actions = keymap
+            .lookup(&insert_state(false), &event)
+            .expect("Ctrl-Shift-z has an insert-mode binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "Redo");
     }
 }
