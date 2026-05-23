@@ -75,6 +75,12 @@ pub struct Workspace {
     diff_coordinator: Entity<DiffCoordinator>,
     blame_coordinator: Entity<BlameCoordinator>,
     docks: Vec<Entity<Dock>>,
+    /// EntityId of the currently-open `DiffHunkPanel` dock item,
+    /// if any. Used by `ToggleDiffHunkPanel` to find the panel
+    /// across `docks` index shifts caused by other dock
+    /// add/remove activity. Cleared when the panel is removed or
+    /// when its dock is no longer present.
+    diff_hunk_panel: Option<gpui::EntityId>,
     modal_layer: Entity<ModalLayer>,
     status_bar: Entity<StatusBar>,
     input_state_machine: Entity<InputStateMachine>,
@@ -318,6 +324,7 @@ impl Workspace {
             diff_coordinator,
             blame_coordinator,
             docks: Vec::new(),
+            diff_hunk_panel: None,
             modal_layer,
             status_bar,
             input_state_machine,
@@ -1871,6 +1878,7 @@ impl Workspace {
             ActionKind::SaveSelection => self.dispatch_save_selection(cx),
             ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
+            ActionKind::ToggleDiffHunkPanel => self.dispatch_toggle_diff_hunk_panel(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
             ActionKind::ReviewNextChunk => self.dispatch_review_step(ReviewStepDir::Next, cx),
@@ -2756,6 +2764,31 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
         self.blame_coordinator
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
+    }
+
+    /// Toggle the right-side `DiffHunkPanel`. When the panel is open,
+    /// remove the dock that hosts it; otherwise create a panel for
+    /// the active editor and add it as a right-side dock. No-op when
+    /// no editor is active.
+    fn dispatch_toggle_diff_hunk_panel(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(panel_id) = self.diff_hunk_panel {
+            let existing_index = self
+                .docks
+                .iter()
+                .position(|d| d.read(cx).item().item_id() == panel_id);
+            self.diff_hunk_panel = None;
+            if let Some(idx) = existing_index {
+                self.remove_dock(idx, cx);
+            }
+            return;
+        }
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let panel = cx.new(|cx| crate::diff_hunk_panel::DiffHunkPanel::new(&editor, cx));
+        let panel_id = panel.entity_id();
+        self.add_dock(Box::new(panel), DockSide::Right, 240, cx);
+        self.diff_hunk_panel = Some(panel_id);
     }
 
     fn dispatch_jump(&mut self, dir: JumpDir, cx: &mut Context<'_, Self>) {
@@ -11879,6 +11912,55 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleBlame);
         vcx.run_until_parked();
         editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+    }
+
+    #[test]
+    fn dispatch_toggle_diff_hunk_panel_adds_then_removes_dock() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma\ndelta");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        editor.update(vcx, |ed, cx| {
+            let hunks = vec![stoat::diff_map::DiffHunk {
+                status: stoat::diff_map::DiffHunkStatus::Added,
+                buffer_start_line: 1,
+                buffer_line_range: 1..2,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: None,
+            }];
+            let new = stoat::DiffMap::from_hunks(hunks, None);
+            ed.diff_map().update(cx, |dm, cx| dm.set_diff(new, cx));
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(ws.read_with(vcx, |w, _| w.docks().len()), 0);
+
+        dispatch(&ws, vcx, stoat_action::ToggleDiffHunkPanel);
+        vcx.run_until_parked();
+        assert_eq!(ws.read_with(vcx, |w, _| w.docks().len()), 1);
+        let docks = ws.read_with(vcx, |w, _| w.docks().to_vec());
+        assert_eq!(
+            docks[0].read_with(vcx, |d, _| d.side()),
+            crate::dock::DockSide::Right
+        );
+
+        dispatch(&ws, vcx, stoat_action::ToggleDiffHunkPanel);
+        vcx.run_until_parked();
+        assert_eq!(ws.read_with(vcx, |w, _| w.docks().len()), 0);
+    }
+
+    #[test]
+    fn dispatch_toggle_diff_hunk_panel_without_editor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleDiffHunkPanel);
+        vcx.run_until_parked();
+
+        assert_eq!(ws.read_with(vcx, |w, _| w.docks().len()), 0);
     }
 
     #[test]

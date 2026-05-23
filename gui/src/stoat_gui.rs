@@ -27,6 +27,7 @@ mod conflict_item;
 mod diagnostics;
 mod diagnostics_picker;
 mod diff_coordinator;
+mod diff_hunk_panel;
 mod diff_map;
 mod display_map;
 mod dock;
