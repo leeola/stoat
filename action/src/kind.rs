@@ -280,6 +280,7 @@ pub enum ActionKind {
     CloseWorkspace,
     RenameWorkspace,
     OpenWorkspacePicker,
+    ToggleProjectTree,
     SubmitPromptInput,
     CancelPromptInput,
     PromptInsertNewline,

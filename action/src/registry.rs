@@ -92,7 +92,7 @@ use crate::{
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
-            SwitchWorkspace,
+            SwitchWorkspace, ToggleProjectTree,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -617,6 +617,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenWorkspacePicker::DEF, |_| {
         Ok(Box::new(OpenWorkspacePicker))
     });
+    add(ToggleProjectTree::DEF, |_| Ok(Box::new(ToggleProjectTree)));
     add(RenameWorkspace::DEF, |params| {
         let raw = match params.first() {
             Some(p) => p.as_string().context(WrongKindSnafu {
@@ -826,6 +827,7 @@ mod tests {
         "SwitchWorkspace",
         "CloseWorkspace",
         "OpenWorkspacePicker",
+        "ToggleProjectTree",
         "HelpSelectPrev",
         "HelpSelectNext",
         "HelpScopeToggle",
@@ -1009,7 +1011,8 @@ mod tests {
         // + 1 ShellInputSubmit (palette-invisible: dismisses the active ShellInputModal).
         // + 3 ToggleBlame / ToggleDiffHunkPanel / OpenGitStatus for the space_git submode.
         // + 1 ToggleMinimap for the space_workspace submode.
-        assert_eq!(all().count(), 297);
+        // + 1 ToggleProjectTree (opens the project file tree in a dock).
+        assert_eq!(all().count(), 298);
     }
 
     #[test]

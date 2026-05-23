@@ -634,6 +634,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::OpenWorkspacePicker
         | ActionKind::ToggleDiffHunkPanel
         | ActionKind::ToggleMinimap
+        | ActionKind::ToggleProjectTree
         | ActionKind::OpenGitStatus => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {

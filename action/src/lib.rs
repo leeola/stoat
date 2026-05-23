@@ -95,7 +95,7 @@ pub use defs::{
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     workspace::{
         CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
-        SwitchWorkspace,
+        SwitchWorkspace, ToggleProjectTree,
     },
 };
 pub use kind::ActionKind;

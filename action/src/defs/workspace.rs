@@ -54,6 +54,16 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    ToggleProjectTreeDef,
+    ToggleProjectTree,
+    "ToggleProjectTree",
+    ActionKind::ToggleProjectTree,
+    "toggle the project file tree",
+    "Open the project file tree in a left dock listing the workspace directory contents, or close it if already open.",
+    ActionPriority::Common
+);
+
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,
@@ -125,6 +135,8 @@ mod tests {
         assert_eq!(CloseWorkspace.def().name(), "CloseWorkspace");
         assert_eq!(OpenWorkspacePicker.kind(), ActionKind::OpenWorkspacePicker);
         assert_eq!(OpenWorkspacePicker.def().name(), "OpenWorkspacePicker");
+        assert_eq!(ToggleProjectTree.kind(), ActionKind::ToggleProjectTree);
+        assert_eq!(ToggleProjectTree.def().name(), "ToggleProjectTree");
         let rename = RenameWorkspace {
             name: "x".to_string(),
         };
