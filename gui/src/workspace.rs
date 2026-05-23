@@ -1412,6 +1412,7 @@ impl Workspace {
                     }
                 }
             },
+            ActionKind::Hover => self.dispatch_hover(cx),
             ActionKind::AcceptCompletion => {
                 let popup = self
                     .input_state_machine
@@ -2545,6 +2546,29 @@ impl Workspace {
             return;
         };
         editor.update(cx, |ed, cx| ed.handle_goto_paragraph(dir, cx));
+    }
+
+    fn dispatch_hover(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| {
+            let Some(newest) = ed
+                .selections()
+                .all_anchors()
+                .iter()
+                .max_by_key(|s| s.id)
+                .cloned()
+            else {
+                return;
+            };
+            let mb_snapshot = ed.multi_buffer().read(cx).snapshot();
+            let head_offset = mb_snapshot.resolve_anchor(&newest.head());
+            let head_point = mb_snapshot.rope().offset_to_point(head_offset);
+            let display_snapshot = ed.display_map().update(cx, |dm, _| dm.snapshot());
+            let head_display = display_snapshot.buffer_to_display(head_point);
+            ed.set_hover_position(Some((head_display.row, head_display.column)), cx);
+        });
     }
 
     fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<crate::editor::Editor>> {
@@ -6223,6 +6247,33 @@ mod tests {
             editor.read_with(vcx, |ed, _| ed.hover_position()),
             Some((0, 4))
         );
+    }
+
+    #[test]
+    fn dispatch_hover_sets_position_at_primary_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world");
+        editor.update(vcx, |ed, cx| ed.set_cursor_at_grid(0, 6, cx));
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::Hover);
+        vcx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.hover_position()),
+            Some((0, 6))
+        );
+    }
+
+    #[test]
+    fn dispatch_hover_without_active_editor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::Hover);
+        vcx.run_until_parked();
     }
 
     #[test]
