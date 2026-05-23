@@ -19,10 +19,11 @@ use crate::{
     theme::{self, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
 };
 use gpui::{
-    canvas, div, font, px, size as gpui_size, uniform_list, App, AppContext, Bounds, Context, Div,
-    ElementInputHandler, Entity, EventEmitter, InteractiveElement, IntoElement, MouseButton,
-    MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
-    SharedString, Size, Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    canvas, div, font, px, relative, size as gpui_size, uniform_list, App, AppContext, Bounds,
+    Context, Div, ElementInputHandler, Entity, EventEmitter, InteractiveElement, IntoElement,
+    MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render,
+    ScrollWheelEvent, SharedString, Size, Styled, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{
@@ -3118,12 +3119,18 @@ impl Editor {
 impl Render for Editor {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         self.apply_pending_autoscroll(cx);
+        let is_minimap = self.mode.is_minimap();
         let total_rows = self
             .display_map
             .update(cx, |dm, _| dm.snapshot())
             .max_point()
             .row as usize
             + 1;
+        let total_rows = if is_minimap {
+            total_rows.min(MAX_MINIMAP_LINES)
+        } else {
+            total_rows
+        };
         let handle = cx.entity().downgrade();
         let bounds_handle = handle.clone();
         let list = uniform_list("editor-rows", total_rows, move |range, _window, cx| {
@@ -3135,7 +3142,18 @@ impl Render for Editor {
         .track_scroll(self.scroll_handle.clone())
         .size_full();
 
-        let (family, size) = editor_font(cx);
+        let (family, base_size) = editor_font(cx);
+        let size = if is_minimap {
+            MINIMAP_FONT_SIZE
+        } else {
+            base_size
+        };
+        let font_size = px(size);
+        let line_height = if is_minimap {
+            px(MINIMAP_LINE_HEIGHT)
+        } else {
+            px((size * GPUI_DEFAULT_LINE_HEIGHT_RATIO).round())
+        };
         let cell_family = family.clone();
         let editor_input = self
             .workspace
@@ -3147,8 +3165,6 @@ impl Render for Editor {
                 let font_id = window
                     .text_system()
                     .resolve_font(&font(cell_family.clone()));
-                let font_size = px(size);
-                let line_height = px((size * GPUI_DEFAULT_LINE_HEIGHT_RATIO).round());
                 let measured_cell = window
                     .text_system()
                     .em_advance(font_id, font_size)
@@ -3177,18 +3193,34 @@ impl Render for Editor {
 
         let hover_popup = self.hover_popup.clone();
         let completion_popup = self.completion_popup.clone();
+        let minimap = self.minimap.clone();
         let mut root = div()
             .relative()
             .size_full()
             .font_family(family)
-            .text_size(px(size))
+            .text_size(font_size)
             .child(list)
             .child(bounds_capture);
+        if is_minimap {
+            root = root.line_height(line_height);
+        }
         if let Some(popup) = hover_popup {
             root = root.child(popup);
         }
         if let Some(popup) = completion_popup {
             root = root.child(popup);
+        }
+        if let Some(minimap) = minimap {
+            root = root.child(
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .h_full()
+                    .w(relative(MINIMAP_WIDTH_FRACTION))
+                    .min_w(px(MINIMAP_MIN_WIDTH))
+                    .child(minimap),
+            );
         }
         root.on_mouse_down(
             MouseButton::Left,
@@ -3215,6 +3247,24 @@ impl Render for Editor {
 /// default, so the cell-height measurement reproduces the constant
 /// rather than threading a `TextStyle` through the paint callback.
 const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
+
+/// Font size and line height (in pixels) used when an editor renders in
+/// [`EditorMode::Minimap`]. The reduced scale packs many source lines
+/// into the narrow overview column; the line height is deliberately
+/// tighter than the golden-ratio default so rows stack densely.
+const MINIMAP_FONT_SIZE: f32 = 2.0;
+const MINIMAP_LINE_HEIGHT: f32 = 2.5;
+
+/// Upper bound on the rows a minimap paints. Beyond this the overview
+/// stops growing so a very long buffer does not shape thousands of
+/// tiny rows every frame.
+const MAX_MINIMAP_LINES: usize = 200;
+
+/// The minimap column occupies this fraction of the parent editor's
+/// width, floored at [`MINIMAP_MIN_WIDTH`] pixels (roughly 20 columns
+/// at [`MINIMAP_FONT_SIZE`]) so it stays visible in a narrow pane.
+const MINIMAP_WIDTH_FRACTION: f32 = 0.15;
+const MINIMAP_MIN_WIDTH: f32 = 24.0;
 
 /// Wall-clock reference seeded into the blame strip's `now_seconds`
 /// field so relative ages render against the user's current time.
@@ -4562,6 +4612,31 @@ mod tests {
             true
         });
         assert!(built);
+    }
+
+    #[test]
+    fn render_with_minimap_visible_does_not_panic() {
+        let mut cx = TestAppContext::single();
+        let text = (0..300)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_buffer, editor) = new_editor(&mut cx, &text);
+        let vcx = cx.add_empty_window();
+        editor.update(vcx, |ed, cx| ed.set_minimap_visible(true, cx));
+        let minimap = editor
+            .read_with(vcx, |ed, _| ed.minimap().cloned())
+            .expect("minimap child constructed");
+
+        let parent_built = editor.update_in(vcx, |ed, window, cx| {
+            ed.render(window, cx).into_any_element();
+            true
+        });
+        let minimap_built = minimap.update_in(vcx, |mm, window, cx| {
+            mm.render(window, cx).into_any_element();
+            true
+        });
+        assert!(parent_built && minimap_built);
     }
 
     #[test]
