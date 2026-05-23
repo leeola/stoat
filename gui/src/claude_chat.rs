@@ -29,8 +29,8 @@ use crate::{
 };
 use gpui::{
     div, AnyElement, App, AppContext, Context, ElementId, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Task, WeakEntity,
-    Window,
+    ParentElement, Render, ScrollHandle, SharedString, StatefulInteractiveElement, Styled, Task,
+    WeakEntity, Window,
 };
 use std::{collections::HashSet, sync::Arc};
 use stoat::{
@@ -68,6 +68,15 @@ pub struct ClaudeChat {
     /// badge on tool cards regardless of whether a server-side
     /// `ToolResult` arrives later.
     pub(crate) cancelled_tool_uses: HashSet<String>,
+    /// When `true`, each appended message auto-scrolls the
+    /// scrollback to the bottom; when `false`, the scroll position
+    /// stays where the user left it. Flipped by
+    /// [`stoat_action::ClaudeToggleFollow`].
+    pub(crate) follow: bool,
+    /// Scroll handle wired into the scrollback container so
+    /// [`Self::finalize_message_push`] can request a scroll-to-bottom
+    /// on the next layout pass.
+    pub(crate) scroll_handle: ScrollHandle,
     /// Kept alive on the entity so the background task that asks the
     /// host for a session is dropped when the chat is dropped.
     _create_task: Option<Task<()>>,
@@ -93,6 +102,8 @@ impl ClaudeChat {
             expanded_tool_ids: HashSet::new(),
             focused_tool_id: None,
             cancelled_tool_uses: HashSet::new(),
+            follow: true,
+            scroll_handle: ScrollHandle::new(),
             _create_task: Some(create_task),
         }
     }
@@ -236,13 +247,31 @@ impl ClaudeChat {
             Some(session) => spawn_send(session.clone(), outgoing, cx),
             None => self.pending_sends.push(outgoing),
         }
+        self.finalize_message_push(cx);
+    }
+
+    /// Flip the auto-scroll-on-incoming-message flag and notify.
+    /// Driven by [`stoat_action::ClaudeToggleFollow`].
+    pub fn toggle_follow(&mut self, cx: &mut Context<'_, Self>) {
+        self.follow = !self.follow;
+        cx.notify();
+    }
+
+    /// Common tail for every code path that appends a [`ChatMessage`]
+    /// to [`Self::messages`]. Requests a scroll-to-bottom on the
+    /// scroll handle when [`Self::follow`] is true so the next
+    /// layout pass keeps the newest message in view, then notifies.
+    pub(crate) fn finalize_message_push(&mut self, cx: &mut Context<'_, Self>) {
+        if self.follow {
+            self.scroll_handle.scroll_to_bottom();
+        }
         cx.notify();
     }
 
     #[cfg(test)]
     pub(crate) fn push_message(&mut self, message: ChatMessage, cx: &mut Context<'_, Self>) {
         self.messages.push(message);
-        cx.notify();
+        self.finalize_message_push(cx);
     }
 }
 
@@ -327,7 +356,7 @@ fn handle_recv_message(
                 content: ChatMessageContent::Text(trimmed.to_string()),
                 checkpoint_sha: None,
             });
-            cx.notify();
+            chat.finalize_message_push(cx);
         },
         AgentMessage::Error { message } => {
             chat.messages.push(ChatMessage {
@@ -335,7 +364,7 @@ fn handle_recv_message(
                 content: ChatMessageContent::Error(message.clone()),
                 checkpoint_sha: None,
             });
-            cx.notify();
+            chat.finalize_message_push(cx);
         },
         AgentMessage::ToolUse {
             id, name, input, ..
@@ -349,7 +378,7 @@ fn handle_recv_message(
                 },
                 checkpoint_sha: None,
             });
-            cx.notify();
+            chat.finalize_message_push(cx);
         },
         AgentMessage::ToolResult {
             id,
@@ -366,7 +395,7 @@ fn handle_recv_message(
                 },
                 checkpoint_sha: None,
             });
-            cx.notify();
+            chat.finalize_message_push(cx);
         },
         _ => {},
     }
@@ -449,7 +478,14 @@ impl ItemView for ClaudeChat {
 impl Render for ClaudeChat {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let count = self.messages.len();
-        let mut scrollback = div().flex().flex_col().flex_grow().w_full();
+        let mut scrollback = div()
+            .id("claude_chat_scrollback")
+            .flex()
+            .flex_col()
+            .flex_grow()
+            .w_full()
+            .overflow_y_scroll()
+            .track_scroll(&self.scroll_handle);
         for idx in 0..count {
             if let Some(row) = render_message_row(self, idx, cx) {
                 scrollback = scrollback.child(row);
@@ -713,6 +749,16 @@ pub fn dispatch_claude_toggle_tool_card_expand(
 pub fn dispatch_claude_interrupt(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
     if let Some(chat) = focused_chat(workspace, cx) {
         chat.update(cx, |c, cx| c.interrupt(cx));
+    }
+}
+
+/// Dispatch the [`stoat_action::ClaudeToggleFollow`] action. Flips
+/// the focused chat's `follow` flag; subsequent message appends
+/// auto-scroll to the bottom only when `follow == true`. No-op when
+/// the active item is not a chat.
+pub fn dispatch_claude_toggle_follow(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    if let Some(chat) = focused_chat(workspace, cx) {
+        chat.update(cx, |c, cx| c.toggle_follow(cx));
     }
 }
 
@@ -1898,6 +1944,58 @@ mod tests {
 
         assert_eq!(pane_item_kinds(&mut h), panes_before);
         assert_eq!(dock_item_kinds(&mut h), docks_before);
+    }
+
+    #[test]
+    fn claude_chat_defaults_follow_true() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        let follow = chat.read_with(h.vcx, |c, _| c.follow);
+        assert!(follow, "newly-opened chat starts in follow mode");
+    }
+
+    #[test]
+    fn toggle_follow_flips_the_flag() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        chat.update(h.vcx, |c, cx| c.toggle_follow(cx));
+        assert!(!chat.read_with(h.vcx, |c, _| c.follow));
+
+        chat.update(h.vcx, |c, cx| c.toggle_follow(cx));
+        assert!(chat.read_with(h.vcx, |c, _| c.follow));
+    }
+
+    #[test]
+    fn dispatch_toggle_follow_flips_focused_chat() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+        let chat = open_chat(&mut h);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_toggle_follow(w, cx);
+        });
+
+        assert!(!chat.read_with(h.vcx, |c, _| c.follow));
+    }
+
+    #[test]
+    fn dispatch_toggle_follow_no_op_when_focus_not_chat() {
+        let mut cx = TestAppContext::single();
+        let host = Arc::new(stoat::host::fake::FakeClaudeCodeHost::new());
+        let mut h = new_harness(&mut cx, host as Arc<dyn ClaudeCodeHost>);
+
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_claude_toggle_follow(w, cx);
+        });
+
+        assert!(focused_chat(&mut h).is_none());
     }
 
     #[test]

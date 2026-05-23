@@ -2020,6 +2020,9 @@ impl Workspace {
             ActionKind::ClaudeToDockRight => {
                 crate::claude_chat::dispatch_claude_to_dock(self, DockSide::Right, cx)
             },
+            ActionKind::ClaudeToggleFollow => {
+                crate::claude_chat::dispatch_claude_toggle_follow(self, cx)
+            },
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
             ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
             ActionKind::RunHistoryPrev => crate::run_pane::dispatch_run_history_prev(self, cx),
