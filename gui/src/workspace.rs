@@ -456,6 +456,26 @@ impl Workspace {
         });
     }
 
+    /// Open a one-shot run overlay for the `Run` action's command. The
+    /// overlay spawns the command, streams its output, and is dismissed
+    /// when done; distinct from the persistent run pane (`OpenRun`).
+    fn dispatch_run(
+        &mut self,
+        action: &dyn stoat_action::Action,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(run) = action.as_any().downcast_ref::<stoat_action::Run>() else {
+            return;
+        };
+        let command = run.command.clone();
+        let cwd = self.git_root.clone();
+        self.modal_layer.update(cx, |layer, cx| {
+            let modal = cx.new(|cx| crate::run_modal::RunModal::new(command, cwd, cx));
+            layer.show_modal(modal, window, cx);
+        });
+    }
+
     /// Dispatch to [`crate::editor::actions::shell::apply`]. Public
     /// so the modal can call back through its weak workspace handle.
     pub fn run_shell_command(
@@ -2043,6 +2063,7 @@ impl Workspace {
                 crate::claude_chat::dispatch_claude_toggle_follow(self, cx)
             },
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
+            ActionKind::Run => self.dispatch_run(&*action, window, cx),
             ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
             ActionKind::RunHistoryPrev => crate::run_pane::dispatch_run_history_prev(self, cx),
             ActionKind::RunHistoryNext => crate::run_pane::dispatch_run_history_next(self, cx),
@@ -6085,6 +6106,37 @@ mod tests {
         ws.update_in(vcx, |w, window, cx| {
             w.dispatch_action(Box::new(action), window, cx);
         });
+    }
+
+    #[test]
+    fn dispatch_run_opens_run_modal() {
+        use stoat::host::{
+            fake::terminal::{FakeTerminalHost, FakeTerminalSession},
+            TerminalHost,
+        };
+
+        let mut cx = TestAppContext::single();
+        let session = Arc::new(FakeTerminalSession::new());
+        let terminal: Arc<dyn TerminalHost> = Arc::new(FakeTerminalHost::new(session));
+        cx.update(|cx| cx.set_global(crate::globals::TerminalHostGlobal(terminal)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::Run {
+                command: "echo hi".into(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let opened = ws.read_with(vcx, |w, cx| {
+            w.modal_layer
+                .read(cx)
+                .active_modal::<crate::run_modal::RunModal>()
+                .is_some()
+        });
+        assert!(opened, "Run should open a run modal overlay");
     }
 
     #[test]

@@ -19,7 +19,7 @@
 //! paint of those grids lives in the [`render`] submodule.
 
 pub(crate) mod mouse;
-mod render;
+pub(crate) mod render;
 
 use crate::{
     editor::Editor,

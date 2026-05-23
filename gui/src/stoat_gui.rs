@@ -61,6 +61,7 @@ mod review_item;
 mod review_move_picker;
 mod review_session;
 mod reword_modal;
+mod run_modal;
 mod run_pane;
 mod settings;
 mod shell_input_modal;
