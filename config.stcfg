@@ -559,6 +559,8 @@ on key {
         c -> [CopyWorkspace(), SetMode(normal)];
         s -> [SwitchWorkspace(), SetMode(normal)];
         x -> [CloseWorkspace(), SetMode(normal)];
+        Shift-L -> [ToggleDockLeft(), SetMode(normal)];
+        Shift-R -> [ToggleDockRight(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == run {

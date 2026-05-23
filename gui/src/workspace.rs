@@ -75,6 +75,15 @@ pub struct Workspace {
     diff_coordinator: Entity<DiffCoordinator>,
     blame_coordinator: Entity<BlameCoordinator>,
     docks: Vec<Entity<Dock>>,
+    /// Workspace-level visibility of the left dock group.
+    /// Independent of each individual [`Dock`]'s
+    /// `DockVisibility` -- this gates whether the side renders at
+    /// all. Hiding restores each dock's prior per-dock state when
+    /// the side is shown again.
+    left_dock_visible: bool,
+    /// Workspace-level visibility of the right dock group. See
+    /// [`Workspace::left_dock_visible`] for the contract.
+    right_dock_visible: bool,
     /// EntityId of the currently-open `DiffHunkPanel` dock item,
     /// if any. Used by `ToggleDiffHunkPanel` to find the panel
     /// across `docks` index shifts caused by other dock
@@ -324,6 +333,8 @@ impl Workspace {
             diff_coordinator,
             blame_coordinator,
             docks: Vec::new(),
+            left_dock_visible: true,
+            right_dock_visible: true,
             diff_hunk_panel: None,
             modal_layer,
             status_bar,
@@ -1364,6 +1375,8 @@ impl Workspace {
                 });
             },
             ActionKind::CloseBuffer => self.close_active_buffer(cx),
+            ActionKind::ToggleDockLeft => self.toggle_dock(DockSide::Left, cx),
+            ActionKind::ToggleDockRight => self.toggle_dock(DockSide::Right, cx),
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {
                     tree.close_others(cx);
@@ -2773,6 +2786,28 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.set_blame_state(Some(state), cx));
         self.blame_coordinator
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
+    }
+
+    /// Whether `side`'s dock group is currently rendered. Each
+    /// individual dock keeps its own `DockVisibility`; this bool
+    /// gates the whole side and is flipped by [`Self::toggle_dock`].
+    pub fn dock_side_visible(&self, side: DockSide) -> bool {
+        match side {
+            DockSide::Left => self.left_dock_visible,
+            DockSide::Right => self.right_dock_visible,
+        }
+    }
+
+    /// Flip the workspace-level visibility of `side`'s dock group
+    /// and trigger a repaint. Preserves each individual dock's
+    /// `DockVisibility` across the toggle.
+    fn toggle_dock(&mut self, side: DockSide, cx: &mut Context<'_, Self>) {
+        let visible = match side {
+            DockSide::Left => &mut self.left_dock_visible,
+            DockSide::Right => &mut self.right_dock_visible,
+        };
+        *visible = !*visible;
+        cx.notify();
     }
 
     /// Remove the active tab from the focused pane, leaving the
@@ -5117,18 +5152,24 @@ impl Render for Workspace {
             self.last_window_title = Some(title);
         }
 
-        let left_docks: Vec<Entity<Dock>> = self
-            .docks
-            .iter()
-            .filter(|d| d.read(cx).side() == DockSide::Left)
-            .cloned()
-            .collect();
-        let right_docks: Vec<Entity<Dock>> = self
-            .docks
-            .iter()
-            .filter(|d| d.read(cx).side() == DockSide::Right)
-            .cloned()
-            .collect();
+        let left_docks: Vec<Entity<Dock>> = if self.left_dock_visible {
+            self.docks
+                .iter()
+                .filter(|d| d.read(cx).side() == DockSide::Left)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
+        let right_docks: Vec<Entity<Dock>> = if self.right_dock_visible {
+            self.docks
+                .iter()
+                .filter(|d| d.read(cx).side() == DockSide::Right)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (ui_family, ui_size) = ui_font(cx);
         div()
             .flex()
@@ -5976,6 +6017,59 @@ mod tests {
         let label = SharedString::from(label.to_string());
         let entity = vcx.update(|_, cx| cx.new(|_| WorkspaceItem { label }));
         Box::new(entity)
+    }
+
+    #[test]
+    fn fresh_workspace_reports_both_dock_sides_visible() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        ws.read_with(&cx, |w, _| {
+            assert!(w.dock_side_visible(DockSide::Left));
+            assert!(w.dock_side_visible(DockSide::Right));
+        });
+    }
+
+    #[test]
+    fn dispatch_toggle_dock_left_flips_left_only() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleDockLeft);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, _| {
+            assert!(!w.dock_side_visible(DockSide::Left));
+            assert!(w.dock_side_visible(DockSide::Right));
+        });
+    }
+
+    #[test]
+    fn dispatch_toggle_dock_right_flips_right_only() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleDockRight);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, _| {
+            assert!(w.dock_side_visible(DockSide::Left));
+            assert!(!w.dock_side_visible(DockSide::Right));
+        });
+    }
+
+    #[test]
+    fn dispatch_toggle_dock_left_round_trips() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleDockLeft);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::ToggleDockLeft);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, _| {
+            assert!(w.dock_side_visible(DockSide::Left));
+        });
     }
 
     #[test]
