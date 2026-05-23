@@ -1927,6 +1927,12 @@ impl Workspace {
             },
             ActionKind::OpenHelp => crate::help::open_help(self, window, cx),
             ActionKind::OpenFileFinder => crate::file_finder::open_file_finder(self, window, cx),
+            ActionKind::OpenFileFinderHSplit => {
+                crate::file_finder::open_file_finder_split(self, Axis::Horizontal, window, cx)
+            },
+            ActionKind::OpenFileFinderVSplit => {
+                crate::file_finder::open_file_finder_split(self, Axis::Vertical, window, cx)
+            },
             ActionKind::OpenBufferPicker => {
                 crate::buffer_picker::open_buffer_picker(self, window, cx)
             },

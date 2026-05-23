@@ -21,7 +21,7 @@ use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
-use stoat::host::FsHost;
+use stoat::{host::FsHost, pane::Axis};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 pub struct FileFinderDelegate {
@@ -43,6 +43,12 @@ pub struct FileFinderDelegate {
     /// between keystrokes; caching here is the obvious place to read
     /// the query from without going back through the picker entity.
     query: String,
+    /// When `Some`, the primary confirm path opens the chosen file
+    /// in a freshly split pane along this axis instead of replacing
+    /// the current pane. Set by openers that want split-on-confirm
+    /// behavior (e.g. `OpenFileFinderHSplit`); a secondary modifier
+    /// at confirm time still overrides this field.
+    intended_split: Option<Axis>,
     /// Drain task that forwards walker batches into [`Self::paths`].
     /// Kept alive on the delegate so dropping the modal drops the
     /// task, which drops the receiver and signals the walker's
@@ -59,8 +65,17 @@ impl FileFinderDelegate {
             matches: Vec::new(),
             selected: 0,
             query: String::new(),
+            intended_split: None,
             _drain_task: None,
         }
+    }
+
+    /// Build a delegate whose primary confirm opens the chosen file
+    /// in a fresh split along `axis` rather than the focused pane.
+    pub fn with_split(workspace: WeakEntity<Workspace>, git_root: PathBuf, axis: Axis) -> Self {
+        let mut delegate = Self::new(workspace, git_root);
+        delegate.intended_split = Some(axis);
+        delegate
     }
 
     /// Append `batch` to [`Self::paths`] and re-run the filter so
@@ -136,7 +151,7 @@ impl PickerDelegate for FileFinderDelegate {
 
     fn confirm(
         &mut self,
-        _secondary: Option<PickerSecondary>,
+        secondary: Option<PickerSecondary>,
         _window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
@@ -146,7 +161,15 @@ impl PickerDelegate for FileFinderDelegate {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        workspace.update(cx, |ws, cx| ws.open_paths(&[path], cx));
+        let split_axis = secondary.map(secondary_to_axis).or(self.intended_split);
+        workspace.update(cx, |ws, cx| {
+            if let Some(axis) = split_axis {
+                ws.pane_tree().update(cx, |tree, cx| {
+                    tree.split(axis, cx);
+                });
+            }
+            ws.open_paths(&[path], cx);
+        });
         cx.emit(DismissEvent);
     }
 
@@ -195,11 +218,39 @@ fn display_path(path: &Path, git_root: &Path) -> String {
     }
 }
 
+fn secondary_to_axis(secondary: PickerSecondary) -> Axis {
+    match secondary {
+        PickerSecondary::OpenInRight => Axis::Vertical,
+        PickerSecondary::OpenInDown => Axis::Horizontal,
+    }
+}
+
 /// Open the file finder as a modal picker, scheduling the walker
 /// on the background blocking pool and streaming batches into the
 /// delegate.
 pub fn open_file_finder(
     workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    open_file_finder_internal(workspace, None, window, cx);
+}
+
+/// Open the file finder with a default split-on-confirm axis. The
+/// chosen file lands in a freshly split pane along `axis` instead
+/// of replacing the focused pane's content.
+pub fn open_file_finder_split(
+    workspace: &mut Workspace,
+    axis: Axis,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    open_file_finder_internal(workspace, Some(axis), window, cx);
+}
+
+fn open_file_finder_internal(
+    workspace: &mut Workspace,
+    intended_split: Option<Axis>,
     window: &mut Window,
     cx: &mut Context<'_, Workspace>,
 ) {
@@ -212,7 +263,10 @@ pub fn open_file_finder(
     let walk_task = spawn_walker(executor.clone(), fs_host, git_root.clone(), walk_tx);
 
     workspace.toggle_modal::<Picker<FileFinderDelegate>, _>(window, cx, move |window, cx| {
-        let delegate = FileFinderDelegate::new(weak_workspace, git_root);
+        let delegate = match intended_split {
+            Some(axis) => FileFinderDelegate::with_split(weak_workspace, git_root, axis),
+            None => FileFinderDelegate::new(weak_workspace, git_root),
+        };
         Picker::new(delegate, window, cx)
     });
     walk_task.detach();
@@ -266,10 +320,11 @@ async fn drain_walker_batches(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::globals::{ExecutorGlobal, FsHostGlobal};
+    use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal};
     use gpui::{Entity, TestAppContext, VisualTestContext};
     use std::sync::Arc;
-    use stoat::host::FakeFs;
+    use stoat::host::{FakeFs, FsWatchHost};
+    use stoat_host::NoopFsWatcher;
     use stoat_scheduler::{Executor, TestScheduler};
 
     fn install_globals(cx: &mut TestAppContext, fake_fs: Arc<FakeFs>) {
@@ -277,6 +332,9 @@ mod tests {
         cx.update(|cx| {
             cx.set_global(ExecutorGlobal(executor));
             cx.set_global(FsHostGlobal(fake_fs));
+            cx.set_global(FsWatchHostGlobal(
+                Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
+            ));
         });
     }
 
@@ -391,6 +449,63 @@ mod tests {
                 .is_some()
         });
         assert!(active, "file finder picker should be the active modal");
+    }
+
+    #[test]
+    fn with_split_stores_intended_axis() {
+        let delegate = FileFinderDelegate::with_split(
+            WeakEntity::new_invalid(),
+            PathBuf::from("/repo"),
+            Axis::Vertical,
+        );
+        assert_eq!(delegate.intended_split, Some(Axis::Vertical));
+    }
+
+    #[test]
+    fn open_file_finder_vsplit_confirm_opens_in_new_right_split() {
+        use stoat::pane::Axis;
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "alpha"), ("b.rs", "beta")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        let pane_tree = h.workspace.read_with(h.vcx, |w, _| w.pane_tree().clone());
+        assert_eq!(pane_tree.read_with(h.vcx, |t, _| t.pane_count()), 1);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_file_finder_split(w, Axis::Vertical, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<FileFinderDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("file finder modal is open");
+        picker.update(h.vcx, |p, _| {
+            let delegate = p.delegate_mut();
+            delegate.paths = vec![PathBuf::from("/repo/b.rs")];
+            delegate.matches = vec![(0, Vec::new())];
+            delegate.selected = 0;
+        });
+
+        picker.update_in(h.vcx, |p, window, cx| {
+            p.delegate_mut().confirm(None, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            pane_tree.read_with(h.vcx, |t, _| t.pane_count()),
+            2,
+            "vsplit confirm should grow pane count to 2",
+        );
+        let focused_id = pane_tree.read_with(h.vcx, |t, _| t.focus());
+        let focused_pane = pane_tree
+            .read_with(h.vcx, |t, _| t.pane(focused_id).cloned())
+            .expect("focused pane registered");
+        assert_eq!(
+            focused_pane.read_with(h.vcx, |p, _| p.items().len()),
+            1,
+            "new pane should host one editor for the chosen file",
+        );
     }
 
     #[test]
