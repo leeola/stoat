@@ -20,10 +20,10 @@ use crate::{
 };
 use gpui::{
     canvas, div, fill, font, px, relative, size as gpui_size, uniform_list, App, AppContext,
-    Bounds, Context, Div, ElementInputHandler, Entity, EventEmitter, Hsla, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render,
-    ScrollWheelEvent, SharedString, Size, Styled, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, Window,
+    Bounds, Context, DispatchPhase, Div, ElementInputHandler, Entity, EventEmitter, Hsla,
+    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled,
+    Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{
@@ -98,6 +98,20 @@ impl EditorMode {
     }
 }
 
+/// Anchor and fixed metrics for an in-progress minimap thumb drag,
+/// captured at mouse-down and held for the gesture. The parent's
+/// [`ScrollManager::minimap_thumb_state`] separately records that a drag
+/// is active; this carries the numbers the move handler maps the pointer
+/// delta through into a parent scroll position.
+#[derive(Clone, Copy)]
+struct MinimapDrag {
+    start_mouse_y: Pixels,
+    start_scroll_y: f64,
+    total_lines: f64,
+    visible_lines: f64,
+    minimap_height: f64,
+}
+
 /// Entity holding the state a single editor view needs:
 /// [`Entity<MultiBuffer>`] for the source text, [`Entity<DisplayMap>`]
 /// for the visible-line projection, [`Entity<DiffMap>`] for the
@@ -144,6 +158,7 @@ pub struct Editor {
     blame_visible: bool,
     minimap_visible: bool,
     minimap: Option<Entity<Editor>>,
+    minimap_drag: Option<MinimapDrag>,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
     _review_session_subscription: Option<Subscription>,
@@ -369,6 +384,7 @@ impl Editor {
             blame_visible: false,
             minimap_visible: false,
             minimap: None,
+            minimap_drag: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
             _review_session_subscription: None,
@@ -2347,6 +2363,132 @@ impl Editor {
         })
     }
 
+    /// Begin a minimap thumb drag when `position` (window coordinates) lands
+    /// on the painted thumb. Captures the scroll/viewport metrics for the
+    /// gesture and marks the parent's
+    /// [`ScrollManager::minimap_thumb_state`] as dragging. No-op on a
+    /// non-minimap editor, before the metrics are known, or when the click
+    /// misses the thumb.
+    fn minimap_thumb_drag_start(&mut self, position: Point<Pixels>, cx: &mut Context<'_, Self>) {
+        let Some(region) = self.text_region_bounds() else {
+            return;
+        };
+        let EditorMode::Minimap { parent } = &self.mode else {
+            return;
+        };
+        let Some(parent) = parent.upgrade() else {
+            return;
+        };
+        let total_lines = self
+            .display_map
+            .update(cx, |dm, _| dm.snapshot())
+            .max_point()
+            .row as f64
+            + 1.0;
+        let (visible_lines, start_scroll_y) = {
+            let parent = parent.read(cx);
+            let (Some(p_region), Some(cell)) = (parent.text_region_bounds(), parent.cell_size())
+            else {
+                return;
+            };
+            let line_height = f32::from(cell.height) as f64;
+            if line_height <= 0.0 {
+                return;
+            }
+            (
+                f32::from(p_region.size.height) as f64 / line_height,
+                parent.scroll_manager().anchor().offset.y,
+            )
+        };
+
+        let Some(thumb) = minimap_thumb_bounds(region, total_lines, visible_lines, start_scroll_y)
+        else {
+            return;
+        };
+        if !thumb.contains(&position) {
+            return;
+        }
+
+        self.minimap_drag = Some(MinimapDrag {
+            start_mouse_y: position.y,
+            start_scroll_y,
+            total_lines,
+            visible_lines,
+            minimap_height: f32::from(region.size.height) as f64,
+        });
+        parent.update(cx, |parent, _| {
+            parent
+                .scroll_manager_mut()
+                .set_minimap_thumb_state(Some(scroll::ScrollbarThumbState::Dragging));
+        });
+        cx.notify();
+    }
+
+    /// Continue an active minimap thumb drag: map the pointer's Y delta
+    /// since drag start into a parent scroll position and apply it. No-op
+    /// when no drag is active.
+    fn minimap_thumb_drag_to(&mut self, position: Point<Pixels>, cx: &mut Context<'_, Self>) {
+        let Some(drag) = self.minimap_drag else {
+            return;
+        };
+        if drag.minimap_height <= 0.0 {
+            return;
+        }
+        let EditorMode::Minimap { parent } = &self.mode else {
+            return;
+        };
+        let Some(parent) = parent.upgrade() else {
+            return;
+        };
+
+        let delta_y = f32::from(position.y - drag.start_mouse_y) as f64;
+        let delta_rows = delta_y * drag.total_lines / drag.minimap_height;
+        let max_scroll = (drag.total_lines - drag.visible_lines).max(0.0);
+        let new_y = (drag.start_scroll_y + delta_rows).clamp(0.0, max_scroll);
+
+        parent.update(cx, |parent, cx| parent.set_scroll_position_y(new_y, cx));
+    }
+
+    /// End a minimap thumb drag, clearing the captured metrics and the
+    /// parent's dragging marker. No-op when no drag is active.
+    fn minimap_thumb_drag_end(&mut self, cx: &mut Context<'_, Self>) {
+        if self.minimap_drag.take().is_none() {
+            return;
+        }
+        if let EditorMode::Minimap { parent } = &self.mode {
+            if let Some(parent) = parent.upgrade() {
+                parent.update(cx, |parent, _| {
+                    parent.scroll_manager_mut().set_minimap_thumb_state(None);
+                });
+            }
+        }
+        cx.notify();
+    }
+
+    /// Scroll the viewport to fractional row `new_y`, updating the scroll
+    /// anchor, the tracked [`UniformListScrollHandle`] offset, and the
+    /// integer [`Editor::scroll_row`]. Always requests a repaint so sub-row
+    /// changes (e.g. a minimap drag in progress) still refresh. No-op until
+    /// cell metrics are known.
+    fn set_scroll_position_y(&mut self, new_y: f64, cx: &mut Context<'_, Self>) {
+        let Some(cell) = self.cell_size else {
+            return;
+        };
+        let mut anchor = *self.scroll_manager.anchor();
+        anchor.offset.y = new_y;
+        self.scroll_manager.set_anchor(anchor);
+
+        let pixel_offset_y = render::scroll_position_to_pixel_offset_y(new_y, cell.height);
+        self.scroll_handle
+            .0
+            .borrow()
+            .base_handle
+            .set_offset(Point::new(px(0.0), pixel_offset_y));
+
+        self.set_scroll_row(new_y.floor().max(0.0) as u32, cx);
+        cx.notify();
+    }
+
     pub fn review_session(&self) -> Option<&Entity<crate::review_session::ReviewSession>> {
         self.review_session.as_ref()
     }
@@ -3225,10 +3367,39 @@ impl Render for Editor {
         if let EditorMode::Minimap { parent } = &self.mode {
             let parent = parent.clone();
             let total_lines = document_rows as f64;
+            let drag_handle = cx.entity().downgrade();
+            let dragging = self.minimap_drag.is_some();
             root = root.child(
                 canvas(
                     |_, _, _| {},
                     move |bounds, _, window, cx| {
+                        if dragging {
+                            window.on_mouse_event::<MouseMoveEvent>({
+                                let drag_handle = drag_handle.clone();
+                                move |event, phase, _window, cx| {
+                                    if phase == DispatchPhase::Bubble {
+                                        if let Some(minimap) = drag_handle.upgrade() {
+                                            minimap.update(cx, |minimap, cx| {
+                                                minimap.minimap_thumb_drag_to(event.position, cx);
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                            window.on_mouse_event::<MouseUpEvent>({
+                                let drag_handle = drag_handle.clone();
+                                move |_event: &MouseUpEvent, phase, _window, cx| {
+                                    if phase == DispatchPhase::Bubble {
+                                        if let Some(minimap) = drag_handle.upgrade() {
+                                            minimap.update(cx, |minimap, cx| {
+                                                minimap.minimap_thumb_drag_end(cx);
+                                            });
+                                        }
+                                    }
+                                }
+                            });
+                        }
+
                         let Some(parent) = parent.upgrade() else {
                             return;
                         };
@@ -3255,20 +3426,30 @@ impl Render for Editor {
                 .size_full(),
             );
         }
-        root.on_mouse_down(
-            MouseButton::Left,
-            cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                this.dispatch_click_at(event.position, window, cx);
-            }),
-        )
-        .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-            if event.dragging() {
-                this.dispatch_drag_select_to(event.position, window, cx);
-            } else {
-                this.schedule_hover_at(event.position, window, cx);
-            }
-        }))
-        .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
+        let root = if is_minimap {
+            root.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.minimap_thumb_drag_start(event.position, cx);
+                    cx.stop_propagation();
+                }),
+            )
+        } else {
+            root.on_mouse_down(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    this.dispatch_click_at(event.position, window, cx);
+                }),
+            )
+            .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                if event.dragging() {
+                    this.dispatch_drag_select_to(event.position, window, cx);
+                } else {
+                    this.schedule_hover_at(event.position, window, cx);
+                }
+            }))
+        };
+        root.on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, window, cx| {
             this.handle_scroll_wheel(event, window, cx);
         }))
     }
@@ -4740,6 +4921,91 @@ mod tests {
 
         assert_eq!(thumb.size, gpui_size(px(20.0), px(20.0)));
         assert_eq!(thumb.origin, Point::new(px(0.0), px(90.0)));
+    }
+
+    /// Parent editor (`editor_with_viewport`: 320px / 16px = 20 visible
+    /// lines) over a 500-line buffer, with a visible minimap whose column
+    /// is 200px tall. The thumb therefore spans `200 * 20/500 = 8px` at
+    /// scroll 0, and the minimap-to-document ratio is `200/500 = 0.4`
+    /// px/line.
+    fn minimap_drag_fixture(vcx: &mut VisualTestContext) -> (Entity<Editor>, Entity<Editor>) {
+        let text = multiline_text(500);
+        let (_buffer, editor) = editor_with_viewport(vcx, &text);
+        editor.update(vcx, |ed, cx| ed.set_minimap_visible(true, cx));
+        let minimap = editor
+            .read_with(vcx, |ed, _| ed.minimap().cloned())
+            .expect("minimap child constructed");
+        minimap.update(vcx, |mm, cx| {
+            mm.set_text_region_bounds(
+                Bounds {
+                    origin: Point::new(px(0.0), px(0.0)),
+                    size: gpui_size(px(20.0), px(200.0)),
+                },
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+        (editor, minimap)
+    }
+
+    #[test]
+    fn minimap_thumb_drag_scrolls_parent_by_delta_over_ratio() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (editor, minimap) = minimap_drag_fixture(vcx);
+
+        minimap.update(vcx, |mm, cx| {
+            mm.minimap_thumb_drag_start(Point::new(px(10.0), px(4.0)), cx);
+            mm.minimap_thumb_drag_to(Point::new(px(10.0), px(104.0)), cx);
+        });
+
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 250);
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().minimap_thumb_state()),
+            Some(scroll::ScrollbarThumbState::Dragging),
+        );
+    }
+
+    #[test]
+    fn minimap_thumb_drag_start_ignores_click_off_thumb() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (editor, minimap) = minimap_drag_fixture(vcx);
+
+        minimap.update(vcx, |mm, cx| {
+            mm.minimap_thumb_drag_start(Point::new(px(10.0), px(150.0)), cx);
+            mm.minimap_thumb_drag_to(Point::new(px(10.0), px(250.0)), cx);
+        });
+
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 0);
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().minimap_thumb_state()),
+            None,
+        );
+    }
+
+    #[test]
+    fn minimap_thumb_drag_end_clears_dragging_state() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (editor, minimap) = minimap_drag_fixture(vcx);
+
+        minimap.update(vcx, |mm, cx| {
+            mm.minimap_thumb_drag_start(Point::new(px(10.0), px(4.0)), cx);
+        });
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().minimap_thumb_state()),
+            Some(scroll::ScrollbarThumbState::Dragging),
+        );
+
+        minimap.update(vcx, |mm, cx| mm.minimap_thumb_drag_end(cx));
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().minimap_thumb_state()),
+            None,
+        );
     }
 
     #[test]
