@@ -6185,6 +6185,68 @@ mod tests {
     }
 
     #[test]
+    fn dispatch_file_finder_scope_toggle_switches_scope() {
+        use crate::{
+            file_finder::FileFinderDelegate,
+            globals::{FsHostGlobal, GitHostGlobal},
+            picker::{Picker, PickerDelegate},
+        };
+        use stoat::host::{fake::FakeGit, FakeFs, FsHost, GitHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        {
+            let mut builder = git.add_repo("/repo").with_fs(&fs);
+            builder.modified("a.rs", "v1\n", "v2\n");
+            builder.unstaged_file("b.rs", "b\n");
+        }
+        fs.insert_files([
+            (PathBuf::from("/repo/c.rs"), b"c".as_slice()),
+            (PathBuf::from("/repo/d.rs"), b"d".as_slice()),
+        ]);
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenFileFinder);
+        vcx.run_until_parked();
+
+        let match_count = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.modal_layer
+                    .read(cx)
+                    .active_modal::<Picker<FileFinderDelegate>>()
+                    .map(|p| p.read(cx).delegate().match_count())
+            })
+        };
+
+        assert_eq!(
+            match_count(vcx),
+            Some(4),
+            "all-files scope lists every walked file"
+        );
+
+        dispatch(&ws, vcx, stoat_action::FileFinderScopeToggle);
+        vcx.run_until_parked();
+        assert_eq!(
+            match_count(vcx),
+            Some(2),
+            "toggling lists only the two git-changed files",
+        );
+
+        dispatch(&ws, vcx, stoat_action::FileFinderScopeToggle);
+        vcx.run_until_parked();
+        assert_eq!(
+            match_count(vcx),
+            Some(4),
+            "toggling back returns to all files"
+        );
+    }
+
+    #[test]
     fn dispatch_split_right_grows_pane_tree() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");

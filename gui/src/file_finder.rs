@@ -22,6 +22,7 @@ use std::{
     sync::Arc,
 };
 use stoat::{host::FsHost, pane::Axis};
+use stoat_action::{Action, ActionKind};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 /// Which subset of workspace files the finder lists when it opens.
@@ -38,12 +39,20 @@ enum FinderScope {
 pub struct FileFinderDelegate {
     workspace: WeakEntity<Workspace>,
     git_root: PathBuf,
+    /// Active scope deciding which list [`Self::base_paths`] feeds the
+    /// matcher. Flipped by [`Self::toggle_scope`].
+    scope: FinderScope,
     /// Absolute paths of every file the streaming walker has produced
     /// so far. Extended in walker order by [`Self::extend_paths`];
     /// fuzzy-ranking sorts the indexed view separately so the natural
-    /// walker order does not bleed into the match list.
-    paths: Vec<PathBuf>,
-    /// Indices into [`Self::paths`] selected by the current
+    /// walker order does not bleed into the match list. The walker runs
+    /// regardless of scope so a toggle to [`FinderScope::All`] always has
+    /// a populated list ready.
+    all_paths: Vec<PathBuf>,
+    /// Absolute paths of files with uncommitted git changes,
+    /// (re)snapshotted whenever the finder enters [`FinderScope::Modified`].
+    modified_paths: Vec<PathBuf>,
+    /// Indices into [`Self::base_paths`] selected by the current
     /// [`Self::query`], paired with the per-match character indices
     /// the renderer highlights. Sorted by rank.
     matches: Vec<(usize, Vec<u32>)>,
@@ -72,7 +81,9 @@ impl FileFinderDelegate {
         Self {
             workspace,
             git_root,
-            paths: Vec::new(),
+            scope: FinderScope::All,
+            all_paths: Vec::new(),
+            modified_paths: Vec::new(),
             matches: Vec::new(),
             selected: 0,
             query: String::new(),
@@ -89,32 +100,65 @@ impl FileFinderDelegate {
         delegate
     }
 
-    /// Append `batch` to [`Self::paths`] and re-run the filter so
-    /// the newly-arrived paths participate in the visible matches.
-    /// Called from the drain task on every batch the walker emits.
+    /// Append `batch` to [`Self::all_paths`]. Re-runs the filter when
+    /// [`FinderScope::All`] is active so the newly-arrived paths join the
+    /// visible matches; under [`FinderScope::Modified`] the batch is
+    /// retained for a later toggle without disturbing the changed-file
+    /// matches. Called from the drain task on every batch the walker emits.
     pub fn extend_paths(&mut self, batch: Vec<PathBuf>) {
         if batch.is_empty() {
             return;
         }
-        self.paths.extend(batch);
-        self.refilter();
+        self.all_paths.extend(batch);
+        if self.scope == FinderScope::All {
+            self.refilter();
+        }
     }
 
     fn set_drain_task(&mut self, task: Task<()>) {
         self._drain_task = Some(task);
     }
 
+    /// The path list backing the current [`Self::scope`]; match
+    /// indices in [`Self::matches`] index into this slice.
+    fn base_paths(&self) -> &[PathBuf] {
+        match self.scope {
+            FinderScope::All => &self.all_paths,
+            FinderScope::Modified => &self.modified_paths,
+        }
+    }
+
+    /// Flip between listing all workspace files and only the files with
+    /// uncommitted git changes. Entering [`FinderScope::Modified`]
+    /// re-snapshots the changed-file set so it reflects the working tree
+    /// at toggle time; the background walk keeps the all-files list fresh
+    /// either way.
+    fn toggle_scope(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        self.scope = match self.scope {
+            FinderScope::All => {
+                self.modified_paths = collect_changed_paths(&self.git_root, cx);
+                FinderScope::Modified
+            },
+            FinderScope::Modified => FinderScope::All,
+        };
+        self.selected = 0;
+        self.refilter();
+        cx.notify();
+    }
+
     fn refilter(&mut self) {
         let trimmed = self.query.trim();
         if trimmed.is_empty() {
-            self.matches = (0..self.paths.len()).map(|i| (i, Vec::new())).collect();
+            self.matches = (0..self.base_paths().len())
+                .map(|i| (i, Vec::new()))
+                .collect();
             if self.selected >= self.matches.len() {
                 self.selected = self.matches.len().saturating_sub(1);
             }
             return;
         }
 
-        let items = self.paths.iter().enumerate().map(|(i, path)| {
+        let items = self.base_paths().iter().enumerate().map(|(i, path)| {
             let display = display_path(path, &self.git_root);
             (i, display)
         });
@@ -135,7 +179,7 @@ impl FileFinderDelegate {
 
     fn selected_path(&self) -> Option<&Path> {
         let (idx, _) = self.matches.get(self.selected)?;
-        self.paths.get(*idx).map(|p| p.as_path())
+        self.base_paths().get(*idx).map(|p| p.as_path())
     }
 }
 
@@ -186,6 +230,19 @@ impl PickerDelegate for FileFinderDelegate {
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
+    fn handle_action(
+        &mut self,
+        action: &dyn Action,
+        _window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) -> bool {
+        if action.kind() == ActionKind::FileFinderScopeToggle {
+            self.toggle_scope(cx);
+            return true;
+        }
+        false
+    }
+
     fn render_match(
         &self,
         ix: usize,
@@ -195,7 +252,7 @@ impl PickerDelegate for FileFinderDelegate {
         let Some((path_idx, matched)) = self.matches.get(ix) else {
             return div().into_any_element();
         };
-        let Some(path) = self.paths.get(*path_idx) else {
+        let Some(path) = self.base_paths().get(*path_idx) else {
             return div().into_any_element();
         };
         let display = display_path(path, &self.git_root);
@@ -281,27 +338,24 @@ fn open_file_finder_internal(
     let git_root = workspace.git_root().clone();
     let weak_workspace = cx.weak_entity();
 
-    let walk_rx = match scope {
-        FinderScope::All => {
-            let fs_host = cx.global::<FsHostGlobal>().0.clone();
-            let executor = cx.global::<ExecutorGlobal>().0.clone();
-            let (walk_tx, walk_rx) = unbounded_channel();
-            spawn_walker(executor, fs_host, git_root.clone(), walk_tx).detach();
-            Some(walk_rx)
-        },
-        FinderScope::Modified => None,
-    };
+    let fs_host = cx.global::<FsHostGlobal>().0.clone();
+    let executor = cx.global::<ExecutorGlobal>().0.clone();
+    let (walk_tx, walk_rx) = unbounded_channel();
+    spawn_walker(executor, fs_host, git_root.clone(), walk_tx).detach();
 
-    let initial_paths = match scope {
+    let modified_paths = match scope {
         FinderScope::All => Vec::new(),
         FinderScope::Modified => collect_changed_paths(&git_root, cx),
     };
 
     workspace.toggle_modal::<Picker<FileFinderDelegate>, _>(window, cx, move |window, cx| {
-        let delegate = match intended_split {
+        let mut delegate = match intended_split {
             Some(axis) => FileFinderDelegate::with_split(weak_workspace, git_root, axis),
             None => FileFinderDelegate::new(weak_workspace, git_root),
         };
+        delegate.scope = scope;
+        delegate.modified_paths = modified_paths;
+        delegate.refilter();
         Picker::new(delegate, window, cx)
     });
 
@@ -313,22 +367,13 @@ fn open_file_finder_internal(
         return;
     };
 
-    if !initial_paths.is_empty() {
-        picker.update(cx, |p, cx| {
-            p.delegate_mut().extend_paths(initial_paths);
-            cx.notify();
-        });
-    }
-
-    if let Some(walk_rx) = walk_rx {
-        let weak_picker = picker.downgrade();
-        let drain_task = cx.spawn(async move |_workspace, async_cx| {
-            drain_walker_batches(weak_picker, walk_rx, async_cx).await;
-        });
-        picker.update(cx, |p, _| {
-            p.delegate_mut().set_drain_task(drain_task);
-        });
-    }
+    let weak_picker = picker.downgrade();
+    let drain_task = cx.spawn(async move |_workspace, async_cx| {
+        drain_walker_batches(weak_picker, walk_rx, async_cx).await;
+    });
+    picker.update(cx, |p, _| {
+        p.delegate_mut().set_drain_task(drain_task);
+    });
 }
 
 fn spawn_walker(
@@ -405,7 +450,7 @@ mod tests {
         delegate
             .matches
             .iter()
-            .map(|(i, _)| display_path(&delegate.paths[*i], &delegate.git_root))
+            .map(|(i, _)| display_path(&delegate.base_paths()[*i], &delegate.git_root))
             .collect()
     }
 
@@ -462,9 +507,9 @@ mod tests {
     fn extend_paths_with_empty_batch_is_noop() {
         let mut delegate = new_delegate("/repo");
         delegate.extend_paths(vec![PathBuf::from("/repo/a.rs")]);
-        let before = delegate.paths.len();
+        let before = delegate.all_paths.len();
         delegate.extend_paths(Vec::new());
-        assert_eq!(delegate.paths.len(), before);
+        assert_eq!(delegate.all_paths.len(), before);
     }
 
     fn fake_fs_with_files(files: &[(&str, &str)]) -> Arc<FakeFs> {
@@ -541,7 +586,7 @@ mod tests {
             .expect("file finder modal is open");
         picker.update(h.vcx, |p, _| {
             let delegate = p.delegate_mut();
-            delegate.paths = vec![PathBuf::from("/repo/b.rs")];
+            delegate.all_paths = vec![PathBuf::from("/repo/b.rs")];
             delegate.matches = vec![(0, Vec::new())];
             delegate.selected = 0;
         });
@@ -585,7 +630,7 @@ mod tests {
             .expect("file finder modal is open");
         let mut listed = picker.read_with(h.vcx, |p, _| {
             p.delegate()
-                .paths
+                .all_paths
                 .iter()
                 .map(|path| display_path(path, p.delegate().git_root.as_path()))
                 .collect::<Vec<_>>()
