@@ -142,6 +142,7 @@ pub struct Editor {
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
     blame_visible: bool,
     minimap_visible: bool,
+    minimap: Option<Entity<Editor>>,
     _subscriptions: [Subscription; 3],
     _diagnostic_subscription: Option<Subscription>,
     _review_session_subscription: Option<Subscription>,
@@ -366,6 +367,7 @@ impl Editor {
             blame_state: None,
             blame_visible: false,
             minimap_visible: false,
+            minimap: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub],
             _diagnostic_subscription: None,
             _review_session_subscription: None,
@@ -2293,17 +2295,55 @@ impl Editor {
         self.minimap_visible
     }
 
-    /// Flip the per-editor minimap-visibility flag. When `true`, the
-    /// render path paints a reduced-scale mirror column alongside the
-    /// editor (constructed and painted by sibling work). Toggling does
-    /// not affect the editor's own viewport or selections.
+    /// The minimap child editor, present only while the minimap is
+    /// visible. It mirrors this editor in [`EditorMode::Minimap`],
+    /// sharing the display and diff maps so it reflects the same
+    /// content without an independent layout pass.
+    pub fn minimap(&self) -> Option<&Entity<Editor>> {
+        self.minimap.as_ref()
+    }
+
+    /// Flip the per-editor minimap visibility. Toggling on constructs
+    /// the [`EditorMode::Minimap`] child via [`Self::make_minimap`] and
+    /// retains it; toggling off drops it. Toggling does not affect this
+    /// editor's own viewport or selections.
     pub fn set_minimap_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
         if self.minimap_visible == visible {
             return;
         }
         self.minimap_visible = visible;
+        if visible {
+            if self.minimap.is_none() {
+                let minimap = self.make_minimap(cx);
+                self.minimap = Some(minimap);
+            }
+        } else {
+            self.minimap = None;
+        }
         cx.emit(EditorEvent::Changed);
         cx.notify();
+    }
+
+    /// Construct an [`EditorMode::Minimap`] child of this editor. The
+    /// child shares this editor's [`MultiBuffer`], [`DisplayMap`], and
+    /// [`DiffMap`] entities so it reflects the same content and diff
+    /// state, and holds a [`WeakEntity`] back-reference to this editor
+    /// as its scroll and paint anchor. The reduced font and viewport
+    /// thumb are applied by the minimap render path.
+    fn make_minimap(&self, cx: &mut Context<'_, Self>) -> Entity<Editor> {
+        let multi_buffer = self.multi_buffer.clone();
+        let display_map = self.display_map.clone();
+        let diff_map = self.diff_map.clone();
+        let parent = cx.entity().downgrade();
+        cx.new(|cx| {
+            Editor::new(
+                multi_buffer,
+                display_map,
+                diff_map,
+                EditorMode::Minimap { parent },
+                cx,
+            )
+        })
     }
 
     pub fn review_session(&self) -> Option<&Entity<crate::review_session::ReviewSession>> {

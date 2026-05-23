@@ -12527,6 +12527,28 @@ mod tests {
     }
 
     #[test]
+    fn toggle_minimap_constructs_and_drops_minimap_child() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        editor.read_with(vcx, |ed, _| assert!(ed.minimap().is_none()));
+
+        dispatch(&ws, vcx, stoat_action::ToggleMinimap);
+        vcx.run_until_parked();
+        let minimap = editor
+            .read_with(vcx, |ed, _| ed.minimap().cloned())
+            .expect("minimap child constructed on toggle-on");
+        minimap.read_with(vcx, |mm, _| assert!(mm.mode().is_minimap()));
+
+        dispatch(&ws, vcx, stoat_action::ToggleMinimap);
+        vcx.run_until_parked();
+        editor.read_with(vcx, |ed, _| assert!(ed.minimap().is_none()));
+    }
+
+    #[test]
     fn dispatch_toggle_diff_hunk_panel_adds_then_removes_dock() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
