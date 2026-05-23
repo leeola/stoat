@@ -43,13 +43,15 @@ use crate::{
             ShellAppendOutput, ShellInsertOutput, ShellKeepPipe, ShellPipe, ShellPipeTo,
             ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
             SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
-            TillNextChar, TillPrevChar, ToggleComments, TriggerCompletion, TrimSelections, Undo,
-            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            TillNextChar, TillPrevChar, ToggleBlame, ToggleComments, ToggleDiffHunkPanel,
+            TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
             FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker,
             OpenChangedFilePicker, OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit,
+            OpenGitStatus,
         },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
@@ -142,6 +144,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenChangedFilePicker::DEF, |_| {
         Ok(Box::new(OpenChangedFilePicker))
     });
+    add(OpenGitStatus::DEF, |_| Ok(Box::new(OpenGitStatus)));
     add(OpenBufferPicker::DEF, |_| Ok(Box::new(OpenBufferPicker)));
     add(FileFinderSelectPrev::DEF, |_| {
         Ok(Box::new(FileFinderSelectPrev))
@@ -460,6 +463,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(IndentSelection::DEF, |_| Ok(Box::new(IndentSelection)));
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
+    add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
+    add(ToggleDiffHunkPanel::DEF, |_| {
+        Ok(Box::new(ToggleDiffHunkPanel))
+    });
     add(ExtendToLineStart::DEF, |_| Ok(Box::new(ExtendToLineStart)));
     add(ExtendToLineEnd::DEF, |_| Ok(Box::new(ExtendToLineEnd)));
     add(ExtendToFileStart::DEF, |_| Ok(Box::new(ExtendToFileStart)));
@@ -674,6 +681,7 @@ mod tests {
         "OpenFileFinderHSplit",
         "OpenFileFinderVSplit",
         "OpenChangedFilePicker",
+        "OpenGitStatus",
         "OpenBufferPicker",
         "FileFinderSelectPrev",
         "FileFinderSelectNext",
@@ -992,7 +1000,8 @@ mod tests {
         // + 5 edit-action primitives (DeleteForward, DeleteBackward, Insert, Append, InsertNewline)
         //   the GUI dispatches via the per-handler edit-action module.
         // + 1 ShellInputSubmit (palette-invisible: dismisses the active ShellInputModal).
-        assert_eq!(all().count(), 291);
+        // + 3 ToggleBlame / ToggleDiffHunkPanel / OpenGitStatus for the space_git submode.
+        assert_eq!(all().count(), 294);
     }
 
     #[test]

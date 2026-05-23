@@ -503,6 +503,7 @@ on key {
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
         l -> SetMode(space_lsp);
+        G -> SetMode(space_git);
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
@@ -541,6 +542,14 @@ on key {
         S -> OpenWorkspaceSymbolPicker();
         d -> [OpenDiagnosticsPicker(), SetMode(normal)];
         D -> [OpenWorkspaceDiagnosticsPicker(), SetMode(normal)];
+        : -> OpenCommandPalette();
+    }
+    mode == space_git {
+        Escape -> SetMode(normal);
+        b -> [ToggleBlame(), SetMode(normal)];
+        s -> [OpenGitStatus(), SetMode(normal)];
+        r -> [OpenReview(), SetMode(normal)];
+        d -> [ToggleDiffHunkPanel(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {

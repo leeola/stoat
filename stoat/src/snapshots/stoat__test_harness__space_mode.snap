@@ -9,7 +9,6 @@ size: 80x24
 ---
 [0m[7m [0m
 
-
                                   [0m[33m┌ space ─────────────────────────────────────┐[0m
                                   [0m[33m│[0m[36m  ?[0m[97m   open the help modal[0m                   [0m[33m│[0m
                                   [0m[33m│[0m[36mEsc[0m[97m   normal mode[0m                           [0m[33m│[0m
@@ -20,6 +19,7 @@ size: 80x24
                                   [0m[33m│[0m[36m  w[0m[97m   space_workspace mode[0m                  [0m[33m│[0m
                                   [0m[33m│[0m[36m  b[0m[97m   space_buffer mode[0m                     [0m[33m│[0m
                                   [0m[33m│[0m[36m  l[0m[97m   space_lsp mode[0m                        [0m[33m│[0m
+                                  [0m[33m│[0m[36m  G[0m[97m   space_git mode[0m                        [0m[33m│[0m
                                   [0m[33m│[0m[36m  "[0m[97m   space_clipboard mode[0m                  [0m[33m│[0m
                                   [0m[33m│[0m[36m  p[0m[97m   open the file finder[0m                  [0m[33m│[0m
                                   [0m[33m│[0m[36m  g[0m[97m   open the changed-file picker[0m          [0m[33m│[0m

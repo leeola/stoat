@@ -11879,6 +11879,29 @@ mod tests {
     }
 
     #[test]
+    fn space_shift_g_b_chord_toggles_blame_via_keymap() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/main.rs", b"hi\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo").head_file("main.rs", "hi\n");
+        install_git_host_global(vcx, git);
+        let editor = open_editor_in_focused_pane(vcx, &ws, Path::new("/tmp/repo/main.rs"));
+
+        editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+        vcx.simulate_keystrokes("space shift-g b");
+        vcx.run_until_parked();
+
+        editor.read_with(vcx, |ed, _| assert!(ed.blame_visible()));
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.read_with(vcx, |sm, _| {
+            assert_eq!(sm.mode(), "normal");
+        });
+    }
+
+    #[test]
     fn dispatch_toggle_blame_populates_blame_state_on_toggle_on() {
         let mut cx = TestAppContext::single();
         let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());

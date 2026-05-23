@@ -629,7 +629,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ApplySurroundReplaceChar
         | ActionKind::ApplyTextobjectChar
         | ActionKind::GotoWordJump
-        | ActionKind::OpenWorkspacePicker => UpdateEffect::None,
+        | ActionKind::OpenWorkspacePicker
+        | ActionKind::ToggleDiffHunkPanel
+        | ActionKind::OpenGitStatus => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

@@ -191,6 +191,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleDiffHunkPanelDef,
+    ToggleDiffHunkPanel,
+    "ToggleDiffHunkPanel",
+    ActionKind::ToggleDiffHunkPanel,
+    "toggle diff hunk panel",
+    "Toggle the right-side diff hunk panel for the active editor's buffer. When visible, the panel lists every diff hunk in the buffer with its line range and status; selecting an entry jumps the cursor to that hunk's first changed line. Buffers without an on-disk path or with no diff state are a no-op.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",

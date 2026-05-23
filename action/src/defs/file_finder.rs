@@ -194,6 +194,54 @@ impl Action for OpenChangedFilePicker {
 }
 
 #[derive(Debug)]
+pub struct OpenGitStatusDef;
+
+impl ActionDef for OpenGitStatusDef {
+    fn name(&self) -> &'static str {
+        "OpenGitStatus"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenGitStatus
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open git status picker"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open a workspace-level picker listing tracked, untracked, and modified \
+         files in the active git repository. Each entry shows the file's git \
+         status; selecting one opens that file in the focused pane."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenGitStatus;
+
+impl OpenGitStatus {
+    pub const DEF: &OpenGitStatusDef = &OpenGitStatusDef;
+}
+
+impl Action for OpenGitStatus {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
 pub struct OpenBufferPickerDef;
 
 impl ActionDef for OpenBufferPickerDef {
