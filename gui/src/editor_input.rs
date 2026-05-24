@@ -53,13 +53,25 @@ impl EntityInputHandler for EditorInput {
         &mut self,
         range: Option<Range<usize>>,
         text: &str,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        if let Some(sm) = self.state_machine.upgrade() {
-            let text = text.to_string();
-            sm.update(cx, |sm, cx| sm.text_input(&text, range, cx));
+        let Some(sm) = self.state_machine.upgrade() else {
+            return;
+        };
+        let text = text.to_string();
+        let actions = sm.update(cx, |sm, cx| sm.text_input(&text, range, window, cx));
+        if actions.is_empty() {
+            return;
         }
+        let Some(workspace) = sm.read(cx).workspace().upgrade() else {
+            return;
+        };
+        workspace.update(cx, |workspace, cx| {
+            for action in actions {
+                workspace.dispatch_action(action, window, cx);
+            }
+        });
     }
 
     fn replace_and_mark_text_in_range(
@@ -288,7 +300,7 @@ mod tests {
     }
 
     #[test]
-    fn replace_text_in_range_dropped_in_normal_mode() {
+    fn replace_text_in_range_not_recorded_in_normal_mode() {
         let mut cx = TestAppContext::single();
         let (sm, _ws, vcx) = new_state_machine_in_window(&mut cx);
         let editor_input = new_editor_input(&sm, vcx);

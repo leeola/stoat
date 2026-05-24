@@ -11,7 +11,7 @@ use crate::{
     workspace::Workspace,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gpui::{Context, FocusHandle, Keystroke, WeakEntity, Window};
+use gpui::{Context, FocusHandle, Keystroke, Modifiers, WeakEntity, Window};
 use std::{collections::HashMap, ops::Range};
 use stoat::{
     action_handlers::surround::SurroundReplaceStage,
@@ -460,9 +460,15 @@ impl InputStateMachine {
 
     /// Apply a committed IME insert (`insertText` from
     /// NSTextInputClient). When [`text_input_allowed`] is false the
-    /// commit is dropped silently. Otherwise the text is recorded
-    /// as the most recent input and any in-flight composition state
-    /// is cleared.
+    /// committed text is routed through [`feed`], one keystroke per
+    /// character, and the resolved actions are returned for the
+    /// caller to dispatch: outside input modes the IME path is the
+    /// only delivery route for printable keys (macOS sends no raw
+    /// key twin while the IME handler is focused), so this is how
+    /// normal-mode bindings such as `:` and `space p` reach the
+    /// matcher. In an input mode the text is instead recorded as the
+    /// most recent input, in-flight composition state is cleared,
+    /// and an empty action list is returned.
     ///
     /// `range` is forwarded for the eventual buffer-level dispatch
     /// but unused today; the field is the temporary observation
@@ -483,10 +489,20 @@ impl InputStateMachine {
         &mut self,
         text: &str,
         _range: Option<Range<usize>>,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
-    ) {
+    ) -> Vec<Box<dyn stoat_action::Action>> {
         if !self.text_input_allowed() {
-            return;
+            let mut actions = Vec::new();
+            for ch in text.chars() {
+                let keystroke = Keystroke {
+                    modifiers: Modifiers::default(),
+                    key: ch.to_string(),
+                    key_char: None,
+                };
+                actions.extend(self.feed(&keystroke, window, cx));
+            }
+            return actions;
         }
         self.last_text_input = Some(text.to_string());
         self.marked_text = None;
@@ -500,6 +516,7 @@ impl InputStateMachine {
             editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&text, cx));
         }
         cx.notify();
+        Vec::new()
     }
 
     /// Apply an IME composition update (`setMarkedText`). When
@@ -1362,7 +1379,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         let (sm, vcx) = new_state_machine(&mut cx);
         set_mode(vcx, &sm, "insert");
-        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("hi", None, cx));
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("hi", None, window, cx)
+        });
         sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.last_text_input(), Some("hi"));
             assert_eq!(sm.marked_text(), None);
@@ -1371,10 +1390,14 @@ mod tests {
     }
 
     #[test]
-    fn text_input_in_normal_mode_is_dropped() {
+    fn text_input_in_normal_mode_routes_through_feed() {
         let mut cx = TestAppContext::single();
-        let (sm, vcx) = new_state_machine(&mut cx);
-        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("hi", None, cx));
+        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
+            quit_kinds(sm.text_input("a", None, window, cx))
+        });
+        assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
         sm.read_with(vcx, |sm, _| assert_eq!(sm.last_text_input(), None));
     }
 
@@ -1459,9 +1482,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         let (sm, vcx) = new_state_machine(&mut cx);
         set_mode(vcx, &sm, "insert");
-        feed_in_app(vcx, &sm, |sm, _window, cx| {
+        feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.composition_update("ka", Some(0..2), None, cx);
-            sm.text_input("か", None, cx);
+            sm.text_input("か", None, window, cx);
         });
         sm.read_with(vcx, |sm, _| {
             assert_eq!(sm.last_text_input(), Some("か"));
@@ -1482,7 +1505,7 @@ mod tests {
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("a", None, cx);
+            sm.text_input("a", None, window, cx);
             quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert!(kinds.is_empty(), "raw duplicate should drop, got {kinds:?}");
@@ -1496,7 +1519,7 @@ mod tests {
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
         let (first, second) = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("a", None, cx);
+            sm.text_input("a", None, window, cx);
             let first = quit_kinds(sm.feed(&stroke, window, cx));
             let second = quit_kinds(sm.feed(&stroke, window, cx));
             (first, second)
@@ -1512,7 +1535,7 @@ mod tests {
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let stroke = key("a");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("a", None, cx);
+            sm.text_input("a", None, window, cx);
             quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
@@ -1524,7 +1547,7 @@ mod tests {
         let keymap = compile_keymap("on key { a -> Quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
-        sm.update(vcx, |sm, cx| sm.text_input("a", None, cx));
+        sm.update_in(vcx, |sm, window, cx| sm.text_input("a", None, window, cx));
         set_mode(vcx, &sm, "normal");
         let stroke = key("a");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
@@ -1541,7 +1564,7 @@ mod tests {
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("ka", None, cx);
+            sm.text_input("ka", None, window, cx);
             quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
@@ -1556,7 +1579,7 @@ mod tests {
         let a = key("a");
         let b = key("b");
         let (first, second) = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("a", None, cx);
+            sm.text_input("a", None, window, cx);
             let first = quit_kinds(sm.feed(&b, window, cx));
             let second = quit_kinds(sm.feed(&a, window, cx));
             (first, second)
@@ -1581,7 +1604,7 @@ mod tests {
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("a", None, cx);
+            sm.text_input("a", None, window, cx);
             sm.composition_update("k", Some(0..1), None, cx);
             quit_kinds(sm.feed(&stroke, window, cx))
         });
@@ -1596,7 +1619,7 @@ mod tests {
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("a", None, cx);
+            sm.text_input("a", None, window, cx);
             sm.composition_commit(cx);
             quit_kinds(sm.feed(&stroke, window, cx))
         });
@@ -1617,7 +1640,7 @@ mod tests {
             },
         );
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
-            sm.text_input("a", None, cx);
+            sm.text_input("a", None, window, cx);
             quit_kinds(sm.feed(&stroke, window, cx))
         });
         assert_eq!(kinds, vec![stoat_action::ActionKind::Quit]);
@@ -1662,7 +1685,9 @@ mod tests {
         let editor = new_singleton_editor(vcx, "hello");
         sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
 
-        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("a", None, cx));
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("a", None, window, cx)
+        });
         vcx.run_until_parked();
 
         assert_eq!(editor_text(vcx, &editor), "ahello");
@@ -1675,7 +1700,9 @@ mod tests {
         let (sm, vcx) = new_state_machine(&mut cx);
         set_mode(vcx, &sm, "insert");
 
-        feed_in_app(vcx, &sm, |sm, _window, cx| sm.text_input("a", None, cx));
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("a", None, window, cx)
+        });
 
         sm.read_with(vcx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
     }

@@ -6364,35 +6364,6 @@ mod tests {
     }
 
     #[test]
-    fn keystroke_colon_opens_palette_with_drawn_focused_editor() {
-        use crate::{stoat_app::StoatApp, RestoreMode};
-
-        let mut cx = TestAppContext::single();
-        install_workspace_test_globals(&mut cx);
-        let (app, vcx) =
-            cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), RestoreMode::None, cx));
-
-        vcx.simulate_resize(size(px(1000.0), px(800.0)));
-        let ws = app.read_with(vcx, |app, _| app.workspace().clone());
-        let editor_input_handle = ws.read_with(vcx, |w, cx| {
-            w.editor_input().read(cx).focus_handle().clone()
-        });
-        vcx.update(|window, _| window.focus(&editor_input_handle));
-        vcx.run_until_parked();
-
-        let window = vcx.window_handle();
-        cx.simulate_keystrokes(window, ":");
-        cx.run_until_parked();
-
-        let palette_open =
-            ws.read_with(&cx, |w, cx| w.input_state_machine().read(cx).palette_open());
-        assert!(
-            palette_open,
-            "typing ':' with a drawn, focused editor should open the command palette"
-        );
-    }
-
-    #[test]
     fn keystroke_space_p_chord_opens_file_finder() {
         use crate::{
             file_finder::FileFinderDelegate,
@@ -6423,6 +6394,72 @@ mod tests {
         assert!(
             finder_active,
             "the 'space p' chord in normal mode should open the file finder"
+        );
+    }
+
+    #[test]
+    fn ime_colon_opens_command_palette() {
+        use crate::{command_palette::CommandPaletteDelegate, picker::Picker};
+        use gpui::EntityInputHandler;
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, ":", window, cx);
+        });
+        vcx.run_until_parked();
+
+        let palette_active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<Picker<CommandPaletteDelegate>>()
+                .is_some()
+        });
+        assert!(
+            palette_active,
+            "typing ':' via the IME replace_text_in_range path should open the command palette"
+        );
+    }
+
+    #[test]
+    fn ime_space_p_chord_opens_file_finder() {
+        use crate::{
+            file_finder::FileFinderDelegate,
+            globals::{FsHostGlobal, GitHostGlobal},
+            picker::Picker,
+        };
+        use gpui::EntityInputHandler;
+        use stoat::host::{fake::FakeGit, FakeFs, FsHost, GitHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo").with_fs(&fs);
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+
+        for ch in [" ", "p"] {
+            editor_input.update_in(vcx, |ei, window, cx| {
+                ei.replace_text_in_range(None, ch, window, cx);
+            });
+        }
+        vcx.run_until_parked();
+
+        let finder_active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<Picker<FileFinderDelegate>>()
+                .is_some()
+        });
+        assert!(
+            finder_active,
+            "the 'space p' chord via the IME replace_text_in_range path should open the file finder"
         );
     }
 
