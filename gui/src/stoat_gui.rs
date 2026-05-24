@@ -44,6 +44,7 @@ mod help;
 mod input_state_machine;
 mod item;
 mod jumplist_picker;
+mod key_hint_banner;
 mod keymap_loader;
 mod lsp;
 mod lsp_state;

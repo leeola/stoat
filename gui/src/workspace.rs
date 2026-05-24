@@ -15,6 +15,7 @@ use crate::{
     globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, PermissionPromptHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
+    key_hint_banner::KeyHintBanner,
     keymap_loader::{compile_default_keymap, compile_from_settings},
     lsp_state::LspState,
     modal_layer::{ModalLayer, ModalView},
@@ -96,6 +97,7 @@ pub struct Workspace {
     diff_hunk_panel: Option<gpui::EntityId>,
     modal_layer: Entity<ModalLayer>,
     status_bar: Entity<StatusBar>,
+    key_hint_banner: Entity<KeyHintBanner>,
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
     lsp_state: Entity<LspState>,
@@ -262,6 +264,7 @@ impl Workspace {
         let lsp_state = cx.new(|_| LspState::new());
         let diagnostics = cx.new(|_| DiagnosticSet::new());
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
+        let key_hint_banner = cx.new(|cx| KeyHintBanner::new(input_state_machine.clone(), cx));
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
         let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
         let cursor_position = cx.new(|_| CursorPosition::new());
@@ -343,6 +346,7 @@ impl Workspace {
             diff_hunk_panel: None,
             modal_layer,
             status_bar,
+            key_hint_banner,
             input_state_machine,
             editor_input,
             lsp_state,
@@ -5465,7 +5469,8 @@ impl Render for Workspace {
                     .flex_col()
                     .flex_1()
                     .child(div().flex_1().child(self.pane_tree.clone()))
-                    .child(self.status_bar.clone()),
+                    .child(self.status_bar.clone())
+                    .child(self.key_hint_banner.clone()),
             )
             .children(right_docks)
             .child(deferred(self.modal_layer.clone()));
