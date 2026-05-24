@@ -377,6 +377,16 @@ impl InputStateMachine {
         }
     }
 
+    /// Set the `finder_open` keymap-state flag. No-ops on unchanged
+    /// value so observers don't see redundant notifications.
+    pub fn set_finder_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {
+        let new = StateValue::Bool(open);
+        if self.finder_open != new {
+            self.finder_open = new;
+            cx.notify();
+        }
+    }
+
     /// Set the `help_open` keymap-state flag. No-ops on unchanged
     /// value so observers don't see redundant notifications.
     pub fn set_help_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {

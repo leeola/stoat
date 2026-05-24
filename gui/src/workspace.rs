@@ -617,15 +617,20 @@ impl Workspace {
     /// / `dismiss_modal_by_id` because each of those calls
     /// `cx.notify` on the modal-layer entity.
     ///
-    /// When the command palette or help modal becomes the top of the
-    /// stack, captures the prior mode, flips `mode` to `prompt`, and
-    /// sets the matching `palette_open` / `help_open` flag. When that
-    /// modal is no longer on top (closed or buried under another
-    /// modal), restores the prior mode and clears the flag.
+    /// When the command palette, file finder, or help modal becomes
+    /// the top of the stack, captures the prior mode, flips `mode` to
+    /// `prompt`, and sets the matching `palette_open` / `finder_open`
+    /// / `help_open` flag. When that modal is no longer on top (closed
+    /// or buried under another modal), restores the prior mode and
+    /// clears the flag.
     fn refresh_modal_keymap_state(&self, layer: &Entity<ModalLayer>, cx: &mut Context<'_, Self>) {
         let palette_active = layer
             .read(cx)
             .active_modal::<crate::picker::Picker<crate::command_palette::CommandPaletteDelegate>>()
+            .is_some();
+        let finder_active = layer
+            .read(cx)
+            .active_modal::<crate::picker::Picker<crate::file_finder::FileFinderDelegate>>()
             .is_some();
         let help_active = layer
             .read(cx)
@@ -638,6 +643,17 @@ impl Workspace {
                 sm.set_palette_open(true, cx_sm);
             } else if sm.palette_open() {
                 sm.set_palette_open(false, cx_sm);
+                if let Some(prev) = sm.take_prev_mode_for_modal() {
+                    sm.set_mode(prev, cx_sm);
+                }
+            }
+
+            if finder_active {
+                sm.capture_prev_mode_for_modal();
+                sm.set_mode("prompt", cx_sm);
+                sm.set_finder_open(true, cx_sm);
+            } else if sm.finder_open() {
+                sm.set_finder_open(false, cx_sm);
                 if let Some(prev) = sm.take_prev_mode_for_modal() {
                     sm.set_mode(prev, cx_sm);
                 }
@@ -6083,6 +6099,88 @@ mod tests {
         assert!(
             !help_open,
             "help_open should clear after the help modal closes"
+        );
+        assert_eq!(mode, "normal", "mode should restore to the prior value");
+    }
+
+    fn new_workspace_with_finder_hosts(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Workspace>, &mut VisualTestContext) {
+        use crate::globals::{FsHostGlobal, GitHostGlobal};
+        use stoat::host::{fake::FakeGit, FakeFs, FsHost, GitHost};
+
+        let fs = Arc::new(FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo").with_fs(&fs);
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+        });
+        new_workspace_in_window(cx, "main", "/repo")
+    }
+
+    #[test]
+    fn opening_file_finder_sets_finder_open_and_resolves_navigation() {
+        use gpui::{Keystroke, Modifiers};
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_with_finder_hosts(&mut cx);
+
+        dispatch(&ws, vcx, stoat_action::OpenFileFinder);
+        vcx.run_until_parked();
+
+        let (finder_open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.finder_open(), sm.mode().to_string())
+        });
+        assert!(
+            finder_open,
+            "finder_open should be true while the finder is the active modal"
+        );
+        assert_eq!(
+            mode, "prompt",
+            "mode should be prompt while the finder is active"
+        );
+
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        let kinds = sm.update_in(vcx, |sm, window, cx| {
+            let down = Keystroke {
+                modifiers: Modifiers::default(),
+                key: "down".into(),
+                key_char: None,
+            };
+            sm.feed(&down, window, cx)
+                .iter()
+                .map(|a| a.kind())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            kinds,
+            vec![ActionKind::FileFinderSelectNext],
+            "Down must resolve to the finder navigation binding while finder_open"
+        );
+    }
+
+    #[test]
+    fn closing_file_finder_clears_finder_open_and_restores_mode() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_with_finder_hosts(&mut cx);
+
+        dispatch(&ws, vcx, stoat_action::OpenFileFinder);
+        vcx.run_until_parked();
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.dismiss_modal(window, cx);
+        });
+        vcx.run_until_parked();
+
+        let (finder_open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.finder_open(), sm.mode().to_string())
+        });
+        assert!(
+            !finder_open,
+            "finder_open should clear after the finder modal closes"
         );
         assert_eq!(mode, "normal", "mode should restore to the prior value");
     }
