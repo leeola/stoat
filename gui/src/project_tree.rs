@@ -140,6 +140,21 @@ impl ProjectTree {
         cx.notify();
     }
 
+    /// The expanded directory paths, sorted, for workspace
+    /// persistence.
+    pub(crate) fn expanded_paths(&self) -> Vec<PathBuf> {
+        self.expanded.iter().cloned().collect()
+    }
+
+    /// Replace the expanded-directory set and recompute the visible
+    /// rows. Used by workspace restore to re-apply a persisted
+    /// expansion; paths that no longer name a directory are simply
+    /// never spliced in by [`build_rows`].
+    pub(crate) fn set_expanded(&mut self, expanded: Vec<PathBuf>) {
+        self.expanded = expanded.into_iter().collect();
+        self.rebuild();
+    }
+
     fn rebuild(&mut self) {
         self.rows = build_rows(self.fs.as_ref(), &self.git_root, &self.expanded);
         let last = self.rows.len().saturating_sub(1);
@@ -414,6 +429,31 @@ mod tests {
                 (PathBuf::from("/repo/src"), 0),
                 (PathBuf::from("/repo/src/inner"), 1),
                 (PathBuf::from("/repo/src/added.rs"), 1),
+                (PathBuf::from("/repo/src/main.rs"), 1),
+                (PathBuf::from("/repo/a.txt"), 0),
+                (PathBuf::from("/repo/readme.md"), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn set_expanded_reshapes_rows_and_round_trips() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx, sample_fs());
+
+        tree.update(&mut cx, |t, _| {
+            t.set_expanded(vec![PathBuf::from("/repo/src")])
+        });
+
+        assert_eq!(
+            tree.read_with(&cx, |t, _| t.expanded_paths()),
+            vec![PathBuf::from("/repo/src")]
+        );
+        assert_eq!(
+            visible(&cx, &tree),
+            [
+                (PathBuf::from("/repo/src"), 0),
+                (PathBuf::from("/repo/src/inner"), 1),
                 (PathBuf::from("/repo/src/main.rs"), 1),
                 (PathBuf::from("/repo/a.txt"), 0),
                 (PathBuf::from("/repo/readme.md"), 0),

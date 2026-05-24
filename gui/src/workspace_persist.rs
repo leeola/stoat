@@ -21,6 +21,7 @@ use crate::{
     dock::{DockSide, DockVisibility},
     editor::Editor,
     item::ItemKind,
+    project_tree::ProjectTree,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -69,6 +70,18 @@ pub struct DockSnapV1 {
     /// Non-`None` entries rebuild the editor via
     /// `Workspace::build_editor_for_path` on restore.
     pub editor_path: Option<PathBuf>,
+    /// `Some` when the dock hosts a [`ProjectTree`]; carries the
+    /// expanded-directory set so the tree restores with the same
+    /// directories open. Mutually exclusive with `editor_path`.
+    #[serde(default)]
+    pub project_tree: Option<ProjectTreeSnapV1>,
+}
+
+/// V1 project tree dock payload: the set of directory paths that
+/// were expanded when the workspace was saved.
+#[derive(Debug, Serialize, Deserialize)]
+pub struct ProjectTreeSnapV1 {
+    pub expanded: Vec<PathBuf>,
 }
 
 /// Per-pane snapshot: every item recorded with its
@@ -142,31 +155,38 @@ pub(crate) fn snapshot_pane_items(
 /// dock's item is an [`Editor`] with a path, otherwise the field
 /// is `None` and a tracing line records why.
 pub(crate) fn snapshot_dock(dock: &crate::dock::Dock, cx: &gpui::App, index: usize) -> DockSnapV1 {
-    let any = dock.item().to_any_view();
-    let editor_path = match any.downcast::<Editor>() {
+    let mut editor_path = None;
+    let mut project_tree = None;
+    match dock.item().to_any_view().downcast::<Editor>() {
         Ok(editor) => {
-            let path = editor.read(cx).file_path().map(Path::to_path_buf);
-            if path.is_none() {
+            editor_path = editor.read(cx).file_path().map(Path::to_path_buf);
+            if editor_path.is_none() {
                 tracing::info!(
                     dock_index = index,
                     "skipping editor with no file_path in dock persistence v1"
                 );
             }
-            path
         },
-        Err(_) => {
-            tracing::info!(
-                dock_index = index,
-                "skipping non-editor item in dock persistence v1"
-            );
-            None
+        Err(any) => match any.downcast::<ProjectTree>() {
+            Ok(tree) => {
+                project_tree = Some(ProjectTreeSnapV1 {
+                    expanded: tree.read(cx).expanded_paths(),
+                });
+            },
+            Err(_) => {
+                tracing::info!(
+                    dock_index = index,
+                    "skipping non-editor item in dock persistence v1"
+                );
+            },
         },
-    };
+    }
     DockSnapV1 {
         side: dock.side(),
         visibility: dock.visibility(),
         default_width: dock.default_width(),
         editor_path,
+        project_tree,
     }
 }
 

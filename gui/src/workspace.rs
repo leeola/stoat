@@ -944,15 +944,25 @@ impl Workspace {
 
         self.docks.clear();
         for (idx, snap) in state.docks.into_iter().enumerate() {
-            let Some(path) = snap.editor_path else {
+            if let Some(path) = snap.editor_path {
+                let editor = self.build_editor_for_path(&path, cx);
+                self.add_dock(Box::new(editor), snap.side, snap.default_width, cx);
+            } else if let Some(tree_snap) = snap.project_tree {
+                let git_root = self.git_root.clone();
+                let fs = cx.global::<FsHostGlobal>().0.clone();
+                let tree = cx.new(|cx| {
+                    let mut tree = ProjectTree::new(git_root, fs, cx);
+                    tree.set_expanded(tree_snap.expanded);
+                    tree
+                });
+                self.add_dock(Box::new(tree), snap.side, snap.default_width, cx);
+            } else {
                 tracing::info!(
                     dock_index = idx,
-                    "skipping dock with no editor_path during workspace restore v1"
+                    "skipping dock with no restorable item during workspace restore v1"
                 );
                 continue;
-            };
-            let editor = self.build_editor_for_path(&path, cx);
-            self.add_dock(Box::new(editor), snap.side, snap.default_width, cx);
+            }
             let dock = self.docks.last().cloned().expect("just-added dock present");
             dock.update(cx, |d, cx| {
                 d.set_visibility(snap.visibility, cx);
@@ -13422,6 +13432,50 @@ mod tests {
         fresh_ws.read_with(vcx2, |w, cx| {
             let sides: Vec<DockSide> = w.docks().iter().map(|d| d.read(cx).side()).collect();
             assert_eq!(sides, vec![DockSide::Left, DockSide::Right]);
+        });
+    }
+
+    #[test]
+    fn restore_rebuilds_project_tree_dock_with_expanded_dirs() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_dir("/tmp/repo");
+        fs.insert_dir("/tmp/repo/src");
+        fs.insert_file("/tmp/repo/src/main.rs", b"fn main() {}\n");
+        fs.insert_file("/tmp/repo/a.rs", b"x\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        dispatch(&ws, vcx, stoat_action::ProjectTreeExpand);
+        ws.update(vcx, |w, _| w.mark_dirty());
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/project-tree.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        fresh_ws.read_with(vcx2, |w, cx| {
+            assert_eq!(w.docks().len(), 1);
+            let dock = w.docks()[0].read(cx);
+            assert_eq!(dock.side(), DockSide::Left);
+            let tree = dock
+                .item()
+                .to_any_view()
+                .downcast::<ProjectTree>()
+                .expect("dock holds a ProjectTree");
+            assert_eq!(
+                tree.read(cx).expanded_paths(),
+                vec![PathBuf::from("/tmp/repo/src")]
+            );
         });
     }
 
