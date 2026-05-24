@@ -290,7 +290,7 @@ fn tool_use_ids(messages: &[ChatMessage]) -> Vec<String> {
 
 async fn install_session(
     host: Arc<dyn ClaudeCodeHost>,
-    this: gpui::WeakEntity<ClaudeChat>,
+    this: WeakEntity<ClaudeChat>,
     cx: &mut gpui::AsyncApp,
 ) {
     let session: Arc<dyn ClaudeCodeSession> = match host.new_session().await {
@@ -470,8 +470,8 @@ impl ItemView for ClaudeChat {
         .fail()
     }
 
-    fn item_kind(&self) -> crate::item::ItemKind {
-        crate::item::ItemKind::Claude
+    fn item_kind(&self) -> ItemKind {
+        ItemKind::Claude
     }
 }
 

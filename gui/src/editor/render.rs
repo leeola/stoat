@@ -687,7 +687,7 @@ pub(crate) fn apply_goto_word_overlay(
     rows: &mut [RenderedRow],
     snapshot: &DisplaySnapshot,
     range: Range<u32>,
-    labels: &std::collections::BTreeMap<String, usize>,
+    labels: &BTreeMap<String, usize>,
     input: &str,
     label_color: Hsla,
     prefix_color: Hsla,

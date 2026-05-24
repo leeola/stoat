@@ -7,7 +7,7 @@ use crate::{
     diff_coordinator::DiffCoordinator,
     diff_map::DiffMap,
     display_map::DisplayMap,
-    dock::{Dock, DockSide, DockVisibility},
+    dock::{Dock, DockSide},
     editor::{Editor, EditorEvent, EditorMode},
     editor_input::EditorInput,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
@@ -2765,7 +2765,7 @@ impl Workspace {
         });
     }
 
-    fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<crate::editor::Editor>> {
+    fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<Editor>> {
         self.input_state_machine
             .read(cx)
             .active_editor()
@@ -13642,6 +13642,8 @@ mod tests {
 
     #[test]
     fn restore_carries_dock_visibility() {
+        use crate::dock::DockVisibility;
+
         let mut cx = TestAppContext::single();
         let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
         fs.insert_file("/tmp/repo/agent.rs", b"x\n");
