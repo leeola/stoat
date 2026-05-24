@@ -477,6 +477,29 @@ impl Workspace {
         });
     }
 
+    /// Write a `.dump` archive of the current workspace under
+    /// `<XDG_DATA_HOME>/stoat/dumps/`. The GUI has no TUI `Stoat` state,
+    /// so the snapshot carries the working tree plus the current input
+    /// mode; richer pane/buffer state is not captured. Logs the outcome.
+    fn dispatch_dump(&mut self, action: &dyn stoat_action::Action, cx: &mut Context<'_, Self>) {
+        let Some(dump) = action.as_any().downcast_ref::<stoat_action::Dump>() else {
+            return;
+        };
+        let git_root = self.git_root.clone();
+        let mode = self.input_state_machine.read(cx).mode().to_string();
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        match stoat::dump::save_workspace_dir(
+            &git_root,
+            &mode,
+            &dump.name,
+            time::OffsetDateTime::now_utc(),
+            fs.as_ref(),
+        ) {
+            Ok(id) => tracing::info!(id = %id, "GUI workspace dump captured"),
+            Err(err) => tracing::error!(%err, name = %dump.name, "GUI workspace dump failed"),
+        }
+    }
+
     /// Dispatch to [`crate::editor::actions::shell::apply`]. Public
     /// so the modal can call back through its weak workspace handle.
     pub fn run_shell_command(
@@ -2089,6 +2112,7 @@ impl Workspace {
             },
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
             ActionKind::Run => self.dispatch_run(&*action, window, cx),
+            ActionKind::Dump => self.dispatch_dump(&*action, cx),
             ActionKind::RunSubmit => crate::run_pane::dispatch_run_submit(self, cx),
             ActionKind::RunHistoryPrev => crate::run_pane::dispatch_run_history_prev(self, cx),
             ActionKind::RunHistoryNext => crate::run_pane::dispatch_run_history_next(self, cx),
@@ -6434,6 +6458,44 @@ mod tests {
             }),
             "normal",
             "opening a file exits project_tree mode"
+        );
+    }
+
+    #[test]
+    fn dispatch_dump_writes_archive_under_dumps_dir() {
+        use stoat::host::FsHost;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/main.rs", b"fn main() {}\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::Dump {
+                name: "gui-bug".to_string(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let dumps = stoat::dump::dumps_dir().expect("dumps dir resolves");
+        let dump_files: Vec<String> = fs
+            .list_dir(&dumps)
+            .expect("dumps dir listed")
+            .into_iter()
+            .filter(|e| e.name.ends_with(".dump"))
+            .map(|e| e.name.to_string())
+            .collect();
+        assert_eq!(
+            dump_files.len(),
+            1,
+            "exactly one dump written, got {dump_files:?}"
+        );
+        assert!(
+            dump_files[0].ends_with("_gui-bug.dump"),
+            "dump filename carries the sanitized name: {}",
+            dump_files[0]
         );
     }
 
