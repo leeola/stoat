@@ -5485,10 +5485,10 @@ impl Render for Workspace {
                     .flex_col()
                     .flex_1()
                     .child(div().flex_1().child(self.pane_tree.clone()))
-                    .child(self.status_bar.clone())
-                    .child(self.key_hint_banner.clone()),
+                    .child(self.status_bar.clone()),
             )
             .children(right_docks)
+            .child(self.key_hint_banner.clone())
             .child(deferred(self.modal_layer.clone()));
         if render_stats_enabled(cx) {
             body.child(deferred(

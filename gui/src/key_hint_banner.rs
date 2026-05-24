@@ -7,7 +7,10 @@
 //! [`stoat::keymap::Keymap::active_bindings`] -- the same source the
 //! help modal uses. Non-transient modes render nothing.
 
-use crate::{input_state_machine::InputStateMachine, theme::statusbar_text_color};
+use crate::{
+    input_state_machine::InputStateMachine,
+    theme::{border_inactive_color, statusbar_focused_color, statusbar_text_color},
+};
 use gpui::{
     div, App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, Window,
@@ -50,7 +53,15 @@ impl Render for KeyHintBanner {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         match self.current_hint(cx) {
             Some(text) => div()
-                .px_2()
+                .absolute()
+                .bottom_4()
+                .right_4()
+                .p_3()
+                .rounded_md()
+                .bg(statusbar_focused_color(cx).opacity(0.95))
+                .border_1()
+                .border_color(border_inactive_color(cx))
+                .shadow_lg()
                 .text_color(statusbar_text_color(cx))
                 .child(SharedString::from(text)),
             None => div(),
