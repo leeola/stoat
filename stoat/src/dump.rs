@@ -449,6 +449,29 @@ pub fn save(stoat: &crate::app::Stoat, name: &str, fs: &dyn FsHost) -> Result<Du
     save_at(stoat, name, OffsetDateTime::now_utc(), fs)
 }
 
+/// Write a dump bundle for a workspace that has no TUI [`crate::app::Stoat`]
+/// state to snapshot, such as the GUI. Captures the working tree under
+/// `git_root` (force-including `.git`/`.stoat`) plus minimal metadata --
+/// the input `mode` at capture time and no rebase plan -- to
+/// `<XDG_DATA_HOME>/stoat/dumps/<id>.dump`. Returns the generated
+/// [`DumpId`].
+pub fn save_workspace_dir(
+    git_root: &Path,
+    mode: &str,
+    name: &str,
+    at: OffsetDateTime,
+    fs: &dyn FsHost,
+) -> Result<DumpId, DumpError> {
+    let id = DumpId::new(name, at)?;
+    let dumps = dumps_dir()?;
+    fs.create_dir_all(&dumps).with_context(|_| CreateDirSnafu {
+        path: dumps.clone(),
+    })?;
+    let archive_path = dumps.join(id.filename());
+    save::write_workspace_dir_archive(git_root, mode, &id, at, &archive_path, fs)?;
+    Ok(id)
+}
+
 /// Load the metadata at `meta_path` (typically
 /// `<extracted-dir>/.stoat/dump.ron`) and apply the captured workspace
 /// snapshot to `stoat`'s active workspace.
@@ -605,6 +628,34 @@ mod tests {
         let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);
         let id = DumpId::new("x", at).unwrap();
         assert_eq!(id.created_at(), Some(at));
+    }
+
+    #[test]
+    fn workspace_dir_archive_captures_tree_and_mode() {
+        use crate::host::FakeFs;
+        let fs = FakeFs::new();
+        fs.insert_file("/ws/main.rs", "fn main() {}\n");
+        fs.insert_file("/ws/sub/lib.rs", "pub fn x() {}\n");
+        let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);
+        let id = DumpId::new("gui-bug", at).unwrap();
+        let archive_path = PathBuf::from("/out/gui-bug.dump");
+
+        save::write_workspace_dir_archive(Path::new("/ws"), "normal", &id, at, &archive_path, &fs)
+            .unwrap();
+
+        let mut bytes = Vec::new();
+        fs.read(&archive_path, &mut bytes).unwrap();
+        let (meta_ron, entries) = bundle::deserialize(&bytes).unwrap();
+        let meta = DumpMeta::from_ron(&meta_ron).unwrap();
+
+        assert_eq!(meta.workspace.mode, "normal");
+        assert_eq!(meta.git_root, PathBuf::from("/ws"));
+        assert!(meta.workspace.rebase.is_none());
+        let files: Vec<String> = entries
+            .keys()
+            .map(|p| p.to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(files, ["main.rs", "sub/lib.rs"]);
     }
 
     #[test]
