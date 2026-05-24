@@ -49,6 +49,7 @@ impl RebaseItem {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn state(&self) -> &Entity<RebaseState> {
         &self.state
     }

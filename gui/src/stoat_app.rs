@@ -108,6 +108,7 @@ impl StoatApp {
     /// Borrow the hosted workspace entity. Used by tests that
     /// need to introspect a window opened through the
     /// `CopyWorkspace` / `NewWorkspace` dispatch paths.
+    #[cfg(test)]
     pub(crate) fn workspace(&self) -> &Entity<Workspace> {
         &self.workspace
     }
