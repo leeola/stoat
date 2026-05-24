@@ -560,7 +560,14 @@ fn dispatch_action(
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
-    workspace.update(cx, |ws, cx| ws.dispatch_action(action, window, cx));
+    // The keyboard confirm path reaches here inside the keystroke
+    // observer's `Workspace` update lease (observer -> dispatch_action
+    // -> modal layer -> palette confirm), so dispatching directly would
+    // re-enter `Workspace::update` and panic. Defer until that lease
+    // releases.
+    window.defer(cx, move |window, cx| {
+        workspace.update(cx, |ws, cx| ws.dispatch_action(action, window, cx));
+    });
 }
 
 fn render_collect_args_prompt(

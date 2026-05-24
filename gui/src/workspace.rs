@@ -6002,6 +6002,49 @@ mod tests {
     }
 
     #[test]
+    fn keyboard_confirmed_palette_action_dispatches_without_reentrant_panic() {
+        use crate::{command_palette::CommandPaletteDelegate, picker::Picker};
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let panes_before = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count());
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+
+        let picker = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<Picker<CommandPaletteDelegate>>()
+                .expect("command palette modal active")
+        });
+        let buffer = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("single-line query editor has singleton buffer")
+                .clone()
+        });
+        buffer.update(vcx, |b, cx| {
+            let len = b.text().len();
+            b.edit(0..len, "SplitRight", cx);
+        });
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::SubmitPromptInput);
+        vcx.run_until_parked();
+
+        let panes_after = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count());
+        assert_eq!(
+            panes_after,
+            panes_before + 1,
+            "keyboard-confirmed palette action must dispatch after the keystroke lease releases",
+        );
+    }
+
+    #[test]
     fn opening_help_sets_help_open_and_prompt_mode() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
