@@ -86,9 +86,8 @@ fn mode_descriptor(mode: &str) -> (&'static str, u32, &'static str) {
         "conflict" => ("CNF", 0xff5555, scope::UI_STATUSLINE_CONFLICT),
         "review" => ("REV", 0x00ffff, scope::UI_STATUSLINE_REVIEW),
         "goto" | "z" | "bracket_next" | "bracket_prev" | "match" | "select_goto" | "space"
-        | "space_workspace" | "space_pane_nav" | "space_pane_nav_new" | "claude" => {
-            (submode_label(mode), 0x808080, scope::UI_STATUSLINE_SUBMODE)
-        },
+        | "space_workspace" | "space_pane_nav" | "space_pane_nav_new" | "claude"
+        | "project_tree" => (submode_label(mode), 0x808080, scope::UI_STATUSLINE_SUBMODE),
         _ => ("---", 0xc0c0c0, scope::UI_STATUSLINE_DEFAULT),
     }
 }
@@ -106,6 +105,7 @@ fn submode_label(mode: &str) -> &'static str {
         "space_pane_nav" => "SPN",
         "space_pane_nav_new" => "SNN",
         "claude" => "CLA",
+        "project_tree" => "TRE",
         _ => "---",
     }
 }

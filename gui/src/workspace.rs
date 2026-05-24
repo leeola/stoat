@@ -21,6 +21,7 @@ use crate::{
     multi_buffer::MultiBuffer,
     pane::{Pane, PaneEvent},
     pane_tree::{PaneTree, PaneTreeEvent},
+    project_tree::ProjectTree,
     rebase_item::{RebaseItem, RebaseMoveDir},
     render_stats::{render_stats_enabled, FrameTimer, RenderStatsOverlay},
     review_session::ReviewApplyResult,
@@ -1964,6 +1965,16 @@ impl Workspace {
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
             ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
+            ActionKind::ProjectTreeSelectNext => {
+                self.update_project_tree(cx, ProjectTree::select_next)
+            },
+            ActionKind::ProjectTreeSelectPrev => {
+                self.update_project_tree(cx, ProjectTree::select_prev)
+            },
+            ActionKind::ProjectTreeCollapse => self.update_project_tree(cx, ProjectTree::collapse),
+            ActionKind::ProjectTreeExpand => self.update_project_tree(cx, ProjectTree::expand),
+            ActionKind::ProjectTreeConfirm => self.dispatch_project_tree_confirm(cx),
+            ActionKind::ProjectTreeRefresh => self.update_project_tree(cx, ProjectTree::refresh),
             ActionKind::ToggleDiffHunkPanel => self.dispatch_toggle_diff_hunk_panel(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
@@ -3059,8 +3070,10 @@ impl Workspace {
     }
 
     /// Toggle the left-side project file tree dock. When a project tree
-    /// dock is open, remove it; otherwise build one listing the
-    /// workspace root and add it as a left-side dock.
+    /// dock is open, remove it and return to normal mode; otherwise
+    /// build one listing the workspace root, add it as a left-side
+    /// dock, and enter `project_tree` mode so navigation keys route to
+    /// the tree.
     fn dispatch_toggle_project_tree(&mut self, cx: &mut Context<'_, Self>) {
         let existing = self
             .docks
@@ -3068,12 +3081,56 @@ impl Workspace {
             .position(|d| d.read(cx).item().item_kind(cx) == crate::item::ItemKind::ProjectTree);
         if let Some(idx) = existing {
             self.remove_dock(idx, cx);
+            self.set_input_mode("normal", cx);
             return;
         }
         let git_root = self.git_root().clone();
         let fs = cx.global::<FsHostGlobal>().0.clone();
-        let tree = cx.new(|cx| crate::project_tree::ProjectTree::new(git_root, fs, cx));
+        let tree = cx.new(|cx| ProjectTree::new(git_root, fs, cx));
         self.add_dock(Box::new(tree), DockSide::Left, 240, cx);
+        self.set_input_mode("project_tree", cx);
+    }
+
+    /// Resolve the project tree hosted in a left dock, if one is open.
+    fn active_project_tree(&self, cx: &App) -> Option<Entity<ProjectTree>> {
+        self.docks.iter().find_map(|dock| {
+            let dock = dock.read(cx);
+            if dock.item().item_kind(cx) != crate::item::ItemKind::ProjectTree {
+                return None;
+            }
+            dock.item().to_any_view().downcast::<ProjectTree>().ok()
+        })
+    }
+
+    /// Run `f` against the open project tree, if any. The shared body
+    /// of the `ProjectTree*` navigation dispatch arms.
+    fn update_project_tree(
+        &self,
+        cx: &mut Context<'_, Self>,
+        f: impl FnOnce(&mut ProjectTree, &mut Context<'_, ProjectTree>),
+    ) {
+        if let Some(tree) = self.active_project_tree(cx) {
+            tree.update(cx, f);
+        }
+    }
+
+    /// Confirm the project tree selection: toggle a directory, or open
+    /// the selected file in the focused pane and return to normal mode.
+    fn dispatch_project_tree_confirm(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(tree) = self.active_project_tree(cx) else {
+            return;
+        };
+        let to_open = tree.update(cx, |tree, cx| tree.confirm(cx));
+        if let Some(path) = to_open {
+            self.open_paths(&[path], cx);
+            self.set_input_mode("normal", cx);
+        }
+    }
+
+    /// Set the input state machine's mode without focus side effects.
+    fn set_input_mode(&self, mode: &str, cx: &mut Context<'_, Self>) {
+        self.input_state_machine
+            .update(cx, |sm, cx_sm| sm.set_mode(mode, cx_sm));
     }
 
     fn dispatch_jump(&mut self, dir: JumpDir, cx: &mut Context<'_, Self>) {
@@ -6303,6 +6360,71 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
         vcx.run_until_parked();
         assert_eq!(project_tree_docks(vcx), 0, "toggling again removes it");
+    }
+
+    #[test]
+    fn dispatch_toggle_project_tree_enters_and_exits_project_tree_mode() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/a.rs", "");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        let mode = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.input_state_machine().read(cx).mode().to_string()
+            })
+        };
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        assert_eq!(
+            mode(vcx),
+            "project_tree",
+            "opening enters project_tree mode"
+        );
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        assert_eq!(mode(vcx), "normal", "closing returns to normal mode");
+    }
+
+    #[test]
+    fn project_tree_confirm_on_file_opens_it_and_exits_mode() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_dir("/repo");
+        fs.insert_dir("/repo/src");
+        fs.insert_file("/repo/a.rs", "hello\n");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::ProjectTreeSelectNext);
+        dispatch(&ws, vcx, stoat_action::ProjectTreeConfirm);
+        vcx.run_until_parked();
+
+        let opened = ws.read_with(vcx, |w, cx| {
+            w.active_pane_item(cx)
+                .and_then(|item| item.to_any_view().downcast::<Editor>().ok())
+                .and_then(|ed| ed.read(cx).file_path().map(Path::to_path_buf))
+        });
+        assert_eq!(opened, Some(PathBuf::from("/repo/a.rs")));
+        assert_eq!(
+            ws.read_with(vcx, |w, cx| {
+                w.input_state_machine().read(cx).mode().to_string()
+            }),
+            "normal",
+            "opening a file exits project_tree mode"
+        );
     }
 
     #[test]

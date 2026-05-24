@@ -515,7 +515,7 @@ on key {
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
-        e -> [ToggleProjectTree(), SetMode(normal)];
+        e -> ToggleProjectTree();
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
@@ -615,5 +615,17 @@ on key {
         r -> [ClaudeToDockRight(), SetMode(normal)];
         R -> [OpenCheckpointPicker(), SetMode(normal)];
         f -> [ClaudeToggleFollow(), SetMode(normal)];
+    }
+    mode == project_tree {
+        Escape -> ToggleProjectTree();
+        q -> ToggleProjectTree();
+        j -> ProjectTreeSelectNext();
+        k -> ProjectTreeSelectPrev();
+        h -> ProjectTreeCollapse();
+        l -> ProjectTreeExpand();
+        Space -> ProjectTreeConfirm();
+        Enter -> ProjectTreeConfirm();
+        R -> ProjectTreeRefresh();
+        : -> OpenCommandPalette();
     }
 }

@@ -1,34 +1,49 @@
 //! Project file tree dock item.
 //!
-//! Lists the immediate contents of the workspace root via
-//! [`FsHost::list_dir`] and renders them as a directories-first list,
-//! hosted in a left [`crate::dock::Dock`] and toggled by the
-//! `ToggleProjectTree` action. Directory expansion and in-tree
-//! navigation are not wired yet; the tree currently shows the root
-//! level only.
+//! Walks the workspace root via [`FsHost::list_dir`] and renders a
+//! directories-first, collapsible tree hosted in a left
+//! [`crate::dock::Dock`]. The `ToggleProjectTree` action opens and
+//! closes it; while open the workspace is in `project_tree` keymap
+//! mode, which routes navigation actions (`ProjectTreeSelectNext`,
+//! `ProjectTreeCollapse`, `ProjectTreeConfirm`, ...) here.
+//!
+//! Expansion is tracked as a set of expanded directory paths; the
+//! flattened list of visible [`Row`]s is recomputed from the
+//! filesystem and that set whenever it changes, so a refresh picks up
+//! external changes while preserving which directories are open.
 
 use crate::{
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     theme::statusbar_text_color,
 };
-use gpui::{div, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window};
+use gpui::{
+    div, white, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
+};
 use serde_json::Value;
 use std::{
+    collections::BTreeSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
 use stoat::host::FsHost;
 
-/// One row in the tree: a file or directory directly under the listed
-/// directory.
-struct TreeEntry {
+const INDENT_SPACES_PER_DEPTH: usize = 2;
+
+/// One visible row in the flattened tree: a file or directory at a
+/// given nesting `depth` below the root.
+struct Row {
+    path: PathBuf,
     name: String,
     is_dir: bool,
+    depth: usize,
 }
 
 pub struct ProjectTree {
     git_root: PathBuf,
-    entries: Vec<TreeEntry>,
+    fs: Arc<dyn FsHost>,
+    expanded: BTreeSet<PathBuf>,
+    rows: Vec<Row>,
+    selected: usize,
 }
 
 impl ProjectTree {
@@ -36,24 +51,121 @@ impl ProjectTree {
     /// unreadable root yields an empty list rather than an error so the
     /// dock still renders.
     pub fn new(git_root: PathBuf, fs: Arc<dyn FsHost>, _cx: &mut Context<'_, Self>) -> Self {
-        let entries = read_entries(fs.as_ref(), &git_root);
-        Self { git_root, entries }
+        let expanded = BTreeSet::new();
+        let rows = build_rows(fs.as_ref(), &git_root, &expanded);
+        Self {
+            git_root,
+            fs,
+            expanded,
+            rows,
+            selected: 0,
+        }
+    }
+
+    /// Move the selection one visible row down, stopping at the last
+    /// row.
+    pub fn select_next(&mut self, cx: &mut Context<'_, Self>) {
+        let last = self.rows.len().saturating_sub(1);
+        if self.selected < last {
+            self.selected += 1;
+            cx.notify();
+        }
+    }
+
+    /// Move the selection one visible row up, stopping at the first
+    /// row.
+    pub fn select_prev(&mut self, cx: &mut Context<'_, Self>) {
+        if self.selected > 0 {
+            self.selected -= 1;
+            cx.notify();
+        }
+    }
+
+    /// Collapse the selected directory. No-op when the selected row is
+    /// a file or an already-collapsed directory.
+    pub fn collapse(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(row) = self.rows.get(self.selected) else {
+            return;
+        };
+        if !row.is_dir {
+            return;
+        }
+        let path = row.path.clone();
+        if self.expanded.remove(&path) {
+            self.rebuild();
+            cx.notify();
+        }
+    }
+
+    /// Expand the selected directory, listing its contents inline.
+    /// No-op when the selected row is a file or an already-expanded
+    /// directory.
+    pub fn expand(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(row) = self.rows.get(self.selected) else {
+            return;
+        };
+        if !row.is_dir {
+            return;
+        }
+        let path = row.path.clone();
+        if self.expanded.insert(path) {
+            self.rebuild();
+            cx.notify();
+        }
+    }
+
+    /// Act on the selected row: toggle a directory's expansion, or
+    /// return the file path for the caller to open. Returns `None`
+    /// when the selection is a directory or empty.
+    pub fn confirm(&mut self, cx: &mut Context<'_, Self>) -> Option<PathBuf> {
+        let row = self.rows.get(self.selected)?;
+        let path = row.path.clone();
+        if !row.is_dir {
+            return Some(path);
+        }
+        if self.expanded.contains(&path) {
+            self.expanded.remove(&path);
+        } else {
+            self.expanded.insert(path);
+        }
+        self.rebuild();
+        cx.notify();
+        None
+    }
+
+    /// Re-read the directory contents from disk, preserving the set of
+    /// expanded directories and clamping the selection into range.
+    pub fn refresh(&mut self, cx: &mut Context<'_, Self>) {
+        self.rebuild();
+        cx.notify();
+    }
+
+    fn rebuild(&mut self) {
+        self.rows = build_rows(self.fs.as_ref(), &self.git_root, &self.expanded);
+        let last = self.rows.len().saturating_sub(1);
+        self.selected = self.selected.min(last);
     }
 }
 
 impl Render for ProjectTree {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let color = statusbar_text_color(cx);
-        let rows = self.entries.iter().map(|entry| {
-            let label = if entry.is_dir {
-                format!("{}/", entry.name)
+        let selected = self.selected;
+        let rows = self.rows.iter().enumerate().map(|(ix, row)| {
+            let indent = " ".repeat(row.depth * INDENT_SPACES_PER_DEPTH);
+            let label = if row.is_dir {
+                format!("{indent}{}/", row.name)
             } else {
-                entry.name.clone()
+                format!("{indent}{}", row.name)
             };
-            div()
+            let mut el = div()
                 .px_2()
                 .text_color(color)
-                .child(SharedString::from(label))
+                .child(SharedString::from(label));
+            if ix == selected {
+                el = el.bg(white().opacity(0.1));
+            }
+            el
         });
         div().flex().flex_col().size_full().children(rows)
     }
@@ -83,44 +195,131 @@ impl ItemView for ProjectTree {
     }
 }
 
-/// List the immediate children of `dir`, directories first then files,
-/// each group ordered alphabetically by name. Empty on any IO error.
-fn read_entries(fs: &dyn FsHost, dir: &Path) -> Vec<TreeEntry> {
-    let mut entries: Vec<TreeEntry> = match fs.list_dir(dir) {
+/// Flatten the tree under `root` into visible rows. Directories listed
+/// in `expanded` have their contents spliced in inline at the next
+/// depth; everything else lists only its top level. Each directory's
+/// children are ordered directories-first then alphabetically.
+fn build_rows(fs: &dyn FsHost, root: &Path, expanded: &BTreeSet<PathBuf>) -> Vec<Row> {
+    let mut rows = Vec::new();
+    push_entries(fs, root, 0, expanded, &mut rows);
+    rows
+}
+
+fn push_entries(
+    fs: &dyn FsHost,
+    dir: &Path,
+    depth: usize,
+    expanded: &BTreeSet<PathBuf>,
+    rows: &mut Vec<Row>,
+) {
+    for (name, is_dir) in read_entries(fs, dir) {
+        let path = dir.join(&name);
+        let expand_here = is_dir && expanded.contains(&path);
+        rows.push(Row {
+            path,
+            name,
+            is_dir,
+            depth,
+        });
+        if expand_here {
+            let child = rows.last().expect("row just pushed").path.clone();
+            push_entries(fs, &child, depth + 1, expanded, rows);
+        }
+    }
+}
+
+/// List the immediate children of `dir` as `(name, is_dir)`,
+/// directories first then files, each group ordered alphabetically by
+/// name. Empty on any IO error.
+fn read_entries(fs: &dyn FsHost, dir: &Path) -> Vec<(String, bool)> {
+    let mut entries: Vec<(String, bool)> = match fs.list_dir(dir) {
         Ok(items) => items
             .into_iter()
-            .map(|entry| TreeEntry {
-                name: entry.name.to_string(),
-                is_dir: entry.is_dir,
-            })
+            .map(|entry| (entry.name.to_string(), entry.is_dir))
             .collect(),
         Err(_) => Vec::new(),
     };
-    entries.sort_by(|a, b| b.is_dir.cmp(&a.is_dir).then_with(|| a.name.cmp(&b.name)));
+    entries.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| a.0.cmp(&b.0)));
     entries
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use gpui::{AppContext, Entity, TestAppContext};
     use stoat::host::FakeFs;
 
-    #[test]
-    fn read_entries_lists_dirs_first_then_alphabetical() {
+    fn sample_fs() -> Arc<FakeFs> {
         let fs = FakeFs::new();
         fs.insert_dir("/repo");
         fs.insert_file("/repo/readme.md", "");
         fs.insert_file("/repo/a.txt", "");
         fs.insert_dir("/repo/src");
+        fs.insert_file("/repo/src/main.rs", "");
+        fs.insert_dir("/repo/src/inner");
+        fs.insert_file("/repo/src/inner/deep.rs", "");
+        Arc::new(fs)
+    }
 
-        let entries = read_entries(&fs, Path::new("/repo"));
-        let listed: Vec<(&str, bool)> = entries
+    fn new_tree(cx: &mut TestAppContext, fs: Arc<dyn FsHost>) -> Entity<ProjectTree> {
+        cx.update(|cx| cx.new(|cx| ProjectTree::new(PathBuf::from("/repo"), fs, cx)))
+    }
+
+    fn visible(cx: &TestAppContext, tree: &Entity<ProjectTree>) -> Vec<(PathBuf, usize)> {
+        tree.read_with(cx, |t, _| {
+            t.rows.iter().map(|r| (r.path.clone(), r.depth)).collect()
+        })
+    }
+
+    #[test]
+    fn read_entries_lists_dirs_first_then_alphabetical() {
+        let fs = sample_fs();
+        let listed = read_entries(fs.as_ref(), Path::new("/repo"));
+        assert_eq!(
+            listed,
+            [
+                ("src".to_string(), true),
+                ("a.txt".to_string(), false),
+                ("readme.md".to_string(), false),
+            ]
+        );
+    }
+
+    #[test]
+    fn build_rows_root_only_when_nothing_expanded() {
+        let fs = sample_fs();
+        let rows = build_rows(fs.as_ref(), Path::new("/repo"), &BTreeSet::new());
+        let listed: Vec<(&str, usize)> = rows
             .iter()
-            .map(|entry| (entry.name.as_str(), entry.is_dir))
+            .map(|r| (r.path.to_str().expect("utf8 path"), r.depth))
             .collect();
         assert_eq!(
             listed,
-            [("src", true), ("a.txt", false), ("readme.md", false)]
+            [("/repo/src", 0), ("/repo/a.txt", 0), ("/repo/readme.md", 0)]
+        );
+    }
+
+    #[test]
+    fn build_rows_splices_expanded_children_at_next_depth() {
+        let fs = sample_fs();
+        let mut expanded = BTreeSet::new();
+        expanded.insert(PathBuf::from("/repo/src"));
+        expanded.insert(PathBuf::from("/repo/src/inner"));
+        let rows = build_rows(fs.as_ref(), Path::new("/repo"), &expanded);
+        let listed: Vec<(&str, usize)> = rows
+            .iter()
+            .map(|r| (r.path.to_str().expect("utf8 path"), r.depth))
+            .collect();
+        assert_eq!(
+            listed,
+            [
+                ("/repo/src", 0),
+                ("/repo/src/inner", 1),
+                ("/repo/src/inner/deep.rs", 2),
+                ("/repo/src/main.rs", 1),
+                ("/repo/a.txt", 0),
+                ("/repo/readme.md", 0),
+            ]
         );
     }
 
@@ -128,5 +327,97 @@ mod tests {
     fn read_entries_empty_for_unreadable_root() {
         let fs = FakeFs::new();
         assert!(read_entries(&fs, Path::new("/missing")).is_empty());
+    }
+
+    #[test]
+    fn select_next_and_prev_clamp_at_bounds() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx, sample_fs());
+
+        tree.update(&mut cx, |t, cx| {
+            t.select_prev(cx);
+        });
+        assert_eq!(tree.read_with(&cx, |t, _| t.selected), 0);
+
+        tree.update(&mut cx, |t, cx| {
+            for _ in 0..10 {
+                t.select_next(cx);
+            }
+        });
+        assert_eq!(tree.read_with(&cx, |t, _| t.selected), 2);
+    }
+
+    #[test]
+    fn expand_then_collapse_reshapes_rows() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx, sample_fs());
+
+        tree.update(&mut cx, |t, cx| t.expand(cx));
+        assert_eq!(
+            visible(&cx, &tree),
+            [
+                (PathBuf::from("/repo/src"), 0),
+                (PathBuf::from("/repo/src/inner"), 1),
+                (PathBuf::from("/repo/src/main.rs"), 1),
+                (PathBuf::from("/repo/a.txt"), 0),
+                (PathBuf::from("/repo/readme.md"), 0),
+            ]
+        );
+
+        tree.update(&mut cx, |t, cx| t.collapse(cx));
+        assert_eq!(
+            visible(&cx, &tree),
+            [
+                (PathBuf::from("/repo/src"), 0),
+                (PathBuf::from("/repo/a.txt"), 0),
+                (PathBuf::from("/repo/readme.md"), 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn confirm_on_directory_toggles_and_returns_none() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx, sample_fs());
+
+        let opened = tree.update(&mut cx, |t, cx| t.confirm(cx));
+        assert_eq!(opened, None);
+        assert_eq!(tree.read_with(&cx, |t, _| t.rows.len()), 5);
+    }
+
+    #[test]
+    fn confirm_on_file_returns_path_without_changing_rows() {
+        let mut cx = TestAppContext::single();
+        let tree = new_tree(&mut cx, sample_fs());
+
+        tree.update(&mut cx, |t, cx| {
+            t.select_next(cx);
+        });
+        let opened = tree.update(&mut cx, |t, cx| t.confirm(cx));
+        assert_eq!(opened, Some(PathBuf::from("/repo/a.txt")));
+        assert_eq!(tree.read_with(&cx, |t, _| t.rows.len()), 3);
+    }
+
+    #[test]
+    fn refresh_picks_up_new_file_and_keeps_expansion() {
+        let mut cx = TestAppContext::single();
+        let fs = sample_fs();
+        let tree = new_tree(&mut cx, fs.clone());
+
+        tree.update(&mut cx, |t, cx| t.expand(cx));
+        fs.insert_file("/repo/src/added.rs", "");
+
+        tree.update(&mut cx, |t, cx| t.refresh(cx));
+        assert_eq!(
+            visible(&cx, &tree),
+            [
+                (PathBuf::from("/repo/src"), 0),
+                (PathBuf::from("/repo/src/inner"), 1),
+                (PathBuf::from("/repo/src/added.rs"), 1),
+                (PathBuf::from("/repo/src/main.rs"), 1),
+                (PathBuf::from("/repo/a.txt"), 0),
+                (PathBuf::from("/repo/readme.md"), 0),
+            ]
+        );
     }
 }
