@@ -141,6 +141,12 @@ pub struct ThemeColors {
     /// drawn yet but the scope is part of the chat palette spec.
     #[allow(dead_code)]
     pub chat_throbber: Hsla,
+    pub vcs_rebase_pick: Hsla,
+    pub vcs_rebase_squash: Hsla,
+    pub vcs_rebase_fixup: Hsla,
+    pub vcs_rebase_reword: Hsla,
+    pub vcs_rebase_edit: Hsla,
+    pub vcs_rebase_drop: Hsla,
 }
 
 impl ThemeColors {
@@ -249,6 +255,24 @@ impl ThemeColors {
                 palette.text_muted,
             ),
             chat_throbber: theme_fg_or(cx, stoat::theme::scope::CHAT_THROBBER, palette.accent),
+            vcs_rebase_pick: theme_fg_or(cx, stoat::theme::scope::VCS_REBASE_PICK, palette.success),
+            vcs_rebase_squash: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_REBASE_SQUASH,
+                palette.warning,
+            ),
+            vcs_rebase_fixup: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_REBASE_FIXUP,
+                palette.warning,
+            ),
+            vcs_rebase_reword: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_REBASE_REWORD,
+                palette.accent,
+            ),
+            vcs_rebase_edit: theme_fg_or(cx, stoat::theme::scope::VCS_REBASE_EDIT, palette.accent),
+            vcs_rebase_drop: theme_fg_or(cx, stoat::theme::scope::VCS_REBASE_DROP, palette.danger),
         }
     }
 }
@@ -354,6 +378,8 @@ mod tests {
         assert_eq!(theme.chat_user, palette.success);
         assert_eq!(theme.chat_tool_status_failed, palette.danger);
         assert_eq!(theme.chat_separator, palette.text_muted);
+        assert_eq!(theme.vcs_rebase_pick, palette.success);
+        assert_eq!(theme.vcs_rebase_drop, palette.danger);
     }
 
     #[test]

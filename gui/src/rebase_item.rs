@@ -1,10 +1,10 @@
 use crate::{
     item::{DeserializeSnafu, ItemError, ItemView},
-    theme::ActiveTheme,
+    theme::{ActiveTheme, ThemeColors},
 };
 use gpui::{
-    div, uniform_list, AnyElement, App, AppContext, Context, Entity, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, UniformListScrollHandle, Window,
+    div, uniform_list, AnyElement, App, AppContext, Context, Entity, Hsla, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, UniformListScrollHandle, Window,
 };
 use serde_json::Value;
 use stoat::{host::RebaseTodoOp, rebase::RebaseState};
@@ -89,17 +89,16 @@ impl RebaseItem {
     }
 
     fn render_row(&self, ix: usize, selected: bool, cx: &App) -> AnyElement {
-        let row_text = self
-            .state
-            .read(cx)
-            .todo
-            .get(ix)
-            .map(format_rebase_row)
-            .unwrap_or_default();
-        let color = cx.theme().statusbar_text;
+        let todo = self.state.read(cx).todo.get(ix).cloned();
+        let row_text = todo.as_ref().map(format_rebase_row).unwrap_or_default();
+        let theme = cx.theme();
+        let color = todo
+            .as_ref()
+            .map(|t| op_color(&t.op, &theme))
+            .unwrap_or(theme.statusbar_text);
         let mut row = div().px_2().text_color(color).child(row_text);
         if selected {
-            row = row.bg(gpui::white().opacity(0.1));
+            row = row.bg(theme.selection);
         }
         row.into_any_element()
     }
@@ -113,6 +112,18 @@ impl RebaseItem {
         range
             .map(|ix| self.render_row(ix, ix == selected, cx))
             .collect()
+    }
+}
+
+/// Pick the foreground color for a rebase-todo row based on its op.
+fn op_color(op: &RebaseTodoOp, theme: &ThemeColors) -> Hsla {
+    match op {
+        RebaseTodoOp::Pick => theme.vcs_rebase_pick,
+        RebaseTodoOp::Squash => theme.vcs_rebase_squash,
+        RebaseTodoOp::Fixup => theme.vcs_rebase_fixup,
+        RebaseTodoOp::Reword => theme.vcs_rebase_reword,
+        RebaseTodoOp::Edit => theme.vcs_rebase_edit,
+        RebaseTodoOp::Drop => theme.vcs_rebase_drop,
     }
 }
 
