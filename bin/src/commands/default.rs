@@ -69,7 +69,13 @@ enum Command {
     /// default mode.
     Diff(crate::commands::diff::DiffArgs),
     /// Open the GPUI editor window.
-    Gui,
+    Gui {
+        /// Drive a vim-style keystroke sequence into the window once it is
+        /// ready, e.g. `--inputs ":wq<Enter>"`. Lets a headless run exercise
+        /// interactive features without a keyboard.
+        #[arg(long)]
+        inputs: Option<String>,
+    },
 }
 
 pub fn run() -> Result<(), Whatever> {
@@ -92,7 +98,7 @@ pub fn run() -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
-        Some(Command::Gui) => crate::commands::gui::run(files, restore),
+        Some(Command::Gui { inputs }) => crate::commands::gui::run(files, restore, inputs),
         Some(Command::Review) | None => {
             let _ = restore;
             print_gui_hint()

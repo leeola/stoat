@@ -41,6 +41,7 @@ mod git_status_picker;
 mod global_search;
 mod globals;
 mod help;
+mod input_driver;
 mod input_parse;
 mod input_state_machine;
 mod item;
@@ -145,23 +146,32 @@ pub use tab_bar::{render_tab_bar, DraggedTab};
 pub use theme::Theme;
 pub use workspace::{Workspace, WorkspaceEvent};
 
-pub fn run(globals: Globals, files: Vec<std::path::PathBuf>, restore: RestoreMode) {
+pub fn run(
+    globals: Globals,
+    files: Vec<std::path::PathBuf>,
+    restore: RestoreMode,
+    inputs: Option<String>,
+) {
     Application::new().run(move |cx: &mut App| {
         tracing::info!("stoat gui starting");
         install_production_globals(cx, globals);
         let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
-        cx.open_window(
-            WindowOptions {
-                window_bounds: Some(WindowBounds::Windowed(bounds)),
-                titlebar: Some(TitlebarOptions {
-                    title: Some(SharedString::from("Stoat")),
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    titlebar: Some(TitlebarOptions {
+                        title: Some(SharedString::from("Stoat")),
+                        ..Default::default()
+                    }),
                     ..Default::default()
-                }),
-                ..Default::default()
-            },
-            move |_window, cx| cx.new(|cx| StoatApp::new(files, restore, cx)),
-        )
-        .expect("open root window");
+                },
+                move |_window, cx| cx.new(|cx| StoatApp::new(files, restore, cx)),
+            )
+            .expect("open root window");
+        if let Some(inputs) = inputs {
+            input_driver::drive_inputs(cx, window, inputs);
+        }
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
                 cx.quit();

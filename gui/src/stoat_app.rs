@@ -105,10 +105,10 @@ fn try_restore_workspace(
 }
 
 impl StoatApp {
-    /// Borrow the hosted workspace entity. Used by tests that
-    /// need to introspect a window opened through the
+    /// Borrow the hosted workspace entity. The `--inputs` driver reaches
+    /// the workspace through this to feed its keystroke sequence, and
+    /// tests use it to introspect windows opened through the
     /// `CopyWorkspace` / `NewWorkspace` dispatch paths.
-    #[cfg(test)]
     pub(crate) fn workspace(&self) -> &Entity<Workspace> {
         &self.workspace
     }
