@@ -6,10 +6,11 @@ use crate::{
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::MultiBuffer,
+    theme::ActiveTheme,
 };
 use gpui::{
-    div, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window,
+    div, App, AppContext, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, Render,
+    SharedString, Styled, Window,
 };
 use serde_json::Value;
 use std::{
@@ -302,17 +303,52 @@ fn format_conflict_markers(ours: Option<&str>, theirs: Option<&str>) -> String {
 }
 
 impl Render for ConflictItem {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let top = div()
             .flex()
             .flex_row()
             .flex_1()
-            .child(div().flex_1().child(self.ancestor.editor.clone()))
-            .child(div().flex_1().child(self.ours.editor.clone()))
-            .child(div().flex_1().child(self.theirs.editor.clone()));
-        let bottom = div().flex_1().child(self.result.editor.clone());
+            .child(pane_with_header(
+                "BASE",
+                theme.muted_text,
+                self.ancestor.editor.clone(),
+            ))
+            .child(pane_with_header(
+                "OURS",
+                theme.vcs_conflict_ours,
+                self.ours.editor.clone(),
+            ))
+            .child(pane_with_header(
+                "THEIRS",
+                theme.vcs_conflict_theirs,
+                self.theirs.editor.clone(),
+            ));
+        let bottom = pane_with_header(
+            "RESULT",
+            theme.vcs_conflict_header,
+            self.result.editor.clone(),
+        );
         div().flex().flex_col().size_full().child(top).child(bottom)
     }
+}
+
+/// Build a vertical pane: a small bold header label colored from
+/// `color`, then the editor below it. Used by [`ConflictItem`] to
+/// identify each side of the 3-way merge view.
+fn pane_with_header(label: &str, color: Hsla, editor: Entity<Editor>) -> impl IntoElement {
+    div()
+        .flex_1()
+        .flex()
+        .flex_col()
+        .child(
+            div()
+                .px_2()
+                .text_color(color)
+                .font_weight(FontWeight::SEMIBOLD)
+                .child(SharedString::from(label.to_string())),
+        )
+        .child(div().flex_1().child(editor))
 }
 
 impl ItemView for ConflictItem {

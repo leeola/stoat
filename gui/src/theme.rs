@@ -152,6 +152,9 @@ pub struct ThemeColors {
     pub vcs_commit_metadata: Hsla,
     pub diff_context: Hsla,
     pub diff_current_hunk: Hsla,
+    pub vcs_conflict_header: Hsla,
+    pub vcs_conflict_ours: Hsla,
+    pub vcs_conflict_theirs: Hsla,
 }
 
 impl ThemeColors {
@@ -295,6 +298,21 @@ impl ThemeColors {
                 stoat::theme::scope::DIFF_CURRENT_HUNK,
                 palette.info,
             ),
+            vcs_conflict_header: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_CONFLICT_HEADER,
+                palette.danger,
+            ),
+            vcs_conflict_ours: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_CONFLICT_OURS,
+                palette.success,
+            ),
+            vcs_conflict_theirs: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_CONFLICT_THEIRS,
+                palette.accent,
+            ),
         }
     }
 }
@@ -406,6 +424,8 @@ mod tests {
         assert_eq!(theme.vcs_commit_metadata, palette.text_muted);
         assert_eq!(theme.diff_context, palette.text_muted);
         assert_eq!(theme.diff_current_hunk, palette.info);
+        assert_eq!(theme.vcs_conflict_ours, palette.success);
+        assert_eq!(theme.vcs_conflict_theirs, palette.accent);
     }
 
     #[test]
