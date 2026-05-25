@@ -1,25 +1,36 @@
-//! Inline key-hint banner shown under the status bar while a transient
-//! chord mode (`goto`, `z`, bracket/match, `space`/`space_*`) is active.
+//! Floating key-hint overlay shown in the bottom-right corner while a
+//! transient chord mode (`goto`, `z`, bracket/match, `space`/`space_*`)
+//! is active.
 //!
 //! Subscribes to the [`InputStateMachine`] (which calls `cx.notify()`
 //! on every mode transition) and, when the active mode is transient,
-//! renders a one-line summary of that mode's live bindings drawn from
+//! renders the live bindings drawn from
 //! [`stoat::keymap::Keymap::active_bindings`] -- the same source the
-//! help modal uses. Non-transient modes render nothing.
+//! help modal uses -- as a vertical list: a mode header, one row per
+//! binding (key chip + description), and a `? for full help` footer.
+//! Non-transient modes render nothing.
 
 use crate::{
     input_state_machine::InputStateMachine,
     theme::{border_inactive_color, statusbar_focused_color, statusbar_text_color},
 };
 use gpui::{
-    div, App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Window,
+    div, App, Context, Entity, FontWeight, IntoElement, ParentElement, Render, SharedString,
+    Styled, Subscription, Window,
 };
 use stoat_action::registry;
 
 pub struct KeyHintBanner {
     input_state_machine: Entity<InputStateMachine>,
     _subscription: Subscription,
+}
+
+/// Structured hint content for the active transient mode: the mode
+/// label and the resolved `(key_label, short_desc)` pairs to display.
+#[derive(Debug, PartialEq, Eq)]
+pub(crate) struct HintContent {
+    pub(crate) mode: String,
+    pub(crate) bindings: Vec<(String, String)>,
 }
 
 impl KeyHintBanner {
@@ -31,9 +42,9 @@ impl KeyHintBanner {
         }
     }
 
-    /// One-line hint for the active mode, or `None` when the mode is not
-    /// a transient chord mode (so the banner stays hidden).
-    pub(crate) fn current_hint(&self, cx: &App) -> Option<String> {
+    /// Structured hint for the active mode, or `None` when the mode is
+    /// not a transient chord mode (so the banner stays hidden).
+    pub(crate) fn current_hint(&self, cx: &App) -> Option<HintContent> {
         let sm = self.input_state_machine.read(cx);
         let mode = sm.mode();
         if !is_transient_mode(mode) {
@@ -45,27 +56,85 @@ impl KeyHintBanner {
             .into_iter()
             .filter_map(|(label, actions)| actions.first().map(|a| (label, a.name.clone())))
             .collect();
-        hint_line(mode, &entries)
+        hint_entries(mode, &entries)
     }
 }
 
 impl Render for KeyHintBanner {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        match self.current_hint(cx) {
-            Some(text) => div()
-                .absolute()
-                .bottom_4()
-                .right_4()
-                .p_3()
-                .rounded_md()
-                .bg(statusbar_focused_color(cx).opacity(0.95))
-                .border_1()
-                .border_color(border_inactive_color(cx))
-                .shadow_lg()
-                .text_color(statusbar_text_color(cx))
-                .child(SharedString::from(text)),
-            None => div(),
-        }
+        let Some(hint) = self.current_hint(cx) else {
+            return div();
+        };
+
+        let text_color = statusbar_text_color(cx);
+        let border_color = border_inactive_color(cx);
+        let bg_color = statusbar_focused_color(cx);
+
+        let rows: Vec<_> = hint
+            .bindings
+            .into_iter()
+            .map(|(key, desc)| {
+                div()
+                    .flex()
+                    .flex_row()
+                    .items_center()
+                    .gap_2()
+                    .child(
+                        div()
+                            .px_1()
+                            .rounded_sm()
+                            .border_1()
+                            .border_color(border_color)
+                            .text_color(text_color)
+                            .text_xs()
+                            .child(SharedString::from(key)),
+                    )
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(text_color.opacity(0.7))
+                            .child(SharedString::from(desc)),
+                    )
+            })
+            .collect();
+
+        let header = div()
+            .text_sm()
+            .font_weight(FontWeight::SEMIBOLD)
+            .text_color(text_color)
+            .child(SharedString::from(format!(
+                "{} MODE",
+                hint.mode.to_uppercase()
+            )));
+
+        let footer = div()
+            .mt_2()
+            .pt_2()
+            .border_t_1()
+            .border_color(border_color.opacity(0.5))
+            .text_xs()
+            .text_color(text_color.opacity(0.7))
+            .child(SharedString::from("? for full help"));
+
+        div()
+            .absolute()
+            .bottom_4()
+            .right_4()
+            .p_3()
+            .rounded_md()
+            .bg(bg_color.opacity(0.95))
+            .border_1()
+            .border_color(border_color)
+            .shadow_lg()
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_2()
+                    .child(header)
+                    .child(div().flex().flex_col().gap_1().children(rows))
+                    .child(footer),
+            )
     }
 }
 
@@ -79,23 +148,26 @@ fn is_transient_mode(mode: &str) -> bool {
         || mode.starts_with("space_")
 }
 
-/// Format the active-binding `entries` -- `(key_label,
-/// first_action_name)` pairs -- into `mode: key (desc)  key (desc)
-/// ...`. Names absent from the action registry (e.g. the `SetMode`
-/// boilerplate every mode carries on `Escape`) are dropped. Returns
-/// `None` for non-transient modes or when no entry resolves.
-fn hint_line(mode: &str, entries: &[(String, String)]) -> Option<String> {
+/// Build the structured hint pairs for `entries` -- `(key_label,
+/// first_action_name)` from the live bindings -- as `(key_label,
+/// short_desc)`. Names absent from the action registry (e.g. the
+/// `SetMode` boilerplate every mode carries on `Escape`) are dropped.
+/// Returns `None` for non-transient modes or when no entry resolves.
+fn hint_entries(mode: &str, entries: &[(String, String)]) -> Option<HintContent> {
     if !is_transient_mode(mode) {
         return None;
     }
-    let hints: Vec<String> = entries
+    let bindings: Vec<(String, String)> = entries
         .iter()
         .filter_map(|(label, name)| {
             let def = registry::lookup(name)?.def;
-            Some(format!("{label} ({})", def.short_desc()))
+            Some((label.clone(), def.short_desc().to_string()))
         })
         .collect();
-    (!hints.is_empty()).then(|| format!("{mode}: {}", hints.join("  ")))
+    (!bindings.is_empty()).then(|| HintContent {
+        mode: mode.to_string(),
+        bindings,
+    })
 }
 
 #[cfg(test)]
@@ -133,7 +205,7 @@ mod tests {
     }
 
     #[test]
-    fn hint_line_formats_bindings_and_drops_unregistered_actions() {
+    fn hint_entries_resolves_pairs_and_drops_unregistered_actions() {
         let pairs = entries(&[
             ("i", "GotoFirstNonwhitespace"),
             ("Escape", "SetMode"),
@@ -142,28 +214,33 @@ mod tests {
         let i_desc = registry::lookup("GotoFirstNonwhitespace")
             .expect("registered")
             .def
-            .short_desc();
+            .short_desc()
+            .to_string();
         let j_desc = registry::lookup("GotoLastLine")
             .expect("registered")
             .def
-            .short_desc();
+            .short_desc()
+            .to_string();
         assert_eq!(
-            hint_line("goto", &pairs),
-            Some(format!("goto: i ({i_desc})  j ({j_desc})"))
+            hint_entries("goto", &pairs),
+            Some(HintContent {
+                mode: "goto".to_string(),
+                bindings: vec![("i".to_string(), i_desc), ("j".to_string(), j_desc)],
+            })
         );
     }
 
     #[test]
-    fn hint_line_none_for_non_transient_mode() {
+    fn hint_entries_none_for_non_transient_mode() {
         let pairs = entries(&[("i", "GotoFirstNonwhitespace")]);
-        assert_eq!(hint_line("normal", &pairs), None);
-        assert_eq!(hint_line("insert", &pairs), None);
+        assert_eq!(hint_entries("normal", &pairs), None);
+        assert_eq!(hint_entries("insert", &pairs), None);
     }
 
     #[test]
-    fn hint_line_none_when_no_entry_resolves() {
+    fn hint_entries_none_when_no_entry_resolves() {
         let pairs = entries(&[("Escape", "SetMode")]);
-        assert_eq!(hint_line("goto", &pairs), None);
+        assert_eq!(hint_entries("goto", &pairs), None);
     }
 
     fn state_machine(cx: &mut TestAppContext) -> Entity<InputStateMachine> {
@@ -184,8 +261,12 @@ mod tests {
         let hint = banner
             .read_with(&cx, |b, cx| b.current_hint(cx))
             .expect("goto is transient and has bindings");
-        assert!(hint.starts_with("goto: "), "hint: {hint}");
-        assert!(hint.contains("i ("), "expected goto motion keys: {hint}");
+        assert_eq!(hint.mode, "goto");
+        assert!(
+            hint.bindings.iter().any(|(key, _)| key == "i"),
+            "expected goto motion key `i`: {:?}",
+            hint.bindings,
+        );
     }
 
     #[test]
