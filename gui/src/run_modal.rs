@@ -4,7 +4,9 @@
 //! interactive run pane ([`crate::run_pane`]); this overlay takes no
 //! input and runs exactly one command.
 
-use crate::{globals::TerminalHostGlobal, modal_layer::ModalView, run_pane::render};
+use crate::{
+    globals::TerminalHostGlobal, modal_layer::ModalView, run_pane::render, theme::ActiveTheme,
+};
 use gpui::{
     div, App, AsyncApp, Context, DismissEvent, EventEmitter, FocusHandle, Focusable,
     InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Task, WeakEntity,
@@ -129,15 +131,18 @@ async fn run_oneshot(
 }
 
 impl Render for RunModal {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let status = if self.finished { "done" } else { "running" };
         let header = SharedString::from(format!("run ({status}): {}", self.command));
+        let accent = cx.theme().ui_modal_run;
         let mut body = div()
             .flex()
             .flex_col()
             .size_full()
+            .border_t_1()
+            .border_color(accent)
             .track_focus(&self.focus_handle)
-            .child(div().px_2().py_1().child(header));
+            .child(div().px_2().py_1().text_color(accent).child(header));
         for block in &self.blocks {
             body = body.child(render::render_block(block));
         }
