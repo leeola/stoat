@@ -8,7 +8,7 @@ pub use delegate::{PickerDelegate, PickerSecondary};
 use gpui::{
     div, uniform_list, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
     Focusable, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Subscription, Task, UniformListScrollHandle, Window,
+    Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
@@ -160,6 +160,7 @@ impl<D: PickerDelegate> Picker<D> {
                         let query = current_query(&this.query_editor, cx);
                         let task = this.delegate.update_matches(query, cx);
                         this.pending_update_matches = Some(task);
+                        cx.notify();
                     },
                 },
             );
@@ -288,6 +289,10 @@ impl<D: PickerDelegate> ModalView for Picker<D> {
         self.delegate.dismissed(cx);
         cx.emit(DismissEvent);
         true
+    }
+
+    fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
+        Some(self.query_editor.downgrade())
     }
 }
 

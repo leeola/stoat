@@ -1,6 +1,10 @@
-use crate::{theme::border_focused_color, workspace::Workspace};
+use crate::{
+    editor::Editor,
+    theme::{background_color, border_focused_color},
+    workspace::Workspace,
+};
 use gpui::{
-    div, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
+    div, px, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
     FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView, MouseButton,
     ParentElement, Render, Styled, Subscription, WeakEntity, Window,
 };
@@ -66,6 +70,15 @@ pub trait ModalView: ManagedView {
     fn insert_newline(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> bool {
         false
     }
+
+    /// The editor that should receive typed text while this modal is
+    /// the active overlay, or `None` for modals with no text field.
+    /// The layer focuses the shared editor input when a modal returns
+    /// `Some`, and the workspace routes IME commits into this editor,
+    /// so query-style modals (the picker) return their query editor.
+    fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
+        None
+    }
 }
 
 trait ModalViewHandle {
@@ -80,6 +93,7 @@ trait ModalViewHandle {
     fn submit_prompt(&mut self, window: &mut Window, cx: &mut App) -> bool;
     fn cancel_prompt(&mut self, window: &mut Window, cx: &mut App) -> bool;
     fn insert_newline(&mut self, window: &mut Window, cx: &mut App) -> bool;
+    fn text_input_editor(&self, cx: &App) -> Option<WeakEntity<Editor>>;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -110,6 +124,10 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
 
     fn insert_newline(&mut self, window: &mut Window, cx: &mut App) -> bool {
         self.update(cx, |modal, cx| modal.insert_newline(window, cx))
+    }
+
+    fn text_input_editor(&self, cx: &App) -> Option<WeakEntity<Editor>> {
+        self.read(cx).text_input_editor()
     }
 }
 
@@ -176,6 +194,14 @@ impl ModalLayer {
         top.modal.view().downcast::<V>().ok()
     }
 
+    /// The text-input editor of the top modal, or `None` when the top
+    /// modal has no text field (or no modal is active). The workspace
+    /// observes this to point its `active_editor` at a modal's query
+    /// field while the modal is open.
+    pub fn active_text_input_editor(&self, cx: &App) -> Option<WeakEntity<Editor>> {
+        self.active_modals.last()?.modal.text_input_editor(cx)
+    }
+
     /// Push `modal` onto the modal stack. Captures the
     /// currently-focused element so it can be restored when this
     /// modal closes (typically the previous top modal, or the
@@ -206,8 +232,13 @@ impl ModalLayer {
             focus_handle,
             _subscriptions: [dismiss_subscription],
         });
-        cx.defer_in(window, move |_, window, cx| {
-            let handle = Focusable::focus_handle(&modal, cx);
+        cx.defer_in(window, move |this, window, cx| {
+            let handle = modal
+                .read(cx)
+                .text_input_editor()
+                .and_then(|_| this.workspace.as_ref().and_then(WeakEntity::upgrade))
+                .map(|ws| ws.read(cx).editor_input().read(cx).focus_handle().clone())
+                .unwrap_or_else(|| Focusable::focus_handle(&modal, cx));
             window.focus(&handle);
         });
         cx.emit(ModalOpenedEvent);
@@ -327,6 +358,9 @@ impl Render for ModalLayer {
             .absolute()
             .size_full()
             .inset_0()
+            .flex()
+            .items_center()
+            .justify_center()
             .track_focus(&top.focus_handle)
             .on_mouse_down(
                 MouseButton::Left,
@@ -348,8 +382,22 @@ impl Render for ModalLayer {
             )
             .child(
                 div()
+                    .flex()
+                    .flex_col()
+                    .w(px(640.))
+                    .h(px(480.))
+                    .overflow_hidden()
+                    .bg(background_color(cx))
                     .border_1()
                     .border_color(border)
+                    .rounded_md()
+                    .shadow_lg()
+                    // Clicks inside the modal must not reach the overlay's
+                    // dismiss handler above; only clicks on the surrounding
+                    // backdrop close the modal.
+                    .on_mouse_down(MouseButton::Left, |_event, _window, cx| {
+                        cx.stop_propagation()
+                    })
                     .child(top.modal.view()),
             )
     }

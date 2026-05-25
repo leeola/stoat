@@ -291,6 +291,12 @@ impl Workspace {
         );
         let modal_layer_subscription = cx.observe(&modal_layer, |workspace, layer, cx| {
             workspace.refresh_modal_keymap_state(&layer, cx);
+            match layer.read(cx).active_text_input_editor(cx) {
+                Some(editor) => workspace
+                    .input_state_machine
+                    .update(cx, |sm, _| sm.set_active_editor(Some(editor))),
+                None => workspace.broadcast_active_editor(cx),
+            }
         });
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);

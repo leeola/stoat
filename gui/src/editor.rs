@@ -3407,11 +3407,24 @@ impl Render for Editor {
         let minimap = self.minimap.clone();
         let mut root = div()
             .relative()
-            .size_full()
+            .w_full()
             .font_family(family)
-            .text_size(font_size)
-            .child(list)
-            .child(bounds_capture);
+            .text_size(font_size);
+        root = match &self.mode {
+            EditorMode::SingleLine => root.h(line_height),
+            EditorMode::AutoHeight {
+                min_lines,
+                max_lines,
+            } => {
+                let capped = match max_lines {
+                    Some(max) => document_rows.min(*max),
+                    None => document_rows,
+                };
+                root.h(line_height * capped.max(*min_lines).max(1) as f32)
+            },
+            EditorMode::Full {} | EditorMode::Minimap { .. } => root.h_full(),
+        };
+        root = root.child(list).child(bounds_capture);
         if is_minimap {
             root = root.line_height(line_height);
         }
