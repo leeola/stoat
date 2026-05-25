@@ -10,10 +10,7 @@
 //! binding (key chip + description), and a `? for full help` footer.
 //! Non-transient modes render nothing.
 
-use crate::{
-    input_state_machine::InputStateMachine,
-    theme::{border_inactive_color, statusbar_focused_color, statusbar_text_color},
-};
+use crate::{input_state_machine::InputStateMachine, theme::ActiveTheme};
 use gpui::{
     div, App, Context, Entity, FontWeight, IntoElement, ParentElement, Render, SharedString,
     Styled, Subscription, Window,
@@ -66,9 +63,9 @@ impl Render for KeyHintBanner {
             return div();
         };
 
-        let text_color = statusbar_text_color(cx);
-        let border_color = border_inactive_color(cx);
-        let bg_color = statusbar_focused_color(cx);
+        let text_color = cx.theme().statusbar_text;
+        let border_color = cx.theme().border_inactive;
+        let bg_color = cx.theme().statusbar_focused;
 
         let rows: Vec<_> = hint
             .bindings

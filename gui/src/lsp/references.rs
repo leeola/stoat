@@ -1,7 +1,7 @@
 use crate::{
     editor::Editor,
     picker::{Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -125,7 +125,7 @@ impl PickerDelegate for ReferencesPickerDelegate {
             .get(ix)
             .map(format_location)
             .unwrap_or_default();
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let mut row = div().px_2().text_color(color).child(label);
         if selected {
             row = row.bg(gpui::white().opacity(0.1));

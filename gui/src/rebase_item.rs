@@ -1,6 +1,6 @@
 use crate::{
     item::{DeserializeSnafu, ItemError, ItemView},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, uniform_list, AnyElement, App, AppContext, Context, Entity, IntoElement, ParentElement,
@@ -96,7 +96,7 @@ impl RebaseItem {
             .get(ix)
             .map(format_rebase_row)
             .unwrap_or_default();
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let mut row = div().px_2().text_color(color).child(row_text);
         if selected {
             row = row.bg(gpui::white().opacity(0.1));

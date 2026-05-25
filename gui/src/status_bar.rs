@@ -8,7 +8,7 @@ pub mod review_progress;
 pub mod search_indicator;
 pub mod workspace_label;
 
-use crate::{item::ItemHandle, theme};
+use crate::{item::ItemHandle, theme::ActiveTheme};
 use gpui::{
     div, AnyView, App, Context, Entity, IntoElement, ParentElement, Render, Styled, Window,
 };
@@ -132,7 +132,7 @@ impl Render for StatusBar {
             .flex_row()
             .w_full()
             .justify_between()
-            .bg(theme::statusbar_focused_color(cx))
+            .bg(cx.theme().statusbar_focused)
             .child(left)
             .child(right)
     }

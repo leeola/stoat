@@ -1,5 +1,5 @@
 use crate::{
-    item::ItemHandle, lsp_state::LspState, status_bar::StatusItemView, theme::statusbar_text_color,
+    item::ItemHandle, lsp_state::LspState, status_bar::StatusItemView, theme::ActiveTheme,
 };
 use gpui::{
     div, AnyElement, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -39,7 +39,7 @@ impl Render for LspProgress {
             div()
                 .px_2()
                 .italic()
-                .text_color(statusbar_text_color(cx))
+                .text_color(cx.theme().statusbar_text)
                 .child(SharedString::from(format_progress_label(entry)))
                 .into_any_element()
         });

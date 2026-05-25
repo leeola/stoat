@@ -16,7 +16,7 @@ use crate::{
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
     settings::Settings,
-    theme::{self, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
+    theme::{self, ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
 };
 use gpui::{
     canvas, div, fill, font, px, relative, size as gpui_size, uniform_list, App, AppContext,
@@ -3230,7 +3230,7 @@ impl Editor {
             .map(|s| s.query())
             .filter(|q| !q.is_empty())
         {
-            let color = theme::search_match_color(cx);
+            let color = cx.theme().search_match;
             render::apply_search_overlay(
                 &mut rows,
                 &display_snapshot,
@@ -3242,8 +3242,8 @@ impl Editor {
 
         if let Some(labels) = self.pending_goto_word_labels.as_ref() {
             let input = self.pending_goto_word_input.clone();
-            let label_color = theme::goto_word_label_color(cx);
-            let prefix_color = theme::goto_word_prefix_color(cx);
+            let label_color = cx.theme().goto_word_label;
+            let prefix_color = cx.theme().goto_word_prefix;
             render::apply_goto_word_overlay(
                 &mut rows,
                 &display_snapshot,
@@ -3261,9 +3261,9 @@ impl Editor {
             &rows,
             start as u32,
         );
-        let selection_color = theme::selection_color(cx);
-        let cursor_color = theme::cursor_color(cx);
-        let active_line_color = theme::active_line_color(cx);
+        let selection_color = cx.theme().selection;
+        let cursor_color = cx.theme().cursor;
+        let active_line_color = cx.theme().line_highlight;
 
         let rows: Vec<render::RenderedRow> = rows
             .into_iter()
@@ -3314,7 +3314,7 @@ impl Editor {
             review_move_provenances: &review_data.provenances,
             blame: blame_paint,
             metrics,
-            line_number_color: theme::muted_text_color(cx),
+            line_number_color: cx.theme().muted_text,
         };
         rows.into_iter()
             .enumerate()

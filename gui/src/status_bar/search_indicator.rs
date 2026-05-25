@@ -2,7 +2,7 @@ use crate::{
     editor::{search::SearchState, Editor, EditorEvent},
     item::ItemHandle,
     status_bar::StatusItemView,
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
@@ -77,7 +77,7 @@ impl Render for SearchQueryIndicator {
         let label = self.state.as_ref().map(|state| {
             div()
                 .px_2()
-                .text_color(statusbar_text_color(cx))
+                .text_color(cx.theme().statusbar_text)
                 .child(SharedString::from(format_label(state)))
         });
         div().children(label)

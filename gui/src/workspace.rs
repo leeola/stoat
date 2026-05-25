@@ -33,7 +33,7 @@ use crate::{
         review_progress::ReviewProgress, search_indicator::SearchQueryIndicator,
         workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
     },
-    theme::{background_color, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
+    theme::{ActiveTheme, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
     deferred, div, px, size, App, AppContext, Bounds, Context, DismissEvent, Entity, EventEmitter,
@@ -5480,7 +5480,7 @@ impl Render for Workspace {
             .flex()
             .flex_row()
             .size_full()
-            .bg(background_color(cx))
+            .bg(cx.theme().background)
             .font_family(ui_family)
             .text_size(px(ui_size))
             .track_focus(&self.focus_handle)

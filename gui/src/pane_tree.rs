@@ -1,8 +1,4 @@
-use crate::{
-    pane::Pane,
-    theme::{border_focused_color, border_inactive_color},
-    workspace::Workspace,
-};
+use crate::{pane::Pane, theme::ActiveTheme, workspace::Workspace};
 use gpui::{
     div, AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement,
     Render, Styled, WeakEntity, Window,
@@ -188,9 +184,9 @@ impl PaneTree {
                     .get(pane_id)
                     .expect("layout references pane absent from panes map");
                 let color = if self.inner.focus() == *pane_id {
-                    border_focused_color(cx)
+                    cx.theme().border_focused
                 } else {
-                    border_inactive_color(cx)
+                    cx.theme().border_inactive
                 };
                 div()
                     .flex_1()

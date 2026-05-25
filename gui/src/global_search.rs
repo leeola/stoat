@@ -18,7 +18,7 @@ use crate::{
     editor::Editor,
     globals::{ExecutorGlobal, FsHostGlobal},
     picker::{Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -165,7 +165,7 @@ impl PickerDelegate for GlobalSearchDelegate {
             return div().into_any_element();
         };
         let display = render_row(entry, &self.git_root);
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let mut row = div().px_2().text_color(color).child(display);
         if selected {
             row = row.bg(gpui::white().opacity(0.1));

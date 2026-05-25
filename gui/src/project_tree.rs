@@ -14,7 +14,7 @@
 
 use crate::{
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, white, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
@@ -164,7 +164,7 @@ impl ProjectTree {
 
 impl Render for ProjectTree {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let selected = self.selected;
         let rows = self.rows.iter().enumerate().map(|(ix, row)| {
             let indent = " ".repeat(row.depth * INDENT_SPACES_PER_DEPTH);

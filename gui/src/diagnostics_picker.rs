@@ -13,7 +13,7 @@ use crate::{
     buffer::Buffer,
     editor::Editor,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -241,7 +241,7 @@ impl PickerDelegate for DiagnosticsPickerDelegate {
             return div().into_any_element();
         };
         let display = render_row(entry, self.scope, &self.git_root);
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let runs = match_highlight_runs(
             &display,
             matched,

@@ -1,4 +1,4 @@
-use crate::{pane::Pane, theme};
+use crate::{pane::Pane, theme::ActiveTheme};
 use gpui::{
     div, AppContext, Context, ElementId, EntityId, InteractiveElement, IntoElement, MouseButton,
     ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
@@ -26,9 +26,9 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
     let pane_id = cx.entity_id();
     let item_count = pane.items().len();
 
-    let label_color = theme::tab_label_color(cx);
-    let active_bg = theme::tab_active_color(cx);
-    let inactive_bg = theme::tab_inactive_color(cx);
+    let label_color = cx.theme().tab_label;
+    let active_bg = cx.theme().tab_active;
+    let inactive_bg = cx.theme().tab_inactive;
 
     let mut row = div().flex().flex_row().w_full();
     for ix in 0..item_count {
@@ -88,8 +88,8 @@ impl Render for DraggedTabView {
         div()
             .px_2()
             .py_1()
-            .bg(theme::tab_active_color(cx))
-            .text_color(theme::tab_label_color(cx))
+            .bg(cx.theme().tab_active)
+            .text_color(cx.theme().tab_label)
             .child(self.label.clone())
     }
 }

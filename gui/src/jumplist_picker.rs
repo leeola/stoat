@@ -12,7 +12,7 @@
 use crate::{
     editor::Editor,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -168,7 +168,7 @@ impl PickerDelegate for JumplistPickerDelegate {
             return div().into_any_element();
         };
         let display = render_row(entry);
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let runs = match_highlight_runs(
             &display,
             matched,

@@ -12,7 +12,7 @@ use crate::{
     editor::Editor,
     globals::{LanguageRegistry, LspHostGlobal},
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -166,7 +166,7 @@ impl PickerDelegate for SymbolPickerDelegate {
         let Some(entry) = self.entries.get(*entry_idx) else {
             return div().into_any_element();
         };
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let runs = match_highlight_runs(
             &entry.title,
             matched,

@@ -2,10 +2,7 @@ use crate::{
     editor::{Editor, EditorEvent},
     item::ItemHandle,
     status_bar::StatusItemView,
-    theme::{
-        diagnostic_error_color, diagnostic_hint_color, diagnostic_info_color,
-        diagnostic_warning_color,
-    },
+    theme::ActiveTheme,
 };
 use gpui::{
     div, App, Context, Entity, Hsla, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -136,11 +133,11 @@ fn format_label(summary: &DiagnosticSummary) -> String {
 
 fn severity_color(severity: DiagnosticSeverity, cx: &App) -> Hsla {
     match severity {
-        DiagnosticSeverity::ERROR => diagnostic_error_color(cx),
-        DiagnosticSeverity::WARNING => diagnostic_warning_color(cx),
-        DiagnosticSeverity::INFORMATION => diagnostic_info_color(cx),
-        DiagnosticSeverity::HINT => diagnostic_hint_color(cx),
-        _ => diagnostic_error_color(cx),
+        DiagnosticSeverity::ERROR => cx.theme().diagnostic_error,
+        DiagnosticSeverity::WARNING => cx.theme().diagnostic_warning,
+        DiagnosticSeverity::INFORMATION => cx.theme().diagnostic_info,
+        DiagnosticSeverity::HINT => cx.theme().diagnostic_hint,
+        _ => cx.theme().diagnostic_error,
     }
 }
 

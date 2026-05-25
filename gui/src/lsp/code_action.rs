@@ -2,7 +2,7 @@ use crate::{
     editor::Editor,
     lsp::edit_apply::apply_workspace_edit_to_buffer,
     picker::{Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -152,7 +152,7 @@ impl PickerDelegate for CodeActionPickerDelegate {
             .get(ix)
             .map(|e| e.title().to_string())
             .unwrap_or_default();
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let mut row = div().px_2().text_color(color).child(title);
         if selected {
             row = row.bg(gpui::white().opacity(0.1));

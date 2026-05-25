@@ -10,7 +10,7 @@ use crate::{
     editor::Editor,
     globals::{LanguageRegistry, LspHostGlobal},
     picker::{Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -168,7 +168,7 @@ impl PickerDelegate for WorkspaceSymbolPickerDelegate {
             entry.path.display(),
             entry.position.line + 1
         );
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let mut row = div().px_2().text_color(color).child(display);
         if selected {
             row = row.bg(gpui::white().opacity(0.1));

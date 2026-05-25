@@ -5,7 +5,7 @@ use crate::{
     picker::{Picker, PickerDelegate, PickerSecondary},
     review_item::ReviewItem,
     review_session::ReviewSession as GuiReviewSession,
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement,
@@ -571,7 +571,7 @@ impl PickerDelegate for CommitListDelegate {
                 .map(format_commit_row)
                 .unwrap_or_default()
         };
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let mut row = div().px_2().text_color(color).child(row_text);
         if selected {
             row = row.bg(gpui::white().opacity(0.1));

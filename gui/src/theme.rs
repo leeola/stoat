@@ -22,19 +22,6 @@ pub const DEFAULT_UI_FONT_FAMILY: &str = ".SystemUIFont";
 /// Default chrome font size in logical pixels.
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 
-/// Fallback for the goto-word label cell when no theme overrides
-/// `ui.goto_word.label`. Bright yellow so label characters stand out
-/// against editor text without requiring a theme. Kept as a
-/// scope-specific constant pending the
-/// `ui.goto_word.label`/`prefix` theme scopes (next item).
-pub const DEFAULT_GOTO_WORD_LABEL_HEX: u32 = 0xeeee00;
-
-/// Fallback for label characters already matched by the user's typed
-/// prefix when no theme overrides `ui.goto_word.prefix`. Dim yellow
-/// so the matched characters fade visually while the unmatched
-/// remainder stays bright.
-pub const DEFAULT_GOTO_WORD_PREFIX_HEX: u32 = 0x666600;
-
 /// Fallback for the editor selection band when no theme overrides
 /// `ui.selection.editor`. Returns a semi-transparent blue so a
 /// selection over text remains legible without a theme installed.
@@ -172,8 +159,8 @@ impl ThemeColors {
                 stoat::theme::scope::UI_DIAGNOSTIC_HINT,
                 palette.text_muted,
             ),
-            goto_word_label: rgb(DEFAULT_GOTO_WORD_LABEL_HEX).into(),
-            goto_word_prefix: rgb(DEFAULT_GOTO_WORD_PREFIX_HEX).into(),
+            goto_word_label: rgb(0xeeee00).into(),
+            goto_word_prefix: rgb(0x666600).into(),
             selection: theme_bg_or(
                 cx,
                 stoat::theme::scope::UI_SELECTION_EDITOR,
@@ -194,135 +181,6 @@ impl ActiveTheme for App {
     fn theme(&self) -> ThemeColors {
         ThemeColors::from_app(self)
     }
-}
-
-/// Resolve the workspace background fill from the active [`Theme`]
-/// global, falling back to the palette-derived value when no theme
-/// is installed or the scope is unset.
-pub fn background_color(cx: &App) -> Hsla {
-    cx.theme().background
-}
-
-/// Resolve the inactive border color from the active [`Theme`]
-/// global, palette-derived fallback otherwise.
-pub fn border_inactive_color(cx: &App) -> Hsla {
-    cx.theme().border_inactive
-}
-
-/// Resolve the focus-ring color from the active [`Theme`] global,
-/// palette-derived fallback otherwise.
-pub fn border_focused_color(cx: &App) -> Hsla {
-    cx.theme().border_focused
-}
-
-/// Resolve the focused status-bar fill from the active [`Theme`]
-/// global, palette-derived fallback otherwise. Reads the scope's
-/// `bg` channel.
-pub fn statusbar_focused_color(cx: &App) -> Hsla {
-    cx.theme().statusbar_focused
-}
-
-/// Resolve the focused status-bar text color from the active [`Theme`]
-/// global, palette-derived fallback otherwise. Reads the scope's `fg`
-/// channel.
-pub fn statusbar_text_color(cx: &App) -> Hsla {
-    cx.theme().statusbar_text
-}
-
-/// Resolve the inactive tab fill from the active [`Theme`] global,
-/// palette-derived fallback otherwise. Reads the scope's `bg` channel.
-pub fn tab_inactive_color(cx: &App) -> Hsla {
-    cx.theme().tab_inactive
-}
-
-/// Resolve the active tab fill from the active [`Theme`] global,
-/// palette-derived fallback otherwise. Reads the scope's `bg` channel.
-pub fn tab_active_color(cx: &App) -> Hsla {
-    cx.theme().tab_active
-}
-
-/// Resolve the tab label color from the active [`Theme`] global,
-/// palette-derived fallback otherwise. Reads the scope's `fg` channel.
-pub fn tab_label_color(cx: &App) -> Hsla {
-    cx.theme().tab_label
-}
-
-/// Resolve the editor cursor cell fill from the active [`Theme`]
-/// global, palette-derived fallback otherwise. Reads the scope's `bg`
-/// channel.
-pub fn cursor_color(cx: &App) -> Hsla {
-    cx.theme().cursor
-}
-
-/// Resolve the active-line row highlight from the active [`Theme`]
-/// global, palette-derived fallback otherwise. Reads the scope's `bg`
-/// channel.
-pub fn active_line_color(cx: &App) -> Hsla {
-    cx.theme().line_highlight
-}
-
-/// Resolve the search-match highlight from the active [`Theme`]
-/// global, palette-derived fallback otherwise. Reads the scope's `bg`
-/// channel.
-pub fn search_match_color(cx: &App) -> Hsla {
-    cx.theme().search_match
-}
-
-/// Resolve the goto-word label cell color. Returns a fixed yellow
-/// per [`DEFAULT_GOTO_WORD_LABEL_HEX`] today -- the corresponding
-/// theme scope is added in a follow-up.
-pub fn goto_word_label_color(cx: &App) -> Hsla {
-    cx.theme().goto_word_label
-}
-
-/// Resolve the goto-word matched-prefix color. Same direct-constant
-/// path as [`goto_word_label_color`] using
-/// [`DEFAULT_GOTO_WORD_PREFIX_HEX`].
-pub fn goto_word_prefix_color(cx: &App) -> Hsla {
-    cx.theme().goto_word_prefix
-}
-
-/// Resolve the muted-text color (gutter line numbers, dimmed chrome
-/// text) from the active [`Theme`] global, palette-derived fallback
-/// otherwise. Reads the scope's `fg` channel.
-pub fn muted_text_color(cx: &App) -> Hsla {
-    cx.theme().muted_text
-}
-
-/// Resolve the diagnostic-error foreground from the active [`Theme`]
-/// global, palette-derived fallback otherwise. Reads the scope's `fg`
-/// channel; consumed by the status-bar diagnostic badge.
-pub fn diagnostic_error_color(cx: &App) -> Hsla {
-    cx.theme().diagnostic_error
-}
-
-/// Resolve the diagnostic-warning foreground from the active
-/// [`Theme`] global, palette-derived fallback otherwise. Reads the
-/// scope's `fg` channel.
-pub fn diagnostic_warning_color(cx: &App) -> Hsla {
-    cx.theme().diagnostic_warning
-}
-
-/// Resolve the diagnostic-information foreground from the active
-/// [`Theme`] global, palette-derived fallback otherwise. Reads the
-/// scope's `fg` channel.
-pub fn diagnostic_info_color(cx: &App) -> Hsla {
-    cx.theme().diagnostic_info
-}
-
-/// Resolve the diagnostic-hint foreground from the active [`Theme`]
-/// global, palette-derived fallback otherwise. Reads the scope's `fg`
-/// channel.
-pub fn diagnostic_hint_color(cx: &App) -> Hsla {
-    cx.theme().diagnostic_hint
-}
-
-/// Resolve the editor selection band fill from the active [`Theme`]
-/// global, falling back to [`default_selection_color`] when no
-/// theme is installed or the scope is unset. Reads the scope's
-/// `bg` channel.
-pub fn selection_color(cx: &App) -> Hsla {
-    cx.theme().selection
 }
 
 fn theme_fg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
@@ -398,238 +256,29 @@ mod tests {
     }
 
     #[test]
-    fn background_color_falls_back_when_theme_missing() {
+    fn cx_theme_falls_back_to_palette_when_no_theme_installed() {
         let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| background_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().background);
+        let palette = BasePalette::default_dark();
+        let theme = cx.update(|cx| cx.theme());
+        assert_eq!(theme.background, palette.background);
+        assert_eq!(theme.statusbar_focused, palette.surface);
+        assert_eq!(theme.diagnostic_error, palette.danger);
+        assert_eq!(theme.selection, default_selection_color());
     }
 
     #[test]
-    fn background_color_resolves_from_theme() {
+    fn cx_theme_picks_up_theme_global_overrides() {
         let cx = TestAppContext::single();
-        let theme = Theme::load_from_source("theme custom { ui.background.fg = blue; }", "custom");
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            background_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().background);
-    }
-
-    #[test]
-    fn statusbar_focused_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| statusbar_focused_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().surface);
-    }
-
-    #[test]
-    fn statusbar_focused_color_resolves_bg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme = Theme::load_from_source(
-            "theme custom { ui.statusbar.focused = { bg: blue }; }",
+        let theme_src = Theme::load_from_source(
+            "theme custom { ui.background.fg = blue; ui.diagnostic.error.fg = green; }",
             "custom",
         );
+        let palette = BasePalette::default_dark();
         let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            statusbar_focused_color(cx)
+            cx.set_global(theme_src);
+            cx.theme()
         });
-        assert_ne!(resolved, BasePalette::default_dark().surface);
-    }
-
-    #[test]
-    fn statusbar_text_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| statusbar_text_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().text);
-    }
-
-    #[test]
-    fn statusbar_text_color_resolves_fg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme = Theme::load_from_source(
-            "theme custom { ui.statusbar.focused = { fg: blue }; }",
-            "custom",
-        );
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            statusbar_text_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().text);
-    }
-
-    #[test]
-    fn tab_active_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| tab_active_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().surface);
-    }
-
-    #[test]
-    fn tab_active_color_resolves_bg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme =
-            Theme::load_from_source("theme custom { ui.tab.active = { bg: blue }; }", "custom");
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            tab_active_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().surface);
-    }
-
-    #[test]
-    fn selection_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| selection_color(cx));
-        assert_eq!(resolved, default_selection_color());
-    }
-
-    #[test]
-    fn selection_color_resolves_bg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme = Theme::load_from_source(
-            "theme custom { ui.selection.editor = { bg: blue }; }",
-            "custom",
-        );
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            selection_color(cx)
-        });
-        assert_ne!(resolved, default_selection_color());
-    }
-
-    #[test]
-    fn muted_text_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| muted_text_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().text_muted);
-    }
-
-    #[test]
-    fn muted_text_color_resolves_fg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme = Theme::load_from_source("theme custom { ui.text.muted.fg = blue; }", "custom");
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            muted_text_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().text_muted);
-    }
-
-    #[test]
-    fn active_line_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| active_line_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().surface);
-    }
-
-    #[test]
-    fn active_line_color_resolves_bg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme = Theme::load_from_source(
-            "theme custom { ui.line_highlight = { bg: blue }; }",
-            "custom",
-        );
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            active_line_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().surface);
-    }
-
-    #[test]
-    fn search_match_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| search_match_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().warning);
-    }
-
-    #[test]
-    fn search_match_color_resolves_bg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme =
-            Theme::load_from_source("theme custom { ui.search.match = { bg: blue }; }", "custom");
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            search_match_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().warning);
-    }
-
-    #[test]
-    fn diagnostic_error_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| diagnostic_error_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().danger);
-    }
-
-    #[test]
-    fn diagnostic_error_color_resolves_fg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme =
-            Theme::load_from_source("theme custom { ui.diagnostic.error.fg = blue; }", "custom");
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            diagnostic_error_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().danger);
-    }
-
-    #[test]
-    fn diagnostic_warning_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| diagnostic_warning_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().warning);
-    }
-
-    #[test]
-    fn diagnostic_warning_color_resolves_fg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme = Theme::load_from_source(
-            "theme custom { ui.diagnostic.warning.fg = blue; }",
-            "custom",
-        );
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            diagnostic_warning_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().warning);
-    }
-
-    #[test]
-    fn diagnostic_info_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| diagnostic_info_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().info);
-    }
-
-    #[test]
-    fn diagnostic_info_color_resolves_fg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme =
-            Theme::load_from_source("theme custom { ui.diagnostic.info.fg = blue; }", "custom");
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            diagnostic_info_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().info);
-    }
-
-    #[test]
-    fn diagnostic_hint_color_falls_back_when_theme_missing() {
-        let cx = TestAppContext::single();
-        let resolved = cx.update(|cx| diagnostic_hint_color(cx));
-        assert_eq!(resolved, BasePalette::default_dark().text_muted);
-    }
-
-    #[test]
-    fn diagnostic_hint_color_resolves_fg_from_theme() {
-        let cx = TestAppContext::single();
-        let theme =
-            Theme::load_from_source("theme custom { ui.diagnostic.hint.fg = blue; }", "custom");
-        let resolved = cx.update(|cx| {
-            cx.set_global(theme);
-            diagnostic_hint_color(cx)
-        });
-        assert_ne!(resolved, BasePalette::default_dark().text_muted);
+        assert_ne!(resolved.background, palette.background);
+        assert_ne!(resolved.diagnostic_error, palette.danger);
     }
 }

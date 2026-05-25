@@ -9,7 +9,7 @@
 use crate::{
     globals::GitHostGlobal,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -170,7 +170,7 @@ impl PickerDelegate for GitStatusDelegate {
         let label_text = format!("{}{}", entry.status.glyph(), display);
         let prefix_len = entry.status.glyph().len();
         let shifted: Vec<u32> = matched.iter().map(|i| i + prefix_len as u32).collect();
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let runs = match_highlight_runs(
             &label_text,
             &shifted,

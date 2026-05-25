@@ -1,8 +1,4 @@
-use crate::{
-    editor::Editor,
-    theme::{background_color, border_focused_color},
-    workspace::Workspace,
-};
+use crate::{editor::Editor, theme::ActiveTheme, workspace::Workspace};
 use gpui::{
     div, px, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
     FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView, MouseButton,
@@ -353,7 +349,7 @@ impl Render for ModalLayer {
         let Some(top) = self.active_modals.last() else {
             return div();
         };
-        let border = border_focused_color(cx);
+        let border = cx.theme().border_focused;
         div()
             .absolute()
             .size_full()
@@ -387,7 +383,7 @@ impl Render for ModalLayer {
                     .w(px(640.))
                     .h(px(480.))
                     .overflow_hidden()
-                    .bg(background_color(cx))
+                    .bg(cx.theme().background)
                     .border_1()
                     .border_color(border)
                     .rounded_md()

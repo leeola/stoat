@@ -1,4 +1,4 @@
-use crate::{item::ItemHandle, status_bar::StatusItemView, theme::statusbar_text_color};
+use crate::{item::ItemHandle, status_bar::StatusItemView, theme::ActiveTheme};
 use gpui::{
     div, Context, FontWeight, IntoElement, ParentElement, Render, SharedString, Styled, Window,
 };
@@ -43,7 +43,7 @@ impl Render for WorkspaceLabel {
         div()
             .px_2()
             .font_weight(FontWeight::BOLD)
-            .text_color(statusbar_text_color(cx))
+            .text_color(cx.theme().statusbar_text)
             .child(self.name.clone())
     }
 }

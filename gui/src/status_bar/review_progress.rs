@@ -3,7 +3,7 @@ use crate::{
     item::ItemHandle,
     review_session::ReviewApplyResult,
     status_bar::StatusItemView,
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -100,7 +100,7 @@ impl Render for ReviewProgress {
         let label = format_badge(self.apply_result.as_ref(), self.progress.as_ref()).map(|text| {
             div()
                 .px_2()
-                .text_color(statusbar_text_color(cx))
+                .text_color(cx.theme().statusbar_text)
                 .child(SharedString::from(text))
         });
         div().children(label)

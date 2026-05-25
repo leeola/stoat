@@ -6,7 +6,7 @@ use crate::{
     diff_map::DiffMapEvent,
     editor::Editor,
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, px, App, Context, Entity, InteractiveElement, IntoElement, MouseButton, ParentElement,
@@ -94,7 +94,7 @@ fn status_glyph(status: DiffHunkStatus) -> &'static str {
 
 impl Render for DiffHunkPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let text_color = statusbar_text_color(cx);
+        let text_color = cx.theme().statusbar_text;
         let mut list = div().size_full().px_2().py_1().text_color(text_color);
         for (idx, hunk) in self.hunks.iter().enumerate() {
             let label = format!(

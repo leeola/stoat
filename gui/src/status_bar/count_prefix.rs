@@ -1,6 +1,6 @@
 use crate::{
     input_state_machine::InputStateMachine, item::ItemHandle, status_bar::StatusItemView,
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, AnyElement, Context, Entity, FontWeight, IntoElement, ParentElement, Render, SharedString,
@@ -10,7 +10,7 @@ use gpui::{
 /// Status-bar item that surfaces the
 /// [`InputStateMachine::pending_count`] prefix during count-active
 /// modes. Renders nothing when the slot is `None`; renders bold
-/// ` {n} ` over [`crate::theme::statusbar_text_color`] when set.
+/// ` {n} ` over `cx.theme().statusbar_text` when set.
 ///
 /// Subscribes to [`InputStateMachine`] notifications via
 /// `cx.observe`, mirroring [`crate::status_bar::mode_badge::ModeBadge`]
@@ -41,7 +41,7 @@ impl Render for CountPrefix {
                     div()
                         .px_2()
                         .font_weight(FontWeight::BOLD)
-                        .text_color(statusbar_text_color(cx))
+                        .text_color(cx.theme().statusbar_text)
                         .child(SharedString::from(format!(" {count} ")))
                         .into_any_element()
                 });

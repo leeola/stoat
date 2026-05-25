@@ -14,7 +14,7 @@ use crate::{
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     rebase_item::RebaseItem,
     review_item::ReviewItem,
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -520,7 +520,7 @@ impl CommandPaletteDelegate {
             return div().into_any_element();
         };
         let name = entry.def.name();
-        let color = statusbar_text_color(cx);
+        let color = cx.theme().statusbar_text;
         let runs = match_highlight_runs(
             name,
             matched,
@@ -581,7 +581,7 @@ fn render_collect_args_prompt(
     let Some(param) = params.get(current) else {
         return div().into_any_element();
     };
-    let color = statusbar_text_color(cx);
+    let color = cx.theme().statusbar_text;
     let header = format!(
         "[{}/{}] {} ({})",
         current + 1,

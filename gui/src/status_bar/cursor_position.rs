@@ -2,7 +2,7 @@ use crate::{
     editor::{Editor, EditorEvent},
     item::ItemHandle,
     status_bar::StatusItemView,
-    theme::statusbar_text_color,
+    theme::ActiveTheme,
 };
 use gpui::{
     div, App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -75,7 +75,7 @@ impl Render for CursorPosition {
         let label = self.position.map(|(line, col)| {
             div()
                 .px_2()
-                .text_color(statusbar_text_color(cx))
+                .text_color(cx.theme().statusbar_text)
                 .child(SharedString::from(format!(" {line}:{col} ")))
         });
         div().children(label)
