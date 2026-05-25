@@ -22,67 +22,11 @@ pub const DEFAULT_UI_FONT_FAMILY: &str = ".SystemUIFont";
 /// Default chrome font size in logical pixels.
 pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
 
-/// Fallback for the workspace background fill when no theme
-/// overrides `ui.background`. Neutral dark so the empty window
-/// reads as an editor surface rather than GPUI's default black.
-pub const DEFAULT_BACKGROUND_HEX: u32 = 0x1e1e1e;
-
-/// Fallback for the inactive border / divider color when no
-/// theme overrides `ui.border.inactive`. Muted enough to read as
-/// a separator against the default backgrounds.
-pub const DEFAULT_BORDER_INACTIVE_HEX: u32 = 0x404040;
-
-/// Fallback for the focus-ring color when no theme overrides
-/// `ui.border.focused`. Subtle accent blue so the focused pane
-/// reads as the active surface without dominating the chrome.
-pub const DEFAULT_BORDER_FOCUSED_HEX: u32 = 0x6090ff;
-
-/// Fallback for the focused status-bar fill when no theme overrides
-/// `ui.statusbar.focused`. Slightly lighter than the workspace-bg
-/// fallback so the row reads as a distinct chrome strip even with
-/// no theme installed.
-pub const DEFAULT_STATUSBAR_FOCUSED_HEX: u32 = 0x2d2d2d;
-
-/// Fallback for the focused status-bar text color when no theme
-/// overrides `ui.statusbar.focused.fg`. Light gray so chrome labels
-/// read against the status-bar fill without requiring a theme.
-pub const DEFAULT_STATUSBAR_TEXT_HEX: u32 = 0xcccccc;
-
-/// Fallback for the inactive tab fill when no theme overrides
-/// `ui.tab.inactive`. Matches the workspace-bg fallback so unfocused
-/// tabs read as part of the surrounding chrome.
-pub const DEFAULT_TAB_INACTIVE_HEX: u32 = 0x1e1e1e;
-
-/// Fallback for the active tab fill when no theme overrides
-/// `ui.tab.active`. Slightly lighter than the inactive fallback so
-/// the focused tab stands out against its siblings.
-pub const DEFAULT_TAB_ACTIVE_HEX: u32 = 0x2d2d2d;
-
-/// Fallback for the tab label color when no theme overrides
-/// `ui.tab.label`. Light gray so labels read against both tab
-/// fills without requiring a theme.
-pub const DEFAULT_TAB_LABEL_HEX: u32 = 0xcccccc;
-
-/// Fallback for the editor cursor cell fill when no theme overrides
-/// `ui.cursor`. Light blue so the cursor reads against dark editor
-/// backgrounds without a theme installed.
-pub const DEFAULT_CURSOR_HEX: u32 = 0xc8d6ff;
-
-/// Fallback for the search-match highlight when no theme overrides
-/// `ui.search.match`. Dim amber so highlighted match cells stand out
-/// against the workspace background without competing with the
-/// selection band's blue.
-pub const DEFAULT_SEARCH_MATCH_HEX: u32 = 0x665500;
-
-/// Fallback for the active-line row highlight when no theme overrides
-/// `ui.line_highlight`. Slightly lighter than the workspace background
-/// so the cursor's row reads against neighboring rows without a theme
-/// installed.
-pub const DEFAULT_LINE_HIGHLIGHT_HEX: u32 = 0x2a2a2a;
-
 /// Fallback for the goto-word label cell when no theme overrides
 /// `ui.goto_word.label`. Bright yellow so label characters stand out
-/// against editor text without requiring a theme.
+/// against editor text without requiring a theme. Kept as a
+/// scope-specific constant pending the
+/// `ui.goto_word.label`/`prefix` theme scopes (next item).
 pub const DEFAULT_GOTO_WORD_LABEL_HEX: u32 = 0xeeee00;
 
 /// Fallback for label characters already matched by the user's typed
@@ -90,32 +34,6 @@ pub const DEFAULT_GOTO_WORD_LABEL_HEX: u32 = 0xeeee00;
 /// so the matched characters fade visually while the unmatched
 /// remainder stays bright.
 pub const DEFAULT_GOTO_WORD_PREFIX_HEX: u32 = 0x666600;
-
-/// Fallback for muted-text scopes (gutter line numbers, dimmed
-/// chrome text) when no theme overrides `ui.text.muted`. Medium gray
-/// so muted text reads against dark editor backgrounds without
-/// requiring a theme.
-pub const DEFAULT_MUTED_TEXT_HEX: u32 = 0x808080;
-
-/// Fallback for the diagnostic-error foreground when no theme
-/// overrides `ui.diagnostic.error`. Saturated red so error badges
-/// read against the status-bar fill without a theme installed.
-pub const DEFAULT_DIAGNOSTIC_ERROR_HEX: u32 = 0xff5555;
-
-/// Fallback for the diagnostic-warning foreground when no theme
-/// overrides `ui.diagnostic.warning`. Amber so warning badges read
-/// distinctly from error and info severities without a theme.
-pub const DEFAULT_DIAGNOSTIC_WARNING_HEX: u32 = 0xffaa00;
-
-/// Fallback for the diagnostic-information foreground when no theme
-/// overrides `ui.diagnostic.info`. Accent blue so info badges read
-/// against the status-bar fill without a theme installed.
-pub const DEFAULT_DIAGNOSTIC_INFO_HEX: u32 = 0x6090ff;
-
-/// Fallback for the diagnostic-hint foreground when no theme
-/// overrides `ui.diagnostic.hint`. Muted gray so hint badges fade
-/// into chrome rather than competing with higher severities.
-pub const DEFAULT_DIAGNOSTIC_HINT_HEX: u32 = 0x808080;
 
 /// Fallback for the editor selection band when no theme overrides
 /// `ui.selection.editor`. Returns a semi-transparent blue so a
@@ -126,201 +44,277 @@ pub fn default_selection_color() -> Hsla {
     hsla(0.6, 0.5, 0.5, 0.3)
 }
 
-/// Resolve the workspace background fill from the active
-/// [`Theme`] global, falling back to [`DEFAULT_BACKGROUND_HEX`]
-/// when no theme is installed or the scope is unset.
+/// Coherent base palette the GUI's scope fallbacks derive from when
+/// the active theme leaves a scope unset. Replaces the previous set
+/// of independent per-scope `DEFAULT_*_HEX` constants so a partial or
+/// absent theme renders with consistent relationships between
+/// surfaces, text, and severity colors.
+///
+/// The 10 fields are the conventional Zed-style roles; surfaces in
+/// [`ThemeColors`] map each scope to one of these members. Curating
+/// these values is the next item's job
+/// (`Curate the default_dark base palette`); the current
+/// [`BasePalette::default_dark`] keeps the values that match the
+/// existing constants so visual output is unchanged for the scopes
+/// that already had a clean palette mapping.
+pub(crate) struct BasePalette {
+    pub(crate) background: Hsla,
+    pub(crate) surface: Hsla,
+    pub(crate) border: Hsla,
+    pub(crate) text: Hsla,
+    pub(crate) text_muted: Hsla,
+    pub(crate) accent: Hsla,
+    /// Part of the canonical 10-color palette spec. No
+    /// [`ThemeColors`] scope maps to it yet; the chat-styling and
+    /// vcs-conflict TODO items will consume it.
+    #[allow(dead_code)]
+    pub(crate) success: Hsla,
+    pub(crate) warning: Hsla,
+    pub(crate) danger: Hsla,
+    pub(crate) info: Hsla,
+}
+
+impl BasePalette {
+    pub(crate) fn default_dark() -> Self {
+        Self {
+            background: rgb(0x1e1e1e).into(),
+            surface: rgb(0x2d2d2d).into(),
+            border: rgb(0x404040).into(),
+            text: rgb(0xcccccc).into(),
+            text_muted: rgb(0x808080).into(),
+            accent: rgb(0x6090ff).into(),
+            success: rgb(0x55ff55).into(),
+            warning: rgb(0xffaa00).into(),
+            danger: rgb(0xff5555).into(),
+            info: rgb(0x6090ff).into(),
+        }
+    }
+}
+
+/// Resolved colors for every GUI scope, built from the active
+/// [`Theme`] global with palette-derived fallbacks. Construct via
+/// [`ActiveTheme::theme`] (i.e. `cx.theme()`); the constructor
+/// re-reads the [`Theme`] global on each call, so a newly installed
+/// theme is visible to the next read.
+///
+/// The `goto_word_*` and `selection` fields keep scope-specific
+/// defaults rather than derive from [`BasePalette`]: `goto_word_*`
+/// have no theme scope today (TODO adds them) and `selection`
+/// carries the alpha channel that [`default_selection_color`]
+/// supplies.
+pub struct ThemeColors {
+    pub background: Hsla,
+    pub border_inactive: Hsla,
+    pub border_focused: Hsla,
+    pub statusbar_focused: Hsla,
+    pub statusbar_text: Hsla,
+    pub tab_inactive: Hsla,
+    pub tab_active: Hsla,
+    pub tab_label: Hsla,
+    pub cursor: Hsla,
+    pub line_highlight: Hsla,
+    pub search_match: Hsla,
+    pub muted_text: Hsla,
+    pub diagnostic_error: Hsla,
+    pub diagnostic_warning: Hsla,
+    pub diagnostic_info: Hsla,
+    pub diagnostic_hint: Hsla,
+    pub goto_word_label: Hsla,
+    pub goto_word_prefix: Hsla,
+    pub selection: Hsla,
+}
+
+impl ThemeColors {
+    pub fn from_app(cx: &App) -> Self {
+        let palette = BasePalette::default_dark();
+        Self {
+            background: theme_fg_or(cx, stoat::theme::scope::UI_BACKGROUND, palette.background),
+            border_inactive: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_BORDER_INACTIVE,
+                palette.border,
+            ),
+            border_focused: theme_fg_or(cx, stoat::theme::scope::UI_BORDER_FOCUSED, palette.accent),
+            statusbar_focused: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_STATUSBAR_FOCUSED,
+                palette.surface,
+            ),
+            statusbar_text: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_STATUSBAR_FOCUSED,
+                palette.text,
+            ),
+            tab_inactive: theme_bg_or(cx, stoat::theme::scope::UI_TAB_INACTIVE, palette.background),
+            tab_active: theme_bg_or(cx, stoat::theme::scope::UI_TAB_ACTIVE, palette.surface),
+            tab_label: theme_fg_or(cx, stoat::theme::scope::UI_TAB_LABEL, palette.text),
+            cursor: theme_bg_or(cx, stoat::theme::scope::UI_CURSOR, palette.accent),
+            line_highlight: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_LINE_HIGHLIGHT,
+                palette.surface,
+            ),
+            search_match: theme_bg_or(cx, stoat::theme::scope::UI_SEARCH_MATCH, palette.warning),
+            muted_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_MUTED, palette.text_muted),
+            diagnostic_error: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_DIAGNOSTIC_ERROR,
+                palette.danger,
+            ),
+            diagnostic_warning: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_DIAGNOSTIC_WARNING,
+                palette.warning,
+            ),
+            diagnostic_info: theme_fg_or(cx, stoat::theme::scope::UI_DIAGNOSTIC_INFO, palette.info),
+            diagnostic_hint: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_DIAGNOSTIC_HINT,
+                palette.text_muted,
+            ),
+            goto_word_label: rgb(DEFAULT_GOTO_WORD_LABEL_HEX).into(),
+            goto_word_prefix: rgb(DEFAULT_GOTO_WORD_PREFIX_HEX).into(),
+            selection: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_SELECTION_EDITOR,
+                default_selection_color(),
+            ),
+        }
+    }
+}
+
+/// Accessor trait that exposes the resolved [`ThemeColors`] for the
+/// active [`Theme`] global. Modeled on Zed's `ActiveTheme` shape so
+/// call sites read theme colors as `cx.theme().<field>`.
+pub trait ActiveTheme {
+    fn theme(&self) -> ThemeColors;
+}
+
+impl ActiveTheme for App {
+    fn theme(&self) -> ThemeColors {
+        ThemeColors::from_app(self)
+    }
+}
+
+/// Resolve the workspace background fill from the active [`Theme`]
+/// global, falling back to the palette-derived value when no theme
+/// is installed or the scope is unset.
 pub fn background_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_BACKGROUND,
-        DEFAULT_BACKGROUND_HEX,
-    )
+    cx.theme().background
 }
 
 /// Resolve the inactive border color from the active [`Theme`]
-/// global, falling back to [`DEFAULT_BORDER_INACTIVE_HEX`] when
-/// no theme is installed or the scope is unset.
+/// global, palette-derived fallback otherwise.
 pub fn border_inactive_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_BORDER_INACTIVE,
-        DEFAULT_BORDER_INACTIVE_HEX,
-    )
+    cx.theme().border_inactive
 }
 
 /// Resolve the focus-ring color from the active [`Theme`] global,
-/// falling back to [`DEFAULT_BORDER_FOCUSED_HEX`] when no theme is
-/// installed or the scope is unset.
+/// palette-derived fallback otherwise.
 pub fn border_focused_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_BORDER_FOCUSED,
-        DEFAULT_BORDER_FOCUSED_HEX,
-    )
+    cx.theme().border_focused
 }
 
 /// Resolve the focused status-bar fill from the active [`Theme`]
-/// global, falling back to [`DEFAULT_STATUSBAR_FOCUSED_HEX`] when no
-/// theme is installed or the scope is unset. Reads the scope's
-/// `bg` channel because chrome strips paint their fill from the
-/// theme's background, not its foreground.
+/// global, palette-derived fallback otherwise. Reads the scope's
+/// `bg` channel.
 pub fn statusbar_focused_color(cx: &App) -> Hsla {
-    theme_bg_or(
-        cx,
-        stoat::theme::scope::UI_STATUSBAR_FOCUSED,
-        DEFAULT_STATUSBAR_FOCUSED_HEX,
-    )
+    cx.theme().statusbar_focused
 }
 
 /// Resolve the focused status-bar text color from the active [`Theme`]
-/// global, falling back to [`DEFAULT_STATUSBAR_TEXT_HEX`] when no
-/// theme is installed or the scope is unset. Reads the scope's `fg`
-/// channel so chrome labels paint over the bar's fill in the theme's
-/// foreground color.
+/// global, palette-derived fallback otherwise. Reads the scope's `fg`
+/// channel.
 pub fn statusbar_text_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_STATUSBAR_FOCUSED,
-        DEFAULT_STATUSBAR_TEXT_HEX,
-    )
+    cx.theme().statusbar_text
 }
 
 /// Resolve the inactive tab fill from the active [`Theme`] global,
-/// falling back to [`DEFAULT_TAB_INACTIVE_HEX`] when no theme is
-/// installed or the scope is unset. Reads the scope's `bg` channel.
+/// palette-derived fallback otherwise. Reads the scope's `bg` channel.
 pub fn tab_inactive_color(cx: &App) -> Hsla {
-    theme_bg_or(
-        cx,
-        stoat::theme::scope::UI_TAB_INACTIVE,
-        DEFAULT_TAB_INACTIVE_HEX,
-    )
+    cx.theme().tab_inactive
 }
 
 /// Resolve the active tab fill from the active [`Theme`] global,
-/// falling back to [`DEFAULT_TAB_ACTIVE_HEX`] when no theme is
-/// installed or the scope is unset. Reads the scope's `bg` channel.
+/// palette-derived fallback otherwise. Reads the scope's `bg` channel.
 pub fn tab_active_color(cx: &App) -> Hsla {
-    theme_bg_or(
-        cx,
-        stoat::theme::scope::UI_TAB_ACTIVE,
-        DEFAULT_TAB_ACTIVE_HEX,
-    )
+    cx.theme().tab_active
 }
 
 /// Resolve the tab label color from the active [`Theme`] global,
-/// falling back to [`DEFAULT_TAB_LABEL_HEX`] when no theme is
-/// installed or the scope is unset. Reads the scope's `fg` channel.
+/// palette-derived fallback otherwise. Reads the scope's `fg` channel.
 pub fn tab_label_color(cx: &App) -> Hsla {
-    theme_fg_or(cx, stoat::theme::scope::UI_TAB_LABEL, DEFAULT_TAB_LABEL_HEX)
+    cx.theme().tab_label
 }
 
 /// Resolve the editor cursor cell fill from the active [`Theme`]
-/// global, falling back to [`DEFAULT_CURSOR_HEX`] when no theme is
-/// installed or the scope is unset. Reads the scope's `bg` channel
-/// because the cursor paints as a highlighted cell behind the
-/// underlying character.
+/// global, palette-derived fallback otherwise. Reads the scope's `bg`
+/// channel.
 pub fn cursor_color(cx: &App) -> Hsla {
-    theme_bg_or(cx, stoat::theme::scope::UI_CURSOR, DEFAULT_CURSOR_HEX)
+    cx.theme().cursor
 }
 
 /// Resolve the active-line row highlight from the active [`Theme`]
-/// global, falling back to [`DEFAULT_LINE_HIGHLIGHT_HEX`] when no
-/// theme is installed or the scope is unset. Reads the scope's `bg`
-/// channel because the highlight paints behind the row's characters.
+/// global, palette-derived fallback otherwise. Reads the scope's `bg`
+/// channel.
 pub fn active_line_color(cx: &App) -> Hsla {
-    theme_bg_or(
-        cx,
-        stoat::theme::scope::UI_LINE_HIGHLIGHT,
-        DEFAULT_LINE_HIGHLIGHT_HEX,
-    )
+    cx.theme().line_highlight
 }
 
 /// Resolve the search-match highlight from the active [`Theme`]
-/// global, falling back to [`DEFAULT_SEARCH_MATCH_HEX`] when no
-/// theme is installed or the scope is unset. Reads the scope's `bg`
-/// channel because matches paint as a background band behind the
-/// matched characters.
+/// global, palette-derived fallback otherwise. Reads the scope's `bg`
+/// channel.
 pub fn search_match_color(cx: &App) -> Hsla {
-    theme_bg_or(
-        cx,
-        stoat::theme::scope::UI_SEARCH_MATCH,
-        DEFAULT_SEARCH_MATCH_HEX,
-    )
+    cx.theme().search_match
 }
 
-/// Resolve the goto-word label cell color. Returns
-/// [`DEFAULT_GOTO_WORD_LABEL_HEX`] directly -- there is no
-/// `ui.goto_word.label` theme scope today; callers paint labels
-/// with this constant until a scope is added.
-pub fn goto_word_label_color(_cx: &App) -> Hsla {
-    rgb(DEFAULT_GOTO_WORD_LABEL_HEX).into()
+/// Resolve the goto-word label cell color. Returns a fixed yellow
+/// per [`DEFAULT_GOTO_WORD_LABEL_HEX`] today -- the corresponding
+/// theme scope is added in a follow-up.
+pub fn goto_word_label_color(cx: &App) -> Hsla {
+    cx.theme().goto_word_label
 }
 
 /// Resolve the goto-word matched-prefix color. Same direct-constant
 /// path as [`goto_word_label_color`] using
 /// [`DEFAULT_GOTO_WORD_PREFIX_HEX`].
-pub fn goto_word_prefix_color(_cx: &App) -> Hsla {
-    rgb(DEFAULT_GOTO_WORD_PREFIX_HEX).into()
+pub fn goto_word_prefix_color(cx: &App) -> Hsla {
+    cx.theme().goto_word_prefix
 }
 
 /// Resolve the muted-text color (gutter line numbers, dimmed chrome
-/// text) from the active [`Theme`] global, falling back to
-/// [`DEFAULT_MUTED_TEXT_HEX`] when no theme is installed or the
-/// scope is unset. Reads the scope's `fg` channel.
+/// text) from the active [`Theme`] global, palette-derived fallback
+/// otherwise. Reads the scope's `fg` channel.
 pub fn muted_text_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_TEXT_MUTED,
-        DEFAULT_MUTED_TEXT_HEX,
-    )
+    cx.theme().muted_text
 }
 
 /// Resolve the diagnostic-error foreground from the active [`Theme`]
-/// global, falling back to [`DEFAULT_DIAGNOSTIC_ERROR_HEX`] when no
-/// theme is installed or the scope is unset. Reads the scope's `fg`
+/// global, palette-derived fallback otherwise. Reads the scope's `fg`
 /// channel; consumed by the status-bar diagnostic badge.
 pub fn diagnostic_error_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_DIAGNOSTIC_ERROR,
-        DEFAULT_DIAGNOSTIC_ERROR_HEX,
-    )
+    cx.theme().diagnostic_error
 }
 
 /// Resolve the diagnostic-warning foreground from the active
-/// [`Theme`] global, falling back to
-/// [`DEFAULT_DIAGNOSTIC_WARNING_HEX`] when no theme is installed or
-/// the scope is unset. Reads the scope's `fg` channel.
+/// [`Theme`] global, palette-derived fallback otherwise. Reads the
+/// scope's `fg` channel.
 pub fn diagnostic_warning_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_DIAGNOSTIC_WARNING,
-        DEFAULT_DIAGNOSTIC_WARNING_HEX,
-    )
+    cx.theme().diagnostic_warning
 }
 
 /// Resolve the diagnostic-information foreground from the active
-/// [`Theme`] global, falling back to
-/// [`DEFAULT_DIAGNOSTIC_INFO_HEX`] when no theme is installed or
-/// the scope is unset. Reads the scope's `fg` channel.
+/// [`Theme`] global, palette-derived fallback otherwise. Reads the
+/// scope's `fg` channel.
 pub fn diagnostic_info_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_DIAGNOSTIC_INFO,
-        DEFAULT_DIAGNOSTIC_INFO_HEX,
-    )
+    cx.theme().diagnostic_info
 }
 
 /// Resolve the diagnostic-hint foreground from the active [`Theme`]
-/// global, falling back to [`DEFAULT_DIAGNOSTIC_HINT_HEX`] when no
-/// theme is installed or the scope is unset. Reads the scope's `fg`
+/// global, palette-derived fallback otherwise. Reads the scope's `fg`
 /// channel.
 pub fn diagnostic_hint_color(cx: &App) -> Hsla {
-    theme_fg_or(
-        cx,
-        stoat::theme::scope::UI_DIAGNOSTIC_HINT,
-        DEFAULT_DIAGNOSTIC_HINT_HEX,
-    )
+    cx.theme().diagnostic_hint
 }
 
 /// Resolve the editor selection band fill from the active [`Theme`]
@@ -328,27 +322,23 @@ pub fn diagnostic_hint_color(cx: &App) -> Hsla {
 /// theme is installed or the scope is unset. Reads the scope's
 /// `bg` channel.
 pub fn selection_color(cx: &App) -> Hsla {
-    cx.try_global::<Theme>()
-        .and_then(|t| t.0.try_get(stoat::theme::scope::UI_SELECTION_EDITOR))
-        .and_then(|style| style.bg)
-        .and_then(ratatui_color_to_hsla)
-        .unwrap_or_else(default_selection_color)
+    cx.theme().selection
 }
 
-fn theme_fg_or(cx: &App, scope: &str, fallback_hex: u32) -> Hsla {
+fn theme_fg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
     cx.try_global::<Theme>()
         .and_then(|t| t.0.try_get(scope))
         .and_then(|style| style.fg)
         .and_then(ratatui_color_to_hsla)
-        .unwrap_or_else(|| rgb(fallback_hex).into())
+        .unwrap_or(fallback)
 }
 
-fn theme_bg_or(cx: &App, scope: &str, fallback_hex: u32) -> Hsla {
+fn theme_bg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
     cx.try_global::<Theme>()
         .and_then(|t| t.0.try_get(scope))
         .and_then(|style| style.bg)
         .and_then(ratatui_color_to_hsla)
-        .unwrap_or_else(|| rgb(fallback_hex).into())
+        .unwrap_or(fallback)
 }
 
 /// App-global wrapper around [`stoat::theme::Theme`]. Stored via
@@ -400,10 +390,18 @@ mod tests {
     use gpui::TestAppContext;
 
     #[test]
+    fn default_dark_palette_severity_colors_are_distinct() {
+        let palette = BasePalette::default_dark();
+        assert_ne!(palette.success, palette.warning);
+        assert_ne!(palette.warning, palette.danger);
+        assert_ne!(palette.success, palette.danger);
+    }
+
+    #[test]
     fn background_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| background_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_BACKGROUND_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().background);
     }
 
     #[test]
@@ -414,14 +412,14 @@ mod tests {
             cx.set_global(theme);
             background_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_BACKGROUND_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().background);
     }
 
     #[test]
     fn statusbar_focused_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| statusbar_focused_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_STATUSBAR_FOCUSED_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().surface);
     }
 
     #[test]
@@ -435,14 +433,14 @@ mod tests {
             cx.set_global(theme);
             statusbar_focused_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_STATUSBAR_FOCUSED_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().surface);
     }
 
     #[test]
     fn statusbar_text_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| statusbar_text_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_STATUSBAR_TEXT_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().text);
     }
 
     #[test]
@@ -456,14 +454,14 @@ mod tests {
             cx.set_global(theme);
             statusbar_text_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_STATUSBAR_TEXT_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().text);
     }
 
     #[test]
     fn tab_active_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| tab_active_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_TAB_ACTIVE_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().surface);
     }
 
     #[test]
@@ -475,7 +473,7 @@ mod tests {
             cx.set_global(theme);
             tab_active_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_TAB_ACTIVE_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().surface);
     }
 
     #[test]
@@ -503,7 +501,7 @@ mod tests {
     fn muted_text_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| muted_text_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_MUTED_TEXT_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().text_muted);
     }
 
     #[test]
@@ -514,14 +512,14 @@ mod tests {
             cx.set_global(theme);
             muted_text_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_MUTED_TEXT_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().text_muted);
     }
 
     #[test]
     fn active_line_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| active_line_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_LINE_HIGHLIGHT_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().surface);
     }
 
     #[test]
@@ -535,14 +533,14 @@ mod tests {
             cx.set_global(theme);
             active_line_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_LINE_HIGHLIGHT_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().surface);
     }
 
     #[test]
     fn search_match_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| search_match_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_SEARCH_MATCH_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().warning);
     }
 
     #[test]
@@ -554,14 +552,14 @@ mod tests {
             cx.set_global(theme);
             search_match_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_SEARCH_MATCH_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().warning);
     }
 
     #[test]
     fn diagnostic_error_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| diagnostic_error_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_ERROR_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().danger);
     }
 
     #[test]
@@ -573,14 +571,14 @@ mod tests {
             cx.set_global(theme);
             diagnostic_error_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_ERROR_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().danger);
     }
 
     #[test]
     fn diagnostic_warning_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| diagnostic_warning_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_WARNING_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().warning);
     }
 
     #[test]
@@ -594,14 +592,14 @@ mod tests {
             cx.set_global(theme);
             diagnostic_warning_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_WARNING_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().warning);
     }
 
     #[test]
     fn diagnostic_info_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| diagnostic_info_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_INFO_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().info);
     }
 
     #[test]
@@ -613,14 +611,14 @@ mod tests {
             cx.set_global(theme);
             diagnostic_info_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_INFO_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().info);
     }
 
     #[test]
     fn diagnostic_hint_color_falls_back_when_theme_missing() {
         let cx = TestAppContext::single();
         let resolved = cx.update(|cx| diagnostic_hint_color(cx));
-        assert_eq!(resolved, rgb(DEFAULT_DIAGNOSTIC_HINT_HEX).into());
+        assert_eq!(resolved, BasePalette::default_dark().text_muted);
     }
 
     #[test]
@@ -632,6 +630,6 @@ mod tests {
             cx.set_global(theme);
             diagnostic_hint_color(cx)
         });
-        assert_ne!(resolved, rgb(DEFAULT_DIAGNOSTIC_HINT_HEX).into());
+        assert_ne!(resolved, BasePalette::default_dark().text_muted);
     }
 }
