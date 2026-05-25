@@ -27,6 +27,7 @@ pub fn run(
     files: Vec<PathBuf>,
     restore: RestoreMode,
     inputs: Option<String>,
+    timeout: Option<f64>,
 ) -> Result<(), Whatever> {
     install_panic_hook();
 
@@ -73,7 +74,7 @@ pub fn run(
         executor: ExecutorGlobal(executor),
     };
 
-    stoat_gui::run(globals, files, restore, inputs);
+    stoat_gui::run(globals, files, restore, inputs, timeout);
     Ok(())
 }
 

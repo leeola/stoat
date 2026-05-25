@@ -75,6 +75,11 @@ enum Command {
         /// interactive features without a keyboard.
         #[arg(long)]
         inputs: Option<String>,
+        /// Auto-close the window after `SECONDS` so a run can capture logs
+        /// for an action without a quit keystroke. Fractional values
+        /// allowed (e.g. `1.5`).
+        #[arg(long, value_name = "SECONDS")]
+        timeout: Option<f64>,
     },
 }
 
@@ -98,7 +103,9 @@ pub fn run() -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
-        Some(Command::Gui { inputs }) => crate::commands::gui::run(files, restore, inputs),
+        Some(Command::Gui { inputs, timeout }) => {
+            crate::commands::gui::run(files, restore, inputs, timeout)
+        },
         Some(Command::Review) | None => {
             let _ = restore;
             print_gui_hint()

@@ -151,6 +151,7 @@ pub fn run(
     files: Vec<std::path::PathBuf>,
     restore: RestoreMode,
     inputs: Option<String>,
+    timeout: Option<f64>,
 ) {
     Application::new().run(move |cx: &mut App| {
         tracing::info!("stoat gui starting");
@@ -171,6 +172,15 @@ pub fn run(
             .expect("open root window");
         if let Some(inputs) = inputs {
             input_driver::drive_inputs(cx, window, inputs);
+        }
+        if let Some(timeout) = timeout {
+            cx.spawn(async move |cx| {
+                cx.background_executor()
+                    .timer(std::time::Duration::from_secs_f64(timeout))
+                    .await;
+                cx.update(|app| app.quit()).ok();
+            })
+            .detach();
         }
         cx.on_window_closed(|cx| {
             if cx.windows().is_empty() {
