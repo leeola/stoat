@@ -150,6 +150,8 @@ pub struct ThemeColors {
     pub vcs_commit_sha: Hsla,
     pub vcs_commit_summary: Hsla,
     pub vcs_commit_metadata: Hsla,
+    pub diff_context: Hsla,
+    pub diff_current_hunk: Hsla,
 }
 
 impl ThemeColors {
@@ -287,6 +289,12 @@ impl ThemeColors {
                 stoat::theme::scope::VCS_COMMIT_METADATA,
                 palette.text_muted,
             ),
+            diff_context: theme_fg_or(cx, stoat::theme::scope::DIFF_CONTEXT, palette.text_muted),
+            diff_current_hunk: theme_fg_or(
+                cx,
+                stoat::theme::scope::DIFF_CURRENT_HUNK,
+                palette.info,
+            ),
         }
     }
 }
@@ -396,6 +404,8 @@ mod tests {
         assert_eq!(theme.vcs_rebase_drop, palette.danger);
         assert_eq!(theme.vcs_commit_sha, palette.warning);
         assert_eq!(theme.vcs_commit_metadata, palette.text_muted);
+        assert_eq!(theme.diff_context, palette.text_muted);
+        assert_eq!(theme.diff_current_hunk, palette.info);
     }
 
     #[test]

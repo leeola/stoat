@@ -94,8 +94,8 @@ fn status_glyph(status: DiffHunkStatus) -> &'static str {
 
 impl Render for DiffHunkPanel {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let text_color = cx.theme().statusbar_text;
-        let mut list = div().size_full().px_2().py_1().text_color(text_color);
+        let theme = cx.theme();
+        let mut list = div().size_full().px_2().py_1();
         for (idx, hunk) in self.hunks.iter().enumerate() {
             let label = format!(
                 "{}  L{}-{}",
@@ -104,14 +104,24 @@ impl Render for DiffHunkPanel {
                 hunk.end_line.max(hunk.start_line + 1),
             );
             let selected = idx == self.selected && !self.hunks.is_empty();
-            let mut row = div().px_1().py_0p5().child(label).on_mouse_down(
-                MouseButton::Left,
-                cx.listener(move |this, _, _window, cx| {
-                    this.select_hunk(idx, cx);
-                }),
-            );
+            let row_color = if selected {
+                theme.diff_current_hunk
+            } else {
+                theme.diff_context
+            };
+            let mut row = div()
+                .px_1()
+                .py_0p5()
+                .text_color(row_color)
+                .child(label)
+                .on_mouse_down(
+                    MouseButton::Left,
+                    cx.listener(move |this, _, _window, cx| {
+                        this.select_hunk(idx, cx);
+                    }),
+                );
             if selected {
-                row = row.bg(gpui::white().opacity(0.1));
+                row = row.bg(theme.selection);
             }
             list = list.child(row);
         }
