@@ -155,6 +155,7 @@ pub struct ThemeColors {
     pub vcs_conflict_header: Hsla,
     pub vcs_conflict_ours: Hsla,
     pub vcs_conflict_theirs: Hsla,
+    pub ui_modal_help: Hsla,
 }
 
 impl ThemeColors {
@@ -313,6 +314,7 @@ impl ThemeColors {
                 stoat::theme::scope::VCS_CONFLICT_THEIRS,
                 palette.accent,
             ),
+            ui_modal_help: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_HELP, palette.accent),
         }
     }
 }
@@ -426,6 +428,7 @@ mod tests {
         assert_eq!(theme.diff_current_hunk, palette.info);
         assert_eq!(theme.vcs_conflict_ours, palette.success);
         assert_eq!(theme.vcs_conflict_theirs, palette.accent);
+        assert_eq!(theme.ui_modal_help, palette.accent);
     }
 
     #[test]

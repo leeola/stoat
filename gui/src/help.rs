@@ -17,6 +17,7 @@ use crate::{
     buffer::Buffer,
     editor::{Editor, EditorEvent},
     modal_layer::ModalView,
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -341,7 +342,8 @@ fn format_example(entry: &HelpEntry) -> String {
 }
 
 impl Render for HelpModal {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let title = match self.scope {
             HelpScope::Active => SharedString::from(format!(
                 "help: active ({})",
@@ -354,6 +356,7 @@ impl Render for HelpModal {
             HelpScope::All => SharedString::from("help: all actions"),
         };
 
+        let selection_bg = theme.selection;
         let list_rows: Vec<gpui::AnyElement> = self
             .filtered
             .iter()
@@ -370,7 +373,7 @@ impl Render for HelpModal {
                     .child(div().child(entry.def.name().to_string()))
                     .child(div().child(entry.def.short_desc().to_string()));
                 if is_selected {
-                    row_div.bg(gpui::black()).into_any_element()
+                    row_div.bg(selection_bg).into_any_element()
                 } else {
                     row_div.into_any_element()
                 }
@@ -390,7 +393,7 @@ impl Render for HelpModal {
             .flex_col()
             .size_full()
             .track_focus(&self.focus_handle)
-            .child(div().child(title))
+            .child(div().text_color(theme.ui_modal_help).child(title))
             .child(self.input.clone())
             .child(
                 div()
