@@ -410,6 +410,18 @@ on key {
     mode == reword_insert {
         Escape -> SetMode(reword);
         Ctrl-s -> RewordConfirm();
+        Backspace -> DeleteBackward();
+        Delete -> DeleteForward();
+        Left -> MoveLeft();
+        Right -> MoveRight();
+        Up -> MoveUp();
+        Down -> MoveDown();
+        Home -> GotoLineStart();
+        End -> GotoLineEnd();
+        Alt-Backspace -> DeleteWordBackward();
+        Alt-Delete -> DeleteWordForward();
+        Ctrl-a -> GotoLineStart();
+        Ctrl-e -> GotoLineEnd();
     }
     mode == conflict {
         Escape -> ConflictAbort();

@@ -120,6 +120,10 @@ impl ModalView for RewordModal {
             _ => false,
         }
     }
+
+    fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
+        Some(self.editor.downgrade())
+    }
 }
 
 #[cfg(test)]
