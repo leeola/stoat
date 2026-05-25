@@ -7,21 +7,21 @@ focused: #1 of 1
 mode: conflict
 size: 100x18
 ---
-[0m[1m[31mconflict picking c3[0m              [0m[90m│[0m
-[0m[90mo take ours  t take theirs  s skip entry  Enter commit  a abort[0m
-                                 [0m[90m│[0m
-[0m[7m[30m[107m? a.rs                           [0m[90m│unresolved (defaults to theirs)[0m
-                                 [0m[90m│[0m
-                                 [0m[90m│[0m[31m<<<<<<< ours[0m
-                                 [0m[90m│[0m[97mline1[0m
-                                 [0m[90m│[0m[97mline2[0m
-                                 [0m[90m│=======[0m
-                                 [0m[90m│[0m[97mline1[0m
-                                 [0m[90m│[0m[97mline2[0m
-                                 [0m[90m│[0m[97mline3[0m
-                                 [0m[90m│[0m[32m>>>>>>> theirs[0m
-                                 [0m[90m│[0m
-                                 [0m[90m│--- ancestor ---[0m
-                                 [0m[90m│line1[0m
-                                 [0m[90m│line2[0m
-[0m[1m[30m[101m CNF [0m[1m[97m[100m repo [0m[97m[100mconflict                                                                                 [0m
+[0m[1m[38;2;244;71;71mconflict picking c3[0m              [0m[38;2;128;128;128m│[0m
+[0m[38;2;128;128;128mo take ours  t take theirs  s skip entry  Enter commit  a abort[0m
+                                 [0m[38;2;128;128;128m│[0m
+[0m[7m[30m[48;2;204;204;204m? a.rs                           [0m[38;2;128;128;128m│unresolved (defaults to theirs)[0m
+                                 [0m[38;2;128;128;128m│[0m
+                                 [0m[38;2;128;128;128m│[0m[38;2;244;71;71m<<<<<<< ours[0m
+                                 [0m[38;2;128;128;128m│[0m[38;2;204;204;204mline1[0m
+                                 [0m[38;2;128;128;128m│[0m[38;2;204;204;204mline2[0m
+                                 [0m[38;2;128;128;128m│=======[0m
+                                 [0m[38;2;128;128;128m│[0m[38;2;204;204;204mline1[0m
+                                 [0m[38;2;128;128;128m│[0m[38;2;204;204;204mline2[0m
+                                 [0m[38;2;128;128;128m│[0m[38;2;204;204;204mline3[0m
+                                 [0m[38;2;128;128;128m│[0m[38;2;78;201;176m>>>>>>> theirs[0m
+                                 [0m[38;2;128;128;128m│[0m
+                                 [0m[38;2;128;128;128m│--- ancestor ---[0m
+                                 [0m[38;2;128;128;128m│line1[0m
+                                 [0m[38;2;128;128;128m│line2[0m
+[0m[1m[30m[101m CNF [0m[1m[38;2;204;204;204m[48;2;128;128;128m repo [0m[38;2;204;204;204m[48;2;128;128;128mconflict                                                                                 [0m

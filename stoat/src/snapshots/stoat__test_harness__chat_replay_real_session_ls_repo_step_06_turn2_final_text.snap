@@ -7,27 +7,27 @@ focused: #1 of 1
 mode: prompt
 size: 80x24
 ---
-[0m[90mClaude[0m
+[0m[38;2;128;128;128mClaude[0m
 
-[0m[90m--------------------------------------------------------------------------------[0m
-[0m[37m  1.8s[0m
+[0m[38;2;128;128;128m--------------------------------------------------------------------------------[0m
+[0m[38;2;160;160;160m  1.8s[0m
 
-[0m[3m[90m~ Thinking... (1 lines)[0m
+[0m[3m[38;2;128;128;128m~ Thinking... (1 lines)[0m
 
-[0m[34m⏺ Bash(ls /Users/lee/projects/stoat)[0m
-[0m[32m  done[0m
-[0m[90m  └─ CLAUDE.local.md (+33 more lines)[0m
+[0m[38;2;86;156;214m⏺ Bash(ls /Users/lee/projects/stoat)[0m
+[0m[38;2;78;201;176m  done[0m
+[0m[38;2;128;128;128m  └─ CLAUDE.local.md (+33 more lines)[0m
 
-[0m[97mHere are the top-level files and directories in the repo:[0m
+[0m[38;2;204;204;204mHere are the top-level files and directories in the repo:[0m
 
-[0m[97m**Files:** `CLAUDE.md`, `CLAUDE.local.md`, `Cargo.lock`, `Cargo.toml`,[0m
-[0m[97m`LICENSE`, `README.md`, `TODO.md`, `clippy.toml`, `config.stcfg`, `flake.lock`,[0m
-[0m[97m`flake.nix`, `log.txt`, `rust-toolchain.toml`, `rustfmt.toml`, `stoat.log`,[0m
-[0m[97m`test.csv`[0m
+[0m[38;2;204;204;204m**Files:** `CLAUDE.md`, `CLAUDE.local.md`, `Cargo.lock`, `Cargo.toml`,[0m
+[0m[38;2;204;204;204m`LICENSE`, `README.md`, `TODO.md`, `clippy.toml`, `config.stcfg`, `flake.lock`,[0m
+[0m[38;2;204;204;204m`flake.nix`, `log.txt`, `rust-toolchain.toml`, `rustfmt.toml`, `stoat.log`,[0m
+[0m[38;2;204;204;204m`test.csv`[0m
 
-[0m[97m**Directories:** `action`, `agent`, `bin`, `config`, `examples`, `language`,[0m
-[0m[97m`log`, `logs`, `references`, `scheduler`, `script`, `stoat`, `target`,[0m
-[0m[97m`test_workspace`, `text`, `tmp`, `vendor`, `viewport`[0m
-[0m[90m--------------------------------------------------------------------------------[0m
+[0m[38;2;204;204;204m**Directories:** `action`, `agent`, `bin`, `config`, `examples`, `language`,[0m
+[0m[38;2;204;204;204m`log`, `logs`, `references`, `scheduler`, `script`, `stoat`, `target`,[0m
+[0m[38;2;204;204;204m`test_workspace`, `text`, `tmp`, `vendor`, `viewport`[0m
+[0m[38;2;128;128;128m--------------------------------------------------------------------------------[0m
 [0m[7m [0m
-[0m[1m[30m[42m PMT [0m[1m[97m[100m (unnamed) [0m[97m[100m[claude]                                                        [0m
+[0m[1m[30m[48;2;78;201;176m PMT [0m[1m[38;2;204;204;204m[48;2;128;128;128m (unnamed) [0m[38;2;204;204;204m[48;2;128;128;128m[claude]                                                        [0m

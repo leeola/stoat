@@ -7,8 +7,8 @@ focused: #1 of 1
 mode: rebase
 size: 90x12
 ---
-[0m[33msquash[0m [0m[36mc2[0m [0m[97mc2: middle[0m
-[0m[7m[30m[107mdrop   c3 c3: tip                                                                         [0m
+[0m[38;2;220;220;170msquash[0m [0m[38;2;79;193;255mc2[0m [0m[38;2;204;204;204mc2: middle[0m
+[0m[7m[30m[48;2;204;204;204mdrop   c3 c3: tip                                                                         [0m
 
 
 
@@ -16,6 +16,6 @@ size: 90x12
 
 
 
-[0m[90mj/k move  K/J reorder  p/s/f/d set op  Enter run  q abort[0m
-[0m[90m2 entries, onto c1[0m
-[0m[1m[30m[41m REB [0m[1m[97m[100m repo [0m[97m[100mrebase                                                                         [0m
+[0m[38;2;128;128;128mj/k move  K/J reorder  p/s/f/d set op  Enter run  q abort[0m
+[0m[38;2;128;128;128m2 entries, onto c1[0m
+[0m[1m[30m[48;2;244;71;71m REB [0m[1m[38;2;204;204;204m[48;2;128;128;128m repo [0m[38;2;204;204;204m[48;2;128;128;128mrebase                                                                         [0m

@@ -1,14 +1,14 @@
 theme default_dark {
-    let accent  = cyan;
-    let primary = blue;
-    let success = green;
-    let warning = yellow;
-    let danger  = red;
-    let info    = cyan;
-    let special = magenta;
-    let muted   = dark_gray;
-    let dim     = gray;
-    let text    = white;
+    let accent  = "#4fc1ff";
+    let primary = "#569cd6";
+    let success = "#4ec9b0";
+    let warning = "#dcdcaa";
+    let danger  = "#f44747";
+    let info    = "#569cd6";
+    let special = "#c586c0";
+    let muted   = "#808080";
+    let dim     = "#a0a0a0";
+    let text    = "#cccccc";
 
     ui.cursor = { modifiers: [reversed] };
     ui.cursor.input = { fg: black, bg: text };
