@@ -499,8 +499,18 @@ on key {
         Enter -> SubmitPromptInput();
         Shift-Enter -> PromptInsertNewline();
         Alt-Enter -> PromptInsertNewline();
+        Backspace -> DeleteBackward();
+        Delete -> DeleteForward();
+        Left -> MoveLeft();
+        Right -> MoveRight();
         Up -> MoveUp();
         Down -> MoveDown();
+        Home -> GotoLineStart();
+        End -> GotoLineEnd();
+        Alt-Backspace -> DeleteWordBackward();
+        Alt-Delete -> DeleteWordForward();
+        Ctrl-a -> GotoLineStart();
+        Ctrl-e -> GotoLineEnd();
     }
     mode == space {
         Escape -> SetMode(normal);
