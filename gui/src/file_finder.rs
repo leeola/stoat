@@ -256,7 +256,7 @@ impl PickerDelegate for FileFinderDelegate {
             return div().into_any_element();
         };
         let display = display_path(path, &self.git_root);
-        let color = cx.theme().statusbar_text;
+        let color = cx.theme().modal_picker;
         let runs = match_highlight_runs(
             &display,
             matched,
@@ -268,7 +268,7 @@ impl PickerDelegate for FileFinderDelegate {
         let label = StyledText::new(SharedString::from(display)).with_highlights(runs);
         let mut row = div().px_2().text_color(color).child(label);
         if selected {
-            row = row.bg(gpui::white().opacity(0.1));
+            row = row.bg(cx.theme().selection);
         }
         row.into_any_element()
     }

@@ -117,6 +117,7 @@ pub struct ThemeColors {
     pub selection: Hsla,
     pub selection_editor: Hsla,
     pub modal_palette: Hsla,
+    pub modal_picker: Hsla,
     pub error: Hsla,
 }
 
@@ -177,6 +178,7 @@ impl ThemeColors {
                 default_selection_color(),
             ),
             modal_palette: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_PALETTE, palette.accent),
+            modal_picker: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_PICKER, palette.accent),
             error: theme_fg_or(cx, stoat::theme::scope::UI_ERROR, palette.danger),
         }
     }
@@ -278,6 +280,7 @@ mod tests {
         assert_eq!(theme.selection_editor, default_selection_color());
         assert_eq!(theme.selection, palette.accent);
         assert_eq!(theme.modal_palette, palette.accent);
+        assert_eq!(theme.modal_picker, palette.accent);
         assert_eq!(theme.error, palette.danger);
     }
 
