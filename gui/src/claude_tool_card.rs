@@ -10,9 +10,9 @@
 //! status badge, per-tool header extraction, and the
 //! collapsed-preview / expanded-input-and-output body split.
 
-use crate::claude_chat::ClaudeChat;
+use crate::{claude_chat::ClaudeChat, theme::ActiveTheme};
 use gpui::{
-    div, AnyElement, Context, ElementId, InteractiveElement, IntoElement, ParentElement,
+    div, AnyElement, Context, ElementId, Hsla, InteractiveElement, IntoElement, ParentElement,
     SharedString, StatefulInteractiveElement, Styled,
 };
 use std::collections::HashSet;
@@ -63,6 +63,16 @@ pub(crate) fn render_tool_card(
     let is_expanded = chat.expanded_tool_ids.contains(id);
     let result_content = find_result_content(&chat.messages, id);
 
+    let theme = cx.theme();
+    let header_color = if is_focused {
+        theme.chat_tool_focused
+    } else {
+        theme.chat_tool_header
+    };
+    let body_color = theme.chat_tool_body;
+    let status_color = status_color(status, &theme);
+    let focused_color = theme.chat_tool_focused;
+
     let header_text = format!("\u{23fa} {}", format_tool_header(name, input));
     let status_text = format!("  {}", status_label(status));
     let element_id: ElementId = SharedString::from(format!("claude_tool_card:{id}")).into();
@@ -72,45 +82,76 @@ pub(crate) fn render_tool_card(
         .id(element_id)
         .px_2()
         .py_1()
+        .text_color(header_color)
         .child(SharedString::from(header_text))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             this.toggle_expanded(&id_for_listener, cx);
         }));
 
-    let mut card = div()
-        .flex()
-        .flex_col()
-        .w_full()
-        .child(header)
-        .child(div().px_2().child(SharedString::from(status_text)));
+    let mut card = div().flex().flex_col().w_full().child(header).child(
+        div()
+            .px_2()
+            .text_color(status_color)
+            .child(SharedString::from(status_text)),
+    );
 
     if is_focused {
-        card = card.child(div().px_2().child(SharedString::from("  (focused)")));
+        card = card.child(
+            div()
+                .px_2()
+                .text_color(focused_color)
+                .child(SharedString::from("  (focused)")),
+        );
     }
 
     if is_expanded {
-        card = card.child(div().px_2().child(SharedString::from(format!(
-            "  input: {}",
-            format_tool_input(input)
-        ))));
+        card = card.child(
+            div()
+                .px_2()
+                .text_color(body_color)
+                .child(SharedString::from(format!(
+                    "  input: {}",
+                    format_tool_input(input)
+                ))),
+        );
         if let Some(content) = result_content {
-            card = card.child(div().px_2().child(SharedString::from("  output:")));
+            card = card.child(
+                div()
+                    .px_2()
+                    .text_color(body_color)
+                    .child(SharedString::from("  output:")),
+            );
             for line in content.lines() {
                 card = card.child(
                     div()
                         .px_2()
+                        .text_color(body_color)
                         .child(SharedString::from(format!("     {line}"))),
                 );
             }
         }
     } else if let Some(content) = result_content {
-        card = card.child(div().px_2().child(SharedString::from(format!(
-            "  {}",
-            format_tool_result_preview(content)
-        ))));
+        card = card.child(
+            div()
+                .px_2()
+                .text_color(body_color)
+                .child(SharedString::from(format!(
+                    "  {}",
+                    format_tool_result_preview(content)
+                ))),
+        );
     }
 
     card.into_any_element()
+}
+
+fn status_color(status: ToolCardStatus, theme: &crate::theme::ThemeColors) -> Hsla {
+    match status {
+        ToolCardStatus::Running => theme.chat_tool_status_running,
+        ToolCardStatus::Done => theme.chat_tool_status_done,
+        ToolCardStatus::Failed => theme.chat_tool_status_failed,
+        ToolCardStatus::Cancelled => theme.chat_tool_status_cancelled,
+    }
 }
 
 /// Per-tool extraction of a one-line summary from the tool's JSON

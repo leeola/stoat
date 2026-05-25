@@ -25,6 +25,7 @@ use crate::{
     editor::Editor,
     globals::ClaudeCodeHostGlobal,
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
@@ -511,7 +512,8 @@ fn render_message_row(
         return Some(div().flex().w_full().child(card).into_any_element());
     }
     let text = message_text(message)?;
-    let bubble = div().px_2().py_1().child(text);
+    let color = bubble_color(message, cx);
+    let bubble = div().px_2().py_1().text_color(color).child(text);
     Some(match message.role {
         ChatRole::User => {
             let mut row = div().flex().flex_row_reverse().w_full().child(bubble);
@@ -544,10 +546,12 @@ fn render_checkpoint_marker(
     cx: &mut Context<'_, ClaudeChat>,
 ) -> AnyElement {
     let element_id: ElementId = SharedString::from(format!("claude_checkpoint:{idx}")).into();
+    let color = cx.theme().chat_time;
     div()
         .id(element_id)
         .px_2()
         .py_1()
+        .text_color(color)
         .child(SharedString::from("o"))
         .on_click(cx.listener(move |this, _event, _window, cx| {
             let Some(workspace) = this.workspace.upgrade() else {
@@ -557,6 +561,21 @@ fn render_checkpoint_marker(
             workspace.update(cx, |w, cx| w.restore_to_checkpoint(sha, cx));
         }))
         .into_any_element()
+}
+
+/// Pick the foreground color for a message bubble based on its
+/// content and role. Text bubbles split on role (user vs assistant);
+/// other content types are content-driven.
+fn bubble_color(message: &ChatMessage, cx: &App) -> gpui::Hsla {
+    let theme = cx.theme();
+    match (&message.content, message.role) {
+        (ChatMessageContent::Text(_), ChatRole::User) => theme.chat_user,
+        (ChatMessageContent::Text(_), ChatRole::Assistant) => theme.chat_text,
+        (ChatMessageContent::Thinking { .. }, _) => theme.chat_thinking,
+        (ChatMessageContent::Error(_), _) => theme.chat_error,
+        (ChatMessageContent::TurnComplete { .. }, _) => theme.chat_meta,
+        _ => theme.chat_text,
+    }
 }
 
 fn message_text(message: &ChatMessage) -> Option<SharedString> {
