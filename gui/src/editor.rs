@@ -3261,7 +3261,7 @@ impl Editor {
             &rows,
             start as u32,
         );
-        let selection_color = cx.theme().selection;
+        let selection_color = cx.theme().selection_editor;
         let cursor_color = cx.theme().cursor;
         let active_line_color = cx.theme().line_highlight;
 

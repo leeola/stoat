@@ -520,7 +520,7 @@ impl CommandPaletteDelegate {
             return div().into_any_element();
         };
         let name = entry.def.name();
-        let color = cx.theme().statusbar_text;
+        let color = cx.theme().modal_palette;
         let runs = match_highlight_runs(
             name,
             matched,
@@ -532,7 +532,7 @@ impl CommandPaletteDelegate {
         let label = StyledText::new(SharedString::from(name)).with_highlights(runs);
         let mut row = div().px_2().text_color(color).child(label);
         if selected {
-            row = row.bg(gpui::white().opacity(0.1));
+            row = row.bg(cx.theme().selection);
         }
         row.into_any_element()
     }
@@ -581,7 +581,7 @@ fn render_collect_args_prompt(
     let Some(param) = params.get(current) else {
         return div().into_any_element();
     };
-    let color = cx.theme().statusbar_text;
+    let color = cx.theme().modal_palette;
     let header = format!(
         "[{}/{}] {} ({})",
         current + 1,
@@ -600,7 +600,7 @@ fn render_collect_args_prompt(
     if let Some(message) = error {
         block = block.child(
             div()
-                .text_color(gpui::red())
+                .text_color(cx.theme().error)
                 .child(SharedString::from(message.to_string())),
         );
     }

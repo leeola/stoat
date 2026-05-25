@@ -84,11 +84,17 @@ impl BasePalette {
 /// re-reads the [`Theme`] global on each call, so a newly installed
 /// theme is visible to the next read.
 ///
-/// The `goto_word_*` and `selection` fields keep scope-specific
-/// defaults rather than derive from [`BasePalette`]: `goto_word_*`
-/// have no theme scope today (TODO adds them) and `selection`
-/// carries the alpha channel that [`default_selection_color`]
-/// supplies.
+/// The `goto_word_*` and `selection_editor` fields keep
+/// scope-specific defaults rather than derive from [`BasePalette`]:
+/// `goto_word_*` have no theme scope today (TODO adds them) and
+/// `selection_editor` carries the alpha channel that
+/// [`default_selection_color`] supplies.
+///
+/// `selection` (the broader UI scope used by modal pickers) and
+/// `selection_editor` (the editor's text-band) are intentionally
+/// distinct: the default theme paints them with different roles
+/// (accent vs muted) so highlighting a list row reads as a stronger
+/// signal than highlighting text under the cursor.
 pub struct ThemeColors {
     pub background: Hsla,
     pub border_inactive: Hsla,
@@ -109,6 +115,9 @@ pub struct ThemeColors {
     pub goto_word_label: Hsla,
     pub goto_word_prefix: Hsla,
     pub selection: Hsla,
+    pub selection_editor: Hsla,
+    pub modal_palette: Hsla,
+    pub error: Hsla,
 }
 
 impl ThemeColors {
@@ -161,11 +170,14 @@ impl ThemeColors {
             ),
             goto_word_label: rgb(0xeeee00).into(),
             goto_word_prefix: rgb(0x666600).into(),
-            selection: theme_bg_or(
+            selection: theme_bg_or(cx, stoat::theme::scope::UI_SELECTION, palette.accent),
+            selection_editor: theme_bg_or(
                 cx,
                 stoat::theme::scope::UI_SELECTION_EDITOR,
                 default_selection_color(),
             ),
+            modal_palette: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_PALETTE, palette.accent),
+            error: theme_fg_or(cx, stoat::theme::scope::UI_ERROR, palette.danger),
         }
     }
 }
@@ -263,7 +275,10 @@ mod tests {
         assert_eq!(theme.background, palette.background);
         assert_eq!(theme.statusbar_focused, palette.surface);
         assert_eq!(theme.diagnostic_error, palette.danger);
-        assert_eq!(theme.selection, default_selection_color());
+        assert_eq!(theme.selection_editor, default_selection_color());
+        assert_eq!(theme.selection, palette.accent);
+        assert_eq!(theme.modal_palette, palette.accent);
+        assert_eq!(theme.error, palette.danger);
     }
 
     #[test]
