@@ -41,6 +41,7 @@ mod git_status_picker;
 mod global_search;
 mod globals;
 mod help;
+mod input_parse;
 mod input_state_machine;
 mod item;
 mod jumplist_picker;
