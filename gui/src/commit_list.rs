@@ -563,18 +563,32 @@ impl PickerDelegate for CommitListDelegate {
         selected: bool,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> AnyElement {
-        let row_text = {
+        let parts = {
             let s = self.state.read(cx);
-            s.inner
-                .commits
-                .get(ix)
-                .map(format_commit_row)
-                .unwrap_or_default()
+            s.inner.commits.get(ix).map(commit_row_parts)
         };
-        let color = cx.theme().statusbar_text;
-        let mut row = div().px_2().text_color(color).child(row_text);
+        let theme = cx.theme();
+        let mut row = div().px_2().flex().flex_row().gap_2();
+        if let Some(parts) = parts {
+            row = row
+                .child(
+                    div()
+                        .text_color(theme.vcs_commit_sha)
+                        .child(SharedString::from(parts.sha)),
+                )
+                .child(
+                    div()
+                        .text_color(theme.vcs_commit_summary)
+                        .child(SharedString::from(parts.summary)),
+                )
+                .child(
+                    div()
+                        .text_color(theme.vcs_commit_metadata)
+                        .child(SharedString::from(parts.metadata)),
+                );
+        }
         if selected {
-            row = row.bg(gpui::white().opacity(0.1));
+            row = row.bg(theme.selection);
         }
         row.into_any_element()
     }
@@ -676,16 +690,23 @@ fn render_preview_body(
     wrapper
 }
 
-fn format_commit_row(commit: &CommitInfo) -> String {
+struct CommitRowParts {
+    sha: String,
+    summary: String,
+    metadata: String,
+}
+
+fn commit_row_parts(commit: &CommitInfo) -> CommitRowParts {
     let author_first = commit.author_name.split_whitespace().next().unwrap_or("");
     let date = OffsetDateTime::from_unix_timestamp(commit.time)
         .ok()
         .and_then(|dt| dt.format(&DATE_FORMAT).ok())
         .unwrap_or_default();
-    format!(
-        "{}  {}  {}  {}",
-        commit.short_sha, commit.summary, author_first, date,
-    )
+    CommitRowParts {
+        sha: commit.short_sha.clone(),
+        summary: commit.summary.clone(),
+        metadata: format!("{author_first}  {date}"),
+    }
 }
 
 #[cfg(test)]

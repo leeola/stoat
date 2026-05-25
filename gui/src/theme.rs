@@ -147,6 +147,9 @@ pub struct ThemeColors {
     pub vcs_rebase_reword: Hsla,
     pub vcs_rebase_edit: Hsla,
     pub vcs_rebase_drop: Hsla,
+    pub vcs_commit_sha: Hsla,
+    pub vcs_commit_summary: Hsla,
+    pub vcs_commit_metadata: Hsla,
 }
 
 impl ThemeColors {
@@ -273,6 +276,17 @@ impl ThemeColors {
             ),
             vcs_rebase_edit: theme_fg_or(cx, stoat::theme::scope::VCS_REBASE_EDIT, palette.accent),
             vcs_rebase_drop: theme_fg_or(cx, stoat::theme::scope::VCS_REBASE_DROP, palette.danger),
+            vcs_commit_sha: theme_fg_or(cx, stoat::theme::scope::VCS_COMMIT_SHA, palette.warning),
+            vcs_commit_summary: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_COMMIT_SUMMARY,
+                palette.text,
+            ),
+            vcs_commit_metadata: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_COMMIT_METADATA,
+                palette.text_muted,
+            ),
         }
     }
 }
@@ -380,6 +394,8 @@ mod tests {
         assert_eq!(theme.chat_separator, palette.text_muted);
         assert_eq!(theme.vcs_rebase_pick, palette.success);
         assert_eq!(theme.vcs_rebase_drop, palette.danger);
+        assert_eq!(theme.vcs_commit_sha, palette.warning);
+        assert_eq!(theme.vcs_commit_metadata, palette.text_muted);
     }
 
     #[test]
