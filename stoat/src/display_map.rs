@@ -25,9 +25,9 @@ pub use crease_map::{
 pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint, FoldSnapshot};
 pub use highlights::{
     CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId, ChunkReplacement,
-    HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId, HighlightStyleInterner,
-    HighlightedChunk, Highlights, InlayHighlight, InlayHighlights, SemanticTokenHighlight,
-    SemanticTokensHighlights, TextHighlights,
+    DecorationHighlight, DecorationHighlights, HighlightKey, HighlightLayer, HighlightStyle,
+    HighlightStyleId, HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight,
+    InlayHighlights, SemanticTokenHighlight, SemanticTokensHighlights, TextHighlights,
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
@@ -204,6 +204,7 @@ pub struct DisplayMap {
     crease_map: CreaseMap,
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
+    decoration_highlights: DecorationHighlights,
     inlay_highlights: InlayHighlights,
     companion: Option<Companion>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
@@ -246,6 +247,7 @@ impl DisplayMap {
             crease_map: CreaseMap::new(),
             text_highlights: Arc::new(HashMap::new()),
             semantic_token_highlights: Arc::new(HashMap::new()),
+            decoration_highlights: Arc::new(HashMap::new()),
             inlay_highlights: BTreeMap::new(),
             companion: None,
             lsp_folding_crease_ids: HashMap::new(),
@@ -389,6 +391,26 @@ impl DisplayMap {
         self.highlights_dirty = true;
     }
 
+    /// Replace the non-LSP decoration highlight set for `buffer_id`.
+    /// Stored in a parallel slot to the semantic-token highlights so
+    /// the two layers co-exist without clobbering each other.
+    pub fn set_decoration_highlights(
+        &mut self,
+        buffer_id: BufferId,
+        decorations: Arc<[DecorationHighlight]>,
+    ) {
+        Arc::make_mut(&mut self.decoration_highlights).insert(buffer_id, decorations);
+        self.highlights_dirty = true;
+    }
+
+    /// Drop the decoration-highlight set for `buffer_id`. Used by
+    /// hosts to clear overlays when the underlying buffer state no
+    /// longer warrants them (e.g. all conflicts resolved).
+    pub fn clear_decoration_highlights(&mut self, buffer_id: BufferId) {
+        Arc::make_mut(&mut self.decoration_highlights).remove(&buffer_id);
+        self.highlights_dirty = true;
+    }
+
     /// Remove the inlays identified by `remove` and insert new
     /// anchored inlays for each `(Anchor, String, InlayKind)` triple
     /// in `insert`. Returns the freshly-allocated [`InlayId`]s in the
@@ -521,6 +543,7 @@ impl DisplayMap {
             diff_map,
             text_highlights: self.text_highlights.clone(),
             semantic_token_highlights: self.semantic_token_highlights.clone(),
+            decoration_highlights: self.decoration_highlights.clone(),
             inlay_highlights: self.inlay_highlights.clone(),
             crease_snapshot: self.crease_map.snapshot(),
             fold_placeholder: FoldPlaceholder::default(),
@@ -540,6 +563,7 @@ pub struct DisplaySnapshot {
     diff_map: Option<DiffMap>,
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
+    decoration_highlights: DecorationHighlights,
     inlay_highlights: InlayHighlights,
     crease_snapshot: CreaseSnapshot,
     fold_placeholder: FoldPlaceholder,
@@ -593,6 +617,10 @@ impl DisplaySnapshot {
         &self.semantic_token_highlights
     }
 
+    pub fn decoration_highlights(&self) -> &DecorationHighlights {
+        &self.decoration_highlights
+    }
+
     pub fn inlay_highlights(&self) -> &InlayHighlights {
         &self.inlay_highlights
     }
@@ -633,6 +661,7 @@ impl DisplaySnapshot {
             text_highlights: Some(&self.text_highlights),
             inlay_highlights: Some(&self.inlay_highlights),
             semantic_token_highlights: Some(&self.semantic_token_highlights),
+            decoration_highlights: Some(&self.decoration_highlights),
         };
         let byte_range = self
             .block_snapshot
@@ -650,11 +679,13 @@ impl DisplaySnapshot {
         let empty: TextHighlights = Arc::new(HashMap::new());
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
         let semantic_ref = highlights.semantic_token_highlights;
+        let decoration_ref = highlights.decoration_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
         let eps = highlights::create_highlight_endpoints(
             &range,
             text_highlights_ref,
             semantic_ref,
+            decoration_ref,
             &resolve,
         );
         Arc::from(eps)

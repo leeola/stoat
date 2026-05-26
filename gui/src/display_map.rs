@@ -4,7 +4,7 @@ use std::sync::Arc;
 use stoat::{
     buffer::BufferId,
     display_map::{
-        highlights::{HighlightStyleInterner, SemanticTokenHighlight},
+        highlights::{DecorationHighlight, HighlightStyleInterner, SemanticTokenHighlight},
         BlockProperties, InlayId, InlayKind,
     },
     multi_buffer::MultiBuffer as InnerMultiBuffer,
@@ -94,6 +94,31 @@ impl DisplayMap {
     /// has been edited. Emits [`DisplayMapEvent::Changed`].
     pub fn invalidate_semantic_tokens(&mut self, buffer_id: BufferId, cx: &mut Context<'_, Self>) {
         self.inner.invalidate_semantic_highlights(buffer_id);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+    }
+
+    /// Replace the non-LSP decoration-highlight set for `buffer_id`.
+    /// Stored in a parallel slot to the semantic-token highlights so
+    /// both layers can co-exist on the same buffer. Emits
+    /// [`DisplayMapEvent::Changed`].
+    pub fn set_decoration_highlights(
+        &mut self,
+        buffer_id: BufferId,
+        decorations: Arc<[DecorationHighlight]>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner.set_decoration_highlights(buffer_id, decorations);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+    }
+
+    /// Drop the decoration-highlight set for `buffer_id`. Hosts call
+    /// this when the underlying buffer state no longer warrants the
+    /// overlay (e.g. all conflicts in the file resolved). Emits
+    /// [`DisplayMapEvent::Changed`].
+    pub fn clear_decoration_highlights(&mut self, buffer_id: BufferId, cx: &mut Context<'_, Self>) {
+        self.inner.clear_decoration_highlights(buffer_id);
         cx.emit(DisplayMapEvent::Changed);
         cx.notify();
     }
@@ -358,5 +383,61 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+    }
+
+    #[test]
+    fn set_decoration_highlights_emits_changed_and_clear_emits_changed() {
+        use stoat::display_map::highlights::{DecorationHighlight, HighlightStyle};
+        use stoat_text::Bias;
+
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "hello world");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        let range = display_map.update(&mut cx, |dm, _| {
+            let snap = dm.snapshot();
+            let buffer_snap = snap.buffer_snapshot();
+            let rope = buffer_snap.rope();
+            let start = buffer_snap.anchor_at(
+                rope.point_to_offset(stoat_text::Point::new(0, 0)),
+                Bias::Right,
+            );
+            let end = buffer_snap.anchor_at(
+                rope.point_to_offset(stoat_text::Point::new(0, 5)),
+                Bias::Left,
+            );
+            start..end
+        });
+        let decorations: Arc<[DecorationHighlight]> = Arc::from(vec![DecorationHighlight {
+            range,
+            style: HighlightStyle::default(),
+        }]);
+
+        let buffer_id = BufferId::new(0);
+        display_map.update(&mut cx, |dm, cx| {
+            dm.set_decoration_highlights(buffer_id, decorations.clone(), cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+
+        let stored_len = display_map.update(&mut cx, |dm, _| {
+            dm.snapshot()
+                .decoration_highlights()
+                .get(&buffer_id)
+                .map(|d| d.len())
+                .unwrap_or(0)
+        });
+        assert_eq!(stored_len, 1);
+
+        display_map.update(&mut cx, |dm, cx| {
+            dm.clear_decoration_highlights(buffer_id, cx)
+        });
+        cx.run_until_parked();
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+
+        let cleared = display_map.update(&mut cx, |dm, _| {
+            dm.snapshot().decoration_highlights().is_empty()
+        });
+        assert!(cleared, "clear should drop the per-buffer entry");
     }
 }

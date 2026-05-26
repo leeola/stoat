@@ -81,6 +81,10 @@ pub enum HighlightLayer {
     ColorizeBracket,
     SyntaxToken,
     SemanticToken,
+    /// Non-LSP per-buffer overlay layer: conflict markers, jump-list
+    /// anchors, and similar decorations that should override syntax
+    /// styling but stay below selection / search overlays.
+    Decoration,
     SearchHighlight,
     DiffHighlight,
     DocumentHighlightRead,
@@ -154,6 +158,23 @@ pub struct SemanticTokenHighlight {
 pub type SemanticTokensHighlights =
     Arc<HashMap<BufferId, (Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)>>;
 
+/// A single decoration overlay: a buffer-anchored range styled by
+/// the host (conflict markers, jump-list anchors, etc.). Distinct
+/// from [`SemanticTokenHighlight`] which interns styles to share
+/// across many tokens; decorations carry their own [`HighlightStyle`]
+/// because the per-buffer count is small.
+#[derive(Debug, Clone)]
+pub struct DecorationHighlight {
+    pub range: Range<Anchor>,
+    pub style: HighlightStyle,
+}
+
+/// Non-LSP decoration overlays keyed by buffer. Stored on
+/// [`crate::DisplayMap`] in a parallel slot to
+/// [`SemanticTokensHighlights`] so the two layers do not clobber
+/// each other when set independently.
+pub type DecorationHighlights = Arc<HashMap<BufferId, Arc<[DecorationHighlight]>>>;
+
 pub type InlayHighlights =
     BTreeMap<HighlightKey, BTreeMap<InlayId, (HighlightStyle, InlayHighlight)>>;
 
@@ -217,6 +238,7 @@ pub struct Highlights<'a> {
     pub text_highlights: Option<&'a TextHighlights>,
     pub inlay_highlights: Option<&'a InlayHighlights>,
     pub semantic_token_highlights: Option<&'a SemanticTokensHighlights>,
+    pub decoration_highlights: Option<&'a DecorationHighlights>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -246,6 +268,7 @@ impl PartialOrd for HighlightEndpoint {
 pub struct CachedHighlightEndpoints {
     text_ptr: usize,
     semantic_ptr: Option<usize>,
+    decoration_ptr: Option<usize>,
     range: Range<usize>,
     endpoints: Arc<[HighlightEndpoint]>,
 }
@@ -255,10 +278,12 @@ impl CachedHighlightEndpoints {
         &self,
         highlights: &TextHighlights,
         semantic: Option<&SemanticTokensHighlights>,
+        decoration: Option<&DecorationHighlights>,
         range: &Range<usize>,
     ) -> bool {
         self.text_ptr == Arc::as_ptr(highlights) as usize
             && self.semantic_ptr == semantic.map(|s| Arc::as_ptr(s) as usize)
+            && self.decoration_ptr == decoration.map(|d| Arc::as_ptr(d) as usize)
             && self.range == *range
     }
 
@@ -271,19 +296,32 @@ pub fn create_highlight_endpoints_cached(
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
+    decoration_highlights: Option<&DecorationHighlights>,
     resolve: &impl Fn(&Anchor) -> usize,
     cache: &mut Option<CachedHighlightEndpoints>,
 ) -> Arc<[HighlightEndpoint]> {
     if let Some(ref cached) = cache {
-        if cached.is_valid(highlights, semantic_highlights, range) {
+        if cached.is_valid(
+            highlights,
+            semantic_highlights,
+            decoration_highlights,
+            range,
+        ) {
             return cached.endpoints.clone();
         }
     }
-    let endpoints = create_highlight_endpoints(range, highlights, semantic_highlights, resolve);
+    let endpoints = create_highlight_endpoints(
+        range,
+        highlights,
+        semantic_highlights,
+        decoration_highlights,
+        resolve,
+    );
     let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
     *cache = Some(CachedHighlightEndpoints {
         text_ptr: Arc::as_ptr(highlights) as usize,
         semantic_ptr: semantic_highlights.map(|s| Arc::as_ptr(s) as usize),
+        decoration_ptr: decoration_highlights.map(|d| Arc::as_ptr(d) as usize),
         range: range.clone(),
         endpoints: arc.clone(),
     });
@@ -294,6 +332,7 @@ pub fn create_highlight_endpoints(
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
+    decoration_highlights: Option<&DecorationHighlights>,
     resolve: &impl Fn(&Anchor) -> usize,
 ) -> Vec<HighlightEndpoint> {
     let mut endpoints = Vec::new();
@@ -364,6 +403,47 @@ pub fn create_highlight_endpoints(
                     is_start: true,
                     key,
                     style: Some(interner[token.style].clone()),
+                });
+                endpoints.push(HighlightEndpoint {
+                    offset: e,
+                    is_start: false,
+                    key,
+                    style: None,
+                });
+            }
+        }
+    }
+
+    if let Some(decoration) = decoration_highlights {
+        for (_buffer_id, decorations) in decoration.iter() {
+            let start_ix = decorations
+                .binary_search_by(|probe| {
+                    resolve(&probe.range.end)
+                        .cmp(&range.start)
+                        .then(std::cmp::Ordering::Less)
+                })
+                .unwrap_or_else(|i| i);
+
+            for (offset_in_slice, decoration) in decorations[start_ix..].iter().enumerate() {
+                let s = resolve(&decoration.range.start);
+                let e = resolve(&decoration.range.end);
+                if s >= range.end {
+                    break;
+                }
+                if s == e {
+                    continue;
+                }
+                // Unique slot per decoration keeps overlapping overlays in
+                // distinct entries of the merger's active map.
+                let key = HighlightKey::new(
+                    HighlightLayer::Decoration,
+                    (start_ix + offset_in_slice) as u32,
+                );
+                endpoints.push(HighlightEndpoint {
+                    offset: s,
+                    is_start: true,
+                    key,
+                    style: Some(decoration.style.clone()),
                 });
                 endpoints.push(HighlightEndpoint {
                     offset: e,
@@ -584,7 +664,7 @@ mod tests {
         let text = "hello world";
         let highlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello world");
@@ -605,7 +685,7 @@ mod tests {
             vec![6..11],
         )]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].text, "hello ");
@@ -643,7 +723,7 @@ mod tests {
             ),
         ]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" (no style), "cd" (blue+bold), "ef" (red+bold, red overrides blue fg),
@@ -683,7 +763,7 @@ mod tests {
             vec![2..2],
         )]);
         let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, &resolve);
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello");
@@ -743,7 +823,8 @@ mod tests {
         let text_hl: TextHighlights = Arc::new(HashMap::new());
         let resolve = |a: &Anchor| a.offset as usize;
 
-        let eps = create_highlight_endpoints(&(0..text.len()), &text_hl, Some(&semantic), &resolve);
+        let eps =
+            create_highlight_endpoints(&(0..text.len()), &text_hl, Some(&semantic), None, &resolve);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" unstyled; "cd" outer only (blue+bold); "ef" outer+inner (inner slot

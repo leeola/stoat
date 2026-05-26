@@ -1626,6 +1626,7 @@ mod tests {
             &(0..10),
             &highlights,
             None,
+            None,
             &resolve,
         ));
 
