@@ -673,6 +673,56 @@ mod tests {
     }
 
     #[test]
+    fn run_mode_backspace_deletes_from_input_editor() {
+        use gpui::{EntityInputHandler, Keystroke, Modifiers};
+        use stoat::keymap::StateValue;
+
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        let sm = h
+            .workspace
+            .read_with(h.vcx, |w, _| w.input_state_machine().clone());
+        sm.update(h.vcx, |sm, _| {
+            sm.set_mode_for_test(StateValue::String("run".into()))
+        });
+
+        let editor_input = h
+            .workspace
+            .read_with(h.vcx, |w, _| w.editor_input().clone());
+        editor_input.update_in(h.vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, "abc", window, cx);
+        });
+        h.vcx.run_until_parked();
+        assert_eq!(
+            input_text(&run, &mut h),
+            "abc",
+            "typing should route to the focused run pane's input editor"
+        );
+
+        let backspace = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "backspace".into(),
+            key_char: None,
+        };
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            let sm = w.input_state_machine().clone();
+            let actions = sm.update(cx, |sm, cx| sm.feed(&backspace, window, cx));
+            for action in actions {
+                w.dispatch_action(action, window, cx);
+            }
+        });
+        h.vcx.run_until_parked();
+        assert_eq!(
+            input_text(&run, &mut h),
+            "ab",
+            "Backspace in mode == run should delete the trailing char of the input editor"
+        );
+    }
+
+    #[test]
     fn submit_writes_command_to_session() {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);

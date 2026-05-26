@@ -1290,14 +1290,18 @@ impl Workspace {
 
     /// Push the focused pane's active editor (if any) into the
     /// [`InputStateMachine`]'s `active_editor` and
-    /// `editor_focus_target` slots. Non-editor active items (or no
-    /// active item) clear both slots. Drives the motion / save /
-    /// save-selection / jump dispatch helpers on [`Workspace`] that
-    /// look up the active editor through the state machine.
+    /// `editor_focus_target` slots. The active item is either an
+    /// [`Editor`] directly or a pane item that hosts an embedded
+    /// editor (today: the Run pane's command line); either flavor
+    /// lands in the state machine so IME commits and dispatched
+    /// editor actions act on the right buffer. Non-editor items
+    /// (or no active item) clear both slots. Drives the motion /
+    /// save / save-selection / jump dispatch helpers on [`Workspace`]
+    /// that look up the active editor through the state machine.
     fn broadcast_active_editor(&mut self, cx: &mut Context<'_, Self>) {
         let editor = self
             .active_pane_item(cx)
-            .and_then(|item| item.to_any_view().downcast::<Editor>().ok());
+            .and_then(|item| Self::editor_for_pane_item(item.as_ref(), cx));
         let focus_target = editor
             .as_ref()
             .map(|_| self.editor_input.read(cx).focus_handle().clone());
@@ -1306,6 +1310,23 @@ impl Workspace {
             sm.set_active_editor(weak_editor);
             sm.set_editor_focus_target(focus_target);
         });
+    }
+
+    /// Extract the editor a pane item exposes to the workspace's
+    /// IME / action pipeline. Items that are themselves [`Editor`]s
+    /// return their own handle; items that host an embedded editor
+    /// command line (today: the Run pane) return that. Other items
+    /// return `None`, leaving `active_editor` cleared while they
+    /// are focused.
+    fn editor_for_pane_item(item: &dyn ItemHandle, cx: &App) -> Option<Entity<Editor>> {
+        let view = item.to_any_view();
+        if let Ok(editor) = view.clone().downcast::<Editor>() {
+            return Some(editor);
+        }
+        if let Ok(run) = view.downcast::<crate::run_pane::Run>() {
+            return Some(run.read(cx).input.clone());
+        }
+        None
     }
 
     pub fn input_state_machine(&self) -> &Entity<InputStateMachine> {

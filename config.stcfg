@@ -602,6 +602,16 @@ on key {
         Up -> RunHistoryPrev();
         Down -> RunHistoryNext();
         Ctrl-c -> RunInterrupt();
+        Backspace -> DeleteBackward();
+        Delete -> DeleteForward();
+        Left -> MoveLeft();
+        Right -> MoveRight();
+        Home -> GotoLineStart();
+        End -> GotoLineEnd();
+        Alt-Backspace -> DeleteWordBackward();
+        Alt-Delete -> DeleteWordForward();
+        Ctrl-a -> GotoLineStart();
+        Ctrl-e -> GotoLineEnd();
     }
     mode == space_pane_nav {
         Escape -> SetMode(normal);
