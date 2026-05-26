@@ -6416,16 +6416,30 @@ mod tests {
             ei.replace_text_in_range(None, ":", window, cx);
         });
         vcx.run_until_parked();
-
-        let palette_active = ws.read_with(vcx, |w, cx| {
-            w.modal_layer()
-                .read(cx)
-                .active_modal::<Picker<CommandPaletteDelegate>>()
-                .is_some()
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, ":", window, cx);
         });
-        assert!(
-            palette_active,
-            "typing ':' via the IME replace_text_in_range path should open the command palette"
+        vcx.run_until_parked();
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<CommandPaletteDelegate>>()
+            })
+            .expect("typing ':' should open the command palette");
+        let query_text = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .snapshot()
+                .text()
+                .to_string()
+        });
+        assert_eq!(
+            query_text, "",
+            "the ':' that opened the palette must not leak into the query editor on the paired IME redelivery"
         );
     }
 

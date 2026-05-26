@@ -72,6 +72,18 @@ pub struct InputStateMachine {
     /// char with no modifiers and we are still in an allowed mode,
     /// the keystroke is dropped as a macOS IME duplicate.
     pending_duplicate_char: Option<char>,
+    /// One-shot marker set by [`text_input`] when a single-char
+    /// commit in a disallowed mode is routed through [`feed`] and
+    /// resolves to at least one action (e.g. `:` dispatching
+    /// `OpenCommandPalette` from normal mode). The next
+    /// [`text_input`] call consumes it; if the incoming text
+    /// matches the same single char, the call returns an empty
+    /// action list without forwarding to the active editor. This
+    /// drops the macOS IME redelivery that follows when the
+    /// dispatched action focuses an input target -- without it,
+    /// the same `:` lands in the palette's query editor and the
+    /// filter shows zero matches until the user backspaces.
+    consumed_text_input_char: Option<char>,
     /// Active editor that [`text_input`] dispatches IME commits
     /// into via [`Editor::apply_text_to_all_cursors`]. Production
     /// callers update this when an editor becomes the workspace's
@@ -203,6 +215,7 @@ impl InputStateMachine {
             marked_range: None,
             last_text_input: None,
             pending_duplicate_char: None,
+            consumed_text_input_char: None,
             active_editor: None,
             editor_focus_target: None,
             pending_find: None,
@@ -474,11 +487,21 @@ impl InputStateMachine {
     /// but unused today; the field is the temporary observation
     /// point until the editor edit-action item lands.
     ///
-    /// Single-char commits also arm a one-shot duplicate-drop
-    /// marker that the next [`feed`] call honours, so a paired raw
-    /// key event from macOS does not double-insert. Multi-char
-    /// commits leave the marker cleared because the originating
-    /// keystrokes were consumed by the IME and have no raw twin.
+    /// In an allowed mode, a single-char commit arms a one-shot
+    /// duplicate-drop marker that the next [`feed`] call honours,
+    /// so a paired raw key event from macOS does not double-insert.
+    /// In a disallowed mode where the commit resolves to at least
+    /// one action via [`feed`], an inverse one-shot marker is
+    /// armed instead: the dispatched action commonly focuses an
+    /// input target (modal opens, mode flips to `prompt`), and
+    /// macOS pairs the original keypress with an IME redelivery
+    /// into that target -- the next [`text_input`] call drops the
+    /// redelivery rather than letting it land in the newly
+    /// focused editor.
+    ///
+    /// Both markers are one-shot, cleared by composition transitions,
+    /// and only set for single-char commits; multi-char commits have
+    /// no raw twin and originate from the IME alone.
     ///
     /// When [`active_editor`] holds a live handle, the commit is
     /// dispatched through [`Editor::apply_text_to_all_cursors`] so
@@ -492,6 +515,12 @@ impl InputStateMachine {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Vec<Box<dyn stoat_action::Action>> {
+        if let Some(consumed) = self.consumed_text_input_char.take() {
+            let mut chars = text.chars();
+            if chars.next() == Some(consumed) && chars.next().is_none() {
+                return Vec::new();
+            }
+        }
         if !self.text_input_allowed() {
             let mut actions = Vec::new();
             for ch in text.chars() {
@@ -502,6 +531,12 @@ impl InputStateMachine {
                 };
                 actions.extend(self.feed(&keystroke, window, cx));
             }
+            self.consumed_text_input_char = {
+                let mut chars = text.chars();
+                chars
+                    .next()
+                    .filter(|_| chars.next().is_none() && !actions.is_empty())
+            };
             return actions;
         }
         self.last_text_input = Some(text.to_string());
@@ -524,8 +559,8 @@ impl InputStateMachine {
     /// silently. Otherwise the marked text and its UTF-16 range
     /// are recorded so [`marked_text`] / [`marked_range`] reflect
     /// the in-flight composition. Any pending duplicate-drop
-    /// marker is cleared -- composition transitions do not pair
-    /// with raw key duplicates.
+    /// markers (both directions) are cleared -- composition
+    /// transitions do not pair with raw key duplicates.
     pub fn composition_update(
         &mut self,
         text: &str,
@@ -539,19 +574,21 @@ impl InputStateMachine {
         self.marked_text = Some(text.to_string());
         self.marked_range = range;
         self.pending_duplicate_char = None;
+        self.consumed_text_input_char = None;
         cx.notify();
     }
 
     /// Clear any in-flight IME composition (`unmarkText`).
     /// Unconditional so a mode change mid-composition still leaves
     /// the state machine with a clean composition slot. Also
-    /// clears any pending duplicate-drop marker so a stale entry
-    /// from a prior commit does not survive across composition
-    /// boundaries.
+    /// clears any pending duplicate-drop markers (both directions)
+    /// so a stale entry from a prior commit does not survive across
+    /// composition boundaries.
     pub fn composition_commit(&mut self, cx: &mut Context<'_, Self>) {
         self.marked_text = None;
         self.marked_range = None;
         self.pending_duplicate_char = None;
+        self.consumed_text_input_char = None;
         cx.notify();
     }
 
