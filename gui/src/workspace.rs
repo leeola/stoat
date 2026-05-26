@@ -6465,6 +6465,65 @@ mod tests {
     }
 
     #[test]
+    fn ime_colon_then_escape_then_colon_keeps_second_palette_query_empty() {
+        use crate::{command_palette::CommandPaletteDelegate, picker::Picker};
+        use gpui::{EntityInputHandler, Keystroke, Modifiers};
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+
+        for _ in 0..2 {
+            editor_input.update_in(vcx, |ei, window, cx| {
+                ei.replace_text_in_range(None, ":", window, cx);
+            });
+            vcx.run_until_parked();
+        }
+
+        let escape = Keystroke {
+            modifiers: Modifiers::default(),
+            key: "escape".into(),
+            key_char: None,
+        };
+        ws.update_in(vcx, |w, window, cx| {
+            let sm = w.input_state_machine().clone();
+            let actions = sm.update(cx, |sm, cx| sm.feed(&escape, window, cx));
+            for action in actions {
+                w.dispatch_action(action, window, cx);
+            }
+        });
+        vcx.run_until_parked();
+
+        for _ in 0..2 {
+            editor_input.update_in(vcx, |ei, window, cx| {
+                ei.replace_text_in_range(None, ":", window, cx);
+            });
+            vcx.run_until_parked();
+        }
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<CommandPaletteDelegate>>()
+            })
+            .expect("the second ':' should re-open the command palette");
+        let query_text = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .snapshot()
+                .text()
+                .to_string()
+        });
+        assert_eq!(
+            query_text, "",
+            "the ':' that re-opens the palette must not leak across the dismiss/re-open boundary"
+        );
+    }
+
+    #[test]
     fn ime_space_p_chord_opens_file_finder() {
         use crate::{
             file_finder::FileFinderDelegate,

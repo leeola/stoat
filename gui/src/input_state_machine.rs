@@ -12,7 +12,11 @@ use crate::{
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gpui::{Context, FocusHandle, Keystroke, Modifiers, WeakEntity, Window};
-use std::{collections::HashMap, ops::Range};
+use std::{
+    collections::HashMap,
+    ops::Range,
+    time::{Duration, Instant},
+};
 use stoat::{
     action_handlers::surround::SurroundReplaceStage,
     keymap::{Keymap, KeymapState, StateValue},
@@ -20,6 +24,36 @@ use stoat::{
     register::Register,
 };
 use stoat_config::KeyPart;
+
+/// Window during which an armed duplicate-drop marker stays
+/// eligible to fire. macOS pairs an IME commit with its raw
+/// twin (and a focus-change redelivery in the inverse case)
+/// within a handful of milliseconds; 50 ms covers the observed
+/// gap while expiring fast enough that a never-arriving paired
+/// event can't eat a later unrelated keypress.
+const DUPLICATE_DROP_WINDOW: Duration = Duration::from_millis(50);
+
+/// Try to drop the incoming `ch` against an armed duplicate
+/// marker. Returns true (and clears the slot) only when the
+/// marker is set, the stored char matches, and the marker is
+/// younger than [`DUPLICATE_DROP_WINDOW`]. An expired marker is
+/// cleared as a side effect; a non-matching but unexpired
+/// marker is left armed so the real paired event can still
+/// fire later.
+fn try_consume_duplicate(marker: &mut Option<(char, Instant)>, ch: char) -> bool {
+    let Some((stored, armed_at)) = *marker else {
+        return false;
+    };
+    if armed_at.elapsed() >= DUPLICATE_DROP_WINDOW {
+        *marker = None;
+        return false;
+    }
+    if stored != ch {
+        return false;
+    }
+    *marker = None;
+    true
+}
 
 /// Operator-pending state for multi-stage chords. Variants land
 /// with the actions that need them (e.g. textobject selection,
@@ -66,24 +100,27 @@ pub struct InputStateMachine {
     /// lands with the editor edit-action item; until then this
     /// field is the only place a committed IME insert surfaces.
     last_text_input: Option<String>,
-    /// One-shot marker set by [`text_input`] when a single-char
-    /// IME commit lands in an allowed mode. The next [`feed`] call
-    /// consumes it; if the raw key event matches the committed
-    /// char with no modifiers and we are still in an allowed mode,
-    /// the keystroke is dropped as a macOS IME duplicate.
-    pending_duplicate_char: Option<char>,
-    /// One-shot marker set by [`text_input`] when a single-char
+    /// Time-windowed marker set by [`text_input`] when a single-char
+    /// IME commit lands in an allowed mode. [`feed`] consumes it
+    /// via [`try_consume_duplicate`]: a raw key event with no
+    /// modifiers that matches the stored char while the marker is
+    /// younger than [`DUPLICATE_DROP_WINDOW`] is dropped as a macOS
+    /// IME duplicate. Non-matching events do not clear the marker,
+    /// so a focus-change IME notification between the commit and
+    /// the paired raw key does not let the duplicate slip through.
+    pending_duplicate_char: Option<(char, Instant)>,
+    /// Time-windowed marker set by [`text_input`] when a single-char
     /// commit in a disallowed mode is routed through [`feed`] and
     /// resolves to at least one action (e.g. `:` dispatching
-    /// `OpenCommandPalette` from normal mode). The next
-    /// [`text_input`] call consumes it; if the incoming text
-    /// matches the same single char, the call returns an empty
-    /// action list without forwarding to the active editor. This
-    /// drops the macOS IME redelivery that follows when the
-    /// dispatched action focuses an input target -- without it,
-    /// the same `:` lands in the palette's query editor and the
-    /// filter shows zero matches until the user backspaces.
-    consumed_text_input_char: Option<char>,
+    /// `OpenCommandPalette` from normal mode). The next matching
+    /// [`text_input`] call within [`DUPLICATE_DROP_WINDOW`] is
+    /// dropped, blocking the macOS IME redelivery that follows
+    /// when the dispatched action focuses an input target.
+    /// Without it the same `:` lands in the palette query and the
+    /// filter shows zero matches. An expired marker (the
+    /// redelivery never arrived) clears itself on the next check
+    /// so a later unrelated keypress is not eaten.
+    consumed_text_input_char: Option<(char, Instant)>,
     /// Active editor that [`text_input`] dispatches IME commits
     /// into via [`Editor::apply_text_to_all_cursors`]. Production
     /// callers update this when an editor becomes the workspace's
@@ -487,21 +524,26 @@ impl InputStateMachine {
     /// but unused today; the field is the temporary observation
     /// point until the editor edit-action item lands.
     ///
-    /// In an allowed mode, a single-char commit arms a one-shot
-    /// duplicate-drop marker that the next [`feed`] call honours,
-    /// so a paired raw key event from macOS does not double-insert.
-    /// In a disallowed mode where the commit resolves to at least
-    /// one action via [`feed`], an inverse one-shot marker is
-    /// armed instead: the dispatched action commonly focuses an
-    /// input target (modal opens, mode flips to `prompt`), and
-    /// macOS pairs the original keypress with an IME redelivery
-    /// into that target -- the next [`text_input`] call drops the
-    /// redelivery rather than letting it land in the newly
-    /// focused editor.
+    /// In an allowed mode, a single-char commit arms a duplicate-drop
+    /// marker that a matching [`feed`] within
+    /// [`DUPLICATE_DROP_WINDOW`] consumes, so a paired raw key event
+    /// from macOS does not double-insert. In a disallowed mode where
+    /// the commit resolves to at least one action via [`feed`], an
+    /// inverse marker is armed instead: the dispatched action
+    /// commonly focuses an input target (modal opens, mode flips to
+    /// `prompt`), and macOS pairs the original keypress with an IME
+    /// redelivery into that target -- a matching [`text_input`]
+    /// within the window drops the redelivery rather than letting
+    /// it land in the newly focused editor.
     ///
-    /// Both markers are one-shot, cleared by composition transitions,
-    /// and only set for single-char commits; multi-char commits have
-    /// no raw twin and originate from the IME alone.
+    /// Both markers are time-windowed rather than one-shot: an
+    /// intermediate non-matching event leaves them armed so the real
+    /// paired event can still fire, and a never-arriving paired
+    /// event expires after [`DUPLICATE_DROP_WINDOW`] so a later
+    /// unrelated keypress is not eaten. They are still cleared on
+    /// composition transitions and only set for single-char commits;
+    /// multi-char commits have no raw twin and originate from the
+    /// IME alone.
     ///
     /// When [`active_editor`] holds a live handle, the commit is
     /// dispatched through [`Editor::apply_text_to_all_cursors`] so
@@ -515,9 +557,12 @@ impl InputStateMachine {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Vec<Box<dyn stoat_action::Action>> {
-        if let Some(consumed) = self.consumed_text_input_char.take() {
+        let single_char = {
             let mut chars = text.chars();
-            if chars.next() == Some(consumed) && chars.next().is_none() {
+            chars.next().filter(|_| chars.next().is_none())
+        };
+        if let Some(ch) = single_char {
+            if try_consume_duplicate(&mut self.consumed_text_input_char, ch) {
                 return Vec::new();
             }
         }
@@ -531,21 +576,15 @@ impl InputStateMachine {
                 };
                 actions.extend(self.feed(&keystroke, window, cx));
             }
-            self.consumed_text_input_char = {
-                let mut chars = text.chars();
-                chars
-                    .next()
-                    .filter(|_| chars.next().is_none() && !actions.is_empty())
-            };
+            self.consumed_text_input_char = single_char
+                .filter(|_| !actions.is_empty())
+                .map(|ch| (ch, Instant::now()));
             return actions;
         }
         self.last_text_input = Some(text.to_string());
         self.marked_text = None;
         self.marked_range = None;
-        self.pending_duplicate_char = {
-            let mut chars = text.chars();
-            chars.next().filter(|_| chars.next().is_none())
-        };
+        self.pending_duplicate_char = single_char.map(|ch| (ch, Instant::now()));
         if let Some(editor) = self.active_editor.as_ref().and_then(WeakEntity::upgrade) {
             let text = text.to_string();
             editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&text, cx));
@@ -793,11 +832,11 @@ impl InputStateMachine {
     /// On macOS, a single keypress in a text-input mode can fire
     /// both an IME commit (via [`text_input`]) and a raw key event.
     /// `feed` consumes the duplicate-drop marker armed by the prior
-    /// `text_input` call: when the marker is set, the current mode
-    /// still allows text input, and the raw event is the unmodified
-    /// `KeyCode::Char` matching the committed character, the
-    /// keystroke is dropped. The marker is one-shot regardless of
-    /// match so a non-matching raw event also clears it.
+    /// `text_input` call via [`try_consume_duplicate`]: a matching
+    /// unmodified `KeyCode::Char` in an allowed mode, within
+    /// [`DUPLICATE_DROP_WINDOW`], is dropped. Non-matching events
+    /// leave the marker armed so the real paired raw key can still
+    /// fire; an expired marker is cleaned up on the next check.
     ///
     /// Returning the action list rather than dispatching inline
     /// keeps this method off the workspace's update path; the
@@ -820,12 +859,11 @@ impl InputStateMachine {
         };
         let event = normalize_shift_event(event);
 
-        if let Some(dup) = self.pending_duplicate_char.take() {
-            if self.text_input_allowed()
-                && event.modifiers.is_empty()
-                && event.code == KeyCode::Char(dup)
-            {
-                return Vec::new();
+        if self.text_input_allowed() && event.modifiers.is_empty() {
+            if let KeyCode::Char(ch) = event.code {
+                if try_consume_duplicate(&mut self.pending_duplicate_char, ch) {
+                    return Vec::new();
+                }
             }
         }
 
@@ -1608,7 +1646,7 @@ mod tests {
     }
 
     #[test]
-    fn non_matching_feed_clears_marker() {
+    fn non_matching_feed_preserves_marker_for_real_duplicate() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap("on key { a -> Quit(); b -> Quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
@@ -1624,12 +1662,11 @@ mod tests {
         assert_eq!(
             first,
             vec![stoat_action::ActionKind::Quit],
-            "non-matching feed processes"
+            "non-matching feed still processes its own keystroke"
         );
-        assert_eq!(
-            second,
-            vec![stoat_action::ActionKind::Quit],
-            "marker was cleared by prior feed"
+        assert!(
+            second.is_empty(),
+            "the paired raw 'a' should still drop even after an intervening non-matching feed; got {second:?}",
         );
     }
 
