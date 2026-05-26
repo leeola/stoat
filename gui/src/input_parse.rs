@@ -123,6 +123,10 @@ fn strip_modifiers(token: &str) -> (Modifiers, &str, bool) {
             modifiers.shift = true;
             modified = true;
             rest = stripped;
+        } else if let Some(stripped) = strip_prefix_ci(rest, "a-") {
+            modifiers.alt = true;
+            modified = true;
+            rest = stripped;
         } else {
             return (modifiers, rest, modified);
         }
@@ -295,6 +299,30 @@ mod tests {
                 modified_named("enter", true, false),
                 modified_named("backspace", true, false),
                 modified_named("up", true, false),
+            ],
+        );
+    }
+
+    fn alt_named(key: &str, control: bool) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers {
+                alt: true,
+                control,
+                ..Default::default()
+            },
+            key: key.to_string(),
+            key_char: None,
+        }
+    }
+
+    #[test]
+    fn alt_prefix_attaches_alt_modifier() {
+        assert_eq!(
+            parse("<A-Backspace><A-Left><C-A-w>"),
+            vec![
+                alt_named("backspace", false),
+                alt_named("left", false),
+                alt_named("w", true),
             ],
         );
     }
