@@ -308,8 +308,16 @@ mod tests {
         let path = dir.path().join("x.jsonl");
         {
             let log = TextProtoLog::create_at(&path).unwrap();
+            // Interleaving a `flush()` every 1000 records keeps the
+            // queue well below `CHANNEL_CAPACITY` even when the writer
+            // thread is scheduled erratically under parallel workspace
+            // test load -- without the periodic drain, a 10k burst can
+            // outpace the writer and spill into the drop counter.
             for i in 0..10_000 {
                 log.record(&format!("{{\"n\":{i}}}"));
+                if (i + 1) % 1000 == 0 {
+                    log.flush();
+                }
             }
             log.flush();
             assert_eq!(
