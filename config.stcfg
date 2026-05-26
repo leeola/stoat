@@ -464,6 +464,8 @@ on key {
         Right -> MoveRight();
         Up -> MoveUp();
         Down -> MoveDown();
+        Home -> GotoLineStart();
+        End -> GotoLineEnd();
         Alt-Left -> MovePrevWordStart();
         Alt-Right -> MoveNextWordStart();
         Alt-Backspace -> DeleteWordBackward();

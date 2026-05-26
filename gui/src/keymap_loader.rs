@@ -238,4 +238,66 @@ mod tests {
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "Redo");
     }
+
+    fn text_entry_state(mode: &str) -> TestState {
+        let mut values = HashMap::new();
+        values.insert("mode".into(), StateValue::String(mode.into()));
+        values.insert("claude_focused".into(), StateValue::Bool(false));
+        values.insert("palette_open".into(), StateValue::Bool(false));
+        values.insert("finder_open".into(), StateValue::Bool(false));
+        values.insert("help_open".into(), StateValue::Bool(false));
+        TestState { values }
+    }
+
+    #[test]
+    fn default_keymap_editing_key_suite_in_every_text_entry_mode() {
+        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+
+        let keymap = compile_default_keymap();
+
+        let modes = ["insert", "prompt", "reword_insert", "run"];
+
+        let keys: &[(&str, KeyEvent)] = &[
+            (
+                "Backspace",
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::NONE),
+            ),
+            ("Delete", KeyEvent::new(KeyCode::Delete, KeyModifiers::NONE)),
+            ("Left", KeyEvent::new(KeyCode::Left, KeyModifiers::NONE)),
+            ("Right", KeyEvent::new(KeyCode::Right, KeyModifiers::NONE)),
+            ("Home", KeyEvent::new(KeyCode::Home, KeyModifiers::NONE)),
+            ("End", KeyEvent::new(KeyCode::End, KeyModifiers::NONE)),
+            (
+                "Alt-Backspace",
+                KeyEvent::new(KeyCode::Backspace, KeyModifiers::ALT),
+            ),
+            (
+                "Alt-Delete",
+                KeyEvent::new(KeyCode::Delete, KeyModifiers::ALT),
+            ),
+            (
+                "Ctrl-a",
+                KeyEvent::new(KeyCode::Char('a'), KeyModifiers::CONTROL),
+            ),
+            (
+                "Ctrl-e",
+                KeyEvent::new(KeyCode::Char('e'), KeyModifiers::CONTROL),
+            ),
+        ];
+
+        let mut missing: Vec<String> = Vec::new();
+        for mode in modes {
+            let state = text_entry_state(mode);
+            for (label, event) in keys {
+                if keymap.lookup(&state, event).is_none() {
+                    missing.push(format!("{mode}/{label}"));
+                }
+            }
+        }
+
+        assert!(
+            missing.is_empty(),
+            "every text-entry mode must bind the standard editing-key suite; missing: {missing:?}",
+        );
+    }
 }
