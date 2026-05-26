@@ -1,4 +1,4 @@
-use snafu::{ResultExt, Whatever};
+use snafu::{whatever, ResultExt, Whatever};
 use std::{path::PathBuf, sync::Arc};
 use stoat::host::{
     LocalClipboard, LocalEnv, LocalFs, LocalFsWatcher, LocalGit, LocalLspHost, LocalShell,
@@ -35,6 +35,7 @@ pub fn run(
         .map(|raw| parse_input_sequence(&raw))
         .transpose()
         .with_whatever_context(|e| format!("parse --inputs sequence: {e}"))?;
+    let timeout = validate_timeout(timeout)?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()
@@ -83,6 +84,19 @@ pub fn run(
     Ok(())
 }
 
+/// Reject `--timeout` values that would panic `Duration::from_secs_f64`.
+/// NaN, +/- infinity, and negative seconds are all caught here so the
+/// binary exits with a usage error before the gpui main loop is
+/// entered. `None` (the flag absent) passes through unchanged.
+fn validate_timeout(timeout: Option<f64>) -> Result<Option<f64>, Whatever> {
+    if let Some(seconds) = timeout {
+        if !seconds.is_finite() || seconds < 0.0 {
+            whatever!("invalid --timeout value: {seconds}");
+        }
+    }
+    Ok(timeout)
+}
+
 fn load_default_settings_and_theme() -> (Settings, Theme) {
     let (config, errors) = stoat_config::parse(DEFAULT_CONFIG);
     if !errors.is_empty() {
@@ -101,4 +115,59 @@ fn load_default_settings_and_theme() -> (Settings, Theme) {
         Theme::from_config(&settings.config, name)
     };
     (settings, theme)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn err_message(timeout: f64) -> String {
+        validate_timeout(Some(timeout))
+            .expect_err("validation should reject")
+            .to_string()
+    }
+
+    #[test]
+    fn validate_timeout_passes_through_well_formed_values() {
+        assert_eq!(validate_timeout(None).unwrap(), None);
+        assert_eq!(validate_timeout(Some(0.0)).unwrap(), Some(0.0));
+        assert_eq!(validate_timeout(Some(1.5)).unwrap(), Some(1.5));
+        assert_eq!(validate_timeout(Some(3600.0)).unwrap(), Some(3600.0));
+    }
+
+    #[test]
+    fn validate_timeout_rejects_negative() {
+        let message = err_message(-1.0);
+        assert!(
+            message.contains("invalid --timeout") && message.contains("-1"),
+            "message should name the offending value: {message}",
+        );
+    }
+
+    #[test]
+    fn validate_timeout_rejects_nan() {
+        let message = err_message(f64::NAN);
+        assert!(
+            message.contains("invalid --timeout") && message.contains("NaN"),
+            "message should name the offending value: {message}",
+        );
+    }
+
+    #[test]
+    fn validate_timeout_rejects_positive_infinity() {
+        let message = err_message(f64::INFINITY);
+        assert!(
+            message.contains("invalid --timeout") && message.contains("inf"),
+            "message should name the offending value: {message}",
+        );
+    }
+
+    #[test]
+    fn validate_timeout_rejects_negative_infinity() {
+        let message = err_message(f64::NEG_INFINITY);
+        assert!(
+            message.contains("invalid --timeout") && message.contains("inf"),
+            "message should name the offending value: {message}",
+        );
+    }
 }
