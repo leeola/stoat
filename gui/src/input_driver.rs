@@ -137,4 +137,69 @@ mod tests {
             assert!(!is_printable_bare_char(&key("w", modifiers)));
         }
     }
+
+    #[test]
+    fn colon_escape_colon_drives_palette_open_each_time() {
+        use crate::{
+            command_palette::CommandPaletteDelegate,
+            globals::{ExecutorGlobal, FsWatchHostGlobal},
+            input_parse::parse_input_sequence,
+            picker::Picker,
+            workspace::Workspace,
+        };
+        use gpui::{Entity, TestAppContext};
+        use std::{path::PathBuf, sync::Arc};
+        use stoat::host::FsWatchHost;
+        use stoat_host::NoopFsWatcher;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.set_global(ExecutorGlobal(Executor::new(
+                Arc::new(TestScheduler::new()),
+            )));
+            cx.set_global(FsWatchHostGlobal(
+                Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
+            ));
+        });
+        let (ws, vcx): (Entity<Workspace>, _) = cx
+            .add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+
+        let keystrokes = parse_input_sequence(":<Esc>:").expect("parse");
+        for keystroke in &keystrokes {
+            ws.update_in(vcx, |workspace, window, cx| {
+                let sm = workspace.input_state_machine().clone();
+                let actions = if is_printable_bare_char(keystroke) {
+                    sm.update(cx, |sm, cx| sm.text_input(&keystroke.key, None, window, cx))
+                } else {
+                    sm.update(cx, |sm, cx| sm.feed(keystroke, window, cx))
+                };
+                for action in actions {
+                    workspace.dispatch_action(action, window, cx);
+                }
+            });
+            vcx.run_until_parked();
+        }
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<CommandPaletteDelegate>>()
+            })
+            .expect("the second ':' must reopen the command palette after the Escape dismiss");
+        let query_text = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .snapshot()
+                .text()
+                .to_string()
+        });
+        assert_eq!(
+            query_text, "",
+            "neither ':' open should leak its commit into the picker query editor",
+        );
+    }
 }
