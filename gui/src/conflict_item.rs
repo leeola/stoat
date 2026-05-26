@@ -1,23 +1,30 @@
 use crate::{
-    buffer::Buffer,
+    buffer::{Buffer, BufferEvent},
     diff_map::DiffMap,
     display_map::DisplayMap,
     editor::{Editor, EditorMode},
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::MultiBuffer,
-    theme::ActiveTheme,
+    theme::{ActiveTheme, Theme},
 };
 use gpui::{
     div, App, AppContext, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, Render,
-    SharedString, Styled, Window,
+    SharedString, Styled, Subscription, Window,
 };
+use ratatui::style::Color;
 use serde_json::Value;
 use std::{
     ops::Range,
     path::{Path, PathBuf},
+    sync::Arc,
 };
-use stoat::{buffer::BufferId, host::ConflictedFile};
+use stoat::{
+    buffer::BufferId,
+    display_map::highlights::{DecorationHighlight, HighlightStyle},
+    host::ConflictedFile,
+};
+use stoat_text::Bias;
 
 const MISSING_SIDE_PLACEHOLDER: &str = "(file not present)\n";
 
@@ -51,6 +58,12 @@ pub struct ConflictItem {
     ours: SideView,
     theirs: SideView,
     result: SideView,
+    /// Keeps the result-buffer edit subscription alive. Dropped
+    /// with the item; the subscription itself runs
+    /// [`refresh_decoration_highlights`] after every edit so the
+    /// `<<<<<<<`/`=======`/`>>>>>>>` marker styling tracks the
+    /// current buffer content.
+    _result_subscription: Subscription,
 }
 
 /// The handles backing one editor pane. The [`Buffer`] handle is
@@ -80,14 +93,60 @@ impl ConflictItem {
         let theirs = build_side_editor(theirs_text, cx);
         let result = build_side_editor(&result_text, cx);
 
-        Self {
+        let result_subscription =
+            cx.subscribe(&result.buffer, |this, _, event: &BufferEvent, cx| {
+                if matches!(event, BufferEvent::Edited | BufferEvent::Reloaded) {
+                    this.refresh_decoration_highlights(cx);
+                }
+            });
+
+        let item = Self {
             rel_path: file.path,
             ancestor_original: file.ancestor,
             ancestor,
             ours,
             theirs,
             result,
+            _result_subscription: result_subscription,
+        };
+        item.refresh_decoration_highlights(cx);
+        item
+    }
+
+    /// Re-scan the result buffer for conflict-marker lines and feed
+    /// the byte ranges into the result editor's display map as
+    /// `vcs.conflict.header`-styled decoration highlights. Called
+    /// once at construction and whenever the result buffer emits
+    /// [`BufferEvent::Edited`] or [`BufferEvent::Reloaded`].
+    fn refresh_decoration_highlights(&self, cx: &mut Context<'_, Self>) {
+        let text = self.result_buffer_text(cx);
+        let ranges = compute_conflict_marker_ranges(&text);
+        let buffer_id = self.result.buffer.read(cx).read(|b| b.buffer_id());
+        let display_map = self.result.editor.read(cx).display_map().clone();
+        if ranges.is_empty() {
+            display_map.update(cx, |dm, cx| dm.clear_decoration_highlights(buffer_id, cx));
+            return;
         }
+        let style = conflict_header_style(cx);
+        let decorations: Vec<DecorationHighlight> = display_map.update(cx, |dm, _| {
+            let snap = dm.snapshot();
+            let buffer_snap = snap.buffer_snapshot();
+            ranges
+                .into_iter()
+                .map(|range| {
+                    let start = buffer_snap.anchor_at(range.start, Bias::Right);
+                    let end = buffer_snap.anchor_at(range.end, Bias::Left);
+                    DecorationHighlight {
+                        range: start..end,
+                        style: style.clone(),
+                    }
+                })
+                .collect()
+        });
+        let decorations: Arc<[DecorationHighlight]> = Arc::from(decorations);
+        display_map.update(cx, |dm, cx| {
+            dm.set_decoration_highlights(buffer_id, decorations, cx)
+        });
     }
 
     /// Replace the conflict block enclosing the result editor's
@@ -284,6 +343,47 @@ fn build_side_editor(text: &str, cx: &mut Context<'_, ConflictItem>) -> SideView
         cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
 
     SideView { buffer, editor }
+}
+
+/// Scan `text` for lines starting with the three conflict-marker
+/// prefixes (`<<<<<<<`, `=======`, `>>>>>>>`). Returns each match's
+/// byte range, including the trailing `\n` when present so the
+/// highlight covers the whole logical marker line.
+fn compute_conflict_marker_ranges(text: &str) -> Vec<Range<usize>> {
+    let mut ranges = Vec::new();
+    let mut pos = 0usize;
+    while pos < text.len() {
+        let nl = text[pos..].find('\n');
+        let line_end = nl.map(|p| pos + p).unwrap_or(text.len());
+        let next_line_start = nl.map(|_| line_end + 1).unwrap_or(text.len());
+        let line = &text[pos..line_end];
+        if line.starts_with("<<<<<<<") || line.starts_with("=======") || line.starts_with(">>>>>>>")
+        {
+            ranges.push(pos..next_line_start);
+        }
+        if nl.is_none() {
+            break;
+        }
+        pos = next_line_start;
+    }
+    ranges
+}
+
+/// Build the [`HighlightStyle`] applied to conflict-marker lines.
+/// Resolves the foreground from the active stoat-side `Theme`'s
+/// `vcs.conflict.header` scope; falls back to red when the theme
+/// has no entry, matching the gui side's `palette.danger`.
+fn conflict_header_style(cx: &App) -> HighlightStyle {
+    let foreground = cx
+        .try_global::<Theme>()
+        .and_then(|t| t.0.try_get(stoat::theme::scope::VCS_CONFLICT_HEADER))
+        .and_then(|style| style.fg)
+        .or(Some(Color::Red));
+    HighlightStyle {
+        foreground,
+        bold: Some(true),
+        ..Default::default()
+    }
 }
 
 fn format_conflict_markers(ours: Option<&str>, theirs: Option<&str>) -> String {
@@ -589,6 +689,55 @@ mod tests {
         item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Ours, cx));
         let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
         assert_eq!(text, "alpha\n");
+    }
+
+    #[test]
+    fn decoration_highlights_track_conflict_markers_through_take_side() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let item = cx.update(|cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file("a.txt", None, Some("alpha\n"), Some("beta\n")),
+                    cx,
+                )
+            })
+        });
+        cx.run_until_parked();
+
+        let (display_map, buffer_id) = item.read_with(&cx, |item, cx| {
+            let display_map = item.result.editor.read(cx).display_map().clone();
+            let buffer_id = item.result.buffer.read(cx).read(|b| b.buffer_id());
+            (display_map, buffer_id)
+        });
+        let initial = display_map.update(&mut cx, |dm, _| {
+            dm.snapshot()
+                .decoration_highlights()
+                .get(&buffer_id)
+                .map(|d| d.len())
+                .unwrap_or(0)
+        });
+        assert_eq!(
+            initial, 3,
+            "the initial result text has three marker lines (<<<<<<<, =======, >>>>>>>)"
+        );
+
+        let editor = item.read_with(&cx, |item, _| item.result.editor.clone());
+        place_cursor_at(&editor, 0, &mut cx);
+        item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Ours, cx));
+        cx.run_until_parked();
+
+        let after = display_map.update(&mut cx, |dm, _| {
+            dm.snapshot()
+                .decoration_highlights()
+                .get(&buffer_id)
+                .map(|d| d.len())
+                .unwrap_or(0)
+        });
+        assert_eq!(
+            after, 0,
+            "taking a side removes the conflict block so no marker decorations remain"
+        );
     }
 
     #[test]
