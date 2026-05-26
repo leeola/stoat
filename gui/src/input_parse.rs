@@ -81,6 +81,24 @@ fn parse_angle_token(token: &str) -> Result<Keystroke, InputParseError> {
         "down" => Some("down"),
         "left" => Some("left"),
         "right" => Some("right"),
+        "home" => Some("home"),
+        "end" => Some("end"),
+        "pageup" | "pgup" => Some("pageup"),
+        "pagedown" | "pgdn" => Some("pagedown"),
+        "delete" | "del" => Some("delete"),
+        "insert" | "ins" => Some("insert"),
+        "f1" => Some("f1"),
+        "f2" => Some("f2"),
+        "f3" => Some("f3"),
+        "f4" => Some("f4"),
+        "f5" => Some("f5"),
+        "f6" => Some("f6"),
+        "f7" => Some("f7"),
+        "f8" => Some("f8"),
+        "f9" => Some("f9"),
+        "f10" => Some("f10"),
+        "f11" => Some("f11"),
+        "f12" => Some("f12"),
         "lt" if !modified => return Ok(plain_keystroke('<')),
         _ => None,
     };
@@ -325,5 +343,41 @@ mod tests {
                 alt_named("w", true),
             ],
         );
+    }
+
+    #[test]
+    fn extended_named_keys_round_trip_to_gpui_names() {
+        let cases = [
+            ("<Home>", "home"),
+            ("<End>", "end"),
+            ("<PageUp>", "pageup"),
+            ("<PgUp>", "pageup"),
+            ("<PageDown>", "pagedown"),
+            ("<PgDn>", "pagedown"),
+            ("<Delete>", "delete"),
+            ("<Del>", "delete"),
+            ("<Insert>", "insert"),
+            ("<Ins>", "insert"),
+            ("<F1>", "f1"),
+            ("<F2>", "f2"),
+            ("<F3>", "f3"),
+            ("<F4>", "f4"),
+            ("<F5>", "f5"),
+            ("<F6>", "f6"),
+            ("<F7>", "f7"),
+            ("<F8>", "f8"),
+            ("<F9>", "f9"),
+            ("<F10>", "f10"),
+            ("<F11>", "f11"),
+            ("<F12>", "f12"),
+        ];
+        for (token, expected) in cases {
+            let parsed = parse(token);
+            assert_eq!(
+                parsed,
+                vec![plain_keystroke(expected)],
+                "{token} should parse to key {expected:?}",
+            );
+        }
     }
 }
