@@ -7,17 +7,13 @@
 //! keys whose modifier prefixes set `control` / `shift` on a single
 //! trailing key (`<C-w>`, `<C-S-w>`), and `<lt>` for a literal `<`.
 
-// The `stoat gui --inputs` driver is this parser's consumer; absent
-// that call site the lib build has no non-test users of these items.
-#![allow(dead_code)]
-
 use gpui::{Keystroke, Modifiers};
 use snafu::{Location, Snafu};
 
 /// Failure parsing an input string in [`parse_input_sequence`].
 #[derive(Debug, Snafu)]
 #[snafu(visibility(pub(crate)))]
-pub(crate) enum InputParseError {
+pub enum InputParseError {
     #[snafu(display("unterminated '<' token at byte {offset}"))]
     UnterminatedToken {
         offset: usize,
@@ -38,7 +34,7 @@ pub(crate) enum InputParseError {
 ///
 /// Errors on a `<...>` token that names no known key or a `<` with no
 /// closing `>`.
-pub(crate) fn parse_input_sequence(input: &str) -> Result<Vec<Keystroke>, InputParseError> {
+pub fn parse_input_sequence(input: &str) -> Result<Vec<Keystroke>, InputParseError> {
     let mut keystrokes = Vec::new();
     let mut chars = input.char_indices();
 

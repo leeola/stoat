@@ -122,10 +122,12 @@ pub enum RestoreMode {
     /// workspace anchored at cwd when no ancestor has any state.
     Resume,
 }
+pub use gpui::Keystroke;
 use gpui::{
     px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
     WindowOptions,
 };
+pub use input_parse::{parse_input_sequence, InputParseError};
 pub use input_state_machine::{InputStateMachine, Operator};
 pub use item::{DeserializeSnafu, ItemError, ItemHandle, ItemView, SaveSnafu};
 pub use keymap_loader::{
@@ -150,7 +152,7 @@ pub fn run(
     globals: Globals,
     files: Vec<std::path::PathBuf>,
     restore: RestoreMode,
-    inputs: Option<String>,
+    inputs: Option<Vec<Keystroke>>,
     timeout: Option<f64>,
 ) {
     Application::new().run(move |cx: &mut App| {
@@ -170,8 +172,8 @@ pub fn run(
                 move |_window, cx| cx.new(|cx| StoatApp::new(files, restore, cx)),
             )
             .expect("open root window");
-        if let Some(inputs) = inputs {
-            input_driver::drive_inputs(cx, window, inputs);
+        if let Some(keystrokes) = inputs {
+            input_driver::drive_inputs(cx, window, keystrokes);
         }
         if let Some(timeout) = timeout {
             cx.spawn(async move |cx| {

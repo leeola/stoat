@@ -6,10 +6,10 @@ use stoat::host::{
 };
 use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_gui::{
-    install_panic_hook, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal,
-    FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry, LspHostGlobal,
-    MpscPermissionPromptHost, PermissionPromptHost, PermissionPromptHostGlobal, RestoreMode,
-    Settings, ShellHostGlobal, TerminalHostGlobal, Theme,
+    install_panic_hook, parse_input_sequence, ClaudeCodeHostGlobal, ClipboardHostGlobal,
+    EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals,
+    LanguageRegistry, LspHostGlobal, MpscPermissionPromptHost, PermissionPromptHost,
+    PermissionPromptHostGlobal, RestoreMode, Settings, ShellHostGlobal, TerminalHostGlobal, Theme,
 };
 use stoat_scheduler::TokioScheduler;
 use tokio::sync::mpsc;
@@ -30,6 +30,11 @@ pub fn run(
     timeout: Option<f64>,
 ) -> Result<(), Whatever> {
     install_panic_hook();
+
+    let inputs = inputs
+        .map(|raw| parse_input_sequence(&raw))
+        .transpose()
+        .with_whatever_context(|e| format!("parse --inputs sequence: {e}"))?;
 
     let runtime = tokio::runtime::Builder::new_multi_thread()
         .enable_all()

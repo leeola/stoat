@@ -12,26 +12,24 @@
 //! re-route printable keys to the focused input handler and double-fire
 //! them under Stoat's no-gpui-bindings setup.
 
-use crate::{input_parse::parse_input_sequence, stoat_app::StoatApp};
+use crate::stoat_app::StoatApp;
 use gpui::{App, Context, Keystroke, Window, WindowHandle};
 use std::time::Duration;
 
 const READINESS_DELAY: Duration = Duration::from_millis(300);
 const INTER_KEY_DELAY: Duration = Duration::from_millis(20);
 
-/// Parse `inputs` and, on the gpui foreground, drive the resulting
-/// keystroke sequence into `window`'s workspace after a readiness delay,
-/// pacing the keys so each settles before the next. A parse failure is
-/// logged and drives nothing; driving stops early if the window closes.
-pub(crate) fn drive_inputs(cx: &mut App, window: WindowHandle<StoatApp>, inputs: String) {
-    let keystrokes = match parse_input_sequence(&inputs) {
-        Ok(keystrokes) => keystrokes,
-        Err(err) => {
-            tracing::error!(error = %err, "failed to parse --inputs sequence");
-            return;
-        },
-    };
-
+/// On the gpui foreground, drive `keystrokes` into `window`'s workspace
+/// after a readiness delay, pacing the keys so each settles before the
+/// next. Parsing happens at the binary entry (see `parse_input_sequence`
+/// re-exported from the crate root) so a bad `--inputs` argument exits
+/// non-zero before the window opens. Driving stops early if the window
+/// closes.
+pub(crate) fn drive_inputs(
+    cx: &mut App,
+    window: WindowHandle<StoatApp>,
+    keystrokes: Vec<Keystroke>,
+) {
     cx.spawn(async move |cx| {
         cx.background_executor().timer(READINESS_DELAY).await;
         for keystroke in keystrokes {
