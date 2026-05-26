@@ -421,6 +421,9 @@ pub mod scope {
 
     pub const UI_SEARCH_MATCH: &str = "ui.search.match";
 
+    pub const UI_GOTO_WORD_LABEL: &str = "ui.goto_word.label";
+    pub const UI_GOTO_WORD_PREFIX: &str = "ui.goto_word.prefix";
+
     pub const UI_BORDER_FOCUSED: &str = "ui.border.focused";
     pub const UI_BORDER_INACTIVE: &str = "ui.border.inactive";
 

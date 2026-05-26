@@ -84,9 +84,8 @@ impl BasePalette {
 /// re-reads the [`Theme`] global on each call, so a newly installed
 /// theme is visible to the next read.
 ///
-/// The `goto_word_*` and `selection_editor` fields keep
-/// scope-specific defaults rather than derive from [`BasePalette`]:
-/// `goto_word_*` have no theme scope today (TODO adds them) and
+/// The `selection_editor` field keeps a scope-specific default
+/// rather than deriving from [`BasePalette`]:
 /// `selection_editor` carries the alpha channel that
 /// [`default_selection_color`] supplies.
 ///
@@ -207,8 +206,16 @@ impl ThemeColors {
                 stoat::theme::scope::UI_DIAGNOSTIC_HINT,
                 palette.text_muted,
             ),
-            goto_word_label: rgb(0xeeee00).into(),
-            goto_word_prefix: rgb(0x666600).into(),
+            goto_word_label: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_GOTO_WORD_LABEL,
+                rgb(0xeeee00).into(),
+            ),
+            goto_word_prefix: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_GOTO_WORD_PREFIX,
+                rgb(0x666600).into(),
+            ),
             selection: theme_bg_or(cx, stoat::theme::scope::UI_SELECTION, palette.accent),
             selection_editor: theme_bg_or(
                 cx,

@@ -18,6 +18,9 @@ theme default_dark {
     ui.line_highlight = { bg: "#2a2a2a" };
     ui.search.match = { fg: black, bg: warning };
 
+    ui.goto_word.label  = { fg: "#eeee00", modifiers: [bold] };
+    ui.goto_word.prefix = { fg: "#666600" };
+
     ui.border.focused.fg = accent;
     ui.border.inactive.fg = muted;
 
