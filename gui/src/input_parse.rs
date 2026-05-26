@@ -71,40 +71,42 @@ pub(crate) fn parse_input_sequence(input: &str) -> Result<Vec<Keystroke>, InputP
 fn parse_angle_token(token: &str) -> Result<Keystroke, InputParseError> {
     let (modifiers, rest, modified) = strip_modifiers(token);
 
+    let named = match rest.to_ascii_lowercase().as_str() {
+        "space" => Some("space"),
+        "esc" => Some("escape"),
+        "enter" | "cr" => Some("enter"),
+        "tab" => Some("tab"),
+        "bs" | "backspace" => Some("backspace"),
+        "up" => Some("up"),
+        "down" => Some("down"),
+        "left" => Some("left"),
+        "right" => Some("right"),
+        "lt" if !modified => return Ok(plain_keystroke('<')),
+        _ => None,
+    };
+
+    if let Some(key) = named {
+        return Ok(Keystroke {
+            modifiers,
+            key: key.to_string(),
+            key_char: None,
+        });
+    }
+
     if modified {
-        return match single_char(rest) {
-            Some(key) => Ok(Keystroke {
+        if let Some(key) = single_char(rest) {
+            return Ok(Keystroke {
                 modifiers,
                 key: key.to_string(),
                 key_char: None,
-            }),
-            None => UnknownTokenSnafu {
-                token: token.to_string(),
-            }
-            .fail(),
-        };
+            });
+        }
     }
 
-    let key = match token.to_ascii_lowercase().as_str() {
-        "space" => "space",
-        "esc" => "escape",
-        "enter" | "cr" => "enter",
-        "tab" => "tab",
-        "bs" | "backspace" => "backspace",
-        "up" => "up",
-        "down" => "down",
-        "left" => "left",
-        "right" => "right",
-        "lt" => return Ok(plain_keystroke('<')),
-        _ => {
-            return UnknownTokenSnafu {
-                token: token.to_string(),
-            }
-            .fail()
-        },
-    };
-
-    Ok(plain_keystroke(key))
+    UnknownTokenSnafu {
+        token: token.to_string(),
+    }
+    .fail()
 }
 
 fn strip_modifiers(token: &str) -> (Modifiers, &str, bool) {
@@ -270,5 +272,30 @@ mod tests {
             parse_input_sequence("<C-ab>"),
             Err(InputParseError::UnknownToken { .. })
         ));
+    }
+
+    fn modified_named(key: &str, control: bool, shift: bool) -> Keystroke {
+        Keystroke {
+            modifiers: Modifiers {
+                control,
+                shift,
+                ..Default::default()
+            },
+            key: key.to_string(),
+            key_char: None,
+        }
+    }
+
+    #[test]
+    fn modifier_prefix_attaches_to_named_keys() {
+        assert_eq!(
+            parse("<S-Tab><C-Enter><C-Backspace><C-Up>"),
+            vec![
+                modified_named("tab", false, true),
+                modified_named("enter", true, false),
+                modified_named("backspace", true, false),
+                modified_named("up", true, false),
+            ],
+        );
     }
 }
