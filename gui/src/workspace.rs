@@ -6563,6 +6563,67 @@ mod tests {
         );
     }
 
+    #[test]
+    fn ime_space_p_chord_keeps_finder_query_empty() {
+        use crate::{
+            file_finder::FileFinderDelegate,
+            globals::{FsHostGlobal, GitHostGlobal},
+            picker::Picker,
+        };
+        use gpui::EntityInputHandler;
+        use stoat::host::{fake::FakeGit, FakeFs, FsHost, GitHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo").with_fs(&fs);
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+
+        // First half of the chord: space dispatches SetMode(space) so the
+        // marker is not armed (action list comes from a SetMode handled
+        // inline, not from a printable-key dispatch).
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, " ", window, cx);
+        });
+        vcx.run_until_parked();
+        // Second half: `p` resolves OpenFileFinder in space mode; the
+        // mode-armed marker should then drop the macOS paired redelivery.
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, "p", window, cx);
+        });
+        vcx.run_until_parked();
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, "p", window, cx);
+        });
+        vcx.run_until_parked();
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<FileFinderDelegate>>()
+            })
+            .expect("space p should open the file finder");
+        let query_text = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .snapshot()
+                .text()
+                .to_string()
+        });
+        assert_eq!(
+            query_text, "",
+            "the 'p' that completed the chord must not leak into the finder query on the paired IME redelivery"
+        );
+    }
+
     fn dispatch<A: stoat_action::Action>(
         ws: &Entity<Workspace>,
         vcx: &mut VisualTestContext,
