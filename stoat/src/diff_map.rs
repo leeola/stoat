@@ -516,6 +516,18 @@ fn changes_to_hunks(
         let lhs_change = &changes[lhs_idx];
         let rhs_change = &changes[rhs_idx];
         let line_range = byte_range_to_line_range(rhs_text, &rhs_change.byte_range);
+        let token_detail = TokenDetail {
+            buffer_spans: vec![ChangeSpan {
+                byte_range: rhs_change.byte_range.clone(),
+                kind: change_kind_from_lang(&rhs_change.kind),
+                move_metadata: None,
+            }],
+            base_spans: vec![ChangeSpan {
+                byte_range: lhs_change.byte_range.clone(),
+                kind: change_kind_from_lang(&lhs_change.kind),
+                move_metadata: None,
+            }],
+        };
         hunks.push(DiffHunk {
             status: DiffHunkStatus::Modified,
             staged: false,
@@ -523,7 +535,7 @@ fn changes_to_hunks(
             buffer_line_range: line_range,
             base_byte_range: lhs_change.byte_range.clone(),
             anchor_range: None,
-            token_detail: None,
+            token_detail: Some(Arc::new(token_detail)),
         });
         consumed[lhs_idx] = true;
         consumed[rhs_idx] = true;
@@ -536,6 +548,14 @@ fn changes_to_hunks(
         match cur.side {
             Side::Rhs => {
                 let line_range = byte_range_to_line_range(rhs_text, &cur.byte_range);
+                let token_detail = TokenDetail {
+                    buffer_spans: vec![ChangeSpan {
+                        byte_range: cur.byte_range.clone(),
+                        kind: change_kind_from_lang(&cur.kind),
+                        move_metadata: None,
+                    }],
+                    base_spans: Vec::new(),
+                };
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Added,
                     staged: false,
@@ -543,7 +563,7 @@ fn changes_to_hunks(
                     buffer_line_range: line_range,
                     base_byte_range: 0..0,
                     anchor_range: None,
-                    token_detail: None,
+                    token_detail: Some(Arc::new(token_detail)),
                 });
             },
             Side::Lhs => {
@@ -557,6 +577,14 @@ fn changes_to_hunks(
                         .filter(|c| *c == '\n')
                         .count() as u32
                 });
+                let token_detail = TokenDetail {
+                    buffer_spans: Vec::new(),
+                    base_spans: vec![ChangeSpan {
+                        byte_range: cur.byte_range.clone(),
+                        kind: change_kind_from_lang(&cur.kind),
+                        move_metadata: None,
+                    }],
+                };
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Deleted,
                     staged: false,
@@ -564,13 +592,22 @@ fn changes_to_hunks(
                     buffer_line_range: buffer_line..buffer_line,
                     base_byte_range: cur.byte_range.clone(),
                     anchor_range: None,
-                    token_detail: None,
+                    token_detail: Some(Arc::new(token_detail)),
                 });
             },
         }
     }
     hunks.sort_by_key(|h| h.buffer_start_line);
     hunks
+}
+
+fn change_kind_from_lang(kind: &stoat_language::structural_diff::ChangeKind) -> ChangeKind {
+    use stoat_language::structural_diff::ChangeKind as LangChangeKind;
+    match kind {
+        LangChangeKind::Novel => ChangeKind::Novel,
+        LangChangeKind::Replaced => ChangeKind::Replaced,
+        LangChangeKind::Moved => ChangeKind::Moved,
+    }
 }
 
 fn byte_range_to_line_range(text: &str, byte_range: &Range<usize>) -> Range<u32> {
@@ -785,6 +822,93 @@ mod tests {
             .find(|h| h.buffer_start_line == 2)
             .expect("pair 1 hunk");
         assert_eq!(p1.base_byte_range, 11..16);
+    }
+
+    #[test]
+    fn modified_added_deleted_hunks_carry_token_detail_spans() {
+        use stoat_language::structural_diff::{
+            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+        };
+        let lhs_text = "alpha\nremove\n";
+        let rhs_text = "ALPHA\nadded\n";
+        let changes = vec![
+            // Modified pair: alpha <-> ALPHA.
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 0..5,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+            },
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 0..5,
+                kind: LangChangeKind::Replaced,
+                move_metadata: None,
+                pair_id: Some(0),
+                deletion_rhs_anchor: None,
+            },
+            // Added: "added" on the rhs.
+            DiffChange {
+                side: Side::Rhs,
+                byte_range: 6..11,
+                kind: LangChangeKind::Novel,
+                move_metadata: None,
+                pair_id: None,
+                deletion_rhs_anchor: None,
+            },
+            // Deleted: "remove" on the lhs.
+            DiffChange {
+                side: Side::Lhs,
+                byte_range: 6..12,
+                kind: LangChangeKind::Novel,
+                move_metadata: None,
+                pair_id: None,
+                deletion_rhs_anchor: None,
+            },
+        ];
+        let dm = DiffMap::from_structural_changes(
+            DiffResult {
+                changes,
+                fell_back_to_line_diff: false,
+            },
+            lhs_text,
+            rhs_text,
+        );
+        let hunks: Vec<&DiffHunk> = dm.hunks_in_range(0..5);
+
+        let modified = hunks
+            .iter()
+            .find(|h| h.status == DiffHunkStatus::Modified)
+            .expect("modified hunk");
+        let detail = modified.token_detail.as_ref().expect("modified detail");
+        assert_eq!(detail.buffer_spans.len(), 1);
+        assert_eq!(detail.buffer_spans[0].byte_range, 0..5);
+        assert_eq!(detail.buffer_spans[0].kind, ChangeKind::Replaced);
+        assert_eq!(detail.base_spans.len(), 1);
+        assert_eq!(detail.base_spans[0].byte_range, 0..5);
+        assert_eq!(detail.base_spans[0].kind, ChangeKind::Replaced);
+
+        let added = hunks
+            .iter()
+            .find(|h| h.status == DiffHunkStatus::Added)
+            .expect("added hunk");
+        let detail = added.token_detail.as_ref().expect("added detail");
+        assert_eq!(detail.buffer_spans.len(), 1);
+        assert_eq!(detail.buffer_spans[0].byte_range, 6..11);
+        assert_eq!(detail.buffer_spans[0].kind, ChangeKind::Novel);
+        assert!(detail.base_spans.is_empty());
+
+        let deleted = hunks
+            .iter()
+            .find(|h| h.status == DiffHunkStatus::Deleted)
+            .expect("deleted hunk");
+        let detail = deleted.token_detail.as_ref().expect("deleted detail");
+        assert!(detail.buffer_spans.is_empty());
+        assert_eq!(detail.base_spans.len(), 1);
+        assert_eq!(detail.base_spans[0].byte_range, 6..12);
+        assert_eq!(detail.base_spans[0].kind, ChangeKind::Novel);
     }
 
     #[test]
