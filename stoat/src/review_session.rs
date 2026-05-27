@@ -49,6 +49,8 @@ impl ChunkStatus {
 /// Provenance of the content under review.
 ///
 /// - [`ReviewSource::WorkingTree`]: git index vs working tree of `workdir`.
+/// - [`ReviewSource::WorkspaceWatch`]: live edits inside `workdir`, diffed per file against git
+///   HEAD. The session starts empty and grows as filesystem-watch events arrive.
 /// - [`ReviewSource::Commit`]: commit tree vs its parent (empty tree for a root commit).
 /// - [`ReviewSource::CommitRange`]: `from..=to`, diff between the trees at the two commits,
 ///   inclusive of `to`.
@@ -57,6 +59,9 @@ impl ChunkStatus {
 #[derive(Clone, Debug)]
 pub enum ReviewSource {
     WorkingTree {
+        workdir: PathBuf,
+    },
+    WorkspaceWatch {
         workdir: PathBuf,
     },
     Commit {

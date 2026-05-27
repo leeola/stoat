@@ -89,9 +89,9 @@ use crate::{
         review::{
             CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
             JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
-            QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk, ReviewPrevChunk,
-            ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk,
-            ReviewToggleStage, ReviewUnstageChunk,
+            OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk,
+            ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk,
+            ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         workspace::{
@@ -227,6 +227,19 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenReviewCommit {
             workdir: PathBuf::from(workdir),
             sha: sha.to_owned(),
+        }))
+    });
+    add(OpenReviewWatch::DEF, |params| {
+        let workdir = params
+            .first()
+            .context(MissingSnafu { name: "workdir" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "workdir",
+                expected: ParamKind::String,
+            })?;
+        Ok(Box::new(OpenReviewWatch {
+            workdir: PathBuf::from(workdir),
         }))
     });
     add(OpenReviewCommitRange::DEF, |params| {
@@ -1040,7 +1053,8 @@ mod tests {
         // + 1 ToggleProjectTree (opens the project file tree in a dock).
         // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
         //   routed to the focused project tree dock.
-        assert_eq!(all().count(), 304);
+        // + 1 OpenReviewWatch (workspace-watch review session).
+        assert_eq!(all().count(), 305);
     }
 
     #[test]

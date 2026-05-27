@@ -26,6 +26,7 @@ pub enum ActionKind {
     OpenCommandPalette,
     OpenHelp,
     OpenReview,
+    OpenReviewWatch,
     AddSelectionBelow,
     AddSelectionAbove,
     MoveLeft,

@@ -5340,6 +5340,7 @@ fn review_inputs_for_source(source: &ReviewSource, cx: &App) -> Vec<ReviewFileIn
         ReviewSource::CommitRange { workdir, from, to } => {
             review_inputs_from_commit_trees(workdir, to, Some(from.as_str()), langs, cx)
         },
+        ReviewSource::WorkspaceWatch { .. } => Vec::new(),
     }
 }
 

@@ -380,6 +380,14 @@ fn review_source_label(source: &ReviewSource, commit_summary: Option<&str>) -> S
                 .unwrap_or_else(|| workdir.display().to_string());
             format!("Review: {name}")
         },
+        ReviewSource::WorkspaceWatch { workdir } => {
+            let name = workdir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| workdir.display().to_string());
+            format!("Watch: {name}")
+        },
         ReviewSource::Commit { sha, .. } => match commit_summary {
             Some(summary) => format!("Commit: {}: {}", short_sha(sha), summary),
             None => format!("Commit: {}", short_sha(sha)),

@@ -553,6 +553,7 @@ pub(super) fn review_refresh(stoat: &mut Stoat) -> UpdateEffect {
 fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> {
     match source {
         ReviewSource::WorkingTree { workdir } => scan_working_tree(stoat, workdir),
+        ReviewSource::WorkspaceWatch { .. } => None,
         ReviewSource::Commit { workdir, sha } => scan_commit(stoat, workdir, sha),
         ReviewSource::CommitRange { workdir, from, to } => {
             scan_commit_range(stoat, workdir, from, to)
@@ -617,6 +618,16 @@ pub(super) fn open_review(stoat: &mut Stoat) {
     let Some(session) = scan_working_tree(stoat, &git_root) else {
         return;
     };
+    install_review_session(stoat, session);
+}
+
+/// Open an empty review session that surfaces live edits inside
+/// `workdir`. Files and chunks are added incrementally by the
+/// workspace-watch event loop; see `ReviewSource::WorkspaceWatch`.
+pub(super) fn open_review_watch(stoat: &mut Stoat, workdir: &Path) {
+    let session = ReviewSession::new(ReviewSource::WorkspaceWatch {
+        workdir: workdir.to_path_buf(),
+    });
     install_review_session(stoat, session);
 }
 
@@ -824,6 +835,16 @@ pub(crate) fn install_review_session(stoat: &mut Stoat, mut session: ReviewSessi
                     "fs watch failed; external edits won't refresh this file",
                 ),
             }
+        }
+    } else if let ReviewSource::WorkspaceWatch { workdir } = &session.source {
+        match fs_watch_host.watch_dir(workdir) {
+            Ok(token) => session.watch_tokens.push(token),
+            Err(err) => tracing::warn!(
+                target: "stoat::review",
+                path = %workdir.display(),
+                error = %err,
+                "fs watch failed; workspace-watch review won't observe edits",
+            ),
         }
     }
 
@@ -1133,5 +1154,36 @@ mod tests {
             progress.total, expected,
             "progress mismatch: {progress:?} expected total {expected}",
         );
+    }
+
+    #[test]
+    fn open_review_watch_starts_empty_with_recursive_watch() {
+        use crate::review_session::ReviewSource;
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        let action = stoat_action::OpenReviewWatch {
+            workdir: workdir.clone(),
+        };
+
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+
+        let ws = h.stoat.active_workspace();
+        let session = ws.review.as_ref().expect("watch session installed");
+        assert!(
+            session.files.is_empty(),
+            "watch session opens empty; expected no files, got {}",
+            session.files.len(),
+        );
+        assert_eq!(session.order.len(), 0);
+        match &session.source {
+            ReviewSource::WorkspaceWatch { workdir: w } => assert_eq!(w, &workdir),
+            other => panic!("unexpected source: {other:?}"),
+        }
+        assert_eq!(
+            session.watch_tokens.len(),
+            1,
+            "recursive watch_dir registers exactly one token",
+        );
+        assert_eq!(h.fake_fs_watcher().watched_paths(), vec![workdir]);
     }
 }
