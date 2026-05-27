@@ -76,6 +76,9 @@ theme default_dark {
     diff.moved.fg        = info;
     diff.context.fg      = muted;
     diff.current_hunk    = { fg: info, modifiers: [bold] };
+    diff.staged_added.fg    = "#bbb529";
+    diff.staged_modified.fg = "#d4aa32";
+    diff.staged_deleted.fg  = "#d08840";
 
     ui.diagnostic.error.fg   = danger;
     ui.diagnostic.warning.fg = warning;

@@ -184,6 +184,7 @@ mod tests {
     fn added_hunk(lines: std::ops::Range<u32>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Added,
+            staged: false,
             buffer_start_line: lines.start,
             buffer_line_range: lines,
             base_byte_range: 0..0,

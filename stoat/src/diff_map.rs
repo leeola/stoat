@@ -53,6 +53,11 @@ pub struct TokenDetail {
 #[derive(Clone, Debug)]
 pub struct DiffHunk {
     pub status: DiffHunkStatus,
+    /// True when the hunk's source diff comes from the git index (the
+    /// change has been `git add`-ed). Today every construction site
+    /// passes `false`; the diff-mode plumbing TODO will populate it from
+    /// the index-vs-worktree comparison.
+    pub staged: bool,
     pub buffer_start_line: u32,
     pub buffer_line_range: Range<u32>,
     pub base_byte_range: Range<usize>,
@@ -164,11 +169,15 @@ impl DiffMap {
         cursor.seek(&target, Bias::Right);
         cursor.prev();
         match cursor.item() {
-            Some(hunk) if hunk.buffer_line_range.contains(&line) => match hunk.status {
-                DiffHunkStatus::Added => DiffStatus::Added,
-                DiffHunkStatus::Modified => DiffStatus::Modified,
-                DiffHunkStatus::Moved => DiffStatus::Moved,
-                DiffHunkStatus::Deleted => DiffStatus::Unchanged,
+            Some(hunk) if hunk.buffer_line_range.contains(&line) => {
+                match (hunk.status, hunk.staged) {
+                    (DiffHunkStatus::Added, false) => DiffStatus::Added,
+                    (DiffHunkStatus::Added, true) => DiffStatus::StagedAdded,
+                    (DiffHunkStatus::Modified, false) => DiffStatus::Modified,
+                    (DiffHunkStatus::Modified, true) => DiffStatus::StagedModified,
+                    (DiffHunkStatus::Moved, _) => DiffStatus::Moved,
+                    (DiffHunkStatus::Deleted, _) => DiffStatus::Unchanged,
+                }
             },
             _ => DiffStatus::Unchanged,
         }
@@ -384,6 +393,7 @@ fn changes_to_hunks(
                 .collect();
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
+                staged: false,
                 buffer_start_line: line_range.start,
                 buffer_line_range: line_range,
                 base_byte_range: base_range,
@@ -424,6 +434,7 @@ fn changes_to_hunks(
                 .collect();
             hunks.push(DiffHunk {
                 status: DiffHunkStatus::Moved,
+                staged: false,
                 buffer_start_line: lhs_line,
                 buffer_line_range: lhs_line..lhs_line,
                 base_byte_range: full_range,
@@ -464,6 +475,7 @@ fn changes_to_hunks(
         let line_range = byte_range_to_line_range(rhs_text, &rhs_change.byte_range);
         hunks.push(DiffHunk {
             status: DiffHunkStatus::Modified,
+            staged: false,
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: lhs_change.byte_range.clone(),
@@ -483,6 +495,7 @@ fn changes_to_hunks(
                 let line_range = byte_range_to_line_range(rhs_text, &cur.byte_range);
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Added,
+                    staged: false,
                     buffer_start_line: line_range.start,
                     buffer_line_range: line_range,
                     base_byte_range: 0..0,
@@ -503,6 +516,7 @@ fn changes_to_hunks(
                 });
                 hunks.push(DiffHunk {
                     status: DiffHunkStatus::Deleted,
+                    staged: false,
                     buffer_start_line: buffer_line,
                     buffer_line_range: buffer_line..buffer_line,
                     base_byte_range: cur.byte_range.clone(),
@@ -537,6 +551,7 @@ mod tests {
     fn added_hunk(line_range: std::ops::Range<u32>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Added,
+            staged: false,
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range: 0..0,
@@ -548,6 +563,7 @@ mod tests {
     fn deleted_hunk(after_line: u32, base_byte_range: std::ops::Range<usize>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Deleted,
+            staged: false,
             buffer_start_line: after_line + 1,
             buffer_line_range: (after_line + 1)..(after_line + 1),
             base_byte_range,
@@ -562,12 +578,60 @@ mod tests {
     ) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Modified,
+            staged: false,
             buffer_start_line: line_range.start,
             buffer_line_range: line_range,
             base_byte_range,
             anchor_range: None,
             token_detail: None,
         }
+    }
+
+    fn moved_hunk(line_range: std::ops::Range<u32>) -> DiffHunk {
+        DiffHunk {
+            status: DiffHunkStatus::Moved,
+            staged: false,
+            buffer_start_line: line_range.start,
+            buffer_line_range: line_range,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        }
+    }
+
+    #[test]
+    fn status_for_line_returns_staged_added_when_hunk_staged() {
+        let mut hunk = added_hunk(2..4);
+        hunk.staged = true;
+        let dm = DiffMap::from_hunks([hunk], None);
+        assert_eq!(dm.status_for_line(2), DiffStatus::StagedAdded);
+        assert_eq!(dm.status_for_line(3), DiffStatus::StagedAdded);
+        assert_eq!(dm.status_for_line(4), DiffStatus::Unchanged);
+    }
+
+    #[test]
+    fn status_for_line_returns_staged_modified_when_hunk_staged() {
+        let mut hunk = modified_hunk(1..3, 0..4);
+        hunk.staged = true;
+        let dm = DiffMap::from_hunks([hunk], None);
+        assert_eq!(dm.status_for_line(1), DiffStatus::StagedModified);
+        assert_eq!(dm.status_for_line(2), DiffStatus::StagedModified);
+    }
+
+    #[test]
+    fn status_for_line_returns_plain_variants_when_not_staged() {
+        let added = DiffMap::from_hunks([added_hunk(0..1)], None);
+        assert_eq!(added.status_for_line(0), DiffStatus::Added);
+        let modified = DiffMap::from_hunks([modified_hunk(0..1, 0..4)], None);
+        assert_eq!(modified.status_for_line(0), DiffStatus::Modified);
+    }
+
+    #[test]
+    fn moved_hunks_ignore_staged_flag() {
+        let mut hunk = moved_hunk(0..2);
+        hunk.staged = true;
+        let dm = DiffMap::from_hunks([hunk], None);
+        assert_eq!(dm.status_for_line(0), DiffStatus::Moved);
     }
 
     #[test]

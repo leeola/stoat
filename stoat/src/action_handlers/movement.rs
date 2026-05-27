@@ -2902,6 +2902,7 @@ mod tests {
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
+            staged: false,
             buffer_start_line: moved_line,
             buffer_line_range: moved_line..(moved_line + 1),
             base_byte_range: 0..0,
@@ -3000,6 +3001,7 @@ mod tests {
         });
         let hunk = DiffHunk {
             status: DiffHunkStatus::Moved,
+            staged: false,
             buffer_start_line: 2,
             buffer_line_range: 2..3,
             base_byte_range: 0..0,

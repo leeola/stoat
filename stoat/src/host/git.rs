@@ -19,6 +19,20 @@ pub enum DiffStatus {
     /// hunk: byte-for-byte equal content that relocated to or from
     /// another position (possibly across files in the same changeset).
     Moved,
+    /// Same shape as [`DiffStatus::Added`] but the hunk has been staged
+    /// to the git index. The gutter renderer paints these in a distinct
+    /// palette so staged changes read as "ready" while unstaged ones
+    /// read as "in flight".
+    StagedAdded,
+    /// Staged counterpart to [`DiffStatus::Modified`].
+    StagedModified,
+    /// Staged counterpart to a deletion. Not currently returned by
+    /// [`crate::diff_map::DiffMap::status_for_line`] -- the non-staged
+    /// `Deleted` mirror is also unrepresented today because a buffer
+    /// line cannot itself "be" a deletion -- but the variant exists so
+    /// the gutter marker for a staged deletion has a theme key to
+    /// resolve.
+    StagedDeleted,
 }
 
 /// One changed path in a repository's working tree or index.

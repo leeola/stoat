@@ -102,6 +102,7 @@ mod tests {
     fn added_hunk(buffer_lines: Range<u32>) -> DiffHunk {
         DiffHunk {
             status: DiffHunkStatus::Added,
+            staged: false,
             buffer_start_line: buffer_lines.start,
             buffer_line_range: buffer_lines,
             base_byte_range: 0..0,

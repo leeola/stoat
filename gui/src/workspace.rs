@@ -13532,6 +13532,7 @@ mod tests {
         editor.update(vcx, |ed, cx| {
             let hunks = vec![stoat::diff_map::DiffHunk {
                 status: stoat::diff_map::DiffHunkStatus::Added,
+                staged: false,
                 buffer_start_line: 1,
                 buffer_line_range: 1..2,
                 base_byte_range: 0..0,

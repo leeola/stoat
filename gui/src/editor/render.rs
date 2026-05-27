@@ -269,6 +269,9 @@ fn buffer_side_token_color(kind: &stoat::ChangeKind, hunk_status: stoat::DiffSta
     match hunk_status {
         stoat::DiffStatus::Added => DIFF_ADDED_HEX,
         stoat::DiffStatus::Moved => DIFF_MOVED_HEX,
+        stoat::DiffStatus::StagedAdded => DIFF_STAGED_ADDED_HEX,
+        stoat::DiffStatus::StagedModified => DIFF_STAGED_MODIFIED_HEX,
+        stoat::DiffStatus::StagedDeleted => DIFF_STAGED_DELETED_HEX,
         _ => DIFF_MODIFIED_HEX,
     }
 }
@@ -1014,6 +1017,9 @@ const DIFF_ADDED_HEX: u32 = 0x4caf50;
 const DIFF_MODIFIED_HEX: u32 = 0x2196f3;
 const DIFF_MOVED_HEX: u32 = 0x00bcd4;
 const DIFF_DELETED_HEX: u32 = 0xf44336;
+const DIFF_STAGED_ADDED_HEX: u32 = 0xbbb529;
+const DIFF_STAGED_MODIFIED_HEX: u32 = 0xd4aa32;
+const DIFF_STAGED_DELETED_HEX: u32 = 0xd08840;
 const DIAG_ERROR_HEX: u32 = 0xe53935;
 const DIAG_WARNING_HEX: u32 = 0xffb300;
 const DIAG_INFO_HEX: u32 = 0x29b6f6;
@@ -1106,6 +1112,9 @@ fn diff_strip_for_status(status: stoat::DiffStatus) -> Option<(char, u32)> {
         stoat::DiffStatus::Added => Some(('|', DIFF_ADDED_HEX)),
         stoat::DiffStatus::Modified => Some(('|', DIFF_MODIFIED_HEX)),
         stoat::DiffStatus::Moved => Some(('|', DIFF_MOVED_HEX)),
+        stoat::DiffStatus::StagedAdded => Some(('|', DIFF_STAGED_ADDED_HEX)),
+        stoat::DiffStatus::StagedModified => Some(('|', DIFF_STAGED_MODIFIED_HEX)),
+        stoat::DiffStatus::StagedDeleted => Some(('|', DIFF_STAGED_DELETED_HEX)),
     }
 }
 
@@ -2073,6 +2082,7 @@ mod tests {
     fn deleted_after(line: u32) -> stoat::DiffHunk {
         stoat::DiffHunk {
             status: stoat::DiffHunkStatus::Deleted,
+            staged: false,
             buffer_start_line: line + 1,
             buffer_line_range: (line + 1)..(line + 1),
             base_byte_range: 0..1,
@@ -2084,6 +2094,7 @@ mod tests {
     fn added_rows(range: Range<u32>) -> stoat::DiffHunk {
         stoat::DiffHunk {
             status: stoat::DiffHunkStatus::Added,
+            staged: false,
             buffer_start_line: range.start,
             buffer_line_range: range,
             base_byte_range: 0..0,
@@ -2786,6 +2797,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let hunk = stoat::DiffHunk {
             status: stoat::DiffHunkStatus::Modified,
+            staged: false,
             buffer_start_line: 1,
             buffer_line_range: 1..2,
             base_byte_range: 0..0,
@@ -2810,6 +2822,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let hunk = stoat::DiffHunk {
             status: stoat::DiffHunkStatus::Modified,
+            staged: false,
             buffer_start_line: 0,
             buffer_line_range: 0..1,
             base_byte_range: 0..0,
@@ -2834,6 +2847,7 @@ mod tests {
         let base = "removed\n";
         let hunk = stoat::DiffHunk {
             status: stoat::DiffHunkStatus::Modified,
+            staged: false,
             buffer_start_line: 1,
             buffer_line_range: 1..2,
             base_byte_range: 0..7,

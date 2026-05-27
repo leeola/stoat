@@ -748,6 +748,7 @@ mod tests {
     fn added_hunk_at(lines: std::ops::Range<u32>) -> stoat::diff_map::DiffHunk {
         stoat::diff_map::DiffHunk {
             status: stoat::diff_map::DiffHunkStatus::Added,
+            staged: false,
             buffer_start_line: lines.start,
             buffer_line_range: lines,
             base_byte_range: 0..0,

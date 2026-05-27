@@ -148,6 +148,17 @@ pub struct DiffTheme {
     /// and matches the convention used by difftastic and IDE move
     /// detectors.
     pub moved: Color,
+    /// Color for added lines that have been staged to the git index.
+    /// Distinct from `added` so a single file's staged and unstaged
+    /// hunks read as two phases of the same change.
+    pub staged_added: Color,
+    /// Color for modified lines that have been staged to the git index.
+    pub staged_modified: Color,
+    /// Color for the gutter marker indicating a staged deletion. Not
+    /// currently emitted via [`Self::color_for`] from any
+    /// [`DiffStatus`] returned by `DiffMap::status_for_line`; available
+    /// for direct callers that paint deletion markers themselves.
+    pub staged_deleted: Color,
 }
 
 impl Default for DiffTheme {
@@ -157,6 +168,9 @@ impl Default for DiffTheme {
             deleted: Color::Red,
             modified: Color::Yellow,
             moved: Color::Cyan,
+            staged_added: Color::Rgb(0xbb, 0xb5, 0x29),
+            staged_modified: Color::Rgb(0xd4, 0xaa, 0x32),
+            staged_deleted: Color::Rgb(0xd0, 0x88, 0x40),
         }
     }
 }
@@ -172,6 +186,18 @@ impl DiffTheme {
             deleted: theme.get("diff.deleted").fg.unwrap_or(default.deleted),
             modified: theme.get("diff.modified").fg.unwrap_or(default.modified),
             moved: theme.get("diff.moved").fg.unwrap_or(default.moved),
+            staged_added: theme
+                .get("diff.staged_added")
+                .fg
+                .unwrap_or(default.staged_added),
+            staged_modified: theme
+                .get("diff.staged_modified")
+                .fg
+                .unwrap_or(default.staged_modified),
+            staged_deleted: theme
+                .get("diff.staged_deleted")
+                .fg
+                .unwrap_or(default.staged_deleted),
         }
     }
 
@@ -183,6 +209,9 @@ impl DiffTheme {
             DiffStatus::Added => Some(self.added),
             DiffStatus::Modified => Some(self.modified),
             DiffStatus::Moved => Some(self.moved),
+            DiffStatus::StagedAdded => Some(self.staged_added),
+            DiffStatus::StagedModified => Some(self.staged_modified),
+            DiffStatus::StagedDeleted => Some(self.staged_deleted),
         }
     }
 }
@@ -279,14 +308,34 @@ mod tests {
             theme.color_for(DiffStatus::Added).unwrap(),
             theme.color_for(DiffStatus::Modified).unwrap(),
             theme.color_for(DiffStatus::Moved).unwrap(),
+            theme.color_for(DiffStatus::StagedAdded).unwrap(),
+            theme.color_for(DiffStatus::StagedModified).unwrap(),
+            theme.color_for(DiffStatus::StagedDeleted).unwrap(),
         ];
         assert_eq!(
             colors
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            3,
-            "Added/Modified/Moved must be visually distinct"
+            6,
+            "all six visible statuses must paint distinct colors"
+        );
+    }
+
+    #[test]
+    fn diff_theme_default_carries_staged_palette() {
+        let dt = DiffTheme::default();
+        assert_eq!(
+            dt.staged_added,
+            ratatui::style::Color::Rgb(0xbb, 0xb5, 0x29)
+        );
+        assert_eq!(
+            dt.staged_modified,
+            ratatui::style::Color::Rgb(0xd4, 0xaa, 0x32)
+        );
+        assert_eq!(
+            dt.staged_deleted,
+            ratatui::style::Color::Rgb(0xd0, 0x88, 0x40)
         );
     }
 
@@ -298,6 +347,9 @@ mod tests {
                 diff.deleted.fg = red;
                 diff.modified.fg = yellow;
                 diff.moved.fg = cyan;
+                diff.staged_added.fg = "#112233";
+                diff.staged_modified.fg = "#445566";
+                diff.staged_deleted.fg = "#778899";
             }"##,
         );
         let dt = DiffTheme::from_theme(&theme);
@@ -305,6 +357,18 @@ mod tests {
         assert_eq!(dt.deleted, ratatui::style::Color::Red);
         assert_eq!(dt.modified, ratatui::style::Color::Yellow);
         assert_eq!(dt.moved, ratatui::style::Color::Cyan);
+        assert_eq!(
+            dt.staged_added,
+            ratatui::style::Color::Rgb(0x11, 0x22, 0x33)
+        );
+        assert_eq!(
+            dt.staged_modified,
+            ratatui::style::Color::Rgb(0x44, 0x55, 0x66)
+        );
+        assert_eq!(
+            dt.staged_deleted,
+            ratatui::style::Color::Rgb(0x77, 0x88, 0x99)
+        );
     }
 
     #[test]

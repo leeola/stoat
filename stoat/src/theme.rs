@@ -540,6 +540,10 @@ pub mod scope {
     pub const DIFF_CONTEXT: &str = "diff.context";
     pub const DIFF_CURRENT_HUNK: &str = "diff.current_hunk";
 
+    pub const DIFF_STAGED_ADDED: &str = "diff.staged_added";
+    pub const DIFF_STAGED_MODIFIED: &str = "diff.staged_modified";
+    pub const DIFF_STAGED_DELETED: &str = "diff.staged_deleted";
+
     pub const UI_DIAGNOSTIC_ERROR: &str = "ui.diagnostic.error";
     pub const UI_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";
     pub const UI_DIAGNOSTIC_INFO: &str = "ui.diagnostic.info";
