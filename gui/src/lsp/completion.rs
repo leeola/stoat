@@ -1,6 +1,7 @@
 use crate::{
     editor::{Editor, EditorEvent},
     globals::{LanguageRegistry, LspHostGlobal},
+    theme::ActiveTheme,
 };
 use gpui::{
     deferred, div, point, Bounds, Context, Entity, IntoElement, ParentElement, Pixels, Point,
@@ -228,6 +229,7 @@ impl Render for CompletionPopup {
         let display = display_snapshot.buffer_to_display(cursor_point);
         let origin = popup_origin(bounds, cell, display.row, display.column);
 
+        let theme = cx.theme();
         let selected = self.selected_idx;
         let rows: Vec<_> = self
             .items
@@ -237,9 +239,11 @@ impl Render for CompletionPopup {
             .map(|(idx, entry)| {
                 let mut row = div().child(entry.label.clone());
                 if idx == selected {
-                    row = row.bg(gpui::rgb(0x3a3a4a)).text_color(gpui::rgb(0xf0f0f0));
+                    row = row
+                        .bg(theme.popup_selection_background)
+                        .text_color(theme.popup_selection_text);
                 } else {
-                    row = row.text_color(gpui::rgb(0xc0c0d0));
+                    row = row.text_color(theme.popup_text);
                 }
                 row.into_any_element()
             })
@@ -250,9 +254,9 @@ impl Render for CompletionPopup {
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .bg(gpui::rgb(0x202028))
+                .bg(theme.popup_background)
                 .border_1()
-                .border_color(gpui::rgb(0x404050))
+                .border_color(theme.popup_border)
                 .child(div().flex().flex_col().children(rows)),
         )
         .with_priority(2)

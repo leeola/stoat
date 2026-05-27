@@ -33,6 +33,8 @@ theme default_dark {
     ui.popup.background = { bg: "#202028" };
     ui.popup.text.fg    = "#d0d0e0";
     ui.popup.border.fg  = "#404050";
+    ui.popup.selection.background = { bg: "#3a3a4a" };
+    ui.popup.selection.text.fg    = "#f0f0f0";
 
     ui.prompt.fg = warning;
     ui.key_label.fg = accent;
