@@ -1,8 +1,8 @@
 use crate::{editor::Editor, theme::ActiveTheme, workspace::Workspace};
 use gpui::{
-    div, px, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId, EventEmitter,
-    FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView, MouseButton,
-    ParentElement, Render, Styled, Subscription, WeakEntity, Window,
+    div, px, relative, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId,
+    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView,
+    MouseButton, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
 };
 use stoat_action::{ActionKind, DismissModal};
 
@@ -380,8 +380,10 @@ impl Render for ModalLayer {
                 div()
                     .flex()
                     .flex_col()
-                    .w(px(640.))
-                    .h(px(480.))
+                    .w(relative(0.65))
+                    .max_w(px(900.))
+                    .h(relative(0.75))
+                    .max_h(px(680.))
                     .overflow_hidden()
                     .bg(cx.theme().background)
                     .border_1()
