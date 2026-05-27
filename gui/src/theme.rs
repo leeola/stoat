@@ -38,12 +38,11 @@ pub fn default_selection_color() -> Hsla {
 /// surfaces, text, and severity colors.
 ///
 /// The 10 fields are the conventional Zed-style roles; surfaces in
-/// [`ThemeColors`] map each scope to one of these members. Curating
-/// these values is the next item's job
-/// (`Curate the default_dark base palette`); the current
-/// [`BasePalette::default_dark`] keeps the values that match the
-/// existing constants so visual output is unchanged for the scopes
-/// that already had a clean palette mapping.
+/// [`ThemeColors`] map each scope to one of these members. The
+/// values in [`BasePalette::default_dark`] mirror the `let`-bindings
+/// in `default_dark`'s `config.stcfg` block, so a theme-parse failure
+/// still degrades to the intended palette rather than a divergent
+/// fallback.
 pub(crate) struct BasePalette {
     pub(crate) background: Hsla,
     pub(crate) surface: Hsla,
@@ -69,11 +68,11 @@ impl BasePalette {
             border: rgb(0x404040).into(),
             text: rgb(0xcccccc).into(),
             text_muted: rgb(0x808080).into(),
-            accent: rgb(0x6090ff).into(),
-            success: rgb(0x55ff55).into(),
-            warning: rgb(0xffaa00).into(),
-            danger: rgb(0xff5555).into(),
-            info: rgb(0x6090ff).into(),
+            accent: rgb(0x4fc1ff).into(),
+            success: rgb(0x4ec9b0).into(),
+            warning: rgb(0xdcdcaa).into(),
+            danger: rgb(0xf44747).into(),
+            info: rgb(0x569cd6).into(),
         }
     }
 }
