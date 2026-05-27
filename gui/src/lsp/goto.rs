@@ -98,6 +98,7 @@ pub fn spawn_goto(
     let weak_workspace = cx.weak_entity();
     let weak_editor = editor.downgrade();
     let source_path = path.clone();
+    let request_id = workspace.bump_lsp_goto_request_id();
     cx.spawn_in(window, async move |_, cx| {
         let server = match host.launch(&language, &workspace_root).await {
             Ok(s) => std::sync::Arc::<dyn LspServer>::from(s),
@@ -147,6 +148,12 @@ pub fn spawn_goto(
         };
 
         let _ = weak_workspace.update_in(cx, |workspace, _window, cx| {
+            if request_id != workspace.lsp_goto_request_id() {
+                // A newer goto request superseded this one before the
+                // response arrived; dropping the stale reply leaves the
+                // cursor where the user has since moved it.
+                return;
+            }
             apply_jump(
                 workspace,
                 &weak_editor,

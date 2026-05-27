@@ -134,6 +134,18 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     last_motion: Option<LastMotion>,
+    /// Monotonic id for the most recent LSP goto request the
+    /// workspace has spawned. The spawn site captures the id at
+    /// dispatch and re-checks it before applying the response so a
+    /// late reply for an obsolete cursor cannot move the cursor
+    /// after the user has moved on.
+    lsp_goto_request_seq: u64,
+    /// Monotonic id for the most recent LSP rename request. The
+    /// rename modal captures this at confirm time and the spawned
+    /// future re-checks it before applying the returned
+    /// `WorkspaceEdit`, so a late reply cannot land edits over a
+    /// user's fresh typing after the modal dismissed.
+    lsp_rename_request_seq: u64,
     frame_timer: Rc<RefCell<FrameTimer>>,
     _active_editor_subscription: Option<Subscription>,
     _pane_subscriptions: Vec<Subscription>,
@@ -377,6 +389,8 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             last_motion: None,
+            lsp_goto_request_seq: 0,
+            lsp_rename_request_seq: 0,
             frame_timer: Rc::new(RefCell::new(FrameTimer::new())),
             _active_editor_subscription: None,
             _pane_subscriptions: initial_pane_subscriptions,
@@ -680,6 +694,31 @@ impl Workspace {
 
     pub fn buffer_registry(&self) -> &Entity<BufferRegistry> {
         &self.buffer_registry
+    }
+
+    /// Allocate the next monotonic id for an LSP goto request and
+    /// record it as the most recent. The spawn site captures the
+    /// returned id, the response site compares it against
+    /// [`Self::lsp_goto_request_id`], and drops the response when
+    /// they differ.
+    pub(crate) fn bump_lsp_goto_request_id(&mut self) -> u64 {
+        self.lsp_goto_request_seq += 1;
+        self.lsp_goto_request_seq
+    }
+
+    pub(crate) fn lsp_goto_request_id(&self) -> u64 {
+        self.lsp_goto_request_seq
+    }
+
+    /// Allocate the next monotonic id for an LSP rename request.
+    /// See [`Self::bump_lsp_goto_request_id`].
+    pub(crate) fn bump_lsp_rename_request_id(&mut self) -> u64 {
+        self.lsp_rename_request_seq += 1;
+        self.lsp_rename_request_seq
+    }
+
+    pub(crate) fn lsp_rename_request_id(&self) -> u64 {
+        self.lsp_rename_request_seq
     }
 
     /// Look up an open [`Entity<Buffer>`] by absolute path. Returns
@@ -9653,6 +9692,42 @@ mod tests {
                 "second open_paths must activate the just-added tab",
             );
         });
+    }
+
+    #[test]
+    fn bump_lsp_goto_request_id_increments_and_records_latest() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+
+        let first = ws.update(&mut cx, |w, _| w.bump_lsp_goto_request_id());
+        let second = ws.update(&mut cx, |w, _| w.bump_lsp_goto_request_id());
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(
+            ws.read_with(&cx, |w, _| w.lsp_goto_request_id()),
+            2,
+            "lsp_goto_request_id must track the most recent bump",
+        );
+    }
+
+    #[test]
+    fn bump_lsp_rename_request_id_increments_and_records_latest() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+
+        let first = ws.update(&mut cx, |w, _| w.bump_lsp_rename_request_id());
+        let second = ws.update(&mut cx, |w, _| w.bump_lsp_rename_request_id());
+        let third = ws.update(&mut cx, |w, _| w.bump_lsp_rename_request_id());
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(third, 3);
+        assert_eq!(
+            ws.read_with(&cx, |w, _| w.lsp_rename_request_id()),
+            3,
+            "lsp_rename_request_id must track the most recent bump",
+        );
     }
 
     #[test]

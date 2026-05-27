@@ -109,6 +109,13 @@ impl RenameModal {
         let encoding = self.encoding;
         let editor = self.editor.clone();
         let workspace = self.workspace.clone();
+        let request_id = match workspace.update(cx, |ws, _| ws.bump_lsp_rename_request_id()) {
+            Ok(id) => id,
+            Err(_) => {
+                cx.emit(DismissEvent);
+                return;
+            },
+        };
         cx.spawn(async move |_, cx| {
             let edit = match server.rename(params).await {
                 Ok(Some(edit)) => edit,
@@ -122,6 +129,15 @@ impl RenameModal {
                     return;
                 },
             };
+            let still_current = workspace
+                .update(cx, |ws, _| ws.lsp_rename_request_id() == request_id)
+                .unwrap_or(false);
+            if !still_current {
+                // A newer rename superseded this one; drop the stale
+                // edit instead of overwriting whatever the user has
+                // typed in the interim.
+                return;
+            }
             let _ = cx.update(|cx| {
                 apply_workspace_edit_to_buffer(
                     &edit,
