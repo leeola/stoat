@@ -13,7 +13,7 @@ use stoat::{
     review_session::ChunkStatus,
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
 };
-use stoat_text::{Anchor, Selection};
+use stoat_text::{Anchor, Bias, Selection};
 
 const NAMED_COLOR_HEX: [u32; 16] = [
     0x000000, // 0 Black
@@ -556,7 +556,9 @@ pub(crate) fn apply_syntax_overlay(
         };
         let stoat_style = &styles.interner[style_id];
         let gpui_style = convert_highlight_style(stoat_style);
-        let node_range = capture.node.byte_range();
+        let raw_range = capture.node.byte_range();
+        let node_range = rope.clip_offset(raw_range.start, Bias::Left)
+            ..rope.clip_offset(raw_range.end, Bias::Left);
         push_syntax_runs(rows, snapshot, &range, rope, node_range, gpui_style);
     }
 }
