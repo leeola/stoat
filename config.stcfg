@@ -16,6 +16,7 @@ theme default_dark {
     let purple  = "#ae81ff";
     let orange  = "#fd971f";
     let olive   = "#75715e";
+    let chrome  = "#3e3e42";
 
     ui.cursor = { modifiers: [reversed] };
     ui.cursor.input = { fg: black, bg: text };
@@ -28,8 +29,8 @@ theme default_dark {
     ui.goto_word.label  = { fg: "#eeee00", modifiers: [bold] };
     ui.goto_word.prefix = { fg: "#666600" };
 
-    ui.border.focused.fg = accent;
-    ui.border.inactive.fg = muted;
+    ui.border.focused.fg = chrome;
+    ui.border.inactive.fg = "#2a2a2a";
 
     ui.modal.help.fg = accent;
     ui.modal.hints.fg = warning;
