@@ -159,6 +159,15 @@ pub struct DiffTheme {
     /// [`DiffStatus`] returned by `DiffMap::status_for_line`; available
     /// for direct callers that paint deletion markers themselves.
     pub staged_deleted: Color,
+    /// Color for added lines in a committed snapshot (the gutter is
+    /// painting a `HeadVsParent` diff). Distinct purple palette so
+    /// history reads as "elsewhere" relative to live worktree edits.
+    pub committed_added: Color,
+    /// Committed counterpart to [`Self::modified`].
+    pub committed_modified: Color,
+    /// Committed counterpart to a deletion. Like [`Self::staged_deleted`],
+    /// not emitted by `status_for_line` today.
+    pub committed_deleted: Color,
 }
 
 impl Default for DiffTheme {
@@ -171,6 +180,9 @@ impl Default for DiffTheme {
             staged_added: Color::Rgb(0xbb, 0xb5, 0x29),
             staged_modified: Color::Rgb(0xd4, 0xaa, 0x32),
             staged_deleted: Color::Rgb(0xd0, 0x88, 0x40),
+            committed_added: Color::Rgb(0x9b, 0x7e, 0xd8),
+            committed_modified: Color::Rgb(0x84, 0x70, 0xc4),
+            committed_deleted: Color::Rgb(0xb0, 0x7c, 0xc0),
         }
     }
 }
@@ -198,6 +210,18 @@ impl DiffTheme {
                 .get("diff.staged_deleted")
                 .fg
                 .unwrap_or(default.staged_deleted),
+            committed_added: theme
+                .get("diff.committed_added")
+                .fg
+                .unwrap_or(default.committed_added),
+            committed_modified: theme
+                .get("diff.committed_modified")
+                .fg
+                .unwrap_or(default.committed_modified),
+            committed_deleted: theme
+                .get("diff.committed_deleted")
+                .fg
+                .unwrap_or(default.committed_deleted),
         }
     }
 
@@ -212,6 +236,9 @@ impl DiffTheme {
             DiffStatus::StagedAdded => Some(self.staged_added),
             DiffStatus::StagedModified => Some(self.staged_modified),
             DiffStatus::StagedDeleted => Some(self.staged_deleted),
+            DiffStatus::CommittedAdded => Some(self.committed_added),
+            DiffStatus::CommittedModified => Some(self.committed_modified),
+            DiffStatus::CommittedDeleted => Some(self.committed_deleted),
         }
     }
 }
@@ -311,14 +338,17 @@ mod tests {
             theme.color_for(DiffStatus::StagedAdded).unwrap(),
             theme.color_for(DiffStatus::StagedModified).unwrap(),
             theme.color_for(DiffStatus::StagedDeleted).unwrap(),
+            theme.color_for(DiffStatus::CommittedAdded).unwrap(),
+            theme.color_for(DiffStatus::CommittedModified).unwrap(),
+            theme.color_for(DiffStatus::CommittedDeleted).unwrap(),
         ];
         assert_eq!(
             colors
                 .iter()
                 .collect::<std::collections::HashSet<_>>()
                 .len(),
-            6,
-            "all six visible statuses must paint distinct colors"
+            9,
+            "all nine visible statuses must paint distinct colors"
         );
     }
 
@@ -340,6 +370,23 @@ mod tests {
     }
 
     #[test]
+    fn diff_theme_default_carries_committed_palette() {
+        let dt = DiffTheme::default();
+        assert_eq!(
+            dt.committed_added,
+            ratatui::style::Color::Rgb(0x9b, 0x7e, 0xd8)
+        );
+        assert_eq!(
+            dt.committed_modified,
+            ratatui::style::Color::Rgb(0x84, 0x70, 0xc4)
+        );
+        assert_eq!(
+            dt.committed_deleted,
+            ratatui::style::Color::Rgb(0xb0, 0x7c, 0xc0)
+        );
+    }
+
+    #[test]
     fn diff_theme_from_theme_reads_scopes() {
         let theme = theme_from(
             r##"theme t {
@@ -350,6 +397,9 @@ mod tests {
                 diff.staged_added.fg = "#112233";
                 diff.staged_modified.fg = "#445566";
                 diff.staged_deleted.fg = "#778899";
+                diff.committed_added.fg = "#aabbcc";
+                diff.committed_modified.fg = "#ddeeff";
+                diff.committed_deleted.fg = "#102030";
             }"##,
         );
         let dt = DiffTheme::from_theme(&theme);
@@ -368,6 +418,18 @@ mod tests {
         assert_eq!(
             dt.staged_deleted,
             ratatui::style::Color::Rgb(0x77, 0x88, 0x99)
+        );
+        assert_eq!(
+            dt.committed_added,
+            ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc)
+        );
+        assert_eq!(
+            dt.committed_modified,
+            ratatui::style::Color::Rgb(0xdd, 0xee, 0xff)
+        );
+        assert_eq!(
+            dt.committed_deleted,
+            ratatui::style::Color::Rgb(0x10, 0x20, 0x30)
         );
     }
 

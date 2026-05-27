@@ -272,6 +272,9 @@ fn buffer_side_token_color(kind: &stoat::ChangeKind, hunk_status: stoat::DiffSta
         stoat::DiffStatus::StagedAdded => DIFF_STAGED_ADDED_HEX,
         stoat::DiffStatus::StagedModified => DIFF_STAGED_MODIFIED_HEX,
         stoat::DiffStatus::StagedDeleted => DIFF_STAGED_DELETED_HEX,
+        stoat::DiffStatus::CommittedAdded => DIFF_COMMITTED_ADDED_HEX,
+        stoat::DiffStatus::CommittedModified => DIFF_COMMITTED_MODIFIED_HEX,
+        stoat::DiffStatus::CommittedDeleted => DIFF_COMMITTED_DELETED_HEX,
         _ => DIFF_MODIFIED_HEX,
     }
 }
@@ -1020,6 +1023,9 @@ const DIFF_DELETED_HEX: u32 = 0xf44336;
 const DIFF_STAGED_ADDED_HEX: u32 = 0xbbb529;
 const DIFF_STAGED_MODIFIED_HEX: u32 = 0xd4aa32;
 const DIFF_STAGED_DELETED_HEX: u32 = 0xd08840;
+const DIFF_COMMITTED_ADDED_HEX: u32 = 0x9b7ed8;
+const DIFF_COMMITTED_MODIFIED_HEX: u32 = 0x8470c4;
+const DIFF_COMMITTED_DELETED_HEX: u32 = 0xb07cc0;
 const DIAG_ERROR_HEX: u32 = 0xe53935;
 const DIAG_WARNING_HEX: u32 = 0xffb300;
 const DIAG_INFO_HEX: u32 = 0x29b6f6;
@@ -1115,6 +1121,9 @@ fn diff_strip_for_status(status: stoat::DiffStatus) -> Option<(char, u32)> {
         stoat::DiffStatus::StagedAdded => Some(('|', DIFF_STAGED_ADDED_HEX)),
         stoat::DiffStatus::StagedModified => Some(('|', DIFF_STAGED_MODIFIED_HEX)),
         stoat::DiffStatus::StagedDeleted => Some(('|', DIFF_STAGED_DELETED_HEX)),
+        stoat::DiffStatus::CommittedAdded => Some(('|', DIFF_COMMITTED_ADDED_HEX)),
+        stoat::DiffStatus::CommittedModified => Some(('|', DIFF_COMMITTED_MODIFIED_HEX)),
+        stoat::DiffStatus::CommittedDeleted => Some(('|', DIFF_COMMITTED_DELETED_HEX)),
     }
 }
 

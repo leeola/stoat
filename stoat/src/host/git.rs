@@ -33,6 +33,19 @@ pub enum DiffStatus {
     /// the gutter marker for a staged deletion has a theme key to
     /// resolve.
     StagedDeleted,
+    /// Same shape as [`DiffStatus::Added`] but the hunk lives in a
+    /// committed snapshot (the gutter is showing a commit-vs-parent
+    /// diff, not a worktree edit). Painted in a distinct purple
+    /// palette so the user can tell at a glance that they're viewing
+    /// history.
+    CommittedAdded,
+    /// Committed counterpart to [`DiffStatus::Modified`].
+    CommittedModified,
+    /// Committed counterpart to a deletion. Symmetric with
+    /// [`DiffStatus::StagedDeleted`]: not returned by
+    /// `status_for_line` today, available for future direct
+    /// construction by the deletion-marker renderer.
+    CommittedDeleted,
 }
 
 /// One changed path in a repository's working tree or index.

@@ -27,6 +27,27 @@ pub enum DiffHunkStatus {
     Moved,
 }
 
+/// Top-level provenance of a [`DiffMap`]: which two snapshots the diff
+/// compares. The gutter renderer keys color off this -- worktree edits
+/// read as "in flight" (default colors), staged hunks as "ready",
+/// committed snapshots as "historical".
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffMode {
+    /// Worktree text vs the git index. Hunks here represent unstaged
+    /// changes; the gutter paints them in the default palette.
+    #[default]
+    WorktreeVsIndex,
+    /// Git index vs HEAD. Hunks here represent staged changes;
+    /// per-hunk `staged: true` is the source of truth for
+    /// [`DiffMap::status_for_line`] today.
+    IndexVsHead,
+    /// A committed snapshot vs its parent commit. Used when navigating
+    /// commit history: paints the gutter in a distinct purple palette
+    /// so the user can tell at a glance that they're not editing the
+    /// worktree.
+    HeadVsParent,
+}
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ChangeKind {
     Novel,
@@ -115,6 +136,7 @@ pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
     base_text: Option<Arc<String>>,
     version: usize,
+    mode: DiffMode,
 }
 
 impl DiffMap {
@@ -130,7 +152,20 @@ impl DiffMap {
             hunks: SumTree::from_iter(hunks, ()),
             base_text,
             version: Self::next_version(),
+            mode: DiffMode::default(),
         }
+    }
+
+    /// Builder that overrides the default [`DiffMode::WorktreeVsIndex`]
+    /// for callers comparing different snapshots (e.g. a commit-vs-parent
+    /// review pane).
+    pub fn with_mode(mut self, mode: DiffMode) -> Self {
+        self.mode = mode;
+        self
+    }
+
+    pub fn mode(&self) -> DiffMode {
+        self.mode
     }
 
     /// Build a [`DiffMap`] from a structural-diff result.
@@ -170,6 +205,14 @@ impl DiffMap {
         cursor.prev();
         match cursor.item() {
             Some(hunk) if hunk.buffer_line_range.contains(&line) => {
+                if self.mode == DiffMode::HeadVsParent {
+                    return match hunk.status {
+                        DiffHunkStatus::Added => DiffStatus::CommittedAdded,
+                        DiffHunkStatus::Modified => DiffStatus::CommittedModified,
+                        DiffHunkStatus::Moved => DiffStatus::Moved,
+                        DiffHunkStatus::Deleted => DiffStatus::Unchanged,
+                    };
+                }
                 match (hunk.status, hunk.staged) {
                     (DiffHunkStatus::Added, false) => DiffStatus::Added,
                     (DiffHunkStatus::Added, true) => DiffStatus::StagedAdded,
@@ -631,6 +674,40 @@ mod tests {
         let mut hunk = moved_hunk(0..2);
         hunk.staged = true;
         let dm = DiffMap::from_hunks([hunk], None);
+        assert_eq!(dm.status_for_line(0), DiffStatus::Moved);
+    }
+
+    #[test]
+    fn default_mode_is_worktree_vs_index() {
+        use super::DiffMode;
+        let dm = DiffMap::from_hunks([added_hunk(0..1)], None);
+        assert_eq!(dm.mode(), DiffMode::WorktreeVsIndex);
+    }
+
+    #[test]
+    fn head_vs_parent_mode_returns_committed_variants() {
+        use super::DiffMode;
+        let dm = DiffMap::from_hunks([added_hunk(0..2), modified_hunk(3..4, 0..5)], None)
+            .with_mode(DiffMode::HeadVsParent);
+        assert_eq!(dm.mode(), DiffMode::HeadVsParent);
+        assert_eq!(dm.status_for_line(0), DiffStatus::CommittedAdded);
+        assert_eq!(dm.status_for_line(1), DiffStatus::CommittedAdded);
+        assert_eq!(dm.status_for_line(3), DiffStatus::CommittedModified);
+    }
+
+    #[test]
+    fn head_vs_parent_mode_overrides_staged_flag() {
+        use super::DiffMode;
+        let mut hunk = added_hunk(0..1);
+        hunk.staged = true;
+        let dm = DiffMap::from_hunks([hunk], None).with_mode(DiffMode::HeadVsParent);
+        assert_eq!(dm.status_for_line(0), DiffStatus::CommittedAdded);
+    }
+
+    #[test]
+    fn moved_hunks_under_head_vs_parent_stay_moved() {
+        use super::DiffMode;
+        let dm = DiffMap::from_hunks([moved_hunk(0..2)], None).with_mode(DiffMode::HeadVsParent);
         assert_eq!(dm.status_for_line(0), DiffStatus::Moved);
     }
 

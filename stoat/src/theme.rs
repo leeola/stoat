@@ -544,6 +544,10 @@ pub mod scope {
     pub const DIFF_STAGED_MODIFIED: &str = "diff.staged_modified";
     pub const DIFF_STAGED_DELETED: &str = "diff.staged_deleted";
 
+    pub const DIFF_COMMITTED_ADDED: &str = "diff.committed_added";
+    pub const DIFF_COMMITTED_MODIFIED: &str = "diff.committed_modified";
+    pub const DIFF_COMMITTED_DELETED: &str = "diff.committed_deleted";
+
     pub const UI_DIAGNOSTIC_ERROR: &str = "ui.diagnostic.error";
     pub const UI_DIAGNOSTIC_WARNING: &str = "ui.diagnostic.warning";
     pub const UI_DIAGNOSTIC_INFO: &str = "ui.diagnostic.info";
