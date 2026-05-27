@@ -7,8 +7,8 @@ use crate::{
 pub use delegate::{PickerDelegate, PickerSecondary};
 use gpui::{
     div, uniform_list, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Render, Styled,
-    Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    Focusable, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Render,
+    ScrollStrategy, Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
@@ -192,6 +192,7 @@ impl<D: PickerDelegate> Picker<D> {
 
     pub fn set_selected_index(&mut self, ix: usize, cx: &mut Context<'_, Self>) {
         self.delegate.set_selected_index(ix, cx);
+        self.scroll_handle.scroll_to_item(ix, ScrollStrategy::Top);
         cx.notify();
     }
 
@@ -253,6 +254,7 @@ impl<D: PickerDelegate> Picker<D> {
         let next = (current + delta as i64).clamp(0, last) as usize;
         if next != self.delegate.selected_index() {
             self.delegate.set_selected_index(next, cx);
+            self.scroll_handle.scroll_to_item(next, ScrollStrategy::Top);
             cx.notify();
         }
     }
@@ -486,6 +488,56 @@ mod tests {
         h.picker.update(h.vcx, |p, cx| p.set_selected_index(1, cx));
 
         assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 1);
+    }
+
+    #[test]
+    fn set_selected_index_queues_scroll_to_target() {
+        let mut cx = TestAppContext::single();
+        let items: Vec<String> = (0..50).map(|i| format!("item-{i:03}")).collect();
+        let h = new_picker(&mut cx, items);
+
+        h.picker.update(h.vcx, |p, cx| p.set_selected_index(42, cx));
+
+        let scroll = h
+            .picker
+            .read_with(h.vcx, |p, _| {
+                p.scroll_handle.0.borrow().deferred_scroll_to_item
+            })
+            .expect("set_selected_index must queue a scroll-to-item");
+        assert_eq!(scroll.item_index, 42);
+        assert_eq!(scroll.strategy, ScrollStrategy::Top);
+    }
+
+    #[test]
+    fn move_selection_queues_scroll_to_new_index() {
+        let mut cx = TestAppContext::single();
+        let items: Vec<String> = (0..50).map(|i| format!("item-{i:03}")).collect();
+        let h = new_picker(&mut cx, items);
+        let scroll_before = h.picker.read_with(h.vcx, |p, _| {
+            p.scroll_handle.0.borrow().deferred_scroll_to_item
+        });
+        assert!(
+            scroll_before.is_none(),
+            "no scroll queued before selection moves"
+        );
+
+        let picker = h.picker.clone();
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                for _ in 0..20 {
+                    assert!(p.handle_action(&stoat_action::PickerSelectNext, window, cx));
+                }
+            });
+        });
+
+        let scroll = h
+            .picker
+            .read_with(h.vcx, |p, _| {
+                p.scroll_handle.0.borrow().deferred_scroll_to_item
+            })
+            .expect("move_selection must queue a scroll-to-item");
+        assert_eq!(scroll.item_index, 20);
+        assert_eq!(scroll.strategy, ScrollStrategy::Top);
     }
 
     #[test]
