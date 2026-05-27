@@ -6,7 +6,7 @@ use ignore::{
 use std::{
     io,
     io::Read,
-    path::{Path, PathBuf},
+    path::{Component, Path, PathBuf},
     time::SystemTime,
 };
 
@@ -96,6 +96,40 @@ pub trait FsHost: Send + Sync {
         if !paths.is_empty() {
             on_batch(paths);
         }
+    }
+
+    /// Returns whether `path` would be filtered out by the workspace
+    /// ignore stack rooted at `workdir` (baked-in [`DEFAULT_STOATIGNORE`]
+    /// plus per-directory `.gitignore` / `.stoatignore` accumulated from
+    /// `workdir` down to `path.parent()`). Paths outside `workdir` are
+    /// reported as non-ignored. The default impl re-reads ignore files
+    /// on every call; callers that query at high rate should batch.
+    fn is_ignored(&self, workdir: &Path, path: &Path) -> bool {
+        if !path.starts_with(workdir) {
+            return false;
+        }
+        let defaults = build_default_ignore(workdir);
+        let mut stack: Vec<Gitignore> = Vec::new();
+        let mut current = workdir.to_path_buf();
+        push_dir_ignores(self, &current, &mut stack);
+
+        if let Some(parent) = path.parent() {
+            if let Ok(rel) = parent.strip_prefix(workdir) {
+                for component in rel.components() {
+                    let Component::Normal(c) = component else {
+                        continue;
+                    };
+                    current.push(c);
+                    if path_is_ignored(&defaults, &stack, &current, true) {
+                        return true;
+                    }
+                    push_dir_ignores(self, &current, &mut stack);
+                }
+            }
+        }
+
+        let is_dir = self.metadata(path).ok().flatten().is_some_and(|m| m.is_dir);
+        path_is_ignored(&defaults, &stack, path, is_dir)
     }
 }
 
@@ -215,7 +249,7 @@ fn walk_dir_streaming(
     stack.truncate(stack.len() - pushed);
 }
 
-fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
+fn push_dir_ignores<F: FsHost + ?Sized>(fs: &F, dir: &Path, stack: &mut Vec<Gitignore>) -> usize {
     const NAMES: &[&str] = &[".gitignore", ".stoatignore"];
     let mut pushed = 0;
     for name in NAMES {
@@ -227,7 +261,7 @@ fn push_dir_ignores(fs: &dyn FsHost, dir: &Path, stack: &mut Vec<Gitignore>) -> 
     pushed
 }
 
-fn read_ignore_file(fs: &dyn FsHost, dir: &Path, name: &str) -> Option<Gitignore> {
+fn read_ignore_file<F: FsHost + ?Sized>(fs: &F, dir: &Path, name: &str) -> Option<Gitignore> {
     let path = dir.join(name);
     let mut buf = Vec::new();
     fs.read(&path, &mut buf).ok()?;

@@ -1151,4 +1151,51 @@ mod tests {
         let expected = fs.walk_workspace_files(&root);
         assert_eq!(combined, expected);
     }
+
+    #[test]
+    fn is_ignored_default_stoatignore_filters_target_dir() {
+        let fs = FakeFs::new();
+        fs.insert_file("/repo/src/main.rs", "fn main() {}");
+        fs.insert_file("/repo/target/debug/foo", "bin");
+        let repo = Path::new("/repo");
+
+        assert!(fs.is_ignored(repo, Path::new("/repo/target/debug/foo")));
+        assert!(!fs.is_ignored(repo, Path::new("/repo/src/main.rs")));
+    }
+
+    #[test]
+    fn is_ignored_honours_per_dir_gitignore() {
+        let fs = FakeFs::new();
+        fs.insert_file("/repo/.gitignore", "secrets.txt\n");
+        fs.insert_file("/repo/secrets.txt", "shh");
+        fs.insert_file("/repo/src/secrets.txt", "shh-nested");
+        fs.insert_file("/repo/src/main.rs", "fn main() {}");
+        let repo = Path::new("/repo");
+
+        assert!(fs.is_ignored(repo, Path::new("/repo/secrets.txt")));
+        assert!(fs.is_ignored(repo, Path::new("/repo/src/secrets.txt")));
+        assert!(!fs.is_ignored(repo, Path::new("/repo/src/main.rs")));
+    }
+
+    #[test]
+    fn is_ignored_nested_stoatignore_negation_reincludes() {
+        let fs = FakeFs::new();
+        fs.insert_file("/repo/.gitignore", "*.log\n");
+        fs.insert_file("/repo/sub/.stoatignore", "!keep.log\n");
+        fs.insert_file("/repo/sub/keep.log", "important");
+        fs.insert_file("/repo/sub/drop.log", "noise");
+        let repo = Path::new("/repo");
+
+        assert!(!fs.is_ignored(repo, Path::new("/repo/sub/keep.log")));
+        assert!(fs.is_ignored(repo, Path::new("/repo/sub/drop.log")));
+    }
+
+    #[test]
+    fn is_ignored_path_outside_workdir_returns_false() {
+        let fs = FakeFs::new();
+        fs.insert_file("/repo/.gitignore", "*\n");
+        let repo = Path::new("/repo");
+
+        assert!(!fs.is_ignored(repo, Path::new("/other/main.rs")));
+    }
 }
