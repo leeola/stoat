@@ -30,6 +30,10 @@ theme default_dark {
     ui.modal.picker.fg = special;
     ui.modal.run.fg = warning;
 
+    ui.popup.background = { bg: "#202028" };
+    ui.popup.text.fg    = "#d0d0e0";
+    ui.popup.border.fg  = "#404050";
+
     ui.prompt.fg = warning;
     ui.key_label.fg = accent;
     ui.heading = { fg: warning, modifiers: [bold] };

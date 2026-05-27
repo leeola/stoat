@@ -1,6 +1,7 @@
 use crate::{
     editor::{Editor, EditorEvent},
     globals::{LanguageRegistry, LspHostGlobal},
+    theme::ActiveTheme,
 };
 use gpui::{
     deferred, div, point, Bounds, Context, Entity, IntoElement, ParentElement, Pixels, Point,
@@ -136,6 +137,7 @@ impl Render for HoverPopup {
         };
         let origin = popup_origin(bounds, cell, row, col);
         let lines = self.lines.clone();
+        let theme = cx.theme();
         deferred(
             div()
                 .absolute()
@@ -143,10 +145,10 @@ impl Render for HoverPopup {
                 .top(origin.y)
                 .px_2()
                 .py_1()
-                .bg(gpui::rgb(0x202028))
-                .text_color(gpui::rgb(0xd0d0e0))
+                .bg(theme.popup_background)
+                .text_color(theme.popup_text)
                 .border_1()
-                .border_color(gpui::rgb(0x404050))
+                .border_color(theme.popup_border)
                 .child(
                     div().flex().flex_col().children(
                         lines

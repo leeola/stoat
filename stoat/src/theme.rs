@@ -433,6 +433,10 @@ pub mod scope {
     pub const UI_MODAL_PICKER: &str = "ui.modal.picker";
     pub const UI_MODAL_RUN: &str = "ui.modal.run";
 
+    pub const UI_POPUP_BACKGROUND: &str = "ui.popup.background";
+    pub const UI_POPUP_TEXT: &str = "ui.popup.text";
+    pub const UI_POPUP_BORDER: &str = "ui.popup.border";
+
     pub const UI_PROMPT: &str = "ui.prompt";
     pub const UI_KEY_LABEL: &str = "ui.key_label";
     pub const UI_HEADING: &str = "ui.heading";
