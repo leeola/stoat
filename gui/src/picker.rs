@@ -350,10 +350,11 @@ impl<D: PickerDelegate> Render for Picker<D> {
                         .flex()
                         .flex_col()
                         .w_2_5()
+                        .min_w_0()
                         .child(self.query_editor.clone())
                         .child(list),
                 )
-                .child(div().flex_grow().child(preview))
+                .child(div().flex_grow().min_w_0().child(preview))
                 .into_any_element(),
         }
     }

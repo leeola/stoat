@@ -325,6 +325,7 @@ impl PickerDelegate for FileFinderDelegate {
                 .border_color(border)
                 .p_2()
                 .size_full()
+                .overflow_hidden()
                 .child(editor.clone())
                 .into_any_element(),
         )
@@ -353,7 +354,7 @@ impl PickerDelegate for FileFinderDelegate {
             },
         );
         let label = StyledText::new(SharedString::from(display)).with_highlights(runs);
-        let mut row = div().px_2().text_color(color).child(label);
+        let mut row = div().px_2().truncate().text_color(color).child(label);
         if selected {
             row = row.bg(cx.theme().modal_selection);
         }
