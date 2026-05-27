@@ -15,18 +15,67 @@
 
 use super::{ChangeKind, DiffChange, DiffQuality, DiffResult, Side};
 
+/// Upper bound on `lhs_lines.len() * rhs_lines.len()` (LCS table
+/// cells) before [`diff_lines`] short-circuits to a flat
+/// full-range fallback. 25M cells is ~100 MB at 4 bytes per cell;
+/// `build_lcs_table` allocates `O(L * R)` and would otherwise grow
+/// past available memory on pathological inputs (e.g. a 50k-line
+/// file vs itself, ~10 GB).
+const LINE_DIFF_TABLE_LIMIT: usize = 25_000_000;
+
 /// Compute a line-level diff between `lhs` and `rhs`. The returned
 /// changes carry rope byte ranges (relative to each input) so they can
 /// be threaded directly into [`crate`]'s `DiffMap` scaffolding.
+///
+/// Inputs whose `lhs_lines.len() * rhs_lines.len()` would exceed
+/// [`LINE_DIFF_TABLE_LIMIT`] short-circuit to a flat
+/// [`DiffQuality::LineDiff`] result covering each side as a single
+/// [`ChangeKind::Novel`] run -- coarse, but bounded in memory.
 pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
     let lhs_lines = lines_with_offsets(lhs);
     let rhs_lines = lines_with_offsets(rhs);
+
+    if lhs_lines.len().saturating_mul(rhs_lines.len()) > LINE_DIFF_TABLE_LIMIT {
+        return flat_fallback(lhs, rhs);
+    }
 
     let lcs = build_lcs_table(&lhs_lines, &rhs_lines);
     let walk = walk_lcs(&lhs_lines, &rhs_lines, &lcs);
 
     let changes = collapse_runs_into_changes(&lhs_lines, &rhs_lines, walk);
 
+    DiffResult {
+        changes,
+        quality: DiffQuality::LineDiff,
+    }
+}
+
+/// Coarse fallback emitted when the LCS table would exceed
+/// [`LINE_DIFF_TABLE_LIMIT`]. One `Novel` run per non-empty side
+/// covering the full input -- callers see a non-empty diff result
+/// without the O(L*R) memory cost.
+fn flat_fallback(lhs: &str, rhs: &str) -> DiffResult {
+    let mut changes = Vec::new();
+    if !lhs.is_empty() {
+        changes.push(DiffChange {
+            side: Side::Lhs,
+            byte_range: 0..lhs.len(),
+            kind: ChangeKind::Novel,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
+        });
+    }
+    if !rhs.is_empty() {
+        changes.push(DiffChange {
+            side: Side::Rhs,
+            byte_range: 0..rhs.len(),
+            kind: ChangeKind::Novel,
+            move_metadata: None,
+            pair_id: None,
+            deletion_rhs_anchor: None,
+        });
+    }
     DiffResult {
         changes,
         quality: DiffQuality::LineDiff,
@@ -277,6 +326,46 @@ mod tests {
     fn fell_back_flag_is_set() {
         let r = diff_lines("a\n", "b\n");
         assert_eq!(r.quality, DiffQuality::LineDiff);
+    }
+
+    #[test]
+    fn oversized_input_short_circuits_without_lcs_table() {
+        // 6000 lines each -> 36M LCS cells, well above the 25M
+        // bail. Allocating the table would be ~140 MB; the flat
+        // fallback runs in seconds.
+        let mut lhs = String::new();
+        let mut rhs = String::new();
+        for i in 0..6_000 {
+            lhs.push_str(&format!("l{i}\n"));
+            rhs.push_str(&format!("r{i}\n"));
+        }
+
+        let result = diff_lines(&lhs, &rhs);
+
+        assert_eq!(result.quality, DiffQuality::LineDiff);
+        assert_eq!(result.changes.len(), 2, "one Novel run per side");
+        let lhs_change = result.changes.iter().find(|c| c.side == Side::Lhs).unwrap();
+        assert_eq!(lhs_change.byte_range, 0..lhs.len());
+        assert_eq!(lhs_change.kind, ChangeKind::Novel);
+        let rhs_change = result.changes.iter().find(|c| c.side == Side::Rhs).unwrap();
+        assert_eq!(rhs_change.byte_range, 0..rhs.len());
+        assert_eq!(rhs_change.kind, ChangeKind::Novel);
+    }
+
+    #[test]
+    fn oversized_input_with_empty_side_emits_one_change() {
+        // Build one large side and one empty side. The empty side
+        // makes the cell product zero -- below the cap -- so this
+        // test exercises a separate angle: the flat fallback's
+        // empty-side skip when triggered by a hand-rolled bail. We
+        // call the bail directly via a tiny override-style check.
+        let lhs: String = (0..3).map(|i| format!("l{i}\n")).collect();
+        let result = flat_fallback(&lhs, "");
+
+        assert_eq!(result.quality, DiffQuality::LineDiff);
+        assert_eq!(result.changes.len(), 1);
+        assert_eq!(result.changes[0].side, Side::Lhs);
+        assert_eq!(result.changes[0].byte_range, 0..lhs.len());
     }
 
     #[test]
