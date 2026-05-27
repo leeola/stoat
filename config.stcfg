@@ -9,6 +9,13 @@ theme default_dark {
     let muted   = "#808080";
     let dim     = "#a0a0a0";
     let text    = "#cccccc";
+    let red     = "#f92672";
+    let green   = "#a6e22e";
+    let cyan    = "#66d9ef";
+    let yellow  = "#e6db74";
+    let purple  = "#ae81ff";
+    let orange  = "#fd971f";
+    let olive   = "#75715e";
 
     ui.cursor = { modifiers: [reversed] };
     ui.cursor.input = { fg: black, bg: text };
@@ -103,20 +110,21 @@ theme default_dark {
     vcs.rebase.edit.fg   = special;
     vcs.rebase.drop.fg   = danger;
 
-    syntax.keyword                = { fg: primary, modifiers: [bold] };
-    syntax.string.fg              = success;
+    syntax.keyword                = { fg: red, modifiers: [bold] };
+    syntax.string.fg              = yellow;
     syntax.string.escape          = { fg: light_green, modifiers: [bold] };
-    syntax.comment                = { fg: muted, modifiers: [italic] };
+    syntax.comment                = { fg: olive, modifiers: [italic] };
     syntax.comment.documentation  = { fg: dim, modifiers: [italic] };
-    syntax.function.fg            = warning;
+    syntax.function.fg            = green;
     syntax.function.special       = { fg: light_yellow, modifiers: [bold] };
-    syntax.type.fg                = info;
-    syntax.constant.fg            = special;
+    syntax.type.fg                = cyan;
+    syntax.constant.fg            = purple;
     syntax.operator.fg            = light_cyan;
     syntax.punctuation.fg         = dim;
     syntax.property.fg            = light_blue;
     syntax.attribute.fg           = light_magenta;
     syntax.variable.fg            = text;
+    syntax.variable.parameter.fg  = orange;
     syntax.variable.special       = { fg: light_red, modifiers: [italic] };
     syntax.special.lifetime       = { fg: light_yellow, modifiers: [italic] };
     syntax.markup.title           = { fg: light_cyan, modifiers: [bold] };
