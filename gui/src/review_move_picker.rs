@@ -79,14 +79,18 @@ impl PickerDelegate for MoveRelationshipPickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(rel) = self.selected_relationship().cloned() else {
             return;
         };
         let workspace = self.workspace.clone();
-        let _ = workspace.update(cx, |ws, cx| ws.navigate_to_move_relationship(&rel, cx));
+        // Defer past the keystroke observer's outer `Workspace::update`
+        // lease so the re-entrant update does not panic.
+        window.defer(cx, move |_window, cx| {
+            let _ = workspace.update(cx, |ws, cx| ws.navigate_to_move_relationship(&rel, cx));
+        });
     }
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}

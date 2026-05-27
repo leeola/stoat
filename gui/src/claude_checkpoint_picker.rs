@@ -108,14 +108,18 @@ impl PickerDelegate for ClaudeCheckpointPickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(sha) = self.selected_sha() else {
             return;
         };
         if let Some(workspace) = self.workspace.upgrade() {
-            workspace.update(cx, |ws, cx| ws.restore_to_checkpoint(sha, cx));
+            // Defer past the keystroke observer's outer `Workspace::update`
+            // lease so the re-entrant update does not panic.
+            window.defer(cx, move |_window, cx| {
+                workspace.update(cx, |ws, cx| ws.restore_to_checkpoint(sha, cx));
+            });
         }
         cx.emit(DismissEvent);
     }

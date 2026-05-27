@@ -192,7 +192,7 @@ impl PickerDelegate for DiagnosticsPickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(entry) = self.selected_entry().cloned() else {
@@ -203,25 +203,29 @@ impl PickerDelegate for DiagnosticsPickerDelegate {
         };
         let line = entry.line;
         let column = entry.column;
-        workspace.update(cx, |workspace, cx| {
-            if let Some(path) = entry.path.as_deref() {
-                workspace.open_paths(&[path.to_path_buf()], cx);
-            }
-            let editor = match entry.path.as_deref() {
-                Some(path) => workspace
-                    .buffer_for_path(path, cx)
-                    .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx)),
-                None => workspace
-                    .input_state_machine()
-                    .read(cx)
-                    .active_editor()
-                    .cloned()
-                    .and_then(|w| w.upgrade()),
-            };
-            let Some(editor) = editor else {
-                return;
-            };
-            set_cursor_to_point(&editor, line, column, cx);
+        // Defer past the keystroke observer's outer `Workspace::update`
+        // lease so the re-entrant update does not panic.
+        window.defer(cx, move |_window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                if let Some(path) = entry.path.as_deref() {
+                    workspace.open_paths(&[path.to_path_buf()], cx);
+                }
+                let editor = match entry.path.as_deref() {
+                    Some(path) => workspace
+                        .buffer_for_path(path, cx)
+                        .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx)),
+                    None => workspace
+                        .input_state_machine()
+                        .read(cx)
+                        .active_editor()
+                        .cloned()
+                        .and_then(|w| w.upgrade()),
+                };
+                let Some(editor) = editor else {
+                    return;
+                };
+                set_cursor_to_point(&editor, line, column, cx);
+            });
         });
         cx.emit(DismissEvent);
     }

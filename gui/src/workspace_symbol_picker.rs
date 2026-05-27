@@ -125,7 +125,7 @@ impl PickerDelegate for WorkspaceSymbolPickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(entry) = self.selected_entry().cloned() else {
@@ -135,18 +135,22 @@ impl PickerDelegate for WorkspaceSymbolPickerDelegate {
             return;
         };
         let encoding = self.encoding;
-        workspace.update(cx, |workspace, cx| {
-            workspace.open_paths(std::slice::from_ref(&entry.path), cx);
-            let Some(editor) = workspace
-                .buffer_for_path(&entry.path, cx)
-                .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))
-            else {
-                return;
-            };
-            let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
-            let rope = mb_snapshot.rope().clone();
-            let offset = lsp_pos_to_byte_offset(&rope, entry.position, encoding);
-            set_cursor_to_offset(&editor, offset, cx);
+        // Defer past the keystroke observer's outer `Workspace::update`
+        // lease so the re-entrant update does not panic.
+        window.defer(cx, move |_window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_paths(std::slice::from_ref(&entry.path), cx);
+                let Some(editor) = workspace
+                    .buffer_for_path(&entry.path, cx)
+                    .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))
+                else {
+                    return;
+                };
+                let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
+                let rope = mb_snapshot.rope().clone();
+                let offset = lsp_pos_to_byte_offset(&rope, entry.position, encoding);
+                set_cursor_to_offset(&editor, offset, cx);
+            });
         });
         cx.emit(DismissEvent);
     }

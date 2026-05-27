@@ -64,7 +64,7 @@ impl PickerDelegate for ReferencesPickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(loc) = self.locations.get(self.selected).cloned() else {
@@ -78,36 +78,40 @@ impl PickerDelegate for ReferencesPickerDelegate {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        workspace.update(cx, |workspace, cx| {
-            workspace.open_paths(&[path.clone()], cx);
-            let Some(editor) = workspace
-                .buffer_for_path(&path, cx)
-                .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))
-            else {
-                return;
-            };
-            let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
-            let rope = mb_snapshot.rope().clone();
-            let offset = stoat::lsp::util::lsp_pos_to_byte_offset(&rope, position, encoding);
-            editor.update(cx, |ed, cx| {
-                let snapshot = ed.multi_buffer().read(cx).snapshot();
-                let anchor = snapshot.anchor_at(offset, stoat_text::Bias::Left);
-                let new_id = ed
-                    .selections()
-                    .all_anchors()
-                    .iter()
-                    .map(|s| s.id)
-                    .max()
-                    .map(|m| m + 1)
-                    .unwrap_or(1);
-                let selection = stoat_text::Selection {
-                    id: new_id,
-                    start: anchor,
-                    end: anchor,
-                    reversed: false,
-                    goal: stoat_text::SelectionGoal::None,
+        // Defer past the keystroke observer's outer `Workspace::update`
+        // lease so the re-entrant update does not panic.
+        window.defer(cx, move |_window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                workspace.open_paths(&[path.clone()], cx);
+                let Some(editor) = workspace
+                    .buffer_for_path(&path, cx)
+                    .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))
+                else {
+                    return;
                 };
-                ed.selections_mut().replace_with(vec![selection], &snapshot);
+                let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
+                let rope = mb_snapshot.rope().clone();
+                let offset = stoat::lsp::util::lsp_pos_to_byte_offset(&rope, position, encoding);
+                editor.update(cx, |ed, cx| {
+                    let snapshot = ed.multi_buffer().read(cx).snapshot();
+                    let anchor = snapshot.anchor_at(offset, stoat_text::Bias::Left);
+                    let new_id = ed
+                        .selections()
+                        .all_anchors()
+                        .iter()
+                        .map(|s| s.id)
+                        .max()
+                        .map(|m| m + 1)
+                        .unwrap_or(1);
+                    let selection = stoat_text::Selection {
+                        id: new_id,
+                        start: anchor,
+                        end: anchor,
+                        reversed: false,
+                        goal: stoat_text::SelectionGoal::None,
+                    };
+                    ed.selections_mut().replace_with(vec![selection], &snapshot);
+                });
             });
         });
     }

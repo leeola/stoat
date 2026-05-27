@@ -117,7 +117,7 @@ impl PickerDelegate for WorkspacePickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(entry) = self.selected_entry() else {
@@ -131,10 +131,14 @@ impl PickerDelegate for WorkspacePickerDelegate {
         };
         if !is_current {
             let fs = self.fs.clone();
-            workspace.update(cx, |ws, cx| {
-                if let Err(err) = ws.restore_state(&path, &*fs, cx) {
-                    tracing::warn!(?err, ?path, "workspace picker restore_state failed");
-                }
+            // Defer past the keystroke observer's outer `Workspace::update`
+            // lease so the re-entrant update does not panic.
+            window.defer(cx, move |_window, cx| {
+                workspace.update(cx, |ws, cx| {
+                    if let Err(err) = ws.restore_state(&path, &*fs, cx) {
+                        tracing::warn!(?err, ?path, "workspace picker restore_state failed");
+                    }
+                });
             });
         }
         cx.emit(DismissEvent);

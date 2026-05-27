@@ -119,7 +119,7 @@ impl PickerDelegate for BufferPickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(path) = self.selected_path().map(Path::to_path_buf) else {
@@ -128,7 +128,11 @@ impl PickerDelegate for BufferPickerDelegate {
         let Some(workspace) = self.workspace.upgrade() else {
             return;
         };
-        workspace.update(cx, |ws, cx| ws.open_paths(&[path], cx));
+        // Defer past the keystroke observer's outer `Workspace::update`
+        // lease so the re-entrant update does not panic.
+        window.defer(cx, move |_window, cx| {
+            workspace.update(cx, |ws, cx| ws.open_paths(&[path], cx));
+        });
         cx.emit(DismissEvent);
     }
 

@@ -130,7 +130,7 @@ impl PickerDelegate for SymbolPickerDelegate {
     fn confirm(
         &mut self,
         _secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(entry) = self.selected_entry().cloned() else {
@@ -140,14 +140,18 @@ impl PickerDelegate for SymbolPickerDelegate {
             return;
         };
         let buffer_path = self.buffer_path.clone();
-        workspace.update(cx, |workspace, cx| {
-            let Some(editor) = workspace
-                .buffer_for_path(&buffer_path, cx)
-                .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))
-            else {
-                return;
-            };
-            set_cursor_to_offset(&editor, entry.anchor_offset, cx);
+        // Defer past the keystroke observer's outer `Workspace::update`
+        // lease so the re-entrant update does not panic.
+        window.defer(cx, move |_window, cx| {
+            workspace.update(cx, |workspace, cx| {
+                let Some(editor) = workspace
+                    .buffer_for_path(&buffer_path, cx)
+                    .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))
+                else {
+                    return;
+                };
+                set_cursor_to_offset(&editor, entry.anchor_offset, cx);
+            });
         });
         cx.emit(DismissEvent);
     }
