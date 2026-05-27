@@ -8,20 +8,29 @@
 //! [`Workspace::open_paths`].
 
 use crate::{
+    buffer::Buffer,
+    editor::Editor,
     globals::{ExecutorGlobal, FsHostGlobal, GitHostGlobal},
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, App, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
-    SharedString, Styled, StyledText, Task, WeakEntity, Window,
+    div, AnyElement, App, Context, DismissEvent, Entity, HighlightStyle, IntoElement,
+    ParentElement, SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
 };
 use stoat::{host::FsHost, pane::Axis};
+
+/// Upper bound on bytes the preview pane reads from a selected
+/// file. Files larger than this are truncated to the prefix.
+/// Mirrors `stoat/src/file_finder.rs:17`. The selection-change
+/// sync that consumes this lands in a follow-up slice.
+#[allow(dead_code)]
+pub const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 use stoat_action::{Action, ActionKind};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
@@ -74,6 +83,15 @@ pub struct FileFinderDelegate {
     /// task, which drops the receiver and signals the walker's
     /// `send`-failure exit path.
     _drain_task: Option<Task<()>>,
+    /// Scratch [`Buffer`] backing the preview pane. The next slice
+    /// writes the selected file's content into it on
+    /// `selection_changed`. `None` when the delegate runs without a
+    /// preview (test-only code path).
+    pub(crate) preview_buffer: Option<Entity<Buffer>>,
+    /// Stand-alone [`Editor`] rendering [`Self::preview_buffer`].
+    /// `None` when the delegate runs without a preview (test-only
+    /// code path).
+    pub(crate) preview_editor: Option<Entity<Editor>>,
 }
 
 impl FileFinderDelegate {
@@ -89,6 +107,8 @@ impl FileFinderDelegate {
             query: String::new(),
             intended_split: None,
             _drain_task: None,
+            preview_buffer: None,
+            preview_editor: None,
         }
     }
 
@@ -98,6 +118,16 @@ impl FileFinderDelegate {
         let mut delegate = Self::new(workspace, git_root);
         delegate.intended_split = Some(axis);
         delegate
+    }
+
+    /// Install a scratch [`Buffer`] and its [`Editor`] as the
+    /// preview pair. Production callers always chain this onto
+    /// [`Self::new`] / [`Self::with_split`] so the layout switches
+    /// to the horizontal split with a populated preview slot.
+    pub fn with_preview(mut self, buffer: Entity<Buffer>, editor: Entity<Editor>) -> Self {
+        self.preview_buffer = Some(buffer);
+        self.preview_editor = Some(editor);
+        self
     }
 
     /// Append `batch` to [`Self::all_paths`]. Re-runs the filter when
@@ -250,6 +280,20 @@ impl PickerDelegate for FileFinderDelegate {
         false
     }
 
+    fn render_preview(&self, cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        let editor = self.preview_editor.as_ref()?;
+        let border = cx.theme().border_focused;
+        Some(
+            div()
+                .border_1()
+                .border_color(border)
+                .p_2()
+                .size_full()
+                .child(editor.clone())
+                .into_any_element(),
+        )
+    }
+
     fn render_match(
         &self,
         ix: usize,
@@ -355,11 +399,14 @@ fn open_file_finder_internal(
         FinderScope::Modified => collect_changed_paths(&git_root, cx),
     };
 
+    let (preview_buffer, preview_editor) = workspace.build_preview_editor(cx);
+
     workspace.toggle_modal::<Picker<FileFinderDelegate>, _>(window, cx, move |window, cx| {
         let mut delegate = match intended_split {
             Some(axis) => FileFinderDelegate::with_split(weak_workspace, git_root, axis),
             None => FileFinderDelegate::new(weak_workspace, git_root),
-        };
+        }
+        .with_preview(preview_buffer, preview_editor);
         delegate.scope = scope;
         delegate.modified_paths = modified_paths;
         delegate.refilter();
@@ -540,6 +587,33 @@ mod tests {
         let (workspace, vcx) =
             cx.add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/repo"), cx));
         Harness { workspace, vcx }
+    }
+
+    #[test]
+    fn open_file_finder_installs_preview_editor() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_file_finder(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<FileFinderDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("file finder modal is open");
+        picker.read_with(h.vcx, |p, _| {
+            assert!(
+                p.delegate().preview_buffer.is_some(),
+                "preview buffer should be installed by open_file_finder",
+            );
+            assert!(
+                p.delegate().preview_editor.is_some(),
+                "preview editor should be installed by open_file_finder",
+            );
+        });
     }
 
     #[test]

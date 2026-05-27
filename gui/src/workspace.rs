@@ -816,6 +816,44 @@ impl Workspace {
         editor
     }
 
+    /// Build a stand-alone preview [`Entity<Editor>`] backed by a
+    /// fresh scratch [`Buffer`] in the workspace's [`BufferRegistry`].
+    /// The editor carries the same `MultiBuffer` + `DisplayMap` +
+    /// `DiffMap` chain a file-bound editor uses plus
+    /// `install_syntax_map_updater` so updates to the buffer's
+    /// content trigger tree-sitter highlighting, but skips the LSP /
+    /// completion / inlay-hints / diagnostics installs the file-bound
+    /// editor needs. Callers writing content into the returned
+    /// buffer assign a language so the syntax pipeline picks it up.
+    pub(crate) fn build_preview_editor(
+        &mut self,
+        cx: &mut Context<'_, Self>,
+    ) -> (Entity<Buffer>, Entity<Editor>) {
+        let shared = self
+            .buffer_registry
+            .update(cx, |registry, cx| registry.new_scratch(cx).1);
+        let buffer = cx.new(|_| Buffer::from_shared(shared));
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            cx.new(|cx| MultiBuffer::singleton(buffer, cx))
+        };
+        let display_map = {
+            let buffer = buffer.clone();
+            cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+        };
+        let diff_map = {
+            let buffer = buffer.clone();
+            cx.new(|cx| DiffMap::new(buffer, cx))
+        };
+        let editor =
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+        editor.update(cx, |ed, cx| {
+            ed.install_syntax_map_updater(cx);
+        });
+        (buffer, editor)
+    }
+
     pub fn uid(&self) -> stoat::workspace::WorkspaceUid {
         self.uid
     }
