@@ -11,13 +11,18 @@
 //! values and edge generation cases are ported verbatim from there;
 //! see in-code citations.
 //!
-//! Differences from Difftastic for this minimum-viable port:
-//! - No `ReplacedComment`/`ReplacedString` (Levenshtein matching). Falls back to two `Novel` edges
-//!   (one per side).
-//! - No punctuation penalty. `probably_punctuation` is always `false`, so the +200 cost doesn't
-//!   apply.
-//! - No 2-variant vertex deduplication; the seen-set picks the first variant.
-//! - No slider correction (separate post-pass, deferred to a follow-up).
+//! Remaining differences from Difftastic:
+//! - Default graph cap is 1,000,000 vertices (`dijkstra::DEFAULT_GRAPH_LIMIT`) vs upstream's
+//!   3,000,000. Searches that exceed it bail to a preprocessing-only result reported as
+//!   `DiffQuality::Degraded`.
+//! - Dijkstra uses `std::collections::BinaryHeap` rather than `radix_heap::RadixHeapMap`; the
+//!   `O(log n)` ops are fast enough for the bounded graph sizes this port handles.
+//! - Slider correction runs slide-left only; slide-right is deferred so a single direction produces
+//!   a stable fixed point (see `sliders`).
+//! - The move pass does not perform copy detection: a subtree that appears on both sides with an
+//!   extra unmatched copy on one side is not flagged.
+//! - `ContentId` hashes raw atom content with no whitespace normalization, so atoms that differ
+//!   only in surrounding whitespace are treated as distinct.
 //!
 //! Required for correctness:
 //! - The `EnteredDelimiter::PopBoth` vs `PopEither` distinction. Without `PopBoth`, structural
