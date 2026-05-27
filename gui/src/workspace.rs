@@ -762,7 +762,8 @@ impl Workspace {
                 .expect("pane tree returns its own pane id")
                 .clone();
             pane.update(cx, |p, cx| {
-                p.add_item(Box::new(editor), cx);
+                let index = p.add_item(Box::new(editor), cx);
+                p.activate(index, cx);
             });
         }
     }
@@ -9580,6 +9581,39 @@ mod tests {
                 .read(cx);
             assert_eq!(pane.len(), 1);
             assert!(pane.active_item().is_some());
+        });
+    }
+
+    #[test]
+    fn open_paths_activates_the_newly_added_item() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"foo\n");
+        fs.insert_file("/tmp/repo/bar.rs", b"bar\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+        });
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/bar.rs")], cx);
+        });
+
+        ws.read_with(vcx, |w, cx| {
+            let focus = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane present")
+                .read(cx);
+            assert_eq!(pane.len(), 2);
+            assert_eq!(
+                pane.active_index(),
+                1,
+                "second open_paths must activate the just-added tab",
+            );
         });
     }
 
