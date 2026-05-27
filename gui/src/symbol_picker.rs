@@ -182,7 +182,7 @@ impl PickerDelegate for SymbolPickerDelegate {
         let label = StyledText::new(SharedString::from(entry.title.clone())).with_highlights(runs);
         let mut row = div().px_2().text_color(color).child(label);
         if selected {
-            row = row.bg(gpui::white().opacity(0.1));
+            row = row.bg(cx.theme().modal_selection);
         }
         row.into_any_element()
     }

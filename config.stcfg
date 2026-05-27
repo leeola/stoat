@@ -37,6 +37,7 @@ theme default_dark {
     ui.modal.hints.fg = warning;
     ui.modal.palette.fg = text;
     ui.modal.picker.fg = text;
+    ui.modal.selection = { bg: "#3b4261" };
     ui.modal.run.fg = warning;
 
     ui.popup.background = { bg: "#202028" };

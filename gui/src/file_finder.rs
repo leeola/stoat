@@ -275,7 +275,7 @@ impl PickerDelegate for FileFinderDelegate {
         let label = StyledText::new(SharedString::from(display)).with_highlights(runs);
         let mut row = div().px_2().text_color(color).child(label);
         if selected {
-            row = row.bg(cx.theme().selection);
+            row = row.bg(cx.theme().modal_selection);
         }
         row.into_any_element()
     }

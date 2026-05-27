@@ -489,6 +489,7 @@ pub mod scope {
     pub const UI_MODAL_HINTS: &str = "ui.modal.hints";
     pub const UI_MODAL_PALETTE: &str = "ui.modal.palette";
     pub const UI_MODAL_PICKER: &str = "ui.modal.picker";
+    pub const UI_MODAL_SELECTION: &str = "ui.modal.selection";
     pub const UI_MODAL_RUN: &str = "ui.modal.run";
 
     pub const UI_POPUP_BACKGROUND: &str = "ui.popup.background";

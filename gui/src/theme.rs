@@ -116,6 +116,7 @@ pub struct ThemeColors {
     pub selection_editor: Hsla,
     pub modal_palette: Hsla,
     pub modal_picker: Hsla,
+    pub modal_selection: Hsla,
     pub popup_background: Hsla,
     pub popup_text: Hsla,
     pub popup_border: Hsla,
@@ -238,6 +239,11 @@ impl ThemeColors {
             ),
             modal_palette: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_PALETTE, palette.accent),
             modal_picker: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_PICKER, palette.accent),
+            modal_selection: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_MODAL_SELECTION,
+                palette.surface,
+            ),
             popup_background: theme_bg_or(
                 cx,
                 stoat::theme::scope::UI_POPUP_BACKGROUND,
