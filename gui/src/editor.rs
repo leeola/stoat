@@ -2784,6 +2784,22 @@ impl Editor {
         self.syntax_map_updater.as_ref()
     }
 
+    /// Retarget a stand-alone preview [`Editor`] at `path`. Updates the
+    /// editor's and singleton buffer's `file_path`, scrolls back to
+    /// the top, drops the current
+    /// [`crate::syntax_updater::SyntaxMapUpdater`], and re-installs it
+    /// so the new path's language drives the syntax pipeline. Used by
+    /// the file finder's preview pane on every selection change.
+    pub fn set_preview_target(&mut self, path: std::path::PathBuf, cx: &mut Context<'_, Self>) {
+        if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
+            buffer.update(cx, |b, cx| b.set_file_path(Some(path.clone()), cx));
+        }
+        self.set_file_path(Some(path), cx);
+        self.set_scroll_row(0, cx);
+        self.syntax_map_updater = None;
+        self.install_syntax_map_updater(cx);
+    }
+
     /// Arm a `goto_word` jump: store the label set and clear any
     /// in-progress typed prefix so the next character keystrokes
     /// step through [`stoat::goto_word::step_jump`]. The render

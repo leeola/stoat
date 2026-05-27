@@ -27,9 +27,7 @@ use stoat::{host::FsHost, pane::Axis};
 
 /// Upper bound on bytes the preview pane reads from a selected
 /// file. Files larger than this are truncated to the prefix.
-/// Mirrors `stoat/src/file_finder.rs:17`. The selection-change
-/// sync that consumes this lands in a follow-up slice.
-#[allow(dead_code)]
+/// Mirrors `stoat/src/file_finder.rs:17`.
 pub const PREVIEW_BYTE_LIMIT: usize = 128 * 1024;
 use stoat_action::{Action, ActionKind};
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
@@ -92,6 +90,10 @@ pub struct FileFinderDelegate {
     /// `None` when the delegate runs without a preview (test-only
     /// code path).
     pub(crate) preview_editor: Option<Entity<Editor>>,
+    /// Path the preview was last rendered for. Selection moves that
+    /// resolve to the same path short-circuit so a repeat
+    /// `selection_changed` does not re-read the file.
+    preview_rendered_for: Option<PathBuf>,
 }
 
 impl FileFinderDelegate {
@@ -109,6 +111,7 @@ impl FileFinderDelegate {
             _drain_task: None,
             preview_buffer: None,
             preview_editor: None,
+            preview_rendered_for: None,
         }
     }
 
@@ -265,7 +268,40 @@ impl PickerDelegate for FileFinderDelegate {
         cx.emit(DismissEvent);
     }
 
-    fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
+    fn dismissed(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        let Some(buffer) = self.preview_buffer.take() else {
+            return;
+        };
+        let id = buffer.read(cx).read(|b| b.buffer_id());
+        let workspace = self.workspace.clone();
+        cx.defer(move |cx| {
+            let _ = workspace.update(cx, |ws, cx| {
+                ws.buffer_registry()
+                    .update(cx, |reg, cx| reg.remove(id, cx));
+            });
+        });
+    }
+
+    fn selection_changed(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        let Some(path) = self.selected_path().map(Path::to_path_buf) else {
+            return;
+        };
+        if self.preview_rendered_for.as_deref() == Some(path.as_path()) {
+            return;
+        }
+        let Some(buffer) = self.preview_buffer.clone() else {
+            return;
+        };
+        let Some(editor) = self.preview_editor.clone() else {
+            return;
+        };
+        let fs_host = cx.global::<FsHostGlobal>().0.clone();
+        let text = read_preview_text(&*fs_host, &path);
+        let len = buffer.read(cx).read(|b| b.rope().len());
+        buffer.update(cx, |b, cx| b.edit(0..len, &text, cx));
+        editor.update(cx, |ed, cx| ed.set_preview_target(path.clone(), cx));
+        self.preview_rendered_for = Some(path);
+    }
 
     fn handle_action(
         &mut self,
@@ -334,6 +370,25 @@ fn display_path(path: &Path, git_root: &Path) -> String {
     match path.strip_prefix(git_root) {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// Read `path` through `fs_host`, truncating at
+/// [`PREVIEW_BYTE_LIMIT`] on a UTF-8 char boundary. Returns
+/// `"<unreadable>"` on read error so the preview pane always has
+/// content to render. Mirrors `stoat/src/file_finder.rs:336-350`.
+fn read_preview_text(fs_host: &dyn FsHost, path: &Path) -> String {
+    let mut buf = Vec::new();
+    if fs_host.read(path, &mut buf).is_err() {
+        return "<unreadable>".to_string();
+    }
+    let limit = PREVIEW_BYTE_LIMIT.min(buf.len());
+    match std::str::from_utf8(&buf[..limit]) {
+        Ok(s) => s.to_string(),
+        Err(err) => {
+            let valid = err.valid_up_to();
+            String::from_utf8_lossy(&buf[..valid]).into_owned()
+        },
     }
 }
 
@@ -587,6 +642,131 @@ mod tests {
         let (workspace, vcx) =
             cx.add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/repo"), cx));
         Harness { workspace, vcx }
+    }
+
+    #[test]
+    fn selection_changed_loads_preview_content() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("hello.txt", "hello stoat\n")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_file_finder(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<FileFinderDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("file finder modal is open");
+
+        picker.update(h.vcx, |p, cx| p.set_selected_index(0, cx));
+        h.vcx.run_until_parked();
+
+        let (content, rendered_for) = picker.read_with(h.vcx, |p, cx| {
+            let buffer = p
+                .delegate()
+                .preview_buffer
+                .clone()
+                .expect("preview buffer set");
+            let content = buffer.read(cx).read(|b| b.rope().to_string());
+            let rendered_for = p.delegate().preview_rendered_for.clone();
+            (content, rendered_for)
+        });
+        assert_eq!(content, "hello stoat\n");
+        assert_eq!(rendered_for, Some(PathBuf::from("/repo/hello.txt")));
+    }
+
+    #[test]
+    fn selection_changed_short_circuits_on_repeat_path() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("only.txt", "data\n")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_file_finder(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<FileFinderDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("file finder modal is open");
+
+        picker.update(h.vcx, |p, cx| p.set_selected_index(0, cx));
+        h.vcx.run_until_parked();
+
+        let version_after_first = picker.read_with(h.vcx, |p, cx| {
+            let buf = p
+                .delegate()
+                .preview_buffer
+                .clone()
+                .expect("preview buffer set");
+            buf.read(cx).read(|b| b.rope().to_string())
+        });
+        assert_eq!(version_after_first, "data\n");
+
+        // Mutate the on-disk file behind the picker's back; the
+        // short-circuit means the preview should NOT pick up the new
+        // content because the path hasn't changed.
+        h.workspace.read_with(h.vcx, |_, cx| {
+            cx.global::<FsHostGlobal>()
+                .0
+                .write(Path::new("/repo/only.txt"), b"new content\n")
+                .expect("FakeFs::write");
+        });
+        picker.update(h.vcx, |p, cx| p.set_selected_index(0, cx));
+        h.vcx.run_until_parked();
+
+        let version_after_second = picker.read_with(h.vcx, |p, cx| {
+            let buf = p
+                .delegate()
+                .preview_buffer
+                .clone()
+                .expect("preview buffer set");
+            buf.read(cx).read(|b| b.rope().to_string())
+        });
+        assert_eq!(
+            version_after_second, version_after_first,
+            "repeat selection_changed on the same path must short-circuit",
+        );
+    }
+
+    #[test]
+    fn dismissed_removes_preview_buffer_from_registry() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_file_finder(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<FileFinderDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("file finder modal is open");
+
+        let preview_id = picker.read_with(h.vcx, |p, cx| {
+            let buffer = p
+                .delegate()
+                .preview_buffer
+                .clone()
+                .expect("preview installed");
+            buffer.read(cx).read(|b| b.buffer_id())
+        });
+
+        picker.update(h.vcx, |p, cx| p.delegate_mut().dismissed(cx));
+        h.vcx.run_until_parked();
+
+        let has_buffer = h.workspace.read_with(h.vcx, |w, cx| {
+            w.buffer_registry().read(cx).get(preview_id).is_some()
+        });
+        assert!(
+            !has_buffer,
+            "preview buffer must be dropped from the registry on dismiss",
+        );
     }
 
     #[test]
