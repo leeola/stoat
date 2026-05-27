@@ -442,6 +442,9 @@ pub mod scope {
     pub const UI_MINIMAP_THUMB: &str = "ui.minimap.thumb";
     pub const UI_MINIMAP_THUMB_BORDER: &str = "ui.minimap.thumb_border";
 
+    pub const UI_DOCK_MINIMIZED_BACKGROUND: &str = "ui.dock.minimized.background";
+    pub const UI_DOCK_MINIMIZED_BORDER: &str = "ui.dock.minimized.border";
+
     pub const UI_PROMPT: &str = "ui.prompt";
     pub const UI_KEY_LABEL: &str = "ui.key_label";
     pub const UI_HEADING: &str = "ui.heading";

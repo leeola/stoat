@@ -1,7 +1,5 @@
-use crate::item::ItemHandle;
-use gpui::{
-    div, px, rgb, Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Window,
-};
+use crate::{item::ItemHandle, theme::ActiveTheme};
+use gpui::{div, px, Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Window};
 use serde::{Deserialize, Serialize};
 
 /// Edge of the window where a dock is pinned.
@@ -41,8 +39,6 @@ pub struct Dock {
 
 impl EventEmitter<DockEvent> for Dock {}
 
-const DOCK_MINIMIZED_BG: u32 = 0x1e1e1e;
-const DOCK_MINIMIZED_FG: u32 = 0x444444;
 const MINIMIZED_STRIP_WIDTH_PX: f32 = 6.0;
 
 impl Dock {
@@ -163,14 +159,15 @@ impl Dock {
 }
 
 impl Render for Dock {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = cx.theme();
         match self.visibility {
             DockVisibility::Hidden => div().w(px(0.0)),
             DockVisibility::Minimized => div()
                 .w(px(MINIMIZED_STRIP_WIDTH_PX))
                 .h_full()
-                .bg(rgb(DOCK_MINIMIZED_BG))
-                .border_color(rgb(DOCK_MINIMIZED_FG)),
+                .bg(theme.dock_minimized_background)
+                .border_color(theme.dock_minimized_border),
             DockVisibility::Open { width } => div()
                 .w(px(f32::from(width)))
                 .h_full()

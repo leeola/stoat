@@ -36,6 +36,9 @@ theme default_dark {
     ui.popup.selection.background = { bg: "#3a3a4a" };
     ui.popup.selection.text.fg    = "#f0f0f0";
 
+    ui.dock.minimized.background = { bg: "#1e1e1e" };
+    ui.dock.minimized.border.fg  = "#444444";
+
     ui.prompt.fg = warning;
     ui.key_label.fg = accent;
     ui.heading = { fg: warning, modifiers: [bold] };
