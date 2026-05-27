@@ -35,8 +35,8 @@ theme default_dark {
 
     ui.modal.help.fg = accent;
     ui.modal.hints.fg = warning;
-    ui.modal.palette.fg = special;
-    ui.modal.picker.fg = special;
+    ui.modal.palette.fg = text;
+    ui.modal.picker.fg = text;
     ui.modal.run.fg = warning;
 
     ui.popup.background = { bg: "#202028" };
