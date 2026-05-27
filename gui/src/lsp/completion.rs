@@ -41,6 +41,11 @@ pub struct CompletionPopup {
     prefix_range: Range<usize>,
     last_signature: Option<(usize, String)>,
     pending_task: Option<Task<()>>,
+    /// Monotonic id for the most recent completion RPC spawn.
+    /// Bumped at dispatch and re-checked in the response branch so
+    /// a late reply for an earlier cursor cannot overwrite the
+    /// popup's current items.
+    request_seq: u64,
     _subscription: Subscription,
 }
 
@@ -70,8 +75,18 @@ impl CompletionPopup {
             prefix_range: 0..0,
             last_signature: None,
             pending_task: None,
+            request_seq: 0,
             _subscription: subscription,
         }
+    }
+
+    pub(crate) fn bump_request_id(&mut self) -> u64 {
+        self.request_seq += 1;
+        self.request_seq
+    }
+
+    pub(crate) fn request_id(&self) -> u64 {
+        self.request_seq
     }
 
     pub fn items(&self) -> &[CompletionEntry] {
@@ -186,9 +201,16 @@ impl CompletionPopup {
 
         let anchor = request.cursor_offset;
         let prefix_range = request.prefix_range.clone();
+        let request_id = self.bump_request_id();
         let task = cx.spawn(async move |this, cx| {
             let entries = request.run().await;
             let _ = this.update(cx, |popup, cx| {
+                if popup.request_id() != request_id {
+                    // A newer completion request superseded this one;
+                    // the stale entries would overwrite items the user
+                    // has since moved past.
+                    return;
+                }
                 popup.items = entries;
                 popup.selected_idx = 0;
                 popup.anchor_offset = anchor;
@@ -493,6 +515,26 @@ mod tests {
         sm.update(cx, |sm, _| {
             sm.set_mode_for_test(stoat::keymap::StateValue::String(mode.into()))
         });
+    }
+
+    #[test]
+    fn bump_request_id_increments_and_records_latest() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        let (_workspace, editor) = build_workspace_editor(&mut cx, &path, "x\n");
+        let popup = cx.update(|cx| cx.new(|cx| CompletionPopup::new(editor.clone(), cx)));
+
+        let first = popup.update(&mut cx, |p, _| p.bump_request_id());
+        let second = popup.update(&mut cx, |p, _| p.bump_request_id());
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(
+            popup.read_with(&cx, |p, _| p.request_id()),
+            2,
+            "request_id must track the most recent bump",
+        );
     }
 
     #[test]

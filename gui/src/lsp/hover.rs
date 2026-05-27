@@ -44,6 +44,11 @@ pub struct HoverPopup {
     anchored_at: Option<(u32, u32)>,
     lines: Vec<SharedString>,
     pending_task: Option<Task<()>>,
+    /// Monotonic id for the most recent hover RPC spawn. The
+    /// spawn captures the id before launching; the response
+    /// branch re-checks it so a late reply for an earlier cursor
+    /// position cannot paint over the popup's current content.
+    request_seq: u64,
     _subscription: Subscription,
 }
 
@@ -58,6 +63,7 @@ impl HoverPopup {
             anchored_at: None,
             lines: Vec::new(),
             pending_task: None,
+            request_seq: 0,
             _subscription: subscription,
         }
     }
@@ -68,6 +74,15 @@ impl HoverPopup {
 
     pub fn anchored_at(&self) -> Option<(u32, u32)> {
         self.anchored_at
+    }
+
+    pub(crate) fn bump_request_id(&mut self) -> u64 {
+        self.request_seq += 1;
+        self.request_seq
+    }
+
+    pub(crate) fn request_id(&self) -> u64 {
+        self.request_seq
     }
 
     /// Read the host editor's `hover_position` and reconcile popup
@@ -93,10 +108,14 @@ impl HoverPopup {
         let Some(request) = HoverRequest::build(&editor, row, col, cx) else {
             return;
         };
+        let request_id = self.bump_request_id();
         let task = cx.spawn(async move |this, cx| {
             let outcome = request.run().await;
             let _ = this.update(cx, |popup, cx| {
-                if popup.anchored_at != Some((row, col)) {
+                if popup.request_id() != request_id {
+                    // A newer hover request superseded this one; the
+                    // stale reply would paint the popup with the
+                    // previous cursor's content.
                     return;
                 }
                 if let Some(lines) = outcome {
@@ -348,6 +367,26 @@ mod tests {
             vec![SharedString::from("**hello**"), SharedString::from("world")]
         );
         assert_eq!(anchored, Some((0, 0)));
+    }
+
+    #[test]
+    fn bump_request_id_increments_and_records_latest() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        let editor = build_editor(&mut cx, &path, "x\n");
+        let popup = cx.update(|cx| cx.new(|cx| HoverPopup::new(editor.clone(), cx)));
+
+        let first = popup.update(&mut cx, |p, _| p.bump_request_id());
+        let second = popup.update(&mut cx, |p, _| p.bump_request_id());
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(
+            popup.read_with(&cx, |p, _| p.request_id()),
+            2,
+            "request_id must track the most recent bump",
+        );
     }
 
     #[test]

@@ -147,6 +147,11 @@ pub struct Editor {
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
     hover_debounce_task: Option<Task<()>>,
+    /// Monotonic id for the most recent hover-debounce spawn. The
+    /// spawn captures the id before the 50ms timer; the timer body
+    /// re-checks it so a debounce queued for an older cursor cell
+    /// cannot dispatch `HoverAt` after the cursor has moved on.
+    hover_debounce_seq: u64,
     hover_popup: Option<Entity<crate::lsp::HoverPopup>>,
     completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
     inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
@@ -374,6 +379,7 @@ impl Editor {
             text_region_bounds: None,
             hover_position: None,
             hover_debounce_task: None,
+            hover_debounce_seq: 0,
             hover_popup: None,
             completion_popup: None,
             inlay_hints_manager: None,
@@ -2989,9 +2995,19 @@ impl Editor {
             return;
         };
         let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let request_id = self.bump_hover_debounce_id();
+        let weak_self = cx.weak_entity();
         let task = cx.spawn_in(window, async move |_, cx| {
             executor.timer(std::time::Duration::from_millis(50)).await;
             let _ = cx.update(|window, cx| {
+                let still_current = weak_self
+                    .read_with(cx, |ed, _| ed.hover_debounce_id() == request_id)
+                    .unwrap_or(false);
+                if !still_current {
+                    // A newer hover position superseded this debounce
+                    // before the 50ms window elapsed.
+                    return;
+                }
                 let Some(workspace) = weak_workspace.upgrade() else {
                     return;
                 };
@@ -3001,6 +3017,15 @@ impl Editor {
             });
         });
         self.hover_debounce_task = Some(task);
+    }
+
+    pub(crate) fn bump_hover_debounce_id(&mut self) -> u64 {
+        self.hover_debounce_seq += 1;
+        self.hover_debounce_seq
+    }
+
+    pub(crate) fn hover_debounce_id(&self) -> u64 {
+        self.hover_debounce_seq
     }
 
     /// Apply a [`ScrollWheelEvent`] to the editor's scroll state.
@@ -3770,6 +3795,23 @@ mod tests {
             cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
         });
         (buffer, editor)
+    }
+
+    #[test]
+    fn bump_hover_debounce_id_increments_and_records_latest() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "hello");
+
+        let first = editor.update(&mut cx, |ed, _| ed.bump_hover_debounce_id());
+        let second = editor.update(&mut cx, |ed, _| ed.bump_hover_debounce_id());
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(
+            editor.read_with(&cx, |ed, _| ed.hover_debounce_id()),
+            2,
+            "hover_debounce_id must track the most recent bump",
+        );
     }
 
     #[test]
