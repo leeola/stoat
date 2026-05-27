@@ -681,6 +681,67 @@ pub(crate) fn apply_review_moved_overlay(
     }
 }
 
+/// Append a `<- basename:line+1` chip after each buffer row whose
+/// diff token detail carries a cross-file move provenance. Mirrors
+/// the TUI's `stoat::render::review::render_move_chip` so cross-file
+/// moves visible inline against the current buffer carry the same
+/// pointer to their source location. Skipped silently when:
+///
+/// - The row is a block row (deletion blocks, etc.); the chip is buffer-side only.
+/// - The buffer row's `token_detail` has no `move_metadata` spans, or only intra-file moves
+///   (`source.buffer.is_none()`).
+///
+/// The chip text is appended after a two-space gap with a run that
+/// colors the chip glyphs in the diff move color. The TUI uses a
+/// session-resolved `rel_path`; this overlay uses the source path's
+/// basename because the workspace rel-path resolver is not in scope
+/// here.
+pub(crate) fn apply_move_chip_overlay(
+    rows: &mut [RenderedRow],
+    snapshot: &DisplaySnapshot,
+    range: Range<u32>,
+) {
+    let Some(diff_map) = snapshot.diff_map() else {
+        return;
+    };
+    let chip_style = gpui::HighlightStyle {
+        color: Some(rgb(DIFF_MOVED_HEX).into()),
+        ..Default::default()
+    };
+    for (idx, row) in rows.iter_mut().enumerate() {
+        let display_row = range.start + idx as u32;
+        if !matches!(
+            snapshot.classify_row(display_row),
+            BlockRowKind::BufferRow { .. }
+        ) {
+            continue;
+        }
+        let Some(buffer_point) = snapshot.display_to_buffer(DisplayPoint::new(display_row, 0))
+        else {
+            continue;
+        };
+        let buffer_row = buffer_point.row;
+        let Some(detail) = diff_map.token_detail_for_line(buffer_row) else {
+            continue;
+        };
+        let Some(chip_text) = detail.buffer_spans.iter().find_map(|span| {
+            let meta = span.move_metadata.as_ref()?;
+            let source = meta.sources.first()?;
+            let path = source.buffer.as_ref()?.path.as_path();
+            let name = path.file_name()?.to_string_lossy().into_owned();
+            Some(format!("  <- {}:{}", name, source.line_range.start + 1))
+        }) else {
+            continue;
+        };
+        let mut text = row.text.as_ref().to_string();
+        let chip_start = text.len();
+        text.push_str(&chip_text);
+        let chip_end = text.len();
+        row.text = SharedString::from(text);
+        row.runs.push((chip_start..chip_end, chip_style));
+    }
+}
+
 /// Overlay one- or two-character `goto_word` jump labels at the
 /// buffer offset each label points at. Each label character
 /// replaces the underlying glyph in the rendered row's text and
@@ -2799,6 +2860,91 @@ mod tests {
 
     fn underline_color(style: &gpui::HighlightStyle) -> Option<u32> {
         style.underline.as_ref().and_then(|u| u.color).map(hex_of)
+    }
+
+    #[test]
+    fn move_chip_overlay_appends_basename_chip_for_cross_file_move() {
+        use stoat_language::structural_diff::{BufferRef, MoveMetadata, MoveSource, Side};
+        let mut cx = TestAppContext::single();
+        let source = MoveSource {
+            buffer: Some(BufferRef {
+                path: std::path::PathBuf::from("/repo/src/other.rs"),
+                fingerprint: [0u8; 32],
+            }),
+            side: Side::Lhs,
+            byte_range: 0..5,
+            line_range: 3..4,
+        };
+        let metadata = Arc::new(MoveMetadata {
+            sources: vec![source],
+        });
+        let moved_span = stoat::ChangeSpan {
+            byte_range: 0..5,
+            kind: stoat::ChangeKind::Moved,
+            move_metadata: Some(metadata),
+        };
+        let hunk = stoat::DiffHunk {
+            status: stoat::DiffHunkStatus::Moved,
+            staged: false,
+            buffer_start_line: 0,
+            buffer_line_range: 0..1,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: Some(Arc::new(detail(vec![moved_span], Vec::new()))),
+        };
+        let diff_map = stoat::DiffMap::from_hunks([hunk], None);
+        let snapshot = snapshot_with_diff_map(&mut cx, "hello", diff_map);
+
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        apply_move_chip_overlay(&mut rows, &snapshot, 0..1);
+
+        assert_eq!(rows[0].text.as_ref(), "hello  <- other.rs:4");
+        let chip_run = rows[0]
+            .runs
+            .iter()
+            .find(|(range, _)| range.start == 5 && range.end == "hello  <- other.rs:4".len())
+            .expect("chip run present");
+        assert_eq!(chip_run.1.color.map(hex_of), Some(DIFF_MOVED_HEX));
+    }
+
+    #[test]
+    fn move_chip_overlay_skips_intra_file_move() {
+        use stoat_language::structural_diff::{MoveMetadata, MoveSource, Side};
+        let mut cx = TestAppContext::single();
+        let source = MoveSource {
+            buffer: None,
+            side: Side::Lhs,
+            byte_range: 0..5,
+            line_range: 3..4,
+        };
+        let metadata = Arc::new(MoveMetadata {
+            sources: vec![source],
+        });
+        let moved_span = stoat::ChangeSpan {
+            byte_range: 0..5,
+            kind: stoat::ChangeKind::Moved,
+            move_metadata: Some(metadata),
+        };
+        let hunk = stoat::DiffHunk {
+            status: stoat::DiffHunkStatus::Moved,
+            staged: false,
+            buffer_start_line: 0,
+            buffer_line_range: 0..1,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: Some(Arc::new(detail(vec![moved_span], Vec::new()))),
+        };
+        let diff_map = stoat::DiffMap::from_hunks([hunk], None);
+        let snapshot = snapshot_with_diff_map(&mut cx, "hello", diff_map);
+
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        apply_move_chip_overlay(&mut rows, &snapshot, 0..1);
+
+        assert_eq!(
+            rows[0].text.as_ref(),
+            "hello",
+            "intra-file moves must not produce a chip",
+        );
     }
 
     #[test]

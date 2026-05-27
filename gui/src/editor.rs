@@ -3239,6 +3239,8 @@ impl Editor {
         let start = range.start.min(end);
         let mut rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
 
+        render::apply_move_chip_overlay(&mut rows, &display_snapshot, start as u32..end as u32);
+
         let review_data = self.collect_review_render_data(cx);
         render::apply_review_moved_overlay(
             &mut rows,
