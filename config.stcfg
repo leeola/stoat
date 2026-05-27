@@ -17,6 +17,7 @@ theme default_dark {
     let orange  = "#fd971f";
     let olive   = "#75715e";
     let chrome  = "#3e3e42";
+    let background = "#1e1e1e";
 
     ui.cursor = { modifiers: [reversed] };
     ui.cursor.input = { fg: black, bg: text };
@@ -63,8 +64,8 @@ theme default_dark {
     ui.tab.active      = { bg: "#2d2d2d" };
     ui.tab.label.fg    = "#cccccc";
 
-    ui.statusbar.focused   = { fg: text, bg: muted };
-    ui.statusbar.unfocused = { fg: muted, bg: black };
+    ui.statusbar.focused   = { fg: text, bg: background };
+    ui.statusbar.unfocused = { fg: muted, bg: background };
     ui.mode_label          = { fg: black, modifiers: [bold] };
 
     ui.statusline.normal.fg   = primary;
