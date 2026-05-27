@@ -13,7 +13,10 @@ use stoat_config::{Config, Expr, Setting, Spanned, Statement, ThemeBlock, Value}
 pub struct Theme {
     pub name: String,
     palette: HashMap<String, Color>,
+    palette_alpha: HashMap<String, u8>,
     styles: HashMap<String, Style>,
+    fg_alpha: HashMap<String, u8>,
+    bg_alpha: HashMap<String, u8>,
 }
 
 impl Theme {
@@ -22,7 +25,10 @@ impl Theme {
         Self {
             name: String::new(),
             palette: HashMap::new(),
+            palette_alpha: HashMap::new(),
             styles: HashMap::new(),
+            fg_alpha: HashMap::new(),
+            bg_alpha: HashMap::new(),
         }
     }
 
@@ -37,8 +43,30 @@ impl Theme {
             .find_map(|s| self.styles.get(s).copied())
     }
 
+    /// Alpha (0-255) declared on the scope's foreground via `"#RRGGBBAA"`
+    /// or `rgba(r,g,b,a)`. Walks the same progressive-broadening fallback
+    /// as [`Self::try_get`]. Returns `None` when no alpha was specified,
+    /// which callers should treat as fully opaque.
+    pub fn fg_alpha(&self, scope: &str) -> Option<u8> {
+        std::iter::successors(Some(scope), |s| Some(s.rsplit_once('.')?.0))
+            .find_map(|s| self.fg_alpha.get(s).copied())
+    }
+
+    /// Alpha (0-255) declared on the scope's background. See
+    /// [`Self::fg_alpha`].
+    pub fn bg_alpha(&self, scope: &str) -> Option<u8> {
+        std::iter::successors(Some(scope), |s| Some(s.rsplit_once('.')?.0))
+            .find_map(|s| self.bg_alpha.get(s).copied())
+    }
+
     pub fn palette_get(&self, name: &str) -> Option<Color> {
         self.palette.get(name).copied()
+    }
+
+    /// Alpha (0-255) declared on a palette entry via an 8-digit hex or
+    /// `rgba(...)` `let` binding. `None` for plain 6-digit / named entries.
+    pub fn palette_alpha(&self, name: &str) -> Option<u8> {
+        self.palette_alpha.get(name).copied()
     }
 
     /// Build a theme from all `theme NAME` blocks in `config` matching `name`.
@@ -58,17 +86,17 @@ impl Theme {
             .fail();
         }
 
-        let mut palette: HashMap<String, Color> = HashMap::new();
-        let mut fg: HashMap<String, Color> = HashMap::new();
-        let mut bg: HashMap<String, Color> = HashMap::new();
+        let mut palette: HashMap<String, (Color, Option<u8>)> = HashMap::new();
+        let mut fg: HashMap<String, (Color, Option<u8>)> = HashMap::new();
+        let mut bg: HashMap<String, (Color, Option<u8>)> = HashMap::new();
         let mut mods: HashMap<String, Modifier> = HashMap::new();
 
         for block in &blocks {
             for stmt in &block.node.statements {
                 match &stmt.node {
                     Statement::Let(l) => {
-                        let color = resolve_color_from_expr(&l.value.node, &palette)?;
-                        palette.insert(l.name.node.clone(), color);
+                        let entry = resolve_color_from_expr(&l.value.node, &palette)?;
+                        palette.insert(l.name.node.clone(), entry);
                     },
                     Statement::Setting(s) => {
                         apply_setting(s, &palette, &mut fg, &mut bg, &mut mods)?;
@@ -84,13 +112,21 @@ impl Theme {
         scope_set.extend(mods.keys().cloned());
 
         let mut styles = HashMap::new();
+        let mut fg_alpha: HashMap<String, u8> = HashMap::new();
+        let mut bg_alpha: HashMap<String, u8> = HashMap::new();
         for scope in scope_set {
             let mut style = Style::default();
-            if let Some(&c) = fg.get(&scope) {
+            if let Some(&(c, a)) = fg.get(&scope) {
                 style = style.fg(c);
+                if let Some(a) = a {
+                    fg_alpha.insert(scope.clone(), a);
+                }
             }
-            if let Some(&c) = bg.get(&scope) {
+            if let Some(&(c, a)) = bg.get(&scope) {
                 style = style.bg(c);
+                if let Some(a) = a {
+                    bg_alpha.insert(scope.clone(), a);
+                }
             }
             if let Some(&m) = mods.get(&scope) {
                 if !m.is_empty() {
@@ -100,19 +136,29 @@ impl Theme {
             styles.insert(scope, style);
         }
 
+        let palette_alpha: HashMap<String, u8> = palette
+            .iter()
+            .filter_map(|(name, (_, a))| a.map(|a| (name.clone(), a)))
+            .collect();
+        let palette: HashMap<String, Color> =
+            palette.into_iter().map(|(k, (c, _))| (k, c)).collect();
+
         Ok(Theme {
             name: name.to_string(),
             palette,
+            palette_alpha,
             styles,
+            fg_alpha,
+            bg_alpha,
         })
     }
 }
 
 fn apply_setting(
     setting: &Setting,
-    palette: &HashMap<String, Color>,
-    fg: &mut HashMap<String, Color>,
-    bg: &mut HashMap<String, Color>,
+    palette: &HashMap<String, (Color, Option<u8>)>,
+    fg: &mut HashMap<String, (Color, Option<u8>)>,
+    bg: &mut HashMap<String, (Color, Option<u8>)>,
     mods: &mut HashMap<String, Modifier>,
 ) -> Result<(), ThemeError> {
     let path: Vec<&str> = setting.path.iter().map(|p| p.node.as_str()).collect();
@@ -152,9 +198,9 @@ fn apply_field(
     scope: &str,
     field: &str,
     value: &Value,
-    palette: &HashMap<String, Color>,
-    fg: &mut HashMap<String, Color>,
-    bg: &mut HashMap<String, Color>,
+    palette: &HashMap<String, (Color, Option<u8>)>,
+    fg: &mut HashMap<String, (Color, Option<u8>)>,
+    bg: &mut HashMap<String, (Color, Option<u8>)>,
     mods: &mut HashMap<String, Modifier>,
 ) -> Result<(), ThemeError> {
     match field {
@@ -180,8 +226,8 @@ fn apply_field(
 
 fn resolve_color_from_expr(
     expr: &Expr,
-    palette: &HashMap<String, Color>,
-) -> Result<Color, ThemeError> {
+    palette: &HashMap<String, (Color, Option<u8>)>,
+) -> Result<(Color, Option<u8>), ThemeError> {
     match expr {
         Expr::Value(v) => resolve_color_from_value(v, palette),
         Expr::Variable(name) => lookup_named_or_palette(name, palette),
@@ -200,8 +246,8 @@ fn resolve_color_from_expr(
 
 fn resolve_color_from_value(
     value: &Value,
-    palette: &HashMap<String, Color>,
-) -> Result<Color, ThemeError> {
+    palette: &HashMap<String, (Color, Option<u8>)>,
+) -> Result<(Color, Option<u8>), ThemeError> {
     match value {
         Value::Ident(name) => lookup_named_or_palette(name, palette),
         Value::String(s) => parse_color_string(s),
@@ -218,51 +264,63 @@ fn resolve_color_from_value(
 
 fn lookup_named_or_palette(
     name: &str,
-    palette: &HashMap<String, Color>,
-) -> Result<Color, ThemeError> {
+    palette: &HashMap<String, (Color, Option<u8>)>,
+) -> Result<(Color, Option<u8>), ThemeError> {
     palette
         .get(name)
         .copied()
-        .or_else(|| named_color(name))
+        .or_else(|| named_color(name).map(|c| (c, None)))
         .context(UnknownColorSnafu {
             name: name.to_string(),
         })
 }
 
-fn parse_color_string(s: &str) -> Result<Color, ThemeError> {
+fn parse_color_string(s: &str) -> Result<(Color, Option<u8>), ThemeError> {
     if let Some(hex) = s.strip_prefix('#') {
-        if hex.len() != 6 {
-            return InvalidHexColorSnafu {
-                value: s.to_string(),
-            }
-            .fail();
+        let invalid = || InvalidHexColorSnafu {
+            value: s.to_string(),
+        };
+        if hex.len() != 6 && hex.len() != 8 {
+            return invalid().fail();
         }
-        let r = u8::from_str_radix(&hex[0..2], 16)
-            .ok()
-            .context(InvalidHexColorSnafu {
-                value: s.to_string(),
-            })?;
-        let g = u8::from_str_radix(&hex[2..4], 16)
-            .ok()
-            .context(InvalidHexColorSnafu {
-                value: s.to_string(),
-            })?;
-        let b = u8::from_str_radix(&hex[4..6], 16)
-            .ok()
-            .context(InvalidHexColorSnafu {
-                value: s.to_string(),
-            })?;
-        return Ok(Color::Rgb(r, g, b));
+        let r = u8::from_str_radix(&hex[0..2], 16).ok().context(invalid())?;
+        let g = u8::from_str_radix(&hex[2..4], 16).ok().context(invalid())?;
+        let b = u8::from_str_radix(&hex[4..6], 16).ok().context(invalid())?;
+        let alpha = if hex.len() == 8 {
+            Some(u8::from_str_radix(&hex[6..8], 16).ok().context(invalid())?)
+        } else {
+            None
+        };
+        return Ok((Color::Rgb(r, g, b), alpha));
     }
     if let Some(inner) = s.strip_prefix("ansi(").and_then(|t| t.strip_suffix(')')) {
         let n: u8 = inner.trim().parse().ok().context(InvalidColorValueSnafu {
             value: s.to_string(),
         })?;
-        return Ok(Color::Indexed(n));
+        return Ok((Color::Indexed(n), None));
     }
-    named_color(s).context(UnknownColorSnafu {
-        name: s.to_string(),
-    })
+    if let Some(inner) = s.strip_prefix("rgba(").and_then(|t| t.strip_suffix(')')) {
+        let parts: Vec<&str> = inner.split(',').map(str::trim).collect();
+        if parts.len() != 4 {
+            return InvalidColorValueSnafu {
+                value: s.to_string(),
+            }
+            .fail();
+        }
+        let invalid = || InvalidColorValueSnafu {
+            value: s.to_string(),
+        };
+        let r: u8 = parts[0].parse().ok().context(invalid())?;
+        let g: u8 = parts[1].parse().ok().context(invalid())?;
+        let b: u8 = parts[2].parse().ok().context(invalid())?;
+        let a: u8 = parts[3].parse().ok().context(invalid())?;
+        return Ok((Color::Rgb(r, g, b), Some(a)));
+    }
+    named_color(s)
+        .context(UnknownColorSnafu {
+            name: s.to_string(),
+        })
+        .map(|c| (c, None))
 }
 
 fn named_color(s: &str) -> Option<Color> {
@@ -582,6 +640,102 @@ mod tests {
             theme.try_get("ui.cursor"),
             Some(Style::default().fg(Color::Rgb(0x89, 0xb4, 0xfa)))
         );
+    }
+
+    #[test]
+    fn hex_color_string_with_alpha() {
+        let src = r##"theme t {
+            ui.selection.editor.bg = "#89b4fa80";
+            ui.cursor.fg = "#11223344";
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(
+            theme.try_get("ui.selection.editor").and_then(|s| s.bg),
+            Some(Color::Rgb(0x89, 0xb4, 0xfa))
+        );
+        assert_eq!(theme.bg_alpha("ui.selection.editor"), Some(0x80));
+        assert_eq!(theme.fg_alpha("ui.cursor"), Some(0x44));
+    }
+
+    #[test]
+    fn rgba_color_string() {
+        let src = r##"theme t {
+            ui.selection.editor.bg = "rgba(137, 180, 250, 128)";
+            ui.cursor.fg = "rgba(0,0,0,255)";
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(
+            theme.try_get("ui.selection.editor").and_then(|s| s.bg),
+            Some(Color::Rgb(137, 180, 250))
+        );
+        assert_eq!(theme.bg_alpha("ui.selection.editor"), Some(128));
+        assert_eq!(theme.fg_alpha("ui.cursor"), Some(255));
+    }
+
+    #[test]
+    fn alpha_threads_through_palette_ref() {
+        let src = r##"theme t {
+            let translucent = "#aabbccdd";
+            ui.cursor.bg = translucent;
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(theme.palette_alpha("translucent"), Some(0xdd));
+        assert_eq!(theme.bg_alpha("ui.cursor"), Some(0xdd));
+    }
+
+    #[test]
+    fn alpha_falls_back_via_progressive_broadening() {
+        let src = r##"theme t {
+            syntax.keyword.fg = "#11223344";
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(theme.fg_alpha("syntax.keyword"), Some(0x44));
+        assert_eq!(theme.fg_alpha("syntax.keyword.control"), Some(0x44));
+        assert_eq!(theme.fg_alpha("syntax.string"), None);
+    }
+
+    #[test]
+    fn opaque_color_has_no_alpha() {
+        let src = r##"theme t {
+            ui.cursor.fg = "#89b4fa";
+            ui.cursor.bg = red;
+        }"##;
+        let theme = load(src, "t");
+        assert_eq!(theme.fg_alpha("ui.cursor"), None);
+        assert_eq!(theme.bg_alpha("ui.cursor"), None);
+    }
+
+    #[test]
+    fn invalid_hex_alpha_lengths_error() {
+        let src7 = r##"theme t { ui.cursor.fg = "#1234567"; }"##;
+        assert!(matches!(
+            load_err(src7, "t"),
+            ThemeError::InvalidHexColor { value, .. } if value == "#1234567"
+        ));
+        let src9 = r##"theme t { ui.cursor.fg = "#123456789"; }"##;
+        assert!(matches!(
+            load_err(src9, "t"),
+            ThemeError::InvalidHexColor { value, .. } if value == "#123456789"
+        ));
+    }
+
+    #[test]
+    fn invalid_rgba_args_error() {
+        let too_few = r##"theme t { ui.cursor.fg = "rgba(1, 2, 3)"; }"##;
+        assert!(matches!(
+            load_err(too_few, "t"),
+            ThemeError::InvalidColorValue { .. }
+        ));
+        let non_int = r##"theme t { ui.cursor.fg = "rgba(1, 2, 3, x)"; }"##;
+        assert!(matches!(
+            load_err(non_int, "t"),
+            ThemeError::InvalidColorValue { .. }
+        ));
+        let oversized = r##"theme t { ui.cursor.fg = "rgba(1, 2, 3, 300)"; }"##;
+        assert!(matches!(
+            load_err(oversized, "t"),
+            ThemeError::InvalidColorValue { .. }
+        ));
     }
 
     #[test]

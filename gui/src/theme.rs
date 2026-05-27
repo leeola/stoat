@@ -388,19 +388,35 @@ impl ActiveTheme for App {
 }
 
 fn theme_fg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
-    cx.try_global::<Theme>()
-        .and_then(|t| t.0.try_get(scope))
-        .and_then(|style| style.fg)
-        .and_then(ratatui_color_to_hsla)
-        .unwrap_or(fallback)
+    let Some(theme) = cx.try_global::<Theme>() else {
+        return fallback;
+    };
+    let Some(color) = theme.0.try_get(scope).and_then(|style| style.fg) else {
+        return fallback;
+    };
+    let Some(mut hsla) = ratatui_color_to_hsla(color) else {
+        return fallback;
+    };
+    if let Some(alpha) = theme.0.fg_alpha(scope) {
+        hsla.a = f32::from(alpha) / 255.0;
+    }
+    hsla
 }
 
 fn theme_bg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
-    cx.try_global::<Theme>()
-        .and_then(|t| t.0.try_get(scope))
-        .and_then(|style| style.bg)
-        .and_then(ratatui_color_to_hsla)
-        .unwrap_or(fallback)
+    let Some(theme) = cx.try_global::<Theme>() else {
+        return fallback;
+    };
+    let Some(color) = theme.0.try_get(scope).and_then(|style| style.bg) else {
+        return fallback;
+    };
+    let Some(mut hsla) = ratatui_color_to_hsla(color) else {
+        return fallback;
+    };
+    if let Some(alpha) = theme.0.bg_alpha(scope) {
+        hsla.a = f32::from(alpha) / 255.0;
+    }
+    hsla
 }
 
 /// App-global wrapper around [`stoat::theme::Theme`]. Stored via
@@ -501,5 +517,24 @@ mod tests {
         });
         assert_ne!(resolved.background, palette.background);
         assert_ne!(resolved.diagnostic_error, palette.danger);
+    }
+
+    #[test]
+    fn cx_theme_applies_alpha_from_eight_digit_hex() {
+        let cx = TestAppContext::single();
+        let theme_src = Theme::load_from_source(
+            r##"theme custom { ui.selection.editor.bg = "#80808040"; }"##,
+            "custom",
+        );
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme_src);
+            cx.theme()
+        });
+        let expected = f32::from(0x40u8) / 255.0;
+        assert!(
+            (resolved.selection_editor.a - expected).abs() < 1e-6,
+            "expected alpha {expected}, got {}",
+            resolved.selection_editor.a
+        );
     }
 }
