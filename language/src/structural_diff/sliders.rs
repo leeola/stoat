@@ -30,53 +30,73 @@
 //! handling (which prefers inner vs outer delimiters per language) is
 //! a future enhancement.
 //!
-//! Two passes are run because some sliders only become fixable after
-//! their neighbors are corrected (cascading).
+//! Slide-LEFT is the preferred direction: cascading runs of slide-LEFT
+//! migrate novel regions as far left as matching content allows.
+//! Slide-RIGHT runs only as a fallback when slide-LEFT is
+//! structurally blocked for a region (mainly `region_start == 0`).
+//! The slide-RIGHT precondition implies the post-slide state matches
+//! slide-LEFT's precondition, so without a text-distance tiebreaker
+//! the two directions can oscillate; the outer fixed-point loop
+//! caps iterations at 4 as a safety net.
 
 use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     unchanged::{ChangeKind, ChangeMap},
 };
 
-/// Run two passes of slider correction over the entire tree rooted at
-/// `root`, updating `changes` in place.
+const MAX_PASSES: usize = 4;
+
+/// Run slider correction over the entire tree rooted at `root`,
+/// updating `changes` in place. Loops until a pass leaves the change
+/// map unchanged or after `MAX_PASSES` iterations.
 pub fn fix_all_sliders(arena: &SyntaxArena, root: SyntaxId, changes: &mut ChangeMap) {
-    for _ in 0..2 {
-        fix_sliders_recursive(arena, root, changes);
+    let mut dirty = true;
+    let mut pass = 0;
+    while dirty && pass < MAX_PASSES {
+        dirty = false;
+        fix_sliders_recursive(arena, root, changes, &mut dirty);
+        pass += 1;
     }
 }
 
-fn fix_sliders_recursive(arena: &SyntaxArena, id: SyntaxId, changes: &mut ChangeMap) {
+fn fix_sliders_recursive(
+    arena: &SyntaxArena,
+    id: SyntaxId,
+    changes: &mut ChangeMap,
+    dirty: &mut bool,
+) {
     if let Syntax::List(list) = arena.get(id) {
-        slide_within_children(arena, &list.children, changes);
+        slide_within_children(arena, &list.children, changes, dirty);
         for child in &list.children {
-            fix_sliders_recursive(arena, *child, changes);
+            fix_sliders_recursive(arena, *child, changes, dirty);
         }
     }
 }
 
 /// Walk a single sibling list and rewrite slider boundaries.
 ///
-/// The algorithm scans for runs of [`ChangeKind::Pending`] nodes
-/// bracketed by [`ChangeKind::Unchanged`] neighbors. When the last
-/// node of the Pending run has the same `content_id` as the
-/// preceding Unchanged neighbor, the boundary can slide LEFT
-/// (the prev node becomes Pending and the last-in-region becomes
-/// Unchanged). The result: novel regions always migrate as far
-/// LEFT as the matching content allows, leaving Unchanged
-/// trailers that match Difftastic's preferred presentation for
-/// most languages.
-///
-/// Slide-RIGHT is intentionally not implemented: the asymmetry
-/// gives the algorithm a stable fixed point (single direction =>
-/// no oscillation between successive passes). Two passes still
-/// run because cascading slides produce different boundaries on
-/// the second iteration.
-fn slide_within_children(arena: &SyntaxArena, children: &[SyntaxId], changes: &mut ChangeMap) {
+/// For each run of [`ChangeKind::Pending`] nodes the function first
+/// attempts a slide-LEFT: when the preceding Unchanged neighbor's
+/// `content_id` matches the last node in the Pending region, the
+/// previous node is marked Pending and the last-in-region is marked
+/// Unchanged (the boundary shifts left by one). If slide-LEFT did not
+/// apply for the region -- because `region_start == 0` or the
+/// content IDs do not match -- the function then tries slide-RIGHT:
+/// when the following Unchanged neighbor's `content_id` matches the
+/// first node in the region, the first-in-region is marked Unchanged
+/// and the next node is marked Pending (boundary shifts right by
+/// one). The exclusivity preserves the existing slide-LEFT cascade
+/// behavior; slide-RIGHT widens coverage to regions that begin at
+/// the start of the list.
+fn slide_within_children(
+    arena: &SyntaxArena,
+    children: &[SyntaxId],
+    changes: &mut ChangeMap,
+    dirty: &mut bool,
+) {
     let n = children.len();
     let mut i = 0;
     while i < n {
-        // Skip leading Unchanged.
         while i < n && changes.get(children[i]) == ChangeKind::Unchanged {
             i += 1;
         }
@@ -84,19 +104,30 @@ fn slide_within_children(arena: &SyntaxArena, children: &[SyntaxId], changes: &m
             break;
         }
         let region_start = i;
-        // Find end of Pending run.
         while i < n && changes.get(children[i]) != ChangeKind::Unchanged {
             i += 1;
         }
         let region_end = i;
 
-        // Slide LEFT: prev node Unchanged + matches last in region.
+        let mut left_applied = false;
         if region_start > 0 && region_end > region_start {
             let prev = children[region_start - 1];
             let last_in_region = children[region_end - 1];
             if arena.get(prev).content_id() == arena.get(last_in_region).content_id() {
                 changes.mark(prev, ChangeKind::Pending);
                 changes.mark(last_in_region, ChangeKind::Unchanged);
+                *dirty = true;
+                left_applied = true;
+            }
+        }
+
+        if !left_applied && region_end < n && region_end > region_start {
+            let next = children[region_end];
+            let first_in_region = children[region_start];
+            if arena.get(next).content_id() == arena.get(first_in_region).content_id() {
+                changes.mark(first_in_region, ChangeKind::Unchanged);
+                changes.mark(next, ChangeKind::Pending);
+                *dirty = true;
             }
         }
     }
@@ -228,5 +259,43 @@ mod tests {
         for c in children {
             assert_eq!(changes.get(c), ChangeKind::Unchanged);
         }
+    }
+
+    #[test]
+    fn slide_within_children_pushes_right_when_left_blocked() {
+        // Children: A B A
+        // Initial:  P P U  (region [A B] starts at index 0)
+        // Slide-LEFT cannot apply (region_start == 0).
+        // Slide-RIGHT: next-Unchanged (idx 2, A) matches first-in-region
+        // (idx 0, A), so children[0] -> Unchanged, children[2] -> Pending.
+        // Final single-pass state: U P P.
+        let mut arena = SyntaxArena::new();
+        let a1 = mk_atom(&mut arena, "ident", "A");
+        let b = mk_atom(&mut arena, "ident", "B");
+        let a2 = mk_atom(&mut arena, "ident", "A");
+        let cids = [
+            ContentId::for_atom("ident", "A"),
+            ContentId::for_atom("ident", "B"),
+            ContentId::for_atom("ident", "A"),
+        ];
+        let root = mk_list(&mut arena, "tuple", vec![a1, b, a2], &cids);
+        arena.link_siblings();
+        let children = match arena.get(root) {
+            Syntax::List(list) => list.children.clone(),
+            Syntax::Atom(_) => unreachable!(),
+        };
+
+        let mut changes = ChangeMap::new();
+        changes.mark(a1, ChangeKind::Pending);
+        changes.mark(b, ChangeKind::Pending);
+        changes.mark(a2, ChangeKind::Unchanged);
+
+        let mut dirty = false;
+        slide_within_children(&arena, &children, &mut changes, &mut dirty);
+
+        assert!(dirty, "slide-RIGHT should have marked changes");
+        assert_eq!(changes.get(a1), ChangeKind::Unchanged);
+        assert_eq!(changes.get(b), ChangeKind::Pending);
+        assert_eq!(changes.get(a2), ChangeKind::Pending);
     }
 }
