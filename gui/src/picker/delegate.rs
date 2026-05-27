@@ -71,4 +71,19 @@ pub trait PickerDelegate: Sized + 'static {
     ) -> bool {
         false
     }
+
+    /// Render an optional preview pane next to the picker's result
+    /// list. Returning `Some(element)` switches the picker layout
+    /// from a single vertical column to a horizontal split with the
+    /// query+list on the left and the preview on the right. Default
+    /// is `None`, which keeps the original column layout.
+    fn render_preview(&self, _cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        None
+    }
+
+    /// Invoked after the active row changes (via arrow-key
+    /// navigation or `Picker::set_selected_index`). Default is a
+    /// no-op; preview-bearing delegates override to refresh the
+    /// preview content lazily as selection moves.
+    fn selection_changed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 }

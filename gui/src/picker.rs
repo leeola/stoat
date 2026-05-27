@@ -193,6 +193,7 @@ impl<D: PickerDelegate> Picker<D> {
     pub fn set_selected_index(&mut self, ix: usize, cx: &mut Context<'_, Self>) {
         self.delegate.set_selected_index(ix, cx);
         self.scroll_handle.scroll_to_item(ix, ScrollStrategy::Top);
+        self.delegate.selection_changed(cx);
         cx.notify();
     }
 
@@ -255,6 +256,7 @@ impl<D: PickerDelegate> Picker<D> {
         if next != self.delegate.selected_index() {
             self.delegate.set_selected_index(next, cx);
             self.scroll_handle.scroll_to_item(next, ScrollStrategy::Top);
+            self.delegate.selection_changed(cx);
             cx.notify();
         }
     }
@@ -328,13 +330,32 @@ impl<D: PickerDelegate> Render for Picker<D> {
         .track_scroll(self.scroll_handle.clone())
         .flex_grow();
 
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .track_focus(&self.focus_handle)
-            .child(self.query_editor.clone())
-            .child(list)
+        let preview = self.delegate.render_preview(cx);
+        match preview {
+            None => div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .track_focus(&self.focus_handle)
+                .child(self.query_editor.clone())
+                .child(list)
+                .into_any_element(),
+            Some(preview) => div()
+                .flex()
+                .flex_row()
+                .size_full()
+                .track_focus(&self.focus_handle)
+                .child(
+                    div()
+                        .flex()
+                        .flex_col()
+                        .w_2_5()
+                        .child(self.query_editor.clone())
+                        .child(list),
+                )
+                .child(div().flex_grow().child(preview))
+                .into_any_element(),
+        }
     }
 }
 
@@ -365,6 +386,7 @@ mod tests {
         history: Arc<Mutex<Vec<String>>>,
         confirmed: Arc<Mutex<Vec<Option<PickerSecondary>>>>,
         dismissed: Arc<Mutex<u32>>,
+        selection_changes: Arc<Mutex<u32>>,
     }
 
     impl TestDelegate {
@@ -375,6 +397,7 @@ mod tests {
                 history: Arc::new(Mutex::new(Vec::new())),
                 confirmed: Arc::new(Mutex::new(Vec::new())),
                 dismissed: Arc::new(Mutex::new(0)),
+                selection_changes: Arc::new(Mutex::new(0)),
             }
         }
     }
@@ -425,11 +448,16 @@ mod tests {
         ) -> AnyElement {
             div().child(self.items[ix].clone()).into_any_element()
         }
+
+        fn selection_changed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {
+            *self.selection_changes.lock().expect("test mutex") += 1;
+        }
     }
 
     struct Harness<'a> {
         picker: Entity<Picker<TestDelegate>>,
         history: Arc<Mutex<Vec<String>>>,
+        selection_changes: Arc<Mutex<u32>>,
         vcx: &'a mut VisualTestContext,
     }
 
@@ -437,11 +465,13 @@ mod tests {
         install_executor_global(cx);
         let delegate = TestDelegate::new(items);
         let history = delegate.history.clone();
+        let selection_changes = delegate.selection_changes.clone();
         let vcx = cx.add_empty_window();
         let picker = vcx.update(|window, cx| cx.new(|cx| Picker::new(delegate, window, cx)));
         Harness {
             picker,
             history,
+            selection_changes,
             vcx,
         }
     }
@@ -506,6 +536,34 @@ mod tests {
             .expect("set_selected_index must queue a scroll-to-item");
         assert_eq!(scroll.item_index, 42);
         assert_eq!(scroll.strategy, ScrollStrategy::Top);
+    }
+
+    #[test]
+    fn selection_changed_fires_on_set_selected_index() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        assert_eq!(*h.selection_changes.lock().expect("test mutex"), 0);
+
+        h.picker.update(h.vcx, |p, cx| p.set_selected_index(2, cx));
+
+        assert_eq!(*h.selection_changes.lock().expect("test mutex"), 1);
+    }
+
+    #[test]
+    fn selection_changed_fires_on_move_selection() {
+        let mut cx = TestAppContext::single();
+        let h = new_picker(&mut cx, vec!["alpha".into(), "beta".into(), "gamma".into()]);
+        assert_eq!(*h.selection_changes.lock().expect("test mutex"), 0);
+
+        let picker = h.picker.clone();
+        h.vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                assert!(p.handle_action(&stoat_action::PickerSelectNext, window, cx));
+                assert!(p.handle_action(&stoat_action::PickerSelectNext, window, cx));
+            });
+        });
+
+        assert_eq!(*h.selection_changes.lock().expect("test mutex"), 2);
     }
 
     #[test]
