@@ -1287,4 +1287,84 @@ mod tests {
         );
         assert_eq!(h.fake_fs_watcher().watched_paths(), vec![workdir]);
     }
+
+    /// A watch-mode external write to a path the session has not yet
+    /// seen flows through the event loop, lands as a new file entry
+    /// via [`ReviewSession::upsert_file`], and parks the cursor on
+    /// the first chunk.
+    #[test]
+    fn workspace_watch_external_create_adds_new_file() {
+        use crate::host::FsHost;
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.fake_git().add_repo(workdir.clone());
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenReviewWatch {
+                workdir: workdir.clone(),
+            },
+        );
+        assert_eq!(h.with_review(|s| s.files.len()), 0);
+
+        let new_path = workdir.join("new.rs");
+        h.fake_fs()
+            .write(&new_path, b"fn main() {}\n")
+            .expect("FakeFs::write");
+        h.fake_fs_watcher().inject(&new_path, FsEventKind::Modified);
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+        h.settle();
+
+        let files = h.with_review(|s| s.files.iter().map(|f| f.path.clone()).collect::<Vec<_>>());
+        assert_eq!(files, vec![new_path.clone()]);
+        let total = h.with_review(|s| s.order.len());
+        assert!(
+            total >= 1,
+            "expected at least one chunk for new file, got {total}",
+        );
+        let cursor = h.current_review_chunk_id();
+        let first = h.with_review(|s| s.files[0].chunks[0]);
+        assert_eq!(cursor, first, "cursor parks on the first new chunk");
+    }
+
+    /// A watch-mode external write to a path matched by
+    /// `.stoatignore` is dropped at the drain edge, never reaches
+    /// the upsert path, and leaves the session unchanged.
+    #[test]
+    fn workspace_watch_stoatignore_path_does_not_enter_session() {
+        use crate::host::FsHost;
+        let mut h = TestHarness::with_size(80, 14);
+        let workdir = PathBuf::from("/work");
+        h.fake_git().add_repo(workdir.clone());
+        h.fake_fs()
+            .insert_file(workdir.join(".stoatignore"), b"ignored.log\n");
+
+        crate::action_handlers::dispatch(
+            &mut h.stoat,
+            &stoat_action::OpenReviewWatch {
+                workdir: workdir.clone(),
+            },
+        );
+        let version_after_open = h.with_review(|s| s.version);
+
+        let ignored = workdir.join("ignored.log");
+        h.fake_fs()
+            .write(&ignored, b"noise\n")
+            .expect("FakeFs::write");
+        h.fake_fs_watcher().inject(&ignored, FsEventKind::Modified);
+        h.stoat.drain_fs_watch_events();
+        h.advance_clock(REVIEW_EXTERNAL_EDIT_DEBOUNCE);
+        h.settle();
+
+        assert!(
+            h.with_review(|s| s.files.is_empty()),
+            "ignored path must not enter the session",
+        );
+        assert_eq!(
+            h.with_review(|s| s.version),
+            version_after_open,
+            "ignored path must not bump the session version",
+        );
+    }
 }
