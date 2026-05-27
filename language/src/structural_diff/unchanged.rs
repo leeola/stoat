@@ -224,13 +224,11 @@ fn pair_children(
             (lhs_arena.get(lhs_id), rhs_arena.get(rhs_id))
         {
             if lhs_list.kind == rhs_list.kind {
-                let lhs_grand = lhs_list.children.clone();
-                let rhs_grand = rhs_list.children.clone();
                 pair_children(
                     lhs_arena,
                     rhs_arena,
-                    &lhs_grand,
-                    &rhs_grand,
+                    &lhs_list.children,
+                    &rhs_list.children,
                     lhs_changes,
                     rhs_changes,
                 );
