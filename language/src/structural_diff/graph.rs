@@ -258,14 +258,22 @@ pub fn is_string_atom(node: &Syntax<'_>) -> bool {
 /// between two strings. Range: 0..=100. Two empty strings return
 /// 100. The implementation is the classic O(n*m) DP, plenty fast for
 /// the comment-/string-sized inputs the structural-diff sees.
+///
+/// Distance is measured at byte granularity, not char granularity:
+/// for non-ASCII content, a single differing char counts as N byte
+/// edits where N is its UTF-8 width. The output feeds a similarity
+/// rank for [`Edge::ReplacedComment`] / [`Edge::ReplacedString`]
+/// cost where relative ordering between candidates is what matters,
+/// so byte-level monotonicity suffices and avoids two `Vec<char>`
+/// allocations per call.
 pub fn levenshtein_pct(a: &str, b: &str) -> u8 {
     if a.is_empty() && b.is_empty() {
         return 100;
     }
-    let a_chars: Vec<char> = a.chars().collect();
-    let b_chars: Vec<char> = b.chars().collect();
-    let n = a_chars.len();
-    let m = b_chars.len();
+    let a_bytes = a.as_bytes();
+    let b_bytes = b.as_bytes();
+    let n = a_bytes.len();
+    let m = b_bytes.len();
     if n == 0 || m == 0 {
         return 0;
     }
@@ -274,7 +282,7 @@ pub fn levenshtein_pct(a: &str, b: &str) -> u8 {
     for i in 1..=n {
         curr[0] = i;
         for j in 1..=m {
-            let cost = if a_chars[i - 1] == b_chars[j - 1] {
+            let cost = if a_bytes[i - 1] == b_bytes[j - 1] {
                 0
             } else {
                 1
