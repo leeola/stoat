@@ -207,7 +207,7 @@ impl PickerDelegate for FileFinderDelegate {
     fn confirm(
         &mut self,
         secondary: Option<PickerSecondary>,
-        _window: &mut Window,
+        window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         let Some(path) = self.selected_path().map(Path::to_path_buf) else {
@@ -217,13 +217,20 @@ impl PickerDelegate for FileFinderDelegate {
             return;
         };
         let split_axis = secondary.map(secondary_to_axis).or(self.intended_split);
-        workspace.update(cx, |ws, cx| {
-            if let Some(axis) = split_axis {
-                ws.pane_tree().update(cx, |tree, cx| {
-                    tree.split(axis, cx);
-                });
-            }
-            ws.open_paths(&[path], cx);
+        // The keyboard confirm path reaches here inside the keystroke
+        // observer's `Workspace` update lease (observer -> dispatch_action
+        // -> modal layer -> picker confirm), so calling `workspace.update`
+        // directly would re-enter it and panic. Defer until that lease
+        // releases.
+        window.defer(cx, move |_window, cx| {
+            workspace.update(cx, |ws, cx| {
+                if let Some(axis) = split_axis {
+                    ws.pane_tree().update(cx, |tree, cx| {
+                        tree.split(axis, cx);
+                    });
+                }
+                ws.open_paths(&[path], cx);
+            });
         });
         cx.emit(DismissEvent);
     }
