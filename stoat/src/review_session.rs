@@ -679,6 +679,180 @@ impl ReviewSession {
         }
     }
 
+    /// Add, replace, or drop the entry for `input.path` based on
+    /// the file's freshly-computed single-file diff. The watch-mode
+    /// event loop calls this on each `FsWatchEvent` for an in-scope
+    /// path. Returns the new chunk ids for the file (empty when the
+    /// file was dropped or when an empty-diff upsert hit a path the
+    /// session did not already contain).
+    ///
+    /// - When `input.path` is not yet in [`Self::files`] and the new diff is non-empty, appends a
+    ///   new file entry and its chunks.
+    /// - When `input.path` is already in [`Self::files`], drops the file's prior chunks and
+    ///   re-extracts in place. Decided statuses carry across when [`Self::identity_key`] matches;
+    ///   if the cursor was on this file, it sticks to a new chunk with the same identity, else the
+    ///   first chunk in the refreshed file.
+    /// - When the new diff is empty and the file is in the session, drops the file entry entirely.
+    ///   Later files' `file_index` shifts down by one to keep `chunks` consistent with `files`. If
+    ///   the cursor was on this file, falls back to the first remaining chunk in `order` (or `None`
+    ///   when empty).
+    /// - When the new diff is empty and the file is not in the session, the call is a no-op (no
+    ///   version bump).
+    ///
+    /// Other files in the session are untouched: their chunk ids,
+    /// statuses, and texts survive. Cross-file move metadata is
+    /// computed only against the single upserted file, so prior
+    /// cross-file move chips referencing other paths may go stale
+    /// until a whole-session refresh.
+    pub fn upsert_file(&mut self, input: ReviewFileInput) -> Vec<ReviewChunkId> {
+        let existing_index = self.files.iter().position(|f| f.path == input.path);
+
+        let inputs = vec![input];
+        let mut hunks_per_file = extract_review_hunks_changeset(&inputs, 3);
+        let input = inputs.into_iter().next().expect("single input");
+        let hunks = hunks_per_file.pop().unwrap_or_default();
+
+        if hunks.is_empty() {
+            let Some(idx) = existing_index else {
+                return Vec::new();
+            };
+            let old_chunk_ids: Vec<ReviewChunkId> = self.files[idx].chunks.clone();
+            let cursor_was_in_file = self
+                .cursor
+                .current
+                .map(|id| old_chunk_ids.contains(&id))
+                .unwrap_or(false);
+            for id in &old_chunk_ids {
+                self.chunks.remove(id);
+            }
+            self.order.retain(|id| !old_chunk_ids.contains(id));
+            self.files.remove(idx);
+            for chunk in self.chunks.values_mut() {
+                if chunk.file_index > idx {
+                    chunk.file_index -= 1;
+                }
+            }
+            if cursor_was_in_file {
+                self.cursor.current = self.order.first().copied();
+            }
+            self.version += 1;
+            return Vec::new();
+        }
+
+        let session_had_no_cursor = self.cursor.current.is_none();
+        let carried: HashMap<ChunkIdentity, ChunkStatus>;
+        let prev_cursor_ident: Option<ChunkIdentity>;
+        let cursor_was_in_file: bool;
+        let order_insert_pos: usize;
+        let file_index: usize;
+
+        if let Some(idx) = existing_index {
+            let old_chunk_ids: Vec<ReviewChunkId> = self.files[idx].chunks.clone();
+            carried = old_chunk_ids
+                .iter()
+                .filter_map(|id| {
+                    let status = self.chunks.get(id)?.status;
+                    if !status.is_decided() {
+                        return None;
+                    }
+                    let ident = self.identity_key(*id)?;
+                    Some((ident, status))
+                })
+                .collect();
+            prev_cursor_ident = self
+                .cursor
+                .current
+                .filter(|id| old_chunk_ids.contains(id))
+                .and_then(|id| self.identity_key(id));
+            cursor_was_in_file = self
+                .cursor
+                .current
+                .map(|id| old_chunk_ids.contains(&id))
+                .unwrap_or(false);
+            order_insert_pos = old_chunk_ids
+                .first()
+                .and_then(|first| self.order.iter().position(|id| id == first))
+                .unwrap_or(self.order.len());
+            for id in &old_chunk_ids {
+                self.chunks.remove(id);
+            }
+            self.order.retain(|id| !old_chunk_ids.contains(id));
+            file_index = idx;
+        } else {
+            carried = HashMap::new();
+            prev_cursor_ident = None;
+            cursor_was_in_file = false;
+            order_insert_pos = self.order.len();
+            file_index = self.files.len();
+        }
+
+        let base_offsets = line_byte_offsets(&split_lines(&input.base_text));
+        let buffer_offsets = line_byte_offsets(&split_lines(&input.buffer_text));
+
+        let mut new_chunk_ids: Vec<ReviewChunkId> = Vec::with_capacity(hunks.len());
+        for (chunk_index_in_file, hunk) in hunks.into_iter().enumerate() {
+            let id = self.alloc_id();
+            let (base_line_range, buffer_line_range) = hunk_line_ranges(&hunk);
+            let base_byte_range = lines_to_bytes(&base_offsets, &base_line_range);
+            let buffer_byte_range = lines_to_bytes(&buffer_offsets, &buffer_line_range);
+            self.chunks.insert(
+                id,
+                ReviewChunk {
+                    id,
+                    file_index,
+                    chunk_index_in_file,
+                    hunk,
+                    buffer_line_range,
+                    base_line_range,
+                    buffer_byte_range,
+                    base_byte_range,
+                    status: ChunkStatus::Pending,
+                },
+            );
+            new_chunk_ids.push(id);
+        }
+
+        for (i, id) in new_chunk_ids.iter().enumerate() {
+            self.order.insert(order_insert_pos + i, *id);
+        }
+
+        let new_file = ReviewFile {
+            path: input.path,
+            rel_path: input.rel_path,
+            language: input.language,
+            base_text: input.base_text,
+            buffer_text: input.buffer_text,
+            chunks: new_chunk_ids.clone(),
+        };
+        if let Some(idx) = existing_index {
+            self.files[idx] = new_file;
+        } else {
+            self.files.push(new_file);
+        }
+
+        for id in &new_chunk_ids {
+            let Some(ident) = self.identity_key(*id) else {
+                continue;
+            };
+            if let Some(status) = carried.get(&ident).copied() {
+                self.set_status(*id, status);
+            }
+        }
+
+        if cursor_was_in_file || session_had_no_cursor {
+            let by_identity = prev_cursor_ident.and_then(|ident| {
+                new_chunk_ids
+                    .iter()
+                    .find(|id| self.identity_key(**id).as_ref() == Some(&ident))
+                    .copied()
+            });
+            self.cursor.current = by_identity.or_else(|| new_chunk_ids.first().copied());
+        }
+
+        self.version += 1;
+        new_chunk_ids
+    }
+
     /// Replace the entry for `path` with `new_input` and
     /// re-extract its hunks in isolation. Other files in the
     /// session are untouched; cross-file move metadata referencing
@@ -2253,5 +2427,105 @@ mod tests {
         let applied = b.apply_statuses(&snap);
         assert_eq!(applied, 0);
         assert_eq!(b.version, before);
+    }
+
+    #[test]
+    fn upsert_file_adds_new_file_and_settles_cursor() {
+        let mut s = in_memory_session();
+        assert!(s.files.is_empty());
+        assert_eq!(s.cursor.current, None);
+
+        let new_ids = s.upsert_file(refresh_input("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n"));
+
+        assert_eq!(new_ids.len(), 1);
+        assert_eq!(s.files.len(), 1);
+        assert_eq!(s.files[0].chunks, new_ids);
+        assert_eq!(s.order, new_ids);
+        assert_eq!(s.cursor.current, Some(new_ids[0]));
+    }
+
+    #[test]
+    fn upsert_file_replaces_existing_file_in_place() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        add(&mut s, "b.txt", "x\nOLD\nz\n", "x\nNEW\nz\n");
+        let total_before = s.order.len();
+        let b_chunks_before: Vec<_> = s.files[1].chunks.clone();
+
+        s.upsert_file(refresh_input("a.txt", "a\nDIFFERENT\nc\n", "a\nNEWER\nc\n"));
+
+        assert_eq!(s.files.len(), 2);
+        assert_eq!(s.order.len(), total_before);
+        assert_eq!(s.files[1].chunks, b_chunks_before);
+        assert_eq!(s.files[0].buffer_text.as_str(), "a\nNEWER\nc\n");
+    }
+
+    #[test]
+    fn upsert_file_carries_decided_status_by_identity() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        s.set_status(ids[0], ChunkStatus::Staged);
+
+        s.upsert_file(refresh_input("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n"));
+
+        let id = s.files[0].chunks[0];
+        assert_eq!(s.chunks[&id].status, ChunkStatus::Staged);
+    }
+
+    #[test]
+    fn upsert_file_drops_entry_when_diff_becomes_empty() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        let b_ids = add(&mut s, "b.txt", "x\nOLD\nz\n", "x\nNEW\nz\n");
+        assert_eq!(s.chunks[&b_ids[0]].file_index, 1);
+
+        s.upsert_file(refresh_input("a.txt", "same\n", "same\n"));
+
+        assert_eq!(s.files.len(), 1, "a.txt entry dropped");
+        assert_eq!(s.files[0].path, PathBuf::from("b.txt"));
+        assert_eq!(
+            s.chunks[&b_ids[0]].file_index, 0,
+            "later file's chunk file_index shifted down",
+        );
+        assert_eq!(s.order, b_ids);
+    }
+
+    #[test]
+    fn upsert_file_empty_diff_for_unknown_path_is_noop() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        let version_before = s.version;
+
+        let new_ids = s.upsert_file(refresh_input("nowhere.txt", "x\n", "x\n"));
+
+        assert!(new_ids.is_empty());
+        assert_eq!(s.version, version_before);
+        assert_eq!(s.files.len(), 1);
+        assert_eq!(s.order, ids);
+    }
+
+    #[test]
+    fn upsert_file_leaves_cursor_on_unrelated_file() {
+        let mut s = in_memory_session();
+        let a_ids = add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        add(&mut s, "b.txt", "x\nOLD\nz\n", "x\nNEW\nz\n");
+        assert_eq!(s.cursor.current, Some(a_ids[0]));
+
+        s.upsert_file(refresh_input("b.txt", "x\nDIFFERENT\nz\n", "x\nNEWER\nz\n"));
+
+        assert_eq!(s.cursor.current, Some(a_ids[0]));
+    }
+
+    #[test]
+    fn upsert_file_drop_falls_back_cursor_when_on_dropped_file() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        let b_ids = add(&mut s, "b.txt", "x\nOLD\nz\n", "x\nNEW\nz\n");
+        let a_id = s.files[0].chunks[0];
+        s.cursor.current = Some(a_id);
+
+        s.upsert_file(refresh_input("a.txt", "same\n", "same\n"));
+
+        assert_eq!(s.cursor.current, Some(b_ids[0]));
     }
 }
