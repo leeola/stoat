@@ -964,15 +964,18 @@ impl InputStateMachine {
         };
         let event = normalize_shift_event(event);
 
-        if event.modifiers.is_empty() {
-            if let KeyCode::Char(ch) = event.code {
-                let in_input_mode = self.text_input_allowed();
-                if matches!(
-                    try_consume_duplicate(&mut self.pending_duplicate_char, ch, in_input_mode,),
-                    DuplicateOutcome::Drop
-                ) {
-                    return Vec::new();
-                }
+        let in_input_mode_at_entry = self.text_input_allowed();
+        let arming_candidate = match event.code {
+            KeyCode::Char(ch) if event.modifiers.is_empty() => Some(ch),
+            _ => None,
+        };
+
+        if let Some(ch) = arming_candidate {
+            if matches!(
+                try_consume_duplicate(&mut self.pending_duplicate_char, ch, in_input_mode_at_entry),
+                DuplicateOutcome::Drop
+            ) {
+                return Vec::new();
             }
         }
 
@@ -1193,6 +1196,16 @@ impl InputStateMachine {
         if !actions.is_empty() && self.pending_count.is_some() {
             self.consumed_count = self.pending_count.take();
             cx.notify();
+        }
+
+        if let Some(ch) = arming_candidate {
+            if !in_input_mode_at_entry && !actions.is_empty() {
+                self.consumed_text_input_char = Some(DuplicateMarker {
+                    char: ch,
+                    armed_at: Instant::now(),
+                    armed_in_input_mode: false,
+                });
+            }
         }
 
         actions

@@ -6524,6 +6524,135 @@ mod tests {
     }
 
     #[test]
+    fn keystroke_colon_then_paired_text_input_keeps_palette_query_empty() {
+        use crate::{command_palette::CommandPaletteDelegate, picker::Picker};
+        use gpui::EntityInputHandler;
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+
+        vcx.simulate_keystrokes(":");
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, ":", window, cx);
+        });
+        vcx.run_until_parked();
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<CommandPaletteDelegate>>()
+            })
+            .expect("real-typing ':' should open the command palette");
+        let query_text = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .snapshot()
+                .text()
+                .to_string()
+        });
+        assert_eq!(
+            query_text, "",
+            "feed(':') via observe_keystrokes followed by text_input(':') via dispatch_input must not leak into the palette query"
+        );
+    }
+
+    #[test]
+    fn keystroke_colon_then_escape_then_colon_with_paired_text_inputs_keeps_palette_query_empty() {
+        use crate::{command_palette::CommandPaletteDelegate, picker::Picker};
+        use gpui::EntityInputHandler;
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+
+        vcx.simulate_keystrokes(":");
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, ":", window, cx);
+        });
+        vcx.run_until_parked();
+        vcx.simulate_keystrokes("escape");
+        vcx.simulate_keystrokes(":");
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, ":", window, cx);
+        });
+        vcx.run_until_parked();
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<CommandPaletteDelegate>>()
+            })
+            .expect("the second ':' should re-open the command palette");
+        let query_text = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .snapshot()
+                .text()
+                .to_string()
+        });
+        assert_eq!(
+            query_text, "",
+            "real-typing ':' / Esc / ':' through the feed+text_input dual-fire must not leak the reopen char"
+        );
+    }
+
+    #[test]
+    fn keystroke_space_p_chord_with_paired_text_input_keeps_finder_query_empty() {
+        use crate::{
+            file_finder::FileFinderDelegate,
+            globals::{FsHostGlobal, GitHostGlobal},
+            picker::Picker,
+        };
+        use gpui::EntityInputHandler;
+        use stoat::host::{fake::FakeGit, FakeFs, FsHost, GitHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo").with_fs(&fs);
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+
+        vcx.simulate_keystrokes("space p");
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, "p", window, cx);
+        });
+        vcx.run_until_parked();
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<FileFinderDelegate>>()
+            })
+            .expect("the 'space p' chord should open the file finder");
+        let query_text = picker.read_with(vcx, |p, cx| {
+            p.query_editor()
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .snapshot()
+                .text()
+                .to_string()
+        });
+        assert_eq!(
+            query_text, "",
+            "the 'p' that completes the chord followed by its paired text_input('p') must not leak into the finder query"
+        );
+    }
+
+    #[test]
     fn ime_space_p_chord_opens_file_finder() {
         use crate::{
             file_finder::FileFinderDelegate,
