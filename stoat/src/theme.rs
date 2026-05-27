@@ -439,6 +439,9 @@ pub mod scope {
     pub const UI_POPUP_SELECTION_BACKGROUND: &str = "ui.popup.selection.background";
     pub const UI_POPUP_SELECTION_TEXT: &str = "ui.popup.selection.text";
 
+    pub const UI_MINIMAP_THUMB: &str = "ui.minimap.thumb";
+    pub const UI_MINIMAP_THUMB_BORDER: &str = "ui.minimap.thumb_border";
+
     pub const UI_PROMPT: &str = "ui.prompt";
     pub const UI_KEY_LABEL: &str = "ui.key_label";
     pub const UI_HEADING: &str = "ui.heading";

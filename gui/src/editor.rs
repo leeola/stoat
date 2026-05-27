@@ -19,11 +19,11 @@ use crate::{
     theme::{self, ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
 };
 use gpui::{
-    canvas, div, fill, font, px, relative, size as gpui_size, uniform_list, App, AppContext,
-    Bounds, Context, DispatchPhase, Div, ElementInputHandler, Entity, EventEmitter, Hsla,
-    InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled,
-    Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    canvas, div, fill, font, outline, px, relative, size as gpui_size, uniform_list, App,
+    AppContext, BorderStyle, Bounds, Context, DispatchPhase, Div, ElementInputHandler, Entity,
+    EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size,
+    Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use serde_json::Value;
 use stoat::{
@@ -3500,7 +3500,13 @@ impl Render for Editor {
                         if let Some(thumb) =
                             minimap_thumb_bounds(bounds, total_lines, visible_lines, scroll_y)
                         {
-                            window.paint_quad(fill(thumb, MINIMAP_THUMB_COLOR));
+                            let theme = cx.theme();
+                            window.paint_quad(fill(thumb, theme.minimap_thumb));
+                            window.paint_quad(outline(
+                                thumb,
+                                theme.minimap_thumb_border,
+                                BorderStyle::Solid,
+                            ));
                         }
                     },
                 )
@@ -3569,16 +3575,6 @@ const SCROLL_ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_mi
 /// Jumps shorter than this many display rows snap instantly; only larger
 /// programmatic jumps are worth animating.
 const MIN_ANIMATED_SCROLL_ROWS: f64 = 3.0;
-
-/// Fill color of the minimap viewport thumb: white at low opacity, so the
-/// overlay marks the editor's visible region without hiding the minimap
-/// text beneath it.
-const MINIMAP_THUMB_COLOR: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 1.0,
-    a: 0.3,
-};
 
 /// Bounds of the minimap viewport thumb within `minimap_bounds`: the
 /// overlay rectangle marking which slice of the document the parent
