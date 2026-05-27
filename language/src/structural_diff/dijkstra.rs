@@ -38,10 +38,11 @@ pub enum SearchOutcome {
     ExceededGraphLimit,
 }
 
-/// Default graph cap. Difftastic uses 3,000,000; we use 250,000 for a
-/// minimum-viable port that handles small inputs and bails fast on
-/// large ones. The fallback path is always available.
-pub const DEFAULT_GRAPH_LIMIT: usize = 250_000;
+/// Default graph cap. Difftastic uses 3,000,000; this port uses
+/// 1,000,000 -- enough headroom for most real inputs while staying
+/// well under upstream. Searches that exceed the cap bail to the
+/// preprocessing-only result reported as [`DiffQuality::Degraded`].
+pub const DEFAULT_GRAPH_LIMIT: usize = 1_000_000;
 
 /// One variant entry within a shallow-key bucket. Difftastic allows
 /// up to 2 variants per shallow `(lhs, rhs, top_parent)` key so the

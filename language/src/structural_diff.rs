@@ -148,14 +148,32 @@ pub struct FileDiffInput {
     pub rhs_text: String,
 }
 
-/// Result of [`diff`] / [`diff_lines`]. `fell_back_to_line_diff` is `true`
-/// for the line-diff path so callers can surface that the structural
-/// algorithm was not used (either by design or due to a graph-cap fall
-/// through).
+/// Quality grade of a [`DiffResult`].
+///
+/// - `Structural`: the Dijkstra search ran to completion and the result reflects the full
+///   structural-diff pipeline.
+/// - `Degraded`: the Dijkstra search bailed on
+///   [`crate::structural_diff::dijkstra::SearchOutcome::ExceededGraphLimit`], so the result
+///   reflects only the preprocessing pass (`mark_unchanged` + sliders) -- changes are still
+///   surface-correct but lack the cost-minimised pairing the full search produces.
+/// - `LineDiff`: the line-diff fallback was used, either because the caller has no language
+///   ([`diff_lines`]) or because a parse failed in [`diff_with_language_or_lines`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum DiffQuality {
+    #[default]
+    Structural,
+    Degraded,
+    LineDiff,
+}
+
+/// Result of [`diff`] / [`diff_lines`] / [`diff_with_language`].
+/// `quality` distinguishes a high-quality structural result from a
+/// preprocessing-only result whose Dijkstra search bailed at the
+/// graph cap, and from the line-diff fallback.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
 pub struct DiffResult {
     pub changes: Vec<DiffChange>,
-    pub fell_back_to_line_diff: bool,
+    pub quality: DiffQuality,
 }
 
 /// Public entry point for callers without a language. Routes to the
@@ -169,9 +187,10 @@ pub fn diff(lhs: &str, rhs: &str) -> DiffResult {
 ///
 /// Tries the structural path first ([`diff_with_language`]), falling
 /// through to [`diff_lines`] when either side fails to parse. The
-/// `fell_back_to_line_diff` flag on the returned [`DiffResult`]
-/// distinguishes the two paths so the host can surface "diff is
-/// approximate" badging when the parse failed.
+/// returned [`DiffResult::quality`] reports whether the structural
+/// pipeline ran ([`DiffQuality::Structural`] / [`DiffQuality::Degraded`])
+/// or the line-diff fallback was used ([`DiffQuality::LineDiff`]), so
+/// the host can badge approximate diffs.
 pub fn diff_with_language_or_lines(
     language: &Arc<crate::Language>,
     lhs: &str,

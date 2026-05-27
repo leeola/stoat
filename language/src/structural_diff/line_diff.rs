@@ -13,7 +13,7 @@
 //! this for the common case. The fallback is a hard ceiling, not a hot
 //! path.
 
-use super::{ChangeKind, DiffChange, DiffResult, Side};
+use super::{ChangeKind, DiffChange, DiffQuality, DiffResult, Side};
 
 /// Compute a line-level diff between `lhs` and `rhs`. The returned
 /// changes carry rope byte ranges (relative to each input) so they can
@@ -29,7 +29,7 @@ pub fn diff_lines(lhs: &str, rhs: &str) -> DiffResult {
 
     DiffResult {
         changes,
-        fell_back_to_line_diff: true,
+        quality: DiffQuality::LineDiff,
     }
 }
 
@@ -276,7 +276,7 @@ mod tests {
     #[test]
     fn fell_back_flag_is_set() {
         let r = diff_lines("a\n", "b\n");
-        assert!(r.fell_back_to_line_diff);
+        assert_eq!(r.quality, DiffQuality::LineDiff);
     }
 
     #[test]

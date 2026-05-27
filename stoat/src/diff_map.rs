@@ -751,7 +751,7 @@ mod tests {
     #[test]
     fn interleaved_replacements_group_by_pair_id() {
         use stoat_language::structural_diff::{
-            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+            ChangeKind as LangChangeKind, DiffChange, DiffQuality, DiffResult, Side,
         };
         let lhs_text = "alpha\nbeta\ngamma\ndelta\n";
         let rhs_text = "ALPHA\nbeta\nGAMMA\ndelta\n";
@@ -795,7 +795,7 @@ mod tests {
         let dm = DiffMap::from_structural_changes(
             DiffResult {
                 changes,
-                fell_back_to_line_diff: false,
+                quality: DiffQuality::Structural,
             },
             lhs_text,
             rhs_text,
@@ -827,7 +827,7 @@ mod tests {
     #[test]
     fn modified_added_deleted_hunks_carry_token_detail_spans() {
         use stoat_language::structural_diff::{
-            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+            ChangeKind as LangChangeKind, DiffChange, DiffQuality, DiffResult, Side,
         };
         let lhs_text = "alpha\nremove\n";
         let rhs_text = "ALPHA\nadded\n";
@@ -871,7 +871,7 @@ mod tests {
         let dm = DiffMap::from_structural_changes(
             DiffResult {
                 changes,
-                fell_back_to_line_diff: false,
+                quality: DiffQuality::Structural,
             },
             lhs_text,
             rhs_text,
@@ -914,7 +914,7 @@ mod tests {
     #[test]
     fn deletion_anchors_to_rhs_line() {
         use stoat_language::structural_diff::{
-            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+            ChangeKind as LangChangeKind, DiffChange, DiffQuality, DiffResult, Side,
         };
         let lhs_text = "keep\nremove me\nkeep2\n";
         let rhs_text = "keep\nkeep2\n";
@@ -929,7 +929,7 @@ mod tests {
         let dm = DiffMap::from_structural_changes(
             DiffResult {
                 changes,
-                fell_back_to_line_diff: false,
+                quality: DiffQuality::Structural,
             },
             lhs_text,
             rhs_text,
@@ -948,7 +948,7 @@ mod tests {
     #[test]
     fn deletion_without_anchor_falls_back_to_lhs_line() {
         use stoat_language::structural_diff::{
-            ChangeKind as LangChangeKind, DiffChange, DiffResult, Side,
+            ChangeKind as LangChangeKind, DiffChange, DiffQuality, DiffResult, Side,
         };
         let lhs_text = "alpha\nbeta\ngamma\n";
         let rhs_text = "alpha\n";
@@ -963,7 +963,7 @@ mod tests {
         let dm = DiffMap::from_structural_changes(
             DiffResult {
                 changes,
-                fell_back_to_line_diff: false,
+                quality: DiffQuality::Structural,
             },
             lhs_text,
             rhs_text,
@@ -1183,7 +1183,8 @@ mod tests {
     #[test]
     fn moved_hunk_round_trips_with_metadata() {
         use stoat_language::structural_diff::{
-            ChangeKind as LangChangeKind, DiffChange, DiffResult, MoveMetadata, MoveSource, Side,
+            ChangeKind as LangChangeKind, DiffChange, DiffQuality, DiffResult, MoveMetadata,
+            MoveSource, Side,
         };
 
         // Fabricate a minimal DiffResult with a Moved pair so the
@@ -1232,7 +1233,7 @@ mod tests {
         ];
         let result = DiffResult {
             changes,
-            fell_back_to_line_diff: false,
+            quality: DiffQuality::Structural,
         };
         let dm = DiffMap::from_structural_changes(result, lhs_text, rhs_text);
 
@@ -1263,7 +1264,8 @@ mod tests {
     #[test]
     fn mixed_move_and_novel_changes_produce_distinct_hunks() {
         use stoat_language::structural_diff::{
-            ChangeKind as LangChangeKind, DiffChange, DiffResult, MoveMetadata, MoveSource, Side,
+            ChangeKind as LangChangeKind, DiffChange, DiffQuality, DiffResult, MoveMetadata,
+            MoveSource, Side,
         };
         // One Moved pair and one Novel-only RHS addition: the
         // converter must emit both a Moved hunk and an Added hunk.
@@ -1306,7 +1308,7 @@ mod tests {
         let dm = DiffMap::from_structural_changes(
             DiffResult {
                 changes,
-                fell_back_to_line_diff: false,
+                quality: DiffQuality::Structural,
             },
             lhs_text,
             rhs_text,

@@ -28,8 +28,8 @@ use super::{
     moves::{find_moves_changeset, ChangesetMoveRecord, FileMoveInput},
     sliders::fix_all_sliders,
     unchanged::{mark_unchanged, ChangeKind, ChangeMap},
-    BufferRef, ChangeKind as DiffChangeKind, DiffChange, DiffResult, FileDiffInput, MoveMetadata,
-    MoveSource, Side,
+    BufferRef, ChangeKind as DiffChangeKind, DiffChange, DiffQuality, DiffResult, FileDiffInput,
+    MoveMetadata, MoveSource, Side,
 };
 use crate::{parse, Language};
 use std::{
@@ -71,7 +71,20 @@ pub fn diff_with_language_cancellable(
     rhs: &str,
     cancel: Option<&AtomicBool>,
 ) -> Option<DiffResult> {
-    let mut prepared = prepare_per_file(language, lhs, rhs, cancel)?;
+    diff_with_language_capped(language, lhs, rhs, DEFAULT_GRAPH_LIMIT, cancel)
+}
+
+/// Variant of [`diff_with_language_cancellable`] that accepts an
+/// explicit graph cap, so tests can force the
+/// [`SearchOutcome::ExceededGraphLimit`] branch with a tiny budget.
+pub(crate) fn diff_with_language_capped(
+    language: &Arc<Language>,
+    lhs: &str,
+    rhs: &str,
+    graph_limit: usize,
+    cancel: Option<&AtomicBool>,
+) -> Option<DiffResult> {
+    let mut prepared = prepare_per_file(language, lhs, rhs, graph_limit, cancel)?;
 
     let records = {
         let mut input = [FileMoveInput {
@@ -119,7 +132,13 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput>) -> Vec<DiffResult> {
     let mut slots: Vec<Slot> = inputs
         .into_iter()
         .map(|input| match input.language.as_ref() {
-            Some(lang) => match prepare_per_file(lang, &input.lhs_text, &input.rhs_text, None) {
+            Some(lang) => match prepare_per_file(
+                lang,
+                &input.lhs_text,
+                &input.rhs_text,
+                DEFAULT_GRAPH_LIMIT,
+                None,
+            ) {
                 Some(prepared) => Slot::Structural(PreparedFile {
                     buffer: input.buffer,
                     ..prepared
@@ -217,6 +236,10 @@ struct PreparedFile {
     rhs_changes: ChangeMap,
     lhs_lines: LineIndex,
     rhs_lines: LineIndex,
+    /// True when the Dijkstra search bailed on
+    /// [`SearchOutcome::ExceededGraphLimit`]. Propagated to the
+    /// final [`DiffResult::quality`] as [`DiffQuality::Degraded`].
+    dijkstra_exceeded: bool,
 }
 
 /// Borrowed view of the arenas + line indices for one prepared file.
@@ -241,6 +264,7 @@ fn prepare_per_file(
     language: &Arc<Language>,
     lhs: &str,
     rhs: &str,
+    graph_limit: usize,
     cancel: Option<&AtomicBool>,
 ) -> Option<PreparedFile> {
     let lhs_tree = parse(language, lhs, None)?;
@@ -250,12 +274,12 @@ fn prepare_per_file(
 
     let mut preprocess = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
 
-    match shortest_path(
+    let dijkstra_exceeded = match shortest_path(
         &lhs_arena,
         &rhs_arena,
         lhs_root,
         rhs_root,
-        DEFAULT_GRAPH_LIMIT,
+        graph_limit,
         cancel,
     ) {
         SearchOutcome::Found(path) => {
@@ -266,9 +290,10 @@ fn prepare_per_file(
                 &mut preprocess.lhs_changes,
                 &mut preprocess.rhs_changes,
             );
+            false
         },
-        SearchOutcome::ExceededGraphLimit => {},
-    }
+        SearchOutcome::ExceededGraphLimit => true,
+    };
 
     fix_all_sliders(&lhs_arena, lhs_root, &mut preprocess.lhs_changes);
     fix_all_sliders(&rhs_arena, rhs_root, &mut preprocess.rhs_changes);
@@ -286,6 +311,7 @@ fn prepare_per_file(
         rhs_changes: preprocess.rhs_changes,
         lhs_lines: LineIndex::new(lhs),
         rhs_lines: LineIndex::new(rhs),
+        dijkstra_exceeded,
     })
 }
 
@@ -324,10 +350,12 @@ fn finalize_per_file(
     changes.sort_by_key(|c| (c.byte_range.start, c.byte_range.end));
     pair_adjacent_replacements(&mut changes);
 
-    DiffResult {
-        changes,
-        fell_back_to_line_diff: false,
-    }
+    let quality = if prepared.dijkstra_exceeded {
+        DiffQuality::Degraded
+    } else {
+        DiffQuality::Structural
+    };
+    DiffResult { changes, quality }
 }
 
 /// Walk an arena depth-first and emit one [`DiffChange`] per maximal
@@ -664,7 +692,26 @@ mod tests {
         let source = "fn main() { let x = 1; }";
         let result = diff_with_language(&lang, source, source).unwrap();
         assert!(result.changes.is_empty());
-        assert!(!result.fell_back_to_line_diff);
+        assert_eq!(result.quality, DiffQuality::Structural);
+    }
+
+    #[test]
+    fn dijkstra_graph_limit_exhaustion_reports_degraded() {
+        let lang = rust_lang();
+        // Force the Dijkstra search to bail by passing a 1-vertex
+        // graph budget. The preprocessing pass still runs, so the
+        // result has changes -- they just lack the cost-optimal
+        // pairing the full search produces.
+        let lhs = "fn one() { 1 }\n";
+        let rhs = "fn two() { 2 }\n";
+        let prepared = prepare_per_file(&lang, lhs, rhs, 1, None).expect("prepare succeeds");
+        assert!(
+            prepared.dijkstra_exceeded,
+            "tight graph limit must exhaust the search",
+        );
+
+        let result = diff_with_language_capped(&lang, lhs, rhs, 1, None).expect("diff succeeds");
+        assert_eq!(result.quality, DiffQuality::Degraded);
     }
 
     #[test]
@@ -778,7 +825,7 @@ mod tests {
         let rhs = "fn beta() { let p = 10; let q = 20; let r = 30; }\n\
                    fn alpha() { let x = 1; let y = 2; let z = 3; }";
         let result = diff_with_language(&lang, lhs, rhs).unwrap();
-        assert!(!result.fell_back_to_line_diff);
+        assert_eq!(result.quality, DiffQuality::Structural);
 
         let moved_rhs: Vec<&DiffChange> = result
             .changes
@@ -912,7 +959,7 @@ mod tests {
         let rhs = "fn b() { call(arg1, arg2, arg3); }";
         let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel))
             .expect("parse succeeds even on cancel");
-        assert!(!result.fell_back_to_line_diff);
+        assert_eq!(result.quality, DiffQuality::Structural);
         // The structural-diff pipeline completed; we got changes even
         // though Dijkstra bailed immediately.
         assert!(!result.changes.is_empty());
