@@ -164,6 +164,12 @@ pub struct ThemeColors {
     pub vcs_conflict_theirs: Hsla,
     pub ui_modal_help: Hsla,
     pub ui_modal_run: Hsla,
+    pub dev_stats_text: Hsla,
+    pub dev_stats_background: Hsla,
+    pub dev_stats_border: Hsla,
+    pub dev_stats_bar_good: Hsla,
+    pub dev_stats_bar_warn: Hsla,
+    pub dev_stats_bar_bad: Hsla,
 }
 
 impl ThemeColors {
@@ -369,6 +375,36 @@ impl ThemeColors {
             ),
             ui_modal_help: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_HELP, palette.accent),
             ui_modal_run: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_RUN, palette.warning),
+            dev_stats_text: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_DEV_STATS_TEXT,
+                hsla(0.0, 0.0, 0.9, 1.0),
+            ),
+            dev_stats_background: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_DEV_STATS_BACKGROUND,
+                hsla(0.0, 0.0, 0.1, 0.8),
+            ),
+            dev_stats_border: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_DEV_STATS_BORDER,
+                hsla(0.0, 0.0, 0.3, 0.8),
+            ),
+            dev_stats_bar_good: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_DEV_STATS_BAR_GOOD,
+                hsla(0.333, 0.8, 0.5, 0.9),
+            ),
+            dev_stats_bar_warn: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_DEV_STATS_BAR_WARN,
+                hsla(0.166, 0.8, 0.5, 0.9),
+            ),
+            dev_stats_bar_bad: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_DEV_STATS_BAR_BAD,
+                hsla(0.0, 0.8, 0.5, 0.9),
+            ),
         }
     }
 }

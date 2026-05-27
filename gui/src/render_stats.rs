@@ -11,11 +11,10 @@
 //! time. A paint with no preceding `start_frame` records nothing, so one
 //! keystroke yields exactly one sample.
 
-use crate::globals::EnvHostGlobal;
+use crate::{globals::EnvHostGlobal, theme::ActiveTheme};
 use gpui::{
     canvas, point, px, size as gpui_size, transparent_black, App, BorderStyle, Bounds, Font,
-    FontStyle, FontWeight, Hsla, IntoElement, PaintQuad, Pixels, SharedString, Styled, TextRun,
-    Window,
+    FontStyle, FontWeight, IntoElement, PaintQuad, Pixels, SharedString, Styled, TextRun, Window,
 };
 use std::{
     cell::RefCell,
@@ -38,42 +37,15 @@ const TARGET_FRAME_TIME: Duration = Duration::from_micros(16667);
 /// height.
 const GRAPH_CEILING: Duration = Duration::from_millis(100);
 
-const TEXT_COLOR: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 0.9,
-    a: 1.0,
-};
-const BACKGROUND_COLOR: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 0.1,
-    a: 0.8,
-};
-const BORDER_COLOR: Hsla = Hsla {
-    h: 0.0,
-    s: 0.0,
-    l: 0.3,
-    a: 0.8,
-};
-const BAR_GOOD: Hsla = Hsla {
-    h: 120.0,
-    s: 0.8,
-    l: 0.5,
-    a: 0.9,
-};
-const BAR_WARN: Hsla = Hsla {
-    h: 60.0,
-    s: 0.8,
-    l: 0.5,
-    a: 0.9,
-};
-const BAR_BAD: Hsla = Hsla {
-    h: 0.0,
-    s: 0.8,
-    l: 0.5,
-    a: 0.9,
-};
+/// Bucket the bar graph paints with: directly matches the three
+/// `ui.dev.stats.bar_*` theme scopes. Kept separate from the color
+/// lookup so the threshold logic is testable without an `App`.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+enum BarBucket {
+    Good,
+    Warn,
+    Bad,
+}
 
 /// Rolling window of the last [`HISTORY_SIZE`] input-to-screen frame
 /// durations. [`start_frame`](Self::start_frame) stamps the start of a
@@ -179,6 +151,7 @@ impl RenderStatsOverlay {
 }
 
 fn paint_overlay(timer: &FrameTimer, window: &mut Window, cx: &mut App) {
+    let theme = cx.theme();
     let text = frame_text(timer.avg_frame_time_ms());
     let font = Font {
         family: SharedString::from("Menlo"),
@@ -190,7 +163,7 @@ fn paint_overlay(timer: &FrameTimer, window: &mut Window, cx: &mut App) {
     let text_run = TextRun {
         len: text.len(),
         font,
-        color: TEXT_COLOR,
+        color: theme.dev_stats_text,
         background_color: None,
         underline: None,
         strikethrough: None,
@@ -216,8 +189,8 @@ fn paint_overlay(timer: &FrameTimer, window: &mut Window, cx: &mut App) {
     window.paint_quad(PaintQuad {
         bounds,
         corner_radii: px(4.0).into(),
-        background: BACKGROUND_COLOR.into(),
-        border_color: BORDER_COLOR,
+        background: theme.dev_stats_background.into(),
+        border_color: theme.dev_stats_border,
         border_widths: px(1.0).into(),
         border_style: BorderStyle::default(),
     });
@@ -239,10 +212,15 @@ fn paint_overlay(timer: &FrameTimer, window: &mut Window, cx: &mut App) {
             origin: point(bar_x, graph_origin_y + (GRAPH_HEIGHT - bar_height)),
             size: gpui_size(GRAPH_BAR_WIDTH, bar_height),
         };
+        let bar_fill = match bar_bucket(frame_time) {
+            BarBucket::Good => theme.dev_stats_bar_good,
+            BarBucket::Warn => theme.dev_stats_bar_warn,
+            BarBucket::Bad => theme.dev_stats_bar_bad,
+        };
         window.paint_quad(PaintQuad {
             bounds: bar_bounds,
             corner_radii: px(1.0).into(),
-            background: bar_color(frame_time).into(),
+            background: bar_fill.into(),
             border_color: transparent_black(),
             border_widths: px(0.0).into(),
             border_style: BorderStyle::default(),
@@ -255,13 +233,13 @@ fn frame_text(avg_ms: f64) -> String {
     format!("Frame: {avg_ms:.1}ms")
 }
 
-fn bar_color(frame_time: Duration) -> Hsla {
+fn bar_bucket(frame_time: Duration) -> BarBucket {
     if frame_time <= TARGET_FRAME_TIME {
-        BAR_GOOD
+        BarBucket::Good
     } else if frame_time <= TARGET_FRAME_TIME * 2 {
-        BAR_WARN
+        BarBucket::Warn
     } else {
-        BAR_BAD
+        BarBucket::Bad
     }
 }
 
@@ -312,10 +290,10 @@ mod tests {
     }
 
     #[test]
-    fn bar_color_buckets_by_target() {
-        assert_eq!(bar_color(Duration::from_millis(10)), BAR_GOOD);
-        assert_eq!(bar_color(Duration::from_millis(25)), BAR_WARN);
-        assert_eq!(bar_color(Duration::from_millis(50)), BAR_BAD);
+    fn bar_bucket_classifies_by_target() {
+        assert_eq!(bar_bucket(Duration::from_millis(10)), BarBucket::Good);
+        assert_eq!(bar_bucket(Duration::from_millis(25)), BarBucket::Warn);
+        assert_eq!(bar_bucket(Duration::from_millis(50)), BarBucket::Bad);
     }
 
     #[test]

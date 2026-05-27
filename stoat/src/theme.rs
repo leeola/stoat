@@ -583,6 +583,13 @@ pub mod scope {
     pub const CHAT_ERROR: &str = "chat.error";
     pub const CHAT_SEPARATOR: &str = "chat.separator";
     pub const CHAT_THROBBER: &str = "chat.throbber";
+
+    pub const UI_DEV_STATS_TEXT: &str = "ui.dev.stats.text";
+    pub const UI_DEV_STATS_BACKGROUND: &str = "ui.dev.stats.background";
+    pub const UI_DEV_STATS_BORDER: &str = "ui.dev.stats.border";
+    pub const UI_DEV_STATS_BAR_GOOD: &str = "ui.dev.stats.bar_good";
+    pub const UI_DEV_STATS_BAR_WARN: &str = "ui.dev.stats.bar_warn";
+    pub const UI_DEV_STATS_BAR_BAD: &str = "ui.dev.stats.bar_bad";
 }
 
 #[cfg(test)]

@@ -90,6 +90,13 @@ theme default_dark {
     diff.committed_modified.fg = "#8470c4";
     diff.committed_deleted.fg  = "#b07cc0";
 
+    ui.dev.stats.text.fg     = "#e6e6e6";
+    ui.dev.stats.background  = { bg: "#1a1a1acc" };
+    ui.dev.stats.border.fg   = "#4d4d4dcc";
+    ui.dev.stats.bar_good    = { bg: "#1ae61ae6" };
+    ui.dev.stats.bar_warn    = { bg: "#e6e61ae6" };
+    ui.dev.stats.bar_bad     = { bg: "#e61a1ae6" };
+
     ui.diagnostic.error.fg   = danger;
     ui.diagnostic.warning.fg = warning;
     ui.diagnostic.info.fg    = info;
