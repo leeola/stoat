@@ -40,6 +40,14 @@ pub trait FsWatchHost: Send + Sync {
     /// the watch active for the host's lifetime.
     fn watch(&self, path: &Path) -> io::Result<WatchToken>;
 
+    /// Begin watching `path` and every descendant recursively. Events
+    /// surface with the full path of the affected file in
+    /// [`FsWatchEvent::path`], not the watched directory. Mixing
+    /// [`Self::watch`] and [`Self::watch_dir`] on the *same* path is
+    /// undefined; production callers watch files and directories at
+    /// distinct paths.
+    fn watch_dir(&self, path: &Path) -> io::Result<WatchToken>;
+
     /// Drop the watch for `token`. Tokens from another host or
     /// already-released tokens are silently ignored.
     fn unwatch(&self, token: WatchToken);
@@ -118,6 +126,22 @@ impl FsWatchHost for LocalFsWatcher {
         Ok(token)
     }
 
+    fn watch_dir(&self, path: &Path) -> io::Result<WatchToken> {
+        let mut inner = self.inner.lock().expect("LocalFsWatcher poisoned");
+        let prior = inner.refs.get(path).copied().unwrap_or(0);
+        if prior == 0 {
+            inner
+                .watcher
+                .watch(path, RecursiveMode::Recursive)
+                .map_err(notify_to_io)?;
+        }
+        inner.refs.insert(path.to_path_buf(), prior + 1);
+        let token = WatchToken(inner.next_id);
+        inner.next_id += 1;
+        inner.tokens.insert(token, path.to_path_buf());
+        Ok(token)
+    }
+
     fn unwatch(&self, token: WatchToken) {
         let mut inner = self.inner.lock().expect("LocalFsWatcher poisoned");
         let Some(path) = inner.tokens.remove(&token) else {
@@ -169,6 +193,13 @@ impl NoopFsWatcher {
 
 impl FsWatchHost for NoopFsWatcher {
     fn watch(&self, _path: &Path) -> io::Result<WatchToken> {
+        let mut next = self.next_id.lock().expect("NoopFsWatcher poisoned");
+        let token = WatchToken(*next);
+        *next += 1;
+        Ok(token)
+    }
+
+    fn watch_dir(&self, _path: &Path) -> io::Result<WatchToken> {
         let mut next = self.next_id.lock().expect("NoopFsWatcher poisoned");
         let token = WatchToken(*next);
         *next += 1;

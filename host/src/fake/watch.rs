@@ -99,6 +99,19 @@ impl FsWatchHost for FakeFsWatcher {
         Ok(token)
     }
 
+    fn watch_dir(&self, path: &Path) -> io::Result<WatchToken> {
+        let mut state = self.state.lock().expect("FakeFsWatcher poisoned");
+        let token = WatchToken(state.next_id);
+        state.next_id += 1;
+        state.tokens.insert(token, path.to_path_buf());
+        state
+            .paths
+            .entry(path.to_path_buf())
+            .or_default()
+            .push(token);
+        Ok(token)
+    }
+
     fn unwatch(&self, token: WatchToken) {
         let mut state = self.state.lock().expect("FakeFsWatcher poisoned");
         let Some(path) = state.tokens.remove(&token) else {
@@ -160,6 +173,13 @@ mod tests {
         let mut paths = watcher.watched_paths();
         paths.sort();
         assert_eq!(paths, [PathBuf::from("/x"), PathBuf::from("/y")]);
+    }
+
+    #[test]
+    fn watch_dir_records_path() {
+        let watcher = FakeFsWatcher::new();
+        watcher.watch_dir(Path::new("/workdir")).unwrap();
+        assert_eq!(watcher.watched_paths(), [PathBuf::from("/workdir")]);
     }
 
     #[test]
