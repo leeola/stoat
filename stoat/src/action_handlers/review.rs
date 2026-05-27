@@ -472,6 +472,14 @@ fn plural(n: usize) -> &'static str {
 }
 
 pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
+    let watch_workdir = match stoat.active_workspace().review.as_ref().map(|s| &s.source) {
+        Some(ReviewSource::WorkspaceWatch { workdir }) => Some(workdir.clone()),
+        _ => None,
+    };
+    if let Some(workdir) = watch_workdir {
+        return review_watch_edit(stoat, path, &workdir);
+    }
+
     let in_session = stoat
         .active_workspace()
         .review
@@ -495,6 +503,99 @@ pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffe
         .position(|f| f.path == path)
         .and_then(|file_index| session.chunk_containing_buffer_byte(file_index, 0));
     sync_review_view_and_scroll(ws, editor_id, chunk_id);
+    emit_review_progress_badge(ws, &progress);
+    UpdateEffect::Redraw
+}
+
+/// Handle one `FsWatchEvent` against a [`ReviewSource::WorkspaceWatch`]
+/// session. Re-reads `path` from `fs_host`, re-derives the base from
+/// `git_host`'s HEAD, and dispatches an incremental
+/// [`ReviewSession::upsert_file`] -- which adds the file when it's
+/// new, replaces its chunks when known, or drops the entry when the
+/// diff becomes empty. The cursor scrolls to the new chunk with the
+/// smallest buffer byte so the user sees the freshest change.
+fn review_watch_edit(stoat: &mut Stoat, path: &Path, workdir: &Path) -> UpdateEffect {
+    if !path.starts_with(workdir) || stoat.fs_host.is_ignored(workdir, path) {
+        return UpdateEffect::None;
+    }
+
+    let buffer_text = {
+        let mut buf = Vec::new();
+        match stoat.fs_host.read(path, &mut buf) {
+            Ok(()) => match String::from_utf8(buf) {
+                Ok(text) => text,
+                Err(err) => {
+                    tracing::warn!(
+                        target: "stoat::review",
+                        ?path,
+                        %err,
+                        "ReviewExternalEdit (watch): file is not valid UTF-8, skipping",
+                    );
+                    return UpdateEffect::None;
+                },
+            },
+            Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat::review",
+                    ?path,
+                    %err,
+                    "ReviewExternalEdit (watch): fs read failed, skipping",
+                );
+                return UpdateEffect::None;
+            },
+        }
+    };
+
+    let Some(repo) = stoat.git_host.discover(workdir) else {
+        tracing::warn!(
+            target: "stoat::review",
+            workdir = %workdir.display(),
+            "ReviewExternalEdit (watch): no git repo at workdir, skipping",
+        );
+        return UpdateEffect::None;
+    };
+    let base_text = repo.head_content(path).unwrap_or_default();
+    let language = stoat.language_registry.for_path(path);
+    let rel_path = path
+        .strip_prefix(workdir)
+        .unwrap_or(path)
+        .display()
+        .to_string();
+
+    let input = ReviewFileInput {
+        path: path.to_path_buf(),
+        rel_path,
+        language,
+        base_text: Arc::new(base_text),
+        buffer_text: Arc::new(buffer_text),
+    };
+
+    let new_ids = {
+        let ws = stoat.active_workspace_mut();
+        let Some(session) = ws.review.as_mut() else {
+            return UpdateEffect::None;
+        };
+        session.upsert_file(input)
+    };
+
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_ref() else {
+        return UpdateEffect::Redraw;
+    };
+    let editor_id = session.view_editor;
+    let progress = session.progress();
+    let scroll_to = new_ids
+        .iter()
+        .filter_map(|id| {
+            session
+                .chunks
+                .get(id)
+                .map(|c| (c.buffer_byte_range.start, *id))
+        })
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, id)| id);
+    sync_review_view_and_scroll(ws, editor_id, scroll_to);
     emit_review_progress_badge(ws, &progress);
     UpdateEffect::Redraw
 }

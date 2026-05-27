@@ -1062,6 +1062,18 @@ impl Stoat {
         if paths.is_empty() || self.active_workspace().review.is_none() {
             return;
         }
+
+        let watch_workdir = match self.active_workspace().review.as_ref().map(|s| &s.source) {
+            Some(crate::review_session::ReviewSource::WorkspaceWatch { workdir }) => {
+                Some(workdir.clone())
+            },
+            _ => None,
+        };
+        if let Some(workdir) = &watch_workdir {
+            let fs = self.fs_host.clone();
+            paths.retain(|p| p.starts_with(workdir) && !fs.is_ignored(workdir, p));
+        }
+
         for path in paths {
             self.arm_review_external_edit_debounce(path);
         }
