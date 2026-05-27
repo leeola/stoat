@@ -50,8 +50,8 @@ pub enum EnteredDelimiter {
     /// have descended into independently. Each side can pop on its
     /// own.
     PopEither {
-        lhs_delims: Vec<SyntaxId>,
-        rhs_delims: Vec<SyntaxId>,
+        lhs_delims: Stack<SyntaxId>,
+        rhs_delims: Stack<SyntaxId>,
     },
 }
 
@@ -74,7 +74,7 @@ impl PartialEq for EnteredDelimiter {
                     lhs_delims: a2,
                     rhs_delims: b2,
                 },
-            ) => a1.last() == a2.last() && b1.last() == b2.last(),
+            ) => a1.peek() == a2.peek() && b1.peek() == b2.peek(),
             _ => false,
         }
     }
@@ -95,8 +95,8 @@ impl std::hash::Hash for EnteredDelimiter {
                 rhs_delims,
             } => {
                 1u8.hash(state);
-                lhs_delims.last().hash(state);
-                rhs_delims.last().hash(state);
+                lhs_delims.peek().hash(state);
+                rhs_delims.peek().hash(state);
             },
         }
     }
@@ -354,14 +354,16 @@ pub fn pop_all_parents(
                 let mut new_rhs_delims = rhs_delims.clone();
                 let mut popped_anything = false;
                 if lhs.is_none() {
-                    if let Some(parent) = new_lhs_delims.pop() {
+                    if let Some((&parent, popped)) = new_lhs_delims.pop() {
                         lhs = lhs_arena.get(parent).next_sibling();
+                        new_lhs_delims = popped;
                         popped_anything = true;
                     }
                 }
                 if rhs.is_none() {
-                    if let Some(parent) = new_rhs_delims.pop() {
+                    if let Some((&parent, popped)) = new_rhs_delims.pop() {
                         rhs = rhs_arena.get(parent).next_sibling();
+                        new_rhs_delims = popped;
                         popped_anything = true;
                     }
                 }
@@ -551,8 +553,8 @@ fn push_novel_lhs(
             // children; we record the entered list on the parents
             // stack so a later pop returns to the list's next sibling.
             let parents = vertex.parents.push(EnteredDelimiter::PopEither {
-                lhs_delims: vec![lhs_id],
-                rhs_delims: vec![],
+                lhs_delims: Stack::new().push(lhs_id),
+                rhs_delims: Stack::new(),
             });
             (
                 Edge::EnterNovelDelimiterLHS,
@@ -589,8 +591,8 @@ fn push_novel_rhs(
         ),
         Syntax::List(list) => {
             let parents = vertex.parents.push(EnteredDelimiter::PopEither {
-                lhs_delims: vec![],
-                rhs_delims: vec![rhs_id],
+                lhs_delims: Stack::new(),
+                rhs_delims: Stack::new().push(rhs_id),
             });
             (
                 Edge::EnterNovelDelimiterRHS,
