@@ -643,6 +643,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ToggleDiffHunkPanel
         | ActionKind::ToggleMinimap
         | ActionKind::ToggleTabBar
+        | ActionKind::Set
         | ActionKind::ToggleProjectTree
         | ActionKind::ProjectTreeSelectNext
         | ActionKind::ProjectTreeSelectPrev

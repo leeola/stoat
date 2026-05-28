@@ -2143,6 +2143,7 @@ impl Workspace {
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
             ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
             ActionKind::ToggleTabBar => self.dispatch_toggle_tab_bar(cx),
+            ActionKind::Set => self.dispatch_set(&*action, cx),
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
             ActionKind::ProjectTreeSelectNext => {
                 self.update_project_tree(cx, ProjectTree::select_next)
@@ -3085,6 +3086,34 @@ impl Workspace {
         };
         let new_visible = !editor.read(cx).minimap_visible();
         editor.update(cx, |ed, cx| ed.set_minimap_visible(new_visible, cx));
+    }
+
+    /// Apply a runtime `Set { key, value }` action against the
+    /// `Settings` global, parsing `value` against the key's typed
+    /// schema via [`stoat_config::Settings::apply_runtime`]. Unknown
+    /// keys and unparseable values log a warning and leave the
+    /// global untouched.
+    fn dispatch_set(&mut self, action: &dyn stoat_action::Action, cx: &mut Context<'_, Self>) {
+        let Some(set) = action.as_any().downcast_ref::<stoat_action::Set>() else {
+            return;
+        };
+        let key = set.key.clone();
+        let value = set.value.clone();
+        if !cx.has_global::<crate::settings::Settings>() {
+            cx.set_global(crate::settings::Settings::default());
+        }
+        let result = cx.update_global::<crate::settings::Settings, _>(|s, _| {
+            s.resolved.apply_runtime(&key, &value)
+        });
+        if let Err(err) = result {
+            tracing::warn!(
+                target: "stoat_gui::settings",
+                ?err,
+                %key,
+                %value,
+                "set: apply_runtime failed",
+            );
+        }
     }
 
     /// Flip the per-pane tab bar visibility via the `Settings` global.
@@ -13678,6 +13707,54 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleBlame);
         vcx.run_until_parked();
         editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+    }
+
+    #[test]
+    fn dispatch_set_applies_runtime_setting_via_settings_global() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        vcx.update(|_, cx| cx.set_global(crate::settings::Settings::default()));
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::Set {
+                key: "ui.pane.show_tab_bar".into(),
+                value: "false".into(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let after = vcx.read(|cx| {
+            cx.global::<crate::settings::Settings>()
+                .resolved
+                .ui_pane_show_tab_bar
+        });
+        assert_eq!(after, Some(false));
+    }
+
+    #[test]
+    fn dispatch_set_unknown_key_leaves_settings_untouched() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        vcx.update(|_, cx| cx.set_global(crate::settings::Settings::default()));
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::Set {
+                key: "nope.bad.path".into(),
+                value: "true".into(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let after = vcx.read(|cx| {
+            cx.global::<crate::settings::Settings>()
+                .resolved
+                .ui_pane_show_tab_bar
+        });
+        assert_eq!(after, None);
     }
 
     #[test]

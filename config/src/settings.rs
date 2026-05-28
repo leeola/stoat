@@ -7,6 +7,7 @@
 //! `settings.field.unwrap_or(default)` at the point of use.
 
 use crate::ast::{Config, EventType, Setting, Statement, Value};
+use snafu::{Location, Snafu};
 use std::collections::BTreeMap;
 
 /// Default placement for a newly-opened Claude chat.
@@ -282,6 +283,65 @@ impl Settings {
             _ => {},
         }
     }
+
+    /// Apply a `<path> = <raw>` assignment at runtime, parsing the
+    /// stringly value the same way the palette's `Set` action would.
+    /// The `path` argument is the dotted setting key (e.g.
+    /// `ui.pane.show_tab_bar`); `raw` is the unparsed value as the
+    /// user typed it.
+    pub fn apply_runtime(&mut self, path: &str, raw: &str) -> Result<(), SettingsApplyError> {
+        let tokens: Vec<&str> = path.split('.').collect();
+        match tokens.as_slice() {
+            ["ui", "pane", "show_tab_bar"] => {
+                let b = parse_bool(raw).ok_or_else(|| {
+                    InvalidValueSnafu {
+                        key: path.to_string(),
+                        expected: "bool",
+                        got: raw.to_string(),
+                    }
+                    .build()
+                })?;
+                self.ui_pane_show_tab_bar = Some(b);
+                Ok(())
+            },
+            _ => UnknownKeySnafu {
+                key: path.to_string(),
+            }
+            .fail(),
+        }
+    }
+}
+
+fn parse_bool(raw: &str) -> Option<bool> {
+    match raw.to_ascii_lowercase().as_str() {
+        "true" | "yes" | "1" | "on" => Some(true),
+        "false" | "no" | "0" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+/// Failure modes for [`Settings::apply_runtime`]. `UnknownKey` covers
+/// dotted paths the runtime dispatcher does not recognize; the typed
+/// `apply` path silently ignores unknowns so a forward-compatible
+/// stcfg doesn't fail to parse on older binaries, but the runtime
+/// path surfaces the error so users get feedback on typos.
+#[derive(Debug, PartialEq, Snafu)]
+#[snafu(visibility(pub))]
+pub enum SettingsApplyError {
+    #[snafu(display("unknown setting key `{key}`"))]
+    UnknownKey {
+        key: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
+    #[snafu(display("setting `{key}` expects {expected}, got `{got}`"))]
+    InvalidValue {
+        key: String,
+        expected: &'static str,
+        got: String,
+        #[snafu(implicit)]
+        location: Location,
+    },
 }
 
 #[cfg(test)]
@@ -293,6 +353,46 @@ mod tests {
         let (config, errors) = parse(source);
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         config.expect("expected successful parse")
+    }
+
+    #[test]
+    fn apply_runtime_sets_ui_pane_show_tab_bar_false() {
+        let mut s = Settings::default();
+        assert_eq!(s.apply_runtime("ui.pane.show_tab_bar", "false"), Ok(()));
+        assert_eq!(s.ui_pane_show_tab_bar, Some(false));
+    }
+
+    #[test]
+    fn apply_runtime_sets_ui_pane_show_tab_bar_true() {
+        let mut s = Settings::default();
+        assert_eq!(s.apply_runtime("ui.pane.show_tab_bar", "on"), Ok(()));
+        assert_eq!(s.ui_pane_show_tab_bar, Some(true));
+    }
+
+    #[test]
+    fn apply_runtime_rejects_unknown_key() {
+        let mut s = Settings::default();
+        let result = s.apply_runtime("nope.bad.path", "true");
+        assert!(matches!(result, Err(SettingsApplyError::UnknownKey { .. })));
+    }
+
+    #[test]
+    fn apply_runtime_rejects_invalid_value() {
+        let mut s = Settings::default();
+        let result = s.apply_runtime("ui.pane.show_tab_bar", "maybe");
+        match result {
+            Err(SettingsApplyError::InvalidValue {
+                key,
+                expected,
+                got,
+                location: _,
+            }) => {
+                assert_eq!(key, "ui.pane.show_tab_bar");
+                assert_eq!(expected, "bool");
+                assert_eq!(got, "maybe");
+            },
+            other => panic!("expected InvalidValue, got {other:?}"),
+        }
     }
 
     #[test]

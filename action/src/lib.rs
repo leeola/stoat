@@ -97,6 +97,7 @@ pub use defs::{
         ReviewSkipChunk, ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+    set::Set,
     workspace::{
         CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
         SwitchWorkspace, ToggleProjectTree,

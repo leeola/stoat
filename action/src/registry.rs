@@ -94,6 +94,7 @@ use crate::{
             ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+        set::Set,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
             SwitchWorkspace, ToggleProjectTree,
@@ -487,6 +488,27 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
     add(ToggleTabBar::DEF, |_| Ok(Box::new(ToggleTabBar)));
+    add(Set::DEF, |params| {
+        let key = params
+            .first()
+            .context(MissingSnafu { name: "key" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "key",
+                expected: ParamKind::String,
+            })?
+            .to_string();
+        let value = params
+            .get(1)
+            .context(MissingSnafu { name: "value" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "value",
+                expected: ParamKind::String,
+            })?
+            .to_string();
+        Ok(Box::new(Set { key, value }))
+    });
     add(ToggleDiffHunkPanel::DEF, |_| {
         Ok(Box::new(ToggleDiffHunkPanel))
     });
@@ -1052,11 +1074,12 @@ mod tests {
         // + 3 ToggleBlame / ToggleDiffHunkPanel / OpenGitStatus for the space_git submode.
         // + 1 ToggleMinimap for the space_workspace submode.
         // + 1 ToggleTabBar for the per-pane tab bar.
+        // + 1 Set runtime-settings palette action.
         // + 1 ToggleProjectTree (opens the project file tree in a dock).
         // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
         //   routed to the focused project tree dock.
         // + 1 OpenReviewWatch (workspace-watch review session).
-        assert_eq!(all().count(), 306);
+        assert_eq!(all().count(), 307);
     }
 
     #[test]
