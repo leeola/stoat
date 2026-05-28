@@ -24,9 +24,9 @@ use crate::{
             ExtendTillNextChar, ExtendTillPrevChar, ExtendToFileStart, ExtendToLastLine,
             ExtendToLineEnd, ExtendToLineStart, ExtendUp, FindNextChar, FindPrevChar,
             FlipSelections, GotoColumn, GotoFileStart, GotoFirstNonwhitespace, GotoLastLine,
-            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextChange,
-            GotoNextClass, GotoNextFunction, GotoNextParagraph, GotoPrevChange, GotoPrevClass,
-            GotoPrevFunction, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
+            GotoLineEnd, GotoLineNumber, GotoLineStart, GotoMark, GotoMarkExact, GotoNextClass,
+            GotoNextFunction, GotoNextHunk, GotoNextParagraph, GotoPrevClass, GotoPrevFunction,
+            GotoPrevHunk, GotoPrevParagraph, GotoWindowBottom, GotoWindowCenter, GotoWindowTop,
             GotoWord, HalfPageDown, HalfPageUp, Increment, IndentSelection, Insert, InsertNewline,
             InsertRegister, JumpBackward, JumpForward, KeepPrimarySelection, KeepSelections,
             MatchBrackets, MoveDown, MoveLeft, MoveNextLongWordEnd, MoveNextLongWordStart,
@@ -446,8 +446,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(GotoLineNumber::DEF, |_| Ok(Box::new(GotoLineNumber)));
     add(GotoColumn::DEF, |_| Ok(Box::new(GotoColumn)));
     add(ExtendGotoColumn::DEF, |_| Ok(Box::new(ExtendGotoColumn)));
-    add(GotoNextChange::DEF, |_| Ok(Box::new(GotoNextChange)));
-    add(GotoPrevChange::DEF, |_| Ok(Box::new(GotoPrevChange)));
+    add(GotoNextHunk::DEF, |_| Ok(Box::new(GotoNextHunk)));
+    add(GotoPrevHunk::DEF, |_| Ok(Box::new(GotoPrevHunk)));
     add(GotoNextParagraph::DEF, |_| Ok(Box::new(GotoNextParagraph)));
     add(GotoPrevParagraph::DEF, |_| Ok(Box::new(GotoPrevParagraph)));
     add(GotoNextFunction::DEF, |_| Ok(Box::new(GotoNextFunction)));
@@ -1028,7 +1028,7 @@ mod tests {
         // + 1 AlignSelections.
         // + 1 Undo.
         // + 1 Redo.
-        // + 2 GotoNextChange/GotoPrevChange.
+        // + 2 GotoNextHunk/GotoPrevHunk.
         // + 1 ExpandSelection.
         // + 1 ShrinkSelection.
         // + 2 SelectNextSibling/SelectPrevSibling.

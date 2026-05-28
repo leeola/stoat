@@ -1980,11 +1980,11 @@ impl Workspace {
             ActionKind::GotoPrevDiagnostic => {
                 self.dispatch_goto_diagnostic(crate::editor::actions::goto::DiagnosticDir::Prev, cx)
             },
-            ActionKind::GotoNextChange => {
-                self.dispatch_goto_change(crate::editor::actions::goto::ChangeDir::Next, cx)
+            ActionKind::GotoNextHunk => {
+                self.dispatch_goto_hunk(crate::editor::actions::goto::ChangeDir::Next, cx)
             },
-            ActionKind::GotoPrevChange => {
-                self.dispatch_goto_change(crate::editor::actions::goto::ChangeDir::Prev, cx)
+            ActionKind::GotoPrevHunk => {
+                self.dispatch_goto_hunk(crate::editor::actions::goto::ChangeDir::Prev, cx)
             },
             ActionKind::GotoNextParagraph => self
                 .dispatch_goto_paragraph(crate::editor::actions::movement::ParagraphDir::Next, cx),
@@ -2855,7 +2855,7 @@ impl Workspace {
         editor.update(cx, |ed, cx| ed.handle_goto_diagnostic(dir, cx));
     }
 
-    fn dispatch_goto_change(
+    fn dispatch_goto_hunk(
         &mut self,
         dir: crate::editor::actions::goto::ChangeDir,
         cx: &mut Context<'_, Self>,
@@ -2863,7 +2863,7 @@ impl Workspace {
         let Some(editor) = self.active_editor(cx) else {
             return;
         };
-        editor.update(cx, |ed, cx| ed.handle_goto_change(dir, cx));
+        editor.update(cx, |ed, cx| ed.handle_goto_hunk(dir, cx));
     }
 
     fn dispatch_goto_paragraph(

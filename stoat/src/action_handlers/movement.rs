@@ -2267,7 +2267,7 @@ fn apply_primary_range(editor: &mut EditorState, target: std::ops::Range<usize>)
     });
 }
 
-pub(super) fn goto_change(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
+pub(super) fn goto_hunk(stoat: &mut Stoat, dir: ChangeDir) -> UpdateEffect {
     let count = stoat.take_pending_count().unwrap_or(1) as usize;
     let Some(editor) = focused_editor_mut(stoat) else {
         return UpdateEffect::None;

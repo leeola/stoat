@@ -16,7 +16,7 @@ pub enum DiagnosticDir {
     Prev,
 }
 
-/// Direction passed to [`Editor::handle_goto_change`].
+/// Direction passed to [`Editor::handle_goto_hunk`].
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum ChangeDir {
     Next,
@@ -327,7 +327,7 @@ impl Editor {
     /// hunk in the active buffer. No-op when the buffer has no diff
     /// hunks or no hunk lies on the requested side of the primary
     /// cursor's row.
-    pub fn handle_goto_change(&mut self, dir: ChangeDir, cx: &mut Context<'_, Self>) {
+    pub fn handle_goto_hunk(&mut self, dir: ChangeDir, cx: &mut Context<'_, Self>) {
         let snapshot = self.multi_buffer.read(cx).snapshot();
 
         let mut rows: Vec<u32> = self
@@ -770,7 +770,7 @@ mod tests {
     }
 
     #[test]
-    fn goto_next_change_jumps_forward_then_to_second() {
+    fn goto_next_hunk_jumps_forward_then_to_second() {
         let mut cx = TestAppContext::single();
         let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
         seed_hunks(
@@ -780,15 +780,15 @@ mod tests {
         );
         seed_at_offset(&editor, &mut cx, 0);
 
-        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_hunk(ChangeDir::Next, cx));
         assert_eq!(cursor_offset(&editor, &mut cx), 6);
 
-        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_hunk(ChangeDir::Next, cx));
         assert_eq!(cursor_offset(&editor, &mut cx), 17);
     }
 
     #[test]
-    fn goto_next_change_past_last_is_noop() {
+    fn goto_next_hunk_past_last_is_noop() {
         let mut cx = TestAppContext::single();
         let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
         seed_hunks(
@@ -798,13 +798,13 @@ mod tests {
         );
         seed_at_offset(&editor, &mut cx, 25);
 
-        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_hunk(ChangeDir::Next, cx));
 
         assert_eq!(cursor_offset(&editor, &mut cx), 25);
     }
 
     #[test]
-    fn goto_prev_change_jumps_backward() {
+    fn goto_prev_hunk_jumps_backward() {
         let mut cx = TestAppContext::single();
         let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
         seed_hunks(
@@ -814,15 +814,15 @@ mod tests {
         );
         seed_at_offset(&editor, &mut cx, 25);
 
-        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Prev, cx));
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_hunk(ChangeDir::Prev, cx));
         assert_eq!(cursor_offset(&editor, &mut cx), 17);
 
-        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Prev, cx));
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_hunk(ChangeDir::Prev, cx));
         assert_eq!(cursor_offset(&editor, &mut cx), 6);
     }
 
     #[test]
-    fn goto_prev_change_before_first_is_noop() {
+    fn goto_prev_hunk_before_first_is_noop() {
         let mut cx = TestAppContext::single();
         let editor = new_editor(&mut cx, "alpha\nbeta\ngamma\ndelta\nepsilon");
         seed_hunks(
@@ -832,18 +832,18 @@ mod tests {
         );
         seed_at_offset(&editor, &mut cx, 0);
 
-        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Prev, cx));
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_hunk(ChangeDir::Prev, cx));
 
         assert_eq!(cursor_offset(&editor, &mut cx), 0);
     }
 
     #[test]
-    fn goto_change_with_empty_diff_is_noop() {
+    fn goto_hunk_with_empty_diff_is_noop() {
         let mut cx = TestAppContext::single();
         let editor = new_editor(&mut cx, "alpha\nbeta\ngamma");
         seed_at_offset(&editor, &mut cx, 0);
 
-        editor.update(&mut cx, |ed, cx| ed.handle_goto_change(ChangeDir::Next, cx));
+        editor.update(&mut cx, |ed, cx| ed.handle_goto_hunk(ChangeDir::Next, cx));
 
         assert_eq!(cursor_offset(&editor, &mut cx), 0);
     }

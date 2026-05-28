@@ -2564,38 +2564,38 @@ mod tests {
     }
 
     #[test]
-    fn goto_next_change_jumps_forward() {
+    fn goto_next_hunk_jumps_forward() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
         h.open_file(&path);
         install_diff_hunks(&mut h, &[2, 5]);
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextHunk);
         assert_eq!(h.primary_head_offset(), 4);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextHunk);
         assert_eq!(h.primary_head_offset(), 10);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextHunk);
         assert_eq!(h.primary_head_offset(), 10);
     }
 
     #[test]
-    fn goto_prev_change_jumps_backward() {
+    fn goto_prev_hunk_jumps_backward() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 10);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\n");
         h.open_file(&path);
         install_diff_hunks(&mut h, &[2, 5]);
         h.type_keys("g j");
 
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevHunk);
         assert_eq!(h.primary_head_offset(), 10);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevHunk);
         assert_eq!(h.primary_head_offset(), 4);
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevChange);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoPrevHunk);
         assert_eq!(h.primary_head_offset(), 4);
     }
 
     #[test]
-    fn count_prefix_goto_next_change_jumps_n_changes() {
+    fn count_prefix_goto_next_hunk_jumps_n_changes() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 15);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
         h.open_file(&path);
@@ -2626,7 +2626,7 @@ mod tests {
     }
 
     #[test]
-    fn count_prefix_goto_prev_change_jumps_back_n_changes() {
+    fn count_prefix_goto_prev_hunk_jumps_back_n_changes() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 15);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
         h.open_file(&path);
@@ -2637,7 +2637,7 @@ mod tests {
     }
 
     #[test]
-    fn count_prefix_goto_next_change_clamps_at_last() {
+    fn count_prefix_goto_next_hunk_clamps_at_last() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 15);
         let path = h.write_file("s.txt", "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n");
         h.open_file(&path);
@@ -3890,12 +3890,12 @@ mod tests {
     }
 
     #[test]
-    fn goto_next_change_no_op_without_diff_map() {
+    fn goto_next_hunk_no_op_without_diff_map() {
         let mut h = crate::test_harness::TestHarness::with_size(20, 5);
         let path = h.write_file("s.txt", "a\nb\nc\n");
         h.open_file(&path);
         let before = h.primary_head_offset();
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextChange);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextHunk);
         assert_eq!(h.primary_head_offset(), before);
     }
 }

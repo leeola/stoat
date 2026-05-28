@@ -1261,21 +1261,21 @@ define_action!(
 );
 
 define_action!(
-    GotoNextChangeDef,
-    GotoNextChange,
-    "GotoNextChange",
-    ActionKind::GotoNextChange,
-    "goto next change",
+    GotoNextHunkDef,
+    GotoNextHunk,
+    "GotoNextHunk",
+    ActionKind::GotoNextHunk,
+    "goto next hunk",
     "Move the primary cursor to the start line of the next diff hunk strictly after the cursor's row. No-op when the buffer has no diff map or no hunk lies after the cursor. Primary-cursor only.",
     ActionPriority::Rare
 );
 
 define_action!(
-    GotoPrevChangeDef,
-    GotoPrevChange,
-    "GotoPrevChange",
-    ActionKind::GotoPrevChange,
-    "goto previous change",
+    GotoPrevHunkDef,
+    GotoPrevHunk,
+    "GotoPrevHunk",
+    ActionKind::GotoPrevHunk,
+    "goto previous hunk",
     "Move the primary cursor to the start line of the previous diff hunk strictly before the cursor's row. No-op when the buffer has no diff map or no hunk lies before the cursor. Primary-cursor only.",
     ActionPriority::Rare
 );

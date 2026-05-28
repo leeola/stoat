@@ -311,8 +311,8 @@ on key {
     }
     mode == bracket_next {
         Escape -> SetMode(normal);
-        g -> [GotoNextChange(), SetMode(normal)];
-        c -> [GotoNextChange(), SetMode(normal)];
+        g -> [GotoNextHunk(), SetMode(normal)];
+        c -> [GotoNextHunk(), SetMode(normal)];
         p -> [GotoNextParagraph(), SetMode(normal)];
         d -> [GotoNextDiagnostic(), SetMode(normal)];
         f -> [GotoNextFunction(), SetMode(normal)];
@@ -321,8 +321,8 @@ on key {
     }
     mode == bracket_prev {
         Escape -> SetMode(normal);
-        g -> [GotoPrevChange(), SetMode(normal)];
-        c -> [GotoPrevChange(), SetMode(normal)];
+        g -> [GotoPrevHunk(), SetMode(normal)];
+        c -> [GotoPrevHunk(), SetMode(normal)];
         p -> [GotoPrevParagraph(), SetMode(normal)];
         d -> [GotoPrevDiagnostic(), SetMode(normal)];
         f -> [GotoPrevFunction(), SetMode(normal)];
