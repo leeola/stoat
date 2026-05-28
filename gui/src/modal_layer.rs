@@ -380,10 +380,10 @@ impl Render for ModalLayer {
                 div()
                     .flex()
                     .flex_col()
-                    .w(relative(0.65))
-                    .max_w(px(900.))
-                    .h(relative(0.75))
-                    .max_h(px(680.))
+                    .w(relative(0.9))
+                    .max_w(px(1400.))
+                    .h(relative(0.9))
+                    .max_h(px(1000.))
                     .overflow_hidden()
                     .bg(cx.theme().background)
                     .border_1()
@@ -894,11 +894,12 @@ mod tests {
         let active_before = layer.read_with(vcx, |l, _| l.active_modal::<SmallModal>());
         assert!(active_before.is_some(), "modal should be open before click");
 
-        // Click far from the SmallModal's 40x40 footprint. GPUI bubbles
-        // child-first; the click misses the modal child and lands on the
-        // backdrop handler. The handler dispatches `DismissModal` through
-        // the workspace, which calls back into this layer's `hide_modal`.
-        vcx.simulate_click(point(px(500.0), px(500.0)), Modifiers::default());
+        // Click in the top-left corner, outside the centered modal
+        // container. GPUI bubbles child-first; the click misses the modal
+        // child and lands on the backdrop handler. The handler dispatches
+        // `DismissModal` through the workspace, which calls back into this
+        // layer's `hide_modal`.
+        vcx.simulate_click(point(px(10.0), px(10.0)), Modifiers::default());
         vcx.run_until_parked();
 
         let active_after = layer.read_with(vcx, |l, _| l.active_modal::<SmallModal>());
