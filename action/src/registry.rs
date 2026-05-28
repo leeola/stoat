@@ -90,8 +90,9 @@ use crate::{
             CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
             JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
             OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk,
-            ReviewNextChunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk,
-            ReviewStageChunk, ReviewToggleApproval, ReviewToggleStage, ReviewUnstageChunk,
+            ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh,
+            ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval,
+            ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -206,6 +207,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ReviewApproveHunk::DEF, |_| Ok(Box::new(ReviewApproveHunk)));
     add(ReviewToggleApproval::DEF, |_| {
         Ok(Box::new(ReviewToggleApproval))
+    });
+    add(ReviewNextUnreviewedHunk::DEF, |_| {
+        Ok(Box::new(ReviewNextUnreviewedHunk))
     });
     add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
     add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
@@ -832,6 +836,7 @@ mod tests {
         "ReviewSkipChunk",
         "ReviewApproveHunk",
         "ReviewToggleApproval",
+        "ReviewNextUnreviewedHunk",
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
@@ -1089,7 +1094,8 @@ mod tests {
         // + 1 OpenReviewWatch (workspace-watch review session).
         // + 1 OpenAbout (build info modal).
         // + 2 ReviewApproveHunk / ReviewToggleApproval.
-        assert_eq!(all().count(), 310);
+        // + 1 ReviewNextUnreviewedHunk.
+        assert_eq!(all().count(), 311);
     }
 
     #[test]

@@ -493,6 +493,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewToggleApproval => {
             review::review_mark(stoat, review::ReviewMark::ToggleApproval)
         },
+        ActionKind::ReviewNextUnreviewedHunk => review::review_next_unreviewed(stoat),
         ActionKind::ReviewRefresh => review::review_refresh(stoat),
         ActionKind::ReviewExternalEdit => {
             let a = action

@@ -237,6 +237,7 @@ pub enum ActionKind {
     ReviewSkipChunk,
     ReviewApproveHunk,
     ReviewToggleApproval,
+    ReviewNextUnreviewedHunk,
     ReviewRefresh,
     ReviewExternalEdit,
     ReviewApplyStaged,

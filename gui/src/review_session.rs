@@ -185,6 +185,17 @@ impl ReviewSession {
         Some(id)
     }
 
+    /// Move the cursor to the next unapproved chunk (wrapping past
+    /// the end if necessary). Returns the new id when the cursor
+    /// moved; emits `Changed` / `CursorMoved` only on a move.
+    pub fn next_unreviewed(&mut self, cx: &mut Context<'_, Self>) -> Option<ReviewChunkId> {
+        let id = self.inner.next_unreviewed()?;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::CursorMoved);
+        cx.notify();
+        Some(id)
+    }
+
     /// Move the cursor to the previous chunk in order. Same
     /// semantics as [`Self::next`].
     pub fn prev(&mut self, cx: &mut Context<'_, Self>) -> Option<ReviewChunkId> {

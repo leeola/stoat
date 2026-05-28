@@ -473,7 +473,7 @@ on key {
     mode == review {
         Escape -> CloseReview();
         q -> CloseReview();
-        n -> ReviewNextChunk();
+        n -> ReviewNextUnreviewedHunk();
         p -> ReviewPrevChunk();
         j -> ReviewNextChunk();
         k -> ReviewPrevChunk();

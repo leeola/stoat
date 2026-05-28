@@ -720,6 +720,31 @@ impl ReviewSession {
         Some(id)
     }
 
+    /// Move the cursor to the next chunk whose `approved` flag is
+    /// `false`, wrapping from the end of `order` back to `0` if no
+    /// unapproved chunk lies past the current position. Returns
+    /// `Some(id)` when the cursor moves, `None` when every chunk
+    /// is approved or the session is empty. The cursor stays put
+    /// when only the current chunk is unapproved.
+    pub fn next_unreviewed(&mut self) -> Option<ReviewChunkId> {
+        if self.order.is_empty() {
+            return None;
+        }
+        let start = self.cursor_order_index().map(|i| i + 1).unwrap_or(0);
+        let len = self.order.len();
+        for offset in 0..len {
+            let i = (start + offset) % len;
+            let id = self.order[i];
+            let unapproved = self.chunks.get(&id).is_some_and(|c| !c.approved);
+            if unapproved && Some(id) != self.cursor.current {
+                self.cursor.current = Some(id);
+                self.version += 1;
+                return Some(id);
+            }
+        }
+        None
+    }
+
     pub fn set_status(&mut self, id: ReviewChunkId, status: ChunkStatus) {
         if let Some(chunk) = self.chunks.get_mut(&id) {
             chunk.status = status;
@@ -2574,6 +2599,48 @@ mod tests {
         let after_first = s.version;
         s.set_approved(ids[0], true);
         assert_eq!(s.version, after_first, "no version bump when unchanged");
+    }
+
+    #[test]
+    fn next_unreviewed_walks_forward_then_wraps() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\nl\nm\nn\no\np\nq\nr\ns\nT\n",
+        );
+        assert!(ids.len() >= 3, "need at least 3 chunks");
+        s.chunks.get_mut(&ids[1]).unwrap().approved = true;
+
+        assert_eq!(s.cursor.current, Some(ids[0]));
+        assert_eq!(s.next_unreviewed(), Some(ids[2]));
+        assert_eq!(s.cursor.current, Some(ids[2]));
+
+        let last = *ids.last().unwrap();
+        if last != ids[2] {
+            assert_eq!(s.next_unreviewed(), Some(last));
+        }
+
+        s.cursor.current = Some(last);
+        let wrapped = s.next_unreviewed();
+        assert_eq!(wrapped, Some(ids[0]), "wraps from end to first unapproved");
+    }
+
+    #[test]
+    fn next_unreviewed_no_op_when_all_approved() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        for id in &ids {
+            s.chunks.get_mut(id).unwrap().approved = true;
+        }
+        assert_eq!(s.next_unreviewed(), None);
+    }
+
+    #[test]
+    fn next_unreviewed_no_op_on_empty_session() {
+        let mut s = in_memory_session();
+        assert_eq!(s.next_unreviewed(), None);
     }
 
     #[test]

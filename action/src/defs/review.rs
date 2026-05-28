@@ -160,6 +160,18 @@ define_action!(
 );
 
 define_action!(
+    ReviewNextUnreviewedHunkDef,
+    ReviewNextUnreviewedHunk,
+    "ReviewNextUnreviewedHunk",
+    ActionKind::ReviewNextUnreviewedHunk,
+    "advance to the next unapproved chunk",
+    "Move the review cursor to the next chunk whose approval flag is \
+     false, wrapping from the end of the session back to the start. \
+     No-op when every chunk has been approved.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewRefreshDef,
     ReviewRefresh,
     "ReviewRefresh",
