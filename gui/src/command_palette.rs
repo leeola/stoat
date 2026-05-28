@@ -18,8 +18,8 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, App, Context, Entity, HighlightStyle, IntoElement, ParentElement,
-    SharedString, Styled, StyledText, Task, WeakEntity, Window,
+    div, AnyElement, App, Context, DismissEvent, Entity, HighlightStyle, IntoElement,
+    ParentElement, SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use stoat::rebase::RebasePause;
 use stoat_action::{
@@ -560,13 +560,22 @@ fn dispatch_action(
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
-    // The keyboard confirm path reaches here inside the keystroke
-    // observer's `Workspace` update lease (observer -> dispatch_action
-    // -> modal layer -> palette confirm), so dispatching directly would
-    // re-enter `Workspace::update` and panic. Defer until that lease
-    // releases.
+    // Pop the palette before the deferred dispatch runs so the workspace
+    // observer at `workspace.rs:304-312` rebroadcasts the pane editor as
+    // `active_editor`. Order matters across two effect-flush passes:
+    //   1. `cx.emit(DismissEvent)` lands `Effect::Emit` ahead of the outer `Effect::Defer`. The
+    //      dismiss handler pops the modal and schedules `Effect::Notify` for the modal layer.
+    //   2. The outer defer fires and schedules another defer -- pushing `Effect::Defer` (inner)
+    //      onto the queue behind the pending modal-layer `Effect::Notify`.
+    //   3. The notify runs `broadcast_active_editor`, restoring the pane editor as `active_editor`,
+    //      before the inner defer dispatches.
+    // A single defer would race the notify and dispatch against the
+    // palette's query editor; the dispatch must wait one extra cycle.
+    cx.emit(DismissEvent);
     window.defer(cx, move |window, cx| {
-        workspace.update(cx, |ws, cx| ws.dispatch_action(action, window, cx));
+        window.defer(cx, move |window, cx| {
+            workspace.update(cx, |ws, cx| ws.dispatch_action(action, window, cx));
+        });
     });
 }
 
@@ -1238,6 +1247,101 @@ mod tests {
                 });
             assert_eq!(entry.def.params()[0].kind, ParamKind::String);
             assert_eq!(entry.def.params()[0].name, "path");
+        }
+    }
+
+    mod dispatch_dismisses_palette {
+        use super::*;
+        use crate::{
+            editor::Editor,
+            globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
+            picker::Picker,
+        };
+        use gpui::TestAppContext;
+        use std::{path::PathBuf, sync::Arc};
+        use stoat::host::{FakeFs, FsHost, FsWatchHost};
+        use stoat_host::NoopFsWatcher;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        fn install_globals(cx: &mut TestAppContext, fs: Arc<FakeFs>) {
+            cx.update(|cx| {
+                cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+                cx.set_global(FsWatchHostGlobal(
+                    Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
+                ));
+                cx.set_global(ExecutorGlobal(Executor::new(
+                    Arc::new(TestScheduler::new()),
+                )));
+            });
+        }
+
+        #[test]
+        fn confirm_zero_param_action_dismisses_palette_and_targets_pane_editor() {
+            let mut cx = TestAppContext::single();
+            let fs = Arc::new(FakeFs::new());
+            fs.insert_file("/tmp/repo/main.rs", b"hi\n");
+            install_globals(&mut cx, fs);
+            let (ws, vcx) = cx.add_window_view(|_, cx| {
+                Workspace::new("main".to_string(), PathBuf::from("/tmp/repo"), cx)
+            });
+            ws.update(vcx, |w, cx| {
+                w.open_paths(&[PathBuf::from("/tmp/repo/main.rs")], cx)
+            });
+            vcx.run_until_parked();
+
+            let pane_editor = ws.read_with(vcx, |w, cx| {
+                let pane_id = w.pane_tree().read(cx).focus();
+                w.pane_tree()
+                    .read(cx)
+                    .pane(pane_id)
+                    .expect("focused pane")
+                    .read(cx)
+                    .active_item()
+                    .expect("editor active in pane")
+                    .to_any_view()
+                    .downcast::<Editor>()
+                    .expect("active item is Editor")
+            });
+
+            ws.update_in(vcx, |w, window, cx| {
+                w.dispatch_action(Box::new(stoat_action::OpenCommandPalette), window, cx);
+            });
+            vcx.run_until_parked();
+
+            let picker = ws
+                .read_with(vcx, |w, cx| {
+                    w.modal_layer()
+                        .read(cx)
+                        .active_modal::<Picker<CommandPaletteDelegate>>()
+                })
+                .expect("command palette modal active after OpenCommandPalette");
+
+            picker.update(vcx, |p, _| {
+                let delegate = p.delegate_mut();
+                let idx = delegate
+                    .entries
+                    .iter()
+                    .position(|e| e.def.name() == "ToggleMinimap")
+                    .expect("ToggleMinimap registered");
+                delegate.matches = vec![(idx, Vec::new())];
+                delegate.selected = 0;
+            });
+
+            assert!(!pane_editor.read_with(vcx, |ed, _| ed.minimap_visible()));
+
+            picker.update_in(vcx, |p, window, cx| {
+                p.handle_action(&stoat_action::PickerConfirm, window, cx)
+            });
+            vcx.run_until_parked();
+
+            assert!(
+                !ws.read_with(vcx, |w, cx| w.modal_layer().read(cx).has_active_modal()),
+                "palette must dismiss itself when confirming a zero-param action",
+            );
+            assert!(
+                pane_editor.read_with(vcx, |ed, _| ed.minimap_visible()),
+                "ToggleMinimap must reach the pane editor, not the palette query editor",
+            );
         }
     }
 }
