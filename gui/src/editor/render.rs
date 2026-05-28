@@ -5,7 +5,11 @@ use gpui::{
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
-use std::{collections::BTreeMap, ops::Range, path::Path};
+use std::{
+    collections::{BTreeMap, BTreeSet},
+    ops::Range,
+    path::Path,
+};
 use stoat::{
     display_map::{Block, BlockContext, BlockId, HighlightStyle as StoatHighlightStyle},
     host::BlameLine,
@@ -1013,54 +1017,110 @@ pub(crate) fn apply_selection_paint(
     cursor_color: Hsla,
     active_line_color: Hsla,
 ) -> RenderedRow {
-    let RenderedRow { text, mut runs } = row;
+    let RenderedRow {
+        text,
+        runs: syntax_runs,
+    } = row;
     let mut text_owned: String = text.as_ref().to_string();
 
-    if paint.active_line_row == Some(display_row) {
-        if text_owned.is_empty() {
-            text_owned.push(' ');
-        }
-        let style = gpui::HighlightStyle {
-            background_color: Some(active_line_color),
-            ..Default::default()
-        };
-        runs.push((0..text_owned.len(), style));
+    let active_line = paint.active_line_row == Some(display_row);
+    if active_line && text_owned.is_empty() {
+        text_owned.push(' ');
     }
 
-    if let Some(spans) = paint.row_selection_spans.get(&display_row) {
-        let style = gpui::HighlightStyle {
-            background_color: Some(selection_color),
-            ..Default::default()
-        };
-        for span in spans {
-            runs.push((span.clone(), style));
-        }
-    }
+    let empty: Vec<Range<usize>> = Vec::new();
+    let selection_spans = paint
+        .row_selection_spans
+        .get(&display_row)
+        .unwrap_or(&empty);
 
-    if let Some(cursors) = paint.row_cursors.get(&display_row) {
-        let style = gpui::HighlightStyle {
-            background_color: Some(cursor_color),
-            ..Default::default()
-        };
-        for &offset in cursors {
+    let mut cursor_ranges: Vec<Range<usize>> = Vec::new();
+    if let Some(offsets) = paint.row_cursors.get(&display_row) {
+        for &offset in offsets {
             if offset < text_owned.len() {
                 let after = text_owned[offset..]
                     .chars()
                     .next()
                     .map(|c| c.len_utf8())
                     .unwrap_or(0);
-                runs.push((offset..offset + after, style));
+                cursor_ranges.push(offset..offset + after);
             } else {
                 let appended_start = text_owned.len();
                 text_owned.push(' ');
-                runs.push((appended_start..text_owned.len(), style));
+                cursor_ranges.push(appended_start..text_owned.len());
             }
         }
     }
 
+    let text_len = text_owned.len();
+    if text_len == 0 {
+        return RenderedRow {
+            text: SharedString::from(text_owned),
+            runs: syntax_runs,
+        };
+    }
+
+    let active_line_style = active_line.then(|| gpui::HighlightStyle {
+        background_color: Some(active_line_color),
+        ..Default::default()
+    });
+    let selection_style = gpui::HighlightStyle {
+        background_color: Some(selection_color),
+        ..Default::default()
+    };
+    let cursor_style = gpui::HighlightStyle {
+        background_color: Some(cursor_color),
+        ..Default::default()
+    };
+
+    let mut breakpoints: BTreeSet<usize> = BTreeSet::new();
+    breakpoints.insert(0);
+    breakpoints.insert(text_len);
+    for (r, _) in &syntax_runs {
+        breakpoints.insert(r.start.min(text_len));
+        breakpoints.insert(r.end.min(text_len));
+    }
+    for r in selection_spans {
+        breakpoints.insert(r.start.min(text_len));
+        breakpoints.insert(r.end.min(text_len));
+    }
+    for r in &cursor_ranges {
+        breakpoints.insert(r.start);
+        breakpoints.insert(r.end);
+    }
+    let breakpoints: Vec<usize> = breakpoints.into_iter().collect();
+
+    let mut merged: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
+    for window in breakpoints.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        if a >= b {
+            continue;
+        }
+        let mut style = gpui::HighlightStyle::default();
+        if let Some(&(_, syntax)) = syntax_runs.iter().find(|(r, _)| r.start <= a && r.end >= b) {
+            style = style.highlight(syntax);
+        }
+        if let Some(al) = active_line_style {
+            style = style.highlight(al);
+        }
+        if selection_spans.iter().any(|r| r.start <= a && r.end >= b) {
+            style = style.highlight(selection_style);
+        }
+        if cursor_ranges.iter().any(|r| r.start <= a && r.end >= b) {
+            style = style.highlight(cursor_style);
+        }
+        if let Some((last_range, last_style)) = merged.last_mut() {
+            if *last_style == style && last_range.end == a {
+                last_range.end = b;
+                continue;
+            }
+        }
+        merged.push((a..b, style));
+    }
+
     RenderedRow {
         text: SharedString::from(text_owned),
-        runs,
+        runs: merged,
     }
 }
 
@@ -2402,6 +2462,37 @@ mod tests {
         assert_eq!(paint.active_line_row, None);
     }
 
+    fn assert_merged_paint_valid(row: &RenderedRow) {
+        let text_len = row.text.as_ref().len();
+        let mut prev_end = 0;
+        let mut sum = 0;
+        for (range, _) in &row.runs {
+            assert!(
+                range.start >= prev_end,
+                "runs must be sorted and non-overlapping; got {range:?} after end {prev_end}",
+            );
+            assert!(
+                range.end > range.start,
+                "no zero-length runs allowed; got {range:?}",
+            );
+            assert!(
+                range.end <= text_len,
+                "run {range:?} spills past text len {text_len}",
+            );
+            sum += range.end - range.start;
+            prev_end = range.end;
+        }
+        assert_eq!(sum, text_len, "merged runs must cover the full text length",);
+    }
+
+    fn style_at(row: &RenderedRow, byte: usize) -> gpui::HighlightStyle {
+        row.runs
+            .iter()
+            .find(|(r, _)| r.start <= byte && byte < r.end)
+            .map(|(_, s)| *s)
+            .unwrap_or_else(|| panic!("no run covers byte {byte}"))
+    }
+
     #[test]
     fn apply_selection_paint_adds_background_run_for_span() {
         let mut paint = SelectionPaint::default();
@@ -2423,9 +2514,17 @@ mod tests {
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
-        assert_eq!(painted.runs.len(), 1);
-        assert_eq!(painted.runs[0].0, 1..4);
-        assert_eq!(painted.runs[0].1.background_color, Some(selection_color));
+        assert_merged_paint_valid(&painted);
+        assert_eq!(style_at(&painted, 0).background_color, None);
+        assert_eq!(
+            style_at(&painted, 1).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(
+            style_at(&painted, 3).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(style_at(&painted, 4).background_color, None);
     }
 
     #[test]
@@ -2449,9 +2548,9 @@ mod tests {
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello ");
-        assert_eq!(painted.runs.len(), 1);
-        assert_eq!(painted.runs[0].0, 5..6);
-        assert_eq!(painted.runs[0].1.background_color, Some(cursor_color));
+        assert_merged_paint_valid(&painted);
+        assert_eq!(style_at(&painted, 0).background_color, None);
+        assert_eq!(style_at(&painted, 5).background_color, Some(cursor_color));
     }
 
     #[test]
@@ -2476,13 +2575,24 @@ mod tests {
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
-        // Selection run added first, cursor run appended after; StyledText paints in
-        // order so the cursor highlight wins at byte 2.
-        assert_eq!(painted.runs.len(), 2);
-        assert_eq!(painted.runs[0].0, 0..5);
-        assert_eq!(painted.runs[0].1.background_color, Some(selection_color));
-        assert_eq!(painted.runs[1].0, 2..3);
-        assert_eq!(painted.runs[1].1.background_color, Some(cursor_color));
+        assert_merged_paint_valid(&painted);
+        assert_eq!(
+            style_at(&painted, 0).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(
+            style_at(&painted, 1).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(style_at(&painted, 2).background_color, Some(cursor_color));
+        assert_eq!(
+            style_at(&painted, 3).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(
+            style_at(&painted, 4).background_color,
+            Some(selection_color)
+        );
     }
 
     #[test]
@@ -2508,9 +2618,14 @@ mod tests {
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
-        assert_eq!(painted.runs.len(), 1);
-        assert_eq!(painted.runs[0].0, 0..5);
-        assert_eq!(painted.runs[0].1.background_color, Some(active_line_color));
+        assert_merged_paint_valid(&painted);
+        for byte in 0..5 {
+            assert_eq!(
+                style_at(&painted, byte).background_color,
+                Some(active_line_color),
+                "byte {byte} should carry active_line_color",
+            );
+        }
     }
 
     #[test]
@@ -2536,7 +2651,14 @@ mod tests {
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
-        assert!(painted.runs.is_empty());
+        assert_merged_paint_valid(&painted);
+        for (_, style) in &painted.runs {
+            assert_ne!(
+                style.background_color,
+                Some(active_line_color),
+                "active_line_color must not apply on other rows",
+            );
+        }
     }
 
     #[test]
@@ -2563,14 +2685,20 @@ mod tests {
             cursor_color,
             active_line_color,
         );
-        // Active-line run first (back-most), then selection, then cursor.
-        assert_eq!(painted.runs.len(), 3);
-        assert_eq!(painted.runs[0].0, 0..5);
-        assert_eq!(painted.runs[0].1.background_color, Some(active_line_color));
-        assert_eq!(painted.runs[1].0, 0..3);
-        assert_eq!(painted.runs[1].1.background_color, Some(selection_color));
-        assert_eq!(painted.runs[2].0, 3..4);
-        assert_eq!(painted.runs[2].1.background_color, Some(cursor_color));
+        assert_merged_paint_valid(&painted);
+        assert_eq!(
+            style_at(&painted, 0).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(
+            style_at(&painted, 2).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(style_at(&painted, 3).background_color, Some(cursor_color));
+        assert_eq!(
+            style_at(&painted, 4).background_color,
+            Some(active_line_color)
+        );
     }
 
     #[test]
@@ -2596,9 +2724,62 @@ mod tests {
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), " ");
-        assert_eq!(painted.runs.len(), 1);
-        assert_eq!(painted.runs[0].0, 0..1);
-        assert_eq!(painted.runs[0].1.background_color, Some(active_line_color));
+        assert_merged_paint_valid(&painted);
+        assert_eq!(
+            style_at(&painted, 0).background_color,
+            Some(active_line_color)
+        );
+    }
+
+    #[test]
+    fn apply_selection_paint_merges_syntax_with_overlays() {
+        let syntax_color: Hsla = rgb(0xff8800).into();
+        let syntax_style = gpui::HighlightStyle {
+            color: Some(syntax_color),
+            ..Default::default()
+        };
+        let row = RenderedRow {
+            text: SharedString::from("hello"),
+            runs: vec![(0..5, syntax_style)],
+        };
+        let mut paint = SelectionPaint::default();
+        paint.row_selection_spans.insert(0, vec![1..4]);
+        paint.row_cursors.insert(0, vec![2]);
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color: Hsla = rgb(0xc8d6ff).into();
+        let active_line_color: Hsla = rgb(0x2a2a2a).into();
+
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            selection_color,
+            cursor_color,
+            active_line_color,
+        );
+
+        assert_eq!(painted.text.as_ref(), "hello");
+        assert_merged_paint_valid(&painted);
+        // Syntax foreground color survives on every segment.
+        for byte in 0..5 {
+            assert_eq!(
+                style_at(&painted, byte).color,
+                Some(syntax_color),
+                "syntax color must survive merge at byte {byte}",
+            );
+        }
+        // Background priority: cursor > selection > syntax.
+        assert_eq!(style_at(&painted, 0).background_color, None);
+        assert_eq!(
+            style_at(&painted, 1).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(style_at(&painted, 2).background_color, Some(cursor_color));
+        assert_eq!(
+            style_at(&painted, 3).background_color,
+            Some(selection_color)
+        );
+        assert_eq!(style_at(&painted, 4).background_color, None);
     }
 
     fn snapshot_with_block(
