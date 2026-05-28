@@ -621,6 +621,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
@@ -644,6 +645,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
@@ -677,6 +679,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let id = h.claude().open();
@@ -720,6 +723,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
