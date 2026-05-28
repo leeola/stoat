@@ -773,6 +773,28 @@ impl ReviewSession {
         }
     }
 
+    /// Move the review cursor back to the first chunk in
+    /// [`Self::order`]. Bumps [`Self::version`] so derived caches
+    /// refresh. Becomes `None` only when the session has no chunks.
+    pub fn reset_cursor(&mut self) {
+        self.cursor.current = self.order.first().copied();
+        self.version += 1;
+    }
+
+    /// Clear approval and revert status to `Pending` for every chunk,
+    /// then snap the cursor back to the first chunk. The reviewer
+    /// uses this to start a session over. Always bumps
+    /// [`Self::version`] so observers refresh even when the session
+    /// was already clean.
+    pub fn reset_progress(&mut self) {
+        for chunk in self.chunks.values_mut() {
+            chunk.status = ChunkStatus::Pending;
+            chunk.approved = false;
+        }
+        self.cursor.current = self.order.first().copied();
+        self.version += 1;
+    }
+
     /// Add, replace, or drop the entry for `input.path` based on
     /// the file's freshly-computed single-file diff. The watch-mode
     /// event loop calls this on each `FsWatchEvent` for an in-scope
@@ -2641,6 +2663,51 @@ mod tests {
     fn next_unreviewed_no_op_on_empty_session() {
         let mut s = in_memory_session();
         assert_eq!(s.next_unreviewed(), None);
+    }
+
+    #[test]
+    fn reset_progress_clears_status_and_approved_and_resets_cursor() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\nl\nm\nn\no\np\nq\nr\ns\nT\n",
+        );
+        assert!(ids.len() >= 2);
+        for id in &ids {
+            s.set_status(*id, ChunkStatus::Staged);
+            s.set_approved(*id, true);
+        }
+        let last = *ids.last().unwrap();
+        s.cursor.current = Some(last);
+        let before = s.version;
+
+        s.reset_progress();
+
+        for id in &ids {
+            assert_eq!(s.chunks[id].status, ChunkStatus::Pending);
+            assert!(!s.chunks[id].approved);
+        }
+        assert_eq!(s.cursor.current, Some(ids[0]));
+        assert!(s.version > before, "version bumps so observers refresh");
+    }
+
+    #[test]
+    fn reset_cursor_snaps_back_to_first_chunk() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\nl\nm\nn\no\np\nq\nr\ns\nt\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\nl\nm\nn\no\np\nq\nr\ns\nT\n",
+        );
+        assert!(ids.len() >= 2);
+        let last = *ids.last().unwrap();
+        s.cursor.current = Some(last);
+
+        s.reset_cursor();
+        assert_eq!(s.cursor.current, Some(ids[0]));
     }
 
     #[test]

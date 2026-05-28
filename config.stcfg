@@ -488,6 +488,7 @@ on key {
         D -> ReviewRemoveSelected();
         C -> RebaseContinue();
         r -> ReviewRefresh();
+        R -> ReviewResetProgress();
         : -> OpenCommandPalette();
     }
     mode == insert && claude_focused {

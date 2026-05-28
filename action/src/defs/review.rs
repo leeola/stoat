@@ -172,6 +172,18 @@ define_action!(
 );
 
 define_action!(
+    ReviewResetProgressDef,
+    ReviewResetProgress,
+    "ReviewResetProgress",
+    ActionKind::ReviewResetProgress,
+    "reset review progress",
+    "Clear every chunk's approval flag, revert every chunk's status to \
+     Pending, and move the review cursor back to the first chunk. Used \
+     to start the review over.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewRefreshDef,
     ReviewRefresh,
     "ReviewRefresh",

@@ -196,6 +196,16 @@ impl ReviewSession {
         Some(id)
     }
 
+    /// Clear approval and revert status to `Pending` for every chunk,
+    /// then snap the cursor back to the first chunk. Emits
+    /// `Changed` and `CursorMoved`.
+    pub fn reset_progress(&mut self, cx: &mut Context<'_, Self>) {
+        self.inner.reset_progress();
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::CursorMoved);
+        cx.notify();
+    }
+
     /// Move the cursor to the previous chunk in order. Same
     /// semantics as [`Self::next`].
     pub fn prev(&mut self, cx: &mut Context<'_, Self>) -> Option<ReviewChunkId> {

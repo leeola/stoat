@@ -91,8 +91,8 @@ use crate::{
             JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
             OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk,
             ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh,
-            ReviewRemoveSelected, ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval,
-            ReviewToggleStage, ReviewUnstageChunk,
+            ReviewRemoveSelected, ReviewResetProgress, ReviewSkipChunk, ReviewStageChunk,
+            ReviewToggleApproval, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -210,6 +210,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ReviewNextUnreviewedHunk::DEF, |_| {
         Ok(Box::new(ReviewNextUnreviewedHunk))
+    });
+    add(ReviewResetProgress::DEF, |_| {
+        Ok(Box::new(ReviewResetProgress))
     });
     add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
     add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
@@ -837,6 +840,7 @@ mod tests {
         "ReviewApproveHunk",
         "ReviewToggleApproval",
         "ReviewNextUnreviewedHunk",
+        "ReviewResetProgress",
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
@@ -1095,7 +1099,8 @@ mod tests {
         // + 1 OpenAbout (build info modal).
         // + 2 ReviewApproveHunk / ReviewToggleApproval.
         // + 1 ReviewNextUnreviewedHunk.
-        assert_eq!(all().count(), 311);
+        // + 1 ReviewResetProgress.
+        assert_eq!(all().count(), 312);
     }
 
     #[test]

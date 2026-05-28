@@ -298,6 +298,20 @@ pub(super) fn review_next_unreviewed(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn review_reset_progress(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    session.reset_progress();
+    let chunk_id = session.cursor.current;
+    let editor_id = session.view_editor;
+    let progress = session.progress();
+    sync_review_view_and_scroll(ws, editor_id, chunk_id);
+    emit_review_progress_badge(ws, &progress);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
     use crate::review_session::ChunkStatus;
 

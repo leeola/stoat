@@ -2175,6 +2175,7 @@ impl Workspace {
             ActionKind::ReviewApproveHunk => self.dispatch_review_approve(true, cx),
             ActionKind::ReviewToggleApproval => self.dispatch_review_approve(false, cx),
             ActionKind::ReviewNextUnreviewedHunk => self.dispatch_review_next_unreviewed(cx),
+            ActionKind::ReviewResetProgress => self.dispatch_review_reset_progress(cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
             ActionKind::ReviewRefresh => self.dispatch_review_refresh(cx),
@@ -4232,6 +4233,42 @@ impl Workspace {
             ReviewStatusChange::Toggle => {
                 session.toggle_stage(id, cx);
             },
+        });
+    }
+
+    /// Clear approval and revert status to `Pending` for every chunk
+    /// in the active review session, then scroll the editor to the
+    /// reset cursor. No-op when no review item is focused.
+    fn dispatch_review_reset_progress(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        review_item.update(cx, |item, cx| {
+            let session = item.session().clone();
+            session.update(cx, |session, cx| session.reset_progress(cx));
+            let Some(new_id) = session.read(cx).inner().cursor.current else {
+                return;
+            };
+            let target = session
+                .read(cx)
+                .inner()
+                .chunks
+                .get(&new_id)
+                .map(|chunk| (chunk.file_index, chunk.buffer_line_range.start));
+            let Some((file_index, buffer_row)) = target else {
+                return;
+            };
+            let Some(file) = item.files().get(file_index) else {
+                return;
+            };
+            let editor = file.editor.clone();
+            editor.update(cx, |ed, cx| {
+                ed.set_cursor_at_buffer_row(buffer_row, cx);
+                ed.request_autoscroll(
+                    crate::editor::scroll::autoscroll::AutoscrollStrategy::Center,
+                    cx,
+                );
+            });
         });
     }
 
@@ -10922,6 +10959,52 @@ mod tests {
             Some(0),
             "wraps back to first unapproved chunk",
         );
+    }
+
+    #[test]
+    fn dispatch_review_reset_progress_clears_state_and_resets_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        let ids = session.read_with(vcx, |s, _| s.inner().order.clone());
+        session.update(vcx, |s, cx| {
+            for id in &ids {
+                s.set_status(*id, ChunkStatus::Staged, cx);
+                s.set_approved(*id, true, cx);
+            }
+        });
+        dispatch(&ws, vcx, stoat_action::ReviewNextChunk);
+        vcx.run_until_parked();
+        assert_eq!(
+            cursor_chunk_index(vcx, &session),
+            Some(1),
+            "cursor advanced before reset",
+        );
+
+        dispatch(&ws, vcx, stoat_action::ReviewResetProgress);
+        vcx.run_until_parked();
+
+        session.read_with(vcx, |s, _| {
+            for id in &ids {
+                assert_eq!(s.inner().chunks[id].status, ChunkStatus::Pending);
+                assert!(!s.inner().chunks[id].approved);
+            }
+        });
+        assert_eq!(
+            cursor_chunk_index(vcx, &session),
+            Some(0),
+            "cursor snaps back to first chunk",
+        );
+    }
+
+    #[test]
+    fn dispatch_review_reset_progress_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        dispatch(&ws, vcx, stoat_action::ReviewResetProgress);
+        vcx.run_until_parked();
     }
 
     #[test]
