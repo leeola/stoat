@@ -210,6 +210,17 @@ define_action!(
 );
 
 define_action!(
+    ReviewToggleFollowDef,
+    ReviewToggleFollow,
+    "ReviewToggleFollow",
+    ActionKind::ReviewToggleFollow,
+    "toggle review follow mode",
+    "Toggle follow mode: while on, an external edit to a reviewed file \
+     moves the review cursor to that file's first chunk. Defaults off.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewRefreshDef,
     ReviewRefresh,
     "ReviewRefresh",

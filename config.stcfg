@@ -483,6 +483,7 @@ on key {
         a -> ReviewApproveHunk();
         Enter -> ReviewApproveHunk();
         t -> ReviewToggleApproval();
+        f -> ReviewToggleFollow();
         S -> ReviewSkipChunk();
         A -> ReviewApplyStaged();
         D -> ReviewRemoveSelected();

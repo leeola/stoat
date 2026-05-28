@@ -96,7 +96,7 @@ pub use defs::{
         QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk, ReviewExternalEdit,
         ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh,
         ReviewRemoveSelected, ReviewResetProgress, ReviewSkipChunk, ReviewStageChunk,
-        ReviewToggleApproval, ReviewToggleStage, ReviewUnstageChunk,
+        ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     set::Set,

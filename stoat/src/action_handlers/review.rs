@@ -312,6 +312,18 @@ pub(super) fn review_reset_progress(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Flip the active session's follow flag. Follow-driven cursor
+/// jumping on external edits is wired in the GUI workspace; the TUI
+/// handler only toggles the flag. No-op without an active review.
+pub(super) fn review_toggle_follow(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    session.follow = !session.follow;
+    UpdateEffect::Redraw
+}
+
 pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
     use crate::review_session::ChunkStatus;
 

@@ -172,6 +172,13 @@ impl ReviewSession {
         self.emit_changed(cx);
     }
 
+    /// Flip follow mode on the inner session. Emits
+    /// [`ReviewSessionEvent::Changed`].
+    pub fn toggle_follow(&mut self, cx: &mut Context<'_, Self>) {
+        self.inner.follow = !self.inner.follow;
+        self.emit_changed(cx);
+    }
+
     /// Advance the cursor to the next chunk in order. Returns the
     /// new cursor id when the cursor actually moved (in which case
     /// [`ReviewSessionEvent::Changed`] and

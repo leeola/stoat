@@ -2178,6 +2178,7 @@ impl Workspace {
             ActionKind::ReviewResetProgress => self.dispatch_review_reset_progress(cx),
             ActionKind::GitToggleStageHunk => self.dispatch_git_stage_hunk(false, cx),
             ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
+            ActionKind::ReviewToggleFollow => self.dispatch_review_toggle_follow(cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
             ActionKind::ReviewRefresh => self.dispatch_review_refresh(cx),
@@ -4527,6 +4528,58 @@ impl Workspace {
         session.update(cx, |session, cx| session.refresh_files(inputs, cx));
     }
 
+    /// Flip follow mode on the active review session. No-op when no
+    /// review item is focused.
+    fn dispatch_review_toggle_follow(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        session.update(cx, |session, cx| session.toggle_follow(cx));
+    }
+
+    /// Move the review cursor to the first chunk of the reviewed file
+    /// at `path` and scroll its editor row into view. No-op when no
+    /// review is active, `path` is not one of the reviewed files, or
+    /// the file has no chunks.
+    fn review_jump_to_file(&mut self, path: &Path, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        review_item.update(cx, |item, cx| {
+            let session = item.session().clone();
+            let target = {
+                let inner = session.read(cx).inner();
+                inner
+                    .files
+                    .iter()
+                    .find(|f| f.path == path)
+                    .and_then(|f| f.chunks.first().copied())
+                    .and_then(|id| {
+                        inner
+                            .chunks
+                            .get(&id)
+                            .map(|c| (id, c.file_index, c.buffer_line_range.start))
+                    })
+            };
+            let Some((chunk_id, file_index, buffer_row)) = target else {
+                return;
+            };
+            session.update(cx, |s, cx| s.set_cursor_chunk(chunk_id, cx));
+            let Some(file) = item.files().get(file_index) else {
+                return;
+            };
+            let editor = file.editor.clone();
+            editor.update(cx, |ed, cx| {
+                ed.set_cursor_at_buffer_row(buffer_row, cx);
+                ed.request_autoscroll(
+                    crate::editor::scroll::autoscroll::AutoscrollStrategy::Center,
+                    cx,
+                );
+            });
+        });
+    }
+
     fn dispatch_review_external_edit(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
         let Some(review_item) = self.active_review_item(cx) else {
             return;
@@ -4580,6 +4633,11 @@ impl Workspace {
         session.update(cx, |session, cx| {
             session.refresh_file(&path, new_input, cx);
         });
+
+        let follow = session.read(cx).inner().follow;
+        if follow {
+            self.review_jump_to_file(&path, cx);
+        }
     }
 
     fn dispatch_jump_to_move_source(&mut self, nav: JumpMoveNav, cx: &mut Context<'_, Self>) {
@@ -11476,6 +11534,69 @@ mod tests {
                 crate::review_session::ReviewSession::new(inner)
             })
         })
+    }
+
+    #[test]
+    fn review_follow_jumps_cursor_to_edited_file_only_when_enabled() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEW\nc\n");
+        fs.insert_file("/tmp/repo/b.txt", b"x\nNEW\nz\n");
+        install_fs_host_global(vcx, fs.clone());
+        let session = in_memory_session_with_files(
+            vcx,
+            vec![
+                stoat::review_session::InMemoryFile {
+                    path: PathBuf::from("/tmp/repo/a.txt"),
+                    base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                    buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+                },
+                stoat::review_session::InMemoryFile {
+                    path: PathBuf::from("/tmp/repo/b.txt"),
+                    base_text: Arc::new("x\nOLD\nz\n".to_string()),
+                    buffer_text: Arc::new("x\nNEW\nz\n".to_string()),
+                },
+            ],
+        );
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        // Park the cursor on file b's chunk so a jump back to file a is
+        // observable.
+        dispatch(&ws, vcx, stoat_action::ReviewNextChunk);
+        vcx.run_until_parked();
+        assert_eq!(cursor_chunk_index(vcx, &session), Some(1));
+
+        // Follow on: an external edit to a.txt snaps the cursor to a's
+        // first chunk.
+        dispatch(&ws, vcx, stoat_action::ReviewToggleFollow);
+        vcx.run_until_parked();
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit {
+                path: PathBuf::from("/tmp/repo/a.txt"),
+            },
+        );
+        vcx.run_until_parked();
+        assert_eq!(cursor_chunk_index(vcx, &session), Some(0));
+
+        // Follow off: an external edit to b.txt leaves the cursor put.
+        dispatch(&ws, vcx, stoat_action::ReviewToggleFollow);
+        vcx.run_until_parked();
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit {
+                path: PathBuf::from("/tmp/repo/b.txt"),
+            },
+        );
+        vcx.run_until_parked();
+        assert_eq!(
+            cursor_chunk_index(vcx, &session),
+            Some(0),
+            "follow off must not move the cursor on an external edit",
+        );
     }
 
     #[test]

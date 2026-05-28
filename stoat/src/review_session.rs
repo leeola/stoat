@@ -348,6 +348,10 @@ pub struct ReviewSession {
     /// [`ReviewSource::WorkingTree`]; other sources skip watching
     /// because their content is not on disk.
     pub watch_tokens: Vec<WatchToken>,
+    /// When true, an external edit to a reviewed file moves the review
+    /// cursor to that file's first chunk (follow mode). Toggled by
+    /// [`stoat_action::ReviewToggleFollow`]; defaults off.
+    pub follow: bool,
     next_id: u32,
 }
 
@@ -363,6 +367,7 @@ impl ReviewSession {
             version: 0,
             origin: ReviewOrigin::Standalone,
             watch_tokens: Vec::new(),
+            follow: false,
             next_id: 0,
         }
     }

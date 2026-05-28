@@ -92,7 +92,8 @@ use crate::{
             OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged,
             ReviewApproveHunk, ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk,
             ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress, ReviewSkipChunk,
-            ReviewStageChunk, ReviewToggleApproval, ReviewToggleStage, ReviewUnstageChunk,
+            ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage,
+            ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -218,6 +219,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(GitToggleStageHunk))
     });
     add(GitUnstageHunk::DEF, |_| Ok(Box::new(GitUnstageHunk)));
+    add(ReviewToggleFollow::DEF, |_| {
+        Ok(Box::new(ReviewToggleFollow))
+    });
     add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
     add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
     add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
@@ -847,6 +851,7 @@ mod tests {
         "ReviewResetProgress",
         "GitToggleStageHunk",
         "GitUnstageHunk",
+        "ReviewToggleFollow",
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
@@ -1107,7 +1112,8 @@ mod tests {
         // + 1 ReviewNextUnreviewedHunk.
         // + 1 ReviewResetProgress.
         // + 2 GitToggleStageHunk / GitUnstageHunk.
-        assert_eq!(all().count(), 314);
+        // + 1 ReviewToggleFollow.
+        assert_eq!(all().count(), 315);
     }
 
     #[test]

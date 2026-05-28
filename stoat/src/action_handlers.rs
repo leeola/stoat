@@ -497,6 +497,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewResetProgress => review::review_reset_progress(stoat),
         ActionKind::GitToggleStageHunk => review::git_stage_hunk(stoat, false),
         ActionKind::GitUnstageHunk => review::git_stage_hunk(stoat, true),
+        ActionKind::ReviewToggleFollow => review::review_toggle_follow(stoat),
         ActionKind::ReviewRefresh => review::review_refresh(stoat),
         ActionKind::ReviewExternalEdit => {
             let a = action
