@@ -55,7 +55,7 @@ use crate::{
         },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
-            HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
+            HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenAbout, OpenHelp,
         },
         lsp::{
             CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
@@ -161,6 +161,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(FileFinderScopeToggle))
     });
     add(OpenHelp::DEF, |_| Ok(Box::new(OpenHelp)));
+    add(OpenAbout::DEF, |_| Ok(Box::new(OpenAbout)));
     add(OpenReview::DEF, |_| Ok(Box::new(OpenReview)));
     add(JumpToMoveSource::DEF, |_| Ok(Box::new(JumpToMoveSource)));
     add(JumpToMoveTarget::DEF, |_| Ok(Box::new(JumpToMoveTarget)));
@@ -748,6 +749,7 @@ mod tests {
         "FileFinderSelectNext",
         "FileFinderScopeToggle",
         "OpenHelp",
+        "OpenAbout",
         "OpenReview",
         "JumpToMoveSource",
         "JumpToMoveTarget",
@@ -1079,7 +1081,8 @@ mod tests {
         // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
         //   routed to the focused project tree dock.
         // + 1 OpenReviewWatch (workspace-watch review session).
-        assert_eq!(all().count(), 307);
+        // + 1 OpenAbout (build info modal).
+        assert_eq!(all().count(), 308);
     }
 
     #[test]

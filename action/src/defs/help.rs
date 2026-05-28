@@ -51,6 +51,53 @@ impl Action for OpenHelp {
     }
 }
 
+#[derive(Debug)]
+pub struct OpenAboutDef;
+
+impl ActionDef for OpenAboutDef {
+    fn name(&self) -> &'static str {
+        "OpenAbout"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenAbout
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "show build info"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open the About modal showing the git commit hash and build date \
+         captured at compile time."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenAbout;
+
+impl OpenAbout {
+    pub const DEF: &OpenAboutDef = &OpenAboutDef;
+}
+
+impl Action for OpenAbout {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 macro_rules! plumbing_action {
     ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr) => {
         #[derive(Debug)]

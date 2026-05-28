@@ -58,7 +58,7 @@ pub use defs::{
     },
     help::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
-        HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenHelp,
+        HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenAbout, OpenHelp,
     },
     lsp::{
         CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,

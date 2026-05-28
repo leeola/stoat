@@ -13,6 +13,7 @@
 //! when the entity has already been released.
 #![deny(clippy::disallowed_types, clippy::disallowed_methods)]
 
+mod about_modal;
 mod actions;
 mod buffer;
 mod buffer_picker;

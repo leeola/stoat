@@ -2201,6 +2201,7 @@ impl Workspace {
                 crate::command_palette::open_command_palette(self, window, cx)
             },
             ActionKind::OpenHelp => crate::help::open_help(self, window, cx),
+            ActionKind::OpenAbout => crate::about_modal::open_about(self, window, cx),
             ActionKind::OpenFileFinder => crate::file_finder::open_file_finder(self, window, cx),
             ActionKind::OpenFileFinderHSplit => {
                 crate::file_finder::open_file_finder_split(self, Axis::Horizontal, window, cx)

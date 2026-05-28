@@ -651,7 +651,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ProjectTreeExpand
         | ActionKind::ProjectTreeConfirm
         | ActionKind::ProjectTreeRefresh
-        | ActionKind::OpenGitStatus => UpdateEffect::None,
+        | ActionKind::OpenGitStatus
+        | ActionKind::OpenAbout => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());
