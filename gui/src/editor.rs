@@ -137,6 +137,14 @@ pub struct Editor {
     selections: SelectionsCollection,
     scroll_row: u32,
     scroll_manager: scroll::ScrollManager,
+    /// Accumulator for wheel events arriving within a single executor
+    /// tick. The first event spawns a one-shot task that yields and
+    /// then drains the accumulator; subsequent events in the same
+    /// tick coalesce into the stored delta via
+    /// [`gpui::ScrollDelta::coalesce`] so only the merged delta hits
+    /// `apply_wheel`. Carries the originating modifiers alongside
+    /// the delta because the alt key flips axis behavior.
+    pending_scroll_delta: Option<(gpui::ScrollDelta, gpui::Modifiers)>,
     scroll_handle: UniformListScrollHandle,
     jumplist: JumpList,
     cell_size: Option<Size<Pixels>>,
@@ -387,6 +395,7 @@ impl Editor {
             selections: SelectionsCollection::new(),
             scroll_row: 0,
             scroll_manager: scroll::ScrollManager::new(std::time::Instant::now()),
+            pending_scroll_delta: None,
             scroll_handle: UniformListScrollHandle::new(),
             jumplist: JumpList::new(),
             cell_size: None,
@@ -3094,6 +3103,40 @@ impl Editor {
         _window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
+        if let Some((existing_delta, _)) = self.pending_scroll_delta.take() {
+            // Same-tick burst: fold the new delta into the pending one
+            // and keep waiting -- the spawned closure already in flight
+            // will pick up the merged value once the executor yields.
+            // Modifiers from the most recent event win because alt
+            // can flip the axis mid-burst.
+            self.pending_scroll_delta =
+                Some((existing_delta.coalesce(event.delta), event.modifiers));
+            return;
+        }
+        self.pending_scroll_delta = Some((event.delta, event.modifiers));
+        cx.spawn(async move |this, cx| {
+            let _ = this.update(cx, |editor, cx| {
+                let Some((delta, modifiers)) = editor.pending_scroll_delta.take() else {
+                    return;
+                };
+                editor.apply_scroll_delta(delta, modifiers, cx);
+            });
+        })
+        .detach();
+    }
+
+    /// Apply a wheel-equivalent scroll to the editor's anchor and
+    /// scroll handles, mirroring the floored row into the editor's
+    /// internal scroll_row. Resolves the line height from
+    /// [`Self::cell_size`] (no-op when unset) and clamps the
+    /// resulting fractional offset against the buffer's last display
+    /// row.
+    fn apply_scroll_delta(
+        &mut self,
+        delta: gpui::ScrollDelta,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(cell) = self.cell_size else {
             return;
         };
@@ -3103,9 +3146,9 @@ impl Editor {
             .max_point()
             .row as f64;
         let changed = self.scroll_manager.apply_wheel(
-            event.delta,
+            delta,
             cell.height,
-            event.modifiers.alt,
+            modifiers.alt,
             std::time::Instant::now(),
             max_row,
         );
@@ -4034,6 +4077,53 @@ mod tests {
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
             3.0,
+        );
+    }
+
+    #[test]
+    fn handle_scroll_wheel_coalesces_same_tick_events() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = new_editor_in_window(
+            vcx,
+            &(0..20)
+                .map(|i| format!("l{i}"))
+                .collect::<Vec<_>>()
+                .join("\n"),
+        );
+        editor.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        vcx.run_until_parked();
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -1.)), false),
+                window,
+                cx,
+            );
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -2.)), false),
+                window,
+                cx,
+            );
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -3.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        // Three same-sign deltas summing to -6; coalescing applies one
+        // merged scroll instead of three intermediate steps.
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 6);
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            6.0,
+        );
+        assert!(
+            editor.read_with(vcx, |ed, _| ed.pending_scroll_delta.is_none()),
+            "pending delta must drain by the time we observe the scroll state",
         );
     }
 
