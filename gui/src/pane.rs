@@ -40,6 +40,8 @@ impl Pane {
         workspace: WeakEntity<Workspace>,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify())
+            .detach();
         Self {
             pane_id,
             workspace,
@@ -180,7 +182,10 @@ impl Pane {
 
 impl Render for Pane {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let tab_bar = render_tab_bar(self, cx).into_any_element();
+        let show_tab_bar = cx
+            .try_global::<crate::settings::Settings>()
+            .and_then(|s| s.resolved.ui_pane_show_tab_bar)
+            .unwrap_or(true);
         let body: AnyElement = match self.active_item() {
             Some(item) => div().flex_1().child(item.to_any_view()).into_any_element(),
             None => div()
@@ -191,25 +196,23 @@ impl Render for Pane {
                 .child("(scratch)")
                 .into_any_element(),
         };
-        div()
-            .flex()
-            .flex_col()
-            .size_full()
-            .on_mouse_down(
-                MouseButton::Left,
-                cx.listener(|this, _event, window, cx| {
-                    if let Some(workspace) = this.workspace.upgrade() {
-                        let action = SetActivePane {
-                            pane_id: this.pane_id.as_ffi(),
-                        };
-                        workspace.update(cx, |w, cx| {
-                            w.dispatch_action(Box::new(action), window, cx);
-                        });
-                    }
-                }),
-            )
-            .child(tab_bar)
-            .child(body)
+        let mut column = div().flex().flex_col().size_full().on_mouse_down(
+            MouseButton::Left,
+            cx.listener(|this, _event, window, cx| {
+                if let Some(workspace) = this.workspace.upgrade() {
+                    let action = SetActivePane {
+                        pane_id: this.pane_id.as_ffi(),
+                    };
+                    workspace.update(cx, |w, cx| {
+                        w.dispatch_action(Box::new(action), window, cx);
+                    });
+                }
+            }),
+        );
+        if show_tab_bar {
+            column = column.child(render_tab_bar(self, cx).into_any_element());
+        }
+        column.child(body)
     }
 }
 
@@ -218,8 +221,8 @@ mod tests {
     use super::*;
     use crate::item::{DeserializeSnafu, ItemError, ItemView};
     use gpui::{
-        div, point, px, App, AppContext, Entity, IntoElement, Modifiers, Render, SharedString,
-        Styled, Subscription, TestAppContext, Window,
+        div, point, px, App, AppContext, BorrowAppContext, Entity, IntoElement, Modifiers, Render,
+        SharedString, Styled, Subscription, TestAppContext, Window,
     };
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
@@ -307,6 +310,42 @@ mod tests {
         assert!(pane.read_with(&cx, |p, _| p.is_empty()));
         assert_eq!(pane.read_with(&cx, |p, _| p.len()), 0);
         assert_eq!(pane.read_with(&cx, |p, _| p.active_index()), 0);
+    }
+
+    #[test]
+    fn pane_observes_settings_global_for_show_tab_bar() {
+        use crate::settings::Settings;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| cx.set_global(Settings::default()));
+        let pane = new_pane(&mut cx);
+
+        let notifies = Arc::new(AtomicUsize::new(0));
+        let observer = {
+            let notifies = notifies.clone();
+            let pane = pane.clone();
+            cx.update(|cx| {
+                cx.new(|cx| {
+                    let sub = cx.observe(&pane, move |_, _, _| {
+                        notifies.fetch_add(1, Ordering::SeqCst);
+                    });
+                    Recorder { _subscription: sub }
+                })
+            })
+        };
+        let _ = observer;
+
+        cx.update(|cx| {
+            cx.update_global::<Settings, _>(|s, _| {
+                s.resolved.ui_pane_show_tab_bar = Some(false);
+            });
+        });
+        cx.run_until_parked();
+
+        assert!(
+            notifies.load(Ordering::SeqCst) >= 1,
+            "mutating Settings global must notify the pane so it re-renders",
+        );
     }
 
     #[test]

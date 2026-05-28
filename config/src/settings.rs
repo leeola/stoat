@@ -94,6 +94,9 @@ pub struct Settings {
     /// Chrome font size in logical pixels. Set via
     /// `ui.font.size = 14;`.
     pub ui_font_size: Option<f32>,
+    /// Show the per-pane tab bar above editor content. `None` defaults
+    /// to visible. Set via `ui.pane.show_tab_bar = false;` to hide.
+    pub ui_pane_show_tab_bar: Option<bool>,
     /// Per-language LSP server commands keyed by language name
     /// (e.g. `rust`, `typescript`). Empty when no
     /// `lsp.<lang>.*` settings are present. Right-hand wins on
@@ -143,6 +146,7 @@ impl Settings {
             editor_font_size: other.editor_font_size.or(self.editor_font_size),
             ui_font_family: other.ui_font_family.or(self.ui_font_family),
             ui_font_size: other.ui_font_size.or(self.ui_font_size),
+            ui_pane_show_tab_bar: other.ui_pane_show_tab_bar.or(self.ui_pane_show_tab_bar),
             language_servers,
         }
     }
@@ -213,6 +217,11 @@ impl Settings {
             ["ui", "font", "size"] => {
                 if let Value::Number(n) = setting.value.node {
                     self.ui_font_size = Some(n as f32);
+                }
+            },
+            ["ui", "pane", "show_tab_bar"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.ui_pane_show_tab_bar = Some(b);
                 }
             },
             ["claude", "permissions", tool, behavior] => {
@@ -287,6 +296,20 @@ mod tests {
     }
 
     #[test]
+    fn from_config_parses_ui_pane_show_tab_bar_false() {
+        let config = parse_ok("on init { ui.pane.show_tab_bar = false; }");
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.ui_pane_show_tab_bar, Some(false));
+    }
+
+    #[test]
+    fn from_config_parses_ui_pane_show_tab_bar_true() {
+        let config = parse_ok("on init { ui.pane.show_tab_bar = true; }");
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.ui_pane_show_tab_bar, Some(true));
+    }
+
+    #[test]
     fn from_config_extracts_text_proto_log() {
         let config = parse_ok("on init { text_proto_log = true; }");
         assert_eq!(
@@ -302,6 +325,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -323,6 +347,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -344,6 +369,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -374,6 +400,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -387,6 +414,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -402,6 +430,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -420,6 +449,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -436,6 +466,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -465,6 +496,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -486,6 +518,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -507,6 +540,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -537,6 +571,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -553,6 +588,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -574,6 +610,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -595,6 +632,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -613,6 +651,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -626,6 +665,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
@@ -644,6 +684,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -657,6 +698,7 @@ mod tests {
             editor_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
+            ui_pane_show_tab_bar: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -672,6 +714,7 @@ mod tests {
                 editor_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
+                ui_pane_show_tab_bar: None,
                 language_servers: BTreeMap::new(),
             }
         );
