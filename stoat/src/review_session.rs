@@ -727,6 +727,27 @@ impl ReviewSession {
         }
     }
 
+    /// Set the chunk's approval flag and bump [`Self::version`] only
+    /// when the value actually changes. Independent of
+    /// [`Self::set_status`] -- approving a chunk does not stage it.
+    pub fn set_approved(&mut self, id: ReviewChunkId, approved: bool) {
+        if let Some(chunk) = self.chunks.get_mut(&id) {
+            if chunk.approved != approved {
+                chunk.approved = approved;
+                self.version += 1;
+            }
+        }
+    }
+
+    /// Flip the chunk's approval flag and bump [`Self::version`].
+    /// Toggling a missing chunk is silently a no-op.
+    pub fn toggle_approved(&mut self, id: ReviewChunkId) {
+        if let Some(chunk) = self.chunks.get_mut(&id) {
+            chunk.approved = !chunk.approved;
+            self.version += 1;
+        }
+    }
+
     /// Add, replace, or drop the entry for `input.path` based on
     /// the file's freshly-computed single-file diff. The watch-mode
     /// event loop calls this on each `FsWatchEvent` for an in-scope
@@ -2011,19 +2032,18 @@ mod tests {
     }
 
     #[test]
-    fn snapshot_review_toggle_cycles_binary() {
+    fn review_space_approves_chunk_and_advances_cursor() {
         let mut h = TestHarness::with_size(80, 14);
         h.open_review_from_texts(&[("a.txt", REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER)]);
+        let first = h.current_review_chunk_id();
         h.type_keys("Space");
         assert_eq!(
-            h.chunk_status(h.current_review_chunk_id()),
-            ChunkStatus::Staged
+            h.chunk_status(first),
+            ChunkStatus::Pending,
+            "Space approves without changing staging status",
         );
-        h.type_keys("Space");
-        assert_eq!(
-            h.chunk_status(h.current_review_chunk_id()),
-            ChunkStatus::Unstaged
-        );
+        let after = h.current_review_chunk_id();
+        assert_ne!(first, after, "cursor advanced to next chunk");
     }
 
     #[test]
@@ -2540,6 +2560,33 @@ mod tests {
         let before = b.version;
         b.apply_approvals(&snap);
         assert!(b.version > before);
+    }
+
+    #[test]
+    fn set_approved_bumps_version_only_on_change() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        let before = s.version;
+        s.set_approved(ids[0], true);
+        assert!(s.chunks[&ids[0]].approved);
+        assert!(s.version > before);
+
+        let after_first = s.version;
+        s.set_approved(ids[0], true);
+        assert_eq!(s.version, after_first, "no version bump when unchanged");
+    }
+
+    #[test]
+    fn toggle_approved_flips_and_bumps_version() {
+        let mut s = in_memory_session();
+        let ids = add(&mut s, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        assert!(!s.chunks[&ids[0]].approved);
+
+        s.toggle_approved(ids[0]);
+        assert!(s.chunks[&ids[0]].approved);
+
+        s.toggle_approved(ids[0]);
+        assert!(!s.chunks[&ids[0]].approved);
     }
 
     #[test]

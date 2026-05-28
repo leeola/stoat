@@ -2172,6 +2172,8 @@ impl Workspace {
             ActionKind::ReviewToggleStage => {
                 self.dispatch_review_set_status(ReviewStatusChange::Toggle, cx)
             },
+            ActionKind::ReviewApproveHunk => self.dispatch_review_approve(true, cx),
+            ActionKind::ReviewToggleApproval => self.dispatch_review_approve(false, cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
             ActionKind::ReviewRefresh => self.dispatch_review_refresh(cx),
@@ -4229,6 +4231,54 @@ impl Workspace {
             ReviewStatusChange::Toggle => {
                 session.toggle_stage(id, cx);
             },
+        });
+    }
+
+    /// Approve the chunk under the review cursor. With `advance = true`
+    /// (the `ReviewApproveHunk` mark-and-advance path), sets the
+    /// approval flag and steps to the next chunk; the cursor jump
+    /// scrolls the corresponding editor row into view. With
+    /// `advance = false` (`ReviewToggleApproval`), flips the flag in
+    /// place without moving the cursor.
+    fn dispatch_review_approve(&mut self, advance: bool, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        review_item.update(cx, |item, cx| {
+            let session = item.session().clone();
+            let Some(id) = session.read(cx).inner().cursor.current else {
+                return;
+            };
+            let new_id = session.update(cx, |session, cx| {
+                if advance {
+                    session.set_approved(id, true, cx);
+                    session.next(cx)
+                } else {
+                    session.toggle_approved(id, cx);
+                    None
+                }
+            });
+            let Some(new_id) = new_id else { return };
+            let target = session
+                .read(cx)
+                .inner()
+                .chunks
+                .get(&new_id)
+                .map(|chunk| (chunk.file_index, chunk.buffer_line_range.start));
+            let Some((file_index, buffer_row)) = target else {
+                return;
+            };
+            let Some(file) = item.files().get(file_index) else {
+                return;
+            };
+            let editor = file.editor.clone();
+            editor.update(cx, |ed, cx| {
+                ed.set_cursor_at_buffer_row(buffer_row, cx);
+                ed.request_autoscroll(
+                    crate::editor::scroll::autoscroll::AutoscrollStrategy::Center,
+                    cx,
+                );
+            });
         });
     }
 
@@ -10730,6 +10780,79 @@ mod tests {
             cursor_chunk_status(vcx, &session),
             Some(ChunkStatus::Staged)
         );
+    }
+
+    fn cursor_chunk_approved(
+        vcx: &mut VisualTestContext,
+        session: &Entity<crate::review_session::ReviewSession>,
+    ) -> Option<bool> {
+        session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            let id = inner.cursor.current?;
+            Some(inner.chunks[&id].approved)
+        })
+    }
+
+    fn cursor_chunk_index(
+        vcx: &mut VisualTestContext,
+        session: &Entity<crate::review_session::ReviewSession>,
+    ) -> Option<usize> {
+        session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            let id = inner.cursor.current?;
+            inner.order.iter().position(|x| *x == id)
+        })
+    }
+
+    #[test]
+    fn dispatch_review_approve_hunk_sets_approved_and_advances_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(cursor_chunk_approved(vcx, &session), Some(false));
+        assert_eq!(cursor_chunk_index(vcx, &session), Some(0));
+
+        dispatch(&ws, vcx, stoat_action::ReviewApproveHunk);
+        vcx.run_until_parked();
+
+        let first = session.read_with(vcx, |s, _| s.inner().order[0]);
+        let first_approved = session.read_with(vcx, |s, _| s.inner().chunks[&first].approved);
+        assert!(first_approved, "first chunk approved after dispatch");
+        assert_eq!(
+            cursor_chunk_index(vcx, &session),
+            Some(1),
+            "cursor advanced to next chunk",
+        );
+    }
+
+    #[test]
+    fn dispatch_review_toggle_approval_flips_without_moving_cursor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        assert_eq!(cursor_chunk_approved(vcx, &session), Some(false));
+        assert_eq!(cursor_chunk_index(vcx, &session), Some(0));
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleApproval);
+        vcx.run_until_parked();
+        assert_eq!(cursor_chunk_approved(vcx, &session), Some(true));
+        assert_eq!(cursor_chunk_index(vcx, &session), Some(0));
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleApproval);
+        vcx.run_until_parked();
+        assert_eq!(cursor_chunk_approved(vcx, &session), Some(false));
+        assert_eq!(cursor_chunk_index(vcx, &session), Some(0));
+    }
+
+    #[test]
+    fn dispatch_review_approve_hunk_without_review_item_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ReviewApproveHunk);
+        vcx.run_until_parked();
     }
 
     #[test]

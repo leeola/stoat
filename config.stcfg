@@ -479,7 +479,10 @@ on key {
         k -> ReviewPrevChunk();
         s -> ReviewStageChunk();
         u -> ReviewUnstageChunk();
-        Space -> ReviewToggleStage();
+        Space -> ReviewApproveHunk();
+        a -> ReviewApproveHunk();
+        Enter -> ReviewApproveHunk();
+        t -> ReviewToggleApproval();
         S -> ReviewSkipChunk();
         A -> ReviewApplyStaged();
         D -> ReviewRemoveSelected();

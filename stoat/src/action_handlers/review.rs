@@ -262,6 +262,8 @@ pub(super) enum ReviewMark {
     Unstage,
     Toggle,
     Skip,
+    Approve,
+    ToggleApproval,
 }
 
 pub(super) fn review_step(stoat: &mut Stoat, step: ReviewStep) -> UpdateEffect {
@@ -292,15 +294,21 @@ pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
     let Some(id) = session.cursor.current else {
         return UpdateEffect::None;
     };
+    let mut moved_to: Option<crate::review_session::ReviewChunkId> = None;
     match mark {
         ReviewMark::Stage => session.set_status(id, ChunkStatus::Staged),
         ReviewMark::Unstage => session.set_status(id, ChunkStatus::Unstaged),
         ReviewMark::Toggle => session.toggle_stage(id),
         ReviewMark::Skip => session.set_status(id, ChunkStatus::Skipped),
+        ReviewMark::Approve => {
+            session.set_approved(id, true);
+            moved_to = session.next();
+        },
+        ReviewMark::ToggleApproval => session.toggle_approved(id),
     }
     let editor_id = session.view_editor;
     let progress = session.progress();
-    sync_review_view_and_scroll(ws, editor_id, None);
+    sync_review_view_and_scroll(ws, editor_id, moved_to);
     emit_review_progress_badge(ws, &progress);
 
     UpdateEffect::Redraw

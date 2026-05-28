@@ -489,6 +489,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewUnstageChunk => review::review_mark(stoat, review::ReviewMark::Unstage),
         ActionKind::ReviewToggleStage => review::review_mark(stoat, review::ReviewMark::Toggle),
         ActionKind::ReviewSkipChunk => review::review_mark(stoat, review::ReviewMark::Skip),
+        ActionKind::ReviewApproveHunk => review::review_mark(stoat, review::ReviewMark::Approve),
+        ActionKind::ReviewToggleApproval => {
+            review::review_mark(stoat, review::ReviewMark::ToggleApproval)
+        },
         ActionKind::ReviewRefresh => review::review_refresh(stoat),
         ActionKind::ReviewExternalEdit => {
             let a = action

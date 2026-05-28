@@ -136,6 +136,30 @@ define_action!(
 );
 
 define_action!(
+    ReviewApproveHunkDef,
+    ReviewApproveHunk,
+    "ReviewApproveHunk",
+    ActionKind::ReviewApproveHunk,
+    "approve the current chunk and advance",
+    "Mark the current chunk as approved and advance the review cursor to \
+     the next chunk. Approval is independent of staged/unstaged so a \
+     reviewer can step through changes without committing to a staging \
+     decision.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ReviewToggleApprovalDef,
+    ReviewToggleApproval,
+    "ReviewToggleApproval",
+    ActionKind::ReviewToggleApproval,
+    "toggle approval of the current chunk",
+    "Flip the current chunk's approval flag without moving the review \
+     cursor. Independent of staged/unstaged status.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewRefreshDef,
     ReviewRefresh,
     "ReviewRefresh",

@@ -156,6 +156,22 @@ impl ReviewSession {
         self.emit_changed(cx);
     }
 
+    /// Set the chunk's approval flag. Emits
+    /// [`ReviewSessionEvent::Changed`] regardless of whether the
+    /// flag changed, mirroring how [`Self::set_status`] always
+    /// notifies.
+    pub fn set_approved(&mut self, id: ReviewChunkId, approved: bool, cx: &mut Context<'_, Self>) {
+        self.inner.set_approved(id, approved);
+        self.emit_changed(cx);
+    }
+
+    /// Flip the chunk's approval flag. Emits
+    /// [`ReviewSessionEvent::Changed`].
+    pub fn toggle_approved(&mut self, id: ReviewChunkId, cx: &mut Context<'_, Self>) {
+        self.inner.toggle_approved(id);
+        self.emit_changed(cx);
+    }
+
     /// Advance the cursor to the next chunk in order. Returns the
     /// new cursor id when the cursor actually moved (in which case
     /// [`ReviewSessionEvent::Changed`] and

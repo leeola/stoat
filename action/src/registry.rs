@@ -89,9 +89,9 @@ use crate::{
         review::{
             CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
             JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
-            OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged, ReviewNextChunk,
-            ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk,
-            ReviewStageChunk, ReviewToggleStage, ReviewUnstageChunk,
+            OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk,
+            ReviewNextChunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewSkipChunk,
+            ReviewStageChunk, ReviewToggleApproval, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -203,6 +203,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ReviewToggleStage::DEF, |_| Ok(Box::new(ReviewToggleStage)));
     add(ReviewSkipChunk::DEF, |_| Ok(Box::new(ReviewSkipChunk)));
+    add(ReviewApproveHunk::DEF, |_| Ok(Box::new(ReviewApproveHunk)));
+    add(ReviewToggleApproval::DEF, |_| {
+        Ok(Box::new(ReviewToggleApproval))
+    });
     add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
     add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
     add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
@@ -826,6 +830,8 @@ mod tests {
         "ReviewUnstageChunk",
         "ReviewToggleStage",
         "ReviewSkipChunk",
+        "ReviewApproveHunk",
+        "ReviewToggleApproval",
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
@@ -1082,7 +1088,8 @@ mod tests {
         //   routed to the focused project tree dock.
         // + 1 OpenReviewWatch (workspace-watch review session).
         // + 1 OpenAbout (build info modal).
-        assert_eq!(all().count(), 308);
+        // + 2 ReviewApproveHunk / ReviewToggleApproval.
+        assert_eq!(all().count(), 310);
     }
 
     #[test]
