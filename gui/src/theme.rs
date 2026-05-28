@@ -103,6 +103,10 @@ pub struct ThemeColors {
     pub tab_active: Hsla,
     pub tab_label: Hsla,
     pub cursor: Hsla,
+    /// Glyph foreground for the cursor cell. Pairs with [`Self::cursor`]
+    /// as the cell background to produce a reverse-video block, so the
+    /// character under the cursor stays legible.
+    pub cursor_text: Hsla,
     pub line_highlight: Hsla,
     pub search_match: Hsla,
     pub muted_text: Hsla,
@@ -198,6 +202,7 @@ impl ThemeColors {
             tab_active: theme_bg_or(cx, stoat::theme::scope::UI_TAB_ACTIVE, palette.surface),
             tab_label: theme_fg_or(cx, stoat::theme::scope::UI_TAB_LABEL, palette.text),
             cursor: theme_bg_or(cx, stoat::theme::scope::UI_CURSOR, palette.accent),
+            cursor_text: theme_fg_or(cx, stoat::theme::scope::UI_CURSOR, palette.background),
             line_highlight: theme_bg_or(
                 cx,
                 stoat::theme::scope::UI_LINE_HIGHLIGHT,

@@ -1015,6 +1015,7 @@ pub(crate) fn apply_selection_paint(
     paint: &SelectionPaint,
     selection_color: Hsla,
     cursor_color: Hsla,
+    cursor_text_color: Hsla,
     active_line_color: Hsla,
 ) -> RenderedRow {
     let RenderedRow {
@@ -1070,6 +1071,7 @@ pub(crate) fn apply_selection_paint(
     };
     let cursor_style = gpui::HighlightStyle {
         background_color: Some(cursor_color),
+        color: Some(cursor_text_color),
         ..Default::default()
     };
 
@@ -2503,6 +2505,7 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let cursor_text_color = rgb(0x101010).into();
         let active_line_color = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2511,6 +2514,7 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
@@ -2537,6 +2541,7 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let cursor_text_color = rgb(0x101010).into();
         let active_line_color = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2545,6 +2550,7 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello ");
@@ -2564,6 +2570,7 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let cursor_text_color = rgb(0x101010).into();
         let active_line_color = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2572,6 +2579,7 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
@@ -2607,6 +2615,7 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let cursor_text_color = rgb(0x101010).into();
         let active_line_color = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2615,6 +2624,7 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
@@ -2640,6 +2650,7 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let cursor_text_color = rgb(0x101010).into();
         let active_line_color = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2648,6 +2659,7 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
@@ -2675,6 +2687,7 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let cursor_text_color = rgb(0x101010).into();
         let active_line_color = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2683,6 +2696,7 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
         assert_merged_paint_valid(&painted);
@@ -2713,6 +2727,7 @@ mod tests {
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
+        let cursor_text_color = rgb(0x101010).into();
         let active_line_color = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2721,6 +2736,7 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), " ");
@@ -2747,6 +2763,7 @@ mod tests {
         paint.row_cursors.insert(0, vec![2]);
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color: Hsla = rgb(0xc8d6ff).into();
+        let cursor_text_color: Hsla = rgb(0x101010).into();
         let active_line_color: Hsla = rgb(0x2a2a2a).into();
 
         let painted = apply_selection_paint(
@@ -2755,13 +2772,14 @@ mod tests {
             &paint,
             selection_color,
             cursor_color,
+            cursor_text_color,
             active_line_color,
         );
 
         assert_eq!(painted.text.as_ref(), "hello");
         assert_merged_paint_valid(&painted);
-        // Syntax foreground color survives on every segment.
-        for byte in 0..5 {
+        // Syntax foreground color survives outside the cursor segment.
+        for byte in [0usize, 1, 3, 4] {
             assert_eq!(
                 style_at(&painted, byte).color,
                 Some(syntax_color),
@@ -2780,6 +2798,9 @@ mod tests {
             Some(selection_color)
         );
         assert_eq!(style_at(&painted, 4).background_color, None);
+        // Cursor foreground overrides syntax color so the glyph reads
+        // against the cursor block (reverse-video).
+        assert_eq!(style_at(&painted, 2).color, Some(cursor_text_color));
     }
 
     fn snapshot_with_block(

@@ -3306,6 +3306,7 @@ impl Editor {
         );
         let selection_color = cx.theme().selection_editor;
         let cursor_color = cx.theme().cursor;
+        let cursor_text_color = cx.theme().cursor_text;
         let active_line_color = cx.theme().line_highlight;
 
         let rows: Vec<render::RenderedRow> = rows
@@ -3319,6 +3320,7 @@ impl Editor {
                     &selection_paint,
                     selection_color,
                     cursor_color,
+                    cursor_text_color,
                     active_line_color,
                 )
             })
