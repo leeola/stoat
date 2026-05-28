@@ -1045,6 +1045,7 @@ pub(crate) fn apply_selection_paint(
     cursor_color: Hsla,
     cursor_text_color: Hsla,
     active_line_color: Hsla,
+    is_minimap: bool,
 ) -> RenderedRow {
     let RenderedRow {
         text,
@@ -1057,11 +1058,20 @@ pub(crate) fn apply_selection_paint(
         .row_selection_spans
         .get(&display_row)
         .unwrap_or(&empty);
-    let cursor_offsets: &[usize] = paint
-        .row_cursors
-        .get(&display_row)
-        .map(Vec::as_slice)
-        .unwrap_or(&[]);
+    // In minimap mode the per-character cursor band is invisible at
+    // 2px and keeping the rest of the overlay logic identical means
+    // ignoring cursor offsets entirely. The active-line band remains
+    // visible as a horizontal stripe, so the rest of the function
+    // runs unchanged.
+    let cursor_offsets: &[usize] = if is_minimap {
+        &[]
+    } else {
+        paint
+            .row_cursors
+            .get(&display_row)
+            .map(Vec::as_slice)
+            .unwrap_or(&[])
+    };
 
     // Fast path: nothing overlays this row, return the input unchanged.
     // `SharedString` is moved through without cloning the underlying
@@ -2635,6 +2645,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         assert_merged_paint_valid(&painted);
@@ -2671,6 +2682,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
         assert_eq!(painted.text.as_ref(), "hello ");
         assert_merged_paint_valid(&painted);
@@ -2700,6 +2712,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         assert_merged_paint_valid(&painted);
@@ -2745,6 +2758,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         assert_merged_paint_valid(&painted);
@@ -2780,6 +2794,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         // No overlay touches row 0, so the fast path returns the input
@@ -2805,6 +2820,7 @@ mod tests {
             rgb(0x000000).into(),
             rgb(0xffffff).into(),
             rgb(0x000000).into(),
+            false,
         );
         assert_eq!(
             painted.text.as_ref().as_ptr(),
@@ -2839,6 +2855,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
         assert_merged_paint_valid(&painted);
         assert_eq!(
@@ -2879,6 +2896,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
         assert_eq!(painted.text.as_ref(), " ");
         assert_merged_paint_valid(&painted);
@@ -2915,6 +2933,7 @@ mod tests {
             cursor_color,
             cursor_text_color,
             active_line_color,
+            false,
         );
 
         assert_eq!(painted.text.as_ref(), "hello");
