@@ -3,9 +3,11 @@ use gpui::{
     div, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, Pixels, SharedString,
     StrikethroughStyle, Styled, StyledText, UnderlineStyle,
 };
+use lru::LruCache;
 use lsp_types::DiagnosticSeverity;
 use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, BTreeSet},
     ops::Range,
     path::Path,
@@ -1368,6 +1370,21 @@ pub(crate) struct GutterPaint<'a> {
     pub blame: Option<BlamePaint<'a>>,
     pub metrics: GutterMetrics,
     pub line_number_color: Hsla,
+    /// LRU cache for formatted line-number cells keyed by
+    /// `(buffer_row, width)`. Set to `None` in tests that do not
+    /// exercise the caching path; the formatter falls back to a
+    /// fresh format when absent.
+    pub line_number_cache: Option<&'a RefCell<LruCache<(u32, usize), SharedString>>>,
+    /// LRU cache for the formatted blame-strip cell keyed by
+    /// `(buffer_row, now_hour_bucket)` where the bucket is
+    /// `now_seconds / 3600`. Value is the strip text and color runs
+    /// to push into the gutter prefix.
+    #[allow(clippy::type_complexity)]
+    pub blame_cache: Option<
+        &'a RefCell<
+            LruCache<(u32, i64), (SharedString, Vec<(Range<usize>, gpui::HighlightStyle)>)>,
+        >,
+    >,
 }
 
 /// Per-row blame entries plus the `now` reference used to format
@@ -1464,13 +1481,30 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
         buffer_row.is_some() && !paint.display_snapshot.is_wrap_continuation(display_row);
 
     if let Some(blame) = paint.blame.as_ref() {
-        append_blame_strip(&mut text, &mut runs, buffer_row, show_line_number, blame);
+        append_blame_strip(
+            &mut text,
+            &mut runs,
+            buffer_row,
+            show_line_number,
+            blame,
+            paint.blame_cache,
+        );
     }
 
     if let (Some(row), true) = (buffer_row, show_line_number) {
-        let line_str = format!("{:>width$}", row + 1, width = width);
+        let line_str: SharedString = match paint.line_number_cache {
+            Some(cache) => {
+                let mut guard = cache.borrow_mut();
+                guard
+                    .get_or_insert((row, width), || {
+                        SharedString::from(format!("{:>width$}", row + 1, width = width))
+                    })
+                    .clone()
+            },
+            None => SharedString::from(format!("{:>width$}", row + 1, width = width)),
+        };
         let start = text.len();
-        text.push_str(&line_str);
+        text.push_str(line_str.as_ref());
         let end = text.len();
         let style = gpui::HighlightStyle {
             color: Some(paint.line_number_color),
@@ -1563,6 +1597,9 @@ fn append_blame_strip(
     buffer_row: Option<u32>,
     show_for_row: bool,
     paint: &BlamePaint<'_>,
+    cache: Option<
+        &RefCell<LruCache<(u32, i64), (SharedString, Vec<(Range<usize>, gpui::HighlightStyle)>)>>,
+    >,
 ) {
     let entry = if show_for_row {
         buffer_row.and_then(|row| paint.lines.iter().find(|line| line.line == row))
@@ -1575,23 +1612,61 @@ fn append_blame_strip(
         }
         return;
     };
+    let buffer_row =
+        buffer_row.expect("buffer_row is Some when an entry was found via the lines lookup");
 
+    // Bucket `now_seconds` to the nearest hour so the relative-age
+    // string -- the only time-varying field -- stays stable within
+    // an hour. Cached values survive scrolling against a stable
+    // viewport for as long as the bucket holds.
+    let hour_bucket = paint.now_seconds / 3600;
+    let (strip_text, strip_runs): (SharedString, Vec<(Range<usize>, gpui::HighlightStyle)>) =
+        match cache {
+            Some(cache) => {
+                let mut guard = cache.borrow_mut();
+                guard
+                    .get_or_insert((buffer_row, hour_bucket), || {
+                        render_blame_strip_cell(entry, paint.now_seconds)
+                    })
+                    .clone()
+            },
+            None => render_blame_strip_cell(entry, paint.now_seconds),
+        };
+
+    let base = text.len();
+    text.push_str(strip_text.as_ref());
+    for (range, style) in strip_runs {
+        runs.push(((range.start + base)..(range.end + base), style));
+    }
+}
+
+/// Build the formatted blame-strip cell -- short sha + first name +
+/// relative age plus inter-column spaces -- and the per-segment
+/// color runs. Returns runs whose byte offsets are relative to the
+/// returned text, so callers shift them by their write position.
+fn render_blame_strip_cell(
+    entry: &BlameLine,
+    now_seconds: i64,
+) -> (SharedString, Vec<(Range<usize>, gpui::HighlightStyle)>) {
+    let mut text = String::with_capacity(BLAME_STRIP_WIDTH);
+    let mut runs: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::with_capacity(3);
     let start = text.len();
-    push_padded_chars(text, &entry.short_sha, BLAME_SHA_WIDTH, false);
+    push_padded_chars(&mut text, &entry.short_sha, BLAME_SHA_WIDTH, false);
     runs.push((start..text.len(), color_style(BLAME_SHA_HEX)));
     text.push(' ');
 
     let first_name = blame::author_first_name(&entry.author_name, BLAME_NAME_WIDTH);
     let start = text.len();
-    push_padded_chars(text, &first_name, BLAME_NAME_WIDTH, false);
+    push_padded_chars(&mut text, &first_name, BLAME_NAME_WIDTH, false);
     runs.push((start..text.len(), color_style(BLAME_NAME_HEX)));
     text.push(' ');
 
-    let age = blame::format_age_short(entry.time, paint.now_seconds);
+    let age = blame::format_age_short(entry.time, now_seconds);
     let start = text.len();
-    push_padded_chars(text, &age, BLAME_AGE_WIDTH, true);
+    push_padded_chars(&mut text, &age, BLAME_AGE_WIDTH, true);
     runs.push((start..text.len(), color_style(BLAME_AGE_HEX)));
     text.push(' ');
+    (SharedString::from(text), runs)
 }
 
 fn push_padded_chars(text: &mut String, value: &str, width: usize, right_align: bool) {
@@ -1936,6 +2011,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
         let original_text = SharedString::from("hello".to_string());
         let original_ptr = original_text.as_ref().as_ptr();
@@ -1962,6 +2039,48 @@ mod tests {
     }
 
     #[test]
+    fn build_gutter_prefix_reuses_cached_line_number_strings() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot, false);
+        let cache: RefCell<LruCache<(u32, usize), SharedString>> =
+            RefCell::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            blame: None,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+            line_number_cache: Some(&cache),
+            blame_cache: None,
+        };
+
+        let first = build_gutter_prefix(0, &paint);
+        let cached_ptr = cache
+            .borrow()
+            .peek(&(0u32, metrics.line_number_width))
+            .expect("line-number cell cached after first build")
+            .as_ref()
+            .as_ptr();
+        let second = build_gutter_prefix(0, &paint);
+        assert_eq!(first.text, second.text);
+        assert_eq!(
+            cache
+                .borrow()
+                .peek(&(0u32, metrics.line_number_width))
+                .expect("line-number cell still cached on second build")
+                .as_ref()
+                .as_ptr(),
+            cached_ptr,
+            "cached SharedString's Arc backing must survive a second build",
+        );
+    }
+
+    #[test]
     fn render_row_with_gutter_paints_line_number() {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "hello\nworld");
@@ -1976,6 +2095,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
         let row = RenderedRow {
             text: SharedString::from("hello"),
@@ -2001,6 +2122,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
         let prefix = build_gutter_prefix(0, &paint);
         assert!(prefix.text.starts_with('1'));
@@ -2021,6 +2144,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
         let prefix = build_gutter_prefix(0, &paint);
 
@@ -2051,6 +2176,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
         let prefix = build_gutter_prefix(0, &paint);
 
@@ -2095,6 +2222,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(1, &paint);
@@ -2117,6 +2246,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(0, &paint);
@@ -2184,6 +2315,8 @@ mod tests {
             blame: Some(blame),
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(0, &paint);
@@ -2211,6 +2344,8 @@ mod tests {
             blame: Some(blame),
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(1, &paint);
@@ -2239,6 +2374,8 @@ mod tests {
             blame: Some(blame),
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(0, &paint);
@@ -2268,6 +2405,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let suffix = build_row_suffix(Some(1), &paint);
@@ -2302,6 +2441,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let suffix = build_row_suffix(Some(2), &paint);
@@ -2333,6 +2474,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let suffix = build_row_suffix(Some(0), &paint);
@@ -2382,6 +2525,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(1, &paint);
@@ -2404,6 +2549,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(0, &paint);
@@ -2428,6 +2575,8 @@ mod tests {
             blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_cache: None,
+            blame_cache: None,
         };
 
         let prefix = build_gutter_prefix(1, &paint);

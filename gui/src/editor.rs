@@ -25,7 +25,9 @@ use gpui::{
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size,
     Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
+use lru::LruCache;
 use serde_json::Value;
+use std::{cell::RefCell, num::NonZeroUsize, ops::Range};
 use stoat::{
     buffer::BufferId, jumplist::JumpList, multi_buffer::MultiBufferSnapshot,
     review_session::ChunkStatus, selection::SelectionsCollection, DisplayPoint,
@@ -138,6 +140,19 @@ pub struct Editor {
     scroll_handle: UniformListScrollHandle,
     jumplist: JumpList,
     cell_size: Option<Size<Pixels>>,
+    /// LRU cache of formatted line-number cells keyed by
+    /// `(buffer_row, width)`. Lookups happen in
+    /// [`render::build_gutter_prefix`] so a small scroll reuses the
+    /// strings the prior frame allocated instead of reformatting.
+    gutter_line_number_cache: RefCell<LruCache<(u32, usize), SharedString>>,
+    /// LRU cache of formatted blame-strip cells keyed by
+    /// `(buffer_row, now_hour_bucket)`. The `now_hour_bucket` is
+    /// `now_seconds / 3600` so the relative-age string stays stable
+    /// within an hour. Value is the pair of bytes and the color runs
+    /// the strip paints inside the gutter prefix.
+    #[allow(clippy::type_complexity)]
+    gutter_blame_cache:
+        RefCell<LruCache<(u32, i64), (SharedString, Vec<(Range<usize>, gpui::HighlightStyle)>)>>,
     file_path: Option<std::path::PathBuf>,
     diagnostic_set: Option<Entity<crate::diagnostics::DiagnosticSet>>,
     review_session: Option<Entity<crate::review_session::ReviewSession>>,
@@ -375,6 +390,12 @@ impl Editor {
             scroll_handle: UniformListScrollHandle::new(),
             jumplist: JumpList::new(),
             cell_size: None,
+            gutter_line_number_cache: RefCell::new(LruCache::new(
+                NonZeroUsize::new(1024).expect("nonzero"),
+            )),
+            gutter_blame_cache: RefCell::new(LruCache::new(
+                NonZeroUsize::new(1024).expect("nonzero"),
+            )),
             file_path: None,
             diagnostic_set: None,
             review_session: None,
@@ -3411,6 +3432,8 @@ impl Editor {
             blame: blame_paint,
             metrics,
             line_number_color: cx.theme().muted_text,
+            line_number_cache: Some(&self.gutter_line_number_cache),
+            blame_cache: Some(&self.gutter_blame_cache),
         };
         rows.into_iter()
             .enumerate()

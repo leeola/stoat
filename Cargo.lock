@@ -6373,6 +6373,7 @@ dependencies = [
  "crossterm",
  "gpui",
  "insta",
+ "lru",
  "lsp-types",
  "ratatui",
  "regex",
