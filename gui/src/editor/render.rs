@@ -439,8 +439,8 @@ fn apply_token_overlay(
 /// [`stoat::action_handlers::search`] behaviour.
 pub(crate) fn apply_search_overlay(
     rows: &mut [RenderedRow],
+    byte_maps: &[RowByteMap],
     snapshot: &DisplaySnapshot,
-    range: Range<u32>,
     query: &str,
     highlight_color: Hsla,
 ) {
@@ -461,64 +461,9 @@ pub(crate) fn apply_search_overlay(
         if m.start() == m.end() {
             continue;
         }
-        let mut current: Option<(u32, usize, usize)> = None;
-        let mut offset = m.start();
-        let mut chars = rope.chars_at(offset);
-        while offset < m.end() {
-            let Some(ch) = chars.next() else {
-                break;
-            };
-            let ch_len = ch.len_utf8();
-            if ch == '\n' {
-                flush_search_run(rows, range.start, current.take(), style);
-                offset += ch_len;
-                continue;
-            }
-            let point = rope.offset_to_point(offset);
-            let display = snapshot.buffer_to_display(point);
-            if display.row < range.start || display.row >= range.end {
-                flush_search_run(rows, range.start, current.take(), style);
-                offset += ch_len;
-                continue;
-            }
-            let row_idx = (display.row - range.start) as usize;
-            let row_text: &str = rows[row_idx].text.as_ref();
-            let cell_start = column_to_byte_offset(row_text, display.column);
-            let cell_end = column_to_byte_offset(row_text, display.column + 1);
-            if cell_start == cell_end {
-                flush_search_run(rows, range.start, current.take(), style);
-                offset += ch_len;
-                continue;
-            }
-            match current {
-                Some((row, start, end)) if row == display.row && end == cell_start => {
-                    current = Some((row, start, cell_end));
-                },
-                _ => {
-                    flush_search_run(rows, range.start, current.take(), style);
-                    current = Some((display.row, cell_start, cell_end));
-                },
-            }
-            offset += ch_len;
-        }
-        flush_search_run(rows, range.start, current.take(), style);
+        let match_range = m.start()..m.end();
+        push_syntax_runs(rows, byte_maps, match_range, style);
     }
-}
-
-fn flush_search_run(
-    rows: &mut [RenderedRow],
-    start_row: u32,
-    pending: Option<(u32, usize, usize)>,
-    style: gpui::HighlightStyle,
-) {
-    let Some((row, start_byte, end_byte)) = pending else {
-        return;
-    };
-    if start_byte >= end_byte {
-        return;
-    }
-    let row_idx = (row - start_row) as usize;
-    rows[row_idx].runs.push((start_byte..end_byte, style));
 }
 
 /// Overlay tree-sitter syntax-highlight runs on every visible row
@@ -537,6 +482,7 @@ fn flush_search_run(
 /// outside `range` are skipped.
 pub(crate) fn apply_syntax_overlay(
     rows: &mut [RenderedRow],
+    byte_maps: &[RowByteMap],
     snapshot: &DisplaySnapshot,
     range: Range<u32>,
     syntax_snapshot: &stoat_language::SyntaxSnapshot,
@@ -563,7 +509,108 @@ pub(crate) fn apply_syntax_overlay(
         let raw_range = capture.node.byte_range();
         let node_range = rope.clip_offset(raw_range.start, Bias::Left)
             ..rope.clip_offset(raw_range.end, Bias::Left);
-        push_syntax_runs(rows, snapshot, &range, rope, node_range, gpui_style);
+        push_syntax_runs(rows, byte_maps, node_range, gpui_style);
+    }
+}
+
+/// Per-display-row lookup table that converts between rope byte
+/// offsets and `RenderedRow.text` byte offsets without paying a
+/// per-character `offset_to_point` / `buffer_to_display` /
+/// `column_to_byte_offset` chain.
+///
+/// Built once at the top of [`crate::editor::Editor::render_visible_rows`]
+/// via [`build_row_byte_maps`] and shared across the syntax and search
+/// overlays. Indexed by `display_row - range.start` to align with the
+/// rendered rows slice.
+#[derive(Debug, Clone)]
+pub(crate) struct RowByteMap {
+    /// Rope byte offset of the first character on this display row.
+    pub buffer_start_offset: usize,
+    /// One past the rope byte offset of the last character that
+    /// belongs to this row (the newline, if present, falls in the gap
+    /// between this row's `buffer_end_offset` and the next row's
+    /// `buffer_start_offset`). Set to `rope.len()` for the trailing
+    /// row.
+    pub buffer_end_offset: usize,
+    /// Byte offsets within `RenderedRow.text` for each character on
+    /// the row. Length = char_count + 1; the trailing entry is
+    /// `row_text.len()` so adjacent entries bracket a character's
+    /// bytes.
+    pub columns: Box<[usize]>,
+    /// Rope byte offsets for each character on the row, parallel to
+    /// `columns`. The trailing entry is `buffer_end_offset`.
+    /// `partition_point(|&o| o <= rope_offset) - 1` returns the
+    /// column index for any rope offset within the row's range.
+    pub rope_offsets: Box<[usize]>,
+}
+
+pub(crate) fn build_row_byte_maps(
+    rows: &[RenderedRow],
+    snapshot: &DisplaySnapshot,
+    range: Range<u32>,
+) -> Vec<RowByteMap> {
+    let rope = snapshot.buffer_snapshot().rope();
+    let rope_len = rope.len();
+    let mut maps = Vec::with_capacity(rows.len());
+    for (idx, row) in rows.iter().enumerate() {
+        let display_row = range.start + idx as u32;
+        let buffer_start_offset = snapshot
+            .display_to_buffer(DisplayPoint::new(display_row, 0))
+            .map(|p| rope.point_to_offset(p))
+            .unwrap_or(rope_len)
+            .min(rope_len);
+        let next_row_start = snapshot
+            .display_to_buffer(DisplayPoint::new(display_row + 1, 0))
+            .map(|p| rope.point_to_offset(p))
+            .unwrap_or(rope_len)
+            .min(rope_len);
+        let row_text: &str = row.text.as_ref();
+        let mut columns: Vec<usize> = row_text.char_indices().map(|(b, _)| b).collect();
+        columns.push(row_text.len());
+        let mut rope_offsets: Vec<usize> = Vec::with_capacity(columns.len());
+        let mut chars = rope.chars_at(buffer_start_offset);
+        let mut offset = buffer_start_offset;
+        rope_offsets.push(offset);
+        // Walk one character per display column; stop at the next
+        // row's start (which may be a newline boundary or the rope
+        // end). The newline char itself is consumed but not assigned
+        // a column.
+        while rope_offsets.len() < columns.len() && offset < next_row_start {
+            let Some(ch) = chars.next() else {
+                break;
+            };
+            let ch_len = ch.len_utf8();
+            offset += ch_len;
+            if ch == '\n' {
+                break;
+            }
+            rope_offsets.push(offset);
+        }
+        // Pad with the row-end offset if the rope ran out before we
+        // filled the column array (defensive: keeps the parallel
+        // structure intact so `partition_point` lookups stay safe).
+        while rope_offsets.len() < columns.len() {
+            rope_offsets.push(offset);
+        }
+        maps.push(RowByteMap {
+            buffer_start_offset,
+            buffer_end_offset: offset,
+            columns: columns.into_boxed_slice(),
+            rope_offsets: rope_offsets.into_boxed_slice(),
+        });
+    }
+    maps
+}
+
+impl RowByteMap {
+    /// Return the column index in `columns`/`rope_offsets` for the
+    /// character at `rope_offset`, assuming `rope_offset` lies within
+    /// `buffer_start_offset..buffer_end_offset`. Out-of-range offsets
+    /// clamp to the nearest endpoint.
+    pub(crate) fn column_for_rope_offset(&self, rope_offset: usize) -> usize {
+        // Find the largest index whose rope offset is <= `rope_offset`.
+        let idx = self.rope_offsets.partition_point(|&o| o <= rope_offset);
+        idx.saturating_sub(1).min(self.columns.len() - 1)
     }
 }
 
@@ -589,56 +636,35 @@ fn visible_byte_range(
 
 fn push_syntax_runs(
     rows: &mut [RenderedRow],
-    snapshot: &DisplaySnapshot,
-    range: &Range<u32>,
-    rope: &stoat_text::Rope,
+    byte_maps: &[RowByteMap],
     node_range: Range<usize>,
     style: gpui::HighlightStyle,
 ) {
-    if node_range.is_empty() {
+    if node_range.is_empty() || byte_maps.is_empty() {
         return;
     }
-    let mut current: Option<(u32, usize, usize)> = None;
-    let mut offset = node_range.start;
-    let mut chars = rope.chars_at(offset);
-    while offset < node_range.end {
-        let Some(ch) = chars.next() else {
+    let first_idx = byte_maps.partition_point(|m| m.buffer_end_offset <= node_range.start);
+    for (row_idx, map) in byte_maps.iter().enumerate().skip(first_idx) {
+        if map.buffer_start_offset >= node_range.end {
             break;
-        };
-        let ch_len = ch.len_utf8();
-        if ch == '\n' {
-            flush_search_run(rows, range.start, current.take(), style);
-            offset += ch_len;
+        }
+        let intersect_start = map.buffer_start_offset.max(node_range.start);
+        let intersect_end = map.buffer_end_offset.min(node_range.end);
+        if intersect_start >= intersect_end {
             continue;
         }
-        let point = rope.offset_to_point(offset);
-        let display = snapshot.buffer_to_display(point);
-        if display.row < range.start || display.row >= range.end {
-            flush_search_run(rows, range.start, current.take(), style);
-            offset += ch_len;
+        let start_col = map.column_for_rope_offset(intersect_start);
+        let end_col = map.column_for_rope_offset(intersect_end.saturating_sub(1)) + 1;
+        if end_col <= start_col {
             continue;
         }
-        let row_idx = (display.row - range.start) as usize;
-        let row_text: &str = rows[row_idx].text.as_ref();
-        let cell_start = column_to_byte_offset(row_text, display.column);
-        let cell_end = column_to_byte_offset(row_text, display.column + 1);
-        if cell_start == cell_end {
-            flush_search_run(rows, range.start, current.take(), style);
-            offset += ch_len;
+        let cell_start = map.columns[start_col];
+        let cell_end = map.columns[end_col.min(map.columns.len() - 1)];
+        if cell_start >= cell_end {
             continue;
         }
-        match current {
-            Some((row, start, end)) if row == display.row && end == cell_start => {
-                current = Some((row, start, cell_end));
-            },
-            _ => {
-                flush_search_run(rows, range.start, current.take(), style);
-                current = Some((display.row, cell_start, cell_end));
-            },
-        }
-        offset += ch_len;
+        rows[row_idx].runs.push((cell_start..cell_end, style));
     }
-    flush_search_run(rows, range.start, current.take(), style);
 }
 
 /// Overlay the move-highlight underline on byte ranges within
@@ -3297,6 +3323,17 @@ mod tests {
             .collect()
     }
 
+    fn search_with_maps(
+        rows: &mut [RenderedRow],
+        snapshot: &DisplaySnapshot,
+        range: Range<u32>,
+        query: &str,
+        color: Hsla,
+    ) {
+        let maps = build_row_byte_maps(rows, snapshot, range);
+        apply_search_overlay(rows, &maps, snapshot, query, color);
+    }
+
     #[test]
     fn search_overlay_paints_single_match() {
         let mut cx = TestAppContext::single();
@@ -3304,7 +3341,7 @@ mod tests {
         let mut rows = build_rendered_rows(&snapshot, 0..1);
         let color = search_overlay_color();
 
-        apply_search_overlay(&mut rows, &snapshot, 0..1, "def", color);
+        search_with_maps(&mut rows, &snapshot, 0..1, "def", color);
 
         assert_eq!(bg_runs(&rows[0].runs), vec![(4..7, Some(color))]);
     }
@@ -3316,7 +3353,7 @@ mod tests {
         let mut rows = build_rendered_rows(&snapshot, 0..1);
         let color = search_overlay_color();
 
-        apply_search_overlay(&mut rows, &snapshot, 0..1, "abc", color);
+        search_with_maps(&mut rows, &snapshot, 0..1, "abc", color);
 
         assert_eq!(
             bg_runs(&rows[0].runs),
@@ -3335,7 +3372,7 @@ mod tests {
         let mut rows = build_rendered_rows(&snapshot, 0..2);
         let color = search_overlay_color();
 
-        apply_search_overlay(&mut rows, &snapshot, 0..2, "abc", color);
+        search_with_maps(&mut rows, &snapshot, 0..2, "abc", color);
 
         assert_eq!(bg_runs(&rows[0].runs), vec![(0..3, Some(color))]);
         assert_eq!(bg_runs(&rows[1].runs), vec![(0..3, Some(color))]);
@@ -3348,7 +3385,7 @@ mod tests {
         let mut rows = build_rendered_rows(&snapshot, 0..2);
         let color = search_overlay_color();
 
-        apply_search_overlay(&mut rows, &snapshot, 0..2, "abc", color);
+        search_with_maps(&mut rows, &snapshot, 0..2, "abc", color);
 
         assert_eq!(bg_runs(&rows[0].runs), vec![(0..3, Some(color))]);
         assert!(bg_runs(&rows[1].runs).is_empty());
@@ -3361,7 +3398,7 @@ mod tests {
         let mut rows = build_rendered_rows(&snapshot, 0..2);
         let color = search_overlay_color();
 
-        apply_search_overlay(&mut rows, &snapshot, 0..2, "^foo", color);
+        search_with_maps(&mut rows, &snapshot, 0..2, "^foo", color);
 
         assert!(bg_runs(&rows[0].runs).is_empty());
         assert_eq!(bg_runs(&rows[1].runs), vec![(0..3, Some(color))]);
@@ -3373,7 +3410,7 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "abc");
         let mut rows = build_rendered_rows(&snapshot, 0..1);
 
-        apply_search_overlay(&mut rows, &snapshot, 0..1, "", search_overlay_color());
+        search_with_maps(&mut rows, &snapshot, 0..1, "", search_overlay_color());
 
         assert!(bg_runs(&rows[0].runs).is_empty());
     }
@@ -3384,7 +3421,7 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "abc");
         let mut rows = build_rendered_rows(&snapshot, 0..1);
 
-        apply_search_overlay(
+        search_with_maps(
             &mut rows,
             &snapshot,
             0..1,
@@ -3401,7 +3438,7 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "abc");
         let mut rows = build_rendered_rows(&snapshot, 0..1);
 
-        apply_search_overlay(&mut rows, &snapshot, 0..1, "^", search_overlay_color());
+        search_with_maps(&mut rows, &snapshot, 0..1, "^", search_overlay_color());
 
         assert!(bg_runs(&rows[0].runs).is_empty());
     }
@@ -3454,7 +3491,8 @@ mod tests {
         let syntax = build_rust_syntax_snapshot("fn main() {}");
         let (_, styles) = install_rust_with_themed_keywords();
 
-        apply_syntax_overlay(&mut rows, &snapshot, 0..1, &syntax, &styles);
+        let maps = build_row_byte_maps(&rows, &snapshot, 0..1);
+        apply_syntax_overlay(&mut rows, &maps, &snapshot, 0..1, &syntax, &styles);
 
         let runs = fg_runs(&rows[0].runs);
         let keyword_run = runs
@@ -3472,7 +3510,8 @@ mod tests {
         let empty = stoat_language::SyntaxSnapshot::default();
         let (_, styles) = install_rust_with_themed_keywords();
 
-        apply_syntax_overlay(&mut rows, &snapshot, 0..1, &empty, &styles);
+        let maps = build_row_byte_maps(&rows, &snapshot, 0..1);
+        apply_syntax_overlay(&mut rows, &maps, &snapshot, 0..1, &empty, &styles);
 
         assert!(rows[0].runs.is_empty());
     }
@@ -3485,7 +3524,8 @@ mod tests {
         let syntax = build_rust_syntax_snapshot("let x = 1;\nfn main() {}");
         let (_, styles) = install_rust_with_themed_keywords();
 
-        apply_syntax_overlay(&mut rows, &snapshot, 0..1, &syntax, &styles);
+        let maps = build_row_byte_maps(&rows, &snapshot, 0..1);
+        apply_syntax_overlay(&mut rows, &maps, &snapshot, 0..1, &syntax, &styles);
 
         let runs = fg_runs(&rows[0].runs);
         assert!(
@@ -3502,7 +3542,8 @@ mod tests {
         let syntax = build_rust_syntax_snapshot("fn a() {}\nfn b() {}");
         let (_, styles) = install_rust_with_themed_keywords();
 
-        apply_syntax_overlay(&mut rows, &snapshot, 0..2, &syntax, &styles);
+        let maps = build_row_byte_maps(&rows, &snapshot, 0..2);
+        apply_syntax_overlay(&mut rows, &maps, &snapshot, 0..2, &syntax, &styles);
 
         let row0 = fg_runs(&rows[0].runs);
         let row1 = fg_runs(&rows[1].runs);

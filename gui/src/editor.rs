@@ -3238,6 +3238,8 @@ impl Editor {
         let end = range.end.min(total_rows);
         let start = range.start.min(end);
         let mut rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
+        let byte_maps =
+            render::build_row_byte_maps(&rows, &display_snapshot, start as u32..end as u32);
 
         render::apply_move_chip_overlay(&mut rows, &display_snapshot, start as u32..end as u32);
 
@@ -3259,6 +3261,7 @@ impl Editor {
                 let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
                 render::apply_syntax_overlay(
                     &mut rows,
+                    &byte_maps,
                     &display_snapshot,
                     start as u32..end as u32,
                     &syntax_snapshot,
@@ -3274,13 +3277,7 @@ impl Editor {
             .filter(|q| !q.is_empty())
         {
             let color = cx.theme().search_match;
-            render::apply_search_overlay(
-                &mut rows,
-                &display_snapshot,
-                start as u32..end as u32,
-                query,
-                color,
-            );
+            render::apply_search_overlay(&mut rows, &byte_maps, &display_snapshot, query, color);
         }
 
         if let Some(labels) = self.pending_goto_word_labels.as_ref() {
