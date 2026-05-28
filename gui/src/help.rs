@@ -356,7 +356,7 @@ impl Render for HelpModal {
             HelpScope::All => SharedString::from("help: all actions"),
         };
 
-        let selection_bg = theme.selection;
+        let selection_bg = theme.modal_selection;
         let list_rows: Vec<gpui::AnyElement> = self
             .filtered
             .iter()
@@ -392,6 +392,7 @@ impl Render for HelpModal {
             .flex()
             .flex_col()
             .size_full()
+            .text_color(theme.popup_text)
             .track_focus(&self.focus_handle)
             .child(div().text_color(theme.ui_modal_help).child(title))
             .child(self.input.clone())
