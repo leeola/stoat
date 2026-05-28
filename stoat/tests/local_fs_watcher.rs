@@ -12,9 +12,10 @@ use stoat::host::{FsEventKind, FsWatchHost, LocalFsWatcher};
 use tempfile::tempdir;
 
 /// Maximum time to wait for a notify event before failing. macOS
-/// FSEvents can take >100 ms to deliver the first event after a watch
-/// is registered; pad generously to keep the test stable on busy CI.
-const POLL_BUDGET: Duration = Duration::from_secs(2);
+/// FSEvents can take well over a second to deliver the first event
+/// after a watch is registered on a freshly-created tempdir; pad
+/// generously to keep the test stable on busy CI.
+const POLL_BUDGET: Duration = Duration::from_secs(8);
 
 /// Polling interval. Short enough that a fast event lands in one or two
 /// ticks; long enough that the test isn't a tight spin loop.
@@ -43,6 +44,11 @@ fn watch_emits_modified_on_write() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
     std::fs::write(&path, b"initial").unwrap();
+    // tempdir on macOS returns /var/folders/...; FSEvents reports the
+    // canonical /private/var/... path so the watch and event paths
+    // must agree. Canonicalize so the backend filter recognises the
+    // file events when they arrive.
+    let path = std::fs::canonicalize(&path).unwrap();
 
     let watcher = LocalFsWatcher::new().unwrap();
     let _token = watcher.watch(&path).unwrap();
@@ -88,6 +94,7 @@ fn unwatch_stops_event_delivery() {
     let dir = tempdir().unwrap();
     let path = dir.path().join("file.txt");
     std::fs::write(&path, b"v1").unwrap();
+    let path = std::fs::canonicalize(&path).unwrap();
 
     let watcher = LocalFsWatcher::new().unwrap();
     let token = watcher.watch(&path).unwrap();
