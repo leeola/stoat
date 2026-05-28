@@ -118,6 +118,11 @@ pub struct ReviewChunk {
     pub buffer_byte_range: Range<usize>,
     pub base_byte_range: Range<usize>,
     pub status: ChunkStatus,
+    /// Reviewer's approval of the chunk, independent of [`Self::status`].
+    /// Lets a reviewer mark a chunk inspected without committing to a
+    /// staging decision -- the v2 review workflow advanced the cursor
+    /// through approval state rather than through `Staged`/`Unstaged`.
+    pub approved: bool,
 }
 
 impl ReviewChunk {
@@ -191,6 +196,10 @@ pub struct ReviewProgress {
     pub skipped: usize,
     pub pending: usize,
     pub total: usize,
+    /// Count of chunks whose `approved` flag is `true`. Independent of
+    /// `staged`/`unstaged`/`skipped`/`pending` -- a chunk can be both
+    /// approved and any status, so this can exceed [`Self::staged`].
+    pub approved: usize,
     /// 1-based index of `cursor.current` within the flattened order, or
     /// `None` if the cursor has not settled on a chunk yet.
     pub current_index: Option<usize>,
@@ -414,6 +423,7 @@ impl ReviewSession {
                         buffer_byte_range,
                         base_byte_range,
                         status: ChunkStatus::Pending,
+                        approved: false,
                     },
                 );
                 self.order.push(id);
@@ -472,6 +482,44 @@ impl ReviewSession {
             if let Some(&status) = statuses.get(&fp) {
                 if chunk.status != status {
                     chunk.status = status;
+                    applied += 1;
+                }
+            }
+        }
+        if applied > 0 {
+            self.version += 1;
+        }
+        applied
+    }
+
+    /// Snapshot approval flags keyed by [`ChunkFingerprint`] for
+    /// workspace persistence. Only chunks with `approved == true`
+    /// appear in the map so the on-disk record stays sparse and
+    /// reloading is a best-effort re-application via
+    /// [`Self::apply_approvals`].
+    pub fn snapshot_approvals(&self) -> HashMap<ChunkFingerprint, bool> {
+        self.chunks
+            .values()
+            .filter(|c| c.approved)
+            .map(|c| (c.fingerprint(), true))
+            .collect()
+    }
+
+    /// Apply persisted approval flags keyed by [`ChunkFingerprint`].
+    /// Chunks whose fingerprint is in `approvals` adopt the saved
+    /// flag; chunks whose fingerprint is absent stay at their current
+    /// value (no automatic reset to `false`, matching how
+    /// [`Self::apply_statuses`] leaves unmatched chunks alone).
+    /// Bumps [`Self::version`] when any chunk changes so derived
+    /// caches refresh. Returns the count of chunks whose flag was
+    /// restored.
+    pub fn apply_approvals(&mut self, approvals: &HashMap<ChunkFingerprint, bool>) -> usize {
+        let mut applied = 0usize;
+        for chunk in self.chunks.values_mut() {
+            let fp = chunk.fingerprint();
+            if let Some(&approved) = approvals.get(&fp) {
+                if chunk.approved != approved {
+                    chunk.approved = approved;
                     applied += 1;
                 }
             }
@@ -807,6 +855,7 @@ impl ReviewSession {
                     buffer_byte_range,
                     base_byte_range,
                     status: ChunkStatus::Pending,
+                    approved: false,
                 },
             );
             new_chunk_ids.push(id);
@@ -931,6 +980,7 @@ impl ReviewSession {
                     buffer_byte_range,
                     base_byte_range,
                     status: ChunkStatus::Pending,
+                    approved: false,
                 },
             );
             new_chunk_ids.push(id);
@@ -1062,6 +1112,9 @@ impl ReviewSession {
                     ChunkStatus::Unstaged => p.unstaged += 1,
                     ChunkStatus::Skipped => p.skipped += 1,
                     ChunkStatus::Pending => p.pending += 1,
+                }
+                if chunk.approved {
+                    p.approved += 1;
                 }
             }
         }
@@ -1300,6 +1353,7 @@ mod tests {
                 skipped: 0,
                 pending: 1,
                 total: 3,
+                approved: 0,
                 current_index: Some(1),
             }
         );
@@ -1716,6 +1770,7 @@ mod tests {
             buffer_byte_range: 0..0,
             base_byte_range: 0..0,
             status: ChunkStatus::Pending,
+            approved: false,
         }
     }
 
@@ -2427,6 +2482,83 @@ mod tests {
         let applied = b.apply_statuses(&snap);
         assert_eq!(applied, 0);
         assert_eq!(b.version, before);
+    }
+
+    #[test]
+    fn snapshot_approvals_drops_unapproved() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        assert_eq!(ids.len(), 2);
+        s.chunks.get_mut(&ids[0]).unwrap().approved = true;
+        let snap = s.snapshot_approvals();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(snap.values().copied().next(), Some(true));
+    }
+
+    #[test]
+    fn apply_approvals_restores_matching_chunks() {
+        let mut a = in_memory_session();
+        let ids = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        a.chunks.get_mut(&ids[0]).unwrap().approved = true;
+        let snap = a.snapshot_approvals();
+
+        let mut b = in_memory_session();
+        let new_ids = add(&mut b, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        let applied = b.apply_approvals(&snap);
+        assert_eq!(applied, 1);
+        assert!(b.chunks[&new_ids[0]].approved);
+    }
+
+    #[test]
+    fn apply_approvals_leaves_unmatched_chunks_alone() {
+        let mut a = in_memory_session();
+        let ids = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        a.chunks.get_mut(&ids[0]).unwrap().approved = true;
+        let snap = a.snapshot_approvals();
+
+        let mut b = in_memory_session();
+        let new_ids = add(&mut b, "x.txt", "a\nb\nc\n", "a\nQ\nc\n");
+        let applied = b.apply_approvals(&snap);
+        assert_eq!(applied, 0);
+        assert!(!b.chunks[&new_ids[0]].approved);
+    }
+
+    #[test]
+    fn apply_approvals_bumps_version_when_any_chunk_updated() {
+        let mut a = in_memory_session();
+        let ids = add(&mut a, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        a.chunks.get_mut(&ids[0]).unwrap().approved = true;
+        let snap = a.snapshot_approvals();
+
+        let mut b = in_memory_session();
+        add(&mut b, "x.txt", "a\nb\nc\n", "a\nB\nc\n");
+        let before = b.version;
+        b.apply_approvals(&snap);
+        assert!(b.version > before);
+    }
+
+    #[test]
+    fn progress_counts_approved_independently() {
+        let mut s = in_memory_session();
+        let ids = add(
+            &mut s,
+            "x.txt",
+            "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n",
+            "A\nb\nc\nd\ne\nf\ng\nh\ni\nj\nK\n",
+        );
+        s.chunks.get_mut(&ids[0]).unwrap().status = ChunkStatus::Staged;
+        s.chunks.get_mut(&ids[0]).unwrap().approved = true;
+        s.chunks.get_mut(&ids[1]).unwrap().approved = true;
+        let p = s.progress();
+        assert_eq!(p.staged, 1);
+        assert_eq!(p.pending, 1);
+        assert_eq!(p.approved, 2);
+        assert_eq!(p.total, 2);
     }
 
     #[test]

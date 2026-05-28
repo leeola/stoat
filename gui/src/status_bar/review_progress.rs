@@ -149,14 +149,15 @@ fn format_badge(
 }
 
 fn format_progress(progress: &InnerProgress) -> String {
-    if progress.skipped > 0 {
-        format!(
-            " {}/{} skip:{} ",
-            progress.staged, progress.total, progress.skipped
-        )
-    } else {
-        format!(" {}/{} ", progress.staged, progress.total)
+    let mut out = format!(" {}/{}", progress.staged, progress.total);
+    if progress.approved > 0 {
+        out.push_str(&format!(" approved:{}", progress.approved));
     }
+    if progress.skipped > 0 {
+        out.push_str(&format!(" skip:{}", progress.skipped));
+    }
+    out.push(' ');
+    out
 }
 
 fn format_apply_result(result: &ReviewApplyResult) -> String {
@@ -335,6 +336,40 @@ mod tests {
             ..Default::default()
         };
         assert_eq!(format_progress(&progress), " 0/3 ");
+    }
+
+    #[test]
+    fn format_label_shows_approved_when_present() {
+        let progress = InnerProgress {
+            staged: 1,
+            total: 4,
+            approved: 2,
+            ..Default::default()
+        };
+        assert_eq!(format_progress(&progress), " 1/4 approved:2 ");
+    }
+
+    #[test]
+    fn format_label_hides_approved_when_zero() {
+        let progress = InnerProgress {
+            staged: 1,
+            total: 4,
+            approved: 0,
+            ..Default::default()
+        };
+        assert_eq!(format_progress(&progress), " 1/4 ");
+    }
+
+    #[test]
+    fn format_label_shows_approved_before_skip() {
+        let progress = InnerProgress {
+            staged: 1,
+            total: 5,
+            approved: 3,
+            skipped: 1,
+            ..Default::default()
+        };
+        assert_eq!(format_progress(&progress), " 1/5 approved:3 skip:1 ");
     }
 
     #[test]
