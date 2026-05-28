@@ -442,7 +442,7 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
                     return None;
                 }
                 let file = session.files.get(c.file_index)?;
-                Some((*id, chunk_to_unified_diff(file, c, &workdir)))
+                Some((*id, chunk_to_unified_diff(file, c, &workdir, false)))
             })
             .collect();
         (staged, workdir)

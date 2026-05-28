@@ -58,8 +58,8 @@ use stoat::{
     pane::{Axis, Direction},
     rebase::{ActiveRebase, RebaseEntry, RebasePause},
     review::ReviewFileInput,
-    review_apply::{chunk_to_unified_diff, remove_chunks_from_buffer},
-    review_session::{ChunkStatus, ReviewSource},
+    review_apply::remove_chunks_from_buffer,
+    review_session::{build_chunk_patch, ChunkStatus, ReviewSource},
 };
 use stoat_action::ActionKind;
 
@@ -4415,8 +4415,7 @@ impl Workspace {
                     if chunk.status != ChunkStatus::Staged {
                         return None;
                     }
-                    let file = inner.files.get(chunk.file_index)?;
-                    Some(chunk_to_unified_diff(file, chunk, &workdir))
+                    build_chunk_patch(inner, [*id], false)
                 })
                 .collect();
             Some((workdir, patches))

@@ -22,7 +22,17 @@ const NO_NEWLINE_MARKER: &str = "\\ No newline at end of file\n";
 /// lacks a trailing newline and the chunk covers the file's final
 /// line, `\ No newline at end of file` is emitted on the affected
 /// side(s) per the gnu diff convention.
-pub fn chunk_to_unified_diff(file: &ReviewFile, chunk: &ReviewChunk, workdir: &Path) -> String {
+///
+/// When `reverse` is set, the base (LHS) and buffer (RHS) sides trade
+/// places: the hunk's from/to ranges swap, `-`/`+` line prefixes flip,
+/// and a forward file creation is emitted as a deletion (and vice
+/// versa). Applying the reversed patch undoes the forward one.
+pub fn chunk_to_unified_diff(
+    file: &ReviewFile,
+    chunk: &ReviewChunk,
+    workdir: &Path,
+    reverse: bool,
+) -> String {
     let rel = file.path.strip_prefix(workdir).unwrap_or(&file.path);
     let rel_display = rel.display();
 
@@ -40,25 +50,45 @@ pub fn chunk_to_unified_diff(file: &ReviewFile, chunk: &ReviewChunk, workdir: &P
     let base_is_new_file = file.base_text.is_empty();
     let buffer_is_deleted_file = file.buffer_text.is_empty();
 
+    // `reverse` swaps the base (LHS) and buffer (RHS) roles so the patch
+    // undoes the forward one: from/to ranges trade places, a creation
+    // becomes a deletion, and the per-row prefixes flip below.
+    let (from_start, from_count, to_start, to_count) = if reverse {
+        (buffer_start, buffer_count, base_start, base_count)
+    } else {
+        (base_start, base_count, buffer_start, buffer_count)
+    };
+    let from_is_dev_null = if reverse {
+        buffer_is_deleted_file
+    } else {
+        base_is_new_file
+    };
+    let to_is_dev_null = if reverse {
+        base_is_new_file
+    } else {
+        buffer_is_deleted_file
+    };
+    let (left_prefix, right_prefix) = if reverse { ('+', '-') } else { ('-', '+') };
+
     let mut out = String::new();
     out.push_str(&format!("diff --git a/{rel_display} b/{rel_display}\n"));
-    if base_is_new_file {
+    if from_is_dev_null {
         out.push_str("new file mode 100644\n");
-    } else if buffer_is_deleted_file {
+    } else if to_is_dev_null {
         out.push_str("deleted file mode 100644\n");
     }
-    if base_is_new_file {
+    if from_is_dev_null {
         out.push_str("--- /dev/null\n");
     } else {
         out.push_str(&format!("--- a/{rel_display}\n"));
     }
-    if buffer_is_deleted_file {
+    if to_is_dev_null {
         out.push_str("+++ /dev/null\n");
     } else {
         out.push_str(&format!("+++ b/{rel_display}\n"));
     }
     out.push_str(&format!(
-        "@@ -{base_start},{base_count} +{buffer_start},{buffer_count} @@\n"
+        "@@ -{from_start},{from_count} +{to_start},{to_count} @@\n"
     ));
 
     for (i, row) in chunk.hunk.rows.iter().enumerate() {
@@ -67,7 +97,8 @@ pub fn chunk_to_unified_diff(file: &ReviewFile, chunk: &ReviewChunk, workdir: &P
 
         match row {
             ReviewRow::Context { left, right } => {
-                emit_prefixed(&mut out, ' ', &right.text);
+                let text = if reverse { &left.text } else { &right.text };
+                emit_prefixed(&mut out, ' ', text);
                 let left_at_eof = base_no_nl && is_last_left && touches_base_eof(left, base_total);
                 let right_at_eof =
                     buffer_no_nl && is_last_right && touches_buffer_eof(right, buffer_total);
@@ -75,41 +106,35 @@ pub fn chunk_to_unified_diff(file: &ReviewFile, chunk: &ReviewChunk, workdir: &P
                     out.push_str(NO_NEWLINE_MARKER);
                 }
             },
-            ReviewRow::Changed {
-                left: Some(l),
-                right: None,
-            } => {
-                emit_prefixed(&mut out, '-', &l.text);
-                if base_no_nl && is_last_left && touches_base_eof(l, base_total) {
-                    out.push_str(NO_NEWLINE_MARKER);
+            ReviewRow::Changed { left, right } => {
+                let emit_left = |out: &mut String| {
+                    if let Some(l) = left {
+                        emit_prefixed(out, left_prefix, &l.text);
+                        if base_no_nl && is_last_left && touches_base_eof(l, base_total) {
+                            out.push_str(NO_NEWLINE_MARKER);
+                        }
+                    }
+                };
+                let emit_right = |out: &mut String| {
+                    if let Some(r) = right {
+                        emit_prefixed(out, right_prefix, &r.text);
+                        if buffer_no_nl && is_last_right && touches_buffer_eof(r, buffer_total) {
+                            out.push_str(NO_NEWLINE_MARKER);
+                        }
+                    }
+                };
+
+                // Removed side first in both directions: forward emits the
+                // base (`-`) then the buffer (`+`); reverse flips both the
+                // prefixes and the order so the buffer line is the removal.
+                if reverse {
+                    emit_right(&mut out);
+                    emit_left(&mut out);
+                } else {
+                    emit_left(&mut out);
+                    emit_right(&mut out);
                 }
             },
-            ReviewRow::Changed {
-                left: None,
-                right: Some(r),
-            } => {
-                emit_prefixed(&mut out, '+', &r.text);
-                if buffer_no_nl && is_last_right && touches_buffer_eof(r, buffer_total) {
-                    out.push_str(NO_NEWLINE_MARKER);
-                }
-            },
-            ReviewRow::Changed {
-                left: Some(l),
-                right: Some(r),
-            } => {
-                emit_prefixed(&mut out, '-', &l.text);
-                if base_no_nl && is_last_left && touches_base_eof(l, base_total) {
-                    out.push_str(NO_NEWLINE_MARKER);
-                }
-                emit_prefixed(&mut out, '+', &r.text);
-                if buffer_no_nl && is_last_right && touches_buffer_eof(r, buffer_total) {
-                    out.push_str(NO_NEWLINE_MARKER);
-                }
-            },
-            ReviewRow::Changed {
-                left: None,
-                right: None,
-            } => {},
         }
     }
 
@@ -217,7 +242,7 @@ mod tests {
         let id = session.order[0];
         let chunk = &session.chunks[&id];
         let file = &session.files[chunk.file_index];
-        chunk_to_unified_diff(file, chunk, Path::new("/work"))
+        chunk_to_unified_diff(file, chunk, Path::new("/work"), false)
     }
 
     #[test]
@@ -324,7 +349,7 @@ mod tests {
         );
         let chunk = &session.chunks[&session.order[0]];
         let file = &session.files[chunk.file_index];
-        let patch = chunk_to_unified_diff(file, chunk, Path::new("/work"));
+        let patch = chunk_to_unified_diff(file, chunk, Path::new("/work"), false);
         assert!(
             patch.starts_with(
                 "diff --git a/sub/a.txt b/sub/a.txt\n--- a/sub/a.txt\n+++ b/sub/a.txt\n"
@@ -399,7 +424,7 @@ mod tests {
         let id = session.order[0];
         let chunk = &session.chunks[&id];
         let file = &session.files[chunk.file_index];
-        let patch = chunk_to_unified_diff(file, chunk, &workdir);
+        let patch = chunk_to_unified_diff(file, chunk, &workdir, false);
 
         let host_repo = LocalGit::new().discover(&workdir).unwrap();
         host_repo

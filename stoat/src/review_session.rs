@@ -5,6 +5,7 @@ use crate::{
         extract_review_hunks_changeset, line_byte_offsets, split_lines, MoveProvenance,
         ReviewFileInput, ReviewHunk, ReviewRow,
     },
+    review_apply,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -1300,6 +1301,44 @@ fn hunk_line_ranges(hunk: &ReviewHunk) -> (Range<u32>, Range<u32>) {
     (base, buffer)
 }
 
+/// Builds a single unified-diff patch covering `chunks`, suitable for
+/// `git apply --cached`. With `reverse` set, the emitted patch is the
+/// inverse of the forward one, so feeding it back through the same
+/// apply path unstages what the forward patch staged.
+///
+/// Returns `None` when `session`'s source carries no working directory
+/// (the in-memory and agent-edit sources), when `chunks` is empty, or
+/// when none of the ids resolve to a chunk with a backing file. Ids
+/// that do not resolve are skipped rather than aborting the patch.
+pub fn build_chunk_patch(
+    session: &ReviewSession,
+    chunks: impl IntoIterator<Item = ReviewChunkId>,
+    reverse: bool,
+) -> Option<String> {
+    let workdir = match &session.source {
+        ReviewSource::WorkingTree { workdir }
+        | ReviewSource::WorkspaceWatch { workdir }
+        | ReviewSource::Commit { workdir, .. }
+        | ReviewSource::CommitRange { workdir, .. } => workdir.as_path(),
+        ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => return None,
+    };
+
+    let mut patch = String::new();
+    for id in chunks {
+        let Some(chunk) = session.chunks.get(&id) else {
+            continue;
+        };
+        let Some(file) = session.files.get(chunk.file_index) else {
+            continue;
+        };
+        patch.push_str(&review_apply::chunk_to_unified_diff(
+            file, chunk, workdir, reverse,
+        ));
+    }
+
+    (!patch.is_empty()).then_some(patch)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1323,6 +1362,77 @@ mod tests {
             Arc::new(base.to_string()),
             Arc::new(buffer.to_string()),
         )
+    }
+
+    fn working_tree(workdir: &str) -> ReviewSession {
+        ReviewSession::new(ReviewSource::WorkingTree {
+            workdir: PathBuf::from(workdir),
+        })
+    }
+
+    #[test]
+    fn build_chunk_patch_reverse_inverts_forward() {
+        let mut s = working_tree("/work");
+        let id = add(&mut s, "a.txt", "a\nb\nc\n", "a\nX\nY\nc\n")[0];
+
+        let fwd = build_chunk_patch(&s, [id], false).expect("forward patch");
+        let rev = build_chunk_patch(&s, [id], true).expect("reverse patch");
+
+        let body = |patch: &str, prefix: char| -> Vec<String> {
+            patch
+                .lines()
+                .filter(|l| l.starts_with(prefix) && !l.starts_with("---") && !l.starts_with("+++"))
+                .map(|l| l[1..].to_string())
+                .collect()
+        };
+        // The reverse patch is the exact inverse of the forward patch -- its
+        // removals are the forward's additions and vice versa -- so the two
+        // applied in sequence leave the index unchanged.
+        assert_eq!(body(&fwd, '+'), body(&rev, '-'));
+        assert_eq!(body(&fwd, '-'), body(&rev, '+'));
+
+        let ranges = |patch: &str| -> (String, String) {
+            let h = patch
+                .lines()
+                .find(|l| l.starts_with("@@"))
+                .expect("hunk header");
+            let mid = h.trim_start_matches("@@ ").trim_end_matches(" @@");
+            let mut p = mid.split(' ');
+            (p.next().unwrap().to_string(), p.next().unwrap().to_string())
+        };
+        let (fwd_from, fwd_to) = ranges(&fwd);
+        let (rev_from, rev_to) = ranges(&rev);
+        assert_eq!(
+            fwd_from.trim_start_matches('-'),
+            rev_to.trim_start_matches('+')
+        );
+        assert_eq!(
+            fwd_to.trim_start_matches('+'),
+            rev_from.trim_start_matches('-')
+        );
+    }
+
+    #[test]
+    fn build_chunk_patch_without_workdir_source_is_none() {
+        let mut s = in_memory_session();
+        let id = add(&mut s, "a.txt", "a\nb\n", "a\nB\n")[0];
+        assert_eq!(build_chunk_patch(&s, [id], false), None);
+    }
+
+    #[test]
+    fn build_chunk_patch_concatenates_chunks_and_skips_empty() {
+        let mut s = working_tree("/work");
+        let a = add(&mut s, "a.txt", "a\nb\n", "a\nB\n")[0];
+        let b = add(&mut s, "b.txt", "x\ny\n", "x\nY\n")[0];
+
+        let combined = build_chunk_patch(&s, [a, b], false).expect("combined patch");
+        assert!(combined.contains("diff --git a/a.txt b/a.txt"));
+        assert!(combined.contains("diff --git a/b.txt b/b.txt"));
+
+        assert_eq!(
+            build_chunk_patch(&s, Vec::<ReviewChunkId>::new(), false),
+            None
+        );
     }
 
     #[test]
