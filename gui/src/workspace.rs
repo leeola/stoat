@@ -787,7 +787,6 @@ impl Workspace {
         let cwd = std::env::current_dir().ok();
         for (index, path) in paths.iter().enumerate() {
             let absolute = absolute_path(path, cwd.as_deref());
-            let editor = self.build_editor_for_path(&absolute, cx);
             let pane_id = if index == 0 {
                 self.pane_tree.read(cx).focus()
             } else {
@@ -800,6 +799,26 @@ impl Workspace {
                 .pane(pane_id)
                 .expect("pane tree returns its own pane id")
                 .clone();
+            // BufferRegistry dedupes the buffer; dedupe the pane item too
+            // so repeat-opens activate the existing tab instead of
+            // stacking duplicates over the same buffer.
+            let existing = pane
+                .read(cx)
+                .items()
+                .iter()
+                .enumerate()
+                .find_map(|(idx, item)| {
+                    let editor = item.to_any_view().downcast::<Editor>().ok()?;
+                    let path = editor.read(cx).file_path()?.to_path_buf();
+                    (path == absolute).then_some(idx)
+                });
+            if let Some(existing) = existing {
+                pane.update(cx, |p, cx| {
+                    p.activate(existing, cx);
+                });
+                continue;
+            }
+            let editor = self.build_editor_for_path(&absolute, cx);
             pane.update(cx, |p, cx| {
                 let index = p.add_item(Box::new(editor), cx);
                 p.activate(index, cx);
@@ -9904,8 +9923,21 @@ mod tests {
         });
 
         assert_eq!(watcher.watched_paths().len(), 1);
-        ws.read_with(vcx, |w, _| {
+        ws.read_with(vcx, |w, cx| {
             assert_eq!(w.fs_watch_tokens.len(), 1);
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .read(cx);
+            assert_eq!(
+                pane.len(),
+                1,
+                "second open_paths must not stack a duplicate tab"
+            );
+            assert_eq!(pane.active_index(), 0);
         });
     }
 
