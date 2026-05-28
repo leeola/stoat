@@ -47,17 +47,34 @@ fn watch_emits_modified_on_write() {
     let watcher = LocalFsWatcher::new().unwrap();
     let _token = watcher.watch(&path).unwrap();
 
-    // Some backends (FSEvents) need a beat to register the watch before
-    // mutations are observed; without this the write may slip in before
-    // the watcher is armed.
-    sleep(Duration::from_millis(50));
-    std::fs::write(&path, b"changed").unwrap();
-
+    // FSEvents on macOS arms the watch asynchronously: there is a window
+    // between `watch` returning and the backend actually subscribing to
+    // file-system change events for the path. A single write immediately
+    // after `watch` can slip into that window and produce no event at
+    // all. Wait, write, and if nothing surfaces within a short tick keep
+    // writing -- once the watch is armed, subsequent writes deliver and
+    // the deadline drain returns a Modified event.
+    sleep(Duration::from_millis(250));
     let deadline = Instant::now() + POLL_BUDGET;
-    let events = drain_events_until(&watcher, deadline, |evs| {
-        evs.iter()
+    let mut suffix = 0u32;
+    let events = loop {
+        suffix += 1;
+        std::fs::write(&path, format!("changed-{suffix}").as_bytes()).unwrap();
+        let tick_deadline = Instant::now() + Duration::from_millis(200);
+        let events = drain_events_until(&watcher, tick_deadline.min(deadline), |evs| {
+            evs.iter()
+                .any(|e| e.path.ends_with("file.txt") && e.kind == FsEventKind::Modified)
+        });
+        if events
+            .iter()
             .any(|e| e.path.ends_with("file.txt") && e.kind == FsEventKind::Modified)
-    });
+        {
+            break events;
+        }
+        if Instant::now() >= deadline {
+            break events;
+        }
+    };
     assert!(
         events
             .iter()
@@ -74,7 +91,7 @@ fn unwatch_stops_event_delivery() {
 
     let watcher = LocalFsWatcher::new().unwrap();
     let token = watcher.watch(&path).unwrap();
-    sleep(Duration::from_millis(50));
+    sleep(Duration::from_millis(250));
     watcher.unwatch(token);
     // Drain any events that landed before unwatch took effect.
     while watcher.try_recv().is_some() {}
