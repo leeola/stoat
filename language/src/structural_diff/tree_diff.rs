@@ -35,7 +35,10 @@ use crate::{parse, Language};
 use std::{
     collections::HashMap,
     ops::Range,
-    sync::{atomic::AtomicBool, Arc},
+    sync::{
+        atomic::{AtomicBool, Ordering},
+        Arc,
+    },
 };
 
 /// Run the full structural-diff pipeline against two source strings.
@@ -93,7 +96,7 @@ pub(crate) fn diff_with_language_capped(
             lhs_changes: &mut prepared.lhs_changes,
             rhs_changes: &mut prepared.rhs_changes,
         }];
-        find_moves_changeset(&mut input)
+        find_moves_changeset(&mut input, cancel)
     };
 
     let no_buffer: [Option<&BufferRef>; 1] = [None];
@@ -109,6 +112,7 @@ pub(crate) fn diff_with_language_capped(
         &records,
         &no_buffer,
         &view_borrowed,
+        cancel,
     ))
 }
 
@@ -167,7 +171,7 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput>) -> Vec<DiffResult> {
                 });
             }
         }
-        find_moves_changeset(&mut move_inputs)
+        find_moves_changeset(&mut move_inputs, None)
     };
 
     // Build per-file index map (slot index -> structural index in cs_records' tuples).
@@ -216,7 +220,7 @@ pub fn diff_changeset(inputs: Vec<FileDiffInput>) -> Vec<DiffResult> {
         .map(|(slot_idx, slot)| match slot {
             Slot::Structural(p) => {
                 let my_struct_idx = structural_idx[slot_idx].expect("structural slot");
-                finalize_per_file(p, my_struct_idx, &cs_records, &buffer_refs, &views)
+                finalize_per_file(p, my_struct_idx, &cs_records, &buffer_refs, &views, None)
             },
             Slot::LineDiff { lhs_text, rhs_text } => line_diff::diff_lines(lhs_text, rhs_text),
         })
@@ -295,8 +299,8 @@ fn prepare_per_file(
         SearchOutcome::ExceededGraphLimit => true,
     };
 
-    fix_all_sliders(&lhs_arena, lhs_root, &mut preprocess.lhs_changes);
-    fix_all_sliders(&rhs_arena, rhs_root, &mut preprocess.rhs_changes);
+    fix_all_sliders(&lhs_arena, lhs_root, &mut preprocess.lhs_changes, cancel);
+    fix_all_sliders(&rhs_arena, rhs_root, &mut preprocess.rhs_changes, cancel);
 
     Some(PreparedFile {
         buffer: BufferRef {
@@ -326,6 +330,7 @@ fn finalize_per_file(
     cs_records: &[ChangesetMoveRecord],
     buffer_refs: &[Option<&BufferRef>],
     views: &[PreparedFileView<'_>],
+    cancel: Option<&AtomicBool>,
 ) -> DiffResult {
     let lhs_meta = build_move_metadata_changeset(cs_records, my_idx, Side::Lhs, buffer_refs, views);
     let rhs_meta = build_move_metadata_changeset(cs_records, my_idx, Side::Rhs, buffer_refs, views);
@@ -337,6 +342,7 @@ fn finalize_per_file(
         &prepared.lhs_changes,
         &lhs_meta,
         Side::Lhs,
+        cancel,
         &mut changes,
     );
     collect_changes(
@@ -345,12 +351,14 @@ fn finalize_per_file(
         &prepared.rhs_changes,
         &rhs_meta,
         Side::Rhs,
+        cancel,
         &mut changes,
     );
     changes.sort_by_key(|c| (c.byte_range.start, c.byte_range.end));
     pair_adjacent_replacements(&mut changes);
 
-    let quality = if prepared.dijkstra_exceeded {
+    let canceled = cancel.is_some_and(|c| c.load(Ordering::Relaxed));
+    let quality = if prepared.dijkstra_exceeded || canceled {
         DiffQuality::Degraded
     } else {
         DiffQuality::Structural
@@ -374,6 +382,7 @@ fn collect_changes(
     changes: &ChangeMap,
     metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
     side: Side,
+    cancel: Option<&AtomicBool>,
     out: &mut Vec<DiffChange>,
 ) {
     let mut current: Option<(DiffChangeKind, Option<Arc<MoveMetadata>>, Range<usize>)> = None;
@@ -382,6 +391,7 @@ fn collect_changes(
         root,
         changes,
         metadata,
+        cancel,
         &mut |kind, meta, byte_range| match &mut current {
             Some((cur_kind, cur_meta, run))
                 if *cur_kind == kind
@@ -431,8 +441,12 @@ fn walk_emit_atoms(
     id: SyntaxId,
     changes: &ChangeMap,
     metadata: &HashMap<SyntaxId, Arc<MoveMetadata>>,
+    cancel: Option<&AtomicBool>,
     callback: &mut impl FnMut(DiffChangeKind, Option<Arc<MoveMetadata>>, Range<usize>),
 ) {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return;
+    }
     match arena.get(id) {
         Syntax::Atom(atom) => {
             if atom.byte_range.start >= atom.byte_range.end {
@@ -456,7 +470,7 @@ fn walk_emit_atoms(
         },
         Syntax::List(list) => {
             for child in &list.children {
-                walk_emit_atoms(arena, *child, changes, metadata, callback);
+                walk_emit_atoms(arena, *child, changes, metadata, cancel, callback);
             }
         },
     }
@@ -949,20 +963,19 @@ mod tests {
 
     #[test]
     fn cancellation_flag_returns_preprocessing_only_result() {
-        // Setting the cancel flag before the first vertex expansion
-        // should not prevent a result; Dijkstra bails on the first poll
-        // and we fall through to preprocessing + moves. The output may
-        // be coarser, but it is still a valid DiffResult.
+        // Setting the cancel flag still produces a valid `DiffResult`:
+        // Dijkstra bails on its next poll, the post-Dijkstra stages
+        // bail on their per-subtree poll, and `finalize_per_file`
+        // folds the cancel state into `DiffQuality::Degraded`. The
+        // diff content may be coarser, but the call returns rather
+        // than aborts.
         let lang = rust_lang();
         let cancel = AtomicBool::new(true);
         let lhs = "fn a() { call(arg1, arg2, arg3); }";
         let rhs = "fn b() { call(arg1, arg2, arg3); }";
         let result = diff_with_language_cancellable(&lang, lhs, rhs, Some(&cancel))
             .expect("parse succeeds even on cancel");
-        assert_eq!(result.quality, DiffQuality::Structural);
-        // The structural-diff pipeline completed; we got changes even
-        // though Dijkstra bailed immediately.
-        assert!(!result.changes.is_empty());
+        assert_eq!(result.quality, DiffQuality::Degraded);
     }
 
     #[test]

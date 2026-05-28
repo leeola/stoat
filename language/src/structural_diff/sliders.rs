@@ -43,18 +43,26 @@ use super::{
     arena::{Syntax, SyntaxArena, SyntaxId},
     unchanged::{ChangeKind, ChangeMap},
 };
+use std::sync::atomic::{AtomicBool, Ordering};
 
 const MAX_PASSES: usize = 4;
 
 /// Run slider correction over the entire tree rooted at `root`,
 /// updating `changes` in place. Loops until a pass leaves the change
-/// map unchanged or after `MAX_PASSES` iterations.
-pub fn fix_all_sliders(arena: &SyntaxArena, root: SyntaxId, changes: &mut ChangeMap) {
+/// map unchanged or after `MAX_PASSES` iterations. The `cancel` flag
+/// is polled once per `fix_sliders_recursive` entry; on cancel the
+/// recursion returns early and the caller observes the partial state.
+pub fn fix_all_sliders(
+    arena: &SyntaxArena,
+    root: SyntaxId,
+    changes: &mut ChangeMap,
+    cancel: Option<&AtomicBool>,
+) {
     let mut dirty = true;
     let mut pass = 0;
     while dirty && pass < MAX_PASSES {
         dirty = false;
-        fix_sliders_recursive(arena, root, changes, &mut dirty);
+        fix_sliders_recursive(arena, root, changes, &mut dirty, cancel);
         pass += 1;
     }
 }
@@ -64,11 +72,15 @@ fn fix_sliders_recursive(
     id: SyntaxId,
     changes: &mut ChangeMap,
     dirty: &mut bool,
+    cancel: Option<&AtomicBool>,
 ) {
+    if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+        return;
+    }
     if let Syntax::List(list) = arena.get(id) {
         slide_within_children(arena, &list.children, changes, dirty);
         for child in &list.children {
-            fix_sliders_recursive(arena, *child, changes, dirty);
+            fix_sliders_recursive(arena, *child, changes, dirty, cancel);
         }
     }
 }
@@ -203,7 +215,7 @@ mod tests {
         changes.mark(children[3], ChangeKind::Pending); // B
         changes.mark(children[4], ChangeKind::Unchanged); // C
 
-        fix_all_sliders(&arena, root, &mut changes);
+        fix_all_sliders(&arena, root, &mut changes, None);
 
         // After sliding left: prev (B at index 1) and last in region
         // (B at index 3) have matching content_ids, so they swap.
@@ -236,7 +248,7 @@ mod tests {
         changes.mark(d, ChangeKind::Pending);
         changes.mark(e, ChangeKind::Unchanged);
 
-        fix_all_sliders(&arena, root, &mut changes);
+        fix_all_sliders(&arena, root, &mut changes, None);
 
         // No content_id match means no slide.
         assert_eq!(changes.get(b), ChangeKind::Pending);
@@ -255,7 +267,7 @@ mod tests {
         for c in children {
             changes.mark(c, ChangeKind::Unchanged);
         }
-        fix_all_sliders(&arena, root, &mut changes);
+        fix_all_sliders(&arena, root, &mut changes, None);
         for c in children {
             assert_eq!(changes.get(c), ChangeKind::Unchanged);
         }

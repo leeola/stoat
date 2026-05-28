@@ -39,7 +39,10 @@ use super::{
     content_id::ContentId,
     unchanged::{ChangeKind, ChangeMap},
 };
-use std::collections::{HashMap, HashSet};
+use std::{
+    collections::{HashMap, HashSet},
+    sync::atomic::{AtomicBool, Ordering},
+};
 
 fn precompute_leaf_counts(arena: &SyntaxArena) -> Vec<usize> {
     let mut counts = vec![0usize; arena.len()];
@@ -134,6 +137,7 @@ pub fn find_moves(
     rhs_arena: &SyntaxArena,
     lhs_changes: &mut ChangeMap,
     rhs_changes: &mut ChangeMap,
+    cancel: Option<&AtomicBool>,
 ) -> Vec<MoveRecord> {
     let mut input = [FileMoveInput {
         lhs_arena,
@@ -141,7 +145,7 @@ pub fn find_moves(
         lhs_changes,
         rhs_changes,
     }];
-    find_moves_changeset(&mut input)
+    find_moves_changeset(&mut input, cancel)
         .into_iter()
         .map(|r| MoveRecord {
             rhs_target: r.rhs_target.1,
@@ -163,7 +167,10 @@ pub fn find_moves(
 /// (scans full arena including Unchanged copies, applies
 /// [`MIN_LEAVES`] / [`MAX_AMBIGUITY`] / [`is_trivial`] gates,
 /// structural-preservation skip).
-pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMoveRecord> {
+pub fn find_moves_changeset(
+    files: &mut [FileMoveInput<'_>],
+    cancel: Option<&AtomicBool>,
+) -> Vec<ChangesetMoveRecord> {
     let n = files.len();
 
     let mut lhs_parents_per: Vec<Vec<Option<SyntaxId>>> = Vec::with_capacity(n);
@@ -235,6 +242,9 @@ pub fn find_moves_changeset(files: &mut [FileMoveInput<'_>]) -> Vec<ChangesetMov
     let mut records: Vec<ChangesetMoveRecord> = Vec::new();
 
     for (cid, _, _) in &shared {
+        if cancel.is_some_and(|c| c.load(Ordering::Relaxed)) {
+            break;
+        }
         let lhs_cand = lhs_by_cid.get(cid).expect("cid in shared set");
         let rhs_cand = rhs_by_cid.get(cid).expect("cid in shared set");
         if lhs_cand.len() > MAX_AMBIGUITY || rhs_cand.len() > MAX_AMBIGUITY {
@@ -567,6 +577,7 @@ mod tests {
             &rhs_arena,
             &mut preprocess.lhs_changes,
             &mut preprocess.rhs_changes,
+            None,
         );
         (
             lhs_arena, rhs_arena, lhs_root, rhs_root, preprocess, records,
@@ -950,7 +961,7 @@ mod tests {
                     rhs_changes: &mut pre_b.rhs_changes,
                 },
             ];
-            find_moves_changeset(&mut input)
+            find_moves_changeset(&mut input, None)
         };
 
         let cross: Vec<&ChangesetMoveRecord> = cs_records
@@ -1021,7 +1032,7 @@ mod tests {
                     rhs_changes: &mut pre.rhs_changes,
                 })
                 .collect();
-            find_moves_changeset(&mut inputs)
+            find_moves_changeset(&mut inputs, None)
         };
 
         (lhs_arenas, rhs_arenas, records)
@@ -1201,6 +1212,7 @@ mod tests {
             &rhs_arena,
             &mut pre_wrapper.lhs_changes,
             &mut pre_wrapper.rhs_changes,
+            None,
         );
 
         let mut pre_cs = mark_unchanged(&lhs_arena, lhs_root, &rhs_arena, rhs_root);
@@ -1211,7 +1223,7 @@ mod tests {
                 lhs_changes: &mut pre_cs.lhs_changes,
                 rhs_changes: &mut pre_cs.rhs_changes,
             }];
-            find_moves_changeset(&mut input)
+            find_moves_changeset(&mut input, None)
         };
 
         let cs_as_record: Vec<MoveRecord> = cs_records
