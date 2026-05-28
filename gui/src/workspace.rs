@@ -36,9 +36,10 @@ use crate::{
     theme::{ActiveTheme, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
 };
 use gpui::{
-    deferred, div, px, size, App, AppContext, Bounds, Context, DismissEvent, Entity, EventEmitter,
-    FocusHandle, InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds, WindowOptions,
+    deferred, div, px, size, App, AppContext, BorrowAppContext, Bounds, Context, DismissEvent,
+    Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowOptions,
 };
 use std::{
     cell::RefCell,
@@ -2141,6 +2142,7 @@ impl Workspace {
             ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
             ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
+            ActionKind::ToggleTabBar => self.dispatch_toggle_tab_bar(cx),
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
             ActionKind::ProjectTreeSelectNext => {
                 self.update_project_tree(cx, ProjectTree::select_next)
@@ -3083,6 +3085,23 @@ impl Workspace {
         };
         let new_visible = !editor.read(cx).minimap_visible();
         editor.update(cx, |ed, cx| ed.set_minimap_visible(new_visible, cx));
+    }
+
+    /// Flip the per-pane tab bar visibility via the `Settings` global.
+    /// Reads the resolved `ui_pane_show_tab_bar` (defaulting to `true`
+    /// when unset) and writes the negation back. Each `Pane` observes
+    /// the global, so every pane repaints on the next frame.
+    fn dispatch_toggle_tab_bar(&mut self, cx: &mut Context<'_, Self>) {
+        let current = cx
+            .try_global::<crate::settings::Settings>()
+            .and_then(|s| s.resolved.ui_pane_show_tab_bar)
+            .unwrap_or(true);
+        if !cx.has_global::<crate::settings::Settings>() {
+            cx.set_global(crate::settings::Settings::default());
+        }
+        cx.update_global::<crate::settings::Settings, _>(|s, _| {
+            s.resolved.ui_pane_show_tab_bar = Some(!current);
+        });
     }
 
     /// Open a new gpui window hosting a clone of the current
@@ -13659,6 +13678,38 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleBlame);
         vcx.run_until_parked();
         editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+    }
+
+    #[test]
+    fn dispatch_toggle_tab_bar_cycles_settings_global() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        vcx.update(|_, cx| cx.set_global(crate::settings::Settings::default()));
+
+        let before = vcx.read(|cx| {
+            cx.global::<crate::settings::Settings>()
+                .resolved
+                .ui_pane_show_tab_bar
+        });
+        assert_eq!(before, None);
+
+        dispatch(&ws, vcx, stoat_action::ToggleTabBar);
+        vcx.run_until_parked();
+        let after_first = vcx.read(|cx| {
+            cx.global::<crate::settings::Settings>()
+                .resolved
+                .ui_pane_show_tab_bar
+        });
+        assert_eq!(after_first, Some(false));
+
+        dispatch(&ws, vcx, stoat_action::ToggleTabBar);
+        vcx.run_until_parked();
+        let after_second = vcx.read(|cx| {
+            cx.global::<crate::settings::Settings>()
+                .resolved
+                .ui_pane_show_tab_bar
+        });
+        assert_eq!(after_second, Some(true));
     }
 
     #[test]

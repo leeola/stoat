@@ -44,8 +44,8 @@ use crate::{
             ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
             SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleBlame, ToggleComments, ToggleDiffHunkPanel,
-            ToggleMinimap, TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank,
-            YankMainToClipboard, YankToClipboard,
+            ToggleMinimap, ToggleTabBar, TriggerCompletion, TrimSelections, Undo,
+            UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -486,6 +486,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
     add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
+    add(ToggleTabBar::DEF, |_| Ok(Box::new(ToggleTabBar)));
     add(ToggleDiffHunkPanel::DEF, |_| {
         Ok(Box::new(ToggleDiffHunkPanel))
     });
@@ -1050,11 +1051,12 @@ mod tests {
         // + 1 ShellInputSubmit (palette-invisible: dismisses the active ShellInputModal).
         // + 3 ToggleBlame / ToggleDiffHunkPanel / OpenGitStatus for the space_git submode.
         // + 1 ToggleMinimap for the space_workspace submode.
+        // + 1 ToggleTabBar for the per-pane tab bar.
         // + 1 ToggleProjectTree (opens the project file tree in a dock).
         // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
         //   routed to the focused project tree dock.
         // + 1 OpenReviewWatch (workspace-watch review session).
-        assert_eq!(all().count(), 305);
+        assert_eq!(all().count(), 306);
     }
 
     #[test]

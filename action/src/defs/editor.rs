@@ -231,6 +231,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleTabBarDef,
+    ToggleTabBar,
+    "ToggleTabBar",
+    ActionKind::ToggleTabBar,
+    "toggle pane tab bar",
+    "Toggle the per-pane tab bar that lists every pane item along the top of the pane. Toggling off hides the bar for every pane; the active item still renders below. Persists via the `ui.pane.show_tab_bar` setting on the runtime `Settings` global -- session only, restart reverts to the stcfg value.",
+    ActionPriority::Rare
+);
+
+define_action!(
     MoveLeftDef,
     MoveLeft,
     "MoveLeft",
