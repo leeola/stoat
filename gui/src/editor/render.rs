@@ -1,7 +1,7 @@
 use crate::{diagnostics::DiagnosticSet, git::blame};
 use gpui::{
     div, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, Pixels, SharedString,
-    StrikethroughStyle, StyledText, UnderlineStyle,
+    StrikethroughStyle, Styled, StyledText, UnderlineStyle,
 };
 use lsp_types::DiagnosticSeverity;
 use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
@@ -1367,7 +1367,7 @@ pub(crate) struct BlamePaint<'a> {
     pub now_seconds: i64,
 }
 
-struct RowSuffix {
+pub(crate) struct RowSuffix {
     text: String,
     runs: Vec<(Range<usize>, gpui::HighlightStyle)>,
 }
@@ -1405,44 +1405,36 @@ pub(crate) fn render_row_with_gutter(
     display_row: u32,
     paint: &GutterPaint<'_>,
 ) -> Div {
+    let (prefix, body, suffix) = build_gutter_row_pieces(row, display_row, paint);
+    div()
+        .flex()
+        .flex_row()
+        .child(StyledText::new(SharedString::from(prefix.text)).with_highlights(prefix.runs))
+        .child(StyledText::new(body.text).with_highlights(body.runs))
+        .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix.runs))
+}
+
+/// Build the three render pieces of a gutter row -- prefix (line
+/// number, diagnostic glyph, diff marker, blame strip), the body
+/// `RenderedRow` passed through unchanged, and the suffix (review
+/// move chip). Splitting this out of [`render_row_with_gutter`]
+/// lets tests observe the body byte buffer to confirm the row's
+/// `SharedString` and runs move through without reallocation.
+pub(crate) fn build_gutter_row_pieces(
+    row: RenderedRow,
+    display_row: u32,
+    paint: &GutterPaint<'_>,
+) -> (GutterPrefix, RenderedRow, RowSuffix) {
     let prefix = build_gutter_prefix(display_row, paint);
     let buffer_row = paint
         .display_snapshot
         .display_to_buffer(DisplayPoint::new(display_row, 0))
         .map(|p| p.row);
     let suffix = build_row_suffix(buffer_row, paint);
-    let RenderedRow {
-        text: row_text,
-        runs: mut row_runs,
-    } = row;
-
-    let prefix_len = prefix.text.len();
-    let row_len = row_text.len();
-    let mut text = String::with_capacity(prefix_len + row_len + suffix.text.len());
-    text.push_str(&prefix.text);
-    text.push_str(&row_text);
-    text.push_str(&suffix.text);
-
-    let mut runs: Vec<(Range<usize>, gpui::HighlightStyle)> = prefix
-        .runs
-        .into_iter()
-        .map(|(range, style)| (range.start..range.end, style))
-        .collect();
-    for (range, style) in row_runs.drain(..) {
-        runs.push(((range.start + prefix_len)..(range.end + prefix_len), style));
-    }
-    let suffix_offset = prefix_len + row_len;
-    for (range, style) in suffix.runs {
-        runs.push((
-            (range.start + suffix_offset)..(range.end + suffix_offset),
-            style,
-        ));
-    }
-
-    div().child(StyledText::new(SharedString::from(text)).with_highlights(runs))
+    (prefix, row, suffix)
 }
 
-struct GutterPrefix {
+pub(crate) struct GutterPrefix {
     text: String,
     runs: Vec<(Range<usize>, gpui::HighlightStyle)>,
 }
@@ -1915,6 +1907,46 @@ mod tests {
         assert_eq!(map.get(&0), Some(&DiagnosticSeverity::ERROR));
         assert_eq!(map.get(&1), None);
         assert_eq!(map.get(&2), Some(&DiagnosticSeverity::HINT));
+    }
+
+    #[test]
+    fn build_gutter_row_pieces_moves_body_text_through_without_reallocating() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "hello\nworld");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot, false);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            blame: None,
+            metrics,
+            line_number_color: rgb(0x808080).into(),
+        };
+        let original_text = SharedString::from("hello".to_string());
+        let original_ptr = original_text.as_ref().as_ptr();
+        let runs = vec![(
+            0..5,
+            gpui::HighlightStyle {
+                color: Some(rgb(0x00ff00).into()),
+                ..Default::default()
+            },
+        )];
+        let row = RenderedRow {
+            text: original_text,
+            runs: runs.clone(),
+        };
+
+        let (_prefix, body, _suffix) = build_gutter_row_pieces(row, 0, &paint);
+
+        assert_eq!(
+            body.text.as_ref().as_ptr(),
+            original_ptr,
+            "body SharedString must move through without reallocating",
+        );
+        assert_eq!(body.runs, runs);
     }
 
     #[test]
