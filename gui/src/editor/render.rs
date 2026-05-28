@@ -441,27 +441,29 @@ pub(crate) fn apply_search_overlay(
     rows: &mut [RenderedRow],
     byte_maps: &[RowByteMap],
     snapshot: &DisplaySnapshot,
-    query: &str,
+    range: Range<u32>,
+    regex: &regex::Regex,
     highlight_color: Hsla,
 ) {
-    if query.is_empty() || rows.is_empty() {
+    if rows.is_empty() {
         return;
     }
-    let Ok(regex) = stoat::action_handlers::search::compile_search_regex(query) else {
-        return;
-    };
     let buffer_snapshot = snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
-    let text = rope.to_string();
+    let visible = visible_byte_range(snapshot, &range, rope.len());
+    if visible.is_empty() {
+        return;
+    }
+    let slice: String = rope.chunks_in_range(visible.clone()).collect();
     let style = gpui::HighlightStyle {
         background_color: Some(highlight_color),
         ..Default::default()
     };
-    for m in regex.find_iter(&text) {
+    for m in regex.find_iter(&slice) {
         if m.start() == m.end() {
             continue;
         }
-        let match_range = m.start()..m.end();
+        let match_range = (visible.start + m.start())..(visible.start + m.end());
         push_syntax_runs(rows, byte_maps, match_range, style);
     }
 }
@@ -3443,8 +3445,14 @@ mod tests {
         query: &str,
         color: Hsla,
     ) {
-        let maps = build_row_byte_maps(rows, snapshot, range);
-        apply_search_overlay(rows, &maps, snapshot, query, color);
+        if query.is_empty() {
+            return;
+        }
+        let Ok(regex) = stoat::action_handlers::search::compile_search_regex(query) else {
+            return;
+        };
+        let maps = build_row_byte_maps(rows, snapshot, range.clone());
+        apply_search_overlay(rows, &maps, snapshot, range, &regex, color);
     }
 
     #[test]

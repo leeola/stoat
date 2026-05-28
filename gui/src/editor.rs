@@ -143,6 +143,11 @@ pub struct Editor {
     review_session: Option<Entity<crate::review_session::ReviewSession>>,
     review_file_index: Option<usize>,
     search_state: Option<search::SearchState>,
+    /// Cached compiled regex for the active search query. Keyed by
+    /// the query string so scrolling against a stable query reuses
+    /// the prior compilation instead of recompiling per frame.
+    /// Populated lazily by [`Self::compiled_search_regex`].
+    cached_search_regex: Option<(String, regex::Regex)>,
     workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
@@ -375,6 +380,7 @@ impl Editor {
             review_session: None,
             review_file_index: None,
             search_state: None,
+            cached_search_regex: None,
             workspace: None,
             text_region_bounds: None,
             hover_position: None,
@@ -2589,6 +2595,31 @@ impl Editor {
         cx.notify();
     }
 
+    /// Return a compiled regex for `query`, reusing the cached
+    /// compilation when `query` matches the cached key. Recompiles
+    /// and caches when the query changes; returns `None` if the
+    /// query is empty or fails to compile.
+    pub(crate) fn compiled_search_regex(&mut self, query: &str) -> Option<&regex::Regex> {
+        if query.is_empty() {
+            self.cached_search_regex = None;
+            return None;
+        }
+        let cache_hit = self
+            .cached_search_regex
+            .as_ref()
+            .is_some_and(|(cached, _)| cached == query);
+        if !cache_hit {
+            match stoat::action_handlers::search::compile_search_regex(query) {
+                Ok(regex) => self.cached_search_regex = Some((query.to_string(), regex)),
+                Err(_) => {
+                    self.cached_search_regex = None;
+                    return None;
+                },
+            }
+        }
+        self.cached_search_regex.as_ref().map(|(_, r)| r)
+    }
+
     /// Attach an [`Entity<ReviewSession>`] so review-aware UI -- the
     /// status-bar progress badge and (in sibling items) the review
     /// ItemView -- can read the session's progress and chunk state.
@@ -3270,14 +3301,23 @@ impl Editor {
             }
         }
 
-        if let Some(query) = self
+        let search_query: Option<String> = self
             .search_state
             .as_ref()
-            .map(|s| s.query())
-            .filter(|q| !q.is_empty())
-        {
+            .map(|s| s.query().to_string())
+            .filter(|q| !q.is_empty());
+        if let Some(query) = search_query {
             let color = cx.theme().search_match;
-            render::apply_search_overlay(&mut rows, &byte_maps, &display_snapshot, query, color);
+            if let Some(regex) = self.compiled_search_regex(&query) {
+                render::apply_search_overlay(
+                    &mut rows,
+                    &byte_maps,
+                    &display_snapshot,
+                    start as u32..end as u32,
+                    regex,
+                    color,
+                );
+            }
         }
 
         if let Some(labels) = self.pending_goto_word_labels.as_ref() {
