@@ -1048,44 +1048,33 @@ pub(crate) fn apply_selection_paint(
         text,
         runs: syntax_runs,
     } = row;
-    let mut text_owned: String = text.as_ref().to_string();
 
     let active_line = paint.active_line_row == Some(display_row);
-    if active_line && text_owned.is_empty() {
-        text_owned.push(' ');
-    }
-
     let empty: Vec<Range<usize>> = Vec::new();
     let selection_spans = paint
         .row_selection_spans
         .get(&display_row)
         .unwrap_or(&empty);
+    let cursor_offsets: &[usize] = paint
+        .row_cursors
+        .get(&display_row)
+        .map(Vec::as_slice)
+        .unwrap_or(&[]);
 
-    let mut cursor_ranges: Vec<Range<usize>> = Vec::new();
-    if let Some(offsets) = paint.row_cursors.get(&display_row) {
-        for &offset in offsets {
-            if offset < text_owned.len() {
-                let after = text_owned[offset..]
-                    .chars()
-                    .next()
-                    .map(|c| c.len_utf8())
-                    .unwrap_or(0);
-                cursor_ranges.push(offset..offset + after);
-            } else {
-                let appended_start = text_owned.len();
-                text_owned.push(' ');
-                cursor_ranges.push(appended_start..text_owned.len());
-            }
-        }
-    }
-
-    let text_len = text_owned.len();
-    if text_len == 0 {
+    // Fast path: nothing overlays this row, return the input unchanged.
+    // `SharedString` is moved through without cloning the underlying
+    // `Arc<str>` and gpui's `compute_runs` fills any gaps in
+    // `syntax_runs` with the default text style at paint time.
+    if !active_line && selection_spans.is_empty() && cursor_offsets.is_empty() {
         return RenderedRow {
-            text: SharedString::from(text_owned),
+            text,
             runs: syntax_runs,
         };
     }
+
+    let text_len_borrowed = text.as_ref().len();
+    let needs_pad = (active_line && text_len_borrowed == 0)
+        || cursor_offsets.iter().any(|&o| o >= text_len_borrowed);
 
     let active_line_style = active_line.then(|| gpui::HighlightStyle {
         background_color: Some(active_line_color),
@@ -1101,10 +1090,84 @@ pub(crate) fn apply_selection_paint(
         ..Default::default()
     };
 
+    if !needs_pad {
+        // Slow path without allocation: build the merged sweep against
+        // the borrowed text and return the original `SharedString`.
+        let mut cursor_ranges: Vec<Range<usize>> = Vec::with_capacity(cursor_offsets.len());
+        for &offset in cursor_offsets {
+            let after = text.as_ref()[offset..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            cursor_ranges.push(offset..offset + after);
+        }
+        let merged = merge_selection_runs(
+            text_len_borrowed,
+            &syntax_runs,
+            active_line_style,
+            selection_spans,
+            selection_style,
+            &cursor_ranges,
+            cursor_style,
+        );
+        return RenderedRow { text, runs: merged };
+    }
+
+    // Padding required: materialize a fresh `String` so we can append
+    // a space for the active-line-on-empty-row case or for end-of-line
+    // cursors.
+    let mut text_owned: String = text.as_ref().to_string();
+    if active_line && text_owned.is_empty() {
+        text_owned.push(' ');
+    }
+    let mut cursor_ranges: Vec<Range<usize>> = Vec::with_capacity(cursor_offsets.len());
+    for &offset in cursor_offsets {
+        if offset < text_owned.len() {
+            let after = text_owned[offset..]
+                .chars()
+                .next()
+                .map(|c| c.len_utf8())
+                .unwrap_or(0);
+            cursor_ranges.push(offset..offset + after);
+        } else {
+            let appended_start = text_owned.len();
+            text_owned.push(' ');
+            cursor_ranges.push(appended_start..text_owned.len());
+        }
+    }
+    let text_len = text_owned.len();
+    let merged = merge_selection_runs(
+        text_len,
+        &syntax_runs,
+        active_line_style,
+        selection_spans,
+        selection_style,
+        &cursor_ranges,
+        cursor_style,
+    );
+    RenderedRow {
+        text: SharedString::from(text_owned),
+        runs: merged,
+    }
+}
+
+fn merge_selection_runs(
+    text_len: usize,
+    syntax_runs: &[(Range<usize>, gpui::HighlightStyle)],
+    active_line_style: Option<gpui::HighlightStyle>,
+    selection_spans: &[Range<usize>],
+    selection_style: gpui::HighlightStyle,
+    cursor_ranges: &[Range<usize>],
+    cursor_style: gpui::HighlightStyle,
+) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+    if text_len == 0 {
+        return syntax_runs.to_vec();
+    }
     let mut breakpoints: BTreeSet<usize> = BTreeSet::new();
     breakpoints.insert(0);
     breakpoints.insert(text_len);
-    for (r, _) in &syntax_runs {
+    for (r, _) in syntax_runs {
         breakpoints.insert(r.start.min(text_len));
         breakpoints.insert(r.end.min(text_len));
     }
@@ -1112,7 +1175,7 @@ pub(crate) fn apply_selection_paint(
         breakpoints.insert(r.start.min(text_len));
         breakpoints.insert(r.end.min(text_len));
     }
-    for r in &cursor_ranges {
+    for r in cursor_ranges {
         breakpoints.insert(r.start);
         breakpoints.insert(r.end);
     }
@@ -1145,11 +1208,7 @@ pub(crate) fn apply_selection_paint(
         }
         merged.push((a..b, style));
     }
-
-    RenderedRow {
-        text: SharedString::from(text_owned),
-        runs: merged,
-    }
+    merged
 }
 
 /// Convert a fractional `scroll_position.y` (in display rows) to the
@@ -2689,14 +2748,36 @@ mod tests {
             active_line_color,
         );
         assert_eq!(painted.text.as_ref(), "hello");
-        assert_merged_paint_valid(&painted);
-        for (_, style) in &painted.runs {
-            assert_ne!(
-                style.background_color,
-                Some(active_line_color),
-                "active_line_color must not apply on other rows",
-            );
-        }
+        // No overlay touches row 0, so the fast path returns the input
+        // runs (empty) unchanged. gpui's compute_runs fills the gap
+        // with the default text style at paint time.
+        assert!(painted.runs.is_empty());
+    }
+
+    #[test]
+    fn apply_selection_paint_fast_path_preserves_shared_string_pointer() {
+        let paint = SelectionPaint::default();
+        let original = SharedString::from("hello");
+        let original_ptr = original.as_ref().as_ptr();
+        let row = RenderedRow {
+            text: original,
+            runs: Vec::new(),
+        };
+        let painted = apply_selection_paint(
+            row,
+            0,
+            &paint,
+            hsla(0.0, 0.0, 0.0, 0.0),
+            rgb(0x000000).into(),
+            rgb(0xffffff).into(),
+            rgb(0x000000).into(),
+        );
+        assert_eq!(
+            painted.text.as_ref().as_ptr(),
+            original_ptr,
+            "fast path must move the SharedString through without reallocating",
+        );
+        assert!(painted.runs.is_empty());
     }
 
     #[test]
