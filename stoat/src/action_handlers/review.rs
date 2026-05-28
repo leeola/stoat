@@ -342,6 +342,71 @@ pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Stage or unstage the chunk under the review cursor directly against
+/// the git index, bypassing the batch [`review_apply_staged`] flow.
+/// With `force_unstage` the chunk is always reversed back out of the
+/// index; otherwise a currently-`Staged` chunk is unstaged and any
+/// other chunk is staged. The chunk's session status follows: `Staged`
+/// on stage, `Pending` on unstage. No-op unless the source is a working
+/// tree, a chunk is under the cursor, and the index apply succeeds.
+pub(super) fn git_stage_hunk(stoat: &mut Stoat, force_unstage: bool) -> UpdateEffect {
+    use crate::{
+        host::GitApplyError,
+        review_session::{build_chunk_patch, ChunkStatus},
+    };
+
+    let (workdir, id, patch, next_status) = {
+        let ws = stoat.active_workspace();
+        let Some(session) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let workdir = match &session.source {
+            ReviewSource::WorkingTree { workdir } => workdir.clone(),
+            _ => {
+                tracing::warn!("GitStageHunk: only WorkingTree sources stage to the index");
+                return UpdateEffect::None;
+            },
+        };
+        let Some(id) = session.cursor.current else {
+            return UpdateEffect::None;
+        };
+        let Some(chunk) = session.chunks.get(&id) else {
+            return UpdateEffect::None;
+        };
+        let unstage = force_unstage || chunk.status == ChunkStatus::Staged;
+        let next_status = if unstage {
+            ChunkStatus::Pending
+        } else {
+            ChunkStatus::Staged
+        };
+        let Some(patch) = build_chunk_patch(session, [id], unstage) else {
+            return UpdateEffect::None;
+        };
+        (workdir, id, patch, next_status)
+    };
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        tracing::warn!("GitStageHunk: no git repo at {}", workdir.display());
+        return UpdateEffect::None;
+    };
+    if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(&patch) {
+        tracing::warn!("GitStageHunk: apply_to_index failed: {reason}");
+        return UpdateEffect::None;
+    }
+
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    session.set_status(id, next_status);
+    let editor_id = session.view_editor;
+    let progress = session.progress();
+    sync_review_view_and_scroll(ws, editor_id, None);
+    emit_review_progress_badge(ws, &progress);
+
+    UpdateEffect::Redraw
+}
+
 /// Insert or update the [`crate::badge::BadgeSource::Review`] badge to
 /// match `progress`. Inserts a [`crate::badge::BadgeState::Complete`]
 /// badge with running counters when the review is complete; removes any

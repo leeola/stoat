@@ -184,6 +184,32 @@ define_action!(
 );
 
 define_action!(
+    GitToggleStageHunkDef,
+    GitToggleStageHunk,
+    "GitToggleStageHunk",
+    ActionKind::GitToggleStageHunk,
+    "stage or unstage the current hunk",
+    "Toggle the git-index staged state of the chunk under the review \
+     cursor. Stages it and marks the chunk Staged when it is not yet \
+     staged; otherwise reverses the patch back out of the index and \
+     marks the chunk Pending. Acts on the index directly, independent \
+     of the batch apply flow.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    GitUnstageHunkDef,
+    GitUnstageHunk,
+    "GitUnstageHunk",
+    ActionKind::GitUnstageHunk,
+    "unstage the current hunk",
+    "Reverse the chunk under the review cursor back out of the git \
+     index regardless of its current state, marking the chunk Pending. \
+     The explicit-unstage counterpart to GitToggleStageHunk.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewRefreshDef,
     ReviewRefresh,
     "ReviewRefresh",

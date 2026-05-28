@@ -87,12 +87,12 @@ use crate::{
             SetRebaseOpReword, SetRebaseOpSquash,
         },
         review::{
-            CloseReview, JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource,
-            JumpToPrevMoveSource, OpenReview, OpenReviewCommit, OpenReviewCommitRange,
-            OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk,
-            ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh,
-            ReviewRemoveSelected, ReviewResetProgress, ReviewSkipChunk, ReviewStageChunk,
-            ReviewToggleApproval, ReviewToggleStage, ReviewUnstageChunk,
+            CloseReview, GitToggleStageHunk, GitUnstageHunk, JumpToMoveSource, JumpToMoveTarget,
+            JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview, OpenReviewCommit,
+            OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged,
+            ReviewApproveHunk, ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk,
+            ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress, ReviewSkipChunk,
+            ReviewStageChunk, ReviewToggleApproval, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -214,6 +214,10 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ReviewResetProgress::DEF, |_| {
         Ok(Box::new(ReviewResetProgress))
     });
+    add(GitToggleStageHunk::DEF, |_| {
+        Ok(Box::new(GitToggleStageHunk))
+    });
+    add(GitUnstageHunk::DEF, |_| Ok(Box::new(GitUnstageHunk)));
     add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
     add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
     add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
@@ -841,6 +845,8 @@ mod tests {
         "ReviewToggleApproval",
         "ReviewNextUnreviewedHunk",
         "ReviewResetProgress",
+        "GitToggleStageHunk",
+        "GitUnstageHunk",
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
@@ -1100,7 +1106,8 @@ mod tests {
         // + 2 ReviewApproveHunk / ReviewToggleApproval.
         // + 1 ReviewNextUnreviewedHunk.
         // + 1 ReviewResetProgress.
-        assert_eq!(all().count(), 312);
+        // + 2 GitToggleStageHunk / GitUnstageHunk.
+        assert_eq!(all().count(), 314);
     }
 
     #[test]

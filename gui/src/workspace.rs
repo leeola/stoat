@@ -2176,6 +2176,8 @@ impl Workspace {
             ActionKind::ReviewToggleApproval => self.dispatch_review_approve(false, cx),
             ActionKind::ReviewNextUnreviewedHunk => self.dispatch_review_next_unreviewed(cx),
             ActionKind::ReviewResetProgress => self.dispatch_review_reset_progress(cx),
+            ActionKind::GitToggleStageHunk => self.dispatch_git_stage_hunk(false, cx),
+            ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
             ActionKind::ReviewRefresh => self.dispatch_review_refresh(cx),
@@ -4388,6 +4390,61 @@ impl Workspace {
         };
         let len = buffer.read(cx).read(|b| b.rope().len());
         buffer.update(cx, |b, cx| b.edit(0..len, &new_buffer, cx));
+    }
+
+    /// Stage or unstage the chunk under the review cursor directly
+    /// against the git index, bypassing the batch apply flow. With
+    /// `force_unstage` the chunk is always reversed out of the index;
+    /// otherwise a currently-`Staged` chunk is unstaged and any other
+    /// chunk is staged. On a successful index apply the chunk's status
+    /// follows (`Staged` on stage, `Pending` on unstage). No-op unless
+    /// the source is a working tree and a chunk is under the cursor.
+    fn dispatch_git_stage_hunk(&mut self, force_unstage: bool, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+
+        let (workdir, id, patch, next_status) = {
+            let inner = session.read(cx).inner();
+            let workdir = match &inner.source {
+                ReviewSource::WorkingTree { workdir } => workdir.clone(),
+                _ => {
+                    tracing::warn!("GitStageHunk: only WorkingTree sources stage to the index");
+                    return;
+                },
+            };
+            let Some(id) = inner.cursor.current else {
+                return;
+            };
+            let Some(chunk) = inner.chunks.get(&id) else {
+                return;
+            };
+            let unstage = force_unstage || chunk.status == ChunkStatus::Staged;
+            let next_status = if unstage {
+                ChunkStatus::Pending
+            } else {
+                ChunkStatus::Staged
+            };
+            let Some(patch) = build_chunk_patch(inner, [id], unstage) else {
+                return;
+            };
+            (workdir, id, patch, next_status)
+        };
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("GitStageHunk: no git repo at {}", workdir.display());
+            return;
+        };
+        if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(&patch) {
+            tracing::warn!("GitStageHunk: apply_to_index failed: {reason}");
+            return;
+        }
+
+        session.update(cx, |session, cx| {
+            session.set_status(id, next_status, cx);
+        });
     }
 
     fn dispatch_review_apply_staged(&mut self, cx: &mut Context<'_, Self>) {
@@ -11221,6 +11278,66 @@ mod tests {
                 s.set_status(id, ChunkStatus::Staged, cx);
             }
         });
+    }
+
+    #[test]
+    fn dispatch_git_toggle_stage_hunk_stages_then_unstages_via_index() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_git_host_global(vcx, git.clone());
+        let (session, _, _) = new_two_chunk_working_tree_session(vcx, "/tmp/repo", "a.txt");
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::GitToggleStageHunk);
+        vcx.run_until_parked();
+        let staged = git.applied_patches(Path::new("/tmp/repo"));
+        assert_eq!(staged.len(), 1, "stage applies the forward patch once");
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Staged)
+        );
+
+        dispatch(&ws, vcx, stoat_action::GitToggleStageHunk);
+        vcx.run_until_parked();
+        let patches = git.applied_patches(Path::new("/tmp/repo"));
+        assert_eq!(patches.len(), 2, "second toggle applies the reversed patch");
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Pending)
+        );
+
+        // The unstage patch is the exact inverse of the stage patch.
+        let body = |patch: &str, prefix: char| -> Vec<String> {
+            patch
+                .lines()
+                .filter(|l| l.starts_with(prefix) && !l.starts_with("---") && !l.starts_with("+++"))
+                .map(|l| l[1..].to_string())
+                .collect()
+        };
+        assert_eq!(body(&patches[0], '+'), body(&patches[1], '-'));
+        assert_eq!(body(&patches[0], '-'), body(&patches[1], '+'));
+    }
+
+    #[test]
+    fn dispatch_git_unstage_hunk_forces_unstage_on_pending_chunk() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_git_host_global(vcx, git.clone());
+        let (session, _, _) = new_two_chunk_working_tree_session(vcx, "/tmp/repo", "a.txt");
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::GitUnstageHunk);
+        vcx.run_until_parked();
+        assert_eq!(git.applied_patches(Path::new("/tmp/repo")).len(), 1);
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::Pending),
+            "GitUnstageHunk forces the unstage path and never stages a pending chunk",
+        );
     }
 
     #[test]
