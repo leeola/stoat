@@ -1527,33 +1527,6 @@ pub fn build_chunk_patch(
     (!patch.is_empty()).then_some(patch)
 }
 
-/// Builds a one-hunk unified-diff patch covering the single changed row
-/// at 0-based index `row` within `id`'s chunk, suitable for `git apply
-/// --cached`. The line-granular counterpart of [`build_chunk_patch`]:
-/// stages (or, with `reverse`, unstages) just that one line.
-///
-/// Returns `None` when `session`'s source carries no working directory
-/// (the in-memory and agent-edit sources), when `id` or `row` does not
-/// resolve, or when the addressed row is a context row (nothing to
-/// stage).
-pub fn build_line_patch(
-    session: &ReviewSession,
-    id: ReviewChunkId,
-    row: u32,
-    reverse: bool,
-) -> Option<String> {
-    let workdir = match &session.source {
-        ReviewSource::WorkingTree { workdir }
-        | ReviewSource::WorkspaceWatch { workdir }
-        | ReviewSource::Commit { workdir, .. }
-        | ReviewSource::CommitRange { workdir, .. } => workdir.as_path(),
-        ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => return None,
-    };
-    let chunk = session.chunks.get(&id)?;
-    let file = session.files.get(chunk.file_index)?;
-    review_apply::row_to_unified_diff(file, chunk, row, workdir, reverse)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1658,8 +1631,8 @@ mod tests {
 
     /// Commit `base`, set the working tree to `buffer`, build a review
     /// session, stage the single row chosen by `pick` via
-    /// [`build_line_patch`] against a real libgit2 index, and return the
-    /// resulting staged blob content.
+    /// [`ReviewSession::plan_line_stage`] against a real libgit2 index, and
+    /// return the resulting staged blob content.
     fn stage_line_to_index(base: &str, buffer: &str, pick: impl Fn(&[ReviewRow]) -> u32) -> String {
         use crate::host::{GitHost, LocalGit};
         use git2::{Repository, Signature};
@@ -1689,12 +1662,17 @@ mod tests {
         );
         let id = session.order[0];
         let row = pick(&session.chunks[&id].hunk.rows);
-        let patch = build_line_patch(&session, id, row, false).expect("line patch");
+        let plan = session.plan_line_stage(id, row).expect("line stage plan");
 
         let host_repo = LocalGit::new().discover(&workdir).unwrap();
-        host_repo
-            .apply_to_index(&patch)
-            .expect("single-line patch must apply to libgit2");
+        for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            host_repo
+                .apply_to_index(patch)
+                .expect("single-line patch must apply to libgit2");
+        }
 
         let mut index = repo.index().unwrap();
         index.read(true).unwrap();
@@ -1704,26 +1682,26 @@ mod tests {
     }
 
     #[test]
-    fn build_line_patch_modification_stages_one_line() {
+    fn single_line_stage_modification() {
         let index =
             stage_line_to_index("a\nb\nOLD\nd\ne\n", "a\nb\nNEW\nd\ne\n", first_changed_row);
         assert_eq!(index, "a\nb\nNEW\nd\ne\n");
     }
 
     #[test]
-    fn build_line_patch_addition_stages_one_line() {
+    fn single_line_stage_addition() {
         let index = stage_line_to_index("a\nb\nc\n", "a\nb\nADD\nc\n", first_changed_row);
         assert_eq!(index, "a\nb\nADD\nc\n");
     }
 
     #[test]
-    fn build_line_patch_deletion_stages_one_line() {
+    fn single_line_stage_deletion() {
         let index = stage_line_to_index("a\nb\nDEL\nc\n", "a\nb\nc\n", first_changed_row);
         assert_eq!(index, "a\nb\nc\n");
     }
 
     #[test]
-    fn build_line_patch_stages_only_selected_of_several() {
+    fn single_line_stage_selects_one_of_several() {
         let index = stage_line_to_index(
             "a\nOLD1\nOLD2\nOLD3\nz\n",
             "a\nNEW1\nNEW2\nNEW3\nz\n",
@@ -1819,13 +1797,13 @@ mod tests {
     }
 
     #[test]
-    fn build_line_patch_no_trailing_newline_last_line() {
+    fn single_line_stage_no_trailing_newline() {
         let index = stage_line_to_index("a\nb\nc", "a\nb\nC", first_changed_row);
         assert_eq!(index, "a\nb\nC");
     }
 
     #[test]
-    fn build_line_patch_none_for_context_row_and_out_of_range() {
+    fn plan_line_stage_none_for_context_or_out_of_range() {
         let mut s = working_tree("/work");
         let id = add(&mut s, "a.txt", "a\nb\nc\n", "a\nB\nc\n")[0];
         let rows = &s.chunks[&id].hunk.rows;
@@ -1833,18 +1811,18 @@ mod tests {
             .iter()
             .position(|r| matches!(r, ReviewRow::Context { .. }))
         {
-            assert_eq!(build_line_patch(&s, id, ctx as u32, false), None);
+            assert!(s.plan_line_stage(id, ctx as u32).is_none());
         }
         let out = rows.len() as u32 + 5;
-        assert_eq!(build_line_patch(&s, id, out, false), None);
+        assert!(s.plan_line_stage(id, out).is_none());
     }
 
     #[test]
-    fn build_line_patch_none_for_non_workdir_source() {
+    fn plan_line_stage_none_for_non_workdir_source() {
         let mut s = in_memory_session();
         let id = add(&mut s, "a.txt", "a\nb\n", "a\nB\n")[0];
         let row = first_changed_row(&s.chunks[&id].hunk.rows);
-        assert_eq!(build_line_patch(&s, id, row, false), None);
+        assert!(s.plan_line_stage(id, row).is_none());
     }
 
     #[test]
