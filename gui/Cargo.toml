@@ -41,3 +41,6 @@ stoat_text = { path = "../text" }
 time.workspace = true
 tokio = { workspace = true, features = ["sync"] }
 tracing.workspace = true
+
+[dev-dependencies]
+stoat_gui = { path = ".", features = ["test-support"] }

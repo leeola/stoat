@@ -6384,6 +6384,7 @@ dependencies = [
  "stoat",
  "stoat_action",
  "stoat_config",
+ "stoat_gui",
  "stoat_host",
  "stoat_language",
  "stoat_scheduler",
