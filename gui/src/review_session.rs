@@ -3,7 +3,8 @@ use std::collections::BTreeSet;
 use stoat::{
     review::ReviewFileInput,
     review_session::{
-        ChunkStatus, ReviewChunkId, ReviewProgress, ReviewSession as InnerSession, ReviewViewState,
+        ChunkStatus, ReviewChunkId, ReviewProgress, ReviewSession as InnerSession, ReviewSource,
+        ReviewViewState,
     },
 };
 
@@ -104,6 +105,23 @@ impl ReviewSession {
     /// [`ReviewSessionEvent::Refreshed`].
     pub fn refresh_files(&mut self, new_files: Vec<ReviewFileInput>, cx: &mut Context<'_, Self>) {
         self.inner.refresh_files(new_files);
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::Refreshed);
+        cx.notify();
+    }
+
+    /// Swap the inner session to `new_source` with `new_files`,
+    /// preserving review decisions across the swap (see
+    /// [`InnerSession::cycle_source`]). Emits
+    /// [`ReviewSessionEvent::Changed`] + [`ReviewSessionEvent::Refreshed`]
+    /// so the review editor rebuilds its blocks against the new file set.
+    pub fn cycle_source(
+        &mut self,
+        new_source: ReviewSource,
+        new_files: Vec<ReviewFileInput>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner.cycle_source(new_source, new_files);
         cx.emit(ReviewSessionEvent::Changed);
         cx.emit(ReviewSessionEvent::Refreshed);
         cx.notify();

@@ -490,6 +490,7 @@ on key {
         C -> RebaseContinue();
         r -> ReviewRefresh();
         R -> ReviewResetProgress();
+        c -> ReviewCycleComparisonMode();
         : -> OpenCommandPalette();
     }
     mode == insert && claude_focused {

@@ -30,6 +30,13 @@ use stoat_language::{Language, LanguageRegistry};
 /// against `langs` via [`LanguageRegistry::for_path`] (unknown
 /// extensions land as `None`).
 ///
+/// `staged_filter` restricts which changed paths are included by their
+/// [`crate::host::ChangedFile::staged`] flag: `Some(true)` keeps only
+/// staged paths, `Some(false)` only unstaged paths, `None` keeps every
+/// changed path. The per-file diff is always HEAD vs working tree
+/// regardless of the filter -- the flag selects which files appear, not
+/// what each is diffed against.
+///
 /// Per-file read failures are logged at `warn` level and the file is
 /// skipped, matching the behavior the TUI review path has shipped with
 /// since `open_review` first landed.
@@ -39,6 +46,7 @@ pub fn scan_working_tree(
     langs: &LanguageRegistry,
     git_root: &Path,
     language_override: Option<Arc<Language>>,
+    staged_filter: Option<bool>,
 ) -> Option<(PathBuf, Vec<ReviewFileInput>)> {
     let repo = git.discover(git_root)?;
     let workdir = repo.workdir()?;
@@ -50,6 +58,9 @@ pub fn scan_working_tree(
 
     let mut inputs: Vec<ReviewFileInput> = Vec::with_capacity(changed.len());
     for file in &changed {
+        if staged_filter.is_some_and(|want| file.staged != want) {
+            continue;
+        }
         let buffer_text = match read_utf8(fs, &file.path) {
             Ok(t) => t,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => String::new(),

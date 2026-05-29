@@ -380,6 +380,22 @@ fn review_source_label(source: &ReviewSource, commit_summary: Option<&str>) -> S
                 .unwrap_or_else(|| workdir.display().to_string());
             format!("Review: {name}")
         },
+        ReviewSource::WorkingTreeUnstaged { workdir } => {
+            let name = workdir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| workdir.display().to_string());
+            format!("Review (unstaged): {name}")
+        },
+        ReviewSource::WorkingTreeStaged { workdir } => {
+            let name = workdir
+                .file_name()
+                .and_then(|n| n.to_str())
+                .map(String::from)
+                .unwrap_or_else(|| workdir.display().to_string());
+            format!("Review (staged): {name}")
+        },
         ReviewSource::WorkspaceWatch { workdir } => {
             let name = workdir
                 .file_name()

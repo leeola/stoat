@@ -506,6 +506,8 @@ pub(super) fn review_revert_hunk(stoat: &mut Stoat) -> UpdateEffect {
         };
         let workdir = match &session.source {
             ReviewSource::WorkingTree { workdir }
+            | ReviewSource::WorkingTreeUnstaged { workdir }
+            | ReviewSource::WorkingTreeStaged { workdir }
             | ReviewSource::WorkspaceWatch { workdir }
             | ReviewSource::Commit { workdir, .. }
             | ReviewSource::CommitRange { workdir, .. } => workdir.clone(),
@@ -617,7 +619,9 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
             return UpdateEffect::None;
         };
         let workdir = match &session.source {
-            ReviewSource::WorkingTree { workdir } => workdir.clone(),
+            ReviewSource::WorkingTree { workdir }
+            | ReviewSource::WorkingTreeUnstaged { workdir }
+            | ReviewSource::WorkingTreeStaged { workdir } => workdir.clone(),
             _ => {
                 tracing::warn!(
                     "ReviewApplyStaged: only WorkingTree sources are applyable; \
@@ -877,12 +881,70 @@ pub(super) fn review_refresh(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Cycle the active review to the next diff-comparison source
+/// ([`ReviewSource::next_comparison`]): WorkingTree -> unstaged-only ->
+/// staged-only -> the HEAD commit -> back to WorkingTree. Rebuilds the
+/// session from the new source, carrying decided statuses and approval
+/// flags across by [`crate::review_session::ChunkFingerprint`] so a chunk
+/// whose content matches in the new source keeps its decision. No-op when
+/// no review is open or the current source is outside the cycle
+/// (`WorkspaceWatch`, `CommitRange`, `AgentEdits`, `InMemory`).
+pub(super) fn review_cycle_comparison_mode(stoat: &mut Stoat) -> UpdateEffect {
+    let source = {
+        let ws = stoat.active_workspace();
+        let Some(session) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        session.source.clone()
+    };
+
+    let workdir = match &source {
+        ReviewSource::WorkingTree { workdir }
+        | ReviewSource::WorkingTreeUnstaged { workdir }
+        | ReviewSource::WorkingTreeStaged { workdir }
+        | ReviewSource::Commit { workdir, .. } => workdir.clone(),
+        _ => return UpdateEffect::None,
+    };
+
+    let head_sha = stoat
+        .git_host
+        .discover(&workdir)
+        .and_then(|repo| repo.log_commits(None, 1).first().map(|c| c.sha.clone()));
+
+    let Some(next) = source.next_comparison(head_sha.as_deref()) else {
+        return UpdateEffect::None;
+    };
+
+    let (statuses, approvals) = {
+        let ws = stoat.active_workspace();
+        let session = ws
+            .review
+            .as_ref()
+            .expect("review session still present (early-returned above when absent)");
+        (session.snapshot_statuses(), session.snapshot_approvals())
+    };
+
+    let mut new_session =
+        rescan_source(stoat, &next).unwrap_or_else(|| ReviewSession::new(next.clone()));
+    new_session.apply_statuses(&statuses);
+    new_session.apply_approvals(&approvals);
+
+    install_review_session(stoat, new_session);
+    UpdateEffect::Redraw
+}
+
 /// Re-scan the underlying source of a review session. Returns `None` when
 /// the source has no re-scannable state (currently `InMemory`) or when the
 /// scan produced no hunks.
 fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> {
     match source {
         ReviewSource::WorkingTree { workdir } => scan_working_tree(stoat, workdir),
+        ReviewSource::WorkingTreeUnstaged { workdir } => {
+            build_working_tree_session(stoat, workdir, Some(false))
+        },
+        ReviewSource::WorkingTreeStaged { workdir } => {
+            build_working_tree_session(stoat, workdir, Some(true))
+        },
         ReviewSource::WorkspaceWatch { .. } => None,
         ReviewSource::Commit { workdir, sha } => scan_commit(stoat, workdir, sha),
         ReviewSource::CommitRange { workdir, from, to } => {
@@ -965,22 +1027,42 @@ pub(super) fn open_review_watch(stoat: &mut Stoat, workdir: &Path) {
 /// `git_root`. Returns `None` when the root is not a repository or has no
 /// diff hunks. Shared by [`open_review`] and [`review_refresh`].
 fn scan_working_tree(stoat: &Stoat, git_root: &Path) -> Option<ReviewSession> {
+    build_working_tree_session(stoat, git_root, None)
+}
+
+/// Build a working-tree review session, optionally restricted to staged
+/// (`Some(true)`) or unstaged (`Some(false)`) changes. `None` scans every
+/// changed path. The resulting session's [`ReviewSource`] matches the
+/// filter -- `WorkingTree`, `WorkingTreeStaged`, or `WorkingTreeUnstaged`
+/// -- so a later refresh re-scans the same subset. Returns `None` when the
+/// root is not a repository or the (filtered) scan has no diff hunks.
+fn build_working_tree_session(
+    stoat: &Stoat,
+    git_root: &Path,
+    staged_filter: Option<bool>,
+) -> Option<ReviewSession> {
     let Some((workdir, inputs)) = crate::diff::scan_working_tree(
         &*stoat.git_host,
         &*stoat.fs_host,
         &stoat.language_registry,
         git_root,
         None,
+        staged_filter,
     ) else {
-        tracing::warn!("open_review: no working-tree changes to review");
+        tracing::warn!("working-tree review: no changes to review");
         return None;
     };
 
-    let mut session = ReviewSession::new(ReviewSource::WorkingTree { workdir });
+    let source = match staged_filter {
+        None => ReviewSource::WorkingTree { workdir },
+        Some(false) => ReviewSource::WorkingTreeUnstaged { workdir },
+        Some(true) => ReviewSource::WorkingTreeStaged { workdir },
+    };
+    let mut session = ReviewSession::new(source);
     session.add_files(inputs);
 
     if session.order.is_empty() {
-        tracing::warn!("open_review: no diff hunks to display");
+        tracing::warn!("working-tree review: no diff hunks to display");
         return None;
     }
 
@@ -1392,6 +1474,82 @@ mod tests {
         assert!(
             h.fake_git.applied_patches(workdir).is_empty(),
             "revert targets the working tree, not the index"
+        );
+    }
+
+    #[test]
+    fn cycle_comparison_mode_advances_source_and_preserves_approval() {
+        use crate::review_session::ReviewSource;
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        {
+            let mut builder = h.fake_git.add_repo("/work").with_fs(&h.fake_fs);
+            builder.modified("a.rs", "v1\n", "v2\n");
+            builder.staged_file("b.rs", "staged\n");
+            builder.commit("c1", &[("z.rs", "z1\n")]);
+            builder.commit_with_parent("c2", "c1", &[("z.rs", "z2\n")]);
+        }
+        h.stoat.open_review();
+        h.settle();
+
+        let source = |h: &TestHarness| h.with_review(|s| s.source.clone());
+        let approved = |h: &TestHarness, rel: &str| {
+            h.with_review(|s| {
+                let file = s.files.iter().find(|f| f.rel_path == rel)?;
+                let id = file.chunks.first().copied()?;
+                Some(s.chunk(id)?.approved)
+            })
+        };
+
+        assert!(matches!(source(&h), ReviewSource::WorkingTree { .. }));
+
+        let a_chunk = h
+            .with_review(|s| {
+                s.files
+                    .iter()
+                    .find(|f| f.rel_path == "a.rs")
+                    .and_then(|f| f.chunks.first().copied())
+            })
+            .expect("a.rs has a chunk in the working-tree view");
+        h.stoat
+            .active_workspace_mut()
+            .review
+            .as_mut()
+            .expect("review session")
+            .set_approved(a_chunk, true);
+
+        let cycle = |h: &mut TestHarness| {
+            crate::action_handlers::dispatch(
+                &mut h.stoat,
+                &stoat_action::ReviewCycleComparisonMode,
+            );
+        };
+
+        cycle(&mut h);
+        assert!(matches!(
+            source(&h),
+            ReviewSource::WorkingTreeUnstaged { .. }
+        ));
+        assert_eq!(
+            approved(&h, "a.rs"),
+            Some(true),
+            "approval must survive the All -> Unstaged swap (fingerprint match)",
+        );
+
+        cycle(&mut h);
+        assert!(matches!(source(&h), ReviewSource::WorkingTreeStaged { .. }));
+
+        cycle(&mut h);
+        assert!(
+            matches!(source(&h), ReviewSource::Commit { sha, .. } if sha == "c2"),
+            "staged view advances to the HEAD commit",
+        );
+
+        cycle(&mut h);
+        assert!(
+            matches!(source(&h), ReviewSource::WorkingTree { .. }),
+            "the commit view wraps back to the full working tree",
         );
     }
 

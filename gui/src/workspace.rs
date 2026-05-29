@@ -2180,6 +2180,7 @@ impl Workspace {
             ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
             ActionKind::GitToggleStageLine => self.dispatch_git_stage_line(cx),
             ActionKind::ReviewRevertHunk => self.dispatch_review_revert_hunk(cx),
+            ActionKind::ReviewCycleComparisonMode => self.dispatch_review_cycle_comparison_mode(cx),
             ActionKind::ReviewToggleFollow => self.dispatch_review_toggle_follow(cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
@@ -4669,6 +4670,41 @@ impl Workspace {
         session.update(cx, |session, cx| session.refresh_files(inputs, cx));
     }
 
+    /// Cycle the active review to the next diff-comparison source
+    /// ([`ReviewSource::next_comparison`]): WorkingTree -> unstaged-only ->
+    /// staged-only -> the HEAD commit -> back. Re-extracts hunks from the
+    /// new source and preserves review decisions across the swap. No-op
+    /// when no review is focused or the current source is outside the
+    /// cycle.
+    fn dispatch_review_cycle_comparison_mode(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        let source = session.read(cx).inner().source.clone();
+
+        let workdir = match &source {
+            ReviewSource::WorkingTree { workdir }
+            | ReviewSource::WorkingTreeUnstaged { workdir }
+            | ReviewSource::WorkingTreeStaged { workdir }
+            | ReviewSource::Commit { workdir, .. } => workdir.clone(),
+            _ => return,
+        };
+
+        let head_sha = {
+            let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+            git.discover(&workdir)
+                .and_then(|repo| repo.log_commits(None, 1).first().map(|c| c.sha.clone()))
+        };
+
+        let Some(next) = source.next_comparison(head_sha.as_deref()) else {
+            return;
+        };
+
+        let inputs = review_inputs_for_source(&next, cx);
+        session.update(cx, |session, cx| session.cycle_source(next, inputs, cx));
+    }
+
     /// Flip follow mode on the active review session. No-op when no
     /// review item is focused.
     fn dispatch_review_toggle_follow(&mut self, cx: &mut Context<'_, Self>) {
@@ -5852,10 +5888,17 @@ fn review_inputs_for_source(source: &ReviewSource, cx: &App) -> Vec<ReviewFileIn
                 buffer_text: edit.proposed_text.clone(),
             })
             .collect(),
-        ReviewSource::WorkingTree { workdir } => {
+        ReviewSource::WorkingTree { workdir }
+        | ReviewSource::WorkingTreeUnstaged { workdir }
+        | ReviewSource::WorkingTreeStaged { workdir } => {
+            let staged_filter = match source {
+                ReviewSource::WorkingTreeUnstaged { .. } => Some(false),
+                ReviewSource::WorkingTreeStaged { .. } => Some(true),
+                _ => None,
+            };
             let git = cx.global::<GitHostGlobal>().0.clone();
             let fs = cx.global::<FsHostGlobal>().0.clone();
-            stoat::diff::scan_working_tree(&*git, &*fs, langs, workdir, None)
+            stoat::diff::scan_working_tree(&*git, &*fs, langs, workdir, None, staged_filter)
                 .map(|(_, inputs)| inputs)
                 .unwrap_or_default()
         },

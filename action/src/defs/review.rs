@@ -236,6 +236,20 @@ define_action!(
 );
 
 define_action!(
+    ReviewCycleComparisonModeDef,
+    ReviewCycleComparisonMode,
+    "ReviewCycleComparisonMode",
+    ActionKind::ReviewCycleComparisonMode,
+    "cycle the diff comparison source",
+    "Swap the review between diff-comparison sources in order: the full \
+     working tree, unstaged-only changes, staged-only changes, and the \
+     last commit, then back to the working tree. Re-extracts hunks from \
+     the new source and preserves each chunk's review decision where its \
+     content still matches.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewToggleFollowDef,
     ReviewToggleFollow,
     "ReviewToggleFollow",

@@ -142,7 +142,8 @@ pub fn run_with_io<W: Write>(
                 args.git_args.len()
             ))));
         }
-        let Some((_workdir, inputs)) = scan_working_tree(git, fs, &langs, cwd, language_override)
+        let Some((_workdir, inputs)) =
+            scan_working_tree(git, fs, &langs, cwd, language_override, None)
         else {
             return Ok(());
         };

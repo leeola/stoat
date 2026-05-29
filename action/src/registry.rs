@@ -90,10 +90,10 @@ use crate::{
             CloseReview, GitToggleStageHunk, GitToggleStageLine, GitUnstageHunk, JumpToMoveSource,
             JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
             OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships,
-            ReviewApplyStaged, ReviewApproveHunk, ReviewNextChunk, ReviewNextUnreviewedHunk,
-            ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress,
-            ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval,
-            ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
+            ReviewApplyStaged, ReviewApproveHunk, ReviewCycleComparisonMode, ReviewNextChunk,
+            ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected,
+            ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
+            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -223,6 +223,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(GitToggleStageLine))
     });
     add(ReviewRevertHunk::DEF, |_| Ok(Box::new(ReviewRevertHunk)));
+    add(ReviewCycleComparisonMode::DEF, |_| {
+        Ok(Box::new(ReviewCycleComparisonMode))
+    });
     add(ReviewToggleFollow::DEF, |_| {
         Ok(Box::new(ReviewToggleFollow))
     });
@@ -857,6 +860,7 @@ mod tests {
         "GitUnstageHunk",
         "GitToggleStageLine",
         "ReviewRevertHunk",
+        "ReviewCycleComparisonMode",
         "ReviewToggleFollow",
         "ReviewRefresh",
         "ReviewApplyStaged",
@@ -1120,8 +1124,9 @@ mod tests {
         // + 2 GitToggleStageHunk / GitUnstageHunk.
         // + 1 GitToggleStageLine.
         // + 1 ReviewRevertHunk.
+        // + 1 ReviewCycleComparisonMode.
         // + 1 ReviewToggleFollow.
-        assert_eq!(all().count(), 317);
+        assert_eq!(all().count(), 318);
     }
 
     #[test]

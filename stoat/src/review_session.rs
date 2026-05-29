@@ -53,7 +53,11 @@ impl ChunkStatus {
 
 /// Provenance of the content under review.
 ///
-/// - [`ReviewSource::WorkingTree`]: git index vs working tree of `workdir`.
+/// - [`ReviewSource::WorkingTree`]: HEAD vs working tree of `workdir`, every changed path.
+/// - [`ReviewSource::WorkingTreeUnstaged`]: like [`ReviewSource::WorkingTree`] but restricted to
+///   paths whose change is unstaged (`ChangedFile::staged == false`).
+/// - [`ReviewSource::WorkingTreeStaged`]: like [`ReviewSource::WorkingTree`] but restricted to
+///   paths whose change is staged in the index (`ChangedFile::staged == true`).
 /// - [`ReviewSource::WorkspaceWatch`]: live edits inside `workdir`, diffed per file against git
 ///   HEAD. The session starts empty and grows as filesystem-watch events arrive.
 /// - [`ReviewSource::Commit`]: commit tree vs its parent (empty tree for a root commit).
@@ -64,6 +68,12 @@ impl ChunkStatus {
 #[derive(Clone, Debug)]
 pub enum ReviewSource {
     WorkingTree {
+        workdir: PathBuf,
+    },
+    WorkingTreeUnstaged {
+        workdir: PathBuf,
+    },
+    WorkingTreeStaged {
         workdir: PathBuf,
     },
     WorkspaceWatch {
@@ -85,6 +95,46 @@ pub enum ReviewSource {
     InMemory {
         files: Arc<Vec<InMemoryFile>>,
     },
+}
+
+impl ReviewSource {
+    /// Next source in the diff-comparison cycle driven by
+    /// [`stoat_action::ReviewCycleComparisonMode`]: `WorkingTree` ->
+    /// `WorkingTreeUnstaged` -> `WorkingTreeStaged` -> `Commit` at
+    /// `head_sha` -> back to `WorkingTree`. `head_sha` is the repository
+    /// HEAD, consulted only for the step into `Commit`; when it is `None`
+    /// (no commits) that step wraps straight back to `WorkingTree`.
+    /// Returns `None` for sources outside the cycle (`WorkspaceWatch`,
+    /// `CommitRange`, `AgentEdits`, `InMemory`), which have no
+    /// working-tree counterpart to advance through.
+    pub fn next_comparison(&self, head_sha: Option<&str>) -> Option<ReviewSource> {
+        match self {
+            ReviewSource::WorkingTree { workdir } => Some(ReviewSource::WorkingTreeUnstaged {
+                workdir: workdir.clone(),
+            }),
+            ReviewSource::WorkingTreeUnstaged { workdir } => {
+                Some(ReviewSource::WorkingTreeStaged {
+                    workdir: workdir.clone(),
+                })
+            },
+            ReviewSource::WorkingTreeStaged { workdir } => Some(match head_sha {
+                Some(sha) => ReviewSource::Commit {
+                    workdir: workdir.clone(),
+                    sha: sha.to_string(),
+                },
+                None => ReviewSource::WorkingTree {
+                    workdir: workdir.clone(),
+                },
+            }),
+            ReviewSource::Commit { workdir, .. } => Some(ReviewSource::WorkingTree {
+                workdir: workdir.clone(),
+            }),
+            ReviewSource::WorkspaceWatch { .. }
+            | ReviewSource::CommitRange { .. }
+            | ReviewSource::AgentEdits { .. }
+            | ReviewSource::InMemory { .. } => None,
+        }
+    }
 }
 
 /// Test-only / future-facing carrier for agent-proposed edits. Kept as a
@@ -1184,6 +1234,25 @@ impl ReviewSession {
         self.version += 1;
     }
 
+    /// Swap the session to `new_source`, replacing its files with
+    /// `new_files` and re-extracting hunks, while preserving prior
+    /// review decisions. Decided statuses carry across by
+    /// [`Self::identity_key`] (via [`Self::refresh_files`]) and approval
+    /// flags by [`ChunkFingerprint`] (via [`Self::apply_approvals`]):
+    /// chunks whose content matches in the new source keep their
+    /// decision, others reset to defaults.
+    ///
+    /// Drives [`stoat_action::ReviewCycleComparisonMode`] in the GUI,
+    /// which mutates the session in place; the TUI rebuilds through
+    /// `install_review_session` and carries the same state with
+    /// [`Self::apply_statuses`] / [`Self::apply_approvals`] instead.
+    pub fn cycle_source(&mut self, new_source: ReviewSource, new_files: Vec<ReviewFileInput>) {
+        let approvals = self.snapshot_approvals();
+        self.source = new_source;
+        self.refresh_files(new_files);
+        self.apply_approvals(&approvals);
+    }
+
     /// Toggle between `Staged` and `Unstaged` for the given chunk. Chunks
     /// currently in `Pending` or `Skipped` flip to `Staged`, giving users
     /// a one-key path from "not looked at" into the accept lane.
@@ -1284,6 +1353,8 @@ impl ReviewSession {
     ) -> Option<String> {
         let workdir = match &self.source {
             ReviewSource::WorkingTree { workdir }
+            | ReviewSource::WorkingTreeUnstaged { workdir }
+            | ReviewSource::WorkingTreeStaged { workdir }
             | ReviewSource::WorkspaceWatch { workdir }
             | ReviewSource::Commit { workdir, .. }
             | ReviewSource::CommitRange { workdir, .. } => workdir.clone(),
@@ -1505,6 +1576,8 @@ pub fn build_chunk_patch(
 ) -> Option<String> {
     let workdir = match &session.source {
         ReviewSource::WorkingTree { workdir }
+        | ReviewSource::WorkingTreeUnstaged { workdir }
+        | ReviewSource::WorkingTreeStaged { workdir }
         | ReviewSource::WorkspaceWatch { workdir }
         | ReviewSource::Commit { workdir, .. }
         | ReviewSource::CommitRange { workdir, .. } => workdir.as_path(),
