@@ -2179,6 +2179,7 @@ impl Workspace {
             ActionKind::GitToggleStageHunk => self.dispatch_git_stage_hunk(false, cx),
             ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
             ActionKind::GitToggleStageLine => self.dispatch_git_stage_line(cx),
+            ActionKind::ReviewRevertHunk => self.dispatch_review_revert_hunk(cx),
             ActionKind::ReviewToggleFollow => self.dispatch_review_toggle_follow(cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
@@ -4544,6 +4545,48 @@ impl Workspace {
         session.update(cx, |session, cx| {
             session.set_chunk_staged_rows(id, plan.rows, plan.status, cx);
         });
+    }
+
+    /// Apply the reversed patch of the chunk under the review cursor to
+    /// the working tree, undoing that change on disk. Works for any
+    /// workdir-bearing source; does not change chunk status.
+    fn dispatch_review_revert_hunk(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+
+        let (workdir, patch) = {
+            let inner = session.read(cx).inner();
+            let workdir = match &inner.source {
+                ReviewSource::WorkingTree { workdir }
+                | ReviewSource::WorkspaceWatch { workdir }
+                | ReviewSource::Commit { workdir, .. }
+                | ReviewSource::CommitRange { workdir, .. } => workdir.clone(),
+                _ => {
+                    tracing::warn!(
+                        "ReviewRevertHunk: source has no working tree to revert against"
+                    );
+                    return;
+                },
+            };
+            let Some(id) = inner.cursor.current else {
+                return;
+            };
+            let Some(patch) = build_chunk_patch(inner, [id], true) else {
+                return;
+            };
+            (workdir, patch)
+        };
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("ReviewRevertHunk: no git repo at {}", workdir.display());
+            return;
+        };
+        if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_workdir(&patch) {
+            tracing::warn!("ReviewRevertHunk: apply_to_workdir failed: {reason}");
+        }
     }
 
     fn dispatch_review_apply_staged(&mut self, cx: &mut Context<'_, Self>) {

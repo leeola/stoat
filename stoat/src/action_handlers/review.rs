@@ -489,6 +489,52 @@ pub(super) fn git_stage_line(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Apply the reversed patch of the chunk under the review cursor to the
+/// working tree, undoing that change on disk. Reuses
+/// [`crate::review_session::build_chunk_patch`] with `reverse = true` and
+/// applies it via [`crate::host::GitRepo::apply_to_workdir`]. Works for
+/// any workdir-bearing source -- the change being reverted lives on disk
+/// regardless of whether the review compares the index, a commit, or a
+/// range. Does not change chunk status; a subsequent refresh re-extracts.
+pub(super) fn review_revert_hunk(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{host::GitApplyError, review_session::build_chunk_patch};
+
+    let (workdir, patch) = {
+        let ws = stoat.active_workspace();
+        let Some(session) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let workdir = match &session.source {
+            ReviewSource::WorkingTree { workdir }
+            | ReviewSource::WorkspaceWatch { workdir }
+            | ReviewSource::Commit { workdir, .. }
+            | ReviewSource::CommitRange { workdir, .. } => workdir.clone(),
+            _ => {
+                tracing::warn!("ReviewRevertHunk: source has no working tree to revert against");
+                return UpdateEffect::None;
+            },
+        };
+        let Some(id) = session.cursor.current else {
+            return UpdateEffect::None;
+        };
+        let Some(patch) = build_chunk_patch(session, [id], true) else {
+            return UpdateEffect::None;
+        };
+        (workdir, patch)
+    };
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        tracing::warn!("ReviewRevertHunk: no git repo at {}", workdir.display());
+        return UpdateEffect::None;
+    };
+    if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_workdir(&patch) {
+        tracing::warn!("ReviewRevertHunk: apply_to_workdir failed: {reason}");
+        return UpdateEffect::None;
+    }
+
+    UpdateEffect::Redraw
+}
+
 /// Insert or update the [`crate::badge::BadgeSource::Review`] badge to
 /// match `progress`. Inserts a [`crate::badge::BadgeState::Complete`]
 /// badge with running counters when the review is complete; removes any
@@ -1317,6 +1363,36 @@ mod tests {
             "patch must not touch the other changed lines: {patch}"
         );
         assert_eq!(h.chunk_status(id), ChunkStatus::PartiallyStaged);
+    }
+
+    #[test]
+    fn review_revert_hunk_applies_reversed_patch_to_workdir() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c1", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+        h.open_commit_review("/work", "c2");
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRevertHunk);
+
+        let workdir = std::path::Path::new("/work");
+        let reverted = h.fake_git.applied_workdir_patches(workdir);
+        assert_eq!(
+            reverted.len(),
+            1,
+            "revert applies one workdir patch: {reverted:?}"
+        );
+        let patch = &reverted[0];
+        assert!(
+            patch.contains("-v2\n") && patch.contains("+v1\n"),
+            "revert patch must undo v2 back to v1: {patch}"
+        );
+        assert!(
+            h.fake_git.applied_patches(workdir).is_empty(),
+            "revert targets the working tree, not the index"
+        );
     }
 
     /// (b) An external edit that shifts a previously-staged chunk

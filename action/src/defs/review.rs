@@ -224,6 +224,18 @@ define_action!(
 );
 
 define_action!(
+    ReviewRevertHunkDef,
+    ReviewRevertHunk,
+    "ReviewRevertHunk",
+    ActionKind::ReviewRevertHunk,
+    "revert the current hunk on disk",
+    "Apply the reversed patch of the chunk under the review cursor to the \
+     working tree, undoing that change on disk. Acts on files directly, \
+     not the git index.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewToggleFollowDef,
     ReviewToggleFollow,
     "ReviewToggleFollow",

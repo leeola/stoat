@@ -252,6 +252,11 @@ pub trait GitRepo: Send + Sync {
     /// to drive this through the review-apply flow rather than directly.
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError>;
 
+    /// Apply a unified-diff patch to the working tree, changing files on
+    /// disk rather than the index. Used by hunk revert to undo a chunk's
+    /// change; pass the reversed patch from `build_chunk_patch`.
+    fn apply_to_workdir(&self, patch: &str) -> Result<(), GitApplyError>;
+
     /// Read the full tree at `sha` as a map of repo-relative path to
     /// UTF-8 content. Returns `None` when the sha is unknown or any
     /// entry is not valid UTF-8. Used by commit and commit-range review.

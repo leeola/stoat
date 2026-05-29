@@ -146,6 +146,24 @@ impl FakeGit {
             .unwrap_or_default()
     }
 
+    /// Snapshot the patches applied to a repo's working tree via
+    /// `apply_to_workdir` (hunk revert). Empty when none have been applied
+    /// or the repo is unknown.
+    pub fn applied_workdir_patches(&self, workdir: &Path) -> Vec<String> {
+        let state = self.state.lock().expect("git repo lock");
+        state
+            .repos
+            .get(workdir)
+            .map(|repo| {
+                repo.state
+                    .lock()
+                    .expect("git repo lock")
+                    .applied_workdir_patches
+                    .clone()
+            })
+            .unwrap_or_default()
+    }
+
     /// Snapshot applied patches grouped by the target path parsed out of
     /// their `+++ b/<rel>` header. Returns absolute paths by joining the
     /// relative target against `workdir`. Patches whose target cannot be
@@ -453,9 +471,13 @@ struct FakeRepoState {
     head_contents: HashMap<PathBuf, String>,
     changed: Vec<ChangedFile>,
     applied_patches: Vec<String>,
-    /// When `Some`, the next [`GitRepo::apply_to_index`] call returns
+    /// Patches applied via [`GitRepo::apply_to_workdir`] (hunk revert),
+    /// kept separate from index patches so tests can tell them apart.
+    applied_workdir_patches: Vec<String>,
+    /// When `Some`, the next [`GitRepo::apply_to_index`] or
+    /// [`GitRepo::apply_to_workdir`] call returns
     /// `Err(GitApplyError::Backend(_))` with this message. The failing
-    /// patch is still pushed to `applied_patches`.
+    /// patch is still pushed to its record.
     apply_error: Option<String>,
     /// Commit objects keyed by opaque sha. Populated via
     /// [`FakeRepoBuilder::commit`] and friends.
@@ -537,6 +559,18 @@ impl GitRepo for FakeGitRepo {
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let mut state = self.state.lock().unwrap();
         state.applied_patches.push(patch.to_string());
+        match &state.apply_error {
+            Some(msg) => BackendSnafu {
+                reason: msg.clone(),
+            }
+            .fail(),
+            None => Ok(()),
+        }
+    }
+
+    fn apply_to_workdir(&self, patch: &str) -> Result<(), GitApplyError> {
+        let mut state = self.state.lock().expect("git repo lock");
+        state.applied_workdir_patches.push(patch.to_string());
         match &state.apply_error {
             Some(msg) => BackendSnafu {
                 reason: msg.clone(),

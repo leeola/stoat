@@ -242,6 +242,7 @@ pub enum ActionKind {
     GitToggleStageHunk,
     GitUnstageHunk,
     GitToggleStageLine,
+    ReviewRevertHunk,
     ReviewToggleFollow,
     ReviewRefresh,
     ReviewExternalEdit,

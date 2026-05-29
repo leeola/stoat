@@ -123,6 +123,13 @@ impl GitRepo for LocalGitRepo {
             .map_err(err_msg)
     }
 
+    fn apply_to_workdir(&self, patch: &str) -> Result<(), GitApplyError> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let diff = Diff::from_buffer(patch.as_bytes()).map_err(err_msg)?;
+        repo.apply(&diff, ApplyLocation::WorkDir, None)
+            .map_err(err_msg)
+    }
+
     fn commit_tree(&self, sha: &str) -> Option<BTreeMap<PathBuf, String>> {
         let repo = self.repo.lock().expect("git repo lock");
         let oid = git2::Oid::from_str(sha).ok()?;
