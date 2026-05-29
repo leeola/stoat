@@ -217,6 +217,7 @@ pub(crate) fn paint_status_gutter(
         ChunkStatus::Staged => ('+', theme.get(s::DIFF_ADDED)),
         ChunkStatus::Unstaged => ('-', theme.get(s::DIFF_DELETED)),
         ChunkStatus::Skipped => ('~', theme.get(s::UI_TEXT_MUTED)),
+        ChunkStatus::PartiallyStaged => ('±', theme.get(s::DIFF_ADDED)),
     };
     buf[(x, y)].set_char(ch).set_style(style);
 }

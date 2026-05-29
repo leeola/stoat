@@ -36,6 +36,10 @@ pub enum ChunkStatus {
     Staged,
     Unstaged,
     Skipped,
+    /// Some lines of the chunk are staged but not the whole chunk. Set by
+    /// single-line staging; not a final decision, so [`Self::is_decided`]
+    /// returns `false` and the chunk still counts as outstanding work.
+    PartiallyStaged,
 }
 
 impl ChunkStatus {
@@ -196,6 +200,8 @@ pub struct ReviewProgress {
     pub unstaged: usize,
     pub skipped: usize,
     pub pending: usize,
+    /// Count of chunks with some, but not all, lines staged.
+    pub partially_staged: usize,
     pub total: usize,
     /// Count of chunks whose `approved` flag is `true`. Independent of
     /// `staged`/`unstaged`/`skipped`/`pending` -- a chunk can be both
@@ -208,9 +214,10 @@ pub struct ReviewProgress {
 
 impl ReviewProgress {
     /// True when the session has at least one chunk and every chunk
-    /// has been decided (staged, unstaged, or skipped).
+    /// has been decided (staged, unstaged, or skipped). Partially-staged
+    /// chunks count as outstanding.
     pub fn is_complete(&self) -> bool {
-        self.total > 0 && self.pending == 0
+        self.total > 0 && self.pending == 0 && self.partially_staged == 0
     }
 }
 
@@ -1165,9 +1172,10 @@ impl ReviewSession {
         if let Some(chunk) = self.chunks.get_mut(&id) {
             chunk.status = match chunk.status {
                 ChunkStatus::Staged => ChunkStatus::Unstaged,
-                ChunkStatus::Unstaged | ChunkStatus::Pending | ChunkStatus::Skipped => {
-                    ChunkStatus::Staged
-                },
+                ChunkStatus::Unstaged
+                | ChunkStatus::Pending
+                | ChunkStatus::Skipped
+                | ChunkStatus::PartiallyStaged => ChunkStatus::Staged,
             };
             self.version += 1;
         }
@@ -1186,6 +1194,7 @@ impl ReviewSession {
                     ChunkStatus::Unstaged => p.unstaged += 1,
                     ChunkStatus::Skipped => p.skipped += 1,
                     ChunkStatus::Pending => p.pending += 1,
+                    ChunkStatus::PartiallyStaged => p.partially_staged += 1,
                 }
                 if chunk.approved {
                     p.approved += 1;
@@ -1573,6 +1582,24 @@ mod tests {
     }
 
     #[test]
+    fn partially_staged_is_undecided_and_counts_separately() {
+        assert!(!ChunkStatus::PartiallyStaged.is_decided());
+
+        let mut s = working_tree("/work");
+        let id = add(&mut s, "a.txt", "a\nb\nc\n", "a\nB\nc\n")[0];
+        s.set_status(id, ChunkStatus::PartiallyStaged);
+
+        let p = s.progress();
+        assert_eq!(p.partially_staged, 1);
+        assert_eq!(p.pending, 0);
+        assert!(!s.is_complete(), "a partially-staged chunk is outstanding");
+        assert!(!p.is_complete());
+
+        s.toggle_stage(id);
+        assert_eq!(s.chunks[&id].status, ChunkStatus::Staged);
+    }
+
+    #[test]
     fn empty_session_has_no_progress() {
         let s = in_memory_session();
         assert_eq!(s.progress(), ReviewProgress::default());
@@ -1667,6 +1694,7 @@ mod tests {
                 unstaged: 1,
                 skipped: 0,
                 pending: 1,
+                partially_staged: 0,
                 total: 3,
                 approved: 0,
                 current_index: Some(1),

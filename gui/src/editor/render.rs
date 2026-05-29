@@ -1290,6 +1290,7 @@ fn chunk_glyph_for(status: ChunkStatus) -> (char, u32) {
         ChunkStatus::Staged => ('+', DIFF_ADDED_HEX),
         ChunkStatus::Unstaged => ('o', DIFF_DELETED_HEX),
         ChunkStatus::Skipped => ('x', DIAG_HINT_HEX),
+        ChunkStatus::PartiallyStaged => ('±', DIFF_ADDED_HEX),
     }
 }
 
@@ -2265,6 +2266,10 @@ mod tests {
             ('o', DIFF_DELETED_HEX)
         );
         assert_eq!(chunk_glyph_for(ChunkStatus::Skipped), ('x', DIAG_HINT_HEX));
+        assert_eq!(
+            chunk_glyph_for(ChunkStatus::PartiallyStaged),
+            ('±', DIFF_ADDED_HEX)
+        );
     }
 
     fn sample_blame_line(line: u32, sha: &str, author: &str, time: i64) -> BlameLine {
