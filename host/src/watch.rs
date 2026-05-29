@@ -229,3 +229,41 @@ fn translate_event_kind(kind: &NotifyEventKind) -> Option<FsEventKind> {
 fn notify_to_io(err: notify::Error) -> io::Error {
     io::Error::other(format!("notify: {err}"))
 }
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use notify::event::{AccessKind, CreateKind, DataChange, RemoveKind, RenameMode};
+
+    #[test]
+    fn translates_notify_kinds_to_fs_events() {
+        let cases = [
+            (
+                NotifyEventKind::Create(CreateKind::File),
+                Some(FsEventKind::Created),
+            ),
+            (
+                NotifyEventKind::Remove(RemoveKind::File),
+                Some(FsEventKind::Removed),
+            ),
+            (
+                NotifyEventKind::Modify(ModifyKind::Name(RenameMode::To)),
+                Some(FsEventKind::Renamed),
+            ),
+            (
+                NotifyEventKind::Modify(ModifyKind::Data(DataChange::Content)),
+                Some(FsEventKind::Modified),
+            ),
+            (
+                NotifyEventKind::Modify(ModifyKind::Any),
+                Some(FsEventKind::Modified),
+            ),
+            (NotifyEventKind::Access(AccessKind::Read), None),
+            (NotifyEventKind::Any, None),
+            (NotifyEventKind::Other, None),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(translate_event_kind(&kind), expected, "kind: {kind:?}");
+        }
+    }
+}
