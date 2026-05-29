@@ -1,6 +1,7 @@
 #![allow(dead_code)]
 
 pub(crate) mod claude;
+pub(crate) mod cursor_notation;
 pub(crate) mod editor;
 pub(crate) mod keys;
 
