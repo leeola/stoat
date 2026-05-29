@@ -3960,4 +3960,178 @@ mod tests {
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GotoNextHunk);
         assert_eq!(h.primary_head_offset(), before);
     }
+
+    /// Seed `input` as marked text into an empty focused buffer, drive
+    /// `keys` through the production input path, and assert the editor
+    /// renders back to `expected`. `desc` labels the case in failures.
+    fn edit_primitive_case(input: &str, keys: &str, expected: &str, desc: &str) {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 8);
+        let path = h.write_file("s.txt", "");
+        h.open_file(&path);
+        h.from_marked_text(input);
+        h.type_keys(keys);
+        assert_eq!(
+            h.to_marked_text(),
+            expected,
+            "{desc} (input {input:?}, keys {keys:?})"
+        );
+    }
+
+    #[test]
+    fn move_left_right_single_cursor() {
+        let cases = [
+            ("hel|lo", "h", "he|llo", "left one char"),
+            ("|hello", "h", "|hello", "left noop at line start"),
+            ("café|", "h", "caf|é", "left over 2-byte char"),
+            (
+                "test\u{00A0}|",
+                "h",
+                "test|\u{00A0}",
+                "left over 2-byte nbsp",
+            ),
+            ("中|x", "h", "|中x", "left over 3-byte char"),
+            ("𝐀|x", "h", "|𝐀x", "left over 4-byte char"),
+            ("|hello", "l", "h|ello", "right one char"),
+            ("hello|", "l", "hello|", "right noop at line end"),
+            ("caf|é", "l", "café|", "right over 2-byte char"),
+            (
+                "|test\u{00A0}",
+                "l",
+                "t|est\u{00A0}",
+                "right one ascii char",
+            ),
+            ("|中x", "l", "中|x", "right over 3-byte char"),
+            ("|𝐀x", "l", "𝐀|x", "right over 4-byte char"),
+        ];
+        for (input, keys, expected, desc) in cases {
+            edit_primitive_case(input, keys, expected, desc);
+        }
+    }
+
+    #[test]
+    fn move_word_single_cursor() {
+        let cases = [
+            (
+                "|foo bar baz",
+                "w",
+                "<|foo||> bar baz",
+                "word-start from line start",
+            ),
+            (
+                "foo |bar baz",
+                "w",
+                "foo <|bar||> baz",
+                "word-start mid line",
+            ),
+            (
+                "|café bar",
+                "w",
+                "<|café||> bar",
+                "word-start over 2-byte word",
+            ),
+            ("|中文 x", "w", "<|中文||> x", "word-start over 3-byte word"),
+            (
+                "|foo bar baz",
+                "e",
+                "<|fo||>o bar baz",
+                "word-end from line start",
+            ),
+            (
+                "|café bar",
+                "e",
+                "<|caf||>é bar",
+                "word-end onto 2-byte char",
+            ),
+            ("foo bar |baz", "b", "foo <||bar b|>az", "prev-word-start"),
+            (
+                "café |bar",
+                "b",
+                "<||café b|>ar",
+                "prev-word-start over 2-byte word",
+            ),
+        ];
+        for (input, keys, expected, desc) in cases {
+            edit_primitive_case(input, keys, expected, desc);
+        }
+    }
+
+    #[test]
+    fn move_line_bounds_single_cursor() {
+        let cases = [
+            ("foo |bar", "home", "|foo bar", "home to line start"),
+            ("foo| bar", "end", "foo bar|", "end to line end"),
+            ("café| bar", "home", "|café bar", "home over 2-byte char"),
+            ("|café bar", "end", "café bar|", "end over 2-byte char"),
+        ];
+        for (input, keys, expected, desc) in cases {
+            edit_primitive_case(input, keys, expected, desc);
+        }
+    }
+
+    #[test]
+    fn insert_text_single_cursor() {
+        let cases = [
+            (
+                "|hello",
+                "i x y z escape",
+                "xyz|hello",
+                "insert at line start",
+            ),
+            ("hel|lo", "i X escape", "helX|lo", "insert mid line"),
+            ("hello|", "i Z escape", "helloZ|", "insert at line end"),
+        ];
+        for (input, keys, expected, desc) in cases {
+            edit_primitive_case(input, keys, expected, desc);
+        }
+    }
+
+    #[test]
+    fn delete_single_cursor() {
+        let cases = [
+            ("hello|", "i backspace", "hell|", "backspace one char"),
+            (
+                "|hello",
+                "i backspace",
+                "|hello",
+                "backspace noop at line start",
+            ),
+            ("hel|lo", "i backspace", "he|lo", "backspace mid line"),
+            (
+                "test\u{00A0}|",
+                "i backspace",
+                "test|",
+                "backspace 2-byte char",
+            ),
+            ("hello中|", "i backspace", "hello|", "backspace 3-byte char"),
+            ("𝐀|", "i backspace", "|", "backspace 4-byte char"),
+            ("hel|lo", "i delete", "hel|o", "delete-forward one char"),
+            (
+                "hello|",
+                "i delete",
+                "hello|",
+                "delete-forward noop at line end",
+            ),
+            (
+                "|中hello",
+                "i delete",
+                "|hello",
+                "delete-forward 3-byte char",
+            ),
+            (
+                "foo bar|",
+                "i alt-backspace",
+                "foo |",
+                "delete word backward",
+            ),
+            (
+                "café bar|",
+                "i alt-backspace",
+                "café |",
+                "delete word backward past 2-byte word",
+            ),
+        ];
+        for (input, keys, expected, desc) in cases {
+            edit_primitive_case(input, keys, expected, desc);
+        }
+    }
 }
