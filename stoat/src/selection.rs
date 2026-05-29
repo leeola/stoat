@@ -4134,4 +4134,90 @@ mod tests {
             edit_primitive_case(input, keys, expected, desc);
         }
     }
+
+    /// Like [`edit_primitive_case`] but snapshots the rendered marked
+    /// text under `name` instead of asserting inline. Used for
+    /// many-cursor / multi-line results reviewed via `cargo insta`.
+    fn marked_snapshot_case(input: &str, keys: &str, name: &str) {
+        let mut h = crate::test_harness::TestHarness::with_size(40, 8);
+        let path = h.write_file("s.txt", "");
+        h.open_file(&path);
+        h.from_marked_text(input);
+        h.type_keys(keys);
+        h.assert_marked_snapshot(name);
+    }
+
+    #[test]
+    fn multi_add_cursor_below_above() {
+        edit_primitive_case("|abc\ndef\nghi", "C", "|abc\n|def\nghi", "add cursor below");
+        edit_primitive_case(
+            "abc\ndef\n|ghi",
+            "alt-shift-C",
+            "abc\n|def\n|ghi",
+            "add cursor above",
+        );
+    }
+
+    #[test]
+    fn multi_cursor_extend_right() {
+        edit_primitive_case("|abc", "L", "<|a||>bc", "extend right one char");
+        edit_primitive_case("|abc", "L L", "<|ab||>c", "extend right twice");
+        edit_primitive_case(
+            "a|bc\nd|ef",
+            "L",
+            "a<|b||>c\nd<|e||>f",
+            "extend at every cursor",
+        );
+    }
+
+    #[test]
+    fn multi_selection_collapse_and_flip() {
+        edit_primitive_case("<|abc||>", ";", "abc|", "collapse selection to cursor");
+        edit_primitive_case(
+            "<|abc||>\n<|def||>",
+            ";",
+            "abc|\ndef|",
+            "collapse every selection",
+        );
+        edit_primitive_case("<|abc||>", "alt-;", "<||abc|>", "flip head to start");
+        edit_primitive_case("<||abc|>", "alt-;", "<|abc||>", "flip head to end");
+    }
+
+    #[test]
+    fn select_all_spans_buffer() {
+        edit_primitive_case("|abc\ndef", "%", "<|abc\ndef||>", "select entire buffer");
+        edit_primitive_case(
+            "|abc\ndef\n",
+            "%",
+            "<|abc\ndef\n||>",
+            "select buffer including trailing newline",
+        );
+    }
+
+    #[test]
+    fn snapshot_marked_add_cursor_below() {
+        marked_snapshot_case(
+            "|aaa\nbbb\nccc\nddd",
+            "C C C",
+            "snapshot_marked_add_cursor_below",
+        );
+    }
+
+    #[test]
+    fn snapshot_marked_split_on_newline() {
+        marked_snapshot_case(
+            "<|abc\ndef\nghi||>",
+            "alt-s",
+            "snapshot_marked_split_on_newline",
+        );
+    }
+
+    #[test]
+    fn snapshot_marked_multi_cursor_extend() {
+        marked_snapshot_case(
+            "a|bcd\ne|fgh\ni|jkl",
+            "L L",
+            "snapshot_marked_multi_cursor_extend",
+        );
+    }
 }
