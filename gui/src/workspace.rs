@@ -59,7 +59,7 @@ use stoat::{
     rebase::{ActiveRebase, RebaseEntry, RebasePause},
     review::{ReviewFileInput, ReviewRow},
     review_apply::remove_chunks_from_buffer,
-    review_session::{build_chunk_patch, build_line_patch, ChunkStatus, ReviewSource},
+    review_session::{build_chunk_patch, ChunkStatus, ReviewSource},
 };
 use stoat_action::ActionKind;
 
@@ -4449,9 +4449,10 @@ impl Workspace {
         });
     }
 
-    /// Stage or unstage a single line of the chunk under the review
-    /// cursor, applying a one-line patch to the git index and marking the
-    /// chunk `PartiallyStaged` (or `Pending` when toggled off). Acts on
+    /// Toggle the staged state of a single line of the chunk under the
+    /// review cursor: add (or remove) the chunk's first changed row in its
+    /// staged-row set and rebuild the index state -- reverse the old
+    /// subset, apply the new -- so adjacent-line stages accumulate. Acts on
     /// the chunk's first changed row; precise per-line cursor targeting is
     /// a follow-up. `WorkingTree` sources only.
     fn dispatch_git_stage_line(&mut self, cx: &mut Context<'_, Self>) {
@@ -4460,7 +4461,7 @@ impl Workspace {
         };
         let session = review_item.read(cx).session().clone();
 
-        let (workdir, id, patch, next_status) = {
+        let (workdir, id, plan) = {
             let inner = session.read(cx).inner();
             let workdir = match &inner.source {
                 ReviewSource::WorkingTree { workdir } => workdir.clone(),
@@ -4485,19 +4486,10 @@ impl Workspace {
             else {
                 return;
             };
-            let unstage = matches!(
-                chunk.status,
-                ChunkStatus::Staged | ChunkStatus::PartiallyStaged
-            );
-            let Some(patch) = build_line_patch(inner, id, row as u32, unstage) else {
+            let Some(plan) = inner.plan_line_stage(id, row as u32) else {
                 return;
             };
-            let next_status = if unstage {
-                ChunkStatus::Pending
-            } else {
-                ChunkStatus::PartiallyStaged
-            };
-            (workdir, id, patch, next_status)
+            (workdir, id, plan)
         };
 
         let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
@@ -4505,13 +4497,18 @@ impl Workspace {
             tracing::warn!("GitToggleStageLine: no git repo at {}", workdir.display());
             return;
         };
-        if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(&patch) {
-            tracing::warn!("GitToggleStageLine: apply_to_index failed: {reason}");
-            return;
+        for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(patch) {
+                tracing::warn!("GitToggleStageLine: apply_to_index failed: {reason}");
+                return;
+            }
         }
 
         session.update(cx, |session, cx| {
-            session.set_status(id, next_status, cx);
+            session.set_chunk_staged_rows(id, plan.rows, plan.status, cx);
         });
     }
 

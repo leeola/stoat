@@ -9,7 +9,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::{hash_map::DefaultHasher, HashMap},
+    collections::{hash_map::DefaultHasher, BTreeSet, HashMap},
     hash::{Hash, Hasher},
     ops::Range,
     path::PathBuf,
@@ -128,6 +128,11 @@ pub struct ReviewChunk {
     /// staging decision -- the v2 review workflow advanced the cursor
     /// through approval state rather than through `Staged`/`Unstaged`.
     pub approved: bool,
+    /// Within-chunk display-row indices currently staged to the git index
+    /// by single-line staging. Empty unless [`Self::status`] is
+    /// [`ChunkStatus::PartiallyStaged`]. Excluded from
+    /// [`Self::fingerprint`] -- it is session decision state, not content.
+    pub staged_rows: BTreeSet<u32>,
 }
 
 impl ReviewChunk {
@@ -362,6 +367,17 @@ pub struct ReviewSession {
     next_id: u32,
 }
 
+/// Outcome of [`ReviewSession::plan_line_stage`]: the patches to apply to
+/// the git index (reverse the prior staged subset, then apply the new one)
+/// plus the staged-row set and status to commit via
+/// [`ReviewSession::set_chunk_staged_rows`] once the applies succeed.
+pub struct LineStagePlan {
+    pub reverse: Option<String>,
+    pub forward: Option<String>,
+    pub rows: BTreeSet<u32>,
+    pub status: ChunkStatus,
+}
+
 impl ReviewSession {
     pub fn new(source: ReviewSource) -> Self {
         Self {
@@ -437,6 +453,7 @@ impl ReviewSession {
                         base_byte_range,
                         status: ChunkStatus::Pending,
                         approved: false,
+                        staged_rows: BTreeSet::new(),
                     },
                 );
                 self.order.push(id);
@@ -937,6 +954,7 @@ impl ReviewSession {
                     base_byte_range,
                     status: ChunkStatus::Pending,
                     approved: false,
+                    staged_rows: BTreeSet::new(),
                 },
             );
             new_chunk_ids.push(id);
@@ -1062,6 +1080,7 @@ impl ReviewSession {
                     base_byte_range,
                     status: ChunkStatus::Pending,
                     approved: false,
+                    staged_rows: BTreeSet::new(),
                 },
             );
             new_chunk_ids.push(id);
@@ -1179,6 +1198,110 @@ impl ReviewSession {
             };
             self.version += 1;
         }
+    }
+
+    /// Plan toggling the staged state of the changed row at within-chunk
+    /// display index `row` in chunk `id`. Returns the patches that reset
+    /// the previously-staged subset and apply the new one, the resulting
+    /// staged-row set, and the resulting [`ChunkStatus`]. `None` when
+    /// `row` is out of range or not a changed row, the source is not
+    /// patchable, or a required patch cannot be built.
+    ///
+    /// Rebuilding the whole subset on each toggle (reverse the old, apply
+    /// the new) keeps staged lines correct even when an adjacent line is
+    /// already staged -- a single-line patch anchored on base context
+    /// would no longer match the shifted index.
+    pub fn plan_line_stage(&self, id: ReviewChunkId, row: u32) -> Option<LineStagePlan> {
+        let chunk = self.chunks.get(&id)?;
+        let rows = &chunk.hunk.rows;
+        if !matches!(rows.get(row as usize)?, ReviewRow::Changed { .. }) {
+            return None;
+        }
+
+        let mut new_rows = chunk.staged_rows.clone();
+        if !new_rows.remove(&row) {
+            new_rows.insert(row);
+        }
+
+        let reverse = if chunk.staged_rows.is_empty() {
+            None
+        } else {
+            Some(self.build_staged_subset_patch(id, &chunk.staged_rows, true)?)
+        };
+        let forward = if new_rows.is_empty() {
+            None
+        } else {
+            Some(self.build_staged_subset_patch(id, &new_rows, false)?)
+        };
+
+        let all_changed: BTreeSet<u32> = rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, ReviewRow::Changed { .. }))
+            .map(|(i, _)| i as u32)
+            .collect();
+        let status = if new_rows.is_empty() {
+            ChunkStatus::Pending
+        } else if new_rows == all_changed {
+            ChunkStatus::Staged
+        } else {
+            ChunkStatus::PartiallyStaged
+        };
+
+        Some(LineStagePlan {
+            reverse,
+            forward,
+            rows: new_rows,
+            status,
+        })
+    }
+
+    /// Commit the staged-row set and status produced by
+    /// [`Self::plan_line_stage`] after its patches have been applied.
+    pub fn set_chunk_staged_rows(
+        &mut self,
+        id: ReviewChunkId,
+        rows: BTreeSet<u32>,
+        status: ChunkStatus,
+    ) {
+        if let Some(chunk) = self.chunks.get_mut(&id) {
+            chunk.staged_rows = rows;
+            chunk.status = status;
+            self.version += 1;
+        }
+    }
+
+    /// Build a `git apply --cached`-ready patch that stages exactly the
+    /// `rows` subset of chunk `id` (or reverses it, with `reverse`). The
+    /// base text is diffed against a target where only the subset's
+    /// changes are applied, reusing the chunk pipeline so hunk grouping,
+    /// no-newline handling, and reverse all come from [`build_chunk_patch`].
+    fn build_staged_subset_patch(
+        &self,
+        id: ReviewChunkId,
+        rows: &BTreeSet<u32>,
+        reverse: bool,
+    ) -> Option<String> {
+        let workdir = match &self.source {
+            ReviewSource::WorkingTree { workdir }
+            | ReviewSource::WorkspaceWatch { workdir }
+            | ReviewSource::Commit { workdir, .. }
+            | ReviewSource::CommitRange { workdir, .. } => workdir.clone(),
+            ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => return None,
+        };
+        let chunk = self.chunks.get(&id)?;
+        let file = self.files.get(chunk.file_index)?;
+        let target = reconstruct_target(file, chunk, rows);
+
+        let mut throwaway = ReviewSession::new(ReviewSource::WorkingTree { workdir });
+        throwaway.add_files(vec![ReviewFileInput {
+            path: file.path.clone(),
+            rel_path: file.rel_path.clone(),
+            language: file.language.clone(),
+            base_text: file.base_text.clone(),
+            buffer_text: Arc::new(target),
+        }]);
+        build_chunk_patch(&throwaway, throwaway.order.clone(), reverse)
     }
 
     pub fn progress(&self) -> ReviewProgress {
@@ -1313,6 +1436,57 @@ fn hunk_line_ranges(hunk: &ReviewHunk) -> (Range<u32>, Range<u32>) {
         _ => 0..0,
     };
     (base, buffer)
+}
+
+/// Reconstruct the file text with exactly the `staged` rows of `chunk`
+/// applied on top of the base: changed rows in `staged` take their buffer
+/// (right) side, every other line keeps its base (left) value. Used to
+/// diff the base against a partially-staged target so the resulting patch
+/// stages just that subset.
+fn reconstruct_target(file: &ReviewFile, chunk: &ReviewChunk, staged: &BTreeSet<u32>) -> String {
+    let base_lines: Vec<&str> = file.base_text.lines().collect();
+    let rows = &chunk.hunk.rows;
+
+    let left_line = |row: &ReviewRow| match row {
+        ReviewRow::Context { left, .. } => Some(left.line_num),
+        ReviewRow::Changed { left: Some(l), .. } => Some(l.line_num),
+        _ => None,
+    };
+    let lefts: Vec<u32> = rows.iter().filter_map(left_line).collect();
+    let (before_end, after_start) = match (lefts.first(), lefts.last()) {
+        (Some(&first), Some(&last)) => ((first as usize).saturating_sub(1), last as usize),
+        _ => {
+            let at = (chunk.base_line_range.start as usize).min(base_lines.len());
+            (at, at)
+        },
+    };
+
+    let mut out: Vec<&str> = Vec::new();
+    out.extend_from_slice(&base_lines[..before_end.min(base_lines.len())]);
+    for (idx, row) in rows.iter().enumerate() {
+        match row {
+            ReviewRow::Context { left, .. } => out.push(&left.text),
+            ReviewRow::Changed { left, right } => {
+                let side = if staged.contains(&(idx as u32)) {
+                    right.as_ref()
+                } else {
+                    left.as_ref()
+                };
+                if let Some(s) = side {
+                    out.push(&s.text);
+                }
+            },
+        }
+    }
+    if after_start < base_lines.len() {
+        out.extend_from_slice(&base_lines[after_start..]);
+    }
+
+    let mut text = out.join("\n");
+    if file.base_text.ends_with('\n') && !text.is_empty() {
+        text.push('\n');
+    }
+    text
 }
 
 /// Builds a single unified-diff patch covering `chunks`, suitable for
@@ -1556,6 +1730,92 @@ mod tests {
             first_changed_row,
         );
         assert_eq!(index, "a\nNEW1\nOLD2\nOLD3\nz\n");
+    }
+
+    #[test]
+    fn plan_line_stage_accumulates_adjacent_rows() {
+        use crate::host::{GitHost, LocalGit};
+        use git2::{Repository, Signature};
+        use std::path::Path;
+
+        let base = "a\nOLD1\nOLD2\nOLD3\nz\n";
+        let buffer = "a\nNEW1\nNEW2\nNEW3\nz\n";
+
+        let dir = tempfile::tempdir().unwrap();
+        let workdir = dir.path().to_path_buf();
+        let repo = Repository::init(&workdir).unwrap();
+        std::fs::write(workdir.join("a.rs"), base).unwrap();
+        let mut index = repo.index().unwrap();
+        index.add_path(Path::new("a.rs")).unwrap();
+        index.write().unwrap();
+        let tree_id = index.write_tree().unwrap();
+        let tree = repo.find_tree(tree_id).unwrap();
+        let sig = Signature::now("t", "t@t").unwrap();
+        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
+            .unwrap();
+        std::fs::write(workdir.join("a.rs"), buffer).unwrap();
+
+        let mut session = working_tree(workdir.to_str().unwrap());
+        session.add_file(
+            workdir.join("a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new(base.to_string()),
+            Arc::new(buffer.to_string()),
+        );
+        let id = session.order[0];
+
+        let changed: Vec<u32> = session.chunks[&id]
+            .hunk
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| matches!(r, ReviewRow::Changed { .. }))
+            .map(|(i, _)| i as u32)
+            .collect();
+        assert_eq!(changed.len(), 3, "expected three changed rows: {changed:?}");
+
+        let host_repo = LocalGit::new().discover(&workdir).unwrap();
+        let staged_index = |session: &mut ReviewSession, row: u32| -> String {
+            let plan = session.plan_line_stage(id, row).expect("plan");
+            for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
+                .into_iter()
+                .flatten()
+            {
+                host_repo.apply_to_index(patch).expect("apply to index");
+            }
+            session.set_chunk_staged_rows(id, plan.rows, plan.status);
+            let mut idx = repo.index().unwrap();
+            idx.read(true).unwrap();
+            let entry = idx.get_path(Path::new("a.rs"), 0).unwrap();
+            String::from_utf8(repo.find_blob(entry.id).unwrap().content().to_vec()).unwrap()
+        };
+
+        assert_eq!(
+            staged_index(&mut session, changed[0]),
+            "a\nNEW1\nOLD2\nOLD3\nz\n"
+        );
+        assert_eq!(
+            staged_index(&mut session, changed[1]),
+            "a\nNEW1\nNEW2\nOLD3\nz\n",
+            "staging a row adjacent to an already-staged one must accumulate"
+        );
+        assert_eq!(session.chunks[&id].status, ChunkStatus::PartiallyStaged);
+
+        assert_eq!(staged_index(&mut session, changed[2]), buffer);
+        assert_eq!(
+            session.chunks[&id].status,
+            ChunkStatus::Staged,
+            "all changed rows staged is a fully staged chunk"
+        );
+
+        assert_eq!(
+            staged_index(&mut session, changed[1]),
+            "a\nNEW1\nOLD2\nNEW3\nz\n"
+        );
+        staged_index(&mut session, changed[0]);
+        assert_eq!(staged_index(&mut session, changed[2]), base);
+        assert_eq!(session.chunks[&id].status, ChunkStatus::Pending);
     }
 
     #[test]
@@ -2120,6 +2380,7 @@ mod tests {
             base_byte_range: 0..0,
             status: ChunkStatus::Pending,
             approved: false,
+            staged_rows: BTreeSet::new(),
         }
     }
 

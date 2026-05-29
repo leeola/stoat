@@ -419,20 +419,18 @@ pub(super) fn git_stage_hunk(stoat: &mut Stoat, force_unstage: bool) -> UpdateEf
     UpdateEffect::Redraw
 }
 
-/// Stage or unstage a single line of the chunk under the review cursor by
-/// applying a one-line patch to the git index. Marks the chunk
-/// `PartiallyStaged` when staging a line, or `Pending` when toggling a
-/// staged/partially-staged chunk back off. Acts on the chunk's first
-/// changed row; precise per-line cursor targeting is a follow-up. Only
-/// `WorkingTree` sources stage to the index.
+/// Toggle the staged state of a single line of the chunk under the review
+/// cursor. Adds (or removes) the chunk's first changed row in its
+/// staged-row set and rebuilds the chunk's index state -- reverse the old
+/// staged subset, then apply the new -- so adjacent-line stages
+/// accumulate. Marks the chunk `Staged` when every changed row is staged,
+/// `Pending` when none are, otherwise `PartiallyStaged`. Acts on the
+/// chunk's first changed row; precise per-line cursor targeting is a
+/// follow-up. Only `WorkingTree` sources stage to the index.
 pub(super) fn git_stage_line(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::{
-        host::GitApplyError,
-        review::ReviewRow,
-        review_session::{build_line_patch, ChunkStatus},
-    };
+    use crate::{host::GitApplyError, review::ReviewRow};
 
-    let (workdir, id, patch, next_status) = {
+    let (workdir, id, plan) = {
         let ws = stoat.active_workspace();
         let Some(session) = ws.review.as_ref() else {
             return UpdateEffect::None;
@@ -458,35 +456,31 @@ pub(super) fn git_stage_line(stoat: &mut Stoat) -> UpdateEffect {
         else {
             return UpdateEffect::None;
         };
-        let unstage = matches!(
-            chunk.status,
-            ChunkStatus::Staged | ChunkStatus::PartiallyStaged
-        );
-        let Some(patch) = build_line_patch(session, id, row as u32, unstage) else {
+        let Some(plan) = session.plan_line_stage(id, row as u32) else {
             return UpdateEffect::None;
         };
-        let next_status = if unstage {
-            ChunkStatus::Pending
-        } else {
-            ChunkStatus::PartiallyStaged
-        };
-        (workdir, id, patch, next_status)
+        (workdir, id, plan)
     };
 
     let Some(repo) = stoat.git_host.discover(&workdir) else {
         tracing::warn!("GitToggleStageLine: no git repo at {}", workdir.display());
         return UpdateEffect::None;
     };
-    if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(&patch) {
-        tracing::warn!("GitToggleStageLine: apply_to_index failed: {reason}");
-        return UpdateEffect::None;
+    for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(patch) {
+            tracing::warn!("GitToggleStageLine: apply_to_index failed: {reason}");
+            return UpdateEffect::None;
+        }
     }
 
     let ws = stoat.active_workspace_mut();
     let Some(session) = ws.review.as_mut() else {
         return UpdateEffect::None;
     };
-    session.set_status(id, next_status);
+    session.set_chunk_staged_rows(id, plan.rows, plan.status);
     let editor_id = session.view_editor;
     let progress = session.progress();
     sync_review_view_and_scroll(ws, editor_id, None);

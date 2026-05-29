@@ -1,4 +1,5 @@
 use gpui::{App, Context, EventEmitter};
+use std::collections::BTreeSet;
 use stoat::{
     review::ReviewFileInput,
     review_session::{
@@ -145,6 +146,20 @@ impl ReviewSession {
         cx: &mut Context<'_, Self>,
     ) {
         self.inner.set_status(id, status);
+        self.emit_changed(cx);
+    }
+
+    /// Commit the staged-row set and status produced by
+    /// [`stoat::review_session::ReviewSession::plan_line_stage`] after its
+    /// patches apply. Emits [`ReviewSessionEvent::Changed`].
+    pub fn set_chunk_staged_rows(
+        &mut self,
+        id: ReviewChunkId,
+        rows: BTreeSet<u32>,
+        status: ChunkStatus,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.inner.set_chunk_staged_rows(id, rows, status);
         self.emit_changed(cx);
     }
 
