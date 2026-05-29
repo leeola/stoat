@@ -1559,6 +1559,12 @@ mod tests {
     }
 
     #[test]
+    fn build_line_patch_no_trailing_newline_last_line() {
+        let index = stage_line_to_index("a\nb\nc", "a\nb\nC", first_changed_row);
+        assert_eq!(index, "a\nb\nC");
+    }
+
+    #[test]
     fn build_line_patch_none_for_context_row_and_out_of_range() {
         let mut s = working_tree("/work");
         let id = add(&mut s, "a.txt", "a\nb\nc\n", "a\nB\nc\n")[0];

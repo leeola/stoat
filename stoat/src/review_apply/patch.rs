@@ -158,9 +158,9 @@ pub fn chunk_to_unified_diff(
 /// (a context line carries no staging decision).
 ///
 /// `reverse` swaps the removal and addition so the patch undoes the
-/// forward one. Staging a single line whose base text lacks a trailing
-/// newline at end-of-file is not yet supported precisely; the resulting
-/// patch may not apply in that case.
+/// forward one. A `\ No newline at end of file` marker is emitted after
+/// any emitted line that sits at the end of a file lacking a trailing
+/// newline, so staging the final line of such a file applies cleanly.
 pub fn row_to_unified_diff(
     file: &ReviewFile,
     chunk: &ReviewChunk,
@@ -212,10 +212,31 @@ pub fn row_to_unified_diff(
     let new_count = lead_n + u32::from(new_change.is_some()) + trail_n;
     let start = lead_line.unwrap_or(1);
 
-    let last_base_line = trail_line
-        .or(left.as_ref().map(|l| l.line_num))
-        .or(lead_line);
-    let trailing_no_nl = base_no_nl && last_base_line == Some(base_total);
+    // No-newline markers are emitted per emitted line at its own
+    // side's end-of-file. `from` is the patch's removal side (base for
+    // a forward patch, buffer when reversed), `to` the addition side.
+    let buffer_total = file.buffer_text.lines().count() as u32;
+    let buffer_no_nl = !file.buffer_text.is_empty() && !file.buffer_text.ends_with('\n');
+    let (from_no_nl, from_total) = if reverse {
+        (buffer_no_nl, buffer_total)
+    } else {
+        (base_no_nl, base_total)
+    };
+    let (to_no_nl, to_total) = if reverse {
+        (base_no_nl, base_total)
+    } else {
+        (buffer_no_nl, buffer_total)
+    };
+    let old_src = if reverse {
+        right.as_ref().map(|s| s.line_num)
+    } else {
+        left.as_ref().map(|s| s.line_num)
+    };
+    let new_src = if reverse {
+        left.as_ref().map(|s| s.line_num)
+    } else {
+        right.as_ref().map(|s| s.line_num)
+    };
 
     let rel = file.path.strip_prefix(workdir).unwrap_or(&file.path);
     let rel_display = rel.display();
@@ -230,18 +251,27 @@ pub fn row_to_unified_diff(
 
     if let Some(ln) = lead_line {
         emit_prefixed(&mut out, ' ', line_text(ln));
+        if base_no_nl && ln == base_total {
+            out.push_str(NO_NEWLINE_MARKER);
+        }
     }
     if let Some(text) = old_change {
         emit_prefixed(&mut out, '-', text);
+        if from_no_nl && old_src == Some(from_total) {
+            out.push_str(NO_NEWLINE_MARKER);
+        }
     }
     if let Some(text) = new_change {
         emit_prefixed(&mut out, '+', text);
+        if to_no_nl && new_src == Some(to_total) {
+            out.push_str(NO_NEWLINE_MARKER);
+        }
     }
     if let Some(ln) = trail_line {
         emit_prefixed(&mut out, ' ', line_text(ln));
-    }
-    if trailing_no_nl {
-        out.push_str(NO_NEWLINE_MARKER);
+        if base_no_nl && ln == base_total {
+            out.push_str(NO_NEWLINE_MARKER);
+        }
     }
 
     Some(out)
