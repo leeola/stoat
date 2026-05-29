@@ -141,6 +141,112 @@ pub fn chunk_to_unified_diff(
     out
 }
 
+/// Serializes a single changed row of `chunk` (0-based display-row index
+/// `row`) into a standalone one-hunk unified-diff patch keyed at
+/// `file.path` relative to `workdir`. The line-granular counterpart of
+/// [`chunk_to_unified_diff`]: stages (or, with `reverse`, unstages) just
+/// that one line.
+///
+/// The changed line is wrapped in the immediately adjacent lines of the
+/// base text as context. Because the index holds the base content, that
+/// context always matches at apply time, so the emitted hunk applies even
+/// when the chunk's own neighbouring rows are themselves changes -- a
+/// zero-context hunk would be rejected (`git apply` needs context unless
+/// invoked with `--unidiff-zero`, which the index-apply path does not).
+///
+/// Returns `None` when `row` is out of range or addresses a context row
+/// (a context line carries no staging decision).
+///
+/// `reverse` swaps the removal and addition so the patch undoes the
+/// forward one. Staging a single line whose base text lacks a trailing
+/// newline at end-of-file is not yet supported precisely; the resulting
+/// patch may not apply in that case.
+pub fn row_to_unified_diff(
+    file: &ReviewFile,
+    chunk: &ReviewChunk,
+    row: u32,
+    workdir: &Path,
+    reverse: bool,
+) -> Option<String> {
+    let rows = &chunk.hunk.rows;
+    let ReviewRow::Changed { left, right } = rows.get(row as usize)? else {
+        return None;
+    };
+
+    let base_lines: Vec<&str> = file.base_text.lines().collect();
+    let base_total = base_lines.len() as u32;
+    let base_no_nl = !file.base_text.is_empty() && !file.base_text.ends_with('\n');
+
+    // 1-based base line immediately before the change region: the line
+    // above a modified/deleted line, or the line after which an addition
+    // is inserted (0 = top of file).
+    let prev_base_line = match left {
+        Some(l) => l.line_num.saturating_sub(1),
+        None => rows[..row as usize]
+            .iter()
+            .rev()
+            .find_map(row_left)
+            .map_or(0, |s| s.line_num),
+    };
+    let lead_line = (prev_base_line >= 1).then_some(prev_base_line);
+    let trail_line = {
+        let after = match left {
+            Some(l) => l.line_num + 1,
+            None => prev_base_line + 1,
+        };
+        (after <= base_total).then_some(after)
+    };
+    let line_text = |ln: u32| base_lines[(ln - 1) as usize];
+
+    let removed = left.as_ref().map(|s| s.text.as_str());
+    let added = right.as_ref().map(|s| s.text.as_str());
+    let (old_change, new_change) = if reverse {
+        (added, removed)
+    } else {
+        (removed, added)
+    };
+
+    let lead_n = u32::from(lead_line.is_some());
+    let trail_n = u32::from(trail_line.is_some());
+    let old_count = lead_n + u32::from(old_change.is_some()) + trail_n;
+    let new_count = lead_n + u32::from(new_change.is_some()) + trail_n;
+    let start = lead_line.unwrap_or(1);
+
+    let last_base_line = trail_line
+        .or(left.as_ref().map(|l| l.line_num))
+        .or(lead_line);
+    let trailing_no_nl = base_no_nl && last_base_line == Some(base_total);
+
+    let rel = file.path.strip_prefix(workdir).unwrap_or(&file.path);
+    let rel_display = rel.display();
+
+    let mut out = String::new();
+    out.push_str(&format!("diff --git a/{rel_display} b/{rel_display}\n"));
+    out.push_str(&format!("--- a/{rel_display}\n"));
+    out.push_str(&format!("+++ b/{rel_display}\n"));
+    out.push_str(&format!(
+        "@@ -{start},{old_count} +{start},{new_count} @@\n"
+    ));
+
+    if let Some(ln) = lead_line {
+        emit_prefixed(&mut out, ' ', line_text(ln));
+    }
+    if let Some(text) = old_change {
+        emit_prefixed(&mut out, '-', text);
+    }
+    if let Some(text) = new_change {
+        emit_prefixed(&mut out, '+', text);
+    }
+    if let Some(ln) = trail_line {
+        emit_prefixed(&mut out, ' ', line_text(ln));
+    }
+    if trailing_no_nl {
+        out.push_str(NO_NEWLINE_MARKER);
+    }
+
+    Some(out)
+}
+
 fn emit_prefixed(out: &mut String, prefix: char, text: &str) {
     out.push(prefix);
     out.push_str(text);
