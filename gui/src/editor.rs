@@ -2273,6 +2273,16 @@ impl Editor {
         cx.notify();
     }
 
+    /// Buffer row (0-based) of the primary (newest) cursor's head, in the
+    /// same multi-buffer coordinate [`Self::set_cursor_at_buffer_row`]
+    /// accepts. For a review editor this is the file row, comparable to a
+    /// chunk row's `right.line_num - 1`.
+    pub fn primary_cursor_buffer_row(&self, cx: &App) -> u32 {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let head = self.selections.newest_anchor().head();
+        snapshot.point_for_anchor(&head).row
+    }
+
     pub fn cell_size(&self) -> Option<Size<Pixels>> {
         self.cell_size
     }

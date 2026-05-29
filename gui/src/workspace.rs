@@ -4461,6 +4461,26 @@ impl Workspace {
         };
         let session = review_item.read(cx).session().clone();
 
+        // Buffer row of the active file's editor cursor, used to pick which
+        // line within the chunk to toggle.
+        let file_index = {
+            let inner = session.read(cx).inner();
+            inner
+                .cursor
+                .current
+                .and_then(|id| inner.chunks.get(&id))
+                .map(|chunk| chunk.file_index)
+        };
+        let cursor_row = file_index
+            .and_then(|fi| {
+                review_item
+                    .read(cx)
+                    .files()
+                    .get(fi)
+                    .map(|f| f.editor.clone())
+            })
+            .map(|editor| editor.read(cx).primary_cursor_buffer_row(cx));
+
         let (workdir, id, plan) = {
             let inner = session.read(cx).inner();
             let workdir = match &inner.source {
@@ -4478,12 +4498,26 @@ impl Workspace {
             let Some(chunk) = inner.chunks.get(&id) else {
                 return;
             };
-            let Some(row) = chunk
-                .hunk
-                .rows
-                .iter()
-                .position(|r| matches!(r, ReviewRow::Changed { .. }))
-            else {
+            // Stage the changed row under the editor cursor; fall back to
+            // the first changed row when the cursor is not on one.
+            let row = cursor_row
+                .and_then(|cr| {
+                    chunk.hunk.rows.iter().position(|r| {
+                        matches!(
+                            r,
+                            ReviewRow::Changed { right: Some(side), .. }
+                                if side.line_num.saturating_sub(1) == cr
+                        )
+                    })
+                })
+                .or_else(|| {
+                    chunk
+                        .hunk
+                        .rows
+                        .iter()
+                        .position(|r| matches!(r, ReviewRow::Changed { .. }))
+                });
+            let Some(row) = row else {
                 return;
             };
             let Some(plan) = inner.plan_line_stage(id, row as u32) else {
@@ -11440,6 +11474,60 @@ mod tests {
         };
         assert_eq!(body(&patches[0], '+'), body(&patches[1], '-'));
         assert_eq!(body(&patches[0], '-'), body(&patches[1], '+'));
+    }
+
+    #[test]
+    fn dispatch_git_stage_line_targets_the_cursor_row() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_git_host_global(vcx, git.clone());
+
+        // One chunk with three adjacent changed lines (L1/L2/L3 -> M1/M2/M3).
+        let base = "a\nL1\nL2\nL3\nz\n";
+        let buffer = "a\nM1\nM2\nM3\nz\n";
+        let session = vcx.update(|_, cx| {
+            cx.new(|_| {
+                let mut inner =
+                    stoat::review_session::ReviewSession::new(ReviewSource::WorkingTree {
+                        workdir: PathBuf::from("/tmp/repo"),
+                    });
+                inner.add_files(vec![ReviewFileInput {
+                    path: PathBuf::from("/tmp/repo/a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new(base.to_string()),
+                    buffer_text: Arc::new(buffer.to_string()),
+                }]);
+                assert_eq!(inner.order.len(), 1, "fixture must be a single chunk");
+                crate::review_session::ReviewSession::new(inner)
+            })
+        });
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        // Park the editor cursor on the middle changed line (M2, buffer row 2).
+        let editor = item.read_with(vcx, |item, _| item.files()[0].editor.clone());
+        editor.update(vcx, |ed, cx| ed.set_cursor_at_buffer_row(2, cx));
+
+        dispatch(&ws, vcx, stoat_action::GitToggleStageLine);
+        vcx.run_until_parked();
+
+        let patches = git.applied_patches(Path::new("/tmp/repo"));
+        assert_eq!(patches.len(), 1, "one line stages one patch: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-L2\n") && patch.contains("+M2\n"),
+            "must stage the line under the cursor (L2 -> M2), not the first: {patch}"
+        );
+        assert!(
+            !patch.contains("-L1\n") && !patch.contains("-L3\n"),
+            "must not stage the other changed lines: {patch}"
+        );
+        assert_eq!(
+            cursor_chunk_status(vcx, &session),
+            Some(ChunkStatus::PartiallyStaged)
+        );
     }
 
     #[test]
