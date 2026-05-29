@@ -90,8 +90,8 @@ pub use defs::{
         SetRebaseOpReword, SetRebaseOpSquash,
     },
     review::{
-        AgentEdit, CloseReview, GitToggleStageHunk, GitUnstageHunk, JumpToMoveSource,
-        JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
+        AgentEdit, CloseReview, GitToggleStageHunk, GitToggleStageLine, GitUnstageHunk,
+        JumpToMoveSource, JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
         OpenReviewAgentEdits, OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch,
         QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk, ReviewExternalEdit,
         ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh,

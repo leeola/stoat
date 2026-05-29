@@ -210,6 +210,20 @@ define_action!(
 );
 
 define_action!(
+    GitToggleStageLineDef,
+    GitToggleStageLine,
+    "GitToggleStageLine",
+    ActionKind::GitToggleStageLine,
+    "stage or unstage the current line",
+    "Stage or unstage a single line within the chunk under the review \
+     cursor, applying a one-line patch to the git index. Marks the chunk \
+     PartiallyStaged when it gains a staged line; reverses the line and \
+     marks the chunk Pending when toggled off. Acts on the index \
+     directly, independent of the batch apply flow.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewToggleFollowDef,
     ReviewToggleFollow,
     "ReviewToggleFollow",

@@ -419,6 +419,82 @@ pub(super) fn git_stage_hunk(stoat: &mut Stoat, force_unstage: bool) -> UpdateEf
     UpdateEffect::Redraw
 }
 
+/// Stage or unstage a single line of the chunk under the review cursor by
+/// applying a one-line patch to the git index. Marks the chunk
+/// `PartiallyStaged` when staging a line, or `Pending` when toggling a
+/// staged/partially-staged chunk back off. Acts on the chunk's first
+/// changed row; precise per-line cursor targeting is a follow-up. Only
+/// `WorkingTree` sources stage to the index.
+pub(super) fn git_stage_line(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::{
+        host::GitApplyError,
+        review::ReviewRow,
+        review_session::{build_line_patch, ChunkStatus},
+    };
+
+    let (workdir, id, patch, next_status) = {
+        let ws = stoat.active_workspace();
+        let Some(session) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let workdir = match &session.source {
+            ReviewSource::WorkingTree { workdir } => workdir.clone(),
+            _ => {
+                tracing::warn!("GitToggleStageLine: only WorkingTree sources stage to the index");
+                return UpdateEffect::None;
+            },
+        };
+        let Some(id) = session.cursor.current else {
+            return UpdateEffect::None;
+        };
+        let Some(chunk) = session.chunks.get(&id) else {
+            return UpdateEffect::None;
+        };
+        let Some(row) = chunk
+            .hunk
+            .rows
+            .iter()
+            .position(|r| matches!(r, ReviewRow::Changed { .. }))
+        else {
+            return UpdateEffect::None;
+        };
+        let unstage = matches!(
+            chunk.status,
+            ChunkStatus::Staged | ChunkStatus::PartiallyStaged
+        );
+        let Some(patch) = build_line_patch(session, id, row as u32, unstage) else {
+            return UpdateEffect::None;
+        };
+        let next_status = if unstage {
+            ChunkStatus::Pending
+        } else {
+            ChunkStatus::PartiallyStaged
+        };
+        (workdir, id, patch, next_status)
+    };
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        tracing::warn!("GitToggleStageLine: no git repo at {}", workdir.display());
+        return UpdateEffect::None;
+    };
+    if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(&patch) {
+        tracing::warn!("GitToggleStageLine: apply_to_index failed: {reason}");
+        return UpdateEffect::None;
+    }
+
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    session.set_status(id, next_status);
+    let editor_id = session.view_editor;
+    let progress = session.progress();
+    sync_review_view_and_scroll(ws, editor_id, None);
+    emit_review_progress_badge(ws, &progress);
+
+    UpdateEffect::Redraw
+}
+
 /// Insert or update the [`crate::badge::BadgeSource::Review`] badge to
 /// match `progress`. Inserts a [`crate::badge::BadgeState::Complete`]
 /// badge with running counters when the review is complete; removes any
@@ -1219,6 +1295,34 @@ mod tests {
             0,
             "cursor parks on the chunk in the touched file",
         );
+    }
+
+    #[test]
+    fn git_stage_line_stages_one_line_and_marks_partially_staged() {
+        use crate::review_session::ChunkStatus;
+
+        let head = "a\nb\nc\nd\ne\n";
+        let buffer = "a\nB\nC\nD\ne\n";
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", head, buffer)]);
+        h.stoat.open_review();
+        h.settle();
+
+        let id = h.current_review_chunk_id();
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::GitToggleStageLine);
+
+        let patches = h.fake_git.applied_patches(std::path::Path::new("/work"));
+        assert_eq!(patches.len(), 1, "one line produces one patch: {patches:?}");
+        let patch = &patches[0];
+        assert!(
+            patch.contains("-b\n") && patch.contains("+B\n"),
+            "patch must change the first hunk line b -> B: {patch}"
+        );
+        assert!(
+            !patch.contains("-c\n") && !patch.contains("-d\n"),
+            "patch must not touch the other changed lines: {patch}"
+        );
+        assert_eq!(h.chunk_status(id), ChunkStatus::PartiallyStaged);
     }
 
     /// (b) An external edit that shifts a previously-staged chunk

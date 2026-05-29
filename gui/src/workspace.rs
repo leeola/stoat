@@ -57,9 +57,9 @@ use stoat::{
     },
     pane::{Axis, Direction},
     rebase::{ActiveRebase, RebaseEntry, RebasePause},
-    review::ReviewFileInput,
+    review::{ReviewFileInput, ReviewRow},
     review_apply::remove_chunks_from_buffer,
-    review_session::{build_chunk_patch, ChunkStatus, ReviewSource},
+    review_session::{build_chunk_patch, build_line_patch, ChunkStatus, ReviewSource},
 };
 use stoat_action::ActionKind;
 
@@ -2178,6 +2178,7 @@ impl Workspace {
             ActionKind::ReviewResetProgress => self.dispatch_review_reset_progress(cx),
             ActionKind::GitToggleStageHunk => self.dispatch_git_stage_hunk(false, cx),
             ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
+            ActionKind::GitToggleStageLine => self.dispatch_git_stage_line(cx),
             ActionKind::ReviewToggleFollow => self.dispatch_review_toggle_follow(cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
@@ -4440,6 +4441,72 @@ impl Workspace {
         };
         if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(&patch) {
             tracing::warn!("GitStageHunk: apply_to_index failed: {reason}");
+            return;
+        }
+
+        session.update(cx, |session, cx| {
+            session.set_status(id, next_status, cx);
+        });
+    }
+
+    /// Stage or unstage a single line of the chunk under the review
+    /// cursor, applying a one-line patch to the git index and marking the
+    /// chunk `PartiallyStaged` (or `Pending` when toggled off). Acts on
+    /// the chunk's first changed row; precise per-line cursor targeting is
+    /// a follow-up. `WorkingTree` sources only.
+    fn dispatch_git_stage_line(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+
+        let (workdir, id, patch, next_status) = {
+            let inner = session.read(cx).inner();
+            let workdir = match &inner.source {
+                ReviewSource::WorkingTree { workdir } => workdir.clone(),
+                _ => {
+                    tracing::warn!(
+                        "GitToggleStageLine: only WorkingTree sources stage to the index"
+                    );
+                    return;
+                },
+            };
+            let Some(id) = inner.cursor.current else {
+                return;
+            };
+            let Some(chunk) = inner.chunks.get(&id) else {
+                return;
+            };
+            let Some(row) = chunk
+                .hunk
+                .rows
+                .iter()
+                .position(|r| matches!(r, ReviewRow::Changed { .. }))
+            else {
+                return;
+            };
+            let unstage = matches!(
+                chunk.status,
+                ChunkStatus::Staged | ChunkStatus::PartiallyStaged
+            );
+            let Some(patch) = build_line_patch(inner, id, row as u32, unstage) else {
+                return;
+            };
+            let next_status = if unstage {
+                ChunkStatus::Pending
+            } else {
+                ChunkStatus::PartiallyStaged
+            };
+            (workdir, id, patch, next_status)
+        };
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!("GitToggleStageLine: no git repo at {}", workdir.display());
+            return;
+        };
+        if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(&patch) {
+            tracing::warn!("GitToggleStageLine: apply_to_index failed: {reason}");
             return;
         }
 

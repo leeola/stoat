@@ -87,13 +87,13 @@ use crate::{
             SetRebaseOpReword, SetRebaseOpSquash,
         },
         review::{
-            CloseReview, GitToggleStageHunk, GitUnstageHunk, JumpToMoveSource, JumpToMoveTarget,
-            JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview, OpenReviewCommit,
-            OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships, ReviewApplyStaged,
-            ReviewApproveHunk, ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk,
-            ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress, ReviewSkipChunk,
-            ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage,
-            ReviewUnstageChunk,
+            CloseReview, GitToggleStageHunk, GitToggleStageLine, GitUnstageHunk, JumpToMoveSource,
+            JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
+            OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships,
+            ReviewApplyStaged, ReviewApproveHunk, ReviewNextChunk, ReviewNextUnreviewedHunk,
+            ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress,
+            ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow,
+            ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -219,6 +219,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(GitToggleStageHunk))
     });
     add(GitUnstageHunk::DEF, |_| Ok(Box::new(GitUnstageHunk)));
+    add(GitToggleStageLine::DEF, |_| {
+        Ok(Box::new(GitToggleStageLine))
+    });
     add(ReviewToggleFollow::DEF, |_| {
         Ok(Box::new(ReviewToggleFollow))
     });
@@ -851,6 +854,7 @@ mod tests {
         "ReviewResetProgress",
         "GitToggleStageHunk",
         "GitUnstageHunk",
+        "GitToggleStageLine",
         "ReviewToggleFollow",
         "ReviewRefresh",
         "ReviewApplyStaged",
@@ -1112,8 +1116,9 @@ mod tests {
         // + 1 ReviewNextUnreviewedHunk.
         // + 1 ReviewResetProgress.
         // + 2 GitToggleStageHunk / GitUnstageHunk.
+        // + 1 GitToggleStageLine.
         // + 1 ReviewToggleFollow.
-        assert_eq!(all().count(), 315);
+        assert_eq!(all().count(), 316);
     }
 
     #[test]
