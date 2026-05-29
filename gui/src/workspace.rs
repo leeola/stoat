@@ -1456,6 +1456,27 @@ impl Workspace {
         true
     }
 
+    /// Set the working directory the workspace resolves paths against.
+    /// File-finder, review-open, git discovery, and the save-state path
+    /// all read this root on demand, so they follow the change; the
+    /// diff/blame coordinators built at construction keep the original
+    /// root.
+    pub fn set_git_root(&mut self, git_root: impl Into<PathBuf>, cx: &mut Context<'_, Self>) {
+        self.git_root = git_root.into();
+        cx.notify();
+    }
+
+    /// Change the active workspace's working directory to `path`. Empty
+    /// paths are ignored. Reached through the command palette's
+    /// argument-collection flow for the `SetCwd` action.
+    fn dispatch_set_cwd(&mut self, path: &str, cx: &mut Context<'_, Self>) {
+        if path.is_empty() {
+            tracing::warn!("SetCwd: empty path ignored");
+            return;
+        }
+        self.set_git_root(PathBuf::from(path), cx);
+    }
+
     pub fn add_dock(
         &mut self,
         item: Box<dyn ItemHandle>,
@@ -1623,6 +1644,14 @@ impl Workspace {
                 } else {
                     self.set_name(name, cx);
                 }
+            },
+            ActionKind::SetCwd => {
+                let path = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::SetCwd>()
+                    .map(|a| a.path.clone())
+                    .unwrap_or_default();
+                self.dispatch_set_cwd(&path, cx);
             },
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {
@@ -7834,6 +7863,24 @@ mod tests {
             "main",
             "workspace name should remain unchanged"
         );
+    }
+
+    #[test]
+    fn dispatch_set_cwd_changes_git_root() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::SetCwd {
+                path: "/tmp/elsewhere".into(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let root = ws.read_with(vcx, |w, _| w.git_root().clone());
+        assert_eq!(root, PathBuf::from("/tmp/elsewhere"));
     }
 
     #[test]

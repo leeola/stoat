@@ -99,7 +99,7 @@ use crate::{
         set::Set,
         workspace::{
             CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
-            SwitchWorkspace, ToggleProjectTree,
+            SetCwd, SwitchWorkspace, ToggleProjectTree,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -713,6 +713,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             name: raw.to_owned(),
         }))
     });
+    add(SetCwd::DEF, |params| {
+        let raw = match params.first() {
+            Some(p) => p.as_string().context(WrongKindSnafu {
+                name: "path",
+                expected: ParamKind::String,
+            })?,
+            None => "",
+        };
+        Ok(Box::new(SetCwd {
+            path: raw.to_owned(),
+        }))
+    });
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
     add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
     add(ShellInputSubmit::DEF, |_| Ok(Box::new(ShellInputSubmit)));
@@ -1126,7 +1138,8 @@ mod tests {
         // + 1 ReviewRevertHunk.
         // + 1 ReviewCycleComparisonMode.
         // + 1 ReviewToggleFollow.
-        assert_eq!(all().count(), 318);
+        // + 1 SetCwd.
+        assert_eq!(all().count(), 319);
     }
 
     #[test]

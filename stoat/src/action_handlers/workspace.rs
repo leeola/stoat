@@ -88,3 +88,7 @@ pub(super) fn handle_dump(stoat: &Stoat, name: &str) {
 pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
     stoat.active_workspace_mut().name = name.to_string();
 }
+
+pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
+    stoat.active_workspace_mut().git_root = path.into();
+}

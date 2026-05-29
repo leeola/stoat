@@ -119,6 +119,61 @@ impl Action for RenameWorkspace {
     }
 }
 
+const SET_CWD_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "path",
+    kind: ParamKind::String,
+    required: true,
+    description: "Filesystem path to set as the active workspace's working directory.",
+}];
+
+#[derive(Debug)]
+pub struct SetCwdDef;
+
+impl ActionDef for SetCwdDef {
+    fn name(&self) -> &'static str {
+        "SetCwd"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::SetCwd
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        SET_CWD_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "change the working directory"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Set the active workspace's working directory to the given path. Subsequent file-finder, review, and git operations resolve against the new root."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct SetCwd {
+    pub path: String,
+}
+
+impl SetCwd {
+    pub const DEF: &SetCwdDef = &SetCwdDef;
+}
+
+impl Action for SetCwd {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -160,6 +215,20 @@ mod tests {
         assert_eq!(params[0].name, "name");
         assert_eq!(params[0].kind, ParamKind::String);
         assert!(!params[0].required);
+    }
+
+    #[test]
+    fn set_cwd_takes_path_param() {
+        let set = SetCwd {
+            path: "/tmp".to_string(),
+        };
+        assert_eq!(set.kind(), ActionKind::SetCwd);
+        assert_eq!(set.def().name(), "SetCwd");
+        let params = SetCwdDef.params();
+        assert_eq!(params.len(), 1);
+        assert_eq!(params[0].name, "path");
+        assert_eq!(params[0].kind, ParamKind::String);
+        assert!(params[0].required);
     }
 
     #[test]

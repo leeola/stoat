@@ -102,7 +102,7 @@ pub use defs::{
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     set::Set,
     workspace::{
-        CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
+        CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace, SetCwd,
         SwitchWorkspace, ToggleProjectTree,
     },
 };

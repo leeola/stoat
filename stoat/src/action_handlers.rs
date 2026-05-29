@@ -44,7 +44,7 @@ pub(crate) use review::install_review_session;
 use std::path::Path;
 use stoat_action::{
     Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
-    OpenReviewCommitRange, OpenReviewWatch, RenameWorkspace, ReviewExternalEdit, Run,
+    OpenReviewCommitRange, OpenReviewWatch, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
 };
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
@@ -611,6 +611,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             workspace::rename_workspace(stoat, &action.name);
             UpdateEffect::Redraw
         },
+        ActionKind::SetCwd => {
+            let action = action
+                .as_any()
+                .downcast_ref::<SetCwd>()
+                .expect("SetCwd action downcast");
+            workspace::set_cwd(stoat, &action.path);
+            UpdateEffect::Redraw
+        },
         ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
         ActionKind::CancelPromptInput => prompt::cancel_prompt_input(stoat),
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
@@ -973,7 +981,7 @@ mod tests {
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
         FlipSelections, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
         MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Quit, QuitAll,
-        RenameWorkspace, SaveSelection, SelectAll, SplitNewRight, SplitRight,
+        RenameWorkspace, SaveSelection, SelectAll, SetCwd, SplitNewRight, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -2097,6 +2105,21 @@ mod tests {
             },
         );
         assert_eq!(stoat.active_workspace().name, "");
+    }
+
+    #[test]
+    fn set_cwd_sets_active_workspace_git_root() {
+        let mut stoat = stoat();
+        dispatch(
+            &mut stoat,
+            &SetCwd {
+                path: "/tmp/elsewhere".to_string(),
+            },
+        );
+        assert_eq!(
+            stoat.active_workspace().git_root,
+            std::path::PathBuf::from("/tmp/elsewhere")
+        );
     }
 
     fn set_focused_viewport_rows(stoat: &mut Stoat, rows: Option<u32>) {

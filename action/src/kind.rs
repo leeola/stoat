@@ -293,6 +293,7 @@ pub enum ActionKind {
     SwitchWorkspace,
     CloseWorkspace,
     RenameWorkspace,
+    SetCwd,
     OpenWorkspacePicker,
     ToggleProjectTree,
     ProjectTreeSelectNext,
