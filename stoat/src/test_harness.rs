@@ -950,6 +950,31 @@ impl TestHarness {
         editor::seed_focused_buffer(&mut self.stoat, text);
     }
 
+    /// Seed the focused editor's text and selections from a marked
+    /// string. See [`editor::from_marked_text`].
+    pub(crate) fn from_marked_text(&mut self, marked: &str) {
+        editor::from_marked_text(&mut self.stoat, marked);
+    }
+
+    /// Render the focused editor's text and selections to a marked
+    /// string. See [`editor::to_marked_text`].
+    pub(crate) fn to_marked_text(&mut self) -> String {
+        editor::to_marked_text(&mut self.stoat)
+    }
+
+    /// Assert the focused editor renders to exactly `expected` in marked
+    /// notation.
+    pub(crate) fn assert_marked_text(&mut self, expected: &str) {
+        assert_eq!(self.to_marked_text(), expected, "marked-text mismatch");
+    }
+
+    /// Snapshot the focused editor's marked-text rendering under `name`,
+    /// reviewed with `cargo insta review`. Compact and multi-line
+    /// friendly, distinct from the full-terminal [`Self::assert_snapshot`].
+    pub(crate) fn assert_marked_snapshot(&mut self, name: &str) {
+        insta::assert_snapshot!(name, self.to_marked_text());
+    }
+
     /// Resolved byte offsets for each selection's head in the focused
     /// editor.
     pub(crate) fn head_offsets(&mut self) -> Vec<usize> {

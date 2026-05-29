@@ -1,6 +1,6 @@
 use crate::multi_buffer::MultiBufferSnapshot;
 use serde::{Deserialize, Serialize};
-use stoat_text::{Anchor, Selection, SelectionGoal};
+use stoat_text::{Anchor, Bias, Selection, SelectionGoal};
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct SelectionsCollection {
@@ -190,6 +190,33 @@ impl SelectionsCollection {
         }
         self.disjoint = deduped;
     }
+
+    /// Replace selections from `(start, end, cursor_at_start)` byte-offset
+    /// spans, assigning sequential ids and advancing the id counter past
+    /// them so later cursor insertions stay monotonic. A span with
+    /// `start == end` becomes a bare cursor; `cursor_at_start` maps to
+    /// [`Selection::reversed`]. Anchors bind with [`Bias::Left`]. Panics
+    /// when `spans` is empty (the collection must keep at least one
+    /// selection). Test-support seeding entry point.
+    pub fn set_from_offsets(
+        &mut self,
+        spans: &[(usize, usize, bool)],
+        snapshot: &MultiBufferSnapshot,
+    ) {
+        let selections: Vec<Selection<Anchor>> = spans
+            .iter()
+            .enumerate()
+            .map(|(id, &(start, end, reversed))| Selection {
+                id,
+                start: snapshot.anchor_at(start, Bias::Left),
+                end: snapshot.anchor_at(end, Bias::Left),
+                reversed,
+                goal: SelectionGoal::None,
+            })
+            .collect();
+        self.next_selection_id = selections.len();
+        self.replace_with(selections, snapshot);
+    }
 }
 
 #[cfg(test)]
@@ -238,6 +265,32 @@ mod tests {
 
         let ids: Vec<usize> = collection.all_anchors().iter().map(|s| s.id).collect();
         assert_eq!(ids, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn set_from_offsets_seeds_spans_and_advances_id_counter() {
+        let multi = singleton("abcdef");
+        let snapshot = multi.snapshot();
+        let mut collection = SelectionsCollection::new();
+
+        collection.set_from_offsets(&[(0, 0, false), (2, 4, true)], &snapshot);
+        let sels = collection.all_anchors();
+        assert_eq!(sels.len(), 2);
+        // Sorted by offset: bare cursor at 0, then the 2..4 selection.
+        assert_eq!(snapshot.resolve_anchor(&sels[0].start), 0);
+        assert!(sels[0].is_empty());
+        assert_eq!(snapshot.resolve_anchor(&sels[1].start), 2);
+        assert_eq!(snapshot.resolve_anchor(&sels[1].end), 4);
+        assert!(sels[1].reversed);
+
+        // The id counter advanced past the seeded ids, so a fresh cursor
+        // becomes the new max-id primary rather than colliding.
+        collection.insert_cursor(
+            snapshot.anchor_at(5, Bias::Right),
+            SelectionGoal::None,
+            &snapshot,
+        );
+        assert_eq!(collection.newest_anchor().id, 2);
     }
 
     #[test]
@@ -657,6 +710,15 @@ mod tests {
         h.open_file(&path);
         h.type_keys("shift-C");
         h.assert_snapshot("shift_c_adds_selection_below");
+    }
+
+    #[test]
+    fn marked_text_round_trips_cursors_and_selections() {
+        let mut h = crate::test_harness::TestHarness::with_size(20, 10);
+        let path = h.write_file("s.txt", "");
+        h.open_file(&path);
+        h.from_marked_text("a<|bc||>d\n|ef");
+        h.assert_marked_text("a<|bc||>d\n|ef");
     }
 
     #[test]
