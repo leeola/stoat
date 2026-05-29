@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use crate::host::lsp::{
     IncomingRequest, LspHost, LspNotification, LspResponseError, LspServer, OffsetEncoding,
 };

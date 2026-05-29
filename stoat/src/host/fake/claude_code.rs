@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use crate::host::claude_code::{
     AgentMessage, ClaudeCodeHost, ClaudeCodeSession, ClaudeSessionSummary, HookLifecycleEvent,
     PlanEntry, SessionStateEvent, TaskEvent, TokenUsage, ToolCallStatus, ToolKind,

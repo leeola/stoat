@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 use crate::{
     host::terminal::{SpawnArgs, TerminalHost, TerminalSession},
     run::{pty::PtyNotification, RunId},

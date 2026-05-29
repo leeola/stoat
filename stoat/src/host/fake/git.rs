@@ -1,3 +1,5 @@
+#![allow(clippy::unwrap_used)]
+
 mod rebase;
 
 use crate::host::{
