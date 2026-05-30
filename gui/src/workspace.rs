@@ -1461,11 +1461,18 @@ impl Workspace {
 
     /// Set the working directory the workspace resolves paths against.
     /// File-finder, review-open, git discovery, and the save-state path
-    /// all read this root on demand, so they follow the change; the
-    /// diff/blame coordinators built at construction keep the original
-    /// root.
+    /// read this root on demand, so they follow the change; the diff and
+    /// blame coordinators and the active-file label captured the root at
+    /// construction and are updated here so they follow it too.
     pub fn set_git_root(&mut self, git_root: impl Into<PathBuf>, cx: &mut Context<'_, Self>) {
-        self.git_root = git_root.into();
+        let git_root = git_root.into();
+        self.git_root = git_root.clone();
+        self.diff_coordinator
+            .update(cx, |c, cx| c.set_git_root(git_root.clone(), cx));
+        self.blame_coordinator
+            .update(cx, |c, cx| c.set_git_root(git_root.clone(), cx));
+        self.active_file_label
+            .update(cx, move |l, cx| l.set_workspace_root(git_root, cx));
         cx.notify();
     }
 
@@ -7895,6 +7902,19 @@ mod tests {
         vcx.run_until_parked();
 
         let root = ws.read_with(vcx, |w, _| w.git_root().clone());
+        assert_eq!(root, PathBuf::from("/tmp/elsewhere"));
+    }
+
+    #[test]
+    fn set_git_root_propagates_to_blame_coordinator() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| w.set_git_root("/tmp/elsewhere", cx));
+
+        let root = ws.read_with(vcx, |w, cx| {
+            w.blame_coordinator().read(cx).git_root().to_path_buf()
+        });
         assert_eq!(root, PathBuf::from("/tmp/elsewhere"));
     }
 

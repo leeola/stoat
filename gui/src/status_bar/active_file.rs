@@ -6,7 +6,7 @@ use gpui::{
     div, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
     Window,
 };
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 /// Status-bar item that surfaces the focused editor's
 /// path-relative filename, plus a trailing ` [+]` when the
@@ -16,6 +16,7 @@ use std::path::PathBuf;
 /// indicator in sync without polling.
 pub struct ActiveFileLabel {
     workspace_root: PathBuf,
+    file_path: Option<PathBuf>,
     filename: Option<SharedString>,
     dirty: bool,
     _buffer_subscription: Option<Subscription>,
@@ -25,9 +26,31 @@ impl ActiveFileLabel {
     pub fn new(workspace_root: PathBuf) -> Self {
         Self {
             workspace_root,
+            file_path: None,
             filename: None,
             dirty: false,
             _buffer_subscription: None,
+        }
+    }
+
+    fn relative_filename(file_path: Option<&Path>, workspace_root: &Path) -> SharedString {
+        match file_path {
+            Some(path) => SharedString::from(stoat::paths::display_relative(path, workspace_root)),
+            None => SharedString::from("[scratch]"),
+        }
+    }
+
+    /// Re-target the label at a new workspace root. When an editor is
+    /// bound, the displayed filename is re-derived relative to the new
+    /// root so a working-directory change is reflected immediately.
+    pub fn set_workspace_root(&mut self, workspace_root: PathBuf, cx: &mut Context<'_, Self>) {
+        self.workspace_root = workspace_root;
+        if self.filename.is_some() {
+            self.filename = Some(Self::relative_filename(
+                self.file_path.as_deref(),
+                &self.workspace_root,
+            ));
+            cx.notify();
         }
     }
 
@@ -40,19 +63,18 @@ impl ActiveFileLabel {
     }
 
     fn bind_to_editor(&mut self, editor: &Entity<Editor>, cx: &mut Context<'_, Self>) {
-        let (filename, buffer) = {
+        let (file_path, buffer) = {
             let editor_ref = editor.read(cx);
-            let filename = match editor_ref.file_path() {
-                Some(path) => {
-                    SharedString::from(stoat::paths::display_relative(path, &self.workspace_root))
-                },
-                None => SharedString::from("[scratch]"),
-            };
+            let file_path = editor_ref.file_path().map(Path::to_path_buf);
             let buffer = editor_ref.multi_buffer().read(cx).as_singleton().cloned();
-            (filename, buffer)
+            (file_path, buffer)
         };
 
-        self.filename = Some(filename);
+        self.filename = Some(Self::relative_filename(
+            file_path.as_deref(),
+            &self.workspace_root,
+        ));
+        self.file_path = file_path;
         self.dirty = buffer
             .as_ref()
             .map(|b| b.read(cx).is_dirty())
@@ -79,6 +101,7 @@ impl ActiveFileLabel {
             return;
         }
         self.filename = None;
+        self.file_path = None;
         self.dirty = false;
         self._buffer_subscription = None;
         cx.notify();
@@ -283,5 +306,27 @@ mod tests {
         buffer.update(&mut cx, |b, cx| b.save(cx));
         cx.run_until_parked();
         label.read_with(&cx, |l, _| assert!(!l.is_dirty()));
+    }
+
+    #[test]
+    fn set_workspace_root_rederives_relative_filename() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let label = new_label(&mut cx, "/tmp/repo");
+        let editor = new_editor(&mut cx, Some(PathBuf::from("/tmp/repo/src/main.rs")));
+        let handle: Box<dyn ItemHandle> = Box::new(editor);
+        label.update(&mut cx, |l, cx| {
+            l.set_active_pane_item(Some(&*handle), cx);
+        });
+        label.read_with(&cx, |l, _| {
+            assert_eq!(l.filename(), Some(&SharedString::from("src/main.rs")));
+        });
+
+        label.update(&mut cx, |l, cx| {
+            l.set_workspace_root(PathBuf::from("/tmp/repo/src"), cx)
+        });
+        label.read_with(&cx, |l, _| {
+            assert_eq!(l.filename(), Some(&SharedString::from("main.rs")));
+        });
     }
 }

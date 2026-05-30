@@ -54,6 +54,14 @@ impl BlameCoordinator {
         &self.git_root
     }
 
+    /// Point the coordinator at a new workspace root. Blame is fetched
+    /// on demand via [`Self::refresh`], so already-tracked states pick
+    /// up the new repository on their next refresh.
+    pub fn set_git_root(&mut self, git_root: PathBuf, cx: &mut Context<'_, Self>) {
+        self.git_root = git_root;
+        cx.notify();
+    }
+
     /// Returns the [`Entity<BlameState>`] for `buffer_id`, creating
     /// a fresh empty state subscribed to `buffer` on first lookup.
     /// Subsequent calls with the same `buffer_id` return the cached
@@ -301,5 +309,32 @@ mod tests {
             assert_eq!(c.tracked_count(), 0);
             assert!(c.state_for_id(registered_id).is_none());
         });
+    }
+
+    #[test]
+    fn set_git_root_redirects_blame_to_new_repo() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/work")
+            .commit("c1", &[("a.rs", "line1\nline2\n")]);
+        let scheduler = install_globals(&mut cx, git);
+        let (_registry, coordinator) = new_coordinator(&mut cx, PathBuf::from("/other"));
+        let buffer = new_buffer(&mut cx, Some(PathBuf::from("/work/a.rs")), "line1\nline2\n");
+
+        let state = coordinator.update(&mut cx, |c, cx| c.state_for(BufferId::new(1), buffer, cx));
+        coordinator.update(&mut cx, |c, cx| {
+            c.refresh(BufferId::new(1), PathBuf::from("/work/a.rs"), cx)
+        });
+        settle(&scheduler, &mut cx);
+        assert!(state.read_with(&cx, |s, _| s.blame().is_empty()));
+
+        coordinator.update(&mut cx, |c, cx| c.set_git_root(PathBuf::from("/work"), cx));
+        coordinator.update(&mut cx, |c, cx| {
+            c.refresh(BufferId::new(1), PathBuf::from("/work/a.rs"), cx)
+        });
+        settle(&scheduler, &mut cx);
+
+        let lines = state.read_with(&cx, |s, _| s.blame().to_vec());
+        assert_eq!(lines.len(), 2);
     }
 }

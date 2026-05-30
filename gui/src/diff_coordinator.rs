@@ -106,6 +106,18 @@ impl DiffCoordinator {
         self.buffers.len()
     }
 
+    /// Point the coordinator at a new workspace root and recompute the
+    /// working-tree diff for every tracked buffer against it, so the
+    /// gutter reflects the new repository's HEAD.
+    pub fn set_git_root(&mut self, git_root: PathBuf, cx: &mut Context<'_, Self>) {
+        self.git_root = git_root;
+        let ids: Vec<BufferId> = self.buffers.keys().copied().collect();
+        for id in ids {
+            self.recompute_for(id, cx);
+        }
+        cx.notify();
+    }
+
     fn recompute_for(&mut self, buffer_id: BufferId, cx: &mut Context<'_, Self>) {
         let Some(tracking) = self.buffers.get(&buffer_id) else {
             return;
@@ -369,5 +381,29 @@ mod tests {
             .read_with(&cx, |c, _| c.diff_map_for(BufferId::new(1)).cloned())
             .expect("diff map");
         assert!(dm.read_with(&cx, |dm, _| dm.diff().is_empty()));
+    }
+
+    #[test]
+    fn set_git_root_recomputes_against_new_repo() {
+        let mut cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/work").head_file("a.rs", "old\n");
+        install_globals(&mut cx, git);
+        let (_registry, coordinator) = new_coordinator(&mut cx, PathBuf::from("/other"));
+        let buffer = new_buffer(&mut cx, Some(PathBuf::from("/work/a.rs")), "new\n");
+
+        coordinator.update(&mut cx, |c, cx| {
+            c.track_buffer(BufferId::new(1), buffer.clone(), cx)
+        });
+        cx.run_until_parked();
+        let dm = coordinator
+            .read_with(&cx, |c, _| c.diff_map_for(BufferId::new(1)).cloned())
+            .expect("diff map");
+        assert!(dm.read_with(&cx, |dm, _| dm.diff().is_empty()));
+
+        coordinator.update(&mut cx, |c, cx| c.set_git_root(PathBuf::from("/work"), cx));
+        cx.run_until_parked();
+
+        assert!(!dm.read_with(&cx, |dm, _| dm.diff().is_empty()));
     }
 }
