@@ -44,6 +44,15 @@ impl EnvHost for FakeEnv {
             .get(name)
             .cloned()
     }
+
+    fn vars(&self) -> Vec<(String, String)> {
+        self.vars
+            .lock()
+            .expect("FakeEnv lock poisoned")
+            .iter()
+            .map(|(name, value)| (name.clone(), value.clone()))
+            .collect()
+    }
 }
 
 #[cfg(test)]
@@ -73,5 +82,21 @@ mod tests {
         env.set("B", "beta");
         assert_eq!(env.var("A"), Some("alpha".to_string()));
         assert_eq!(env.var("B"), Some("beta".to_string()));
+    }
+
+    #[test]
+    fn vars_returns_all_seeded_pairs() {
+        let env = FakeEnv::new();
+        env.set("A", "alpha");
+        env.set("B", "beta");
+        let mut vars = env.vars();
+        vars.sort();
+        assert_eq!(
+            vars,
+            vec![
+                ("A".to_string(), "alpha".to_string()),
+                ("B".to_string(), "beta".to_string()),
+            ]
+        );
     }
 }
