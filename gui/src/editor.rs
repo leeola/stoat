@@ -30,7 +30,7 @@ use serde_json::Value;
 use std::{cell::RefCell, num::NonZeroUsize, ops::Range};
 use stoat::{
     buffer::BufferId, jumplist::JumpList, multi_buffer::MultiBufferSnapshot,
-    review_session::ChunkStatus, selection::SelectionsCollection, DisplayPoint,
+    review_session::ChunkStatus, selection::SelectionsCollection, DiffHunkStatus, DisplayPoint,
 };
 use stoat_text::{
     next_word_start, prev_word_start, Anchor, Bias, OffsetUtf16, Selection, SelectionGoal,
@@ -2810,6 +2810,69 @@ impl Editor {
         self.inlay_hints_manager.as_ref()
     }
 
+    /// Aggregate the per-row scrollbar markers from the editor's three
+    /// marker sources -- diagnostic severities, git-hunk statuses, and
+    /// search-query hits -- each as a row-sorted, row-deduplicated
+    /// vector. Computed at read time, so callers see fresh markers by
+    /// re-reading after the underlying diagnostics, diff, or search
+    /// state changes.
+    pub fn scrollbar_markers(&self, cx: &App) -> scroll::ScrollbarMarkerSet {
+        let diagnostics = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
+            (Some(path), Some(set)) => render::compute_row_severity_for_path(set.read(cx), path)
+                .into_iter()
+                .collect(),
+            _ => Vec::new(),
+        };
+
+        let mut hunks: Vec<(u32, DiffHunkStatus)> = self
+            .diff_map
+            .read(cx)
+            .diff()
+            .hunks_in_range(0..u32::MAX)
+            .into_iter()
+            .flat_map(|hunk| {
+                let status = hunk.status;
+                hunk.buffer_line_range.clone().map(move |row| (row, status))
+            })
+            .collect();
+        hunks.sort_by_key(|(row, _)| *row);
+        hunks.dedup_by_key(|(row, _)| *row);
+
+        let search_hits = self.search_hit_rows(cx);
+
+        scroll::ScrollbarMarkerSet {
+            diagnostics,
+            hunks,
+            search_hits,
+        }
+    }
+
+    /// Rows containing a match of the active search query, sorted and
+    /// deduplicated. Empty when no search is active, the query is empty,
+    /// or the query does not compile as a regex.
+    fn search_hit_rows(&self, cx: &App) -> Vec<u32> {
+        let Some(state) = self.search_state.as_ref() else {
+            return Vec::new();
+        };
+        if state.query().is_empty() {
+            return Vec::new();
+        }
+        let Ok(regex) = stoat::action_handlers::search::compile_search_regex(state.query()) else {
+            return Vec::new();
+        };
+
+        let snapshot = self.multi_buffer().read(cx).snapshot();
+        let rope = snapshot.rope();
+        let text = rope.to_string();
+
+        let mut rows: Vec<u32> = regex
+            .find_iter(&text)
+            .map(|m| rope.offset_to_point(m.start()).row)
+            .collect();
+        rows.dedup();
+        rows
+    }
+
     /// Construct the [`crate::lsp::SemanticTokensManager`] entity
     /// that drives `textDocument/semanticTokens/full` requests for
     /// the active buffer into the editor's
@@ -5487,6 +5550,80 @@ mod tests {
             editor.read_with(&cx, |ed, _| ed.file_path().map(|p| p.to_path_buf())),
             Some(PathBuf::from("/ws/a.rs")),
         );
+    }
+
+    #[test]
+    fn scrollbar_markers_aggregates_diagnostics_hunks_and_search() {
+        use crate::{
+            diagnostics::DiagnosticSet,
+            editor::search::{SearchDirection, SearchState},
+        };
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+
+        let diag_at = |row: u32, severity: DiagnosticSeverity| Diagnostic {
+            range: Range::new(Position::new(row, 0), Position::new(row, 1)),
+            severity: Some(severity),
+            code: None,
+            code_description: None,
+            source: None,
+            message: String::new(),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+        let hunk = |status, range: std::ops::Range<u32>| stoat::DiffHunk {
+            status,
+            staged: false,
+            buffer_start_line: range.start,
+            buffer_line_range: range,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: None,
+        };
+
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "foo\nbar\nfoo\nbaz\n");
+        let path = PathBuf::from("/ws/a.rs");
+        let diag_set = cx.update(|cx| cx.new(|_| DiagnosticSet::new()));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_file_path(Some(path.clone()), cx);
+            ed.set_diagnostic_set(Some(diag_set.clone()), cx);
+            ed.set_search_state(Some(SearchState::new("foo", SearchDirection::Forward)), cx);
+            let diff_map = ed.diff_map().clone();
+            diff_map.update(cx, |dm, cx| {
+                dm.set_diff(
+                    stoat::DiffMap::from_hunks([hunk(DiffHunkStatus::Added, 0..2)], None),
+                    cx,
+                );
+            });
+        });
+        diag_set.update(&mut cx, |s, cx| {
+            s.replace_for_path(
+                path.clone(),
+                vec![
+                    diag_at(1, DiagnosticSeverity::WARNING),
+                    diag_at(1, DiagnosticSeverity::ERROR),
+                    diag_at(3, DiagnosticSeverity::HINT),
+                ],
+                cx,
+            )
+        });
+
+        let markers = editor.read_with(&cx, |ed, cx| ed.scrollbar_markers(cx));
+        assert_eq!(
+            markers.diagnostics,
+            vec![
+                (1, DiagnosticSeverity::ERROR),
+                (3, DiagnosticSeverity::HINT)
+            ],
+            "worst severity wins per row"
+        );
+        assert_eq!(
+            markers.hunks,
+            vec![(0, DiffHunkStatus::Added), (1, DiffHunkStatus::Added)]
+        );
+        assert_eq!(markers.search_hits, vec![0, 2], "foo matches rows 0 and 2");
     }
 
     #[test]

@@ -2,7 +2,9 @@ pub mod autoscroll;
 
 use autoscroll::AutoscrollStrategy;
 use gpui::{px, Axis, Pixels, Point, ScrollDelta};
+use lsp_types::DiagnosticSeverity;
 use std::time::{Duration, Instant};
+use stoat::DiffHunkStatus;
 use stoat_text::Anchor;
 
 /// Minimum gap between scroll events for a new axis-lock decision.
@@ -138,6 +140,18 @@ pub enum ScrollbarThumbState {
     Idle,
     Hovered,
     Dragging,
+}
+
+/// Per-row markers painted along the scrollbar's vertical extent so
+/// diagnostics, git hunks, and search hits surface over the full file
+/// at a glance. Each vector is sorted by row and holds at most one
+/// entry per row; the editor's `scrollbar_markers` accessor aggregates
+/// the three sources at read time.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct ScrollbarMarkerSet {
+    pub diagnostics: Vec<(u32, DiagnosticSeverity)>,
+    pub hunks: Vec<(u32, DiffHunkStatus)>,
+    pub search_hits: Vec<u32>,
 }
 
 /// In-progress eased scroll animation. The scroll position interpolates
