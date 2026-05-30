@@ -1702,28 +1702,15 @@ mod tests {
             .expect("a changed row") as u32
     }
 
-    /// Commit `base`, set the working tree to `buffer`, build a review
-    /// session, stage the single row chosen by `pick` via
-    /// [`ReviewSession::plan_line_stage`] against a real libgit2 index, and
-    /// return the resulting staged blob content.
+    /// Seed HEAD with `base`, build a review session over `buffer`, stage
+    /// the single row chosen by `pick` via [`ReviewSession::plan_line_stage`]
+    /// against the in-memory fake index, and return the staged blob content.
     fn stage_line_to_index(base: &str, buffer: &str, pick: impl Fn(&[ReviewRow]) -> u32) -> String {
-        use crate::host::{GitHost, LocalGit};
-        use git2::{Repository, Signature};
-        use std::path::Path;
+        use crate::host::{fake::FakeGit, GitHost};
 
-        let dir = tempfile::tempdir().unwrap();
-        let workdir = dir.path().to_path_buf();
-        let repo = Repository::init(&workdir).unwrap();
-        std::fs::write(workdir.join("a.rs"), base).unwrap();
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("a.rs")).unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = Signature::now("t", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
-            .unwrap();
-        std::fs::write(workdir.join("a.rs"), buffer).unwrap();
+        let workdir = PathBuf::from("/repo");
+        let git = FakeGit::new();
+        git.add_repo(workdir.clone()).head_file("a.rs", base);
 
         let mut session = working_tree(workdir.to_str().unwrap());
         session.add_file(
@@ -1737,21 +1724,18 @@ mod tests {
         let row = pick(&session.chunks[&id].hunk.rows);
         let plan = session.plan_line_stage(id, row).expect("line stage plan");
 
-        let host_repo = LocalGit::new().discover(&workdir).unwrap();
+        let host_repo = git.discover(&workdir).unwrap();
         for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
             .into_iter()
             .flatten()
         {
             host_repo
                 .apply_to_index(patch)
-                .expect("single-line patch must apply to libgit2");
+                .expect("single-line patch must apply to the fake index");
         }
 
-        let mut index = repo.index().unwrap();
-        index.read(true).unwrap();
-        let entry = index.get_path(Path::new("a.rs"), 0).unwrap();
-        let blob = repo.find_blob(entry.id).unwrap();
-        String::from_utf8(blob.content().to_vec()).unwrap()
+        git.staged_content(&workdir, "a.rs")
+            .expect("staged content after applying line patches")
     }
 
     #[test]
@@ -1785,26 +1769,14 @@ mod tests {
 
     #[test]
     fn plan_line_stage_accumulates_adjacent_rows() {
-        use crate::host::{GitHost, LocalGit};
-        use git2::{Repository, Signature};
-        use std::path::Path;
+        use crate::host::{fake::FakeGit, GitHost};
 
         let base = "a\nOLD1\nOLD2\nOLD3\nz\n";
         let buffer = "a\nNEW1\nNEW2\nNEW3\nz\n";
 
-        let dir = tempfile::tempdir().unwrap();
-        let workdir = dir.path().to_path_buf();
-        let repo = Repository::init(&workdir).unwrap();
-        std::fs::write(workdir.join("a.rs"), base).unwrap();
-        let mut index = repo.index().unwrap();
-        index.add_path(Path::new("a.rs")).unwrap();
-        index.write().unwrap();
-        let tree_id = index.write_tree().unwrap();
-        let tree = repo.find_tree(tree_id).unwrap();
-        let sig = Signature::now("t", "t@t").unwrap();
-        repo.commit(Some("HEAD"), &sig, &sig, "c", &tree, &[])
-            .unwrap();
-        std::fs::write(workdir.join("a.rs"), buffer).unwrap();
+        let workdir = PathBuf::from("/repo");
+        let git = FakeGit::new();
+        git.add_repo(workdir.clone()).head_file("a.rs", base);
 
         let mut session = working_tree(workdir.to_str().unwrap());
         session.add_file(
@@ -1826,7 +1798,7 @@ mod tests {
             .collect();
         assert_eq!(changed.len(), 3, "expected three changed rows: {changed:?}");
 
-        let host_repo = LocalGit::new().discover(&workdir).unwrap();
+        let host_repo = git.discover(&workdir).unwrap();
         let staged_index = |session: &mut ReviewSession, row: u32| -> String {
             let plan = session.plan_line_stage(id, row).expect("plan");
             for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
@@ -1836,10 +1808,8 @@ mod tests {
                 host_repo.apply_to_index(patch).expect("apply to index");
             }
             session.set_chunk_staged_rows(id, plan.rows, plan.status);
-            let mut idx = repo.index().unwrap();
-            idx.read(true).unwrap();
-            let entry = idx.get_path(Path::new("a.rs"), 0).unwrap();
-            String::from_utf8(repo.find_blob(entry.id).unwrap().content().to_vec()).unwrap()
+            git.staged_content(&workdir, "a.rs")
+                .expect("staged content")
         };
 
         assert_eq!(
