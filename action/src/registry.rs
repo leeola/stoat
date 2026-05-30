@@ -50,8 +50,8 @@ use crate::{
         file::OpenFile,
         file_finder::{
             FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker,
-            OpenChangedFilePicker, OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit,
-            OpenGitStatus,
+            OpenChangedFilePicker, OpenConflictPicker, OpenFileFinder, OpenFileFinderHSplit,
+            OpenFileFinderVSplit, OpenGitStatus,
         },
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
@@ -152,6 +152,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenChangedFilePicker))
     });
     add(OpenGitStatus::DEF, |_| Ok(Box::new(OpenGitStatus)));
+    add(OpenConflictPicker::DEF, |_| {
+        Ok(Box::new(OpenConflictPicker))
+    });
     add(OpenBufferPicker::DEF, |_| Ok(Box::new(OpenBufferPicker)));
     add(FileFinderSelectPrev::DEF, |_| {
         Ok(Box::new(FileFinderSelectPrev))
@@ -1142,7 +1145,8 @@ mod tests {
         // + 1 ReviewToggleFollow.
         // + 1 SetCwd.
         // + 2 Pwd / Env (command-line :pwd / :env palette actions).
-        assert_eq!(all().count(), 321);
+        // + 1 OpenConflictPicker (lists conflicted files in the worktree).
+        assert_eq!(all().count(), 322);
     }
 
     #[test]

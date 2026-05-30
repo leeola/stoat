@@ -624,6 +624,7 @@ on key {
         Escape -> SetMode(normal);
         b -> [ToggleBlame(), SetMode(normal)];
         s -> [OpenGitStatus(), SetMode(normal)];
+        x -> [OpenConflictPicker(), SetMode(normal)];
         r -> [OpenReview(), SetMode(normal)];
         d -> [ToggleDiffHunkPanel(), SetMode(normal)];
         : -> OpenCommandPalette();

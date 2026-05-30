@@ -179,6 +179,7 @@ pub enum ActionKind {
     Set,
     ToggleDiffHunkPanel,
     OpenGitStatus,
+    OpenConflictPicker,
     ExtendToLineStart,
     ExtendToLineEnd,
     ExtendToFileStart,

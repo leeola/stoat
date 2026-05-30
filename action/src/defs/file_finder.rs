@@ -1,4 +1,4 @@
-use crate::{Action, ActionDef, ActionKind, ParamDef};
+use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef};
 use std::any::Any;
 
 #[derive(Debug)]
@@ -232,6 +232,58 @@ impl OpenGitStatus {
 }
 
 impl Action for OpenGitStatus {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenConflictPickerDef;
+
+impl ActionDef for OpenConflictPickerDef {
+    fn name(&self) -> &'static str {
+        "OpenConflictPicker"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenConflictPicker
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        &[]
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "open conflict picker"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open a workspace-level picker listing every file in the active git \
+         repository with unresolved merge conflicts. Selecting one opens that \
+         file in the focused pane, where its conflict regions are highlighted."
+    }
+
+    fn palette_visible(&self) -> bool {
+        true
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+
+#[derive(Debug)]
+pub struct OpenConflictPicker;
+
+impl OpenConflictPicker {
+    pub const DEF: &OpenConflictPickerDef = &OpenConflictPickerDef;
+}
+
+impl Action for OpenConflictPicker {
     fn def(&self) -> &'static dyn ActionDef {
         Self::DEF
     }

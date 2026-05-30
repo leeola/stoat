@@ -25,6 +25,7 @@ mod claude_tool_card;
 mod command_palette;
 mod commit_list;
 mod conflict_item;
+mod conflict_picker;
 mod diagnostics;
 mod diagnostics_picker;
 mod diff_coordinator;

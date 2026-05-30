@@ -2281,6 +2281,9 @@ impl Workspace {
             ActionKind::OpenGitStatus => {
                 crate::git_status_picker::open_git_status_picker(self, window, cx)
             },
+            ActionKind::OpenConflictPicker => {
+                crate::conflict_picker::open_conflict_picker(self, window, cx)
+            },
             ActionKind::OpenSymbolPicker => {
                 crate::symbol_picker::open_symbol_picker(self, window, cx)
             },

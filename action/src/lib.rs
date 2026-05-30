@@ -53,8 +53,8 @@ pub use defs::{
     file::OpenFile,
     file_finder::{
         FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker,
-        OpenChangedFilePicker, OpenFileFinder, OpenFileFinderHSplit, OpenFileFinderVSplit,
-        OpenGitStatus,
+        OpenChangedFilePicker, OpenConflictPicker, OpenFileFinder, OpenFileFinderHSplit,
+        OpenFileFinderVSplit, OpenGitStatus,
     },
     help::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
