@@ -1,10 +1,5 @@
 //! File-type icon lookups (Nerd Font glyph + tint) keyed by path, for
 //! the path-rendering pickers and the project tree.
-//!
-//! This is the icon data layer: it defines the lookups that the picker
-//! and project-tree row renderers read, separately from those render
-//! call sites.
-#![allow(dead_code)]
 
 use crate::theme::ThemeColors;
 use gpui::{rgb, Hsla};

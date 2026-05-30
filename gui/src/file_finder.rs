@@ -10,13 +10,14 @@
 use crate::{
     buffer::Buffer,
     editor::Editor,
+    file_icons,
     globals::{ExecutorGlobal, FsHostGlobal, GitHostGlobal},
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, App, Context, DismissEvent, Entity, HighlightStyle, IntoElement,
+    div, px, AnyElement, App, Context, DismissEvent, Entity, HighlightStyle, IntoElement,
     ParentElement, SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use std::{
@@ -344,7 +345,8 @@ impl PickerDelegate for FileFinderDelegate {
             return div().into_any_element();
         };
         let display = display_path(path, &self.git_root);
-        let color = cx.theme().modal_picker;
+        let theme = cx.theme();
+        let color = theme.modal_picker;
         let runs = match_highlight_runs(
             &display,
             matched,
@@ -354,9 +356,19 @@ impl PickerDelegate for FileFinderDelegate {
             },
         );
         let label = StyledText::new(SharedString::from(display)).with_highlights(runs);
-        let mut row = div().px_2().truncate().text_color(color).child(label);
+        let mut row = div()
+            .flex()
+            .items_center()
+            .px_2()
+            .child(
+                div()
+                    .mr(px(6.0))
+                    .text_color(file_icons::color_for_path(path, &theme))
+                    .child(file_icons::icon_for_path(path, false)),
+            )
+            .child(div().truncate().text_color(color).child(label));
         if selected {
-            row = row.bg(cx.theme().modal_selection);
+            row = row.bg(theme.modal_selection);
         }
         row.into_any_element()
     }
