@@ -148,6 +148,16 @@ impl FakeGit {
             .unwrap_or_default()
     }
 
+    /// Staged blob content for the repo-relative `rel_path` in the repo at
+    /// `workdir`, as accumulated by [`GitRepo::apply_to_index`]. `None`
+    /// when the repo is unknown or the path has never been staged.
+    pub fn staged_content(&self, workdir: &Path, rel_path: impl AsRef<Path>) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        let repo = state.repos.get(workdir)?;
+        let repo_state = repo.state.lock().unwrap();
+        repo_state.staged.get(rel_path.as_ref()).cloned()
+    }
+
     /// Snapshot the patches applied to a repo's working tree via
     /// `apply_to_workdir` (hunk revert). Empty when none have been applied
     /// or the repo is unknown.
@@ -224,6 +234,192 @@ fn parse_patch_target(patch: &str) -> Option<PathBuf> {
         base_target
     } else {
         buffer_target.or(base_target)
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DiffOpKind {
+    Context,
+    Remove,
+    Add,
+}
+
+struct DiffOp {
+    kind: DiffOpKind,
+    text: String,
+    /// Set when a `\ No newline at end of file` marker follows this line,
+    /// meaning its side's final line has no trailing newline.
+    no_newline: bool,
+}
+
+struct DiffHunk {
+    /// 1-based start line on the `-` (from) side; 0 for a new file.
+    from_start: usize,
+    ops: Vec<DiffOp>,
+}
+
+/// Apply unified-diff `patch` to `base`, returning the new content, or the
+/// mismatch reason when a hunk's context or removed lines do not match the
+/// current content.
+///
+/// Hand-rolled and independent of the patch generator: it parses each
+/// `@@`-hunk, verifies context and removed lines against the current
+/// content, emits context and added lines, and reproduces the
+/// `\ No newline at end of file` behaviour for a hunk that reaches the end
+/// of the file.
+fn apply_unified_diff(base: &str, patch: &str) -> Result<String, String> {
+    let (lines, base_final_newline) = split_lines(base);
+    let hunks = parse_hunks(patch);
+
+    let mut out: Vec<String> = Vec::new();
+    let mut cursor = 0usize;
+    let mut last_emitted_no_newline = false;
+
+    for hunk in &hunks {
+        let start = hunk.from_start.saturating_sub(1);
+        if start < cursor {
+            return Err(format!(
+                "hunk at line {} overlaps a prior hunk",
+                hunk.from_start
+            ));
+        }
+        if start > lines.len() {
+            return Err(format!(
+                "hunk starts at line {} past end of {}-line file",
+                hunk.from_start,
+                lines.len()
+            ));
+        }
+        out.extend_from_slice(&lines[cursor..start]);
+        cursor = start;
+
+        for op in &hunk.ops {
+            match op.kind {
+                DiffOpKind::Context => {
+                    if lines.get(cursor) != Some(&op.text) {
+                        return Err(format!("context mismatch at line {}", cursor + 1));
+                    }
+                    out.push(op.text.clone());
+                    last_emitted_no_newline = op.no_newline;
+                    cursor += 1;
+                },
+                DiffOpKind::Remove => {
+                    if lines.get(cursor) != Some(&op.text) {
+                        return Err(format!("context mismatch at line {}", cursor + 1));
+                    }
+                    cursor += 1;
+                },
+                DiffOpKind::Add => {
+                    out.push(op.text.clone());
+                    last_emitted_no_newline = op.no_newline;
+                },
+            }
+        }
+    }
+    out.extend_from_slice(&lines[cursor..]);
+
+    let reached_eof = !hunks.is_empty() && cursor == lines.len();
+    let final_newline = if reached_eof {
+        !last_emitted_no_newline
+    } else {
+        base_final_newline
+    };
+    Ok(join_lines(&out, final_newline))
+}
+
+/// Split `content` into newline-stripped lines plus whether it ends in a
+/// trailing newline. Round-trips through [`join_lines`].
+fn split_lines(content: &str) -> (Vec<String>, bool) {
+    if content.is_empty() {
+        return (Vec::new(), false);
+    }
+    let final_newline = content.ends_with('\n');
+    let body = content.strip_suffix('\n').unwrap_or(content);
+    (
+        body.split('\n').map(str::to_string).collect(),
+        final_newline,
+    )
+}
+
+fn join_lines(lines: &[String], final_newline: bool) -> String {
+    let mut out = lines.join("\n");
+    if final_newline && !lines.is_empty() {
+        out.push('\n');
+    }
+    out
+}
+
+fn parse_hunks(patch: &str) -> Vec<DiffHunk> {
+    let mut hunks: Vec<DiffHunk> = Vec::new();
+    let mut remaining_from = 0usize;
+    let mut remaining_to = 0usize;
+    for line in patch.lines() {
+        if let Some(rest) = line.strip_prefix("@@ ") {
+            if let Some((from_start, from_count, to_count)) = parse_hunk_header(rest) {
+                hunks.push(DiffHunk {
+                    from_start,
+                    ops: Vec::new(),
+                });
+                remaining_from = from_count;
+                remaining_to = to_count;
+            }
+            continue;
+        }
+        if line.starts_with('\\') {
+            if let Some(op) = hunks.last_mut().and_then(|h| h.ops.last_mut()) {
+                op.no_newline = true;
+            }
+            continue;
+        }
+        if remaining_from == 0 && remaining_to == 0 {
+            continue;
+        }
+        let Some(hunk) = hunks.last_mut() else {
+            continue;
+        };
+        if let Some(text) = line.strip_prefix(' ') {
+            hunk.ops.push(DiffOp {
+                kind: DiffOpKind::Context,
+                text: text.to_string(),
+                no_newline: false,
+            });
+            remaining_from = remaining_from.saturating_sub(1);
+            remaining_to = remaining_to.saturating_sub(1);
+        } else if let Some(text) = line.strip_prefix('+') {
+            hunk.ops.push(DiffOp {
+                kind: DiffOpKind::Add,
+                text: text.to_string(),
+                no_newline: false,
+            });
+            remaining_to = remaining_to.saturating_sub(1);
+        } else if let Some(text) = line.strip_prefix('-') {
+            hunk.ops.push(DiffOp {
+                kind: DiffOpKind::Remove,
+                text: text.to_string(),
+                no_newline: false,
+            });
+            remaining_from = remaining_from.saturating_sub(1);
+        }
+    }
+    hunks
+}
+
+/// Parse the `-<from_start>,<from_count> +<to_start>,<to_count> @@` body of
+/// a hunk header (the text after the leading `@@ `).
+fn parse_hunk_header(rest: &str) -> Option<(usize, usize, usize)> {
+    let mut parts = rest.split_whitespace();
+    let from = parts.next()?.strip_prefix('-')?;
+    let to = parts.next()?.strip_prefix('+')?;
+    let (from_start, from_count) = parse_range(from)?;
+    let (_, to_count) = parse_range(to)?;
+    Some((from_start, from_count, to_count))
+}
+
+/// Parse a `start,count` range, defaulting `count` to 1 when omitted.
+fn parse_range(range: &str) -> Option<(usize, usize)> {
+    match range.split_once(',') {
+        Some((start, count)) => Some((start.parse().ok()?, count.parse().ok()?)),
+        None => Some((range.parse().ok()?, 1)),
     }
 }
 
@@ -471,6 +667,11 @@ pub struct FakeGitRepo {
 #[derive(Default)]
 struct FakeRepoState {
     head_contents: HashMap<PathBuf, String>,
+    /// In-memory staged index keyed by repo-relative path. Seeded lazily
+    /// from [`Self::head_contents`] the first time a path is staged via
+    /// [`GitRepo::apply_to_index`], then mutated by applying each patch's
+    /// hunks so tests can read staged blobs back without a real index.
+    staged: HashMap<PathBuf, String>,
     changed: Vec<ChangedFile>,
     applied_patches: Vec<String>,
     /// Patches applied via [`GitRepo::apply_to_workdir`] (hunk revert),
@@ -561,12 +762,32 @@ impl GitRepo for FakeGitRepo {
     fn apply_to_index(&self, patch: &str) -> Result<(), GitApplyError> {
         let mut state = self.state.lock().unwrap();
         state.applied_patches.push(patch.to_string());
-        match &state.apply_error {
-            Some(msg) => BackendSnafu {
+        if let Some(msg) = &state.apply_error {
+            return BackendSnafu {
                 reason: msg.clone(),
             }
-            .fail(),
-            None => Ok(()),
+            .fail();
+        }
+        let Some(rel) = parse_patch_target(patch) else {
+            return Ok(());
+        };
+        // Apply only when a base is known: an existing staged blob, or a HEAD
+        // entry to seed from. Repos used purely to record emitted patches
+        // register no HEAD content, so for them apply_to_index stays a
+        // recording no-op and the patch context is not checked.
+        let seed = if let Some(staged) = state.staged.get(&rel) {
+            staged.clone()
+        } else if let Some(head) = state.head_contents.get(&rel) {
+            head.clone()
+        } else {
+            return Ok(());
+        };
+        match apply_unified_diff(&seed, patch) {
+            Ok(updated) => {
+                state.staged.insert(rel, updated);
+                Ok(())
+            },
+            Err(reason) => BackendSnafu { reason }.fail(),
         }
     }
 
@@ -990,6 +1211,36 @@ mod tests {
             host.applied_patches(&workdir()),
             vec!["--- a\n+++ b\n".to_string(), "--- c\n+++ d\n".to_string()],
         );
+    }
+
+    #[test]
+    fn apply_to_index_stages_modified_content() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "line1\nOLD\nline3\n");
+        let repo = host.discover(&workdir()).unwrap();
+        let patch = "--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n line1\n-OLD\n+NEW\n line3\n";
+        repo.apply_to_index(patch).expect("apply");
+        assert_eq!(
+            host.staged_content(&workdir(), "a.rs"),
+            Some("line1\nNEW\nline3\n".to_string()),
+        );
+        assert_eq!(host.applied_patches(&workdir()), vec![patch.to_string()]);
+    }
+
+    #[test]
+    fn apply_to_index_rejects_context_mismatch() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .head_file("a.rs", "line1\nOLD\nline3\n");
+        let repo = host.discover(&workdir()).unwrap();
+        let patch = "--- a/a.rs\n+++ b/a.rs\n@@ -1,3 +1,3 @@\n line1\n-WRONG\n+NEW\n line3\n";
+        assert!(matches!(
+            repo.apply_to_index(patch),
+            Err(GitApplyError::Backend { .. })
+        ));
+        assert_eq!(host.staged_content(&workdir(), "a.rs"), None);
+        assert_eq!(host.applied_patches(&workdir()), vec![patch.to_string()]);
     }
 
     #[test]
