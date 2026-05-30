@@ -78,7 +78,7 @@ mod tests {
         install_executor(&mut cx);
         let (workspace, vcx) = new_workspace(&mut cx);
 
-        workspace.update_in(vcx, |ws, window, cx| open_about(ws, window, cx));
+        workspace.update_in(vcx, open_about);
         vcx.run_until_parked();
 
         let has_modal =

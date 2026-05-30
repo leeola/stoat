@@ -8,7 +8,7 @@ use gpui::{
     div, AnyElement, Context, Entity, IntoElement, ParentElement, Styled, Task, WeakEntity, Window,
 };
 use lsp_types::Location;
-use std::path::PathBuf;
+use std::{path::PathBuf, slice};
 use stoat::host::OffsetEncoding;
 
 /// Picker delegate listing the locations returned by
@@ -82,7 +82,7 @@ impl PickerDelegate for ReferencesPickerDelegate {
         // lease so the re-entrant update does not panic.
         window.defer(cx, move |_window, cx| {
             workspace.update(cx, |workspace, cx| {
-                workspace.open_paths(&[path.clone()], cx);
+                workspace.open_paths(slice::from_ref(&path), cx);
                 let Some(editor) = workspace
                     .buffer_for_path(&path, cx)
                     .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))

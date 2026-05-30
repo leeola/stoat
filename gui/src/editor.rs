@@ -3332,11 +3332,7 @@ impl Editor {
         }
     }
 
-    fn render_visible_rows(
-        &mut self,
-        range: Range<usize>,
-        cx: &mut Context<'_, Self>,
-    ) -> Vec<Div> {
+    fn render_visible_rows(&mut self, range: Range<usize>, cx: &mut Context<'_, Self>) -> Vec<Div> {
         let _span = tracing::trace_span!("editor.render_visible_rows").entered();
         let is_minimap = self.mode.is_minimap();
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
@@ -5335,7 +5331,7 @@ mod tests {
                 .collect()
         });
         assert!(
-            !bg_colors.iter().any(|c| *c == Some(search_color)),
+            !bg_colors.contains(&Some(search_color)),
             "minimap must not paint search_match backgrounds (found {bg_colors:?})",
         );
     }

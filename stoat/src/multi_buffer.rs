@@ -812,7 +812,10 @@ impl Iterator for ExcerptBoundaryIter {
 mod tests {
     use super::{ExcerptId, MultiBuffer, MultiBufferAnchor, MultiBufferPoint};
     use crate::buffer::{BufferId, TextBuffer};
-    use std::sync::{Arc, RwLock};
+    use std::{
+        iter,
+        sync::{Arc, RwLock},
+    };
     use stoat_text::Point;
 
     fn create_test_buffer(content: &str) -> (BufferId, Arc<RwLock<TextBuffer>>) {
@@ -1145,7 +1148,7 @@ mod tests {
         let buf2 = Arc::new(RwLock::new(TextBuffer::with_text(id2, "bravo")));
 
         let mut multi = MultiBuffer::singleton(id1, buf1);
-        multi.insert_excerpts(id2, buf2, vec![0..5]);
+        multi.insert_excerpts(id2, buf2, iter::once(0..5).collect::<Vec<_>>());
 
         let snap = multi.live_excerpts_snapshot().unwrap();
         let rebuilt = MultiBuffer::restore_from_excerpts(snap, |_bid| None);

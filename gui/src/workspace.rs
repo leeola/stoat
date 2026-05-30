@@ -46,6 +46,7 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
+    slice,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -578,7 +579,7 @@ impl Workspace {
             return;
         }
         let _ = window;
-        self.open_paths(&[absolute.clone()], cx);
+        self.open_paths(slice::from_ref(&absolute), cx);
         let pane_id = self.pane_tree.read(cx).focus();
         let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
             return;
@@ -3142,9 +3143,7 @@ impl Workspace {
         if !cx.has_global::<Settings>() {
             cx.set_global(Settings::default());
         }
-        let result = cx.update_global::<Settings, _>(|s, _| {
-            s.resolved.apply_runtime(&key, &value)
-        });
+        let result = cx.update_global::<Settings, _>(|s, _| s.resolved.apply_runtime(&key, &value));
         if let Err(err) = result {
             tracing::warn!(
                 target: "stoat_gui::settings",
@@ -8179,10 +8178,7 @@ mod tests {
         assert!(active.is_none());
     }
 
-    fn new_singleton_editor(
-        vcx: &mut VisualTestContext,
-        text: &str,
-    ) -> Entity<Editor> {
+    fn new_singleton_editor(vcx: &mut VisualTestContext, text: &str) -> Entity<Editor> {
         use crate::{
             buffer::Buffer,
             diff_map::DiffMap,
@@ -8209,10 +8205,7 @@ mod tests {
         })
     }
 
-    fn cursor_offsets(
-        vcx: &mut VisualTestContext,
-        editor: &Entity<Editor>,
-    ) -> Vec<usize> {
+    fn cursor_offsets(vcx: &mut VisualTestContext, editor: &Entity<Editor>) -> Vec<usize> {
         editor.update(vcx, |ed, cx| {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
             ed.selections()
@@ -8593,9 +8586,7 @@ mod tests {
                         for pane_id in pane_tree.split_pane_ids() {
                             let pane = pane_tree.pane(pane_id)?;
                             for item in pane.read(cx).items() {
-                                if let Ok(editor) =
-                                    item.to_any_view().downcast::<Editor>()
-                                {
+                                if let Ok(editor) = item.to_any_view().downcast::<Editor>() {
                                     let singleton = editor
                                         .read(cx)
                                         .multi_buffer()
@@ -9154,11 +9145,7 @@ mod tests {
         assert_eq!(selection_offsets(vcx, &editor), vec![(0, 7)]);
     }
 
-    fn seed_primary_offset(
-        vcx: &mut VisualTestContext,
-        editor: &Entity<Editor>,
-        offset: usize,
-    ) {
+    fn seed_primary_offset(vcx: &mut VisualTestContext, editor: &Entity<Editor>, offset: usize) {
         use stoat_text::{Bias, Selection, SelectionGoal};
         editor.update(vcx, |ed, cx| {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
@@ -10833,11 +10820,9 @@ mod tests {
     ) -> Entity<crate::review_session::ReviewSession> {
         vcx.update(|_, cx| {
             cx.new(|_| {
-                let mut inner = stoat::review_session::ReviewSession::new(
-                    ReviewSource::InMemory {
-                        files: Arc::new(Vec::new()),
-                    },
-                );
+                let mut inner = stoat::review_session::ReviewSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
                 let base = (0..14)
                     .map(|i| format!("L{i}"))
                     .collect::<Vec<_>>()
@@ -11023,11 +11008,9 @@ mod tests {
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let session = vcx.update(|_, cx| {
             cx.new(|_| {
-                let mut inner = stoat::review_session::ReviewSession::new(
-                    ReviewSource::InMemory {
-                        files: Arc::new(Vec::new()),
-                    },
-                );
+                let mut inner = stoat::review_session::ReviewSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
                 inner.add_files(vec![
                     ReviewFileInput {
                         path: PathBuf::from("a.txt"),
@@ -11400,11 +11383,9 @@ mod tests {
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let session = vcx.update(|_, cx| {
             cx.new(|_| {
-                let inner = stoat::review_session::ReviewSession::new(
-                    ReviewSource::InMemory {
-                        files: Arc::new(Vec::new()),
-                    },
-                );
+                let inner = stoat::review_session::ReviewSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
                 crate::review_session::ReviewSession::new(inner)
             })
         });
@@ -14556,11 +14537,7 @@ mod tests {
         );
         vcx.run_until_parked();
 
-        let after = vcx.read(|cx| {
-            cx.global::<Settings>()
-                .resolved
-                .ui_pane_show_tab_bar
-        });
+        let after = vcx.read(|cx| cx.global::<Settings>().resolved.ui_pane_show_tab_bar);
         assert_eq!(after, Some(false));
     }
 
@@ -14580,11 +14557,7 @@ mod tests {
         );
         vcx.run_until_parked();
 
-        let after = vcx.read(|cx| {
-            cx.global::<Settings>()
-                .resolved
-                .ui_pane_show_tab_bar
-        });
+        let after = vcx.read(|cx| cx.global::<Settings>().resolved.ui_pane_show_tab_bar);
         assert_eq!(after, None);
     }
 
@@ -14594,29 +14567,17 @@ mod tests {
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         vcx.update(|_, cx| cx.set_global(Settings::default()));
 
-        let before = vcx.read(|cx| {
-            cx.global::<Settings>()
-                .resolved
-                .ui_pane_show_tab_bar
-        });
+        let before = vcx.read(|cx| cx.global::<Settings>().resolved.ui_pane_show_tab_bar);
         assert_eq!(before, None);
 
         dispatch(&ws, vcx, stoat_action::ToggleTabBar);
         vcx.run_until_parked();
-        let after_first = vcx.read(|cx| {
-            cx.global::<Settings>()
-                .resolved
-                .ui_pane_show_tab_bar
-        });
+        let after_first = vcx.read(|cx| cx.global::<Settings>().resolved.ui_pane_show_tab_bar);
         assert_eq!(after_first, Some(false));
 
         dispatch(&ws, vcx, stoat_action::ToggleTabBar);
         vcx.run_until_parked();
-        let after_second = vcx.read(|cx| {
-            cx.global::<Settings>()
-                .resolved
-                .ui_pane_show_tab_bar
-        });
+        let after_second = vcx.read(|cx| cx.global::<Settings>().resolved.ui_pane_show_tab_bar);
         assert_eq!(after_second, Some(true));
     }
 
@@ -14689,10 +14650,7 @@ mod tests {
         vcx.run_until_parked();
         assert_eq!(ws.read_with(vcx, |w, _| w.docks().len()), 1);
         let docks = ws.read_with(vcx, |w, _| w.docks().to_vec());
-        assert_eq!(
-            docks[0].read_with(vcx, |d, _| d.side()),
-            DockSide::Right
-        );
+        assert_eq!(docks[0].read_with(vcx, |d, _| d.side()), DockSide::Right);
 
         dispatch(&ws, vcx, stoat_action::ToggleDiffHunkPanel);
         vcx.run_until_parked();

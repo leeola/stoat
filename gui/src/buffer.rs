@@ -571,7 +571,7 @@ mod tests {
     fn reload_with_invalid_utf8_emits_nothing() {
         let mut cx = TestAppContext::single();
         let fs = install_fs_global(&mut cx, Arc::new(stoat::host::FakeFs::new()));
-        fs.insert_file("/tmp/binary.bin", &[0xffu8, 0xfe, 0xfd]);
+        fs.insert_file("/tmp/binary.bin", [0xffu8, 0xfe, 0xfd]);
         let buffer = new_buffer(&mut cx, "kept");
         buffer.update(&mut cx, |b, cx| {
             b.set_file_path(Some(PathBuf::from("/tmp/binary.bin")), cx)

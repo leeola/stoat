@@ -43,6 +43,8 @@ pub struct RenameModal {
 }
 
 impl RenameModal {
+    // Constructor stores each argument as a field.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         placeholder: &str,
         source_uri: Uri,

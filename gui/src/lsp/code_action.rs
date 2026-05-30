@@ -73,6 +73,8 @@ pub struct CodeActionPickerDelegate {
 }
 
 impl CodeActionPickerDelegate {
+    // Constructor stores each argument as a field.
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         entries: Vec<CodeActionEntry>,
         editor: WeakEntity<Editor>,

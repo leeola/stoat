@@ -165,7 +165,7 @@ mod tests {
         assert_eq!(labels.get("az"), Some(&(25 * 4)));
         assert_eq!(labels.get("ba"), Some(&(26 * 4)));
         assert_eq!(labels.get("bd"), Some(&(29 * 4)));
-        for (label, _) in &labels {
+        for label in labels.keys() {
             assert_eq!(label.len(), 2, "expected two-char label, got {label:?}");
         }
     }

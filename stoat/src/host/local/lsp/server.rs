@@ -96,15 +96,18 @@ impl LocalLsp {
             .kill_on_drop(true)
             .spawn()?;
 
-        let stdin = child.stdin.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "spawned LSP child has no stdin")
-        })?;
-        let stdout = child.stdout.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "spawned LSP child has no stdout")
-        })?;
-        let stderr = child.stderr.take().ok_or_else(|| {
-            io::Error::new(io::ErrorKind::Other, "spawned LSP child has no stderr")
-        })?;
+        let stdin = child
+            .stdin
+            .take()
+            .ok_or_else(|| io::Error::other("spawned LSP child has no stdin"))?;
+        let stdout = child
+            .stdout
+            .take()
+            .ok_or_else(|| io::Error::other("spawned LSP child has no stdout"))?;
+        let stderr = child
+            .stderr
+            .take()
+            .ok_or_else(|| io::Error::other("spawned LSP child has no stderr"))?;
 
         let pending: PendingMap = Arc::new(Mutex::new(HashMap::new()));
         let (notif_tx, notif_rx) = unbounded_channel();
@@ -151,11 +154,8 @@ impl LocalLsp {
         match rx.await {
             Ok(Ok(value)) => serde_json::from_value(value)
                 .map_err(|e| io::Error::new(io::ErrorKind::InvalidData, e)),
-            Ok(Err(err)) => Err(io::Error::new(io::ErrorKind::Other, err.message)),
-            Err(_) => Err(io::Error::new(
-                io::ErrorKind::Other,
-                "language server closed before responding",
-            )),
+            Ok(Err(err)) => Err(io::Error::other(err.message)),
+            Err(_) => Err(io::Error::other("language server closed before responding")),
         }
     }
 

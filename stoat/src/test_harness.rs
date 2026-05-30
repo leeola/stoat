@@ -952,12 +952,16 @@ impl TestHarness {
 
     /// Seed the focused editor's text and selections from a marked
     /// string. See [`editor::from_marked_text`].
+    // Mirrors editor::from_marked_text; a harness mutator, not a constructor.
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn from_marked_text(&mut self, marked: &str) {
         editor::from_marked_text(&mut self.stoat, marked);
     }
 
     /// Render the focused editor's text and selections to a marked
     /// string. See [`editor::to_marked_text`].
+    // Mirrors editor::to_marked_text; rendering mutates, so it needs &mut self.
+    #[allow(clippy::wrong_self_convention)]
     pub(crate) fn to_marked_text(&mut self) -> String {
         editor::to_marked_text(&mut self.stoat)
     }

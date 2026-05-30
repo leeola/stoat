@@ -1039,6 +1039,8 @@ fn column_to_byte_offset(row_text: &str, column: u32) -> usize {
         .unwrap_or(row_text.len())
 }
 
+// Row paint helper: each argument is a distinct paint input.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn apply_selection_paint(
     row: RenderedRow,
     display_row: u32,
@@ -1588,6 +1590,9 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     GutterPrefix { text, runs }
 }
 
+type BlameStripCache =
+    RefCell<LruCache<(u32, i64), (SharedString, Vec<(Range<usize>, gpui::HighlightStyle)>)>>;
+
 /// Prepend the blame strip onto `text` / `runs`. When the row is a
 /// wrap continuation, has no buffer mapping, or no blame entry covers
 /// `buffer_row`, the strip is rendered as [`BLAME_STRIP_WIDTH`] blank
@@ -1598,9 +1603,7 @@ fn append_blame_strip(
     buffer_row: Option<u32>,
     show_for_row: bool,
     paint: &BlamePaint<'_>,
-    cache: Option<
-        &RefCell<LruCache<(u32, i64), (SharedString, Vec<(Range<usize>, gpui::HighlightStyle)>)>>,
-    >,
+    cache: Option<&BlameStripCache>,
 ) {
     let entry = if show_for_row {
         buffer_row.and_then(|row| paint.lines.iter().find(|line| line.line == row))

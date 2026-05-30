@@ -1,7 +1,7 @@
 use crate::{buffer::Buffer, editor::Editor, workspace::Workspace};
 use gpui::{Entity, WeakEntity};
 use lsp_types::{DocumentChangeOperation, DocumentChanges, OneOf, TextEdit, Uri, WorkspaceEdit};
-use std::{collections::HashMap, ops::Range, path::PathBuf};
+use std::{cmp::Reverse, collections::HashMap, ops::Range, path::PathBuf};
 use stoat::{host::OffsetEncoding, lsp::util::lsp_range_to_byte_range};
 
 /// Apply a `WorkspaceEdit` across every open buffer the workspace
@@ -70,7 +70,7 @@ fn apply_text_edits(
             )
         })
         .collect();
-    byte_edits.sort_by(|a, b| b.0.start.cmp(&a.0.start));
+    byte_edits.sort_by_key(|b| Reverse(b.0.start));
     buffer.update(cx, |b, cx| {
         for (range, text) in byte_edits {
             b.edit(range, &text, cx);
@@ -196,6 +196,6 @@ mod tests {
             ..Default::default()
         };
         let grouped = collect_text_edits_by_uri(&edit);
-        assert!(grouped.get(&target).is_none());
+        assert!(!grouped.contains_key(&target));
     }
 }

@@ -4,7 +4,7 @@ use lsp_types::{
     GotoDefinitionParams, GotoDefinitionResponse, TextDocumentIdentifier,
     TextDocumentPositionParams, Uri,
 };
-use std::{path::PathBuf, str::FromStr};
+use std::{path::PathBuf, slice, str::FromStr};
 use stoat::{
     host::{LanguageServerFeature, LspServer, OffsetEncoding},
     lsp::util::{byte_offset_to_lsp_pos, lsp_pos_to_byte_offset},
@@ -186,7 +186,7 @@ fn apply_jump(
         set_cursor_to_offset(&editor, offset, cx);
         return;
     }
-    workspace.open_paths(&[target_path.clone()], cx);
+    workspace.open_paths(slice::from_ref(&target_path), cx);
     let Some(editor) = workspace
         .buffer_for_path(&target_path, cx)
         .and_then(|buffer| editor_for_buffer(workspace, &buffer, cx))

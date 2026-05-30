@@ -904,7 +904,7 @@ mod tests {
         let mut multi = MultiBuffer::singleton(id_primary, buf_primary.clone());
         let inserted = multi.insert_excerpts(id_other, buf_other, vec![0..5, 6..13]);
         assert_eq!(inserted.len(), 2);
-        let original_ids: Vec<_> = inserted.iter().copied().collect();
+        let original_ids: Vec<_> = inserted.to_vec();
 
         let editor_id = ws.editors.insert(EditorState::from_multi_buffer(
             id_primary,
