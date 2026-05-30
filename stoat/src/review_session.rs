@@ -414,6 +414,10 @@ pub struct ReviewSession {
     /// cursor to that file's first chunk (follow mode). Toggled by
     /// [`stoat_action::ReviewToggleFollow`]; defaults off.
     pub follow: bool,
+    /// Active per-line selection while the user is in `line_select`
+    /// mode; `None` otherwise. Set by [`Self::enter_line_select`] and
+    /// cleared by [`Self::cancel_line_select`].
+    pub line_selection: Option<LineSelection>,
     next_id: u32,
 }
 
@@ -426,6 +430,18 @@ pub struct LineStagePlan {
     pub forward: Option<String>,
     pub rows: BTreeSet<u32>,
     pub status: ChunkStatus,
+}
+
+/// Per-line selection within a single chunk's hunk, snapshotted when
+/// the user enters `line_select` mode. `selected[i]` tracks whether
+/// `lines[i]` participates in the next stage/unstage; every row starts
+/// selected. `lines` is a copy of the chunk's hunk rows so the
+/// selection survives independent of later session mutations.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineSelection {
+    pub hunk_id: ReviewChunkId,
+    pub lines: Vec<ReviewRow>,
+    pub selected: Vec<bool>,
 }
 
 impl ReviewSession {
@@ -441,6 +457,7 @@ impl ReviewSession {
             origin: ReviewOrigin::Standalone,
             watch_tokens: Vec::new(),
             follow: false,
+            line_selection: None,
             next_id: 0,
         }
     }
@@ -1280,6 +1297,33 @@ impl ReviewSession {
     /// the new) keeps staged lines correct even when an adjacent line is
     /// already staged -- a single-line patch anchored on base context
     /// would no longer match the shifted index.
+    /// Snapshot chunk `id`'s hunk rows into [`Self::line_selection`]
+    /// with every row selected, entering line-select state. Returns
+    /// `false` and leaves `line_selection` unchanged when the chunk is
+    /// unknown or has no rows.
+    pub fn enter_line_select(&mut self, id: ReviewChunkId) -> bool {
+        let Some(chunk) = self.chunks.get(&id) else {
+            return false;
+        };
+        let lines = chunk.hunk.rows.clone();
+        if lines.is_empty() {
+            return false;
+        }
+        let selected = vec![true; lines.len()];
+        self.line_selection = Some(LineSelection {
+            hunk_id: id,
+            lines,
+            selected,
+        });
+        true
+    }
+
+    /// Clear any active [`Self::line_selection`], leaving line-select
+    /// state.
+    pub fn cancel_line_select(&mut self) {
+        self.line_selection = None;
+    }
+
     pub fn plan_line_stage(&self, id: ReviewChunkId, row: u32) -> Option<LineStagePlan> {
         let chunk = self.chunks.get(&id)?;
         let rows = &chunk.hunk.rows;
@@ -1700,6 +1744,30 @@ mod tests {
         rows.iter()
             .position(|r| matches!(r, ReviewRow::Changed { .. }))
             .expect("a changed row") as u32
+    }
+
+    #[test]
+    fn enter_line_select_snapshots_all_rows_then_cancel_clears() {
+        let mut session = working_tree("/repo");
+        session.add_file(
+            PathBuf::from("/repo/a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new("x\na\ny\n".to_string()),
+            Arc::new("x\nb\ny\n".to_string()),
+        );
+        let id = session.order[0];
+        let row_count = session.chunks[&id].hunk.rows.len();
+        assert_eq!(row_count, 3);
+
+        assert!(session.enter_line_select(id));
+        let sel = session.line_selection.as_ref().expect("line selection set");
+        assert_eq!(sel.hunk_id, id);
+        assert_eq!(sel.lines.len(), 3);
+        assert_eq!(sel.selected, vec![true; row_count]);
+
+        session.cancel_line_select();
+        assert_eq!(session.line_selection, None);
     }
 
     /// Seed HEAD with `base`, build a review session over `buffer`, stage
