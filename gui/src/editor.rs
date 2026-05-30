@@ -2433,13 +2433,22 @@ impl Editor {
         let diff_map = self.diff_map.clone();
         let parent = cx.entity().downgrade();
         cx.new(|cx| {
-            Editor::new(
+            let minimap = Editor::new(
                 multi_buffer,
                 display_map,
                 diff_map,
-                EditorMode::Minimap { parent },
+                EditorMode::Minimap {
+                    parent: parent.clone(),
+                },
                 cx,
-            )
+            );
+            // Refresh scrollbar markers when the parent's diagnostics or
+            // search state change; its diff_map is shared, so hunk
+            // changes already repaint via that subscription.
+            if let Some(parent) = parent.upgrade() {
+                cx.observe(&parent, |_, _, cx| cx.notify()).detach();
+            }
+            minimap
         })
     }
 
@@ -3680,6 +3689,32 @@ impl Render for Editor {
         if let EditorMode::Minimap { parent } = &self.mode {
             let parent = parent.clone();
             let total_lines = document_rows as f64;
+
+            // Scrollbar markers, painted over the minimap extent and
+            // behind the thumb: one 2px block per diagnostic / hunk /
+            // search-hit row, positioned at row / total_lines.
+            if total_lines > 0.0 {
+                let markers = parent.upgrade().map(|parent_editor| {
+                    let set = parent_editor.read(cx).scrollbar_markers(cx);
+                    let theme = cx.theme();
+                    render::scrollbar_marker_colors(&set, &theme)
+                });
+                if let Some(markers) = markers.filter(|m| !m.is_empty()) {
+                    let mut overlay = div().absolute().size_full();
+                    for (row, color) in markers {
+                        overlay = overlay.child(
+                            div()
+                                .absolute()
+                                .top(relative(row as f32 / total_lines as f32))
+                                .w_full()
+                                .h(px(2.0))
+                                .bg(color),
+                        );
+                    }
+                    root = root.child(overlay);
+                }
+            }
+
             let drag_handle = cx.entity().downgrade();
             let dragging = self.minimap_drag.is_some();
             root = root.child(
@@ -5422,6 +5457,60 @@ mod tests {
             true
         });
         assert!(parent_built && minimap_built);
+    }
+
+    #[test]
+    fn minimap_render_with_markers_does_not_panic() {
+        use crate::{
+            diagnostics::DiagnosticSet,
+            editor::search::{SearchDirection, SearchState},
+        };
+
+        let mut cx = TestAppContext::single();
+        let text = (0..300)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_buffer, editor) = new_editor(&mut cx, &text);
+        let path = PathBuf::from("/ws/a.rs");
+        let diag_set = cx.update(|cx| cx.new(|_| DiagnosticSet::new()));
+        diag_set.update(&mut cx, |s, cx| {
+            s.replace_for_path(
+                path.clone(),
+                vec![lsp_types::Diagnostic {
+                    range: lsp_types::Range::new(
+                        lsp_types::Position::new(40, 0),
+                        lsp_types::Position::new(40, 1),
+                    ),
+                    severity: Some(lsp_types::DiagnosticSeverity::ERROR),
+                    code: None,
+                    code_description: None,
+                    source: None,
+                    message: String::new(),
+                    related_information: None,
+                    tags: None,
+                    data: None,
+                }],
+                cx,
+            )
+        });
+
+        let vcx = cx.add_empty_window();
+        editor.update(vcx, |ed, cx| {
+            ed.set_file_path(Some(path.clone()), cx);
+            ed.set_diagnostic_set(Some(diag_set.clone()), cx);
+            ed.set_search_state(Some(SearchState::new("line", SearchDirection::Forward)), cx);
+            ed.set_minimap_visible(true, cx);
+        });
+        let minimap = editor
+            .read_with(vcx, |ed, _| ed.minimap().cloned())
+            .expect("minimap child constructed");
+
+        let built = minimap.update_in(vcx, |mm, window, cx| {
+            mm.render(window, cx).into_any_element();
+            true
+        });
+        assert!(built, "minimap with scrollbar markers renders");
     }
 
     #[test]

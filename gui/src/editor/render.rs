@@ -1,4 +1,6 @@
-use crate::{diagnostics::DiagnosticSet, git::blame};
+use crate::{
+    diagnostics::DiagnosticSet, editor::scroll::ScrollbarMarkerSet, git::blame, theme::ThemeColors,
+};
 use gpui::{
     div, px, rgb, Div, FontStyle, FontWeight, Hsla, ParentElement, Pixels, SharedString,
     StrikethroughStyle, Styled, StyledText, UnderlineStyle,
@@ -1337,6 +1339,58 @@ fn severity_rank(sev: DiagnosticSeverity) -> u8 {
         DiagnosticSeverity::HINT => 3,
         _ => 0,
     }
+}
+
+/// Flatten a [`ScrollbarMarkerSet`] into `(row, color)` pairs for the
+/// scrollbar marker render pass, in diagnostics-then-hunks-then-search
+/// order. Hunk colors reuse the gutter's diff palette so a marker reads
+/// the same as its gutter strip.
+pub(crate) fn scrollbar_marker_colors(
+    markers: &ScrollbarMarkerSet,
+    theme: &ThemeColors,
+) -> Vec<(u32, Hsla)> {
+    let mut out = Vec::with_capacity(
+        markers.diagnostics.len() + markers.hunks.len() + markers.search_hits.len(),
+    );
+    out.extend(
+        markers
+            .diagnostics
+            .iter()
+            .map(|&(row, sev)| (row, diagnostic_severity_color(sev, theme))),
+    );
+    out.extend(
+        markers
+            .hunks
+            .iter()
+            .map(|&(row, status)| (row, hunk_status_color(status))),
+    );
+    out.extend(
+        markers
+            .search_hits
+            .iter()
+            .map(|&row| (row, theme.search_match)),
+    );
+    out
+}
+
+fn diagnostic_severity_color(sev: DiagnosticSeverity, theme: &ThemeColors) -> Hsla {
+    match sev {
+        DiagnosticSeverity::ERROR => theme.diagnostic_error,
+        DiagnosticSeverity::WARNING => theme.diagnostic_warning,
+        DiagnosticSeverity::INFORMATION => theme.diagnostic_info,
+        DiagnosticSeverity::HINT => theme.diagnostic_hint,
+        _ => theme.diagnostic_error,
+    }
+}
+
+fn hunk_status_color(status: stoat::DiffHunkStatus) -> Hsla {
+    let hex = match status {
+        stoat::DiffHunkStatus::Added => DIFF_ADDED_HEX,
+        stoat::DiffHunkStatus::Modified => DIFF_MODIFIED_HEX,
+        stoat::DiffHunkStatus::Deleted => DIFF_DELETED_HEX,
+        stoat::DiffHunkStatus::Moved => DIFF_MOVED_HEX,
+    };
+    rgb(hex).into()
 }
 
 fn diff_strip_for_status(status: stoat::DiffStatus) -> Option<(char, u32)> {
@@ -4007,5 +4061,33 @@ mod tests {
         );
 
         assert!(bg_runs(&rows[0].runs).is_empty());
+    }
+
+    #[test]
+    fn scrollbar_marker_colors_maps_each_source() {
+        use crate::theme::ActiveTheme;
+
+        let cx = TestAppContext::single();
+        let theme = cx.read(|cx| cx.theme());
+        let set = ScrollbarMarkerSet {
+            diagnostics: vec![
+                (10, DiagnosticSeverity::ERROR),
+                (50, DiagnosticSeverity::WARNING),
+                (90, DiagnosticSeverity::HINT),
+            ],
+            hunks: vec![(20, stoat::DiffHunkStatus::Added)],
+            search_hits: vec![70],
+        };
+
+        assert_eq!(
+            scrollbar_marker_colors(&set, &theme),
+            vec![
+                (10, theme.diagnostic_error),
+                (50, theme.diagnostic_warning),
+                (90, theme.diagnostic_hint),
+                (20, rgb(DIFF_ADDED_HEX).into()),
+                (70, theme.search_match),
+            ]
+        );
     }
 }
