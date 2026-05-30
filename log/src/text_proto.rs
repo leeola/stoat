@@ -253,7 +253,14 @@ pub fn log_dir() -> io::Result<PathBuf> {
             "could not resolve XDG state directory",
         )
     })?;
-    Ok(base.join("stoat").join("logs"))
+    Ok(log_dir_from_base(&base))
+}
+
+/// Joins the `stoat/logs` suffix onto an XDG state base. Split from
+/// [`log_dir`] so the join is testable without resolving the real
+/// environment.
+fn log_dir_from_base(base: &Path) -> PathBuf {
+    base.join("stoat").join("logs")
 }
 
 #[cfg(test)]
@@ -362,21 +369,10 @@ mod tests {
     }
 
     #[test]
-    fn log_dir_ends_in_stoat_logs() {
-        let path = log_dir().expect("resolve log dir");
-        let mut components: Vec<_> = path
-            .components()
-            .rev()
-            .take(2)
-            .map(|c| c.as_os_str().to_owned())
-            .collect();
-        components.reverse();
+    fn log_dir_from_base_appends_stoat_logs() {
         assert_eq!(
-            components,
-            [
-                std::ffi::OsString::from("stoat"),
-                std::ffi::OsString::from("logs"),
-            ]
+            log_dir_from_base(Path::new("/x/y")),
+            Path::new("/x/y/stoat/logs")
         );
     }
 }
