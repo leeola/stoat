@@ -13,11 +13,12 @@
 //! external changes while preserving which directories are open.
 
 use crate::{
+    file_icons,
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     theme::ActiveTheme,
 };
 use gpui::{
-    div, white, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
+    div, px, white, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
 };
 use serde_json::Value;
 use std::{
@@ -164,19 +165,34 @@ impl ProjectTree {
 
 impl Render for ProjectTree {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let color = cx.theme().statusbar_text;
+        let theme = cx.theme();
+        let color = theme.statusbar_text;
         let selected = self.selected;
         let rows = self.rows.iter().enumerate().map(|(ix, row)| {
             let indent = " ".repeat(row.depth * INDENT_SPACES_PER_DEPTH);
-            let label = if row.is_dir {
-                format!("{indent}{}/", row.name)
+            let name = if row.is_dir {
+                format!("{}/", row.name)
             } else {
-                format!("{indent}{}", row.name)
+                row.name.clone()
+            };
+            let icon_color = if row.is_dir {
+                theme.muted_text
+            } else {
+                file_icons::color_for_path(&row.path, &theme)
             };
             let mut el = div()
+                .flex()
+                .items_center()
                 .px_2()
                 .text_color(color)
-                .child(SharedString::from(label));
+                .child(SharedString::from(indent))
+                .child(
+                    div()
+                        .mr(px(6.0))
+                        .text_color(icon_color)
+                        .child(file_icons::icon_for_path(&row.path, row.is_dir)),
+                )
+                .child(SharedString::from(name));
             if ix == selected {
                 el = el.bg(white().opacity(0.1));
             }
