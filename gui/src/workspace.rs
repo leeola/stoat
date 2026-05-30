@@ -2231,6 +2231,8 @@ impl Workspace {
             ActionKind::ReviewResetProgress => self.dispatch_review_reset_progress(cx),
             ActionKind::ReviewEnterLineSelect => self.dispatch_review_enter_line_select(cx),
             ActionKind::ReviewLineSelectCancel => self.dispatch_review_line_select_cancel(cx),
+            ActionKind::ReviewLineSelectToggle => self.dispatch_review_line_select_toggle(cx),
+            ActionKind::ReviewLineSelectAll => self.dispatch_review_line_select_all(cx),
             ActionKind::GitToggleStageHunk => self.dispatch_git_stage_hunk(false, cx),
             ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
             ActionKind::GitToggleStageLine => self.dispatch_git_stage_line(cx),
@@ -4359,6 +4361,52 @@ impl Workspace {
             });
         }
         self.set_input_mode("review", cx);
+    }
+
+    /// Toggle the selected bit of the line under the active file's editor
+    /// cursor. No-op when no review item is active, no line selection
+    /// exists, or the cursor is not on a changed row.
+    fn dispatch_review_line_select_toggle(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+
+        let file_index = {
+            let inner = session.read(cx).inner();
+            inner
+                .cursor
+                .current
+                .and_then(|id| inner.chunks.get(&id))
+                .map(|chunk| chunk.file_index)
+        };
+        let Some(cursor_row) = file_index
+            .and_then(|fi| {
+                review_item
+                    .read(cx)
+                    .files()
+                    .get(fi)
+                    .map(|f| f.editor.clone())
+            })
+            .map(|editor| editor.read(cx).primary_cursor_buffer_row(cx))
+        else {
+            return;
+        };
+
+        session.update(cx, |session, cx| {
+            session.toggle_line_select(cursor_row, cx);
+        });
+    }
+
+    /// Select every row of the active line selection.
+    fn dispatch_review_line_select_all(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        session.update(cx, |session, cx| {
+            session.select_all_lines(cx);
+        });
     }
 
     /// Advance the review cursor to the next chunk whose `approved`

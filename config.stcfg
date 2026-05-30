@@ -496,6 +496,8 @@ on key {
     }
     mode == line_select {
         Escape -> ReviewLineSelectCancel();
+        Space -> ReviewLineSelectToggle();
+        a -> ReviewLineSelectAll();
     }
     mode == insert && claude_focused {
         Enter -> ClaudeSubmit();

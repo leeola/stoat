@@ -958,6 +958,48 @@ pub(super) fn line_select_cancel(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Toggle the selected bit of the line under the review cursor. The TUI
+/// review has no per-row editor cursor (see [`git_stage_line`]), so this
+/// targets the first changed row of the active selection.
+pub(super) fn line_select_toggle(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::review::ReviewRow;
+
+    let Some(session) = stoat.active_workspace_mut().review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    let row = {
+        let Some(sel) = session.line_selection.as_ref() else {
+            return UpdateEffect::None;
+        };
+        sel.lines.iter().find_map(|r| match r {
+            ReviewRow::Changed {
+                right: Some(side), ..
+            } => Some(side.line_num.saturating_sub(1)),
+            _ => None,
+        })
+    };
+    let Some(row) = row else {
+        return UpdateEffect::None;
+    };
+    if session.toggle_line_select(row) {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
+/// Select every row of the active line selection.
+pub(super) fn line_select_all(stoat: &mut Stoat) -> UpdateEffect {
+    let Some(session) = stoat.active_workspace_mut().review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    if session.select_all_lines() {
+        UpdateEffect::Redraw
+    } else {
+        UpdateEffect::None
+    }
+}
+
 /// Re-scan the underlying source of a review session. Returns `None` when
 /// the source has no re-scannable state (currently `InMemory`) or when the
 /// scan produced no hunks.
@@ -1500,6 +1542,42 @@ mod tests {
             .unwrap()
             .line_selection
             .is_none());
+    }
+
+    #[test]
+    fn line_select_toggle_clears_changed_row_then_select_all_restores() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\na\ny\n", "x\nb\ny\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        let bits = |h: &TestHarness| {
+            h.stoat
+                .active_workspace()
+                .review
+                .as_ref()
+                .unwrap()
+                .line_selection
+                .as_ref()
+                .unwrap()
+                .selected
+                .clone()
+        };
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewEnterLineSelect);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewLineSelectToggle);
+        assert_eq!(
+            bits(&h),
+            vec![true, false, true],
+            "toggle clears the changed row's bit"
+        );
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewLineSelectAll);
+        assert_eq!(
+            bits(&h),
+            vec![true, true, true],
+            "select-all restores every bit"
+        );
     }
 
     #[test]

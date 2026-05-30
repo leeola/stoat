@@ -91,10 +91,10 @@ use crate::{
             JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
             OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships,
             ReviewApplyStaged, ReviewApproveHunk, ReviewCycleComparisonMode, ReviewEnterLineSelect,
-            ReviewLineSelectCancel, ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk,
-            ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress, ReviewRevertHunk,
-            ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow,
-            ReviewToggleStage, ReviewUnstageChunk,
+            ReviewLineSelectAll, ReviewLineSelectCancel, ReviewLineSelectToggle, ReviewNextChunk,
+            ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected,
+            ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
+            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -224,6 +224,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ReviewLineSelectCancel::DEF, |_| {
         Ok(Box::new(ReviewLineSelectCancel))
+    });
+    add(ReviewLineSelectToggle::DEF, |_| {
+        Ok(Box::new(ReviewLineSelectToggle))
+    });
+    add(ReviewLineSelectAll::DEF, |_| {
+        Ok(Box::new(ReviewLineSelectAll))
     });
     add(GitToggleStageHunk::DEF, |_| {
         Ok(Box::new(GitToggleStageHunk))
@@ -1154,7 +1160,8 @@ mod tests {
         // + 2 Pwd / Env (command-line :pwd / :env palette actions).
         // + 1 OpenConflictPicker (lists conflicted files in the worktree).
         // + 2 ReviewEnterLineSelect / ReviewLineSelectCancel (line-select mode).
-        assert_eq!(all().count(), 324);
+        // + 2 ReviewLineSelectToggle / ReviewLineSelectAll (line-select mutation).
+        assert_eq!(all().count(), 326);
     }
 
     #[test]

@@ -444,6 +444,22 @@ pub struct LineSelection {
     pub selected: Vec<bool>,
 }
 
+impl LineSelection {
+    /// Index into [`Self::selected`] of the changed row whose right side
+    /// renders at buffer `row` (0-based), if any. Maps an editor cursor
+    /// row to the bit it toggles; context rows have no right-side change
+    /// and never match.
+    fn index_at_row(&self, row: u32) -> Option<usize> {
+        self.lines.iter().position(|r| {
+            matches!(
+                r,
+                ReviewRow::Changed { right: Some(side), .. }
+                    if side.line_num.saturating_sub(1) == row
+            )
+        })
+    }
+}
+
 impl ReviewSession {
     pub fn new(source: ReviewSource) -> Self {
         Self {
@@ -1324,6 +1340,31 @@ impl ReviewSession {
         self.line_selection = None;
     }
 
+    /// Flip the selected bit of the active line selection's changed row
+    /// displayed at buffer `row` (0-based). Returns `false`, leaving the
+    /// selection unchanged, when no selection is active or `row` matches
+    /// no changed row.
+    pub fn toggle_line_select(&mut self, row: u32) -> bool {
+        let Some(sel) = self.line_selection.as_mut() else {
+            return false;
+        };
+        let Some(idx) = sel.index_at_row(row) else {
+            return false;
+        };
+        sel.selected[idx] = !sel.selected[idx];
+        true
+    }
+
+    /// Select every row of the active line selection. Returns `false`
+    /// when no selection is active.
+    pub fn select_all_lines(&mut self) -> bool {
+        let Some(sel) = self.line_selection.as_mut() else {
+            return false;
+        };
+        sel.selected.iter_mut().for_each(|b| *b = true);
+        true
+    }
+
     pub fn plan_line_stage(&self, id: ReviewChunkId, row: u32) -> Option<LineStagePlan> {
         let chunk = self.chunks.get(&id)?;
         let rows = &chunk.hunk.rows;
@@ -1768,6 +1809,45 @@ mod tests {
 
         session.cancel_line_select();
         assert_eq!(session.line_selection, None);
+    }
+
+    #[test]
+    fn toggle_line_select_flips_cursor_bit_and_select_all_resets() {
+        let mut session = working_tree("/repo");
+        session.add_file(
+            PathBuf::from("/repo/a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new("x\na\ny\n".to_string()),
+            Arc::new("x\nb\ny\n".to_string()),
+        );
+        let id = session.order[0];
+        assert!(session.enter_line_select(id));
+
+        // The only changed row ("b") renders at buffer row 1; context
+        // rows "x"/"y" sit at rows 0 and 2 and never toggle.
+        assert!(session.toggle_line_select(1));
+        assert_eq!(
+            session.line_selection.as_ref().unwrap().selected,
+            vec![true, false, true]
+        );
+        assert!(
+            !session.toggle_line_select(0),
+            "context row does not toggle"
+        );
+
+        assert!(session.toggle_line_select(1));
+        assert_eq!(
+            session.line_selection.as_ref().unwrap().selected,
+            vec![true, true, true]
+        );
+
+        session.toggle_line_select(1);
+        assert!(session.select_all_lines());
+        assert_eq!(
+            session.line_selection.as_ref().unwrap().selected,
+            vec![true, true, true]
+        );
     }
 
     /// Seed HEAD with `base`, build a review session over `buffer`, stage

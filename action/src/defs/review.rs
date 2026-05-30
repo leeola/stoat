@@ -628,6 +628,26 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    ReviewLineSelectToggleDef,
+    ReviewLineSelectToggle,
+    "ReviewLineSelectToggle",
+    ActionKind::ReviewLineSelectToggle,
+    "toggle the selected line",
+    "Toggle whether the line under the review cursor participates in the next stage or unstage while in line-select mode.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ReviewLineSelectAllDef,
+    ReviewLineSelectAll,
+    "ReviewLineSelectAll",
+    ActionKind::ReviewLineSelectAll,
+    "select every line",
+    "Select every line in the current hunk while in line-select mode.",
+    ActionPriority::Common
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

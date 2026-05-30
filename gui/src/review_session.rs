@@ -110,6 +110,29 @@ impl ReviewSession {
         cx.notify();
     }
 
+    /// Flip the selected bit of the active line selection's row at buffer
+    /// `row`. Emits [`ReviewSessionEvent::Changed`] and returns `true`
+    /// when a bit flipped; a no-op (no event) otherwise.
+    pub fn toggle_line_select(&mut self, row: u32, cx: &mut Context<'_, Self>) -> bool {
+        if !self.inner.toggle_line_select(row) {
+            return false;
+        }
+        self.inner.version += 1;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.notify();
+        true
+    }
+
+    /// Select every row of the active line selection. No-op (no event)
+    /// when no selection is active.
+    pub fn select_all_lines(&mut self, cx: &mut Context<'_, Self>) {
+        if self.inner.select_all_lines() {
+            self.inner.version += 1;
+            cx.emit(ReviewSessionEvent::Changed);
+            cx.notify();
+        }
+    }
+
     /// Record the result of a [`stoat_action::ReviewApplyStaged`]
     /// run and fan out [`ReviewSessionEvent::Changed`] +
     /// [`ReviewSessionEvent::Applied`] so status-bar badges and

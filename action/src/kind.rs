@@ -242,6 +242,8 @@ pub enum ActionKind {
     ReviewResetProgress,
     ReviewEnterLineSelect,
     ReviewLineSelectCancel,
+    ReviewLineSelectToggle,
+    ReviewLineSelectAll,
     GitToggleStageHunk,
     GitUnstageHunk,
     GitToggleStageLine,
