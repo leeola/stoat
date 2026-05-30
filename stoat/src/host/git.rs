@@ -245,6 +245,10 @@ pub trait GitHost: Send + Sync {
 pub trait GitRepo: Send + Sync {
     fn workdir(&self) -> Option<PathBuf>;
     fn changed_files(&self) -> Vec<ChangedFile>;
+    /// Absolute paths of working-tree files with unresolved merge
+    /// conflicts (unmerged index entries), like [`ChangedFile::path`].
+    /// Empty when the repository has no conflicts.
+    fn conflicted_files(&self) -> Vec<PathBuf>;
     /// Read the UTF-8 content of `path` as it appears in HEAD. Returns
     /// `None` for orphan branches, paths not in HEAD, or binary blobs.
     fn head_content(&self, path: &Path) -> Option<String>;

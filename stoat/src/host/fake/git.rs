@@ -512,6 +512,19 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Record `rel_path` as a working-tree merge conflict, surfaced by
+    /// [`GitRepo::conflicted_files`]. Stores the absolute path; does not
+    /// write content to any attached [`FakeFs`].
+    pub fn conflicted_file(&mut self, rel_path: impl AsRef<Path>) -> &mut Self {
+        let abs = self.workdir.join(rel_path.as_ref());
+        self.mutate_repo(|state| {
+            if !state.conflicted.contains(&abs) {
+                state.conflicted.push(abs.clone());
+            }
+        });
+        self
+    }
+
     /// Record `rel_path` as deleted in the working tree: present in HEAD,
     /// absent from the filesystem. Mirrors `git status` reporting a deleted
     /// path. Does not write to any attached [`FakeFs`]; callers that
@@ -673,6 +686,9 @@ struct FakeRepoState {
     /// hunks so tests can read staged blobs back without a real index.
     staged: HashMap<PathBuf, String>,
     changed: Vec<ChangedFile>,
+    /// Absolute paths seeded via [`FakeRepoBuilder::conflicted_file`] and
+    /// returned by [`GitRepo::conflicted_files`].
+    conflicted: Vec<PathBuf>,
     applied_patches: Vec<String>,
     /// Patches applied via [`GitRepo::apply_to_workdir`] (hunk revert),
     /// kept separate from index patches so tests can tell them apart.
@@ -751,6 +767,13 @@ impl GitRepo for FakeGitRepo {
         unstaged.sort_by(|a, b| a.path.cmp(&b.path));
         staged.extend(unstaged);
         staged
+    }
+
+    fn conflicted_files(&self) -> Vec<PathBuf> {
+        let state = self.state.lock().unwrap();
+        let mut paths = state.conflicted.clone();
+        paths.sort();
+        paths
     }
 
     fn head_content(&self, path: &Path) -> Option<String> {
@@ -1139,6 +1162,19 @@ mod tests {
         assert_eq!(changed.len(), 1);
         assert_eq!(changed[0].path, workdir().join("a.rs"));
         assert!(!changed[0].staged);
+    }
+
+    #[test]
+    fn conflicted_files_returns_seeded_paths_sorted() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .conflicted_file("b.rs")
+            .conflicted_file("a.rs");
+        let repo = host.discover(&workdir()).unwrap();
+        assert_eq!(
+            repo.conflicted_files(),
+            vec![workdir().join("a.rs"), workdir().join("b.rs")],
+        );
     }
 
     #[test]

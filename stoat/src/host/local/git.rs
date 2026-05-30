@@ -106,6 +106,31 @@ impl GitRepo for LocalGitRepo {
         staged
     }
 
+    fn conflicted_files(&self) -> Vec<PathBuf> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let workdir = match repo.workdir() {
+            Some(w) => w.to_path_buf(),
+            None => return Vec::new(),
+        };
+
+        let statuses = {
+            let mut opts = StatusOptions::new();
+            opts.include_untracked(false);
+            match repo.statuses(Some(&mut opts)) {
+                Ok(s) => s,
+                Err(_) => return Vec::new(),
+            }
+        };
+
+        let mut paths: Vec<PathBuf> = statuses
+            .iter()
+            .filter(|entry| entry.status().contains(Status::CONFLICTED))
+            .filter_map(|entry| entry.path().map(|rel| workdir.join(rel)))
+            .collect();
+        paths.sort();
+        paths
+    }
+
     fn head_content(&self, path: &Path) -> Option<String> {
         let repo = self.repo.lock().expect("git repo lock");
         let workdir = repo.workdir()?;
