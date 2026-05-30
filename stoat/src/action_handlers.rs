@@ -619,6 +619,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             workspace::set_cwd(stoat, &action.path);
             UpdateEffect::Redraw
         },
+        ActionKind::Pwd => {
+            workspace::pwd(stoat);
+            UpdateEffect::None
+        },
+        ActionKind::Env => {
+            workspace::env(stoat);
+            UpdateEffect::None
+        },
         ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
         ActionKind::CancelPromptInput => prompt::cancel_prompt_input(stoat),
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),

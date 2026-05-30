@@ -174,6 +174,26 @@ impl Action for SetCwd {
     }
 }
 
+define_action!(
+    PwdDef,
+    Pwd,
+    "Pwd",
+    ActionKind::Pwd,
+    "report the working directory",
+    "Write the active workspace's working directory to the log at info level. The working directory is the workspace git root that the file finder, review, and git operations resolve against.",
+    ActionPriority::Common
+);
+
+define_action!(
+    EnvDef,
+    Env,
+    "Env",
+    ActionKind::Env,
+    "report STOAT_ environment variables",
+    "Write every environment variable whose name begins with STOAT_ to the log at info level as name/value pairs, reporting which Stoat-specific overrides are active in the current process.",
+    ActionPriority::Common
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -192,6 +212,10 @@ mod tests {
         assert_eq!(OpenWorkspacePicker.def().name(), "OpenWorkspacePicker");
         assert_eq!(ToggleProjectTree.kind(), ActionKind::ToggleProjectTree);
         assert_eq!(ToggleProjectTree.def().name(), "ToggleProjectTree");
+        assert_eq!(Pwd.kind(), ActionKind::Pwd);
+        assert_eq!(Pwd.def().name(), "Pwd");
+        assert_eq!(Env.kind(), ActionKind::Env);
+        assert_eq!(Env.def().name(), "Env");
         let rename = RenameWorkspace {
             name: "x".to_string(),
         };
@@ -206,6 +230,8 @@ mod tests {
         assert!(SwitchWorkspace.def().params().is_empty());
         assert!(CloseWorkspace.def().params().is_empty());
         assert!(OpenWorkspacePicker.def().params().is_empty());
+        assert!(Pwd.def().params().is_empty());
+        assert!(Env.def().params().is_empty());
     }
 
     #[test]

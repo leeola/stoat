@@ -102,8 +102,8 @@ pub use defs::{
     run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
     set::Set,
     workspace::{
-        CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace, SetCwd,
-        SwitchWorkspace, ToggleProjectTree,
+        CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
+        RenameWorkspace, SetCwd, SwitchWorkspace, ToggleProjectTree,
     },
 };
 pub use kind::ActionKind;

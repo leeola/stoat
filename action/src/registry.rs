@@ -98,8 +98,8 @@ use crate::{
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
         workspace::{
-            CloseWorkspace, CopyWorkspace, NewWorkspace, OpenWorkspacePicker, RenameWorkspace,
-            SetCwd, SwitchWorkspace, ToggleProjectTree,
+            CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
+            RenameWorkspace, SetCwd, SwitchWorkspace, ToggleProjectTree,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -725,6 +725,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: raw.to_owned(),
         }))
     });
+    add(Pwd::DEF, |_| Ok(Box::new(Pwd)));
+    add(Env::DEF, |_| Ok(Box::new(Env)));
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
     add(CancelPromptInput::DEF, |_| Ok(Box::new(CancelPromptInput)));
     add(ShellInputSubmit::DEF, |_| Ok(Box::new(ShellInputSubmit)));
@@ -1139,7 +1141,8 @@ mod tests {
         // + 1 ReviewCycleComparisonMode.
         // + 1 ReviewToggleFollow.
         // + 1 SetCwd.
-        assert_eq!(all().count(), 319);
+        // + 2 Pwd / Env (command-line :pwd / :env palette actions).
+        assert_eq!(all().count(), 321);
     }
 
     #[test]

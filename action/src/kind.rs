@@ -294,6 +294,8 @@ pub enum ActionKind {
     CloseWorkspace,
     RenameWorkspace,
     SetCwd,
+    Pwd,
+    Env,
     OpenWorkspacePicker,
     ToggleProjectTree,
     ProjectTreeSelectNext,

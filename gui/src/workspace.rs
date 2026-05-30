@@ -12,7 +12,9 @@ use crate::{
     editor_input::EditorInput,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
     git::coordinator::BlameCoordinator,
-    globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, PermissionPromptHostGlobal},
+    globals::{
+        EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, PermissionPromptHostGlobal,
+    },
     input_state_machine::InputStateMachine,
     item::ItemHandle,
     key_hint_banner::KeyHintBanner,
@@ -1653,6 +1655,20 @@ impl Workspace {
                     .map(|a| a.path.clone())
                     .unwrap_or_default();
                 self.dispatch_set_cwd(&path, cx);
+            },
+            ActionKind::Pwd => {
+                tracing::info!(working_directory = %self.git_root().display(), "pwd");
+            },
+            ActionKind::Env => {
+                if let Some(env) = cx.try_global::<EnvHostGlobal>() {
+                    let vars: Vec<(String, String)> = env
+                        .0
+                        .vars()
+                        .into_iter()
+                        .filter(|(name, _)| name.starts_with("STOAT_"))
+                        .collect();
+                    tracing::info!(?vars, "env");
+                }
             },
             ActionKind::CloseOtherPanes => {
                 self.pane_tree.update(cx, |tree, cx| {

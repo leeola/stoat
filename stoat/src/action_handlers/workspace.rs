@@ -92,3 +92,20 @@ pub(super) fn rename_workspace(stoat: &mut Stoat, name: &str) {
 pub(super) fn set_cwd(stoat: &mut Stoat, path: &str) {
     stoat.active_workspace_mut().git_root = path.into();
 }
+
+pub(super) fn pwd(stoat: &Stoat) {
+    tracing::info!(
+        working_directory = %stoat.active_workspace().git_root.display(),
+        "pwd"
+    );
+}
+
+pub(super) fn env(stoat: &Stoat) {
+    let vars: Vec<(String, String)> = stoat
+        .env_host()
+        .vars()
+        .into_iter()
+        .filter(|(name, _)| name.starts_with("STOAT_"))
+        .collect();
+    tracing::info!(?vars, "env");
+}
