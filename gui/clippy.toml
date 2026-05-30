@@ -1,3 +1,6 @@
+allow-unwrap-in-tests = true
+allow-expect-in-tests = true
+
 disallowed-types = [
   { path = "std::fs::File", reason = "route fs through FsHost via cx.global" },
   { path = "std::fs::OpenOptions", reason = "route fs through FsHost via cx.global" },
