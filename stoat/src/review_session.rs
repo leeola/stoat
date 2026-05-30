@@ -1367,8 +1367,10 @@ impl ReviewSession {
 
     pub fn plan_line_stage(&self, id: ReviewChunkId, row: u32) -> Option<LineStagePlan> {
         let chunk = self.chunks.get(&id)?;
-        let rows = &chunk.hunk.rows;
-        if !matches!(rows.get(row as usize)?, ReviewRow::Changed { .. }) {
+        if !matches!(
+            chunk.hunk.rows.get(row as usize)?,
+            ReviewRow::Changed { .. }
+        ) {
             return None;
         }
 
@@ -1376,6 +1378,49 @@ impl ReviewSession {
         if !new_rows.remove(&row) {
             new_rows.insert(row);
         }
+        self.plan_staged_rows(id, new_rows)
+    }
+
+    /// Stage (or unstage, when `unstage`) the active line selection's
+    /// selected changed rows in one patch. The selected rows union (stage)
+    /// or are removed from (unstage) the chunk's current staged set, then
+    /// the transition runs through [`Self::plan_staged_rows`]. Returns
+    /// `None` when no line selection is active, its hunk is unknown, or no
+    /// changed row is selected.
+    pub fn plan_line_select_stage(&self, unstage: bool) -> Option<LineStagePlan> {
+        let sel = self.line_selection.as_ref()?;
+        let id = sel.hunk_id;
+        let chunk = self.chunks.get(&id)?;
+        let rows = &chunk.hunk.rows;
+
+        let selected: BTreeSet<u32> = sel
+            .selected
+            .iter()
+            .enumerate()
+            .filter(|(i, on)| **on && matches!(rows.get(*i), Some(ReviewRow::Changed { .. })))
+            .map(|(i, _)| i as u32)
+            .collect();
+        if selected.is_empty() {
+            return None;
+        }
+
+        let new_rows: BTreeSet<u32> = if unstage {
+            chunk.staged_rows.difference(&selected).copied().collect()
+        } else {
+            chunk.staged_rows.union(&selected).copied().collect()
+        };
+        self.plan_staged_rows(id, new_rows)
+    }
+
+    /// Build the reverse+forward patch plan transitioning chunk `id`'s
+    /// staged-row set from its current value to `new_rows`. Shared by the
+    /// single-row toggle and the line-select multi-row apply.
+    fn plan_staged_rows(
+        &self,
+        id: ReviewChunkId,
+        new_rows: BTreeSet<u32>,
+    ) -> Option<LineStagePlan> {
+        let chunk = self.chunks.get(&id)?;
 
         let reverse = if chunk.staged_rows.is_empty() {
             None
@@ -1388,7 +1433,9 @@ impl ReviewSession {
             Some(self.build_staged_subset_patch(id, &new_rows, false)?)
         };
 
-        let all_changed: BTreeSet<u32> = rows
+        let all_changed: BTreeSet<u32> = chunk
+            .hunk
+            .rows
             .iter()
             .enumerate()
             .filter(|(_, r)| matches!(r, ReviewRow::Changed { .. }))
@@ -1848,6 +1895,34 @@ mod tests {
             session.line_selection.as_ref().unwrap().selected,
             vec![true, true, true]
         );
+    }
+
+    #[test]
+    fn plan_line_select_stage_targets_selected_changed_rows() {
+        let mut session = working_tree("/repo");
+        session.add_file(
+            PathBuf::from("/repo/a.rs"),
+            "a.rs".into(),
+            None,
+            Arc::new("a\nOLD1\nOLD2\nOLD3\nz\n".to_string()),
+            Arc::new("a\nNEW1\nNEW2\nNEW3\nz\n".to_string()),
+        );
+        let id = session.order[0];
+
+        // Changed rows sit at buffer rows 1/2/3; deselect the middle one.
+        assert!(session.enter_line_select(id));
+        assert!(session.toggle_line_select(2));
+
+        let stage = session.plan_line_select_stage(false).expect("stage plan");
+        assert_eq!(stage.rows, BTreeSet::from([1, 3]));
+        assert_eq!(stage.status, ChunkStatus::PartiallyStaged);
+
+        // With all three already staged, unstaging the same selection
+        // removes rows 1 and 3 and leaves the middle row staged.
+        session.set_chunk_staged_rows(id, BTreeSet::from([1, 2, 3]), ChunkStatus::Staged);
+        let unstage = session.plan_line_select_stage(true).expect("unstage plan");
+        assert_eq!(unstage.rows, BTreeSet::from([2]));
+        assert_eq!(unstage.status, ChunkStatus::PartiallyStaged);
     }
 
     /// Seed HEAD with `base`, build a review session over `buffer`, stage

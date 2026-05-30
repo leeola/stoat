@@ -499,6 +499,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewLineSelectCancel => review::line_select_cancel(stoat),
         ActionKind::ReviewLineSelectToggle => review::line_select_toggle(stoat),
         ActionKind::ReviewLineSelectAll => review::line_select_all(stoat),
+        ActionKind::ReviewLineSelectStage => review::line_select_stage(stoat, false),
+        ActionKind::ReviewLineSelectUnstage => review::line_select_stage(stoat, true),
         ActionKind::GitToggleStageHunk => review::git_stage_hunk(stoat, false),
         ActionKind::GitUnstageHunk => review::git_stage_hunk(stoat, true),
         ActionKind::GitToggleStageLine => review::git_stage_line(stoat),

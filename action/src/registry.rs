@@ -91,7 +91,8 @@ use crate::{
             JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
             OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships,
             ReviewApplyStaged, ReviewApproveHunk, ReviewCycleComparisonMode, ReviewEnterLineSelect,
-            ReviewLineSelectAll, ReviewLineSelectCancel, ReviewLineSelectToggle, ReviewNextChunk,
+            ReviewLineSelectAll, ReviewLineSelectCancel, ReviewLineSelectStage,
+            ReviewLineSelectToggle, ReviewLineSelectUnstage, ReviewNextChunk,
             ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected,
             ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
             ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
@@ -230,6 +231,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ReviewLineSelectAll::DEF, |_| {
         Ok(Box::new(ReviewLineSelectAll))
+    });
+    add(ReviewLineSelectStage::DEF, |_| {
+        Ok(Box::new(ReviewLineSelectStage))
+    });
+    add(ReviewLineSelectUnstage::DEF, |_| {
+        Ok(Box::new(ReviewLineSelectUnstage))
     });
     add(GitToggleStageHunk::DEF, |_| {
         Ok(Box::new(GitToggleStageHunk))
@@ -1161,7 +1168,8 @@ mod tests {
         // + 1 OpenConflictPicker (lists conflicted files in the worktree).
         // + 2 ReviewEnterLineSelect / ReviewLineSelectCancel (line-select mode).
         // + 2 ReviewLineSelectToggle / ReviewLineSelectAll (line-select mutation).
-        assert_eq!(all().count(), 326);
+        // + 2 ReviewLineSelectStage / ReviewLineSelectUnstage (line-select apply).
+        assert_eq!(all().count(), 328);
     }
 
     #[test]

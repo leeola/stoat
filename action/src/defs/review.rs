@@ -648,6 +648,26 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    ReviewLineSelectStageDef,
+    ReviewLineSelectStage,
+    "ReviewLineSelectStage",
+    ActionKind::ReviewLineSelectStage,
+    "stage the selected lines",
+    "Stage the selected lines of the current hunk to the git index, then leave line-select mode.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ReviewLineSelectUnstageDef,
+    ReviewLineSelectUnstage,
+    "ReviewLineSelectUnstage",
+    ActionKind::ReviewLineSelectUnstage,
+    "unstage the selected lines",
+    "Unstage the selected lines of the current hunk from the git index, then leave line-select mode.",
+    ActionPriority::Common
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

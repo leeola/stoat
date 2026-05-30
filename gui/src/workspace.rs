@@ -2233,6 +2233,8 @@ impl Workspace {
             ActionKind::ReviewLineSelectCancel => self.dispatch_review_line_select_cancel(cx),
             ActionKind::ReviewLineSelectToggle => self.dispatch_review_line_select_toggle(cx),
             ActionKind::ReviewLineSelectAll => self.dispatch_review_line_select_all(cx),
+            ActionKind::ReviewLineSelectStage => self.dispatch_review_line_select_stage(false, cx),
+            ActionKind::ReviewLineSelectUnstage => self.dispatch_review_line_select_stage(true, cx),
             ActionKind::GitToggleStageHunk => self.dispatch_git_stage_hunk(false, cx),
             ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
             ActionKind::GitToggleStageLine => self.dispatch_git_stage_line(cx),
@@ -4407,6 +4409,61 @@ impl Workspace {
         session.update(cx, |session, cx| {
             session.select_all_lines(cx);
         });
+    }
+
+    /// Stage (or unstage, when `unstage`) the active line selection's
+    /// selected rows by applying its partial-hunk patch to the index,
+    /// then clear the selection and return to `review` mode. No-op for
+    /// non-WorkingTree sources or when no selection is active.
+    fn dispatch_review_line_select_stage(&mut self, unstage: bool, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+
+        let (workdir, id, plan) = {
+            let inner = session.read(cx).inner();
+            let workdir = match &inner.source {
+                ReviewSource::WorkingTree { workdir } => workdir.clone(),
+                _ => {
+                    tracing::warn!(
+                        "ReviewLineSelectStage: only WorkingTree sources stage to the index"
+                    );
+                    return;
+                },
+            };
+            let Some(id) = inner.line_selection.as_ref().map(|s| s.hunk_id) else {
+                return;
+            };
+            let Some(plan) = inner.plan_line_select_stage(unstage) else {
+                return;
+            };
+            (workdir, id, plan)
+        };
+
+        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(&workdir) else {
+            tracing::warn!(
+                "ReviewLineSelectStage: no git repo at {}",
+                workdir.display()
+            );
+            return;
+        };
+        for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
+            .into_iter()
+            .flatten()
+        {
+            if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(patch) {
+                tracing::warn!("ReviewLineSelectStage: apply_to_index failed: {reason}");
+                return;
+            }
+        }
+
+        session.update(cx, |session, cx| {
+            session.set_chunk_staged_rows(id, plan.rows, plan.status, cx);
+            session.cancel_line_select(cx);
+        });
+        self.set_input_mode("review", cx);
     }
 
     /// Advance the review cursor to the next chunk whose `approved`

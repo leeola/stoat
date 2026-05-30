@@ -1000,6 +1000,66 @@ pub(super) fn line_select_all(stoat: &mut Stoat) -> UpdateEffect {
     }
 }
 
+/// Stage (or unstage, when `unstage`) the active line selection's selected
+/// rows by applying its partial-hunk patch to the index, then clear the
+/// selection and return to review mode. WorkingTree sources only.
+pub(super) fn line_select_stage(stoat: &mut Stoat, unstage: bool) -> UpdateEffect {
+    use crate::host::GitApplyError;
+
+    let (workdir, id, plan) = {
+        let ws = stoat.active_workspace();
+        let Some(session) = ws.review.as_ref() else {
+            return UpdateEffect::None;
+        };
+        let workdir = match &session.source {
+            ReviewSource::WorkingTree { workdir } => workdir.clone(),
+            _ => {
+                tracing::warn!(
+                    "ReviewLineSelectStage: only WorkingTree sources stage to the index"
+                );
+                return UpdateEffect::None;
+            },
+        };
+        let Some(id) = session.line_selection.as_ref().map(|s| s.hunk_id) else {
+            return UpdateEffect::None;
+        };
+        let Some(plan) = session.plan_line_select_stage(unstage) else {
+            return UpdateEffect::None;
+        };
+        (workdir, id, plan)
+    };
+
+    let Some(repo) = stoat.git_host.discover(&workdir) else {
+        tracing::warn!(
+            "ReviewLineSelectStage: no git repo at {}",
+            workdir.display()
+        );
+        return UpdateEffect::None;
+    };
+    for patch in [plan.reverse.as_ref(), plan.forward.as_ref()]
+        .into_iter()
+        .flatten()
+    {
+        if let Err(GitApplyError::Backend { reason, .. }) = repo.apply_to_index(patch) {
+            tracing::warn!("ReviewLineSelectStage: apply_to_index failed: {reason}");
+            return UpdateEffect::None;
+        }
+    }
+
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    session.set_chunk_staged_rows(id, plan.rows, plan.status);
+    session.cancel_line_select();
+    let editor_id = session.view_editor;
+    let progress = session.progress();
+    sync_review_view_and_scroll(ws, editor_id, None);
+    emit_review_progress_badge(ws, &progress);
+    stoat.mode = "review".to_string();
+    UpdateEffect::Redraw
+}
+
 /// Re-scan the underlying source of a review session. Returns `None` when
 /// the source has no re-scannable state (currently `InMemory`) or when the
 /// scan produced no hunks.
@@ -1577,6 +1637,42 @@ mod tests {
             bits(&h),
             vec![true, true, true],
             "select-all restores every bit"
+        );
+    }
+
+    #[test]
+    fn line_select_stage_applies_selected_rows_and_returns_to_review() {
+        let base = "a\nOLD1\nOLD2\nOLD3\nz\n";
+        let buffer = "a\nNEW1\nNEW2\nNEW3\nz\n";
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", base, buffer)]);
+        h.stoat.open_review();
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewEnterLineSelect);
+        // Deselect the middle changed row (NEW2 at buffer row 2).
+        h.stoat
+            .active_workspace_mut()
+            .review
+            .as_mut()
+            .unwrap()
+            .toggle_line_select(2);
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewLineSelectStage);
+
+        assert_eq!(h.stoat.mode, "review");
+        assert!(h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .unwrap()
+            .line_selection
+            .is_none());
+        assert_eq!(
+            h.fake_git
+                .staged_content(std::path::Path::new("/work"), "a.rs"),
+            Some("a\nNEW1\nOLD2\nNEW3\nz\n".to_string()),
+            "only the selected rows 1 and 3 stage; the deselected middle stays at base"
         );
     }
 
