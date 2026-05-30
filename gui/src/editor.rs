@@ -3692,8 +3692,13 @@ impl Render for Editor {
 
             // Scrollbar markers, painted over the minimap extent and
             // behind the thumb: one 2px block per diagnostic / hunk /
-            // search-hit row, positioned at row / total_lines.
-            if total_lines > 0.0 {
+            // search-hit row, positioned at row / total_lines. Gated on
+            // the `ui.editor.show_scrollbar_markers` setting (default on).
+            let markers_enabled = cx
+                .try_global::<Settings>()
+                .and_then(|s| s.resolved.ui_editor_show_scrollbar_markers)
+                .unwrap_or(true);
+            if markers_enabled && total_lines > 0.0 {
                 let markers = parent.upgrade().map(|parent_editor| {
                     let set = parent_editor.read(cx).scrollbar_markers(cx);
                     let theme = cx.theme();

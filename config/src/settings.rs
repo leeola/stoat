@@ -98,6 +98,10 @@ pub struct Settings {
     /// Show the per-pane tab bar above editor content. `None` defaults
     /// to visible. Set via `ui.pane.show_tab_bar = false;` to hide.
     pub ui_pane_show_tab_bar: Option<bool>,
+    /// Paint diagnostic, git-hunk, and search markers on the editor
+    /// scrollbar. `None` defaults to enabled. Set via
+    /// `ui.editor.show_scrollbar_markers = false;` to hide.
+    pub ui_editor_show_scrollbar_markers: Option<bool>,
     /// Per-language LSP server commands keyed by language name
     /// (e.g. `rust`, `typescript`). Empty when no
     /// `lsp.<lang>.*` settings are present. Right-hand wins on
@@ -148,6 +152,9 @@ impl Settings {
             ui_font_family: other.ui_font_family.or(self.ui_font_family),
             ui_font_size: other.ui_font_size.or(self.ui_font_size),
             ui_pane_show_tab_bar: other.ui_pane_show_tab_bar.or(self.ui_pane_show_tab_bar),
+            ui_editor_show_scrollbar_markers: other
+                .ui_editor_show_scrollbar_markers
+                .or(self.ui_editor_show_scrollbar_markers),
             language_servers,
         }
     }
@@ -223,6 +230,11 @@ impl Settings {
             ["ui", "pane", "show_tab_bar"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.ui_pane_show_tab_bar = Some(b);
+                }
+            },
+            ["ui", "editor", "show_scrollbar_markers"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.ui_editor_show_scrollbar_markers = Some(b);
                 }
             },
             ["claude", "permissions", tool, behavior] => {
@@ -304,6 +316,18 @@ impl Settings {
                 self.ui_pane_show_tab_bar = Some(b);
                 Ok(())
             },
+            ["ui", "editor", "show_scrollbar_markers"] => {
+                let b = parse_bool(raw).ok_or_else(|| {
+                    InvalidValueSnafu {
+                        key: path.to_string(),
+                        expected: "bool",
+                        got: raw.to_string(),
+                    }
+                    .build()
+                })?;
+                self.ui_editor_show_scrollbar_markers = Some(b);
+                Ok(())
+            },
             _ => UnknownKeySnafu {
                 key: path.to_string(),
             }
@@ -370,6 +394,16 @@ mod tests {
     }
 
     #[test]
+    fn apply_runtime_sets_ui_editor_show_scrollbar_markers_false() {
+        let mut s = Settings::default();
+        assert_eq!(
+            s.apply_runtime("ui.editor.show_scrollbar_markers", "false"),
+            Ok(())
+        );
+        assert_eq!(s.ui_editor_show_scrollbar_markers, Some(false));
+    }
+
+    #[test]
     fn apply_runtime_rejects_unknown_key() {
         let mut s = Settings::default();
         let result = s.apply_runtime("nope.bad.path", "true");
@@ -410,6 +444,13 @@ mod tests {
     }
 
     #[test]
+    fn from_config_parses_ui_editor_show_scrollbar_markers_false() {
+        let config = parse_ok("on init { ui.editor.show_scrollbar_markers = false; }");
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.ui_editor_show_scrollbar_markers, Some(false));
+    }
+
+    #[test]
     fn from_config_extracts_text_proto_log() {
         let config = parse_ok("on init { text_proto_log = true; }");
         assert_eq!(
@@ -426,6 +467,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -448,6 +490,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -470,6 +513,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -501,6 +545,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -515,6 +560,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -531,6 +577,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -550,6 +597,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -567,6 +615,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -597,6 +646,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -619,6 +669,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -641,6 +692,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -672,6 +724,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -689,6 +742,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -711,6 +765,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -733,6 +788,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -752,6 +808,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -766,6 +823,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
@@ -785,6 +843,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -799,6 +858,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -815,6 +875,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
         );
