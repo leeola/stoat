@@ -6,14 +6,12 @@
 //! the `messages` root for a flat public API.
 
 use crate::messages::{
-    ResultSubtype,
     content::{AssistantMessage, UserMessage},
     control::{CanUseToolRequest, HookCallbackRequest},
-    result::{ModelUsage, StopReason, Usage},
+    result::ResultMessage,
     system::{ApiKeySource, McpServer, PermissionMode, SystemSubtype},
 };
 use serde::{Deserialize, Serialize};
-use std::collections::HashMap;
 
 /// Root message type for the Claude Code stream-json protocol.
 ///
@@ -33,6 +31,10 @@ use std::collections::HashMap;
 /// ```json
 /// {"type": "assistant", "message": {...}, "session_id": "..."}
 /// ```
+// Streaming protocol enum buffered shallowly (mpsc cap <=32) and handled one
+// frame at a time, so the size disparity costs nothing measurable here. The
+// oversized terminal Result payload is boxed; the rest stay inline.
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum SdkMessage {
@@ -121,39 +123,7 @@ pub enum SdkMessage {
     /// - `Success`: Normal completion
     /// - `ErrorMaxTurns`: Hit configured turn limit
     /// - `ErrorDuringExecution`: Runtime or processing error
-    Result {
-        /// Type of result (success or error variant)
-        subtype: ResultSubtype,
-        /// Total wall-clock time in milliseconds
-        duration_ms: u64,
-        /// Time spent in API calls in milliseconds
-        duration_api_ms: u64,
-        /// Whether this result represents an error condition
-        is_error: bool,
-        /// Number of conversation turns completed
-        num_turns: u32,
-        /// Final result text (usually assistant's last response)
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        result: Option<String>,
-        /// Session identifier for message correlation
-        session_id: String,
-        /// Total cost in USD for this conversation
-        total_cost_usd: f64,
-        /// Aggregate token usage for the turn. Missing on older CLI
-        /// releases; callers should treat absence as "unknown", not zero.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        usage: Option<Usage>,
-        /// Per-model usage breakdown when the session touched more than
-        /// one model. Keyed by model id.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        model_usage: Option<HashMap<String, ModelUsage>>,
-        /// Reason the model stopped (`end_turn`, `max_tokens`, ...).
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        stop_reason: Option<StopReason>,
-        /// Set when this `Result` terminates a subagent's run.
-        #[serde(default, skip_serializing_if = "Option::is_none")]
-        parent_tool_use_id: Option<String>,
-    },
+    Result(Box<ResultMessage>),
 
     /// Initialization message establishing session context.
     ///
@@ -318,7 +288,7 @@ impl SdkMessage {
     /// Only `Result` messages are terminal. After receiving a terminal
     /// message, no further messages should be sent in this conversation.
     pub fn is_terminal(&self) -> bool {
-        matches!(self, SdkMessage::Result { .. })
+        matches!(self, SdkMessage::Result(_))
     }
 
     /// Extract the session ID from any message type, when present.
@@ -330,9 +300,9 @@ impl SdkMessage {
         match self {
             SdkMessage::Assistant { session_id, .. }
             | SdkMessage::User { session_id, .. }
-            | SdkMessage::Result { session_id, .. }
             | SdkMessage::System { session_id, .. }
             | SdkMessage::StreamEvent { session_id, .. } => session_id,
+            SdkMessage::Result(r) => &r.session_id,
             SdkMessage::ControlRequest { .. } | SdkMessage::ControlResponse { .. } => "",
         }
     }
@@ -342,7 +312,7 @@ impl SdkMessage {
         match self {
             SdkMessage::Assistant { .. } => "assistant",
             SdkMessage::User { .. } => "user",
-            SdkMessage::Result { .. } => "result",
+            SdkMessage::Result(_) => "result",
             SdkMessage::System { .. } => "system",
             SdkMessage::StreamEvent { .. } => "stream_event",
             SdkMessage::ControlRequest { .. } => "control_request",

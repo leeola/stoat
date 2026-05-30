@@ -12,8 +12,8 @@
 use crate::{
     ClaudeCode,
     messages::{
-        AssistantMessage, MessageContent, SdkMessage, SystemSubtype, UserContent, UserContentBlock,
-        UserMessage,
+        AssistantMessage, MessageContent, ResultMessage, SdkMessage, SystemSubtype, UserContent,
+        UserContentBlock, UserMessage,
     },
     tools::{ToolUseSnapshot, tool_info_from_tool_use, tool_update_from_tool_result},
 };
@@ -303,15 +303,16 @@ pub(crate) fn sdk_message_to_agent_messages(
             .to_string(),
         }],
 
-        SdkMessage::Result {
-            total_cost_usd,
-            duration_ms,
-            num_turns,
-            is_error,
-            result,
-            usage,
-            ..
-        } => {
+        SdkMessage::Result(r) => {
+            let ResultMessage {
+                total_cost_usd,
+                duration_ms,
+                num_turns,
+                is_error,
+                result,
+                usage,
+                ..
+            } = *r;
             let mut out = Vec::new();
             // Fold result-level usage into the accumulator and emit a
             // Usage snapshot before the terminating Result.
@@ -851,7 +852,7 @@ mod tests {
 
     #[test]
     fn sdk_result_success_maps_to_result() {
-        let msg = SdkMessage::Result {
+        let msg = SdkMessage::Result(Box::new(ResultMessage {
             subtype: ResultSubtype::Success,
             duration_ms: 1234,
             duration_api_ms: 1000,
@@ -864,7 +865,7 @@ mod tests {
             model_usage: None,
             stop_reason: None,
             parent_tool_use_id: None,
-        };
+        }));
         let out = sdk_message_to_agent_messages(msg);
         assert_eq!(out.len(), 1);
         match &out[0] {
@@ -883,7 +884,7 @@ mod tests {
 
     #[test]
     fn sdk_result_error_maps_to_error() {
-        let msg = SdkMessage::Result {
+        let msg = SdkMessage::Result(Box::new(ResultMessage {
             subtype: ResultSubtype::ErrorDuringExecution,
             duration_ms: 50,
             duration_api_ms: 40,
@@ -896,7 +897,7 @@ mod tests {
             model_usage: None,
             stop_reason: None,
             parent_tool_use_id: None,
-        };
+        }));
         let out = sdk_message_to_agent_messages(msg);
         assert_eq!(out.len(), 1);
         match &out[0] {

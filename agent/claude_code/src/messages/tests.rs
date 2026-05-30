@@ -3,7 +3,7 @@ use std::collections::HashMap;
 
 #[test]
 fn test_message_type_detection() {
-    let result = SdkMessage::Result {
+    let result = SdkMessage::Result(Box::new(ResultMessage {
         subtype: ResultSubtype::Success,
         duration_ms: 1000,
         duration_api_ms: 800,
@@ -16,7 +16,7 @@ fn test_message_type_detection() {
         model_usage: None,
         stop_reason: None,
         parent_tool_use_id: None,
-    };
+    }));
 
     assert!(result.is_terminal());
     assert_eq!(result.session_id(), "test");
@@ -312,7 +312,7 @@ fn stream_event_message_start_returns_none() {
 
 #[test]
 fn non_stream_event_text_delta_returns_none() {
-    let msg = SdkMessage::Result {
+    let msg = SdkMessage::Result(Box::new(ResultMessage {
         subtype: ResultSubtype::Success,
         duration_ms: 1,
         duration_api_ms: 1,
@@ -325,7 +325,7 @@ fn non_stream_event_text_delta_returns_none() {
         model_usage: None,
         stop_reason: None,
         parent_tool_use_id: None,
-    };
+    }));
     assert_eq!(msg.as_text_delta(), None);
 }
 
@@ -556,9 +556,10 @@ fn result_parses_with_usage_and_stop_reason() {
     }"#;
     let parsed: SdkMessage = serde_json::from_str(json).unwrap();
     match parsed {
-        SdkMessage::Result {
-            usage, stop_reason, ..
-        } => {
+        SdkMessage::Result(r) => {
+            let ResultMessage {
+                usage, stop_reason, ..
+            } = *r;
             let usage = usage.expect("usage present");
             assert_eq!(usage.input_tokens, 12);
             assert_eq!(usage.output_tokens, 3);

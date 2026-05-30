@@ -106,7 +106,7 @@ pub use content::{
     UserMessage,
 };
 pub use control::{CanUseToolRequest, ControlResponse, ControlResponseBody, HookCallbackRequest};
-pub use result::{ModelUsage, ResultSubtype, StopReason, Usage};
+pub use result::{ModelUsage, ResultMessage, ResultSubtype, StopReason, Usage};
 pub use sdk::SdkMessage;
 pub use system::{
     ApiKeySource, McpServer, McpServerStatus, PermissionMode, Role, SettingSource, SystemSubtype,
