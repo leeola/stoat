@@ -138,7 +138,10 @@ impl LocalLsp {
     async fn request<R: Request>(&self, params: R::Params) -> io::Result<R::Result> {
         let id = self.next_id.fetch_add(1, Ordering::Relaxed);
         let (tx, rx) = oneshot::channel();
-        self.pending.lock().unwrap().insert(id, tx);
+        self.pending
+            .lock()
+            .expect("pending mutex poisoned")
+            .insert(id, tx);
 
         let envelope = json!({
             "jsonrpc": "2.0",
@@ -147,7 +150,10 @@ impl LocalLsp {
             "params": params,
         });
         if let Err(err) = self.write_value(&envelope).await {
-            self.pending.lock().unwrap().remove(&id);
+            self.pending
+                .lock()
+                .expect("pending mutex poisoned")
+                .remove(&id);
             return Err(err);
         }
 
@@ -181,7 +187,12 @@ impl LocalLsp {
 #[async_trait]
 impl LspServer for LocalLsp {
     fn capabilities(&self) -> Arc<ServerCapabilities> {
-        Arc::clone(&self.capabilities.lock().unwrap())
+        Arc::clone(
+            &self
+                .capabilities
+                .lock()
+                .expect("capabilities mutex poisoned"),
+        )
     }
 
     async fn initialize(&self, root_uri: Option<Uri>) -> io::Result<InitializeResult> {
@@ -204,7 +215,10 @@ impl LspServer for LocalLsp {
         let result: InitializeResult = self
             .request::<lsp_types::request::Initialize>(params)
             .await?;
-        *self.capabilities.lock().unwrap() = Arc::new(result.capabilities.clone());
+        *self
+            .capabilities
+            .lock()
+            .expect("capabilities mutex poisoned") = Arc::new(result.capabilities.clone());
         self.notify::<lsp_types::notification::Initialized>(InitializedParams {})
             .await?;
         Ok(result)
@@ -583,7 +597,7 @@ impl LocalLsp {
         match self
             .capabilities
             .lock()
-            .unwrap()
+            .expect("capabilities mutex poisoned")
             .position_encoding
             .as_ref()
             .map(|e| e.as_str())
@@ -678,7 +692,7 @@ fn dispatch_frame(
                 warn!("LSP response id is not an integer");
                 return;
             };
-            let sender = pending.lock().unwrap().remove(&id);
+            let sender = pending.lock().expect("pending mutex poisoned").remove(&id);
             let Some(sender) = sender else {
                 warn!("LSP response for unknown id {}", id);
                 return;
