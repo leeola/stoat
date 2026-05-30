@@ -3139,10 +3139,10 @@ impl Workspace {
         };
         let key = set.key.clone();
         let value = set.value.clone();
-        if !cx.has_global::<crate::settings::Settings>() {
-            cx.set_global(crate::settings::Settings::default());
+        if !cx.has_global::<Settings>() {
+            cx.set_global(Settings::default());
         }
-        let result = cx.update_global::<crate::settings::Settings, _>(|s, _| {
+        let result = cx.update_global::<Settings, _>(|s, _| {
             s.resolved.apply_runtime(&key, &value)
         });
         if let Err(err) = result {
@@ -3162,13 +3162,13 @@ impl Workspace {
     /// the global, so every pane repaints on the next frame.
     fn dispatch_toggle_tab_bar(&mut self, cx: &mut Context<'_, Self>) {
         let current = cx
-            .try_global::<crate::settings::Settings>()
+            .try_global::<Settings>()
             .and_then(|s| s.resolved.ui_pane_show_tab_bar)
             .unwrap_or(true);
-        if !cx.has_global::<crate::settings::Settings>() {
-            cx.set_global(crate::settings::Settings::default());
+        if !cx.has_global::<Settings>() {
+            cx.set_global(Settings::default());
         }
-        cx.update_global::<crate::settings::Settings, _>(|s, _| {
+        cx.update_global::<Settings, _>(|s, _| {
             s.resolved.ui_pane_show_tab_bar = Some(!current);
         });
     }
@@ -7892,7 +7892,7 @@ mod tests {
         install_globals_with_fs(&mut cx, fs.clone());
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
 
-        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        let fs_dyn: Arc<dyn FsHost> = fs.clone();
         let dir = stoat::workspace::persist::workspace_dir_for(Path::new("/tmp/repo"), &*fs_dyn)
             .expect("workspace dir");
         let current_uid = ws.read_with(vcx, |w, _| w.uid());
@@ -8182,7 +8182,7 @@ mod tests {
     fn new_singleton_editor(
         vcx: &mut VisualTestContext,
         text: &str,
-    ) -> Entity<crate::editor::Editor> {
+    ) -> Entity<Editor> {
         use crate::{
             buffer::Buffer,
             diff_map::DiffMap,
@@ -8211,7 +8211,7 @@ mod tests {
 
     fn cursor_offsets(
         vcx: &mut VisualTestContext,
-        editor: &Entity<crate::editor::Editor>,
+        editor: &Entity<Editor>,
     ) -> Vec<usize> {
         editor.update(vcx, |ed, cx| {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
@@ -8376,7 +8376,7 @@ mod tests {
 
     fn selection_offsets(
         vcx: &mut VisualTestContext,
-        editor: &Entity<crate::editor::Editor>,
+        editor: &Entity<Editor>,
     ) -> Vec<(usize, usize)> {
         editor.update(vcx, |ed, cx| {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
@@ -8594,7 +8594,7 @@ mod tests {
                             let pane = pane_tree.pane(pane_id)?;
                             for item in pane.read(cx).items() {
                                 if let Ok(editor) =
-                                    item.to_any_view().downcast::<crate::editor::Editor>()
+                                    item.to_any_view().downcast::<Editor>()
                                 {
                                     let singleton = editor
                                         .read(cx)
@@ -8963,7 +8963,7 @@ mod tests {
             ed.schedule_hover_debounce(3, 5, window, cx);
         });
         vcx.run_until_parked();
-        scheduler.advance_clock(std::time::Duration::from_millis(60));
+        scheduler.advance_clock(Duration::from_millis(60));
         vcx.run_until_parked();
 
         assert_eq!(
@@ -9156,7 +9156,7 @@ mod tests {
 
     fn seed_primary_offset(
         vcx: &mut VisualTestContext,
-        editor: &Entity<crate::editor::Editor>,
+        editor: &Entity<Editor>,
         offset: usize,
     ) {
         use stoat_text::{Bias, Selection, SelectionGoal};
@@ -9595,7 +9595,7 @@ mod tests {
         vcx.update(|_, cx| cx.set_global(crate::globals::LanguageRegistry::standard()));
         let editor = new_singleton_editor(vcx, "hello");
         editor.update(vcx, |ed, cx| {
-            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/main.rs")), cx)
+            ed.set_file_path(Some(PathBuf::from("/tmp/repo/main.rs")), cx)
         });
         let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
         sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
@@ -9620,7 +9620,7 @@ mod tests {
         vcx.update(|_, cx| cx.set_global(crate::globals::LanguageRegistry::standard()));
         let editor = new_singleton_editor(vcx, "// hello");
         editor.update(vcx, |ed, cx| {
-            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/main.rs")), cx)
+            ed.set_file_path(Some(PathBuf::from("/tmp/repo/main.rs")), cx)
         });
         let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
         sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
@@ -9644,7 +9644,7 @@ mod tests {
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let editor = new_singleton_editor(vcx, "hello");
         editor.update(vcx, |ed, cx| {
-            ed.set_file_path(Some(std::path::PathBuf::from("/tmp/repo/main.rs")), cx)
+            ed.set_file_path(Some(PathBuf::from("/tmp/repo/main.rs")), cx)
         });
         let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
         sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
@@ -10084,7 +10084,7 @@ mod tests {
         let probe_calls_before = observed.lock().expect("probe mutex").len();
         let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
         pane_tree.update(vcx, |tree, cx| {
-            tree.split(stoat::pane::Axis::Vertical, cx);
+            tree.split(Axis::Vertical, cx);
         });
         vcx.run_until_parked();
 
@@ -10834,7 +10834,7 @@ mod tests {
         vcx.update(|_, cx| {
             cx.new(|_| {
                 let mut inner = stoat::review_session::ReviewSession::new(
-                    stoat::review_session::ReviewSource::InMemory {
+                    ReviewSource::InMemory {
                         files: Arc::new(Vec::new()),
                     },
                 );
@@ -10849,7 +10849,7 @@ mod tests {
                     lines[13] = "L13_NEW".to_string();
                     lines.join("\n") + "\n"
                 };
-                inner.add_files(vec![stoat::review::ReviewFileInput {
+                inner.add_files(vec![ReviewFileInput {
                     path: PathBuf::from("a.txt"),
                     rel_path: "a.txt".to_string(),
                     language: None,
@@ -11024,19 +11024,19 @@ mod tests {
         let session = vcx.update(|_, cx| {
             cx.new(|_| {
                 let mut inner = stoat::review_session::ReviewSession::new(
-                    stoat::review_session::ReviewSource::InMemory {
+                    ReviewSource::InMemory {
                         files: Arc::new(Vec::new()),
                     },
                 );
                 inner.add_files(vec![
-                    stoat::review::ReviewFileInput {
+                    ReviewFileInput {
                         path: PathBuf::from("a.txt"),
                         rel_path: "a.txt".to_string(),
                         language: None,
                         base_text: Arc::new("a_old\n".to_string()),
                         buffer_text: Arc::new("a_new\n".to_string()),
                     },
-                    stoat::review::ReviewFileInput {
+                    ReviewFileInput {
                         path: PathBuf::from("b.txt"),
                         rel_path: "b.txt".to_string(),
                         language: None,
@@ -11401,7 +11401,7 @@ mod tests {
         let session = vcx.update(|_, cx| {
             cx.new(|_| {
                 let inner = stoat::review_session::ReviewSession::new(
-                    stoat::review_session::ReviewSource::InMemory {
+                    ReviewSource::InMemory {
                         files: Arc::new(Vec::new()),
                     },
                 );
@@ -12072,7 +12072,7 @@ mod tests {
         // values directly.
         chunk.hunk.rows.clear();
         for (i, prov) in extra_provenances.iter().enumerate() {
-            chunk.hunk.rows.push(stoat::review::ReviewRow::Changed {
+            chunk.hunk.rows.push(ReviewRow::Changed {
                 left: None,
                 right: Some(ReviewSide {
                     text: String::new(),
@@ -12210,7 +12210,7 @@ mod tests {
         let cursor_id = inner.cursor.current.expect("cursor set");
         let chunk = inner.chunks.get_mut(&cursor_id).expect("cursor chunk");
         chunk.hunk.rows.clear();
-        chunk.hunk.rows.push(stoat::review::ReviewRow::Changed {
+        chunk.hunk.rows.push(ReviewRow::Changed {
             left: Some(ReviewSide {
                 text: String::new(),
                 line_num: 1,
@@ -13015,7 +13015,7 @@ mod tests {
     fn open_conflict_item_in_focused_pane(
         vcx: &mut VisualTestContext,
         ws: &Entity<Workspace>,
-        file: stoat::host::ConflictedFile,
+        file: ConflictedFile,
     ) -> Entity<ConflictItem> {
         let item = vcx.update(|_, cx| cx.new(|cx| ConflictItem::from_conflicted_file(file, cx)));
         ws.update(vcx, |w, cx| {
@@ -13035,8 +13035,8 @@ mod tests {
         item
     }
 
-    fn conflicted_file(path: &str, ours: &str, theirs: &str) -> stoat::host::ConflictedFile {
-        stoat::host::ConflictedFile {
+    fn conflicted_file(path: &str, ours: &str, theirs: &str) -> ConflictedFile {
+        ConflictedFile {
             path: PathBuf::from(path),
             ancestor: None,
             ours: Some(ours.to_string()),
@@ -13218,7 +13218,7 @@ mod tests {
     fn dispatch_conflict_skip_entry_resolves_with_ancestor() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
-        let file = stoat::host::ConflictedFile {
+        let file = ConflictedFile {
             path: PathBuf::from("a.txt"),
             ancestor: Some("base\n".to_string()),
             ours: Some("alpha\n".to_string()),
@@ -13235,7 +13235,7 @@ mod tests {
 
     fn rebase_entry(sha: &str, summary: &str) -> RebaseEntry {
         RebaseEntry {
-            op: stoat::host::RebaseTodoOp::Pick,
+            op: RebaseTodoOp::Pick,
             commit: stoat::host::CommitInfo {
                 sha: sha.to_string(),
                 short_sha: sha.chars().take(7).collect(),
@@ -13254,7 +13254,7 @@ mod tests {
         workdir: &str,
         source_sha: &str,
         current_head: &str,
-        files: Vec<stoat::host::ConflictedFile>,
+        files: Vec<ConflictedFile>,
         remaining: Vec<RebaseEntry>,
     ) {
         ws.update(vcx, |w, _| {
@@ -13505,7 +13505,7 @@ mod tests {
         assert_eq!(
             rebases[0].todo,
             vec![RebaseTodo {
-                op: stoat::host::RebaseTodoOp::Pick,
+                op: RebaseTodoOp::Pick,
                 sha: "c2".to_string(),
                 message: "c2 summary".to_string(),
             }],
@@ -14544,7 +14544,7 @@ mod tests {
     fn dispatch_set_applies_runtime_setting_via_settings_global() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
-        vcx.update(|_, cx| cx.set_global(crate::settings::Settings::default()));
+        vcx.update(|_, cx| cx.set_global(Settings::default()));
 
         dispatch(
             &ws,
@@ -14557,7 +14557,7 @@ mod tests {
         vcx.run_until_parked();
 
         let after = vcx.read(|cx| {
-            cx.global::<crate::settings::Settings>()
+            cx.global::<Settings>()
                 .resolved
                 .ui_pane_show_tab_bar
         });
@@ -14568,7 +14568,7 @@ mod tests {
     fn dispatch_set_unknown_key_leaves_settings_untouched() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
-        vcx.update(|_, cx| cx.set_global(crate::settings::Settings::default()));
+        vcx.update(|_, cx| cx.set_global(Settings::default()));
 
         dispatch(
             &ws,
@@ -14581,7 +14581,7 @@ mod tests {
         vcx.run_until_parked();
 
         let after = vcx.read(|cx| {
-            cx.global::<crate::settings::Settings>()
+            cx.global::<Settings>()
                 .resolved
                 .ui_pane_show_tab_bar
         });
@@ -14592,10 +14592,10 @@ mod tests {
     fn dispatch_toggle_tab_bar_cycles_settings_global() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
-        vcx.update(|_, cx| cx.set_global(crate::settings::Settings::default()));
+        vcx.update(|_, cx| cx.set_global(Settings::default()));
 
         let before = vcx.read(|cx| {
-            cx.global::<crate::settings::Settings>()
+            cx.global::<Settings>()
                 .resolved
                 .ui_pane_show_tab_bar
         });
@@ -14604,7 +14604,7 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleTabBar);
         vcx.run_until_parked();
         let after_first = vcx.read(|cx| {
-            cx.global::<crate::settings::Settings>()
+            cx.global::<Settings>()
                 .resolved
                 .ui_pane_show_tab_bar
         });
@@ -14613,7 +14613,7 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleTabBar);
         vcx.run_until_parked();
         let after_second = vcx.read(|cx| {
-            cx.global::<crate::settings::Settings>()
+            cx.global::<Settings>()
                 .resolved
                 .ui_pane_show_tab_bar
         });
@@ -14691,7 +14691,7 @@ mod tests {
         let docks = ws.read_with(vcx, |w, _| w.docks().to_vec());
         assert_eq!(
             docks[0].read_with(vcx, |d, _| d.side()),
-            crate::dock::DockSide::Right
+            DockSide::Right
         );
 
         dispatch(&ws, vcx, stoat_action::ToggleDiffHunkPanel);

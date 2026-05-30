@@ -986,7 +986,7 @@ mod tests {
         let multi = MultiBuffer::singleton(id, buffer);
         let snapshot = multi.snapshot();
         let mb_anchor = snapshot.multi_buffer_anchor_at(5, stoat_text::Bias::Right);
-        assert_eq!(mb_anchor.excerpt_id, super::ExcerptId(0));
+        assert_eq!(mb_anchor.excerpt_id, ExcerptId(0));
         assert!(!mb_anchor.is_min());
         assert!(!mb_anchor.is_max());
         assert_eq!(mb_anchor.diff_base_anchor, None);
@@ -1012,7 +1012,7 @@ mod tests {
         let snapshot = multi.snapshot();
         let text_anchor = snapshot.anchor_at(3, stoat_text::Bias::Right);
         let base_anchor = snapshot.anchor_at(1, stoat_text::Bias::Left);
-        let mb_anchor = MultiBufferAnchor::in_buffer(super::ExcerptId(0), text_anchor)
+        let mb_anchor = MultiBufferAnchor::in_buffer(ExcerptId(0), text_anchor)
             .with_diff_base_anchor(base_anchor);
         assert_eq!(mb_anchor.diff_base_anchor, Some(base_anchor));
     }

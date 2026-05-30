@@ -3859,7 +3859,7 @@ mod tests {
         hsla(0.15, 1.0, 0.25, 1.0)
     }
 
-    fn labels(entries: &[(&str, usize)]) -> std::collections::BTreeMap<String, usize> {
+    fn labels(entries: &[(&str, usize)]) -> BTreeMap<String, usize> {
         entries.iter().map(|(k, v)| (k.to_string(), *v)).collect()
     }
 

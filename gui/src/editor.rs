@@ -187,8 +187,8 @@ pub struct Editor {
     syntax_map_updater: Option<Entity<crate::syntax_updater::SyntaxMapUpdater>>,
     pending_goto_word_labels: Option<std::collections::BTreeMap<String, usize>>,
     pending_goto_word_input: String,
-    expansion_history: Vec<std::ops::Range<usize>>,
-    expansion_tip: Option<std::ops::Range<usize>>,
+    expansion_history: Vec<Range<usize>>,
+    expansion_tip: Option<Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
     blame_visible: bool,
     minimap_visible: bool,
@@ -364,7 +364,7 @@ fn touched_rows(snapshot: &MultiBufferSnapshot, selections: &SelectionsCollectio
 struct ReviewRenderData {
     chunk_markers: Vec<(u32, ChunkStatus)>,
     provenances: Vec<(u32, stoat::review::MoveProvenance)>,
-    moved_spans: Vec<(u32, std::ops::Range<usize>)>,
+    moved_spans: Vec<(u32, Range<usize>)>,
 }
 
 impl Editor {
@@ -582,7 +582,7 @@ impl Editor {
             },
         };
 
-        let mut ascending: Vec<(usize, std::ops::Range<usize>)> = {
+        let mut ascending: Vec<(usize, Range<usize>)> = {
             let snapshot = self.multi_buffer.read(cx).snapshot();
             self.selections
                 .all_anchors()
@@ -916,7 +916,7 @@ impl Editor {
                 return;
             },
         };
-        let mut ascending: Vec<(usize, std::ops::Range<usize>)> = {
+        let mut ascending: Vec<(usize, Range<usize>)> = {
             let snapshot = self.multi_buffer.read(cx).snapshot();
             self.selections
                 .all_anchors()
@@ -3334,7 +3334,7 @@ impl Editor {
 
     fn render_visible_rows(
         &mut self,
-        range: std::ops::Range<usize>,
+        range: Range<usize>,
         cx: &mut Context<'_, Self>,
     ) -> Vec<Div> {
         let _span = tracing::trace_span!("editor.render_visible_rows").entered();
