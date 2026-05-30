@@ -23,7 +23,7 @@
 use etcetera::base_strategy::{BaseStrategy, Xdg};
 use std::{
     fmt,
-    fs::{File, OpenOptions},
+    fs::OpenOptions,
     io::{self, BufWriter, Write},
     path::{Path, PathBuf},
     sync::{
@@ -83,19 +83,34 @@ impl TextProtoLog {
             .write(true)
             .truncate(true)
             .open(path)?;
+        let thread_name = format!(
+            "text-proto-log-{}",
+            path.file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default()
+        );
+        Self::with_named_writer(file, thread_name)
+    }
 
+    /// Spawns the writer thread over an arbitrary [`Write`] sink instead of
+    /// a file, serializing records to it exactly as [`Self::create_at`]
+    /// does. Lets tests capture output in memory.
+    #[cfg(test)]
+    fn with_writer<W: Write + Send + 'static>(writer: W) -> io::Result<Self> {
+        Self::with_named_writer(writer, "text-proto-log".to_string())
+    }
+
+    fn with_named_writer<W: Write + Send + 'static>(
+        writer: W,
+        thread_name: String,
+    ) -> io::Result<Self> {
         let (sender, receiver) = sync_channel::<WriterMessage>(CHANNEL_CAPACITY);
         let dropped = std::sync::Arc::new(AtomicU64::new(0));
-        let writer = BufWriter::new(file);
+        let writer = BufWriter::new(writer);
         let thread_dropped = dropped.clone();
 
         let thread = thread::Builder::new()
-            .name(format!(
-                "text-proto-log-{}",
-                path.file_name()
-                    .map(|n| n.to_string_lossy().into_owned())
-                    .unwrap_or_default()
-            ))
+            .name(thread_name)
             .spawn(move || writer_loop(writer, receiver, thread_dropped))
             .map_err(|e| io::Error::other(format!("spawn writer thread: {e}")))?;
 
@@ -177,8 +192,8 @@ impl Drop for TextProtoLog {
     }
 }
 
-fn writer_loop(
-    mut writer: BufWriter<File>,
+fn writer_loop<W: Write>(
+    mut writer: BufWriter<W>,
     receiver: std::sync::mpsc::Receiver<WriterMessage>,
     dropped: std::sync::Arc<AtomicU64>,
 ) {
@@ -211,8 +226,8 @@ fn writer_loop(
     }
 }
 
-fn write_record(
-    writer: &mut BufWriter<File>,
+fn write_record<W: Write>(
+    writer: &mut BufWriter<W>,
     dropped: &AtomicU64,
     payload: &str,
 ) -> io::Result<()> {
@@ -244,8 +259,34 @@ pub fn log_dir() -> io::Result<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::io::Read;
+    use std::{fs::File, io::Read, sync::Arc};
     use tempfile::TempDir;
+
+    #[derive(Clone)]
+    struct SharedSink(Arc<Mutex<Vec<u8>>>);
+
+    impl Write for SharedSink {
+        fn write(&mut self, buf: &[u8]) -> io::Result<usize> {
+            self.0.lock().unwrap().extend_from_slice(buf);
+            Ok(buf.len())
+        }
+
+        fn flush(&mut self) -> io::Result<()> {
+            Ok(())
+        }
+    }
+
+    /// A [`TextProtoLog`] writing into an in-memory buffer, paired with a
+    /// handle to that buffer for reading back what the writer persisted.
+    fn sink_log() -> (TextProtoLog, Arc<Mutex<Vec<u8>>>) {
+        let buf = Arc::new(Mutex::new(Vec::new()));
+        let log = TextProtoLog::with_writer(SharedSink(buf.clone())).unwrap();
+        (log, buf)
+    }
+
+    fn sink_text(buf: &Arc<Mutex<Vec<u8>>>) -> String {
+        String::from_utf8(buf.lock().unwrap().clone()).unwrap()
+    }
 
     fn read_file(path: &Path) -> String {
         let mut buf = String::new();
@@ -258,25 +299,19 @@ mod tests {
 
     #[test]
     fn record_writes_payload_with_newline() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("x.jsonl");
-        {
-            let log = TextProtoLog::create_at(&path).unwrap();
-            log.record(r#"{"a":1}"#);
-            log.record(r#"{"b":2}"#);
-        }
-        assert_eq!(read_file(&path), "{\"a\":1}\n{\"b\":2}\n");
+        let (log, buf) = sink_log();
+        log.record(r#"{"a":1}"#);
+        log.record(r#"{"b":2}"#);
+        log.flush();
+        assert_eq!(sink_text(&buf), "{\"a\":1}\n{\"b\":2}\n");
     }
 
     #[test]
     fn trailing_newline_stripped() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("x.jsonl");
-        {
-            let log = TextProtoLog::create_at(&path).unwrap();
-            log.record("{\"a\":1}\n");
-        }
-        assert_eq!(read_file(&path), "{\"a\":1}\n");
+        let (log, buf) = sink_log();
+        log.record("{\"a\":1}\n");
+        log.flush();
+        assert_eq!(sink_text(&buf), "{\"a\":1}\n");
     }
 
     #[test]
@@ -293,40 +328,33 @@ mod tests {
 
     #[test]
     fn flush_persists_records_without_drop() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("x.jsonl");
-        let log = TextProtoLog::create_at(&path).unwrap();
+        let (log, buf) = sink_log();
         log.record(r#"{"a":1}"#);
         log.flush();
-        assert_eq!(read_file(&path), "{\"a\":1}\n");
-        drop(log);
+        assert_eq!(sink_text(&buf), "{\"a\":1}\n");
     }
 
     #[test]
     fn stress_10k_records_no_drops() {
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("x.jsonl");
-        {
-            let log = TextProtoLog::create_at(&path).unwrap();
-            // Interleaving a `flush()` every 1000 records keeps the
-            // queue well below `CHANNEL_CAPACITY` even when the writer
-            // thread is scheduled erratically under parallel workspace
-            // test load -- without the periodic drain, a 10k burst can
-            // outpace the writer and spill into the drop counter.
-            for i in 0..10_000 {
-                log.record(&format!("{{\"n\":{i}}}"));
-                if (i + 1) % 1000 == 0 {
-                    log.flush();
-                }
+        let (log, buf) = sink_log();
+        // Interleaving a `flush()` every 1000 records keeps the queue
+        // well below `CHANNEL_CAPACITY` even when the writer thread is
+        // scheduled erratically under parallel workspace test load --
+        // without the periodic drain, a 10k burst can outpace the writer
+        // and spill into the drop counter.
+        for i in 0..10_000 {
+            log.record(&format!("{{\"n\":{i}}}"));
+            if (i + 1) % 1000 == 0 {
+                log.flush();
             }
-            log.flush();
-            assert_eq!(
-                log.dropped.load(Ordering::Relaxed),
-                0,
-                "no drops expected on a non-stalled disk"
-            );
         }
-        let contents = read_file(&path);
+        log.flush();
+        assert_eq!(
+            log.dropped.load(Ordering::Relaxed),
+            0,
+            "no drops expected when the writer keeps up"
+        );
+        let contents = sink_text(&buf);
         let line_count = contents.lines().count();
         assert_eq!(line_count, 10_000);
         assert!(contents.starts_with("{\"n\":0}\n"));
