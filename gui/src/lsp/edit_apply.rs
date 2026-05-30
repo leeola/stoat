@@ -12,6 +12,8 @@ use stoat::{host::OffsetEncoding, lsp::util::lsp_range_to_byte_range};
 /// silently dropped. Each per-buffer apply sorts its text edits in
 /// reverse byte order so earlier ranges stay stable as later edits
 /// land first. Returns the number of buffers actually mutated.
+// Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+#[allow(clippy::mutable_key_type)]
 pub fn apply_workspace_edit_to_buffer(
     edit: &WorkspaceEdit,
     active_uri: &Uri,
@@ -89,6 +91,8 @@ pub fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
 /// `changes` map, mirroring the spec. `DocumentChanges::Operations`
 /// resource ops (Create / Delete / Rename) are dropped; only
 /// `Edit` ops contribute text edits.
+// Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+#[allow(clippy::mutable_key_type)]
 pub fn collect_text_edits_by_uri(edit: &WorkspaceEdit) -> HashMap<Uri, Vec<TextEdit>> {
     let mut out: HashMap<Uri, Vec<TextEdit>> = HashMap::new();
     if let Some(changes) = &edit.document_changes {
@@ -151,6 +155,8 @@ mod tests {
         Uri::from_str(s).unwrap()
     }
 
+    // Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+    #[allow(clippy::mutable_key_type)]
     #[test]
     fn collect_text_edits_by_uri_groups_changes_map_per_target() {
         let target_a = make_uri("file:///tmp/a.rs");
@@ -180,6 +186,8 @@ mod tests {
         assert_eq!(grouped.get(&target_b).unwrap()[0].new_text, "Y");
     }
 
+    // Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+    #[allow(clippy::mutable_key_type)]
     #[test]
     fn collect_text_edits_returns_empty_when_uri_absent() {
         let target = make_uri("file:///tmp/a.rs");

@@ -322,6 +322,8 @@ mod tests {
         guard.rope().to_string()
     }
 
+    // Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+    #[allow(clippy::mutable_key_type)]
     #[test]
     fn applies_changes_map_to_open_buffer() {
         let mut h = TestHarness::with_size(80, 24);
@@ -339,6 +341,8 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "aXe\n");
     }
 
+    // Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+    #[allow(clippy::mutable_key_type)]
     #[test]
     fn applies_text_edits_right_to_left() {
         let mut h = TestHarness::with_size(80, 24);
@@ -377,6 +381,8 @@ mod tests {
         assert_eq!(buffer_text(&h, &path), "Xabc\n");
     }
 
+    // Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+    #[allow(clippy::mutable_key_type)]
     #[test]
     fn loads_unopened_file_via_fs_host() {
         let mut h = TestHarness::with_size(80, 24);
@@ -478,6 +484,8 @@ mod tests {
         assert!(!h.fake_fs().exists(&path));
     }
 
+    // Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+    #[allow(clippy::mutable_key_type)]
     #[test]
     fn errors_on_non_file_uri() {
         let mut h = TestHarness::with_size(80, 24);

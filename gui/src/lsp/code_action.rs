@@ -347,6 +347,8 @@ mod tests {
         assert!(matches!(entries[0], CodeActionEntry::NeedsResolve { .. }));
     }
 
+    // Uri's Hash/Eq don't observe its interior-mutability cache; sound as a map key.
+    #[allow(clippy::mutable_key_type)]
     #[test]
     fn translate_keeps_direct_and_command() {
         let mut changes = std::collections::HashMap::new();
