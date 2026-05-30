@@ -933,6 +933,31 @@ pub(super) fn review_cycle_comparison_mode(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn enter_line_select(stoat: &mut Stoat) -> UpdateEffect {
+    let entered = {
+        let Some(session) = stoat.active_workspace_mut().review.as_mut() else {
+            return UpdateEffect::None;
+        };
+        match session.cursor.current {
+            Some(id) => session.enter_line_select(id),
+            None => false,
+        }
+    };
+    if !entered {
+        return UpdateEffect::None;
+    }
+    stoat.mode = "line_select".to_string();
+    UpdateEffect::Redraw
+}
+
+pub(super) fn line_select_cancel(stoat: &mut Stoat) -> UpdateEffect {
+    if let Some(session) = stoat.active_workspace_mut().review.as_mut() {
+        session.cancel_line_select();
+    }
+    stoat.mode = "review".to_string();
+    UpdateEffect::Redraw
+}
+
 /// Re-scan the underlying source of a review session. Returns `None` when
 /// the source has no re-scannable state (currently `InMemory`) or when the
 /// scan produced no hunks.
@@ -1445,6 +1470,36 @@ mod tests {
             "patch must not touch the other changed lines: {patch}"
         );
         assert_eq!(h.chunk_status(id), ChunkStatus::PartiallyStaged);
+    }
+
+    #[test]
+    fn enter_line_select_sets_mode_then_cancel_returns_to_review() {
+        let mut h = TestHarness::with_size(80, 14);
+        h.stage_review_scenario("/work", &[("a.rs", "x\na\ny\n", "x\nb\ny\n")]);
+        h.stoat.open_review();
+        h.settle();
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewEnterLineSelect);
+        assert_eq!(h.stoat.mode, "line_select");
+        assert!(h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .unwrap()
+            .line_selection
+            .is_some());
+
+        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewLineSelectCancel);
+        assert_eq!(h.stoat.mode, "review");
+        assert!(h
+            .stoat
+            .active_workspace()
+            .review
+            .as_ref()
+            .unwrap()
+            .line_selection
+            .is_none());
     }
 
     #[test]

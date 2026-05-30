@@ -608,6 +608,26 @@ impl Action for OpenReviewAgentEdits {
     }
 }
 
+define_action!(
+    ReviewEnterLineSelectDef,
+    ReviewEnterLineSelect,
+    "ReviewEnterLineSelect",
+    ActionKind::ReviewEnterLineSelect,
+    "select lines in the current hunk",
+    "Enter line-select mode on the chunk under the review cursor, snapshotting its rows with every row selected so individual lines can be staged or unstaged as a group.",
+    ActionPriority::Common
+);
+
+define_action!(
+    ReviewLineSelectCancelDef,
+    ReviewLineSelectCancel,
+    "ReviewLineSelectCancel",
+    ActionKind::ReviewLineSelectCancel,
+    "cancel line selection",
+    "Discard the current line selection and return to review mode without staging anything.",
+    ActionPriority::Common
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

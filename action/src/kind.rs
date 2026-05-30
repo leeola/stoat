@@ -240,6 +240,8 @@ pub enum ActionKind {
     ReviewToggleApproval,
     ReviewNextUnreviewedHunk,
     ReviewResetProgress,
+    ReviewEnterLineSelect,
+    ReviewLineSelectCancel,
     GitToggleStageHunk,
     GitUnstageHunk,
     GitToggleStageLine,

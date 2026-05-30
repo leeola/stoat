@@ -86,6 +86,30 @@ impl ReviewSession {
         cx.notify();
     }
 
+    /// Snapshot the chunk under the review cursor into the inner
+    /// session's line selection. Returns false when there is no current
+    /// chunk or the chunk has no rows.
+    pub fn enter_line_select(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let Some(id) = self.inner.cursor.current else {
+            return false;
+        };
+        if !self.inner.enter_line_select(id) {
+            return false;
+        }
+        self.inner.version += 1;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.notify();
+        true
+    }
+
+    /// Clear any active line selection.
+    pub fn cancel_line_select(&mut self, cx: &mut Context<'_, Self>) {
+        self.inner.cancel_line_select();
+        self.inner.version += 1;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.notify();
+    }
+
     /// Record the result of a [`stoat_action::ReviewApplyStaged`]
     /// run and fan out [`ReviewSessionEvent::Changed`] +
     /// [`ReviewSessionEvent::Applied`] so status-bar badges and

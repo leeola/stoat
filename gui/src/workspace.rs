@@ -2229,6 +2229,8 @@ impl Workspace {
             ActionKind::ReviewToggleApproval => self.dispatch_review_approve(false, cx),
             ActionKind::ReviewNextUnreviewedHunk => self.dispatch_review_next_unreviewed(cx),
             ActionKind::ReviewResetProgress => self.dispatch_review_reset_progress(cx),
+            ActionKind::ReviewEnterLineSelect => self.dispatch_review_enter_line_select(cx),
+            ActionKind::ReviewLineSelectCancel => self.dispatch_review_line_select_cancel(cx),
             ActionKind::GitToggleStageHunk => self.dispatch_git_stage_hunk(false, cx),
             ActionKind::GitUnstageHunk => self.dispatch_git_stage_hunk(true, cx),
             ActionKind::GitToggleStageLine => self.dispatch_git_stage_line(cx),
@@ -4330,6 +4332,33 @@ impl Workspace {
                 );
             });
         });
+    }
+
+    /// Enter `line_select` mode on the chunk under the review cursor,
+    /// snapshotting its rows all-selected. No-op (mode unchanged) when
+    /// no review item is active or the cursor has no chunk.
+    fn dispatch_review_enter_line_select(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let entered = review_item.update(cx, |item, cx| {
+            let session = item.session().clone();
+            session.update(cx, |session, cx| session.enter_line_select(cx))
+        });
+        if entered {
+            self.set_input_mode("line_select", cx);
+        }
+    }
+
+    /// Clear the active line selection and return to `review` mode.
+    fn dispatch_review_line_select_cancel(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(review_item) = self.active_review_item(cx) {
+            review_item.update(cx, |item, cx| {
+                let session = item.session().clone();
+                session.update(cx, |session, cx| session.cancel_line_select(cx));
+            });
+        }
+        self.set_input_mode("review", cx);
     }
 
     /// Advance the review cursor to the next chunk whose `approved`

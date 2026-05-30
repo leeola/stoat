@@ -90,10 +90,11 @@ use crate::{
             CloseReview, GitToggleStageHunk, GitToggleStageLine, GitUnstageHunk, JumpToMoveSource,
             JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
             OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships,
-            ReviewApplyStaged, ReviewApproveHunk, ReviewCycleComparisonMode, ReviewNextChunk,
-            ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected,
-            ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
-            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
+            ReviewApplyStaged, ReviewApproveHunk, ReviewCycleComparisonMode, ReviewEnterLineSelect,
+            ReviewLineSelectCancel, ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk,
+            ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress, ReviewRevertHunk,
+            ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow,
+            ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
         set::Set,
@@ -217,6 +218,12 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(ReviewResetProgress::DEF, |_| {
         Ok(Box::new(ReviewResetProgress))
+    });
+    add(ReviewEnterLineSelect::DEF, |_| {
+        Ok(Box::new(ReviewEnterLineSelect))
+    });
+    add(ReviewLineSelectCancel::DEF, |_| {
+        Ok(Box::new(ReviewLineSelectCancel))
     });
     add(GitToggleStageHunk::DEF, |_| {
         Ok(Box::new(GitToggleStageHunk))
@@ -1146,7 +1153,8 @@ mod tests {
         // + 1 SetCwd.
         // + 2 Pwd / Env (command-line :pwd / :env palette actions).
         // + 1 OpenConflictPicker (lists conflicted files in the worktree).
-        assert_eq!(all().count(), 322);
+        // + 2 ReviewEnterLineSelect / ReviewLineSelectCancel (line-select mode).
+        assert_eq!(all().count(), 324);
     }
 
     #[test]

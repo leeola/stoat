@@ -491,7 +491,11 @@ on key {
         r -> ReviewRefresh();
         R -> ReviewResetProgress();
         c -> ReviewCycleComparisonMode();
+        V -> ReviewEnterLineSelect();
         : -> OpenCommandPalette();
+    }
+    mode == line_select {
+        Escape -> ReviewLineSelectCancel();
     }
     mode == insert && claude_focused {
         Enter -> ClaudeSubmit();
