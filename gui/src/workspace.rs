@@ -1071,6 +1071,11 @@ impl Workspace {
                             continue;
                         };
                         let editor = self.build_editor_for_path(&path, cx);
+                        let folds = crate::workspace_persist::folds_from_blob(&snap.blob);
+                        if !folds.is_empty() {
+                            let display_map = editor.read(cx).display_map().clone();
+                            display_map.update(cx, |dm, dm_cx| dm.fold(folds, dm_cx));
+                        }
                         pane.update(cx, |p, cx| {
                             p.add_item(Box::new(editor), cx);
                         });
@@ -15400,6 +15405,52 @@ mod tests {
         });
         let restored_uid = fresh_ws.read_with(vcx2, |w, _| w.uid());
         assert_eq!(restored_uid, original_uid);
+    }
+
+    #[test]
+    fn restore_preserves_editor_folds() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/fold.rs", b"fn main() {\n    body;\n}\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/fold.rs")], cx);
+        });
+        vcx.run_until_parked();
+        ws.update(vcx, |w, cx| {
+            let editor = w.active_editor(cx).expect("active editor");
+            let display_map = editor.read(cx).display_map().clone();
+            display_map.update(cx, |dm, dm_cx| {
+                dm.fold(
+                    vec![stoat_text::Point::new(0, 11)..stoat_text::Point::new(2, 0)],
+                    dm_cx,
+                )
+            });
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/folds.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/tmp/repo");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        let folded = fresh_ws.update(vcx2, |w, cx| {
+            let editor = w.active_editor(cx).expect("restored editor");
+            let display_map = editor.read(cx).display_map().clone();
+            display_map
+                .update(cx, |dm, _| dm.snapshot())
+                .is_line_folded(1)
+        });
+        assert!(folded, "restored editor keeps the persisted fold");
     }
 
     #[test]

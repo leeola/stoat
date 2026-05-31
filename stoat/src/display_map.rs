@@ -344,6 +344,23 @@ impl DisplayMap {
         }
     }
 
+    /// Buffer-`Point` range of every active fold, resolved against the
+    /// current buffer. The inverse of [`Self::fold`]'s input; used to
+    /// enumerate folds for persistence.
+    pub fn fold_point_ranges(&self) -> Vec<std::ops::Range<Point>> {
+        let buffer_snapshot = self.multi_buffer.snapshot();
+        let rope = buffer_snapshot.rope();
+        self.fold_map
+            .fold_anchor_ranges()
+            .into_iter()
+            .map(|range| {
+                let start = rope.offset_to_point(buffer_snapshot.resolve_anchor(&range.start));
+                let end = rope.offset_to_point(buffer_snapshot.resolve_anchor(&range.end));
+                start..end
+            })
+            .collect()
+    }
+
     pub fn set_wrap_width(&mut self, width: Option<u32>) {
         self.wrap_map.set_wrap_width(width);
     }
@@ -1052,6 +1069,18 @@ mod tests {
         let display = snapshot.buffer_to_display(Point::new(2, 1));
         let back = snapshot.display_to_buffer(display).unwrap();
         assert_eq!(back, Point::new(2, 1));
+    }
+
+    #[test]
+    fn fold_point_ranges_returns_folded_ranges() {
+        let mut display_map = create_display_map("fn main() {\n    body;\n}");
+        assert!(display_map.fold_point_ranges().is_empty());
+
+        display_map.fold(vec![Point::new(0, 11)..Point::new(2, 0)]);
+        assert_eq!(
+            display_map.fold_point_ranges(),
+            vec![Point::new(0, 11)..Point::new(2, 0)]
+        );
     }
 
     #[test]

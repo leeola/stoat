@@ -4142,13 +4142,20 @@ impl ItemView for Editor {
         crate::item::ItemKind::Editor
     }
 
-    fn serialize(&self, _cx: &App) -> Value {
+    fn serialize(&self, cx: &App) -> Value {
         let file_path = self
             .file_path
             .as_deref()
             .and_then(|p| p.to_str())
             .map(String::from);
-        serde_json::json!({ "file_path": file_path })
+        let folds: Vec<[u32; 4]> = self
+            .display_map
+            .read(cx)
+            .fold_point_ranges()
+            .into_iter()
+            .map(|r| [r.start.row, r.start.column, r.end.row, r.end.column])
+            .collect();
+        serde_json::json!({ "file_path": file_path, "folds": folds })
     }
 }
 

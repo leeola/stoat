@@ -93,6 +93,12 @@ impl DisplayMap {
         cx.notify();
     }
 
+    /// Buffer-`Point` range of every active fold, for persistence. The
+    /// inverse of [`Self::fold`]'s input. Read-only: no event or notify.
+    pub fn fold_point_ranges(&self) -> Vec<Range<Point>> {
+        self.inner.fold_point_ranges()
+    }
+
     /// Replace the semantic-token highlight set for `buffer_id`.
     /// `tokens` and `interner` ride together so the per-token
     /// [`stoat::display_map::highlights::HighlightStyleId`] indices

@@ -489,6 +489,13 @@ impl FoldMap {
         false
     }
 
+    /// The anchor range of every active fold, in storage order.
+    /// Resolve against a buffer snapshot to recover offsets or points;
+    /// the display map uses this to enumerate folds for persistence.
+    pub fn fold_anchor_ranges(&self) -> Vec<Range<Anchor>> {
+        self.folds.iter().map(|fold| fold.range.clone()).collect()
+    }
+
     pub fn version_unchanged(&self) -> bool {
         self.version == self.last_self_version
     }

@@ -26,6 +26,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use std::{
     collections::BTreeMap,
+    ops::Range,
     path::{Path, PathBuf},
 };
 use stoat::{
@@ -33,6 +34,7 @@ use stoat::{
     pane::{PaneId, PaneTree as InnerPaneTree},
     workspace::WorkspaceUid,
 };
+use stoat_text::Point;
 
 /// Versioned on-disk shape of a GUI workspace.
 #[derive(Debug, Serialize, Deserialize)]
@@ -116,6 +118,24 @@ pub struct ItemSnap {
     pub kind: ItemKind,
     #[serde(default)]
     pub blob: serde_json::Value,
+}
+
+/// Parse the persisted fold ranges from an editor item's serialized
+/// blob. Each entry is `[start_row, start_col, end_row, end_col]`;
+/// missing or malformed entries are skipped, so a blob written before
+/// fold persistence restores with no folds.
+pub(crate) fn folds_from_blob(blob: &serde_json::Value) -> Vec<Range<Point>> {
+    let Some(entries) = blob.get("folds").and_then(|v| v.as_array()) else {
+        return Vec::new();
+    };
+    entries
+        .iter()
+        .filter_map(|entry| {
+            let nums = entry.as_array()?;
+            let at = |i: usize| nums.get(i)?.as_u64().map(|n| n as u32);
+            Some(Point::new(at(0)?, at(1)?)..Point::new(at(2)?, at(3)?))
+        })
+        .collect()
 }
 
 /// Walk every item in `pane` and record its kind + serialized
@@ -209,4 +229,27 @@ pub fn list_workspace_files(
     fs: &dyn stoat::host::FsHost,
 ) -> std::io::Result<Vec<PathBuf>> {
     stoat::workspace::persist::list_workspace_files(git_root, fs)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn folds_from_blob_parses_point_ranges() {
+        let blob = serde_json::json!({ "folds": [[0, 11, 2, 0], [5, 3, 9, 0]] });
+        assert_eq!(
+            folds_from_blob(&blob),
+            vec![
+                Point::new(0, 11)..Point::new(2, 0),
+                Point::new(5, 3)..Point::new(9, 0),
+            ]
+        );
+    }
+
+    #[test]
+    fn folds_from_blob_missing_or_malformed_is_empty() {
+        assert!(folds_from_blob(&serde_json::json!({ "file_path": "/x" })).is_empty());
+        assert!(folds_from_blob(&serde_json::json!({ "folds": [[0, 1, 2]] })).is_empty());
+    }
 }
