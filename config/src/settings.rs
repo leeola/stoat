@@ -98,6 +98,10 @@ pub struct Settings {
     /// Show the per-pane tab bar above editor content. `None` defaults
     /// to visible. Set via `ui.pane.show_tab_bar = false;` to hide.
     pub ui_pane_show_tab_bar: Option<bool>,
+    /// Show the per-pane breadcrumbs bar above editor content. `None`
+    /// defaults to visible. Set via `ui.pane.show_breadcrumbs = false;`
+    /// to hide.
+    pub ui_pane_show_breadcrumbs: Option<bool>,
     /// Paint diagnostic, git-hunk, and search markers on the editor
     /// scrollbar. `None` defaults to enabled. Set via
     /// `ui.editor.show_scrollbar_markers = false;` to hide.
@@ -152,6 +156,9 @@ impl Settings {
             ui_font_family: other.ui_font_family.or(self.ui_font_family),
             ui_font_size: other.ui_font_size.or(self.ui_font_size),
             ui_pane_show_tab_bar: other.ui_pane_show_tab_bar.or(self.ui_pane_show_tab_bar),
+            ui_pane_show_breadcrumbs: other
+                .ui_pane_show_breadcrumbs
+                .or(self.ui_pane_show_breadcrumbs),
             ui_editor_show_scrollbar_markers: other
                 .ui_editor_show_scrollbar_markers
                 .or(self.ui_editor_show_scrollbar_markers),
@@ -230,6 +237,11 @@ impl Settings {
             ["ui", "pane", "show_tab_bar"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.ui_pane_show_tab_bar = Some(b);
+                }
+            },
+            ["ui", "pane", "show_breadcrumbs"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.ui_pane_show_breadcrumbs = Some(b);
                 }
             },
             ["ui", "editor", "show_scrollbar_markers"] => {
@@ -316,6 +328,18 @@ impl Settings {
                 self.ui_pane_show_tab_bar = Some(b);
                 Ok(())
             },
+            ["ui", "pane", "show_breadcrumbs"] => {
+                let b = parse_bool(raw).ok_or_else(|| {
+                    InvalidValueSnafu {
+                        key: path.to_string(),
+                        expected: "bool",
+                        got: raw.to_string(),
+                    }
+                    .build()
+                })?;
+                self.ui_pane_show_breadcrumbs = Some(b);
+                Ok(())
+            },
             ["ui", "editor", "show_scrollbar_markers"] => {
                 let b = parse_bool(raw).ok_or_else(|| {
                     InvalidValueSnafu {
@@ -394,6 +418,13 @@ mod tests {
     }
 
     #[test]
+    fn apply_runtime_sets_ui_pane_show_breadcrumbs_false() {
+        let mut s = Settings::default();
+        assert_eq!(s.apply_runtime("ui.pane.show_breadcrumbs", "false"), Ok(()));
+        assert_eq!(s.ui_pane_show_breadcrumbs, Some(false));
+    }
+
+    #[test]
     fn apply_runtime_sets_ui_editor_show_scrollbar_markers_false() {
         let mut s = Settings::default();
         assert_eq!(
@@ -444,6 +475,13 @@ mod tests {
     }
 
     #[test]
+    fn from_config_parses_ui_pane_show_breadcrumbs_false() {
+        let config = parse_ok("on init { ui.pane.show_breadcrumbs = false; }");
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.ui_pane_show_breadcrumbs, Some(false));
+    }
+
+    #[test]
     fn from_config_parses_ui_editor_show_scrollbar_markers_false() {
         let config = parse_ok("on init { ui.editor.show_scrollbar_markers = false; }");
         let settings = Settings::from_config(&config);
@@ -467,6 +505,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -490,6 +529,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -513,6 +553,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -545,6 +586,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -560,6 +602,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -577,6 +620,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -597,6 +641,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -615,6 +660,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -646,6 +692,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -669,6 +716,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -692,6 +740,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -724,6 +773,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -742,6 +792,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -765,6 +816,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -788,6 +840,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
@@ -808,6 +861,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -823,6 +877,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -843,6 +898,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -858,6 +914,7 @@ mod tests {
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
+            ui_pane_show_breadcrumbs: None,
             ui_editor_show_scrollbar_markers: None,
             language_servers: BTreeMap::new(),
         };
@@ -875,6 +932,7 @@ mod tests {
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
+                ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 language_servers: BTreeMap::new(),
             }
