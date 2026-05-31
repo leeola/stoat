@@ -66,6 +66,7 @@ use stoat::{
     review_session::{build_chunk_patch, ChunkStatus, ReviewSource},
 };
 use stoat_action::ActionKind;
+use stoat_config::LineNumberMode;
 
 /// Top-level workspace entity. Composes the structural pieces of
 /// a single Stoat window: the git root, the pane tree, any docks
@@ -2217,6 +2218,7 @@ impl Workspace {
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
             ActionKind::ToggleInlineBlame => self.dispatch_toggle_inline_blame(cx),
             ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
+            ActionKind::ToggleRelativeLineNumbers => self.dispatch_toggle_relative_line_numbers(cx),
             ActionKind::ToggleTabBar => self.dispatch_toggle_tab_bar(cx),
             ActionKind::Set => self.dispatch_set(&*action, cx),
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
@@ -3245,6 +3247,27 @@ impl Workspace {
         }
         cx.update_global::<Settings, _>(|s, _| {
             s.resolved.ui_pane_show_tab_bar = Some(!current);
+        });
+    }
+
+    /// Cycle the gutter line-number mode via the `Settings` global:
+    /// absolute -> relative -> hybrid -> absolute. Each `Pane` observes
+    /// the global, so every editor repaints on the next frame.
+    fn dispatch_toggle_relative_line_numbers(&mut self, cx: &mut Context<'_, Self>) {
+        let current = cx
+            .try_global::<Settings>()
+            .and_then(|s| s.resolved.ui_editor_line_numbers)
+            .unwrap_or(LineNumberMode::Absolute);
+        let next = match current {
+            LineNumberMode::Absolute => LineNumberMode::Relative,
+            LineNumberMode::Relative => LineNumberMode::Hybrid,
+            LineNumberMode::Hybrid => LineNumberMode::Absolute,
+        };
+        if !cx.has_global::<Settings>() {
+            cx.set_global(Settings::default());
+        }
+        cx.update_global::<Settings, _>(|s, _| {
+            s.resolved.ui_editor_line_numbers = Some(next);
         });
     }
 
@@ -14848,6 +14871,31 @@ mod tests {
         vcx.run_until_parked();
         let after_second = vcx.read(|cx| cx.global::<Settings>().resolved.ui_pane_show_tab_bar);
         assert_eq!(after_second, Some(true));
+    }
+
+    #[test]
+    fn dispatch_toggle_relative_line_numbers_cycles_settings_global() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        vcx.update(|_, cx| cx.set_global(Settings::default()));
+
+        let before = vcx.read(|cx| cx.global::<Settings>().resolved.ui_editor_line_numbers);
+        assert_eq!(before, None);
+
+        dispatch(&ws, vcx, stoat_action::ToggleRelativeLineNumbers);
+        vcx.run_until_parked();
+        let first = vcx.read(|cx| cx.global::<Settings>().resolved.ui_editor_line_numbers);
+        assert_eq!(first, Some(LineNumberMode::Relative));
+
+        dispatch(&ws, vcx, stoat_action::ToggleRelativeLineNumbers);
+        vcx.run_until_parked();
+        let second = vcx.read(|cx| cx.global::<Settings>().resolved.ui_editor_line_numbers);
+        assert_eq!(second, Some(LineNumberMode::Hybrid));
+
+        dispatch(&ws, vcx, stoat_action::ToggleRelativeLineNumbers);
+        vcx.run_until_parked();
+        let third = vcx.read(|cx| cx.global::<Settings>().resolved.ui_editor_line_numbers);
+        assert_eq!(third, Some(LineNumberMode::Absolute));
     }
 
     #[test]

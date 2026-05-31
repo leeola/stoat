@@ -34,6 +34,7 @@ use stoat::{
     buffer::BufferId, jumplist::JumpList, multi_buffer::MultiBufferSnapshot,
     review_session::ChunkStatus, selection::SelectionsCollection, DiffHunkStatus, DisplayPoint,
 };
+use stoat_config::LineNumberMode;
 use stoat_text::{
     next_word_start, prev_word_start, Anchor, Bias, OffsetUtf16, Selection, SelectionGoal,
 };
@@ -3626,6 +3627,11 @@ impl Editor {
                 _ => None,
             }
         };
+        let line_number_mode = cx
+            .try_global::<Settings>()
+            .and_then(|s| s.resolved.ui_editor_line_numbers)
+            .unwrap_or(LineNumberMode::Absolute);
+        let cursor_buffer_row = self.primary_cursor_buffer_row(cx);
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
@@ -3637,6 +3643,8 @@ impl Editor {
             indent_guides: indent_guide_paint,
             metrics,
             line_number_color: cx.theme().muted_text,
+            line_number_mode,
+            cursor_buffer_row,
             line_number_cache: Some(&self.gutter_line_number_cache),
             blame_cache: Some(&self.gutter_blame_cache),
         };

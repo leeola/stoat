@@ -9,7 +9,8 @@ pub use ast::{
 };
 pub use error::{format_errors, ParseError};
 pub use settings::{
-    ClaudePlacement, LanguageServerCommand, MouseCapturePolicy, Settings, ToolPermissions,
+    ClaudePlacement, LanguageServerCommand, LineNumberMode, MouseCapturePolicy, Settings,
+    ToolPermissions,
 };
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {

@@ -44,8 +44,9 @@ use crate::{
             ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
             SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleBlame, ToggleComments, ToggleDiffHunkPanel,
-            ToggleInlineBlame, ToggleMinimap, ToggleTabBar, TriggerCompletion, TrimSelections,
-            Undo, UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
+            ToggleInlineBlame, ToggleMinimap, ToggleRelativeLineNumbers, ToggleTabBar,
+            TriggerCompletion, TrimSelections, Undo, UnindentSelection, Yank, YankMainToClipboard,
+            YankToClipboard,
         },
         file::OpenFile,
         file_finder::{
@@ -538,6 +539,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
     add(ToggleInlineBlame::DEF, |_| Ok(Box::new(ToggleInlineBlame)));
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
+    add(ToggleRelativeLineNumbers::DEF, |_| {
+        Ok(Box::new(ToggleRelativeLineNumbers))
+    });
     add(ToggleTabBar::DEF, |_| Ok(Box::new(ToggleTabBar)));
     add(Set::DEF, |params| {
         let key = params
@@ -1171,7 +1175,8 @@ mod tests {
         // + 2 ReviewLineSelectToggle / ReviewLineSelectAll (line-select mutation).
         // + 2 ReviewLineSelectStage / ReviewLineSelectUnstage (line-select apply).
         // + 1 ToggleInlineBlame (inline end-of-line git blame).
-        assert_eq!(all().count(), 329);
+        // + 1 ToggleRelativeLineNumbers (cycle gutter line-number mode).
+        assert_eq!(all().count(), 330);
     }
 
     #[test]

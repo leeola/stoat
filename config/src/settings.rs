@@ -29,6 +29,17 @@ pub enum MouseCapturePolicy {
     Never,
 }
 
+/// Gutter line-number display mode. `Absolute` shows the 1-based row
+/// number; `Relative` shows each row's distance from the cursor row
+/// (the cursor row reads 0); `Hybrid` shows the absolute number on the
+/// cursor row and the distance on every other row.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LineNumberMode {
+    Absolute,
+    Relative,
+    Hybrid,
+}
+
 /// Per-tool Claude permission rule lists. Each `Vec<String>` carries
 /// raw regex source as parsed from stcfg; compilation happens at the
 /// host's policy construction so a bad pattern can be reported with
@@ -118,6 +129,10 @@ pub struct Settings {
     /// signature at the viewport top). `None` defaults to on. Set via
     /// `ui.editor.show_sticky_scroll = false;` to hide.
     pub ui_editor_show_sticky_scroll: Option<bool>,
+    /// Gutter line-number display mode. `None` defaults to
+    /// [`LineNumberMode::Absolute`]. Set via
+    /// `ui.editor.line_numbers = relative;` (or `hybrid`).
+    pub ui_editor_line_numbers: Option<LineNumberMode>,
     /// Per-language LSP server commands keyed by language name
     /// (e.g. `rust`, `typescript`). Empty when no
     /// `lsp.<lang>.*` settings are present. Right-hand wins on
@@ -183,6 +198,7 @@ impl Settings {
             ui_editor_show_sticky_scroll: other
                 .ui_editor_show_sticky_scroll
                 .or(self.ui_editor_show_sticky_scroll),
+            ui_editor_line_numbers: other.ui_editor_line_numbers.or(self.ui_editor_line_numbers),
             language_servers,
         }
     }
@@ -283,6 +299,15 @@ impl Settings {
             ["ui", "editor", "show_sticky_scroll"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.ui_editor_show_sticky_scroll = Some(b);
+                }
+            },
+            ["ui", "editor", "line_numbers"] => {
+                let mode = match &setting.value.node {
+                    Value::String(s) | Value::Ident(s) => parse_line_number_mode(s),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    self.ui_editor_line_numbers = Some(mode);
                 }
             },
             ["claude", "permissions", tool, behavior] => {
@@ -424,6 +449,18 @@ impl Settings {
                 self.ui_editor_show_sticky_scroll = Some(b);
                 Ok(())
             },
+            ["ui", "editor", "line_numbers"] => {
+                let mode = parse_line_number_mode(raw).ok_or_else(|| {
+                    InvalidValueSnafu {
+                        key: path.to_string(),
+                        expected: "absolute|relative|hybrid",
+                        got: raw.to_string(),
+                    }
+                    .build()
+                })?;
+                self.ui_editor_line_numbers = Some(mode);
+                Ok(())
+            },
             _ => UnknownKeySnafu {
                 key: path.to_string(),
             }
@@ -436,6 +473,15 @@ fn parse_bool(raw: &str) -> Option<bool> {
     match raw.to_ascii_lowercase().as_str() {
         "true" | "yes" | "1" | "on" => Some(true),
         "false" | "no" | "0" | "off" => Some(false),
+        _ => None,
+    }
+}
+
+fn parse_line_number_mode(raw: &str) -> Option<LineNumberMode> {
+    match raw.to_ascii_lowercase().as_str() {
+        "absolute" => Some(LineNumberMode::Absolute),
+        "relative" => Some(LineNumberMode::Relative),
+        "hybrid" => Some(LineNumberMode::Hybrid),
         _ => None,
     }
 }
@@ -537,6 +583,26 @@ mod tests {
     }
 
     #[test]
+    fn apply_runtime_sets_ui_editor_line_numbers_relative() {
+        let mut s = Settings::default();
+        assert_eq!(
+            s.apply_runtime("ui.editor.line_numbers", "relative"),
+            Ok(())
+        );
+        assert_eq!(s.ui_editor_line_numbers, Some(LineNumberMode::Relative));
+    }
+
+    #[test]
+    fn apply_runtime_rejects_invalid_line_number_mode() {
+        let mut s = Settings::default();
+        let result = s.apply_runtime("ui.editor.line_numbers", "sideways");
+        assert!(matches!(
+            result,
+            Err(SettingsApplyError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
     fn apply_runtime_rejects_unknown_key() {
         let mut s = Settings::default();
         let result = s.apply_runtime("nope.bad.path", "true");
@@ -612,6 +678,16 @@ mod tests {
     }
 
     #[test]
+    fn from_config_parses_ui_editor_line_numbers_hybrid() {
+        let config = parse_ok("on init { ui.editor.line_numbers = hybrid; }");
+        let settings = Settings::from_config(&config);
+        assert_eq!(
+            settings.ui_editor_line_numbers,
+            Some(LineNumberMode::Hybrid)
+        );
+    }
+
+    #[test]
     fn from_config_extracts_text_proto_log() {
         let config = parse_ok("on init { text_proto_log = true; }");
         assert_eq!(
@@ -633,6 +709,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -660,6 +737,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -687,6 +765,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -723,6 +802,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -742,6 +822,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -763,6 +844,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -787,6 +869,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -809,6 +892,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -844,6 +928,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -871,6 +956,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -898,6 +984,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -934,6 +1021,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -956,6 +1044,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -983,6 +1072,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -1010,6 +1100,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -1034,6 +1125,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -1053,6 +1145,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
@@ -1077,6 +1170,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -1096,6 +1190,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -1117,6 +1212,7 @@ mod tests {
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
+                ui_editor_line_numbers: None,
                 language_servers: BTreeMap::new(),
             }
         );

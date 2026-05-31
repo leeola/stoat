@@ -241,6 +241,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleRelativeLineNumbersDef,
+    ToggleRelativeLineNumbers,
+    "ToggleRelativeLineNumbers",
+    ActionKind::ToggleRelativeLineNumbers,
+    "cycle line-number mode",
+    "Cycle the gutter line-number mode across all editors: absolute -> relative -> hybrid -> absolute. Relative shows each row's distance from the cursor row; hybrid shows the absolute number on the cursor row and the distance elsewhere. Changes the global ui.editor.line_numbers setting.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ToggleTabBarDef,
     ToggleTabBar,
     "ToggleTabBar",

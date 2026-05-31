@@ -176,6 +176,7 @@ pub enum ActionKind {
     ToggleBlame,
     ToggleInlineBlame,
     ToggleMinimap,
+    ToggleRelativeLineNumbers,
     ToggleTabBar,
     Set,
     ToggleDiffHunkPanel,

@@ -627,6 +627,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
@@ -656,6 +657,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();
@@ -695,6 +697,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let id = h.claude().open();
@@ -744,6 +747,7 @@ mod tests {
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
+            ui_editor_line_numbers: None,
             language_servers: std::collections::BTreeMap::new(),
         });
         let _id = h.claude().open();

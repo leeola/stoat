@@ -21,6 +21,7 @@ use stoat::{
     review_session::ChunkStatus,
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
 };
+use stoat_config::LineNumberMode;
 use stoat_text::{Anchor, Bias, Selection};
 
 const NAMED_COLOR_HEX: [u32; 16] = [
@@ -1361,6 +1362,24 @@ fn digit_count(mut n: u32) -> usize {
     digits
 }
 
+/// The number displayed in the gutter for `buffer_row` under `mode`,
+/// relative to `cursor_row`. Absolute is the 1-based row; Relative is
+/// the distance from the cursor (0 on the cursor row); Hybrid shows the
+/// absolute number on the cursor row and the distance elsewhere.
+fn line_number_value(mode: LineNumberMode, buffer_row: u32, cursor_row: u32) -> u32 {
+    match mode {
+        LineNumberMode::Absolute => buffer_row + 1,
+        LineNumberMode::Relative => buffer_row.abs_diff(cursor_row),
+        LineNumberMode::Hybrid => {
+            if buffer_row == cursor_row {
+                buffer_row + 1
+            } else {
+                buffer_row.abs_diff(cursor_row)
+            }
+        },
+    }
+}
+
 pub(crate) type DiagnosticRowMap = BTreeMap<u32, DiagnosticSeverity>;
 
 pub(crate) fn compute_row_severity_for_path(
@@ -1483,6 +1502,10 @@ pub(crate) struct GutterPaint<'a> {
     pub indent_guides: Option<IndentGuidePaint>,
     pub metrics: GutterMetrics,
     pub line_number_color: Hsla,
+    pub line_number_mode: LineNumberMode,
+    /// Buffer row of the primary cursor, for relative / hybrid line
+    /// numbers.
+    pub cursor_buffer_row: u32,
     /// LRU cache for formatted line-number cells keyed by
     /// `(buffer_row, width)`. Set to `None` in tests that do not
     /// exercise the caching path; the formatter falls back to a
@@ -1788,16 +1811,17 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     }
 
     if let (Some(row), true) = (buffer_row, show_line_number) {
-        let line_str: SharedString = match paint.line_number_cache {
-            Some(cache) => {
+        let value = line_number_value(paint.line_number_mode, row, paint.cursor_buffer_row);
+        let line_str: SharedString = match (paint.line_number_mode, paint.line_number_cache) {
+            (LineNumberMode::Absolute, Some(cache)) => {
                 let mut guard = cache.borrow_mut();
                 guard
                     .get_or_insert((row, width), || {
-                        SharedString::from(format!("{:>width$}", row + 1, width = width))
+                        SharedString::from(format!("{value:>width$}"))
                     })
                     .clone()
             },
-            None => SharedString::from(format!("{:>width$}", row + 1, width = width)),
+            _ => SharedString::from(format!("{value:>width$}")),
         };
         let start = text.len();
         text.push_str(line_str.as_ref());
@@ -2021,6 +2045,16 @@ mod tests {
         assert_eq!(enclosing_block_indent(None, Some(2)), None);
         assert_eq!(enclosing_block_indent(Some(2), None), None);
         assert_eq!(enclosing_block_indent(None, None), None);
+    }
+
+    #[test]
+    fn line_number_value_per_mode() {
+        assert_eq!(line_number_value(LineNumberMode::Absolute, 7, 5), 8);
+        assert_eq!(line_number_value(LineNumberMode::Relative, 7, 5), 2);
+        assert_eq!(line_number_value(LineNumberMode::Relative, 5, 5), 0);
+        assert_eq!(line_number_value(LineNumberMode::Relative, 2, 5), 3);
+        assert_eq!(line_number_value(LineNumberMode::Hybrid, 5, 5), 6);
+        assert_eq!(line_number_value(LineNumberMode::Hybrid, 7, 5), 2);
     }
 
     fn hex_of(color: Hsla) -> u32 {
@@ -2330,6 +2364,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2376,6 +2412,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: Some(&cache),
             blame_cache: None,
         };
@@ -2418,6 +2456,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2447,6 +2487,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2471,6 +2513,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2505,6 +2549,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2553,6 +2599,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2579,6 +2627,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2654,6 +2704,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2685,6 +2737,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2717,6 +2771,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2750,6 +2806,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2788,6 +2846,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2823,6 +2883,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2876,6 +2938,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2902,6 +2966,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
@@ -2930,6 +2996,8 @@ mod tests {
             indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
             line_number_cache: None,
             blame_cache: None,
         };
