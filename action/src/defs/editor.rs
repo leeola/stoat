@@ -211,6 +211,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleInlineBlameDef,
+    ToggleInlineBlame,
+    "ToggleInlineBlame",
+    ActionKind::ToggleInlineBlame,
+    "toggle inline blame",
+    "Toggle inline git blame at the end of each editable line in the active editor, showing the commit author and a relative age (e.g. `Lee Olayvar, 3 days ago`) in muted text. Defaults off and is an alternative to the gutter blame strip. Toggling on triggers a refresh against the workspace's git host; buffers without an on-disk path (scratch, modal inputs) are a no-op.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ToggleDiffHunkPanelDef,
     ToggleDiffHunkPanel,
     "ToggleDiffHunkPanel",

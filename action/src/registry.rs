@@ -44,7 +44,7 @@ use crate::{
             ShrinkSelection, SmartTab, SplitSelection, SplitSelectionOnNewline, SurroundAdd,
             SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
             TillNextChar, TillPrevChar, ToggleBlame, ToggleComments, ToggleDiffHunkPanel,
-            ToggleMinimap, ToggleTabBar, TriggerCompletion, TrimSelections, Undo,
+            ToggleInlineBlame, ToggleMinimap, ToggleTabBar, TriggerCompletion, TrimSelections, Undo,
             UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
         },
         file::OpenFile,
@@ -536,6 +536,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(UnindentSelection::DEF, |_| Ok(Box::new(UnindentSelection)));
     add(ToggleComments::DEF, |_| Ok(Box::new(ToggleComments)));
     add(ToggleBlame::DEF, |_| Ok(Box::new(ToggleBlame)));
+    add(ToggleInlineBlame::DEF, |_| Ok(Box::new(ToggleInlineBlame)));
     add(ToggleMinimap::DEF, |_| Ok(Box::new(ToggleMinimap)));
     add(ToggleTabBar::DEF, |_| Ok(Box::new(ToggleTabBar)));
     add(Set::DEF, |params| {
@@ -1169,7 +1170,8 @@ mod tests {
         // + 2 ReviewEnterLineSelect / ReviewLineSelectCancel (line-select mode).
         // + 2 ReviewLineSelectToggle / ReviewLineSelectAll (line-select mutation).
         // + 2 ReviewLineSelectStage / ReviewLineSelectUnstage (line-select apply).
-        assert_eq!(all().count(), 328);
+        // + 1 ToggleInlineBlame (inline end-of-line git blame).
+        assert_eq!(all().count(), 329);
     }
 
     #[test]

@@ -109,6 +109,68 @@ pub fn author_first_name(author: &str, max_chars: usize) -> String {
     first.chars().take(max_chars).collect()
 }
 
+/// Maximum character width of the inline blame label appended at a
+/// line's end; longer labels are truncated with a trailing `...`.
+const INLINE_BLAME_MAX_CHARS: usize = 40;
+
+/// Compose the end-of-line inline blame label for `entry` -- full
+/// author name and verbose relative age (e.g. `Lee Olayvar, 3 days
+/// ago`) -- truncated to [`INLINE_BLAME_MAX_CHARS`] characters so the
+/// trailing text stays bounded regardless of line width.
+pub fn inline_blame_text(entry: &BlameLine, now_seconds: i64) -> String {
+    let raw = format!(
+        "{}, {}",
+        entry.author_name,
+        format_relative(entry.time, now_seconds)
+    );
+    elide(&raw, INLINE_BLAME_MAX_CHARS)
+}
+
+/// Format `commit_seconds` as a verbose relative age against
+/// `now_seconds` ("just now", "5 minutes ago", "3 days ago", "2 years
+/// ago"). The count is singular at 1. Future-dated commits fold to
+/// "just now" rather than reporting a negative age.
+pub fn format_relative(commit_seconds: i64, now_seconds: i64) -> String {
+    let delta = now_seconds.saturating_sub(commit_seconds).max(0);
+    const MINUTE: i64 = 60;
+    const HOUR: i64 = 60 * MINUTE;
+    const DAY: i64 = 24 * HOUR;
+    const WEEK: i64 = 7 * DAY;
+    const MONTH: i64 = 30 * DAY;
+    const YEAR: i64 = 365 * DAY;
+    if delta < MINUTE {
+        return "just now".to_string();
+    }
+
+    let (count, unit) = if delta < HOUR {
+        (delta / MINUTE, "minute")
+    } else if delta < DAY {
+        (delta / HOUR, "hour")
+    } else if delta < WEEK {
+        (delta / DAY, "day")
+    } else if delta < MONTH {
+        (delta / WEEK, "week")
+    } else if delta < YEAR {
+        (delta / MONTH, "month")
+    } else {
+        (delta / YEAR, "year")
+    };
+    let plural = if count == 1 { "" } else { "s" };
+    format!("{count} {unit}{plural} ago")
+}
+
+/// Truncate `s` to at most `max_chars` characters, ending with `...`
+/// when truncation occurs. Operates on `char` boundaries so multi-byte
+/// text is never split.
+fn elide(s: &str, max_chars: usize) -> String {
+    if s.chars().count() <= max_chars {
+        return s.to_string();
+    }
+    let mut out: String = s.chars().take(max_chars.saturating_sub(3)).collect();
+    out.push_str("...");
+    out
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -312,5 +374,51 @@ mod tests {
     #[test]
     fn author_first_name_respects_char_boundaries() {
         assert_eq!(author_first_name("Ångström", 4), "Ångs");
+    }
+
+    #[test]
+    fn format_relative_verbose_thresholds() {
+        let now = 1_000_000_000i64;
+        assert_eq!(format_relative(now, now), "just now");
+        assert_eq!(format_relative(now - 59, now), "just now");
+        assert_eq!(format_relative(now - 60, now), "1 minute ago");
+        assert_eq!(format_relative(now - 120, now), "2 minutes ago");
+        assert_eq!(format_relative(now - 60 * 60, now), "1 hour ago");
+        assert_eq!(format_relative(now - 24 * 60 * 60, now), "1 day ago");
+        assert_eq!(format_relative(now - 3 * 24 * 60 * 60, now), "3 days ago");
+        assert_eq!(format_relative(now - 7 * 24 * 60 * 60, now), "1 week ago");
+        assert_eq!(format_relative(now - 30 * 24 * 60 * 60, now), "1 month ago");
+        assert_eq!(format_relative(now - 365 * 24 * 60 * 60, now), "1 year ago");
+        assert_eq!(format_relative(now - 730 * 24 * 60 * 60, now), "2 years ago");
+    }
+
+    #[test]
+    fn format_relative_future_folds_to_just_now() {
+        let now = 1_000_000_000i64;
+        assert_eq!(format_relative(now + 5000, now), "just now");
+    }
+
+    #[test]
+    fn inline_blame_text_composes_author_and_age() {
+        let now = 1_700_000_000i64 + 3 * 24 * 60 * 60;
+        assert_eq!(
+            inline_blame_text(&sample_blame(0), now),
+            "Ada Lovelace, 3 days ago"
+        );
+    }
+
+    #[test]
+    fn inline_blame_text_elides_long_label() {
+        let mut entry = sample_blame(0);
+        entry.author_name = "A".repeat(60);
+        let out = inline_blame_text(&entry, entry.time);
+        assert_eq!(out.chars().count(), INLINE_BLAME_MAX_CHARS);
+        assert!(out.ends_with("..."));
+    }
+
+    #[test]
+    fn elide_truncates_on_char_boundaries() {
+        assert_eq!(elide("short", 40), "short");
+        assert_eq!(elide("Ångström rocks", 8), "Ångst...");
     }
 }

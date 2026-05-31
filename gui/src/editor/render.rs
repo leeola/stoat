@@ -1479,6 +1479,7 @@ pub(crate) struct GutterPaint<'a> {
     pub review_chunk_markers: &'a [(u32, ChunkStatus)],
     pub review_move_provenances: &'a [(u32, MoveProvenance)],
     pub blame: Option<BlamePaint<'a>>,
+    pub inline_blame: Option<InlineBlamePaint<'a>>,
     pub metrics: GutterMetrics,
     pub line_number_color: Hsla,
     /// LRU cache for formatted line-number cells keyed by
@@ -1505,6 +1506,17 @@ pub(crate) struct GutterPaint<'a> {
 pub(crate) struct BlamePaint<'a> {
     pub lines: &'a [BlameLine],
     pub now_seconds: i64,
+}
+
+/// Per-row blame entries, `now` reference, and text color for the
+/// end-of-line inline blame form. Carried on [`GutterPaint`] when the
+/// editor has inline blame toggled visible and the per-buffer
+/// [`BlameState`] holds populated entries. Distinct from [`BlamePaint`]
+/// (the left-gutter strip); the two are alternative presentations.
+pub(crate) struct InlineBlamePaint<'a> {
+    pub lines: &'a [BlameLine],
+    pub now_seconds: i64,
+    pub color: Hsla,
 }
 
 pub(crate) struct RowSuffix {
@@ -1549,12 +1561,39 @@ pub(crate) fn render_row_with_gutter(
     let prefix_runs = coalesce_runs(prefix.text.len(), &prefix.runs);
     let body_runs = coalesce_runs(body.text.len(), &body.runs);
     let suffix_runs = coalesce_runs(suffix.text.len(), &suffix.runs);
-    div()
+    let mut row_el = div()
         .flex()
         .flex_row()
         .child(StyledText::new(SharedString::from(prefix.text)).with_highlights(prefix_runs))
         .child(StyledText::new(body.text).with_highlights(body_runs))
-        .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix_runs))
+        .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix_runs));
+    if let Some(cell) = inline_blame_cell(display_row, paint) {
+        row_el = row_el.child(cell);
+    }
+    row_el
+}
+
+/// Build the trailing inline-blame element for `display_row` when
+/// inline blame is active and a blame entry covers the row's buffer
+/// line. Returns `None` for wrap continuations, unmapped rows, or rows
+/// without a blame entry. The label is padded with leading spaces so
+/// it floats a few columns clear of the line's end.
+fn inline_blame_cell(display_row: u32, paint: &GutterPaint<'_>) -> Option<Div> {
+    let inline = paint.inline_blame.as_ref()?;
+    if paint.display_snapshot.is_wrap_continuation(display_row) {
+        return None;
+    }
+    let buffer_row = paint
+        .display_snapshot
+        .display_to_buffer(DisplayPoint::new(display_row, 0))
+        .map(|p| p.row)?;
+    let entry = inline.lines.iter().find(|line| line.line == buffer_row)?;
+    let label = blame::inline_blame_text(entry, inline.now_seconds);
+    Some(
+        div()
+            .text_color(inline.color)
+            .child(SharedString::from(format!("    {label}"))),
+    )
 }
 
 /// Build the three render pieces of a gutter row -- prefix (line
@@ -2124,6 +2163,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2168,6 +2208,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: Some(&cache),
@@ -2208,6 +2249,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2235,6 +2277,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2257,6 +2300,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2289,6 +2333,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2335,6 +2380,7 @@ mod tests {
             review_chunk_markers: &markers,
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2359,6 +2405,7 @@ mod tests {
             review_chunk_markers: &markers,
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2432,6 +2479,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: Some(blame),
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2461,6 +2509,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: Some(blame),
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2491,6 +2540,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: Some(blame),
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2522,6 +2572,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2558,6 +2609,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2591,6 +2643,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2642,6 +2695,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2666,6 +2720,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2692,6 +2747,7 @@ mod tests {
             review_chunk_markers: &[],
             review_move_provenances: &[],
             blame: None,
+            inline_blame: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,

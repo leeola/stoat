@@ -112,6 +112,9 @@ pub struct ThemeColors {
     pub line_highlight: Hsla,
     pub search_match: Hsla,
     pub muted_text: Hsla,
+    /// Optional color override for end-of-line inline git blame. `None`
+    /// falls back to [`Self::muted_text`].
+    pub blame_inline: Option<Hsla>,
     pub diagnostic_error: Hsla,
     pub diagnostic_warning: Hsla,
     pub diagnostic_info: Hsla,
@@ -223,6 +226,7 @@ impl ThemeColors {
             ),
             search_match: theme_bg_or(cx, stoat::theme::scope::UI_SEARCH_MATCH, palette.warning),
             muted_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_MUTED, palette.text_muted),
+            blame_inline: None,
             diagnostic_error: theme_fg_or(
                 cx,
                 stoat::theme::scope::UI_DIAGNOSTIC_ERROR,

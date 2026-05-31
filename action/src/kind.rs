@@ -174,6 +174,7 @@ pub enum ActionKind {
     UnindentSelection,
     ToggleComments,
     ToggleBlame,
+    ToggleInlineBlame,
     ToggleMinimap,
     ToggleTabBar,
     Set,

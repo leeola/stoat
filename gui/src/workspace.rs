@@ -882,6 +882,9 @@ impl Workspace {
             ed.install_semantic_tokens(cx);
             ed.install_syntax_map_updater(cx);
         });
+        if editor.read(cx).inline_blame_visible() {
+            self.attach_and_refresh_blame(&editor, cx);
+        }
         editor
     }
 
@@ -2212,6 +2215,7 @@ impl Workspace {
             ActionKind::SaveSelection => self.dispatch_save_selection(cx),
             ActionKind::SaveBuffer => self.dispatch_save_buffer(cx),
             ActionKind::ToggleBlame => self.dispatch_toggle_blame(cx),
+            ActionKind::ToggleInlineBlame => self.dispatch_toggle_inline_blame(cx),
             ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
             ActionKind::ToggleTabBar => self.dispatch_toggle_tab_bar(cx),
             ActionKind::Set => self.dispatch_set(&*action, cx),
@@ -3140,11 +3144,33 @@ impl Workspace {
         };
         let new_visible = !editor.read(cx).blame_visible();
         editor.update(cx, |ed, cx| ed.set_blame_visible(new_visible, cx));
-
-        if !new_visible {
-            return;
+        if new_visible {
+            self.attach_and_refresh_blame(&editor, cx);
         }
+    }
 
+    /// Flip the active editor's inline-blame visibility -- the
+    /// end-of-line alternative to the gutter strip. On toggle-on,
+    /// attaches the shared [`crate::git::blame::BlameState`] and
+    /// schedules a refresh; scratch buffers flip the flag but skip the
+    /// refresh.
+    fn dispatch_toggle_inline_blame(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let new_visible = !editor.read(cx).inline_blame_visible();
+        editor.update(cx, |ed, cx| ed.set_inline_blame_visible(new_visible, cx));
+        if new_visible {
+            self.attach_and_refresh_blame(&editor, cx);
+        }
+    }
+
+    /// Attach the workspace-shared [`crate::git::blame::BlameState`] for
+    /// `editor`'s singleton buffer and schedule a blame refresh against
+    /// the git host. A no-op for buffers without an on-disk path
+    /// (scratch, modal inputs). Shared by both blame toggles and the
+    /// editor-open path when inline blame starts visible from settings.
+    fn attach_and_refresh_blame(&mut self, editor: &Entity<Editor>, cx: &mut Context<'_, Self>) {
         let Some(buffer) = editor
             .read(cx)
             .multi_buffer()
@@ -14740,6 +14766,28 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleBlame);
         vcx.run_until_parked();
         editor.read_with(vcx, |ed, _| assert!(!ed.blame_visible()));
+    }
+
+    #[test]
+    fn dispatch_toggle_inline_blame_flips_visibility_on_active_editor() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/main.rs", b"hi\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo").head_file("main.rs", "hi\n");
+        install_git_host_global(vcx, git);
+        let editor = open_editor_in_focused_pane(vcx, &ws, Path::new("/tmp/repo/main.rs"));
+
+        editor.read_with(vcx, |ed, _| assert!(!ed.inline_blame_visible()));
+        dispatch(&ws, vcx, stoat_action::ToggleInlineBlame);
+        vcx.run_until_parked();
+        editor.read_with(vcx, |ed, _| assert!(ed.inline_blame_visible()));
+
+        dispatch(&ws, vcx, stoat_action::ToggleInlineBlame);
+        vcx.run_until_parked();
+        editor.read_with(vcx, |ed, _| assert!(!ed.inline_blame_visible()));
     }
 
     #[test]

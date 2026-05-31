@@ -192,6 +192,7 @@ pub struct Editor {
     expansion_tip: Option<Range<usize>>,
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
     blame_visible: bool,
+    inline_blame_visible: bool,
     minimap_visible: bool,
     minimap: Option<Entity<Editor>>,
     minimap_drag: Option<MinimapDrag>,
@@ -388,6 +389,10 @@ impl Editor {
             cx.emit(EditorEvent::Changed);
             cx.notify();
         });
+        let inline_blame_visible = cx
+            .try_global::<Settings>()
+            .and_then(|s| s.resolved.ui_editor_show_inline_blame)
+            .unwrap_or(false);
         Self {
             multi_buffer,
             display_map,
@@ -428,6 +433,7 @@ impl Editor {
             expansion_tip: None,
             blame_state: None,
             blame_visible: false,
+            inline_blame_visible,
             minimap_visible: false,
             minimap: None,
             minimap_drag: None,
@@ -2389,6 +2395,25 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn inline_blame_visible(&self) -> bool {
+        self.inline_blame_visible
+    }
+
+    /// Flip the per-editor inline-blame visibility flag. When `true`
+    /// and a [`BlameState`] is attached, each editable line renders the
+    /// commit author and relative age at its end (see
+    /// [`crate::git::blame::inline_blame_text`]). The initial value
+    /// comes from the `ui.editor.show_inline_blame` setting; inline
+    /// blame is an alternative to the gutter blame strip.
+    pub fn set_inline_blame_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
+        if self.inline_blame_visible == visible {
+            return;
+        }
+        self.inline_blame_visible = visible;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
     pub fn minimap_visible(&self) -> bool {
         self.minimap_visible
     }
@@ -3555,6 +3580,22 @@ impl Editor {
                     lines,
                     now_seconds: now_unix_seconds(),
                 });
+        let inline_blame_lines = match (self.inline_blame_visible, self.blame_state.as_ref()) {
+            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
+            _ => None,
+        };
+        let inline_blame_color = {
+            let theme = cx.theme();
+            theme.blame_inline.unwrap_or(theme.muted_text)
+        };
+        let inline_blame_paint = inline_blame_lines
+            .as_ref()
+            .filter(|v| !v.is_empty())
+            .map(|lines| render::InlineBlamePaint {
+                lines,
+                now_seconds: now_unix_seconds(),
+                color: inline_blame_color,
+            });
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
@@ -3562,6 +3603,7 @@ impl Editor {
             review_chunk_markers: &review_data.chunk_markers,
             review_move_provenances: &review_data.provenances,
             blame: blame_paint,
+            inline_blame: inline_blame_paint,
             metrics,
             line_number_color: cx.theme().muted_text,
             line_number_cache: Some(&self.gutter_line_number_cache),
