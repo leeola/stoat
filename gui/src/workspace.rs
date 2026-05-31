@@ -4864,6 +4864,8 @@ impl Workspace {
                 cx,
             );
         });
+
+        self.show_toast(Toast::success(format!("Staged {applied} chunks")), cx);
     }
 
     fn dispatch_review_refresh(&mut self, cx: &mut Context<'_, Self>) {

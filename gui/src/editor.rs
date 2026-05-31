@@ -17,6 +17,7 @@ use crate::{
     multi_buffer::{MultiBuffer, MultiBufferEvent},
     settings::Settings,
     theme::{self, ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
+    toast::Toast,
 };
 use gpui::{
     canvas, div, fill, font, outline, px, relative, size as gpui_size, uniform_list, App,
@@ -3943,6 +3944,9 @@ impl ItemView for Editor {
     fn save(&mut self, cx: &mut Context<'_, Self>) -> Task<Result<(), ItemError>> {
         if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
             buffer.update(cx, |b, cx| b.save(cx));
+            if let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) {
+                workspace.update(cx, |w, cx| w.show_toast(Toast::success("Saved"), cx));
+            }
         }
         Task::ready(Ok(()))
     }

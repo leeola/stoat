@@ -14,6 +14,7 @@
 use crate::{
     editor::{DeleteDirection, Editor, OpenLineDir, PastePosition},
     globals::ClipboardHostGlobal,
+    toast::Toast,
     workspace::Workspace,
 };
 use gpui::{Context, Entity, Window};
@@ -90,7 +91,9 @@ pub fn handle_yank_to_clipboard(workspace: &mut Workspace, cx: &mut Context<'_, 
     };
     if let Err(err) = clipboard.set(&payload) {
         tracing::warn!(target: "stoat_gui::actions::edit", ?err, "clipboard set failed");
+        return;
     }
+    workspace.show_toast(Toast::info("Copied"), cx);
 }
 
 /// `YankMainToClipboard` action: copy the primary selection's
@@ -129,7 +132,9 @@ pub fn handle_yank_main_to_clipboard(workspace: &mut Workspace, cx: &mut Context
     };
     if let Err(err) = clipboard.set(&payload) {
         tracing::warn!(target: "stoat_gui::actions::edit", ?err, "clipboard set failed");
+        return;
     }
+    workspace.show_toast(Toast::info("Copied"), cx);
 }
 
 /// `PasteClipboardAfter` action: read the system clipboard and
