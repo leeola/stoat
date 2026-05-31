@@ -102,6 +102,8 @@ pub struct ThemeColors {
     pub tab_inactive: Hsla,
     pub tab_active: Hsla,
     pub tab_label: Hsla,
+    pub breadcrumb_text: Hsla,
+    pub breadcrumb_separator: Hsla,
     pub cursor: Hsla,
     /// Glyph foreground for the cursor cell. Pairs with [`Self::cursor`]
     /// as the cell background to produce a reverse-video block, so the
@@ -202,6 +204,16 @@ impl ThemeColors {
             tab_inactive: theme_bg_or(cx, stoat::theme::scope::UI_TAB_INACTIVE, palette.background),
             tab_active: theme_bg_or(cx, stoat::theme::scope::UI_TAB_ACTIVE, palette.surface),
             tab_label: theme_fg_or(cx, stoat::theme::scope::UI_TAB_LABEL, palette.text),
+            breadcrumb_text: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_TEXT_MUTED,
+                palette.text_muted,
+            ),
+            breadcrumb_separator: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_BORDER_INACTIVE,
+                palette.border,
+            ),
             cursor: theme_bg_or(cx, stoat::theme::scope::UI_CURSOR, palette.accent),
             cursor_text: theme_fg_or(cx, stoat::theme::scope::UI_CURSOR, palette.background),
             line_highlight: theme_bg_or(

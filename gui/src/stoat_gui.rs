@@ -15,6 +15,7 @@
 
 mod about_modal;
 mod actions;
+mod breadcrumbs;
 mod buffer;
 mod buffer_picker;
 mod buffer_registry;

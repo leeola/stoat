@@ -1,9 +1,10 @@
 use crate::{
-    actions::SetActivePane, item::ItemHandle, tab_bar::render_tab_bar, workspace::Workspace,
+    actions::SetActivePane, breadcrumbs::Breadcrumbs, editor::Editor, item::ItemHandle,
+    tab_bar::render_tab_bar, workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, Context, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, Styled, WeakEntity, Window,
+    div, AnyElement, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
+    IntoElement, MouseButton, ParentElement, Render, Styled, WeakEntity, Window,
 };
 use stoat::pane::PaneId;
 
@@ -23,6 +24,7 @@ pub struct Pane {
     items: Vec<Box<dyn ItemHandle>>,
     active_index: usize,
     focus_handle: FocusHandle,
+    breadcrumbs: Entity<Breadcrumbs>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -42,12 +44,14 @@ impl Pane {
     ) -> Self {
         cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify())
             .detach();
+        let breadcrumbs = cx.new(|_| Breadcrumbs::new());
         Self {
             pane_id,
             workspace,
             items: Vec::new(),
             active_index: 0,
             focus_handle: cx.focus_handle(),
+            breadcrumbs,
         }
     }
 
@@ -79,6 +83,21 @@ impl Pane {
         self.items.get(self.active_index).map(|b| &**b)
     }
 
+    fn active_editor(&self) -> Option<Entity<Editor>> {
+        self.active_item()
+            .and_then(|item| item.to_any_view().downcast::<Editor>().ok())
+    }
+
+    /// Rebind the breadcrumbs bar to the active editor (or clear it when
+    /// the active item is not an editor). Called after every active-item
+    /// transition; [`Breadcrumbs::set_editor`] no-ops when the binding
+    /// is unchanged.
+    fn sync_breadcrumbs(&mut self, cx: &mut Context<'_, Self>) {
+        let editor = self.active_editor();
+        self.breadcrumbs
+            .update(cx, |breadcrumbs, cx| breadcrumbs.set_editor(editor, cx));
+    }
+
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus_handle
     }
@@ -86,6 +105,7 @@ impl Pane {
     pub fn add_item(&mut self, item: Box<dyn ItemHandle>, cx: &mut Context<'_, Self>) -> usize {
         let index = self.items.len();
         self.items.push(item);
+        self.sync_breadcrumbs(cx);
         cx.emit(PaneEvent::ItemAdded { index });
         cx.notify();
         index
@@ -103,6 +123,7 @@ impl Pane {
             return false;
         }
         self.active_index = index;
+        self.sync_breadcrumbs(cx);
         cx.emit(PaneEvent::ActiveItemChanged);
         cx.notify();
         true
@@ -138,6 +159,7 @@ impl Pane {
         };
 
         self.active_index = new_active;
+        self.sync_breadcrumbs(cx);
         if new_active != old_active {
             cx.emit(PaneEvent::ActiveItemChanged);
         }
@@ -175,6 +197,7 @@ impl Pane {
         if active_changed {
             cx.emit(PaneEvent::ActiveItemChanged);
         }
+        self.sync_breadcrumbs(cx);
         cx.notify();
         Some(removed)
     }
@@ -211,6 +234,13 @@ impl Render for Pane {
         );
         if show_tab_bar {
             column = column.child(render_tab_bar(self, cx).into_any_element());
+        }
+        let show_breadcrumbs = cx
+            .try_global::<crate::settings::Settings>()
+            .and_then(|s| s.resolved.ui_pane_show_breadcrumbs)
+            .unwrap_or(true);
+        if show_breadcrumbs && self.active_editor().is_some() {
+            column = column.child(self.breadcrumbs.clone());
         }
         column.child(body)
     }
