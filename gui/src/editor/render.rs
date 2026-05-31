@@ -937,6 +937,7 @@ fn append_run(
 
 pub(crate) fn render_row_element(row: RenderedRow) -> Div {
     let RenderedRow { text, runs } = row;
+    let runs = coalesce_runs(text.len(), &runs);
     div().child(StyledText::new(text).with_highlights(runs))
 }
 
@@ -1206,8 +1207,10 @@ fn merge_selection_runs(
             continue;
         }
         let mut style = gpui::HighlightStyle::default();
-        if let Some(&(_, syntax)) = syntax_runs.iter().find(|(r, _)| r.start <= a && r.end >= b) {
-            style = style.highlight(syntax);
+        for (r, syntax) in syntax_runs {
+            if r.start <= a && r.end >= b {
+                style = style.highlight(*syntax);
+            }
         }
         if let Some(al) = active_line_style {
             style = style.highlight(al);
@@ -1217,6 +1220,57 @@ fn merge_selection_runs(
         }
         if cursor_ranges.iter().any(|r| r.start <= a && r.end >= b) {
             style = style.highlight(cursor_style);
+        }
+        if let Some((last_range, last_style)) = merged.last_mut() {
+            if *last_style == style && last_range.end == a {
+                last_range.end = b;
+                continue;
+            }
+        }
+        merged.push((a..b, style));
+    }
+    merged
+}
+
+/// Fold `runs` -- pushed in overlay order and possibly overlapping or
+/// out of order -- into a sorted, gap-free run list tiling
+/// `0..text_len`. Each output segment carries the fold of every input
+/// run covering it, applied in push order so the last-pushed run's
+/// fields win (narrower or deeper syntax captures and later overlays
+/// override broader earlier ones).
+///
+/// [`gpui::StyledText::with_highlights`] positions each run by its
+/// length and assumes sorted, non-overlapping input; one overlapping
+/// or out-of-order run otherwise drifts every following run onto the
+/// wrong characters. Every row's runs pass through here before
+/// reaching that consumer. Idempotent on already-coalesced input.
+fn coalesce_runs(
+    text_len: usize,
+    runs: &[(Range<usize>, gpui::HighlightStyle)],
+) -> Vec<(Range<usize>, gpui::HighlightStyle)> {
+    if text_len == 0 {
+        return Vec::new();
+    }
+    let mut breakpoints: BTreeSet<usize> = BTreeSet::new();
+    breakpoints.insert(0);
+    breakpoints.insert(text_len);
+    for (r, _) in runs {
+        breakpoints.insert(r.start.min(text_len));
+        breakpoints.insert(r.end.min(text_len));
+    }
+    let breakpoints: Vec<usize> = breakpoints.into_iter().collect();
+
+    let mut merged: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
+    for window in breakpoints.windows(2) {
+        let (a, b) = (window[0], window[1]);
+        if a >= b {
+            continue;
+        }
+        let mut style = gpui::HighlightStyle::default();
+        for (r, s) in runs {
+            if r.start <= a && r.end >= b {
+                style = style.highlight(*s);
+            }
         }
         if let Some((last_range, last_style)) = merged.last_mut() {
             if *last_style == style && last_range.end == a {
@@ -1492,12 +1546,15 @@ pub(crate) fn render_row_with_gutter(
     paint: &GutterPaint<'_>,
 ) -> Div {
     let (prefix, body, suffix) = build_gutter_row_pieces(row, display_row, paint);
+    let prefix_runs = coalesce_runs(prefix.text.len(), &prefix.runs);
+    let body_runs = coalesce_runs(body.text.len(), &body.runs);
+    let suffix_runs = coalesce_runs(suffix.text.len(), &suffix.runs);
     div()
         .flex()
         .flex_row()
-        .child(StyledText::new(SharedString::from(prefix.text)).with_highlights(prefix.runs))
-        .child(StyledText::new(body.text).with_highlights(body.runs))
-        .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix.runs))
+        .child(StyledText::new(SharedString::from(prefix.text)).with_highlights(prefix_runs))
+        .child(StyledText::new(body.text).with_highlights(body_runs))
+        .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix_runs))
 }
 
 /// Build the three render pieces of a gutter row -- prefix (line
@@ -2836,6 +2893,37 @@ mod tests {
     }
 
     #[test]
+    fn coalesce_runs_sorts_tiles_and_resolves_overlaps_last_wins() {
+        // Broad red base, a later green span, then an out-of-order blue
+        // span pushed last: the raw list overlaps and is unsorted.
+        let runs = coalesce_runs(
+            6,
+            &[
+                (0..6, color_style(0xff0000)),
+                (4..6, color_style(0x00ff00)),
+                (0..2, color_style(0x0000ff)),
+            ],
+        );
+
+        let row = RenderedRow {
+            text: SharedString::from("abcdef"),
+            runs: runs.clone(),
+        };
+        assert_merged_paint_valid(&row);
+
+        let colors: Vec<(Range<usize>, Option<Hsla>)> =
+            runs.iter().map(|(r, s)| (r.clone(), s.color)).collect();
+        assert_eq!(
+            colors,
+            vec![
+                (0..2, Some(rgb(0x0000ff).into())),
+                (2..4, Some(rgb(0xff0000).into())),
+                (4..6, Some(rgb(0x00ff00).into())),
+            ],
+        );
+    }
+
+    #[test]
     fn apply_selection_paint_adds_background_run_for_span() {
         let mut paint = SelectionPaint::default();
         paint.row_selection_spans.insert(0, vec![1..4]);
@@ -3801,7 +3889,9 @@ mod tests {
             .collect()
     }
 
-    fn install_rust_with_themed_keywords() -> (
+    fn install_rust_with_theme(
+        theme_src: &str,
+    ) -> (
         Arc<stoat_language::Language>,
         stoat::display_map::syntax_theme::SyntaxStyles,
     ) {
@@ -3814,7 +3904,7 @@ mod tests {
             .clone();
         let theme = {
             use stoat_config::parse;
-            let (config, _) = parse("theme t { syntax.keyword.fg = blue; }");
+            let (config, _) = parse(theme_src);
             stoat::theme::Theme::from_config(&config.expect("parse"), "t").expect("theme")
         };
         let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
@@ -3824,6 +3914,13 @@ mod tests {
         );
         language.set_highlight_map(map);
         (language, styles)
+    }
+
+    fn install_rust_with_themed_keywords() -> (
+        Arc<stoat_language::Language>,
+        stoat::display_map::syntax_theme::SyntaxStyles,
+    ) {
+        install_rust_with_theme("theme t { syntax.keyword.fg = blue; }")
     }
 
     fn build_rust_syntax_snapshot(text: &str) -> stoat_language::SyntaxSnapshot {
@@ -3905,6 +4002,43 @@ mod tests {
         assert!(
             row1.iter().any(|(r, _)| r.start == 0 && r.end == 2),
             "row 1 should paint `fn`"
+        );
+    }
+
+    #[test]
+    fn syntax_overlay_overlapping_captures_clamp_within_row() {
+        let mut cx = TestAppContext::single();
+        let src = "fn f() { bar() }";
+        let snapshot = test_snapshot(&mut cx, src);
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        // Theme `variable` and `function` so the rust query's
+        // overlapping `@variable`/`@function` captures on `bar` both
+        // resolve to styled runs that land on the same span.
+        let (language, styles) = install_rust_with_theme(
+            "theme t { syntax.variable.fg = red; syntax.function.fg = green; }",
+        );
+        let syntax = {
+            let rope = stoat_text::Rope::from(src);
+            let mut map = stoat_language::SyntaxMap::new();
+            let _ = map.reparse(&rope, language, 1);
+            map.snapshot().clone()
+        };
+
+        let maps = build_row_byte_maps(&rows, &snapshot, 0..1);
+        apply_syntax_overlay(&mut rows, &maps, &snapshot, 0..1, &syntax, &styles);
+
+        let row_len = rows[0].text.as_ref().len();
+        for (range, _) in &rows[0].runs {
+            assert!(
+                range.end <= row_len,
+                "run {range:?} spills past row len {row_len}",
+            );
+        }
+        let mut starts: Vec<usize> = rows[0].runs.iter().map(|(r, _)| r.start).collect();
+        starts.sort_unstable();
+        assert!(
+            starts.windows(2).any(|w| w[0] == w[1]),
+            "rust query must emit overlapping captures (two runs sharing a start)",
         );
     }
 
