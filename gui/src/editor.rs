@@ -3211,8 +3211,11 @@ impl Editor {
     /// scroll handles, mirroring the floored row into the editor's
     /// internal scroll_row. Resolves the line height from
     /// [`Self::cell_size`] (no-op when unset) and clamps the
-    /// resulting fractional offset against the buffer's last display
-    /// row.
+    /// resulting fractional offset to the maximum scroll-top
+    /// (`total_rows - visible_rows`) so the final line can rest at
+    /// the viewport bottom without scrolling off the top. Before the
+    /// first paint reports [`Self::text_region_bounds`], visible rows
+    /// count as zero, leaving the bound at the full document height.
     fn apply_scroll_delta(
         &mut self,
         delta: gpui::ScrollDelta,
@@ -3222,17 +3225,24 @@ impl Editor {
         let Some(cell) = self.cell_size else {
             return;
         };
-        let max_row = self
+        let line_height = f32::from(cell.height) as f64;
+        let total_rows = self
             .display_map
             .update(cx, |dm, _| dm.snapshot())
             .max_point()
-            .row as f64;
+            .row as f64
+            + 1.0;
+        let visible_rows = match self.text_region_bounds {
+            Some(region) if line_height > 0.0 => f32::from(region.size.height) as f64 / line_height,
+            _ => 0.0,
+        };
+        let max_scroll_top = (total_rows - visible_rows).max(0.0);
         let changed = self.scroll_manager.apply_wheel(
             delta,
             cell.height,
             modifiers.alt,
             std::time::Instant::now(),
-            max_row,
+            max_scroll_top,
         );
         if !changed {
             return;
@@ -4262,6 +4272,46 @@ mod tests {
         });
         assert_eq!(offset.y, px(-24.5));
         assert_eq!(offset.x, px(0.0));
+    }
+
+    #[test]
+    fn apply_scroll_delta_clamps_to_max_scroll_top_not_last_row() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        // 40 rows in a 20-visible-row viewport (320px / 16px): the
+        // max scroll-top is 40 - 20 = 20, far below the last row (39).
+        let (_buffer, editor) = editor_with_viewport(vcx, &multiline_text(40));
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -1000.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        let at_bottom = editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y);
+        assert_eq!(
+            at_bottom, 20.0,
+            "a large downward scroll clamps to total_rows - visible_rows, not the last row",
+        );
+
+        editor.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., 1.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        let after_up = editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y);
+        assert_eq!(
+            after_up, 19.0,
+            "one upward line moves the view immediately, with no overshoot dead zone",
+        );
     }
 
     fn editor_with_viewport(

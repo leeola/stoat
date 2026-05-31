@@ -306,8 +306,8 @@ impl ScrollManager {
     /// `alt` selects between [`DEFAULT_SCROLL_SENSITIVITY`] and
     /// [`DEFAULT_FAST_SCROLL_SENSITIVITY`]. `now` advances the
     /// `OngoingScroll` clock so subsequent events see the new lock.
-    /// `max_row` clamps the resulting fractional y to
-    /// `[0, max_row]`.
+    /// `max_scroll_top` clamps the resulting fractional y to
+    /// `[0, max_scroll_top]`.
     ///
     /// Returns `true` when the offset moved, `false` when the apply
     /// landed on the same position (e.g. clamped against an edge).
@@ -322,7 +322,7 @@ impl ScrollManager {
         line_height: Pixels,
         alt: bool,
         now: Instant,
-        max_row: f64,
+        max_scroll_top: f64,
     ) -> bool {
         let line_height_f64: f64 = f32::from(line_height) as f64;
         if line_height_f64 <= 0.0 {
@@ -349,7 +349,7 @@ impl ScrollManager {
         let dx = (f32::from(pixel_delta.x) as f64 * sensitivity) / line_height_f64;
         let dy = (f32::from(pixel_delta.y) as f64 * sensitivity) / line_height_f64;
         let new_x = (self.anchor.offset.x - dx).max(0.0);
-        let new_y = (self.anchor.offset.y - dy).clamp(0.0, max_row);
+        let new_y = (self.anchor.offset.y - dy).clamp(0.0, max_scroll_top);
         let new_offset = Point::new(new_x, new_y);
 
         if new_offset == self.anchor.offset {
@@ -578,7 +578,7 @@ mod tests {
     }
 
     #[test]
-    fn apply_wheel_pixels_clamps_to_max_row() {
+    fn apply_wheel_pixels_clamps_to_max_scroll_top() {
         let now = epoch();
         let mut mgr = ScrollManager::new(now);
         seed_offset(&mut mgr, 95.0);
