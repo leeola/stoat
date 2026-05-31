@@ -36,6 +36,7 @@ use crate::{
         workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
     },
     theme::{ActiveTheme, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
+    toast::{Toast, ToastId, ToastView},
 };
 use gpui::{
     deferred, div, px, size, App, AppContext, BorrowAppContext, Bounds, Context, DismissEvent,
@@ -100,6 +101,7 @@ pub struct Workspace {
     /// when its dock is no longer present.
     diff_hunk_panel: Option<gpui::EntityId>,
     modal_layer: Entity<ModalLayer>,
+    toast_view: Entity<ToastView>,
     status_bar: Entity<StatusBar>,
     key_hint_banner: Entity<KeyHintBanner>,
     input_state_machine: Entity<InputStateMachine>,
@@ -219,6 +221,10 @@ impl Workspace {
         let modal_layer = {
             let weak = workspace_handle.clone();
             cx.new(|cx| ModalLayer::new(Some(weak), cx))
+        };
+        let toast_view = {
+            let weak = workspace_handle.clone();
+            cx.new(|_| ToastView::new(Some(weak)))
         };
         let status_bar = cx.new(StatusBar::new);
         let buffer_registry = cx.new(|_| BufferRegistry::new());
@@ -367,6 +373,7 @@ impl Workspace {
             right_dock_visible: true,
             diff_hunk_panel: None,
             modal_layer,
+            toast_view,
             status_bar,
             key_hint_banner,
             input_state_machine,
@@ -1182,6 +1189,17 @@ impl Workspace {
     pub fn dismiss_modal(&mut self, window: &mut Window, cx: &mut App) -> bool {
         self.modal_layer
             .update(cx, |layer, cx| layer.hide_modal(window, cx))
+    }
+
+    /// Raise `toast` on the workspace's bottom-right toast overlay.
+    /// Transient kinds auto-dismiss; errors persist until dismissed.
+    pub fn show_toast(&mut self, toast: Toast, cx: &mut Context<'_, Self>) {
+        self.toast_view.update(cx, |view, cx| view.push(toast, cx));
+    }
+
+    /// Dismiss the toast with `id` from the overlay, if still showing.
+    pub fn dismiss_toast(&mut self, id: ToastId, cx: &mut Context<'_, Self>) {
+        self.toast_view.update(cx, |view, cx| view.dismiss(id, cx));
     }
 
     pub fn status_bar(&self) -> &Entity<StatusBar> {
@@ -6268,7 +6286,12 @@ impl Render for Workspace {
                     .flex()
                     .flex_col()
                     .flex_1()
-                    .child(div().flex_1().child(self.pane_tree.clone()))
+                    .child(
+                        div()
+                            .flex_1()
+                            .child(self.pane_tree.clone())
+                            .child(deferred(self.toast_view.clone())),
+                    )
                     .child(self.status_bar.clone()),
             )
             .children(right_docks)
@@ -6470,6 +6493,29 @@ mod tests {
             assert!(!sm.help_open());
             assert!(!sm.claude_focused());
             assert_eq!(sm.pending_count(), None);
+        });
+    }
+
+    #[test]
+    fn show_toast_adds_to_overlay_and_dismiss_removes_it() {
+        use crate::toast::Toast;
+
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+
+        let id = ws.update(&mut cx, |w, cx| {
+            let toast = Toast::error("boom");
+            let id = toast.id;
+            w.show_toast(toast, cx);
+            id
+        });
+        ws.read_with(&cx, |w, cx| {
+            assert_eq!(w.toast_view.read(cx).toasts().len(), 1);
+        });
+
+        ws.update(&mut cx, |w, cx| w.dismiss_toast(id, cx));
+        ws.read_with(&cx, |w, cx| {
+            assert!(w.toast_view.read(cx).toasts().is_empty());
         });
     }
 
