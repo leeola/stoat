@@ -3597,6 +3597,34 @@ impl Editor {
                     now_seconds: now_unix_seconds(),
                     color: inline_blame_color,
                 });
+        let indent_guide_paint = {
+            let show = cx
+                .try_global::<Settings>()
+                .and_then(|s| s.resolved.ui_editor_show_indent_guides)
+                .unwrap_or(true);
+            match (show, self.cell_size) {
+                (true, Some(cell)) => {
+                    let cursor_display_row = display_snapshot
+                        .buffer_to_display(stoat_text::Point::new(
+                            self.primary_cursor_buffer_row(cx),
+                            0,
+                        ))
+                        .row;
+                    let theme = cx.theme();
+                    Some(render::IndentGuidePaint {
+                        cell_width: cell.width,
+                        cell_height: cell.height,
+                        line_color: theme.indent_guide,
+                        active_color: theme.indent_guide_active,
+                        active_index: render::cursor_active_indent_index(
+                            &display_snapshot,
+                            cursor_display_row,
+                        ),
+                    })
+                },
+                _ => None,
+            }
+        };
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
@@ -3605,6 +3633,7 @@ impl Editor {
             review_move_provenances: &review_data.provenances,
             blame: blame_paint,
             inline_blame: inline_blame_paint,
+            indent_guides: indent_guide_paint,
             metrics,
             line_number_color: cx.theme().muted_text,
             line_number_cache: Some(&self.gutter_line_number_cache),

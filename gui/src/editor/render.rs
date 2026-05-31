@@ -1480,6 +1480,7 @@ pub(crate) struct GutterPaint<'a> {
     pub review_move_provenances: &'a [(u32, MoveProvenance)],
     pub blame: Option<BlamePaint<'a>>,
     pub inline_blame: Option<InlineBlamePaint<'a>>,
+    pub indent_guides: Option<IndentGuidePaint>,
     pub metrics: GutterMetrics,
     pub line_number_color: Hsla,
     /// LRU cache for formatted line-number cells keyed by
@@ -1517,6 +1518,66 @@ pub(crate) struct InlineBlamePaint<'a> {
     pub lines: &'a [BlameLine],
     pub now_seconds: i64,
     pub color: Hsla,
+}
+
+/// Geometry and colors for editor indent guides. Carried on
+/// [`GutterPaint`] when `ui.editor.show_indent_guides` is on and the
+/// editor's cell size is known. `active_index` is the cursor's current
+/// indent level (0-based), painted in `active_color`; other levels use
+/// `line_color`.
+pub(crate) struct IndentGuidePaint {
+    pub cell_width: Pixels,
+    pub cell_height: Pixels,
+    pub line_color: Hsla,
+    pub active_color: Hsla,
+    pub active_index: Option<u32>,
+}
+
+/// Display tab width for indent-guide column spacing. Mirrors the
+/// hardcoded display tab width (stoat `display_map` `TabMap`, currently
+/// 4) so guides align with rendered indentation; there is no live
+/// `tab_size` setting to read.
+const INDENT_GUIDE_TAB_WIDTH: u32 = 4;
+
+/// Maximum rows scanned up or down from a blank line to find the
+/// enclosing block's indent, bounding the per-row cost.
+const INDENT_GUIDE_BLANK_SCAN: u32 = 256;
+
+/// Indent levels for a line: leading-space columns divided by
+/// `tab_width` (floor). Display lines have tabs expanded to spaces, so
+/// leading whitespace is counted directly. Returns 0 for an
+/// unindented line or a zero `tab_width`.
+fn indent_levels(display_line: &str, tab_width: u32) -> u32 {
+    if tab_width == 0 {
+        return 0;
+    }
+    let leading = display_line.chars().take_while(|c| *c == ' ').count() as u32;
+    leading / tab_width
+}
+
+/// Effective indent depth for a blank line: the lesser of the nearest
+/// non-blank neighbors' depths, so guides bridge a gap without drawing
+/// past a shallower block boundary. `None` when either side lacks an
+/// indented neighbor (file edge or a depth-0 line), meaning no guides.
+fn enclosing_block_indent(above: Option<u32>, below: Option<u32>) -> Option<u32> {
+    match (above, below) {
+        (Some(a), Some(b)) => Some(a.min(b)),
+        _ => None,
+    }
+}
+
+/// The cursor's active indent-guide level (0-based) for the line at
+/// `cursor_display_row`: its indent depth minus one. `None` when the
+/// cursor's line has no indentation, so no guide is highlighted.
+pub(crate) fn cursor_active_indent_index(
+    snapshot: &DisplaySnapshot,
+    cursor_display_row: u32,
+) -> Option<u32> {
+    let depth = indent_levels(
+        &snapshot.display_line(cursor_display_row),
+        INDENT_GUIDE_TAB_WIDTH,
+    );
+    depth.checked_sub(1)
 }
 
 pub(crate) struct RowSuffix {
@@ -1561,9 +1622,11 @@ pub(crate) fn render_row_with_gutter(
     let prefix_runs = coalesce_runs(prefix.text.len(), &prefix.runs);
     let body_runs = coalesce_runs(body.text.len(), &body.runs);
     let suffix_runs = coalesce_runs(suffix.text.len(), &suffix.runs);
-    let mut row_el = div()
-        .flex()
-        .flex_row()
+    let mut row_el = div().relative().flex().flex_row();
+    for guide in indent_guide_lines(display_row, paint) {
+        row_el = row_el.child(guide);
+    }
+    row_el = row_el
         .child(StyledText::new(SharedString::from(prefix.text)).with_highlights(prefix_runs))
         .child(StyledText::new(body.text).with_highlights(body_runs))
         .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix_runs));
@@ -1571,6 +1634,86 @@ pub(crate) fn render_row_with_gutter(
         row_el = row_el.child(cell);
     }
     row_el
+}
+
+/// Build the per-row indent-guide elements: faint 1px vertical lines at
+/// each tab-stop column up to the row's indent depth, the cursor's
+/// active level in `active_color`. Empty when indent guides are off or
+/// the row is a wrap continuation or block row. Prepended to the row so
+/// they paint behind the text. Blank lines take their enclosing block's
+/// depth so guides bridge gaps.
+fn indent_guide_lines(display_row: u32, paint: &GutterPaint<'_>) -> Vec<Div> {
+    let Some(guides) = paint.indent_guides.as_ref() else {
+        return Vec::new();
+    };
+    let snapshot = paint.display_snapshot;
+    if snapshot.is_wrap_continuation(display_row)
+        || matches!(
+            snapshot.classify_row(display_row),
+            BlockRowKind::Block { .. }
+        )
+    {
+        return Vec::new();
+    }
+    let depth = row_indent_depth(snapshot, display_row);
+    let gutter_cols = paint.metrics.total_width as u32;
+    let cell_w = f32::from(guides.cell_width);
+    (0..depth)
+        .map(|level| {
+            let x = cell_w * (gutter_cols + level * INDENT_GUIDE_TAB_WIDTH) as f32;
+            let color = if Some(level) == guides.active_index {
+                guides.active_color
+            } else {
+                guides.line_color
+            };
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(0.0))
+                .w(px(1.0))
+                .h(guides.cell_height)
+                .bg(color)
+        })
+        .collect()
+}
+
+/// Indent depth for `display_row`: the line's own indent, or for a
+/// blank line the enclosing block's indent (see
+/// [`enclosing_block_indent`]).
+fn row_indent_depth(snapshot: &DisplaySnapshot, display_row: u32) -> u32 {
+    let line = snapshot.display_line(display_row);
+    if !line.trim().is_empty() {
+        return indent_levels(&line, INDENT_GUIDE_TAB_WIDTH);
+    }
+    let above = nearest_nonblank_indent(snapshot, display_row, true);
+    let below = nearest_nonblank_indent(snapshot, display_row, false);
+    enclosing_block_indent(above, below).unwrap_or(0)
+}
+
+/// Indent depth of the nearest non-blank display line above (or below)
+/// `display_row`, within [`INDENT_GUIDE_BLANK_SCAN`] rows. `None` if
+/// none is found before the file edge or the scan bound.
+fn nearest_nonblank_indent(
+    snapshot: &DisplaySnapshot,
+    display_row: u32,
+    upward: bool,
+) -> Option<u32> {
+    let mut row = display_row;
+    for _ in 0..INDENT_GUIDE_BLANK_SCAN {
+        if upward {
+            row = row.checked_sub(1)?;
+        } else {
+            row += 1;
+            if row >= snapshot.line_count() {
+                return None;
+            }
+        }
+        let line = snapshot.display_line(row);
+        if !line.trim().is_empty() {
+            return Some(indent_levels(&line, INDENT_GUIDE_TAB_WIDTH));
+        }
+    }
+    None
 }
 
 /// Build the trailing inline-blame element for `display_row` when
@@ -1859,6 +2002,26 @@ mod tests {
     use std::sync::Arc;
     use stoat::buffer::BufferId;
     use stoat_scheduler::{Executor, TestScheduler};
+
+    #[test]
+    fn indent_levels_counts_tab_stops() {
+        assert_eq!(indent_levels("code", 4), 0);
+        assert_eq!(indent_levels("    code", 4), 1);
+        assert_eq!(indent_levels("        code", 4), 2);
+        assert_eq!(indent_levels("      code", 4), 1);
+        assert_eq!(indent_levels("", 4), 0);
+        assert_eq!(indent_levels("    code", 0), 0);
+    }
+
+    #[test]
+    fn enclosing_block_indent_takes_min_of_neighbors() {
+        assert_eq!(enclosing_block_indent(Some(1), Some(1)), Some(1));
+        assert_eq!(enclosing_block_indent(Some(2), Some(1)), Some(1));
+        assert_eq!(enclosing_block_indent(Some(1), Some(2)), Some(1));
+        assert_eq!(enclosing_block_indent(None, Some(2)), None);
+        assert_eq!(enclosing_block_indent(Some(2), None), None);
+        assert_eq!(enclosing_block_indent(None, None), None);
+    }
 
     fn hex_of(color: Hsla) -> u32 {
         let rgba: gpui::Rgba = color.into();
@@ -2164,6 +2327,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2209,6 +2373,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: Some(&cache),
@@ -2250,6 +2415,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2278,6 +2444,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2301,6 +2468,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2334,6 +2502,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2381,6 +2550,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2406,6 +2576,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2480,6 +2651,7 @@ mod tests {
             review_move_provenances: &[],
             blame: Some(blame),
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2510,6 +2682,7 @@ mod tests {
             review_move_provenances: &[],
             blame: Some(blame),
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2541,6 +2714,7 @@ mod tests {
             review_move_provenances: &[],
             blame: Some(blame),
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2573,6 +2747,7 @@ mod tests {
             review_move_provenances: &provenances,
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2610,6 +2785,7 @@ mod tests {
             review_move_provenances: &provenances,
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2644,6 +2820,7 @@ mod tests {
             review_move_provenances: &provenances,
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2696,6 +2873,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2721,6 +2899,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,
@@ -2748,6 +2927,7 @@ mod tests {
             review_move_provenances: &[],
             blame: None,
             inline_blame: None,
+            indent_guides: None,
             metrics,
             line_number_color: rgb(0x808080).into(),
             line_number_cache: None,

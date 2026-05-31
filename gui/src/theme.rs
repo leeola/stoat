@@ -115,6 +115,10 @@ pub struct ThemeColors {
     /// Optional color override for end-of-line inline git blame. `None`
     /// falls back to [`Self::muted_text`].
     pub blame_inline: Option<Hsla>,
+    /// Faint vertical indent-guide line color.
+    pub indent_guide: Hsla,
+    /// Indent-guide color for the cursor's active indent level.
+    pub indent_guide_active: Hsla,
     pub diagnostic_error: Hsla,
     pub diagnostic_warning: Hsla,
     pub diagnostic_info: Hsla,
@@ -227,6 +231,12 @@ impl ThemeColors {
             search_match: theme_bg_or(cx, stoat::theme::scope::UI_SEARCH_MATCH, palette.warning),
             muted_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_MUTED, palette.text_muted),
             blame_inline: None,
+            indent_guide: theme_fg_or(cx, stoat::theme::scope::UI_BORDER_INACTIVE, palette.border),
+            indent_guide_active: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_TEXT_MUTED,
+                palette.text_muted,
+            ),
             diagnostic_error: theme_fg_or(
                 cx,
                 stoat::theme::scope::UI_DIAGNOSTIC_ERROR,

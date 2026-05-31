@@ -1075,6 +1075,7 @@ mod tests {
                 ui_pane_show_breadcrumbs: None,
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
+                ui_editor_show_indent_guides: None,
                 language_servers: std::collections::BTreeMap::new(),
             },
         );
