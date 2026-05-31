@@ -4042,11 +4042,11 @@ mod tests {
                 "<|caf||>é bar",
                 "word-end onto 2-byte char",
             ),
-            ("foo bar |baz", "b", "foo <||bar b|>az", "prev-word-start"),
+            ("foo bar |baz", "b", "foo <||bar |>baz", "prev-word-start"),
             (
                 "café |bar",
                 "b",
-                "<||café b|>ar",
+                "<||café |>bar",
                 "prev-word-start over 2-byte word",
             ),
         ];

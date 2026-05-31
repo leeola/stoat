@@ -455,9 +455,270 @@ fn prev_word_end_from_end<F: Fn(char) -> CharCategory>(
     }
 }
 
+/// Word-motion targets for [`word_move_range`], covering both the
+/// regular (`categorize_char`) and long-word (`long_word_category`)
+/// boundary families.
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
+pub enum WordTarget {
+    NextStart,
+    NextEnd,
+    PrevStart,
+    PrevEnd,
+    NextLongStart,
+    NextLongEnd,
+    PrevLongStart,
+    PrevLongEnd,
+}
+
+impl WordTarget {
+    fn is_prev(self) -> bool {
+        matches!(
+            self,
+            WordTarget::PrevStart
+                | WordTarget::PrevEnd
+                | WordTarget::PrevLongStart
+                | WordTarget::PrevLongEnd
+        )
+    }
+
+    fn category(self) -> fn(char) -> CharCategory {
+        if matches!(
+            self,
+            WordTarget::NextLongStart
+                | WordTarget::NextLongEnd
+                | WordTarget::PrevLongStart
+                | WordTarget::PrevLongEnd
+        ) {
+            long_word_category
+        } else {
+            categorize_char
+        }
+    }
+
+    /// True when the target lands on the first char of a run (a
+    /// "start"-family motion); false for "end"-family motions. Mirrors
+    /// the two predicate shapes in Helix's `reached_target`.
+    fn lands_on_run_start(self) -> bool {
+        matches!(
+            self,
+            WordTarget::NextStart
+                | WordTarget::PrevEnd
+                | WordTarget::NextLongStart
+                | WordTarget::PrevLongEnd
+        )
+    }
+
+    /// True when stoat renders the block cursor on the last char of the
+    /// region, so the head is shifted one grapheme back from the run
+    /// boundary [`word_move_range`] reports. The forward motions and
+    /// `PrevEnd` shift; the prev-start motions and `PrevLongEnd` leave
+    /// the head on the boundary.
+    fn shifts_head(self) -> bool {
+        matches!(
+            self,
+            WordTarget::NextStart
+                | WordTarget::NextEnd
+                | WordTarget::NextLongStart
+                | WordTarget::NextLongEnd
+                | WordTarget::PrevEnd
+        )
+    }
+}
+
+/// Resolve a word motion to a `(anchor, head)` byte-offset range using
+/// Helix's block-cursor semantics: the range is first collapsed to the
+/// 1-grapheme cursor at `head` (the incoming `anchor` only selects the
+/// collapse direction), then the head advances to the target and the
+/// anchor is re-derived from the motion. This is what stops a repeated
+/// `w`/`b` from dragging the stray boundary char the previous press
+/// left under the cursor.
+///
+/// Offsets are rope byte offsets; the returned `head` sits on the run
+/// boundary (one past the last consumed char for forward motions), so
+/// callers that render a block cursor on the last char shift it back
+/// themselves.
+pub fn word_move_range(
+    rope: &Rope,
+    anchor: usize,
+    head: usize,
+    target: WordTarget,
+    count: usize,
+) -> (usize, usize) {
+    let is_prev = target.is_prev();
+    if (is_prev && head == 0) || (!is_prev && head == rope.len()) {
+        return (anchor, head);
+    }
+
+    let prev_boundary = head - char_len_before(rope, head);
+    let next_boundary = head + char_len_at(rope, head);
+    let (mut a, mut h) = if is_prev {
+        if anchor < head {
+            (head, prev_boundary)
+        } else {
+            (next_boundary, head)
+        }
+    } else if anchor < head {
+        (prev_boundary, head)
+    } else {
+        (head, next_boundary)
+    };
+
+    for _ in 0..count {
+        let (na, nh) = range_to_target(rope, target, a, h);
+        if (na, nh) == (a, h) {
+            break;
+        }
+        a = na;
+        h = nh;
+    }
+    (a, h)
+}
+
+/// Convert a stoat selection `(start, end, reversed)` through a word
+/// motion into the new selection's `(tail, head)` byte offsets, or
+/// `None` when the motion does not move. `head` is returned in stoat's
+/// convention -- on the last char of the region for every target
+/// except `PrevStart`/`PrevLongStart` -- matching how the editor draws
+/// the block cursor; `tail` is the anchor re-derived by
+/// [`word_move_range`], which is what stops repeated motions from
+/// dragging a stray boundary char. For an extend motion the caller
+/// keeps its own fixed tail and uses only `head`.
+pub fn word_selection_offsets(
+    rope: &Rope,
+    start: usize,
+    end: usize,
+    reversed: bool,
+    target: WordTarget,
+    count: usize,
+) -> Option<(usize, usize)> {
+    let head = if reversed { start } else { end };
+    let collapsed = start == end;
+    // Recover the Helix-convention head (on the run boundary). A
+    // forward selection's stored head is shifted back onto the last
+    // char, so un-shift it; collapsed and reversed heads are already on
+    // the boundary.
+    let head_in = if collapsed || reversed {
+        head
+    } else {
+        head + char_len_at(rope, end)
+    };
+    // Only the sign of `anchor_in - head_in` matters: it selects the
+    // 1-grapheme collapse direction in `word_move_range`.
+    let anchor_in = if !reversed && !collapsed {
+        head_in.saturating_sub(1)
+    } else {
+        head_in
+    };
+    // The anchor is re-derived from the starting cursor and is
+    // independent of count, so take it from a single step. The head
+    // accumulates across all `count` words, preserving stoat's
+    // count-spanning selection.
+    let (tail, first_head) = word_move_range(rope, anchor_in, head_in, target, 1);
+    if (tail, first_head) == (anchor_in, head_in) {
+        return None;
+    }
+    let head_boundary = if count <= 1 {
+        first_head
+    } else {
+        word_move_range(rope, anchor_in, head_in, target, count).1
+    };
+    let new_head = if target.shifts_head() {
+        head_boundary - char_len_before(rope, head_boundary)
+    } else {
+        head_boundary
+    };
+    Some((tail, new_head))
+}
+
+fn range_to_target(rope: &Rope, target: WordTarget, anchor: usize, head: usize) -> (usize, usize) {
+    let is_prev = target.is_prev();
+    let mut anchor = anchor;
+    let mut head = head;
+
+    let mut prev_ch = if is_prev {
+        rope.chars_at(head).next()
+    } else {
+        rope.reversed_chars_at(head).next()
+    };
+
+    while let Some(ch) = dir_char(rope, head, is_prev) {
+        if char_is_line_ending(ch) {
+            prev_ch = Some(ch);
+            head = dir_advance(head, ch, is_prev);
+        } else {
+            break;
+        }
+    }
+    if prev_ch.map(char_is_line_ending).unwrap_or(false) {
+        anchor = head;
+    }
+
+    let head_start = head;
+    while let Some(next_ch) = dir_char(rope, head, is_prev) {
+        let reached = match prev_ch {
+            None => true,
+            Some(p) => reached_target(target, p, next_ch),
+        };
+        if reached {
+            if head == head_start {
+                anchor = head;
+            } else {
+                break;
+            }
+        }
+        prev_ch = Some(next_ch);
+        head = dir_advance(head, next_ch, is_prev);
+    }
+    (anchor, head)
+}
+
+fn reached_target(target: WordTarget, prev_ch: char, next_ch: char) -> bool {
+    let category = target.category();
+    let boundary = category(prev_ch) != category(next_ch);
+    if target.lands_on_run_start() {
+        boundary && (char_is_line_ending(next_ch) || !next_ch.is_whitespace())
+    } else {
+        boundary && (!prev_ch.is_whitespace() || char_is_line_ending(next_ch))
+    }
+}
+
+fn dir_char(rope: &Rope, head: usize, is_prev: bool) -> Option<char> {
+    if is_prev {
+        rope.reversed_chars_at(head).next()
+    } else {
+        rope.chars_at(head).next()
+    }
+}
+
+fn dir_advance(head: usize, ch: char, is_prev: bool) -> usize {
+    if is_prev {
+        head - ch.len_utf8()
+    } else {
+        head + ch.len_utf8()
+    }
+}
+
+fn char_len_at(rope: &Rope, offset: usize) -> usize {
+    rope.chars_at(offset)
+        .next()
+        .map(char::len_utf8)
+        .unwrap_or(0)
+}
+
+fn char_len_before(rope: &Rope, offset: usize) -> usize {
+    rope.reversed_chars_at(offset)
+        .next()
+        .map(char::len_utf8)
+        .unwrap_or(0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `(count, (begin_anchor, begin_head), (expected_anchor, expected_head))`.
+    type WordMoveCase = (usize, (usize, usize), (usize, usize));
+    type WordMoveScenarios = &'static [(&'static str, &'static [WordMoveCase])];
 
     fn rope(s: &str) -> Rope {
         let mut r = Rope::new();
@@ -1055,5 +1316,167 @@ mod tests {
         assert_eq!(long_word_category('!'), CharCategory::Word);
         assert_eq!(long_word_category(' '), CharCategory::Whitespace);
         assert_eq!(long_word_category('\n'), CharCategory::Eol);
+    }
+
+    /// Ground-truth cases ported from Helix's
+    /// `test_behaviour_when_moving_to_start_of_next_words`
+    /// (`helix-core/src/movement.rs`). Each entry is
+    /// `(count, (begin_anchor, begin_head), (expected_anchor, expected_head))`;
+    /// all samples are ASCII so char indices equal byte offsets. Proves
+    /// the block-cursor anchor re-derivation matches Helix.
+    #[test]
+    fn word_move_range_matches_helix_next_word_start() {
+        let tests: WordMoveScenarios = &[
+            (
+                "Basic forward motion stops at the first space",
+                &[(1, (0, 0), (0, 6))],
+            ),
+            (
+                " Starting from a boundary advances the anchor",
+                &[(1, (0, 0), (1, 10))],
+            ),
+            (
+                "Long       whitespace gap is bridged by the head",
+                &[(1, (0, 0), (0, 11))],
+            ),
+            (
+                "Previous anchor is irrelevant for forward motions",
+                &[(1, (12, 0), (0, 9))],
+            ),
+            (
+                "    Starting from whitespace moves to last space in sequence",
+                &[(1, (0, 0), (0, 4))],
+            ),
+            (
+                "Starting from mid-word leaves anchor at start position and moves head",
+                &[(1, (3, 3), (3, 9))],
+            ),
+            (
+                "Identifiers_with_underscores are considered a single word",
+                &[(1, (0, 0), (0, 29))],
+            ),
+            (
+                "alphanumeric.!,and.?=punctuation are considered 'words' for word motion",
+                &[
+                    (1, (0, 0), (0, 12)),
+                    (1, (0, 12), (12, 15)),
+                    (1, (12, 15), (15, 18)),
+                ],
+            ),
+            (
+                "...   ... punctuation and spaces behave as expected",
+                &[(1, (0, 0), (0, 6)), (1, (0, 6), (6, 10))],
+            ),
+            (
+                ".._.._ punctuation is not joined by underscores into a single block",
+                &[(1, (0, 0), (0, 2))],
+            ),
+            (
+                "Multiple motions at once resolve correctly",
+                &[(3, (0, 0), (17, 20))],
+            ),
+            (
+                "Excessive motions are performed partially",
+                &[(999, (0, 0), (32, 41))],
+            ),
+        ];
+        for (sample, scenario) in tests {
+            let r = rope(sample);
+            for &(count, (ba, bh), (ea, eh)) in *scenario {
+                assert_eq!(
+                    word_move_range(&r, ba, bh, WordTarget::NextStart, count),
+                    (ea, eh),
+                    "sample {sample:?} from ({ba},{bh}) x{count}",
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn word_move_range_treats_scope_operator_as_one_run() {
+        let r = rope("foo::bar");
+        // `w` from the start of `foo` lands on the start of `::`.
+        assert_eq!(word_move_range(&r, 0, 0, WordTarget::NextStart, 1), (0, 3));
+        // and the next `w` selects the whole `::` run, head on `bar`.
+        assert_eq!(word_move_range(&r, 0, 3, WordTarget::NextStart, 1), (3, 5));
+
+        let r = rope("a::b::c");
+        // The leading 1-char word `a` is followed immediately by a
+        // boundary, so the anchor advances past it (Helix's "advancing
+        // the anchor" rule); three motions land the head on the final
+        // `c` at offset 6.
+        assert_eq!(word_move_range(&r, 0, 0, WordTarget::NextStart, 3), (4, 6));
+    }
+
+    /// `NextEnd` cases ported from Helix's
+    /// `test_behaviour_when_moving_to_end_of_next_words`.
+    #[test]
+    fn word_move_range_matches_helix_next_word_end() {
+        let tests: WordMoveScenarios = &[
+            (
+                "Basic forward motion from the start of a word to the end of it",
+                &[(1, (0, 0), (0, 5))],
+            ),
+            (
+                "Basic forward motion from the end of a word to the end of the next",
+                &[(1, (0, 5), (5, 13))],
+            ),
+            (
+                "Basic forward motion from the middle of a word to the end of it",
+                &[(1, (2, 2), (2, 5))],
+            ),
+            (
+                "Previous anchor is irrelevant for end of word motion",
+                &[(1, (12, 2), (2, 8))],
+            ),
+            (
+                "alphanumeric.!,and.?=punctuation are considered 'words' for word motion",
+                &[(1, (0, 0), (0, 12)), (1, (0, 12), (12, 15))],
+            ),
+        ];
+        for (sample, scenario) in tests {
+            let r = rope(sample);
+            for &(count, (ba, bh), (ea, eh)) in *scenario {
+                assert_eq!(
+                    word_move_range(&r, ba, bh, WordTarget::NextEnd, count),
+                    (ea, eh),
+                    "sample {sample:?} from ({ba},{bh}) x{count}",
+                );
+            }
+        }
+    }
+
+    /// `PrevStart` cases ported from Helix's
+    /// `test_behaviour_when_moving_to_start_of_previous_words`.
+    #[test]
+    fn word_move_range_matches_helix_prev_word_start() {
+        let tests: WordMoveScenarios = &[
+            (
+                "Basic backward motion from the middle of a word",
+                &[(1, (3, 3), (4, 0))],
+            ),
+            (
+                "Previous anchor is irrelevant for backward motions",
+                &[(1, (12, 5), (6, 0))],
+            ),
+            (
+                "    Starting from whitespace moves to first space in sequence",
+                &[(1, (0, 4), (4, 0))],
+            ),
+            (
+                "alphanumeric.!,and.?=punctuation are considered 'words' for word motion",
+                &[(1, (29, 30), (30, 21)), (1, (30, 21), (21, 18))],
+            ),
+        ];
+        for (sample, scenario) in tests {
+            let r = rope(sample);
+            for &(count, (ba, bh), (ea, eh)) in *scenario {
+                assert_eq!(
+                    word_move_range(&r, ba, bh, WordTarget::PrevStart, count),
+                    (ea, eh),
+                    "sample {sample:?} from ({ba},{bh}) x{count}",
+                );
+            }
+        }
     }
 }

@@ -2,8 +2,7 @@ use crate::editor::{Editor, EditorEvent};
 use gpui::Context;
 use stoat::{multi_buffer::MultiBufferSnapshot, DisplayPoint};
 use stoat_text::{
-    next_long_word_end, next_long_word_start, next_word_end, next_word_start, prev_long_word_end,
-    prev_long_word_start, prev_word_end, prev_word_start, Anchor, Bias, Selection, SelectionGoal,
+    word_selection_offsets, Anchor, Bias, Selection, SelectionGoal, WordTarget as TextWordTarget,
 };
 
 /// Vertical-only page-style motion direction. `Up` walks toward
@@ -28,6 +27,19 @@ pub enum WordTarget {
     NextLongEnd,
     PrevLongStart,
     PrevLongEnd,
+}
+
+fn to_text_target(target: WordTarget) -> TextWordTarget {
+    match target {
+        WordTarget::NextStart => TextWordTarget::NextStart,
+        WordTarget::NextEnd => TextWordTarget::NextEnd,
+        WordTarget::PrevStart => TextWordTarget::PrevStart,
+        WordTarget::PrevEnd => TextWordTarget::PrevEnd,
+        WordTarget::NextLongStart => TextWordTarget::NextLongStart,
+        WordTarget::NextLongEnd => TextWordTarget::NextLongEnd,
+        WordTarget::PrevLongStart => TextWordTarget::PrevLongStart,
+        WordTarget::PrevLongEnd => TextWordTarget::PrevLongEnd,
+    }
 }
 
 /// Fallback viewport row count when the editor's text-region
@@ -285,99 +297,40 @@ impl Editor {
         cx: &mut Context<'_, Self>,
     ) {
         let snapshot = self.multi_buffer.read(cx).snapshot();
+        let text_target = to_text_target(target);
         let mut moved = false;
         let new_disjoint: Vec<Selection<Anchor>> = self
             .selections
             .all_anchors()
             .iter()
             .map(|sel| {
-                let head_offset = snapshot.resolve_anchor(&sel.head());
-                let mut target_offset = head_offset;
-                for _ in 0..count {
-                    let next = match target {
-                        WordTarget::NextStart => next_word_start(snapshot.rope(), target_offset),
-                        WordTarget::NextEnd => next_word_end(snapshot.rope(), target_offset),
-                        WordTarget::PrevStart => prev_word_start(snapshot.rope(), target_offset),
-                        WordTarget::PrevEnd => prev_word_end(snapshot.rope(), target_offset),
-                        WordTarget::NextLongStart => {
-                            next_long_word_start(snapshot.rope(), target_offset)
-                        },
-                        WordTarget::NextLongEnd => {
-                            next_long_word_end(snapshot.rope(), target_offset)
-                        },
-                        WordTarget::PrevLongStart => {
-                            prev_long_word_start(snapshot.rope(), target_offset)
-                        },
-                        WordTarget::PrevLongEnd => {
-                            prev_long_word_end(snapshot.rope(), target_offset)
-                        },
-                    };
-                    if next == target_offset {
-                        break;
-                    }
-                    target_offset = next;
-                }
-                if target_offset == head_offset {
+                let start = snapshot.resolve_anchor(&sel.start);
+                let end = snapshot.resolve_anchor(&sel.end);
+                let Some((tail, head)) = word_selection_offsets(
+                    snapshot.rope(),
+                    start,
+                    end,
+                    sel.reversed,
+                    text_target,
+                    count as usize,
+                ) else {
                     return sel.clone();
-                }
+                };
                 moved = true;
 
-                let shift_to_prev_char = || {
-                    snapshot
-                        .rope()
-                        .reversed_chars_at(target_offset)
-                        .next()
-                        .map(|ch| target_offset - ch.len_utf8())
-                        .unwrap_or(target_offset)
-                };
-
                 if extend {
-                    let new_head_offset =
-                        if target_offset > head_offset || matches!(target, WordTarget::PrevEnd) {
-                            shift_to_prev_char()
-                        } else {
-                            target_offset
-                        };
-                    let head_anchor = snapshot.anchor_at(new_head_offset, Bias::Right);
-                    return extend_head(
-                        sel,
-                        head_anchor,
-                        new_head_offset,
-                        SelectionGoal::None,
-                        &snapshot,
-                    );
+                    let head_anchor = snapshot.anchor_at(head, Bias::Right);
+                    return extend_head(sel, head_anchor, head, SelectionGoal::None, &snapshot);
                 }
 
-                if target_offset > head_offset {
-                    let end_offset = shift_to_prev_char();
-                    let tail_anchor = snapshot.anchor_at(head_offset, Bias::Right);
-                    let head_anchor = snapshot.anchor_at(end_offset, Bias::Right);
-                    Selection {
-                        id: sel.id,
-                        start: tail_anchor,
-                        end: head_anchor,
-                        reversed: false,
-                        goal: SelectionGoal::None,
-                    }
-                } else {
-                    let resolved_head_offset = if matches!(target, WordTarget::PrevEnd) {
-                        shift_to_prev_char()
-                    } else {
-                        target_offset
-                    };
-                    let head_anchor = snapshot.anchor_at(resolved_head_offset, Bias::Right);
-                    let tail_offset = match snapshot.rope().chars_at(head_offset).next() {
-                        Some(ch) => head_offset + ch.len_utf8(),
-                        None => head_offset,
-                    };
-                    let tail_anchor = snapshot.anchor_at(tail_offset, Bias::Right);
-                    Selection {
-                        id: sel.id,
-                        start: head_anchor,
-                        end: tail_anchor,
-                        reversed: true,
-                        goal: SelectionGoal::None,
-                    }
+                let reversed = head < tail;
+                let (lo, hi) = if reversed { (head, tail) } else { (tail, head) };
+                Selection {
+                    id: sel.id,
+                    start: snapshot.anchor_at(lo, Bias::Right),
+                    end: snapshot.anchor_at(hi, Bias::Right),
+                    reversed,
+                    goal: SelectionGoal::None,
                 }
             })
             .collect();
@@ -1033,7 +986,7 @@ mod tests {
         editor.update(&mut cx, |ed, cx| {
             ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
         });
-        assert_eq!(selection_span(&editor, &mut cx), (3, 7, false));
+        assert_eq!(selection_span(&editor, &mut cx), (4, 7, false));
     }
 
     #[test]

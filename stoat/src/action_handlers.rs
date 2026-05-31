@@ -1363,7 +1363,26 @@ mod tests {
         dispatch(&mut stoat, &MoveNextWordStart);
         assert_eq!(editor::selection_spans(&mut stoat), vec![(0, 3, false)]);
         dispatch(&mut stoat, &MoveNextWordStart);
-        assert_eq!(editor::selection_spans(&mut stoat), vec![(3, 7, false)]);
+        assert_eq!(editor::selection_spans(&mut stoat), vec![(4, 7, false)]);
+    }
+
+    #[test]
+    fn move_next_word_start_walks_scope_path_without_dragging() {
+        let mut stoat = stoat();
+        editor::seed_focused_buffer(&mut stoat, "use parking_lot::Mutex;");
+        // Each `w` selects exactly one run -- `use`, `parking_lot`, `::`,
+        // `Mutex` -- never dragging the previous run's trailing char into
+        // the new selection's anchor.
+        let expected = [
+            (0, 3, false),
+            (4, 14, false),
+            (15, 16, false),
+            (17, 21, false),
+        ];
+        for span in expected {
+            dispatch(&mut stoat, &MoveNextWordStart);
+            assert_eq!(editor::selection_spans(&mut stoat), vec![span]);
+        }
     }
 
     #[test]

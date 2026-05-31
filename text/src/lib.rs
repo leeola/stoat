@@ -21,8 +21,8 @@ pub use locator::Locator;
 pub use movement::{
     categorize_char, find_decimal_number_at, find_decimal_number_seeking, find_number_at,
     find_number_seeking, next_long_word_end, next_long_word_start, next_word_end, next_word_start,
-    prev_long_word_end, prev_long_word_start, prev_word_end, prev_word_start, CharCategory,
-    NumberKind, NumberMatch,
+    prev_long_word_end, prev_long_word_start, prev_word_end, prev_word_start, word_move_range,
+    word_selection_offsets, CharCategory, NumberKind, NumberMatch, WordTarget,
 };
 pub use offset_utf16::OffsetUtf16;
 pub use point::{Point, PointUtf16};

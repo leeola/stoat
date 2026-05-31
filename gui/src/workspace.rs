@@ -8721,7 +8721,7 @@ mod tests {
 
         dispatch(&ws, vcx, stoat_action::RepeatLastMotion);
         vcx.run_until_parked();
-        assert_eq!(selection_offsets(vcx, &editor), vec![(3, 7)]);
+        assert_eq!(selection_offsets(vcx, &editor), vec![(4, 7)]);
     }
 
     #[test]
