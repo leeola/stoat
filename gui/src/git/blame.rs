@@ -389,7 +389,10 @@ mod tests {
         assert_eq!(format_relative(now - 7 * 24 * 60 * 60, now), "1 week ago");
         assert_eq!(format_relative(now - 30 * 24 * 60 * 60, now), "1 month ago");
         assert_eq!(format_relative(now - 365 * 24 * 60 * 60, now), "1 year ago");
-        assert_eq!(format_relative(now - 730 * 24 * 60 * 60, now), "2 years ago");
+        assert_eq!(
+            format_relative(now - 730 * 24 * 60 * 60, now),
+            "2 years ago"
+        );
     }
 
     #[test]

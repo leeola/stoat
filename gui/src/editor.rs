@@ -3588,14 +3588,15 @@ impl Editor {
             let theme = cx.theme();
             theme.blame_inline.unwrap_or(theme.muted_text)
         };
-        let inline_blame_paint = inline_blame_lines
-            .as_ref()
-            .filter(|v| !v.is_empty())
-            .map(|lines| render::InlineBlamePaint {
-                lines,
-                now_seconds: now_unix_seconds(),
-                color: inline_blame_color,
-            });
+        let inline_blame_paint =
+            inline_blame_lines
+                .as_ref()
+                .filter(|v| !v.is_empty())
+                .map(|lines| render::InlineBlamePaint {
+                    lines,
+                    now_seconds: now_unix_seconds(),
+                    color: inline_blame_color,
+                });
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,

@@ -48,8 +48,7 @@ pub use defs::{
         SurroundDelete, SurroundReplace, SwitchCase, SwitchToLowercase, SwitchToUppercase,
         TillNextChar, TillPrevChar, ToggleBlame, ToggleComments, ToggleDiffHunkPanel,
         ToggleInlineBlame, ToggleMinimap, ToggleTabBar, TriggerCompletion, TrimSelections, Undo,
-        UnindentSelection,
-        Yank, YankMainToClipboard, YankToClipboard,
+        UnindentSelection, Yank, YankMainToClipboard, YankToClipboard,
     },
     file::OpenFile,
     file_finder::{
