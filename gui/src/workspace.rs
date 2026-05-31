@@ -10,6 +10,7 @@ use crate::{
     dock::{Dock, DockSide},
     editor::{Editor, EditorEvent, EditorMode},
     editor_input::EditorInput,
+    fold_actions,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
     git::coordinator::BlameCoordinator,
     globals::{
@@ -2219,6 +2220,10 @@ impl Workspace {
             ActionKind::ToggleInlineBlame => self.dispatch_toggle_inline_blame(cx),
             ActionKind::ToggleMinimap => self.dispatch_toggle_minimap(cx),
             ActionKind::ToggleRelativeLineNumbers => self.dispatch_toggle_relative_line_numbers(cx),
+            ActionKind::FoldAtCursor => self.dispatch_fold_at_cursor(cx),
+            ActionKind::UnfoldAtCursor => self.dispatch_unfold_at_cursor(cx),
+            ActionKind::FoldAll => self.dispatch_fold_all(cx),
+            ActionKind::UnfoldAll => self.dispatch_unfold_all(cx),
             ActionKind::ToggleTabBar => self.dispatch_toggle_tab_bar(cx),
             ActionKind::Set => self.dispatch_set(&*action, cx),
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
@@ -3268,6 +3273,61 @@ impl Workspace {
         }
         cx.update_global::<Settings, _>(|s, _| {
             s.resolved.ui_editor_line_numbers = Some(next);
+        });
+    }
+
+    /// Fold the smallest syntactic container enclosing the cursor.
+    fn dispatch_fold_at_cursor(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let Some(range) = fold_actions::fold_container_at(editor.read(cx), cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| {
+            ed.display_map()
+                .update(cx, |dm, dm_cx| dm.fold(vec![range], dm_cx));
+        });
+    }
+
+    /// Unfold the container fold enclosing the cursor.
+    fn dispatch_unfold_at_cursor(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let Some(range) = fold_actions::fold_container_at(editor.read(cx), cx) else {
+            return;
+        };
+        editor.update(cx, |ed, cx| {
+            ed.display_map()
+                .update(cx, |dm, dm_cx| dm.unfold(vec![range], dm_cx));
+        });
+    }
+
+    /// Fold every top-level syntactic container in the active editor.
+    fn dispatch_fold_all(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let ranges = fold_actions::top_level_fold_ranges(editor.read(cx), cx);
+        if ranges.is_empty() {
+            return;
+        }
+        editor.update(cx, |ed, cx| {
+            ed.display_map()
+                .update(cx, |dm, dm_cx| dm.fold(ranges, dm_cx));
+        });
+    }
+
+    /// Clear every fold in the active editor.
+    fn dispatch_unfold_all(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let range = fold_actions::whole_buffer_range(editor.read(cx), cx);
+        editor.update(cx, |ed, cx| {
+            ed.display_map()
+                .update(cx, |dm, dm_cx| dm.unfold(vec![range], dm_cx));
         });
     }
 

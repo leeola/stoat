@@ -678,6 +678,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ToggleDiffHunkPanel
         | ActionKind::ToggleMinimap
         | ActionKind::ToggleRelativeLineNumbers
+        | ActionKind::FoldAtCursor
+        | ActionKind::UnfoldAtCursor
+        | ActionKind::FoldAll
+        | ActionKind::UnfoldAll
         | ActionKind::ToggleTabBar
         | ActionKind::Set
         | ActionKind::ToggleProjectTree

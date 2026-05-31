@@ -1,6 +1,6 @@
 use crate::buffer::{Buffer, BufferEvent};
 use gpui::{Context, Entity, EventEmitter, Subscription};
-use std::sync::Arc;
+use std::{ops::Range, sync::Arc};
 use stoat::{
     buffer::BufferId,
     display_map::{
@@ -11,7 +11,7 @@ use stoat::{
     DisplayMap as InnerDisplayMap, DisplaySnapshot,
 };
 use stoat_scheduler::Executor;
-use stoat_text::Anchor;
+use stoat_text::{Anchor, Point};
 
 /// Entity-shaped wrapper around [`stoat::DisplayMap`]. Subscribes to the
 /// source [`Entity<Buffer>`] and re-emits [`DisplayMapEvent::Changed`]
@@ -67,6 +67,28 @@ impl DisplayMap {
             return;
         }
         self.inner.insert_blocks(blocks);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+    }
+
+    /// Fold the given buffer-`Point` ranges, collapsing them to fold
+    /// placeholders. A no-op when `ranges` is empty.
+    pub fn fold(&mut self, ranges: Vec<Range<Point>>, cx: &mut Context<'_, Self>) {
+        if ranges.is_empty() {
+            return;
+        }
+        self.inner.fold(ranges);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+    }
+
+    /// Remove every fold overlapping the given buffer-`Point` ranges. A
+    /// no-op when `ranges` is empty.
+    pub fn unfold(&mut self, ranges: Vec<Range<Point>>, cx: &mut Context<'_, Self>) {
+        if ranges.is_empty() {
+            return;
+        }
+        self.inner.unfold(ranges);
         cx.emit(DisplayMapEvent::Changed);
         cx.notify();
     }
@@ -294,9 +316,7 @@ mod tests {
         let anchor = display_map.update(&mut cx, |dm, _| {
             let snap = dm.snapshot();
             let buffer_snap = snap.buffer_snapshot();
-            let off = buffer_snap
-                .rope()
-                .point_to_offset(stoat_text::Point::new(0, 5));
+            let off = buffer_snap.rope().point_to_offset(Point::new(0, 5));
             buffer_snap.anchor_at(off, Bias::Right)
         });
 
@@ -354,14 +374,8 @@ mod tests {
             let snap = dm.snapshot();
             let buffer_snap = snap.buffer_snapshot();
             let rope = buffer_snap.rope();
-            let start = buffer_snap.anchor_at(
-                rope.point_to_offset(stoat_text::Point::new(0, 0)),
-                Bias::Right,
-            );
-            let end = buffer_snap.anchor_at(
-                rope.point_to_offset(stoat_text::Point::new(0, 5)),
-                Bias::Left,
-            );
+            let start = buffer_snap.anchor_at(rope.point_to_offset(Point::new(0, 0)), Bias::Right);
+            let end = buffer_snap.anchor_at(rope.point_to_offset(Point::new(0, 5)), Bias::Left);
             (start..end, HighlightStyleInterner::default())
         });
         let style_id = interner.intern(HighlightStyle::default());
@@ -398,14 +412,8 @@ mod tests {
             let snap = dm.snapshot();
             let buffer_snap = snap.buffer_snapshot();
             let rope = buffer_snap.rope();
-            let start = buffer_snap.anchor_at(
-                rope.point_to_offset(stoat_text::Point::new(0, 0)),
-                Bias::Right,
-            );
-            let end = buffer_snap.anchor_at(
-                rope.point_to_offset(stoat_text::Point::new(0, 5)),
-                Bias::Left,
-            );
+            let start = buffer_snap.anchor_at(rope.point_to_offset(Point::new(0, 0)), Bias::Right);
+            let end = buffer_snap.anchor_at(rope.point_to_offset(Point::new(0, 5)), Bias::Left);
             start..end
         });
         let decorations: Arc<[DecorationHighlight]> = Arc::from(vec![DecorationHighlight {

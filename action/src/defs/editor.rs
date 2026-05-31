@@ -1640,6 +1640,46 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    FoldAtCursorDef,
+    FoldAtCursor,
+    "FoldAtCursor",
+    ActionKind::FoldAtCursor,
+    "fold at cursor",
+    "Fold the smallest syntactic container (function, impl, block, etc.) enclosing the cursor whose declaration starts above the cursor's row. The body collapses to a placeholder, keeping the declaration and closing lines visible. A no-op when no such container encloses the cursor.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    UnfoldAtCursorDef,
+    UnfoldAtCursor,
+    "UnfoldAtCursor",
+    ActionKind::UnfoldAtCursor,
+    "unfold at cursor",
+    "Unfold the container fold enclosing the cursor, restoring the collapsed body. A no-op when nothing is folded there.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    FoldAllDef,
+    FoldAll,
+    "FoldAll",
+    ActionKind::FoldAll,
+    "fold all top-level items",
+    "Fold every top-level syntactic container (function, impl, struct, etc.) in the active buffer.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    UnfoldAllDef,
+    UnfoldAll,
+    "UnfoldAll",
+    ActionKind::UnfoldAll,
+    "unfold all",
+    "Clear every fold in the active buffer, restoring all collapsed bodies.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
