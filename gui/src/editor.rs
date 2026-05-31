@@ -12,6 +12,7 @@ use crate::{
     editor::scroll::autoscroll::{
         compute_autoscroll_y, AutoscrollStrategy, DEFAULT_VERTICAL_SCROLL_MARGIN,
     },
+    fold_actions,
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
@@ -3109,6 +3110,9 @@ impl Editor {
         let Some((row, col)) = self.position_to_grid(position) else {
             return;
         };
+        if self.try_toggle_fold_chevron(row, col, cx) {
+            return;
+        }
         let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
             return;
         };
@@ -3117,6 +3121,48 @@ impl Editor {
                 w.dispatch_action(Box::new(crate::actions::ClickAt { row, col }), window, cx);
             });
         });
+    }
+
+    /// Toggle the fold of the container whose chevron sits at gutter
+    /// grid `(row, col)`, returning whether a chevron was hit. The
+    /// chevron occupies the gutter column adjacent to the code on a
+    /// foldable container's start row; `col` is gutter-inclusive, so
+    /// the hit test is `col == metrics.chevron_col()`. A miss returns
+    /// `false` so the click falls through to cursor placement.
+    fn try_toggle_fold_chevron(&mut self, row: u32, col: u32, cx: &mut Context<'_, Self>) -> bool {
+        if !self.mode.show_gutter() {
+            return false;
+        }
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let blame_visible = match (self.blame_visible, self.blame_state.as_ref()) {
+            (true, Some(state)) => !state.read(cx).blame().is_empty(),
+            _ => false,
+        };
+        let metrics = render::gutter_metrics(&display_snapshot, blame_visible);
+        if col as usize != metrics.chevron_col() {
+            return false;
+        }
+        let Some(buffer_row) = display_snapshot
+            .display_to_buffer(DisplayPoint::new(row, 0))
+            .map(|p| p.row)
+        else {
+            return false;
+        };
+        let Some(range) =
+            fold_actions::foldable_container_ranges_in_range(self, buffer_row, buffer_row + 1, cx)
+                .remove(&buffer_row)
+        else {
+            return false;
+        };
+        let folded = display_snapshot.is_line_folded(buffer_row + 1);
+        self.display_map.update(cx, |dm, dm_cx| {
+            if folded {
+                dm.unfold(vec![range], dm_cx);
+            } else {
+                dm.fold(vec![range], dm_cx);
+            }
+        });
+        true
     }
 
     pub(crate) fn dispatch_drag_select_to(
@@ -3632,6 +3678,24 @@ impl Editor {
             .and_then(|s| s.resolved.ui_editor_line_numbers)
             .unwrap_or(LineNumberMode::Absolute);
         let cursor_buffer_row = self.primary_cursor_buffer_row(cx);
+        let fold_chevron_rows: Vec<u32> = {
+            let first_buffer_row = display_snapshot
+                .display_to_buffer(DisplayPoint::new(start as u32, 0))
+                .map(|p| p.row)
+                .unwrap_or(0);
+            let last_buffer_row = display_snapshot
+                .display_to_buffer(DisplayPoint::new(end.saturating_sub(1) as u32, 0))
+                .map(|p| p.row)
+                .unwrap_or(first_buffer_row);
+            fold_actions::foldable_container_ranges_in_range(
+                self,
+                first_buffer_row,
+                last_buffer_row + 1,
+                cx,
+            )
+            .into_keys()
+            .collect()
+        };
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
@@ -3642,6 +3706,7 @@ impl Editor {
             inline_blame: inline_blame_paint,
             indent_guides: indent_guide_paint,
             metrics,
+            fold_chevron_rows: &fold_chevron_rows,
             line_number_color: cx.theme().muted_text,
             line_number_mode,
             cursor_buffer_row,
@@ -4097,7 +4162,9 @@ mod tests {
         sync::{Arc, Mutex},
     };
     use stoat::buffer::BufferId;
+    use stoat_language::{Language, LanguageRegistry, SyntaxMap};
     use stoat_scheduler::{Executor, TestScheduler};
+    use stoat_text::Rope;
 
     struct Recorder {
         _subscription: Subscription,
@@ -4153,6 +4220,67 @@ mod tests {
             cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
         });
         (buffer, editor)
+    }
+
+    fn rust_language() -> Arc<Language> {
+        LanguageRegistry::standard()
+            .find_by_name("rust")
+            .expect("rust grammar")
+    }
+
+    fn new_rust_editor(cx: &mut TestAppContext, text: &str) -> (Entity<Buffer>, Entity<Editor>) {
+        let (buffer, editor) = new_editor(cx, text);
+        let map = {
+            let rope = Rope::from(text);
+            let mut map = SyntaxMap::new();
+            map.reparse(&rope, rust_language(), 1).expect("reparse");
+            map
+        };
+        buffer.update(cx, |b, cx| b.set_syntax_map(Some(map), cx));
+        (buffer, editor)
+    }
+
+    #[test]
+    fn click_on_fold_chevron_toggles_container_fold() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_rust_editor(&mut cx, "fn f() {\n    let x = 1;\n}\n");
+
+        let is_folded = |editor: &Entity<Editor>, cx: &mut TestAppContext| {
+            editor.update(cx, |ed, cx| {
+                ed.display_map
+                    .update(cx, |dm, _| dm.snapshot())
+                    .is_line_folded(1)
+            })
+        };
+        assert!(!is_folded(&editor, &mut cx), "container starts unfolded");
+
+        // Gutter columns: line number (0), diff/diagnostic/chunk (1-3),
+        // chevron (4), trailing space (5).
+        let chevron = 4;
+        let line_number_col_hit =
+            editor.update(&mut cx, |ed, cx| ed.try_toggle_fold_chevron(0, 0, cx));
+        assert!(!line_number_col_hit, "line-number column is not a chevron");
+        assert!(!is_folded(&editor, &mut cx));
+
+        let non_start_hit =
+            editor.update(&mut cx, |ed, cx| ed.try_toggle_fold_chevron(1, chevron, cx));
+        assert!(
+            !non_start_hit,
+            "rows without a container start have no chevron"
+        );
+
+        let hit = editor.update(&mut cx, |ed, cx| ed.try_toggle_fold_chevron(0, chevron, cx));
+        cx.run_until_parked();
+        assert!(hit, "chevron column on the start row toggles");
+        assert!(
+            is_folded(&editor, &mut cx),
+            "first toggle folds the container"
+        );
+
+        let hit = editor.update(&mut cx, |ed, cx| ed.try_toggle_fold_chevron(0, chevron, cx));
+        cx.run_until_parked();
+        assert!(hit);
+        assert!(!is_folded(&editor, &mut cx), "second toggle unfolds");
     }
 
     #[test]
@@ -5938,6 +6066,15 @@ mod tests {
 
         let rows = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(0..3, cx).len());
         assert_eq!(rows, 3);
+    }
+
+    #[test]
+    fn render_visible_rows_builds_fold_chevrons_for_parsed_buffer() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_rust_editor(&mut cx, "fn f() {\n    let x = 1;\n}\n");
+
+        let rows = editor.update(&mut cx, |ed, cx| ed.render_visible_rows(0..4, cx).len());
+        assert_eq!(rows, 4);
     }
 
     #[test]

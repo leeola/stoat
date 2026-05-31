@@ -1315,6 +1315,12 @@ const DIAG_INFO_HEX: u32 = 0x29b6f6;
 const DIAG_HINT_HEX: u32 = 0x9e9e9e;
 const BLOCK_TEXT_HEX: u32 = 0xa0a0a0;
 
+// ASCII fold chevrons: open points down (click to collapse), folded
+// points right (click to expand). The repo's content tooling rejects
+// the Geometric Shapes triangles, so the gutter uses these instead.
+const FOLD_CHEVRON_OPEN: char = 'v';
+const FOLD_CHEVRON_FOLDED: char = '>';
+
 /// Visible characters in the blame strip when active:
 /// `{short_sha:7} {first_name:<8} {age:>3} ` separator → 21 cells.
 pub(crate) const BLAME_STRIP_WIDTH: usize = 21;
@@ -1332,6 +1338,16 @@ pub(crate) struct GutterMetrics {
     pub total_width: usize,
 }
 
+impl GutterMetrics {
+    /// Gutter-inclusive grid column of the fold chevron, which
+    /// [`build_gutter_prefix`] paints after the change indicators
+    /// (blame, line number, diff, diagnostic, chunk) and before the
+    /// trailing space. Used to hit-test a chevron click.
+    pub fn chevron_col(&self) -> usize {
+        self.blame_width + self.line_number_width + 3
+    }
+}
+
 pub(crate) fn gutter_metrics(snapshot: &DisplaySnapshot, blame_visible: bool) -> GutterMetrics {
     let buffer_line_count = snapshot.buffer_line_count().max(1);
     let line_number_width = digit_count(buffer_line_count);
@@ -1339,7 +1355,7 @@ pub(crate) fn gutter_metrics(snapshot: &DisplaySnapshot, blame_visible: bool) ->
     GutterMetrics {
         line_number_width,
         blame_width,
-        total_width: blame_width + line_number_width + 1 + 1 + 1 + 1,
+        total_width: blame_width + line_number_width + 1 + 1 + 1 + 1 + 1,
     }
 }
 
@@ -1501,6 +1517,10 @@ pub(crate) struct GutterPaint<'a> {
     pub inline_blame: Option<InlineBlamePaint<'a>>,
     pub indent_guides: Option<IndentGuidePaint>,
     pub metrics: GutterMetrics,
+    /// Buffer rows that begin a foldable container, sorted ascending.
+    /// Each gets a fold chevron in the gutter column adjacent to the
+    /// code (see [`GutterMetrics::chevron_col`]).
+    pub fold_chevron_rows: &'a [u32],
     pub line_number_color: Hsla,
     pub line_number_mode: LineNumberMode,
     /// Buffer row of the primary cursor, for relative / hybrid line
@@ -1902,6 +1922,29 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
         text.push(' ');
     }
 
+    let chevron_folded = buffer_row.filter(|_| show_line_number).and_then(|row| {
+        paint
+            .fold_chevron_rows
+            .contains(&row)
+            .then(|| paint.display_snapshot.is_line_folded(row + 1))
+    });
+    let start = text.len();
+    if let Some(folded) = chevron_folded {
+        text.push(if folded {
+            FOLD_CHEVRON_FOLDED
+        } else {
+            FOLD_CHEVRON_OPEN
+        });
+        let end = text.len();
+        let style = gpui::HighlightStyle {
+            color: Some(paint.line_number_color),
+            ..Default::default()
+        };
+        runs.push((start..end, style));
+    } else {
+        text.push(' ');
+    }
+
     text.push(' ');
 
     GutterPrefix { text, runs }
@@ -2282,7 +2325,8 @@ mod tests {
 
         let metrics = gutter_metrics(&snapshot, false);
         assert_eq!(metrics.line_number_width, 1);
-        assert_eq!(metrics.total_width, 5);
+        // line number + chevron + diff + diagnostic + chunk + trailing space
+        assert_eq!(metrics.total_width, 6);
     }
 
     #[test]
@@ -2296,7 +2340,8 @@ mod tests {
 
         let metrics = gutter_metrics(&snapshot, false);
         assert_eq!(metrics.line_number_width, 3);
-        assert_eq!(metrics.total_width, 7);
+        // 3 line-number digits + chevron + diff + diagnostic + chunk + space
+        assert_eq!(metrics.total_width, 8);
     }
 
     fn diagnostic_set_with(
@@ -2363,6 +2408,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2411,6 +2457,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2439,6 +2486,56 @@ mod tests {
         );
     }
 
+    fn chevron_prefix(snapshot: &DisplaySnapshot, chevron_rows: &[u32]) -> String {
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(snapshot, false);
+        let paint = GutterPaint {
+            display_snapshot: snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            blame: None,
+            inline_blame: None,
+            indent_guides: None,
+            metrics,
+            fold_chevron_rows: chevron_rows,
+            line_number_color: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
+            line_number_cache: None,
+            blame_cache: None,
+        };
+        build_gutter_prefix(0, &paint).text.to_string()
+    }
+
+    #[test]
+    fn build_gutter_prefix_chevron_tracks_fold_start_and_state() {
+        let mut cx = TestAppContext::single();
+        let open = test_snapshot(&mut cx, "fn f() {\n}\n");
+        let col = gutter_metrics(&open, false).chevron_col();
+        assert_eq!(chevron_prefix(&open, &[0]).chars().nth(col), Some('v'));
+        assert_eq!(chevron_prefix(&open, &[]).chars().nth(col), Some(' '));
+
+        let folded = {
+            let buffer =
+                cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), "fn f() {\n}\n")));
+            let executor = Executor::new(Arc::new(TestScheduler::new()));
+            let display_map = {
+                let buffer = buffer.clone();
+                cx.update(|cx| cx.new(|cx| DisplayMap::new(buffer, executor, cx)))
+            };
+            display_map.update(&mut cx, |dm, dm_cx| {
+                dm.fold(
+                    vec![stoat_text::Point::new(0, 8)..stoat_text::Point::new(1, 0)],
+                    dm_cx,
+                )
+            });
+            display_map.update(&mut cx, |dm, _| dm.snapshot())
+        };
+        assert_eq!(chevron_prefix(&folded, &[0]).chars().nth(col), Some('>'));
+    }
+
     #[test]
     fn render_row_with_gutter_paints_line_number() {
         let mut cx = TestAppContext::single();
@@ -2455,6 +2552,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2486,6 +2584,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2512,6 +2611,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2548,6 +2648,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2598,6 +2699,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2626,6 +2728,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2703,6 +2806,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2736,6 +2840,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2770,6 +2875,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2805,6 +2911,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2845,6 +2952,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2882,6 +2990,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2937,6 +3046,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2965,6 +3075,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
@@ -2995,6 +3106,7 @@ mod tests {
             inline_blame: None,
             indent_guides: None,
             metrics,
+            fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
