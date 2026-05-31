@@ -80,6 +80,7 @@ mod tab_bar;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test;
 mod theme;
+mod toast;
 mod workspace;
 mod workspace_persist;
 mod workspace_picker;
