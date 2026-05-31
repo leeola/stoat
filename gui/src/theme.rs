@@ -119,6 +119,8 @@ pub struct ThemeColors {
     pub indent_guide: Hsla,
     /// Indent-guide color for the cursor's active indent level.
     pub indent_guide_active: Hsla,
+    /// Background for the pinned sticky-scroll header at the viewport top.
+    pub sticky_header_background: Hsla,
     pub diagnostic_error: Hsla,
     pub diagnostic_warning: Hsla,
     pub diagnostic_info: Hsla,
@@ -236,6 +238,11 @@ impl ThemeColors {
                 cx,
                 stoat::theme::scope::UI_TEXT_MUTED,
                 palette.text_muted,
+            ),
+            sticky_header_background: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_TAB_INACTIVE,
+                palette.surface,
             ),
             diagnostic_error: theme_fg_or(
                 cx,

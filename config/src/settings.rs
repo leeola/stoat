@@ -114,6 +114,10 @@ pub struct Settings {
     /// editor. `None` defaults to on. Set via
     /// `ui.editor.show_indent_guides = false;` to hide.
     pub ui_editor_show_indent_guides: Option<bool>,
+    /// Show sticky scroll headers (pin the enclosing container's
+    /// signature at the viewport top). `None` defaults to on. Set via
+    /// `ui.editor.show_sticky_scroll = false;` to hide.
+    pub ui_editor_show_sticky_scroll: Option<bool>,
     /// Per-language LSP server commands keyed by language name
     /// (e.g. `rust`, `typescript`). Empty when no
     /// `lsp.<lang>.*` settings are present. Right-hand wins on
@@ -176,6 +180,9 @@ impl Settings {
             ui_editor_show_indent_guides: other
                 .ui_editor_show_indent_guides
                 .or(self.ui_editor_show_indent_guides),
+            ui_editor_show_sticky_scroll: other
+                .ui_editor_show_sticky_scroll
+                .or(self.ui_editor_show_sticky_scroll),
             language_servers,
         }
     }
@@ -271,6 +278,11 @@ impl Settings {
             ["ui", "editor", "show_indent_guides"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.ui_editor_show_indent_guides = Some(b);
+                }
+            },
+            ["ui", "editor", "show_sticky_scroll"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.ui_editor_show_sticky_scroll = Some(b);
                 }
             },
             ["claude", "permissions", tool, behavior] => {
@@ -400,6 +412,18 @@ impl Settings {
                 self.ui_editor_show_indent_guides = Some(b);
                 Ok(())
             },
+            ["ui", "editor", "show_sticky_scroll"] => {
+                let b = parse_bool(raw).ok_or_else(|| {
+                    InvalidValueSnafu {
+                        key: path.to_string(),
+                        expected: "bool",
+                        got: raw.to_string(),
+                    }
+                    .build()
+                })?;
+                self.ui_editor_show_sticky_scroll = Some(b);
+                Ok(())
+            },
             _ => UnknownKeySnafu {
                 key: path.to_string(),
             }
@@ -503,6 +527,16 @@ mod tests {
     }
 
     #[test]
+    fn apply_runtime_sets_ui_editor_show_sticky_scroll_false() {
+        let mut s = Settings::default();
+        assert_eq!(
+            s.apply_runtime("ui.editor.show_sticky_scroll", "false"),
+            Ok(())
+        );
+        assert_eq!(s.ui_editor_show_sticky_scroll, Some(false));
+    }
+
+    #[test]
     fn apply_runtime_rejects_unknown_key() {
         let mut s = Settings::default();
         let result = s.apply_runtime("nope.bad.path", "true");
@@ -571,6 +605,13 @@ mod tests {
     }
 
     #[test]
+    fn from_config_parses_ui_editor_show_sticky_scroll_false() {
+        let config = parse_ok("on init { ui.editor.show_sticky_scroll = false; }");
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.ui_editor_show_sticky_scroll, Some(false));
+    }
+
+    #[test]
     fn from_config_extracts_text_proto_log() {
         let config = parse_ok("on init { text_proto_log = true; }");
         assert_eq!(
@@ -591,6 +632,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -617,6 +659,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -643,6 +686,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -678,6 +722,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -696,6 +741,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -716,6 +762,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -739,6 +786,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -760,6 +808,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -794,6 +843,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -820,6 +870,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -846,6 +897,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -881,6 +933,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -902,6 +955,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -928,6 +982,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -954,6 +1009,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -977,6 +1033,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -995,6 +1052,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
@@ -1018,6 +1076,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -1036,6 +1095,7 @@ mod tests {
             ui_editor_show_scrollbar_markers: None,
             ui_editor_show_inline_blame: None,
             ui_editor_show_indent_guides: None,
+            ui_editor_show_sticky_scroll: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -1056,6 +1116,7 @@ mod tests {
                 ui_editor_show_scrollbar_markers: None,
                 ui_editor_show_inline_blame: None,
                 ui_editor_show_indent_guides: None,
+                ui_editor_show_sticky_scroll: None,
                 language_servers: BTreeMap::new(),
             }
         );

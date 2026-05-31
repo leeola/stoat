@@ -23,7 +23,7 @@ use stoat_text::Rope;
 /// segment, across the languages stoat bundles. The Rust grammar names
 /// the relevant containers `*_item`; Python/JavaScript use
 /// `*_definition`.
-const CONTAINER_KINDS: &[&str] = &[
+pub(crate) const CONTAINER_KINDS: &[&str] = &[
     "function_item",
     "impl_item",
     "trait_item",
@@ -182,7 +182,10 @@ fn context_segments(editor: &Editor, cx: &App) -> Vec<SharedString> {
 /// The shallowest syntax layer whose byte span contains `offset` -- the
 /// whole-file tree -- so injected sub-layers do not hide the outer
 /// structural context.
-fn shallowest_containing_layer(snapshot: &SyntaxSnapshot, offset: usize) -> Option<&SyntaxLayer> {
+pub(crate) fn shallowest_containing_layer(
+    snapshot: &SyntaxSnapshot,
+    offset: usize,
+) -> Option<&SyntaxLayer> {
     snapshot.iter_layers().fold(None, |acc, layer| {
         let start = layer.start_offset as usize;
         let end = layer.end_offset as usize;

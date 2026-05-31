@@ -16,6 +16,7 @@ use crate::{
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
     settings::Settings,
+    sticky_scroll,
     theme::{self, ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
     toast::Toast,
 };
@@ -3756,6 +3757,39 @@ impl Render for Editor {
         }
         if let Some(popup) = completion_popup {
             root = root.child(popup);
+        }
+        if !is_minimap {
+            let show_sticky = cx
+                .try_global::<Settings>()
+                .and_then(|s| s.resolved.ui_editor_show_sticky_scroll)
+                .unwrap_or(true);
+            if show_sticky {
+                let snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+                let first_display_row =
+                    self.scroll_manager().anchor().offset.y.max(0.0).floor() as u32;
+                let header = snapshot
+                    .display_to_buffer(DisplayPoint::new(first_display_row, 0))
+                    .map(|p| p.row)
+                    .and_then(|row| sticky_scroll::sticky_header(self, row, cx));
+                if let Some(header) = header {
+                    let theme = cx.theme();
+                    root = root.child(
+                        div()
+                            .absolute()
+                            .top_0()
+                            .left_0()
+                            .w_full()
+                            .h(line_height)
+                            .flex()
+                            .items_center()
+                            .px_2()
+                            .bg(theme.sticky_header_background)
+                            .border_b_1()
+                            .border_color(theme.border_inactive)
+                            .child(header),
+                    );
+                }
+            }
         }
         if let Some(minimap) = minimap {
             root = root.child(

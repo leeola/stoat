@@ -74,6 +74,7 @@ mod run_pane;
 mod settings;
 mod shell_input_modal;
 mod status_bar;
+mod sticky_scroll;
 mod stoat_app;
 mod symbol_picker;
 mod syntax_updater;
