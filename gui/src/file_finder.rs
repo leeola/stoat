@@ -317,6 +317,17 @@ impl PickerDelegate for FileFinderDelegate {
         false
     }
 
+    fn render_header(&self, cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        Some(
+            div()
+                .px_2()
+                .py_1()
+                .text_color(cx.theme().muted_text)
+                .child(SharedString::from(scope_label(self.scope)))
+                .into_any_element(),
+        )
+    }
+
     fn render_preview(&self, cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
         let editor = self.preview_editor.as_ref()?;
         let border = cx.theme().border_focused;
@@ -383,6 +394,14 @@ fn display_path(path: &Path, git_root: &Path) -> String {
     match path.strip_prefix(git_root) {
         Ok(rel) => rel.to_string_lossy().into_owned(),
         Err(_) => path.to_string_lossy().into_owned(),
+    }
+}
+
+/// The section-header label for the finder's current [`FinderScope`].
+fn scope_label(scope: FinderScope) -> &'static str {
+    match scope {
+        FinderScope::All => "All files",
+        FinderScope::Modified => "Modified files",
     }
 }
 
@@ -580,6 +599,12 @@ mod tests {
     fn delegate_lists_no_paths_when_constructed() {
         let delegate = new_delegate("/repo");
         assert_eq!(delegate.match_count(), 0);
+    }
+
+    #[test]
+    fn scope_label_reflects_finder_scope() {
+        assert_eq!(scope_label(FinderScope::All), "All files");
+        assert_eq!(scope_label(FinderScope::Modified), "Modified files");
     }
 
     #[test]
