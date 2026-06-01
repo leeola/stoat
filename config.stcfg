@@ -497,6 +497,11 @@ on key {
         R -> ReviewResetProgress();
         c -> ReviewCycleComparisonMode();
         V -> ReviewEnterLineSelect();
+        m -> JumpToMoveSource();
+        M -> JumpToMoveTarget();
+        g -> QueryMoveRelationships();
+        ] -> JumpToNextMoveSource();
+        [ -> JumpToPrevMoveSource();
         : -> OpenCommandPalette();
     }
     mode == line_select {
