@@ -99,7 +99,9 @@ use crate::{
             ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
             ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
         },
-        run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+        run::{
+            OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
+        },
         set::Set,
         workspace::{
             CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
@@ -611,6 +613,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         }))
     });
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
+    add(OpenTerminalDock::DEF, |_| Ok(Box::new(OpenTerminalDock)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
@@ -947,6 +950,7 @@ mod tests {
         "ConflictApply",
         "ConflictAbort",
         "OpenRun",
+        "OpenTerminalDock",
         "RunSubmit",
         "RunInterrupt",
         "RunHistoryPrev",
@@ -1182,7 +1186,8 @@ mod tests {
         // + 1 ToggleInlineBlame (inline end-of-line git blame).
         // + 1 ToggleRelativeLineNumbers (cycle gutter line-number mode).
         // + 4 FoldAtCursor / UnfoldAtCursor / FoldAll / UnfoldAll.
-        assert_eq!(all().count(), 334);
+        // + 1 OpenTerminalDock (run pane hosted in a bottom dock).
+        assert_eq!(all().count(), 335);
     }
 
     #[test]

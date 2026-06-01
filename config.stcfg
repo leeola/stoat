@@ -260,6 +260,7 @@ on key {
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
         Alt-` -> SwitchToUppercase();
+        Ctrl-` -> OpenTerminalDock();
         Ctrl-a -> Increment();
         Ctrl-x -> Decrement();
         d -> DeleteSelection();

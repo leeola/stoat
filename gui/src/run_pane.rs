@@ -22,9 +22,10 @@ pub(crate) mod mouse;
 pub(crate) mod render;
 
 use crate::{
+    dock::DockSide,
     editor::Editor,
     globals::TerminalHostGlobal,
-    item::{DeserializeSnafu, ItemError, ItemHandle, ItemView},
+    item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
     settings::Settings,
     theme::{DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
     workspace::Workspace,
@@ -409,8 +410,8 @@ impl ItemView for Run {
         .fail()
     }
 
-    fn item_kind(&self) -> crate::item::ItemKind {
-        crate::item::ItemKind::Run
+    fn item_kind(&self) -> ItemKind {
+        ItemKind::Run
     }
 
     fn serialize(&self, _cx: &App) -> serde_json::Value {
@@ -523,6 +524,30 @@ pub fn dispatch_open_run(
     pane.update(cx, |p, cx| {
         p.add_item(Box::new(run), cx);
     });
+}
+
+/// Dispatch the [`stoat_action::OpenTerminalDock`] action. Opens a
+/// [`Run`] pane as a bottom dock anchored at the workspace's git
+/// root. When a run dock already exists, toggles its visibility
+/// instead of spawning a second one.
+pub fn dispatch_open_terminal_dock(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let existing = workspace
+        .docks()
+        .iter()
+        .find(|dock| dock.read(cx).item().item_kind(cx) == ItemKind::Run)
+        .cloned();
+    if let Some(dock) = existing {
+        dock.update(cx, |d, cx| d.toggle_open(cx));
+        return;
+    }
+    let cwd = workspace.git_root().clone();
+    let weak_workspace = cx.weak_entity();
+    let run = cx.new(|cx| Run::new(weak_workspace, cwd, window, cx));
+    workspace.add_dock(Box::new(run), DockSide::Bottom, 240, cx);
 }
 
 /// Dispatch the [`stoat_action::RunSubmit`] action. Finds the focused
@@ -638,6 +663,43 @@ mod tests {
             let view = pane.read(cx).active_item().map(ItemHandle::to_any_view)?;
             view.downcast::<Run>().ok()
         })
+    }
+
+    fn dock_states(h: &mut Harness<'_>) -> Vec<(DockSide, u16)> {
+        h.workspace.read_with(h.vcx, |w, cx| {
+            w.docks()
+                .iter()
+                .map(|d| {
+                    let d = d.read(cx);
+                    (d.side(), d.effective_width())
+                })
+                .collect()
+        })
+    }
+
+    #[test]
+    fn open_terminal_dock_toggles_bottom_dock_visibility() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal_dock(w, window, cx);
+        });
+        assert_eq!(dock_states(&mut h), vec![(DockSide::Bottom, 240)]);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal_dock(w, window, cx);
+        });
+        assert_eq!(
+            dock_states(&mut h),
+            vec![(DockSide::Bottom, 0)],
+            "second invocation hides the dock instead of spawning a new one"
+        );
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal_dock(w, window, cx);
+        });
+        assert_eq!(dock_states(&mut h), vec![(DockSide::Bottom, 240)]);
     }
 
     fn type_into_input(run: &Entity<Run>, h: &mut Harness<'_>, text: &str) {

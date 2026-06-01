@@ -15,6 +15,16 @@ define_action!(
 );
 
 define_action!(
+    OpenTerminalDockDef,
+    OpenTerminalDock,
+    "OpenTerminalDock",
+    ActionKind::OpenTerminalDock,
+    "open terminal dock",
+    "Open the run pane in a bottom dock, or toggle its visibility when it is already open.",
+    ActionPriority::Common
+);
+
+define_action!(
     RunSubmitDef,
     RunSubmit,
     "RunSubmit",

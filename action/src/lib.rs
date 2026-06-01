@@ -101,7 +101,9 @@ pub use defs::{
         ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
         ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
     },
-    run::{OpenRun, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit},
+    run::{
+        OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
+    },
     set::Set,
     workspace::{
         CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,

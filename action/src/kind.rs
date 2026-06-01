@@ -202,6 +202,7 @@ pub enum ActionKind {
     SplitSelectionOnNewline,
     AlignSelections,
     OpenRun,
+    OpenTerminalDock,
     RunSubmit,
     RunInterrupt,
     Run,
