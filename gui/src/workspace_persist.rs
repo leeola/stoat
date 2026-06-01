@@ -70,6 +70,9 @@ pub struct WorkspaceStateV1 {
 pub struct DockSnapV1 {
     pub side: DockSide,
     pub visibility: DockVisibility,
+    /// Stable serialized key for the dock's default open extent
+    /// (`Dock::default_extent`). Retains the `default_width` name so
+    /// snapshots written before [`DockSide::Bottom`] still deserialize.
     pub default_width: u16,
     /// `Some` when the dock's item is an [`Editor`] with a file
     /// path; `None` for editors without a path or non-editor items.
@@ -208,7 +211,7 @@ pub(crate) fn snapshot_dock(dock: &crate::dock::Dock, cx: &gpui::App, index: usi
     DockSnapV1 {
         side: dock.side(),
         visibility: dock.visibility(),
-        default_width: dock.default_width(),
+        default_width: dock.default_extent(),
         editor_path,
         project_tree,
     }

@@ -96,6 +96,9 @@ pub struct Workspace {
     /// Workspace-level visibility of the right dock group. See
     /// [`Workspace::left_dock_visible`] for the contract.
     right_dock_visible: bool,
+    /// Workspace-level visibility of the bottom dock group. See
+    /// [`Workspace::left_dock_visible`] for the contract.
+    bottom_dock_visible: bool,
     /// EntityId of the currently-open `DiffHunkPanel` dock item,
     /// if any. Used by `ToggleDiffHunkPanel` to find the panel
     /// across `docks` index shifts caused by other dock
@@ -377,6 +380,7 @@ impl Workspace {
             docks: Vec::new(),
             left_dock_visible: true,
             right_dock_visible: true,
+            bottom_dock_visible: true,
             diff_hunk_panel: None,
             modal_layer,
             toast_view,
@@ -1542,10 +1546,10 @@ impl Workspace {
         &mut self,
         item: Box<dyn ItemHandle>,
         side: DockSide,
-        default_width: u16,
+        default_extent: u16,
         cx: &mut Context<'_, Self>,
     ) -> usize {
-        let dock = cx.new(|cx| Dock::new(item, side, default_width, cx));
+        let dock = cx.new(|cx| Dock::new(item, side, default_extent, cx));
         let index = self.docks.len();
         self.docks.push(dock);
         cx.emit(WorkspaceEvent::DockAdded { index });
@@ -3428,6 +3432,7 @@ impl Workspace {
         match side {
             DockSide::Left => self.left_dock_visible,
             DockSide::Right => self.right_dock_visible,
+            DockSide::Bottom => self.bottom_dock_visible,
         }
     }
 
@@ -3438,6 +3443,7 @@ impl Workspace {
         let visible = match side {
             DockSide::Left => &mut self.left_dock_visible,
             DockSide::Right => &mut self.right_dock_visible,
+            DockSide::Bottom => &mut self.bottom_dock_visible,
         };
         *visible = !*visible;
         cx.notify();
@@ -6410,6 +6416,15 @@ impl Render for Workspace {
         } else {
             Vec::new()
         };
+        let bottom_docks: Vec<Entity<Dock>> = if self.bottom_dock_visible {
+            self.docks
+                .iter()
+                .filter(|d| d.read(cx).side() == DockSide::Bottom)
+                .cloned()
+                .collect()
+        } else {
+            Vec::new()
+        };
         let (ui_family, ui_size) = ui_font(cx);
         let body = div()
             .flex()
@@ -6431,6 +6446,7 @@ impl Render for Workspace {
                             .child(self.pane_tree.clone())
                             .child(deferred(self.toast_view.clone())),
                     )
+                    .children(bottom_docks)
                     .child(self.status_bar.clone()),
             )
             .children(right_docks)
@@ -8299,6 +8315,15 @@ mod tests {
         ws.read_with(&cx, |w, _| {
             assert!(w.dock_side_visible(DockSide::Left));
             assert!(w.dock_side_visible(DockSide::Right));
+        });
+    }
+
+    #[test]
+    fn fresh_workspace_reports_bottom_dock_visible() {
+        let mut cx = TestAppContext::single();
+        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
+        ws.read_with(&cx, |w, _| {
+            assert!(w.dock_side_visible(DockSide::Bottom));
         });
     }
 
@@ -15534,7 +15559,7 @@ mod tests {
             assert_eq!(w.docks().len(), 1);
             let dock = w.docks()[0].read(cx);
             assert_eq!(dock.side(), DockSide::Left);
-            assert_eq!(dock.default_width(), 220);
+            assert_eq!(dock.default_extent(), 220);
             let editor = dock
                 .item()
                 .to_any_view()
@@ -15542,6 +15567,38 @@ mod tests {
                 .expect("dock holds an Editor");
             let path = editor.read(cx).file_path().map(Path::to_path_buf);
             assert_eq!(path, Some(PathBuf::from("/tmp/repo/outline.rs")));
+        });
+    }
+
+    #[test]
+    fn restore_rebuilds_bottom_dock_at_saved_side() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/term.rs", b"// term\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            let dock_editor = w.build_editor_for_path(Path::new("/tmp/repo/term.rs"), cx);
+            w.add_dock(Box::new(dock_editor), DockSide::Bottom, 200, cx);
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/bottom-dock.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            assert_eq!(w.docks().len(), 1);
+            let dock = w.docks()[0].read(cx);
+            assert_eq!(dock.side(), DockSide::Bottom);
+            assert_eq!(dock.default_extent(), 200);
         });
     }
 

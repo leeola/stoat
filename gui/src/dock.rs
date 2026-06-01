@@ -1,5 +1,7 @@
 use crate::{item::ItemHandle, theme::ActiveTheme};
-use gpui::{div, px, Context, EventEmitter, IntoElement, ParentElement, Render, Styled, Window};
+use gpui::{
+    div, px, Context, Div, EventEmitter, IntoElement, ParentElement, Render, Styled, Window,
+};
 use serde::{Deserialize, Serialize};
 
 /// Edge of the window where a dock is pinned.
@@ -7,6 +9,16 @@ use serde::{Deserialize, Serialize};
 pub enum DockSide {
     Left,
     Right,
+    Bottom,
+}
+
+impl DockSide {
+    /// Whether docks pinned to this side lay out as a horizontal
+    /// strip -- fixed height, full width. `Bottom` is horizontal;
+    /// `Left` and `Right` are vertical (fixed width, full height).
+    fn is_horizontal(self) -> bool {
+        matches!(self, DockSide::Bottom)
+    }
 }
 
 /// Whether a dock is rendered, and at what width when open.
@@ -34,7 +46,7 @@ pub struct Dock {
     item: Box<dyn ItemHandle>,
     side: DockSide,
     visibility: DockVisibility,
-    default_width: u16,
+    default_extent: u16,
 }
 
 impl EventEmitter<DockEvent> for Dock {}
@@ -45,16 +57,16 @@ impl Dock {
     pub fn new(
         item: Box<dyn ItemHandle>,
         side: DockSide,
-        default_width: u16,
+        default_extent: u16,
         _cx: &mut Context<'_, Self>,
     ) -> Self {
         Self {
             item,
             side,
             visibility: DockVisibility::Open {
-                width: default_width,
+                width: default_extent,
             },
-            default_width,
+            default_extent,
         }
     }
 
@@ -70,8 +82,8 @@ impl Dock {
         self.visibility
     }
 
-    pub fn default_width(&self) -> u16 {
-        self.default_width
+    pub fn default_extent(&self) -> u16 {
+        self.default_extent
     }
 
     /// Width the dock occupies on the relevant axis. `Minimized`
@@ -116,27 +128,27 @@ impl Dock {
         true
     }
 
-    /// Flip between `Open { default_width }` and `Minimized`.
-    /// Hidden docks resurface at `Open { default_width }` so the
+    /// Flip between `Open { default_extent }` and `Minimized`.
+    /// Hidden docks resurface at `Open { default_extent }` so the
     /// toggle always lands the dock in a visible state.
     pub fn toggle_minimize(&mut self, cx: &mut Context<'_, Self>) {
         let next = match self.visibility {
             DockVisibility::Open { .. } => DockVisibility::Minimized,
             DockVisibility::Minimized | DockVisibility::Hidden => DockVisibility::Open {
-                width: self.default_width,
+                width: self.default_extent,
             },
         };
         self.set_visibility(next, cx);
     }
 
-    /// Flip between `Open { default_width }` and `Hidden`. From
-    /// `Minimized` the dock opens to `default_width` rather than
+    /// Flip between `Open { default_extent }` and `Hidden`. From
+    /// `Minimized` the dock opens to `default_extent` rather than
     /// hiding -- show-or-hide treats Minimized as already shown.
     pub fn toggle_open(&mut self, cx: &mut Context<'_, Self>) {
         let next = match self.visibility {
             DockVisibility::Open { .. } => DockVisibility::Hidden,
             DockVisibility::Minimized | DockVisibility::Hidden => DockVisibility::Open {
-                width: self.default_width,
+                width: self.default_extent,
             },
         };
         self.set_visibility(next, cx);
@@ -161,17 +173,25 @@ impl Dock {
 impl Render for Dock {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = cx.theme();
+        let horizontal = self.side.is_horizontal();
+        let along_main = |d: Div, extent: f32| {
+            if horizontal {
+                d.h(px(extent)).w_full()
+            } else {
+                d.w(px(extent)).h_full()
+            }
+        };
         match self.visibility {
-            DockVisibility::Hidden => div().w(px(0.0)),
-            DockVisibility::Minimized => div()
-                .w(px(MINIMIZED_STRIP_WIDTH_PX))
-                .h_full()
-                .bg(theme.dock_minimized_background)
-                .border_color(theme.dock_minimized_border),
-            DockVisibility::Open { width } => div()
-                .w(px(f32::from(width)))
-                .h_full()
-                .child(self.item.to_any_view()),
+            DockVisibility::Hidden => along_main(div(), 0.0),
+            DockVisibility::Minimized => along_main(
+                div()
+                    .bg(theme.dock_minimized_background)
+                    .border_color(theme.dock_minimized_border),
+                MINIMIZED_STRIP_WIDTH_PX,
+            ),
+            DockVisibility::Open { width } => {
+                along_main(div(), f32::from(width)).child(self.item.to_any_view())
+            },
         }
     }
 }
@@ -214,12 +234,12 @@ mod tests {
         }
     }
 
-    fn new_dock(cx: &mut TestAppContext, side: DockSide, default_width: u16) -> Entity<Dock> {
+    fn new_dock(cx: &mut TestAppContext, side: DockSide, default_extent: u16) -> Entity<Dock> {
         cx.update(|cx| {
             let item = cx.new(|_| DockItem {
                 label: "panel".into(),
             });
-            cx.new(|cx| Dock::new(Box::new(item), side, default_width, cx))
+            cx.new(|cx| Dock::new(Box::new(item), side, default_extent, cx))
         })
     }
 
@@ -258,7 +278,7 @@ mod tests {
 
         dock.read_with(&cx, |d, _| {
             assert_eq!(d.side(), DockSide::Left);
-            assert_eq!(d.default_width(), 200);
+            assert_eq!(d.default_extent(), 200);
             assert_eq!(d.visibility(), DockVisibility::Open { width: 200 });
             assert_eq!(d.effective_width(), 200);
         });
@@ -405,5 +425,28 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(drain(&events), vec![DockEvent::ItemChanged]);
+    }
+
+    #[test]
+    fn bottom_is_horizontal_other_sides_vertical() {
+        assert!(DockSide::Bottom.is_horizontal());
+        assert!(!DockSide::Left.is_horizontal());
+        assert!(!DockSide::Right.is_horizontal());
+    }
+
+    #[test]
+    fn bottom_dock_reports_extent_and_resizes() {
+        let mut cx = TestAppContext::single();
+        let dock = new_dock(&mut cx, DockSide::Bottom, 240);
+
+        dock.read_with(&cx, |d, _| {
+            assert_eq!(d.side(), DockSide::Bottom);
+            assert_eq!(d.default_extent(), 240);
+            assert_eq!(d.effective_width(), 240);
+        });
+
+        let resized = dock.update(&mut cx, |d, cx| d.set_width(180, cx));
+        assert!(resized);
+        assert_eq!(dock.read_with(&cx, |d, _| d.effective_width()), 180);
     }
 }

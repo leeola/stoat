@@ -671,7 +671,7 @@ pub fn dispatch_claude_to_dock(
             if matches!(d.visibility(), DockVisibility::Hidden) {
                 d.set_visibility(
                     DockVisibility::Open {
-                        width: d.default_width(),
+                        width: d.default_extent(),
                     },
                     cx,
                 );
