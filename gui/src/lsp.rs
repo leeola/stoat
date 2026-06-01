@@ -4,6 +4,7 @@ pub mod edit_apply;
 pub mod goto;
 pub mod hover;
 pub mod inlay_hints;
+pub mod popup;
 pub mod references;
 pub mod rename;
 pub mod semantic_tokens;

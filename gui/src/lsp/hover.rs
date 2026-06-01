@@ -1,11 +1,12 @@
 use crate::{
     editor::{Editor, EditorEvent},
     globals::{LanguageRegistry, LspHostGlobal},
+    lsp::popup::{popup_container, popup_origin_below},
     theme::ActiveTheme,
 };
 use gpui::{
-    deferred, div, point, Bounds, Context, Entity, IntoElement, ParentElement, Pixels, Point,
-    Render, SharedString, Size, Styled, Subscription, Task, WeakEntity, Window,
+    deferred, div, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
+    Subscription, Task, WeakEntity, Window,
 };
 use lsp_types::{
     HoverContents, HoverParams, MarkedString, TextDocumentIdentifier, TextDocumentPositionParams,
@@ -154,27 +155,17 @@ impl Render for HoverPopup {
         let Some(cell) = editor_ref.cell_size() else {
             return empty().into_any_element();
         };
-        let origin = popup_origin(bounds, cell, row, col);
+        let origin = popup_origin_below(bounds, cell, row, col);
         let lines = self.lines.clone();
         let theme = cx.theme();
         deferred(
-            div()
-                .absolute()
-                .left(origin.x)
-                .top(origin.y)
-                .px_2()
-                .py_1()
-                .bg(theme.popup_background)
-                .text_color(theme.popup_text)
-                .border_1()
-                .border_color(theme.popup_border)
-                .child(
-                    div().flex().flex_col().children(
-                        lines
-                            .into_iter()
-                            .map(|line| div().child(line).into_any_element()),
-                    ),
+            popup_container(origin, &theme).child(
+                div().flex().flex_col().children(
+                    lines
+                        .into_iter()
+                        .map(|line| div().child(line).into_any_element()),
                 ),
+            ),
         )
         .with_priority(2)
         .into_any_element()
@@ -183,12 +174,6 @@ impl Render for HoverPopup {
 
 fn empty() -> impl IntoElement {
     div()
-}
-
-fn popup_origin(bounds: Bounds<Pixels>, cell: Size<Pixels>, row: u32, col: u32) -> Point<Pixels> {
-    let x = bounds.origin.x + cell.width * col as f32;
-    let y = bounds.origin.y + cell.height * (row + 1) as f32;
-    point(x, y)
 }
 
 struct HoverRequest {
