@@ -8,6 +8,36 @@ use stoat_text::{
     Rope, SumTree, UndoMap, UndoOperation,
 };
 
+/// The dominant line terminator a [`TextBuffer`] uses. The rope stores
+/// line endings verbatim, so this is detected from and applied to its
+/// content rather than tracked as separate metadata.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum LineEnding {
+    #[default]
+    Lf,
+    Crlf,
+    Cr,
+}
+
+impl LineEnding {
+    /// Short status-bar tag: `LF`, `CRLF`, or `CR`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            LineEnding::Lf => "LF",
+            LineEnding::Crlf => "CRLF",
+            LineEnding::Cr => "CR",
+        }
+    }
+
+    fn terminator(self) -> &'static str {
+        match self {
+            LineEnding::Lf => "\n",
+            LineEnding::Crlf => "\r\n",
+            LineEnding::Cr => "\r",
+        }
+    }
+}
+
 pub struct TextBuffer {
     pub snapshot: TextBufferSnapshot,
     pub dirty: bool,
@@ -482,6 +512,22 @@ impl TextBuffer {
         &self.snapshot.visible_text
     }
 
+    /// The buffer's dominant line ending, detected from its first
+    /// terminator. Empty and single-line buffers report [`LineEnding::Lf`].
+    pub fn line_ending(&self) -> LineEnding {
+        detect_line_ending(self.rope())
+    }
+
+    /// Rewrite every line ending to `target`, replacing the whole buffer
+    /// text. A no-op when the text is already uniform at `target`.
+    pub fn set_line_ending(&mut self, target: LineEnding) {
+        let current = self.rope().to_string();
+        let rewritten = normalize_line_endings(&current, target);
+        if rewritten != current {
+            self.edit(0..current.len(), &rewritten);
+        }
+    }
+
     pub fn version(&self) -> u64 {
         self.snapshot.version
     }
@@ -740,13 +786,67 @@ impl TextBufferSnapshot {
 
 pub type SharedBuffer = Arc<std::sync::RwLock<TextBuffer>>;
 
+fn detect_line_ending(rope: &Rope) -> LineEnding {
+    let mut chars = rope.chars();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                return if chars.next() == Some('\n') {
+                    LineEnding::Crlf
+                } else {
+                    LineEnding::Cr
+                };
+            },
+            '\n' => return LineEnding::Lf,
+            _ => {},
+        }
+    }
+    LineEnding::Lf
+}
+
+fn normalize_line_endings(text: &str, target: LineEnding) -> String {
+    let terminator = target.terminator();
+    let mut out = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(ch) = chars.next() {
+        match ch {
+            '\r' => {
+                if chars.peek() == Some(&'\n') {
+                    chars.next();
+                }
+                out.push_str(terminator);
+            },
+            '\n' => out.push_str(terminator),
+            other => out.push(other),
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod tests {
-    use super::TextBuffer;
+    use super::{LineEnding, TextBuffer};
     use stoat_text::{Bias, BufferId, Point};
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
+    }
+
+    #[test]
+    fn line_ending_detects_lf_crlf_cr_and_defaults() {
+        assert_eq!(buf("a\nb\n").line_ending(), LineEnding::Lf);
+        assert_eq!(buf("a\r\nb\r\n").line_ending(), LineEnding::Crlf);
+        assert_eq!(buf("a\rb").line_ending(), LineEnding::Cr);
+        assert_eq!(buf("abc").line_ending(), LineEnding::Lf);
+    }
+
+    #[test]
+    fn set_line_ending_rewrites_terminators() {
+        let mut b = buf("a\nb\nc");
+        b.set_line_ending(LineEnding::Crlf);
+        assert_eq!(b.rope().to_string(), "a\r\nb\r\nc");
+        b.set_line_ending(LineEnding::Lf);
+        assert_eq!(b.rope().to_string(), "a\nb\nc");
     }
 
     #[test]
