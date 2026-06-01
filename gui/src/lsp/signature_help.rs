@@ -1,13 +1,19 @@
 use crate::{
     editor::{Editor, EditorEvent},
     globals::{LanguageRegistry, LspHostGlobal},
+    lsp::popup::{popup_container, popup_origin_below},
+    theme::ActiveTheme,
 };
-use gpui::{Context, Entity, Subscription, Task, WeakEntity};
+use gpui::{
+    deferred, div, point, Bounds, Context, Entity, FontWeight, HighlightStyle, IntoElement,
+    ParentElement, Pixels, Point, Render, SharedString, Size, Styled, StyledText, Subscription,
+    Task, WeakEntity, Window,
+};
 use lsp_types::{
-    SignatureHelp, SignatureHelpParams, SignatureInformation, TextDocumentIdentifier,
-    TextDocumentPositionParams, Uri,
+    Documentation, ParameterLabel, SignatureHelp, SignatureHelpParams, SignatureInformation,
+    TextDocumentIdentifier, TextDocumentPositionParams, Uri,
 };
-use std::{path::Path, str::FromStr, sync::Arc};
+use std::{ops::Range, path::Path, str::FromStr, sync::Arc};
 use stoat::{
     host::{LanguageServerFeature, LspHost},
     lsp::util::byte_offset_to_lsp_pos,
@@ -103,6 +109,13 @@ impl SignatureHelpManager {
             self.clear();
             return;
         };
+        if !is_in_insert_mode(&editor, cx) {
+            if !self.signatures.is_empty() || self.pending_task.is_some() {
+                self.clear();
+                cx.notify();
+            }
+            return;
+        }
         let snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
         let head = editor.read(cx).selections().newest_anchor().head();
         let offset = snapshot.resolve_anchor(&head);
@@ -162,6 +175,157 @@ impl SignatureHelpManager {
         self.active_parameter = None;
         self.anchored_at = None;
     }
+}
+
+impl Render for SignatureHelpManager {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if self.signatures.is_empty() {
+            return empty().into_any_element();
+        }
+        let Some(editor) = self.editor.upgrade() else {
+            return empty().into_any_element();
+        };
+        let Some(anchor) = self.anchored_at else {
+            return empty().into_any_element();
+        };
+        let (bounds, cell, display_map, multi_buffer) = {
+            let editor_ref = editor.read(cx);
+            (
+                editor_ref.text_region_bounds(),
+                editor_ref.cell_size(),
+                editor_ref.display_map().clone(),
+                editor_ref.multi_buffer().clone(),
+            )
+        };
+        let (Some(bounds), Some(cell)) = (bounds, cell) else {
+            return empty().into_any_element();
+        };
+        let display_snapshot = display_map.update(cx, |dm, _| dm.snapshot());
+        let mb_snapshot = multi_buffer.read(cx).snapshot();
+        let buffer_point = mb_snapshot.point_for_anchor(&anchor);
+        let display = display_snapshot.buffer_to_display(buffer_point);
+
+        let sig_idx = self.active_signature.unwrap_or(0) as usize;
+        let Some(signature) = self.signatures.get(sig_idx) else {
+            return empty().into_any_element();
+        };
+        let active = signature.active_parameter.or(self.active_parameter);
+        let active_param = active.and_then(|i| signature.parameters.as_ref()?.get(i as usize));
+        let highlight = active_param.and_then(|p| active_param_range(&signature.label, &p.label));
+        let doc = active_param
+            .and_then(|p| p.documentation.as_ref())
+            .and_then(documentation_first_line);
+
+        let theme = cx.theme();
+        let line_count = if doc.is_some() { 2 } else { 1 };
+        let origin = signature_popup_origin(bounds, cell, display.row, display.column, line_count);
+
+        let runs: Vec<(Range<usize>, HighlightStyle)> = highlight
+            .map(|range| {
+                vec![(
+                    range,
+                    HighlightStyle {
+                        color: Some(theme.cursor),
+                        font_weight: Some(FontWeight::BOLD),
+                        ..Default::default()
+                    },
+                )]
+            })
+            .unwrap_or_default();
+        let label =
+            StyledText::new(SharedString::from(signature.label.clone())).with_highlights(runs);
+
+        let mut content = div().flex().flex_col().child(label);
+        if let Some(doc) = doc {
+            content = content.child(
+                div()
+                    .text_color(theme.muted_text)
+                    .child(SharedString::from(doc)),
+            );
+        }
+        deferred(popup_container(origin, &theme).child(content))
+            .with_priority(2)
+            .into_any_element()
+    }
+}
+
+fn empty() -> impl IntoElement {
+    div()
+}
+
+fn is_in_insert_mode(editor: &Entity<Editor>, cx: &Context<'_, SignatureHelpManager>) -> bool {
+    let Some(workspace) = editor.read(cx).workspace().cloned() else {
+        return false;
+    };
+    let Some(workspace) = workspace.upgrade() else {
+        return false;
+    };
+    let sm = workspace.read(cx).input_state_machine().clone();
+    sm.read(cx).mode() == "insert"
+}
+
+/// Byte range of the active parameter `param` within the signature
+/// `label`, or `None` when it cannot be located. `Simple` matches the
+/// first substring occurrence; `LabelOffsets` are LSP UTF-16 code-unit
+/// offsets converted to byte offsets.
+fn active_param_range(label: &str, param: &ParameterLabel) -> Option<Range<usize>> {
+    match param {
+        ParameterLabel::Simple(text) => {
+            let start = label.find(text.as_str())?;
+            Some(start..start + text.len())
+        },
+        ParameterLabel::LabelOffsets([start, end]) => {
+            let start = utf16_offset_to_byte(label, *start)?;
+            let end = utf16_offset_to_byte(label, *end)?;
+            (start <= end).then_some(start..end)
+        },
+    }
+}
+
+/// Byte offset in `s` at UTF-16 code-unit offset `target`, or `None` when
+/// `target` exceeds the string's UTF-16 length.
+fn utf16_offset_to_byte(s: &str, target: u32) -> Option<usize> {
+    let target = target as usize;
+    let mut units = 0;
+    for (byte, ch) in s.char_indices() {
+        if units == target {
+            return Some(byte);
+        }
+        units += ch.len_utf16();
+    }
+    (units == target).then_some(s.len())
+}
+
+/// First non-empty line of an LSP [`Documentation`] value, trimmed.
+fn documentation_first_line(doc: &Documentation) -> Option<String> {
+    let text = match doc {
+        Documentation::String(s) => s.as_str(),
+        Documentation::MarkupContent(markup) => markup.value.as_str(),
+    };
+    text.lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .map(str::to_string)
+}
+
+/// Pixel origin for the signature box: one row below the cursor, or
+/// `line_count` rows above it when the box would overflow the bottom of
+/// `bounds`.
+fn signature_popup_origin(
+    bounds: Bounds<Pixels>,
+    cell: Size<Pixels>,
+    row: u32,
+    col: u32,
+    line_count: u32,
+) -> Point<Pixels> {
+    let below = popup_origin_below(bounds, cell, row, col);
+    let box_height = cell.height * line_count as f32;
+    if below.y + box_height <= bounds.origin.y + bounds.size.height {
+        return below;
+    }
+    let x = bounds.origin.x + cell.width * col as f32;
+    let y = bounds.origin.y + cell.height * row as f32 - box_height;
+    point(x, y)
 }
 
 struct SignatureHelpRequest {
@@ -248,9 +412,9 @@ mod tests {
     use super::*;
     use crate::{
         buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        globals::ExecutorGlobal, multi_buffer::MultiBuffer,
+        globals::ExecutorGlobal, multi_buffer::MultiBuffer, workspace::Workspace,
     };
-    use gpui::{AppContext, TestAppContext};
+    use gpui::{px, size, AppContext, TestAppContext};
     use lsp_types::{
         ParameterInformation, ParameterLabel, ServerCapabilities, SignatureHelpOptions,
     };
@@ -260,6 +424,52 @@ mod tests {
         host::fake::{FakeLsp, FakeLspHost},
     };
     use stoat_scheduler::{Executor, TestScheduler};
+
+    #[test]
+    fn active_param_range_simple_finds_substring() {
+        let label = "fn add(x: i32, y: i32) -> i32";
+        assert_eq!(
+            active_param_range(label, &ParameterLabel::Simple("y: i32".to_string())),
+            Some(15..21)
+        );
+    }
+
+    #[test]
+    fn active_param_range_label_offsets_map_utf16_to_bytes() {
+        let label = "fn add(x: i32, y: i32)";
+        assert_eq!(
+            active_param_range(label, &ParameterLabel::LabelOffsets([7, 13])),
+            Some(7..13)
+        );
+    }
+
+    #[test]
+    fn active_param_range_label_offsets_handle_multibyte() {
+        let label = "café(α: T)";
+        let range =
+            active_param_range(label, &ParameterLabel::LabelOffsets([5, 6])).expect("range");
+        assert_eq!(&label[range], "α");
+    }
+
+    #[test]
+    fn signature_popup_origin_below_when_room() {
+        let bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(200.), px(200.)),
+        };
+        let origin = signature_popup_origin(bounds, size(px(8.), px(16.)), 2, 3, 1);
+        assert_eq!(origin, point(px(24.), px(48.)));
+    }
+
+    #[test]
+    fn signature_popup_origin_above_when_no_room() {
+        let bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(200.), px(200.)),
+        };
+        let origin = signature_popup_origin(bounds, size(px(8.), px(16.)), 12, 0, 2);
+        assert_eq!(origin, point(px(0.), px(160.)));
+    }
 
     fn install_globals(cx: &mut TestAppContext) -> Arc<FakeLsp> {
         let lsp = Arc::new(FakeLsp::new());
@@ -273,9 +483,15 @@ mod tests {
         lsp
     }
 
-    fn build_editor(cx: &mut TestAppContext, path: &Path, text: &str) -> Entity<Editor> {
+    fn build_workspace_editor(
+        cx: &mut TestAppContext,
+        path: &Path,
+        text: &str,
+    ) -> (Entity<Workspace>, Entity<Editor>) {
         let path = path.to_path_buf();
         cx.update(|cx| {
+            let workspace = cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+            let workspace_handle = workspace.downgrade();
             let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), text));
             let executor = cx.global::<ExecutorGlobal>().0.clone();
             let multi = cx.new({
@@ -290,12 +506,21 @@ mod tests {
                 let buffer = buffer.clone();
                 |cx| DiffMap::new(buffer, cx)
             });
-            cx.new(|cx| {
+            let editor = cx.new(|cx| {
                 let mut ed = Editor::new(multi, display, diff, EditorMode::full(), cx);
+                ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(path), cx);
                 ed
-            })
+            });
+            (workspace, editor)
         })
+    }
+
+    fn set_mode(cx: &mut TestAppContext, ws: &Entity<Workspace>, mode: &str) {
+        let sm = ws.read_with(cx, |w, _| w.input_state_machine().clone());
+        sm.update(cx, |sm, _| {
+            sm.set_mode_for_test(stoat::keymap::StateValue::String(mode.into()))
+        });
     }
 
     fn sample_help() -> SignatureHelp {
@@ -335,7 +560,8 @@ mod tests {
         lsp.set_capabilities(signature_help_capabilities());
         lsp.set_signature_help(path.to_str().unwrap(), 0, 4, sample_help());
 
-        let editor = build_editor(&mut cx, &path, "add()\n");
+        let (workspace, editor) = build_workspace_editor(&mut cx, &path, "add()\n");
+        set_mode(&mut cx, &workspace, "insert");
         let manager = cx.update(|cx| {
             let editor_clone = editor.clone();
             cx.new(|cx| SignatureHelpManager::new(editor_clone, cx))
@@ -360,7 +586,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let _lsp = install_globals(&mut cx);
         let path = PathBuf::from("/tmp/main.rs");
-        let editor = build_editor(&mut cx, &path, "add()\n");
+        let (_workspace, editor) = build_workspace_editor(&mut cx, &path, "add()\n");
         let manager = cx.update(|cx| cx.new(|cx| SignatureHelpManager::new(editor.clone(), cx)));
 
         let first = manager.update(&mut cx, |m, _| m.bump_request_id());
@@ -383,7 +609,8 @@ mod tests {
         lsp.set_capabilities(signature_help_capabilities());
         lsp.set_signature_help(path.to_str().unwrap(), 0, 4, sample_help());
 
-        let editor = build_editor(&mut cx, &path, "add()\n");
+        let (workspace, editor) = build_workspace_editor(&mut cx, &path, "add()\n");
+        set_mode(&mut cx, &workspace, "insert");
         let manager = cx.update(|cx| {
             let editor_clone = editor.clone();
             cx.new(|cx| SignatureHelpManager::new(editor_clone, cx))

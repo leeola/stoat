@@ -3873,6 +3873,7 @@ impl Render for Editor {
 
         let hover_popup = self.hover_popup.clone();
         let completion_popup = self.completion_popup.clone();
+        let signature_help = self.signature_help_manager.clone();
         let minimap = self.minimap.clone();
         let mut root = div()
             .relative()
@@ -3902,6 +3903,9 @@ impl Render for Editor {
         }
         if let Some(popup) = completion_popup {
             root = root.child(popup);
+        }
+        if let Some(manager) = signature_help {
+            root = root.child(manager);
         }
         if !is_minimap {
             let show_sticky = cx
