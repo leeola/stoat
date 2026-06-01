@@ -24,12 +24,13 @@ pub struct ReviewFileInput {
     pub buffer_text: Arc<String>,
 }
 
-/// Cross-file move provenance for a single review row. Set when the
-/// row participates in a [`stoat_language::structural_diff::ChangeKind::Moved`]
-/// hunk whose [`stoat_language::structural_diff::MoveSource`] points
-/// at a *different* file in the same review session. Intra-file moves
-/// keep this as `None`. The renderer paints a chip
-/// `<- {rel_path}:{line+1}` next to the row when set.
+/// Move provenance for a single review row. Set when the row
+/// participates in a [`stoat_language::structural_diff::ChangeKind::Moved`]
+/// hunk: [`stoat_language::structural_diff::MoveSource`] names a
+/// *different* file for a cross-file move (`rel_path` set) or the same
+/// file for an intra-file move (`rel_path` empty). The renderer paints a
+/// chip `<- {rel_path}:{line+1}` next to the row when set, omitting the
+/// path segment when `rel_path` is empty.
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct MoveProvenance {
     pub rel_path: String,
@@ -52,7 +53,8 @@ pub struct ReviewSide {
     /// loss.
     #[serde(with = "range_vec_codec")]
     pub moved_spans: Vec<Range<usize>>,
-    /// First cross-file move source covering this row, if any.
+    /// First move source covering this row, if any -- cross-file (with a
+    /// `rel_path`) or intra-file (empty `rel_path`).
     pub move_provenance: Option<MoveProvenance>,
 }
 
@@ -254,12 +256,13 @@ fn collect_moved_spans(
     })
 }
 
-/// Per-line cross-file move provenance. For each line on `side` that
-/// participates in a [`LangChangeKind::Moved`] change whose first
-/// `MoveSource` carries `Some(BufferRef)` for a *different* file
-/// (resolved via `rel_path_for`), emit `Some(MoveProvenance { rel_path,
-/// line })`. Intra-file moves and lines untouched by a Moved change get
-/// `None`. The renderer paints the chip with the move-highlight style.
+/// Per-line move provenance. For each line on `side` that participates
+/// in a [`LangChangeKind::Moved`] change, emit `Some(MoveProvenance)`: a
+/// cross-file `MoveSource` (`Some(BufferRef)`, resolved via
+/// `rel_path_for`) yields the source's `rel_path`, while an intra-file
+/// source (`buffer: None`) yields an empty `rel_path`. Cross-file sources
+/// take precedence. Lines untouched by a Moved change get `None`. The
+/// renderer paints the chip with the move-highlight style.
 fn collect_moved_provenance(
     lines: &[&str],
     changes: &[DiffChange],
@@ -284,15 +287,25 @@ fn collect_moved_provenance(
             Some(m) => m,
             None => continue,
         };
-        let foreign = metadata.sources.iter().find_map(|s| {
-            let path = s.buffer.as_ref()?.path.as_path();
-            let rel_path = rel_path_for(path)?;
-            Some(MoveProvenance {
-                rel_path,
-                line: s.line_range.start,
+        let prov = metadata
+            .sources
+            .iter()
+            .find_map(|s| {
+                let rel_path = rel_path_for(s.buffer.as_ref()?.path.as_path())?;
+                Some(MoveProvenance {
+                    rel_path,
+                    line: s.line_range.start,
+                })
             })
-        });
-        let Some(prov) = foreign else {
+            .or_else(|| {
+                metadata.sources.iter().find_map(|s| {
+                    s.buffer.is_none().then(|| MoveProvenance {
+                        rel_path: String::new(),
+                        line: s.line_range.start,
+                    })
+                })
+            });
+        let Some(prov) = prov else {
             continue;
         };
         let cr = &change.byte_range;
@@ -740,6 +753,40 @@ mod tests {
         }];
         let spans = collect_line_spans(&lines, &changes, Side::Rhs);
         assert_eq!(spans, vec![vec![6..11]]);
+    }
+
+    #[test]
+    fn collect_moved_provenance_intra_file_source_yields_empty_rel_path() {
+        let text = "aaa\nbbb\nccc\n";
+        let lines = split_lines(text);
+        let changes = vec![DiffChange {
+            side: Side::Rhs,
+            byte_range: 4..7,
+            kind: structural_diff::ChangeKind::Moved,
+            move_metadata: Some(Arc::new(structural_diff::MoveMetadata {
+                sources: vec![structural_diff::MoveSource {
+                    buffer: None,
+                    side: Side::Lhs,
+                    byte_range: 0..0,
+                    line_range: 5..6,
+                }],
+            })),
+            pair_id: None,
+            deletion_rhs_anchor: None,
+        }];
+        let rel_path_for = |_: &Path| -> Option<String> { None };
+        let prov = collect_moved_provenance(&lines, &changes, Side::Rhs, &rel_path_for);
+        assert_eq!(
+            prov,
+            vec![
+                None,
+                Some(MoveProvenance {
+                    rel_path: String::new(),
+                    line: 5,
+                }),
+                None,
+            ]
+        );
     }
 
     use crate::test_harness::TestHarness;
