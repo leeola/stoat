@@ -5,6 +5,14 @@ use stoat_config::{
     ActionExpr, Binding, Config, EventType, Key, KeyPart, Predicate, Statement, Value,
 };
 
+/// The mode the input state machine starts in. Bindings scoped to it,
+/// or to no mode at all, need no prefix chord to reach.
+const BASE_MODE: &str = "normal";
+
+/// Recursion cap for [`Keymap::chord_for_action`] mode-prefix tracing,
+/// so a pathological cyclic `SetMode` chain cannot loop forever.
+const MAX_MODE_DEPTH: usize = 16;
+
 #[derive(Debug, Clone, PartialEq)]
 pub enum StateValue {
     String(CompactString),
@@ -362,6 +370,78 @@ impl Keymap {
         }
         results
     }
+
+    /// The key chord that invokes `action_name`, as a display label
+    /// (e.g. `"Spc p"`, `"z c"`, `":"`). Submode prefixes are
+    /// reconstructed by tracing `SetMode` bindings back to the base
+    /// `normal` mode. `None` when no binding maps to the action. The
+    /// first binding in config order wins, so a direct normal-mode
+    /// binding takes precedence over a deeper submode one.
+    pub fn chord_for_action(&self, action_name: &str) -> Option<String> {
+        let binding = self
+            .bindings
+            .iter()
+            .find(|b| b.actions.iter().any(|a| a.name == action_name))?;
+        let prefix = self.mode_entry_prefix(binding_mode(binding), 0)?;
+        Some(join_chord(prefix, &binding.key.display_label()))
+    }
+
+    /// The chord that switches into `mode` from the base mode; empty
+    /// for the base `normal` mode or a binding with no mode predicate.
+    /// `None` when no `SetMode` binding reaches `mode`. `depth` guards
+    /// against cyclic `SetMode` chains.
+    fn mode_entry_prefix(&self, mode: Option<&str>, depth: usize) -> Option<String> {
+        let mode = match mode {
+            None | Some(BASE_MODE) => return Some(String::new()),
+            Some(m) => m,
+        };
+        if depth >= MAX_MODE_DEPTH {
+            return None;
+        }
+        let entry = self.bindings.iter().find(|b| {
+            b.actions
+                .iter()
+                .any(|a| a.name == "SetMode" && action_target_mode(a) == Some(mode))
+        })?;
+        let prefix = self.mode_entry_prefix(binding_mode(entry), depth + 1)?;
+        Some(join_chord(prefix, &entry.key.display_label()))
+    }
+}
+
+/// Join a mode-entry `prefix` and a `key` label into a space-separated
+/// chord, dropping the separator when there is no prefix.
+fn join_chord(prefix: String, key: &str) -> String {
+    if prefix.is_empty() {
+        key.to_string()
+    } else {
+        format!("{prefix} {key}")
+    }
+}
+
+/// The mode a binding requires, read from its first `mode == X`
+/// predicate; `None` when the binding is not mode-scoped.
+fn binding_mode(binding: &CompiledBinding) -> Option<&str> {
+    binding.predicates.iter().find_map(predicate_mode)
+}
+
+fn predicate_mode(pred: &Predicate) -> Option<&str> {
+    match pred {
+        Predicate::Eq(field, val) if field.node == "mode" => value_as_str(&val.node),
+        Predicate::And(l, r) => predicate_mode(&l.node).or_else(|| predicate_mode(&r.node)),
+        _ => None,
+    }
+}
+
+/// The mode a `SetMode(mode)` action targets, from its first argument.
+fn action_target_mode(action: &ResolvedAction) -> Option<&str> {
+    action.args.first().and_then(|a| value_as_str(&a.value))
+}
+
+fn value_as_str(val: &Value) -> Option<&str> {
+    match val {
+        Value::String(s) | Value::Ident(s) => Some(s),
+        _ => None,
+    }
 }
 
 fn predicate_mentions_field(pred: &Predicate, field: &str) -> bool {
@@ -577,6 +657,48 @@ mod tests {
 
         let state = TestState::new().set("mode", StateValue::String("insert".into()));
         assert!(!evaluate(&block.predicate.node, &state));
+    }
+
+    #[test]
+    fn chord_for_action_reconstructs_mode_prefixes() {
+        let config = parse_config(
+            r#"on key {
+                mode == normal {
+                    : -> OpenCommandPalette();
+                    Space -> SetMode(space);
+                    z -> SetMode(z);
+                }
+                mode == space {
+                    p -> OpenFileFinder();
+                    b -> SetMode(space_buffer);
+                }
+                mode == space_buffer { n -> OpenBufferPicker(); }
+                mode == z { c -> [FoldAtCursor(), SetMode(normal)]; }
+            }"#,
+        );
+        let keymap = Keymap::compile(&config);
+
+        assert_eq!(
+            keymap.chord_for_action("OpenCommandPalette").as_deref(),
+            Some(":"),
+            "direct normal-mode binding has no prefix"
+        );
+        assert_eq!(
+            keymap.chord_for_action("OpenFileFinder").as_deref(),
+            Some("Spc p"),
+            "leader binding reconstructs the Space prefix"
+        );
+        assert_eq!(
+            keymap.chord_for_action("OpenBufferPicker").as_deref(),
+            Some("Spc b n"),
+            "nested submode chains both prefixes"
+        );
+        assert_eq!(
+            keymap.chord_for_action("FoldAtCursor").as_deref(),
+            Some("z c"),
+            "submode action keeps its entry key"
+        );
+        assert_eq!(keymap.chord_for_action("Unbound"), None);
     }
 
     #[test]
