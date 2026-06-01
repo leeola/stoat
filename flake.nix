@@ -44,6 +44,7 @@
               libGL
               # X11 fallback libraries
               xorg.libX11
+              xorg.libxcb
               xorg.libXcursor
               xorg.libXrandr
               xorg.libXi
@@ -60,6 +61,7 @@
               pkgs.vulkan-loader
               # X11 fallback libraries
               pkgs.xorg.libX11
+              pkgs.xorg.libxcb
               pkgs.xorg.libXcursor
               pkgs.xorg.libXrandr
               pkgs.xorg.libXi
