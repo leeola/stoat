@@ -504,6 +504,22 @@ impl PickerDelegate for CommandPaletteDelegate {
         }
         false
     }
+
+    fn keybinding_for_index(
+        &self,
+        ix: usize,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) -> Option<SharedString> {
+        if !matches!(self.phase, PalettePhase::Filter) {
+            return None;
+        }
+        let (entry_idx, _) = self.matches.get(ix)?;
+        let name = self.entries.get(*entry_idx)?.def.name();
+        let workspace = self.workspace.upgrade()?;
+        let state_machine = workspace.read(cx).input_state_machine().clone();
+        let chord = state_machine.read(cx).keymap().chord_for_action(name)?;
+        Some(SharedString::from(chord))
+    }
 }
 
 impl CommandPaletteDelegate {
@@ -1256,6 +1272,7 @@ mod tests {
             editor::Editor,
             globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
             picker::Picker,
+            settings::Settings,
         };
         use gpui::TestAppContext;
         use std::{path::PathBuf, sync::Arc};
@@ -1272,6 +1289,52 @@ mod tests {
                 cx.set_global(ExecutorGlobal(Executor::new(
                     Arc::new(TestScheduler::new()),
                 )));
+            });
+        }
+
+        #[test]
+        fn keybinding_for_index_shows_action_chord() {
+            let mut cx = TestAppContext::single();
+            let fs = Arc::new(FakeFs::new());
+            install_globals(&mut cx, fs);
+            cx.update(|cx| {
+                cx.set_global(Settings::load_from_source(
+                    "on key { mode == normal { Space -> SetMode(space); } \
+                     mode == space { p -> OpenFileFinder(); } }",
+                ));
+            });
+            let (ws, vcx) = cx.add_window_view(|_, cx| {
+                Workspace::new("main".to_string(), PathBuf::from("/tmp/repo"), cx)
+            });
+            vcx.run_until_parked();
+
+            ws.update_in(vcx, |w, window, cx| {
+                w.dispatch_action(Box::new(stoat_action::OpenCommandPalette), window, cx);
+            });
+            vcx.run_until_parked();
+
+            let picker = ws
+                .read_with(vcx, |w, cx| {
+                    w.modal_layer()
+                        .read(cx)
+                        .active_modal::<Picker<CommandPaletteDelegate>>()
+                })
+                .expect("command palette modal active after OpenCommandPalette");
+
+            picker.update(vcx, |p, cx| {
+                let delegate = p.delegate();
+                let row = delegate
+                    .matches
+                    .iter()
+                    .position(|(entry_idx, _)| {
+                        delegate.entries[*entry_idx].def.name() == "OpenFileFinder"
+                    })
+                    .expect("OpenFileFinder row present in palette");
+                assert_eq!(
+                    delegate.keybinding_for_index(row, cx),
+                    Some(SharedString::from("Spc p")),
+                    "palette resolves the leader chord for the action"
+                );
             });
         }
 
