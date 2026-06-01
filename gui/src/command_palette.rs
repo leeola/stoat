@@ -21,11 +21,29 @@ use gpui::{
     div, AnyElement, App, Context, DismissEvent, Entity, HighlightStyle, IntoElement,
     ParentElement, SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
+use std::collections::VecDeque;
 use stoat::rebase::RebasePause;
 use stoat_action::{
     registry::{self, RegistryEntry},
     ActionKind, ParamValue,
 };
+
+/// Maximum number of confirmed queries retained for history recall.
+pub(crate) const HISTORY_LIMIT: usize = 50;
+
+/// Record `query` as the most recent history entry. An earlier
+/// occurrence is removed first so each query appears once at its
+/// latest position; the oldest entries are dropped once the list
+/// exceeds `limit`. Callers pass a non-empty, trimmed query.
+pub(crate) fn record_query_capped(history: &mut VecDeque<String>, query: String, limit: usize) {
+    if let Some(pos) = history.iter().position(|q| q == &query) {
+        history.remove(pos);
+    }
+    history.push_back(query);
+    while history.len() > limit {
+        history.pop_front();
+    }
+}
 
 pub struct CommandPaletteDelegate {
     /// Every palette-visible entry, captured at construction time.
@@ -53,6 +71,18 @@ pub struct CommandPaletteDelegate {
     /// palette is modal, so workspace state can't drift while it is
     /// up; refiltering reads this directly instead of recomputing.
     availability: Availability,
+    /// Snapshot of the workspace's confirmed-query history taken at
+    /// open, oldest first. Recall reads this local copy so navigation
+    /// never re-enters the workspace lease the keystroke dispatch
+    /// holds; confirms append here and to the durable workspace store.
+    history: VecDeque<String>,
+    /// Position into [`Self::history`] currently recalled into the
+    /// query editor, or `None` when not navigating history.
+    history_cursor: Option<usize>,
+    /// The query text typed before history navigation began. Recall
+    /// filters history to entries sharing this prefix, and restores it
+    /// when the user walks forward past the newest entry.
+    history_prefix: Option<String>,
 }
 
 /// Listing mode for [`CommandPaletteDelegate`]. Toggled between
@@ -242,6 +272,9 @@ impl CommandPaletteDelegate {
             query_editor: None,
             scope: PaletteScope::Active,
             availability,
+            history: VecDeque::new(),
+            history_cursor: None,
+            history_prefix: None,
         };
         delegate.set_matches_for_empty_query();
         delegate
@@ -283,10 +316,11 @@ impl CommandPaletteDelegate {
         self.entries.get(*idx).copied()
     }
 
-    /// Replace the picker query editor's text. No-op when the editor
-    /// has been dropped (the picker entity is gone) or
-    /// [`on_attach`] hasn't run yet.
-    fn clear_query_editor(&self, cx: &mut Context<'_, Picker<Self>>) {
+    /// Replace the picker query editor's text with `text`. No-op when
+    /// the editor has been dropped (the picker entity is gone),
+    /// [`on_attach`] hasn't run yet, or the editor is already empty and
+    /// `text` is empty.
+    fn set_query_editor(&self, text: &str, cx: &mut Context<'_, Picker<Self>>) {
         let Some(editor) = self.query_editor.as_ref().and_then(WeakEntity::upgrade) else {
             return;
         };
@@ -295,10 +329,15 @@ impl CommandPaletteDelegate {
             return;
         };
         let len = singleton.read(cx).text().len();
-        if len == 0 {
+        if len == 0 && text.is_empty() {
             return;
         }
-        singleton.update(cx, |b, cx| b.edit(0..len, "", cx));
+        singleton.update(cx, |b, cx| b.edit(0..len, text, cx));
+    }
+
+    /// Clear the picker query editor's text.
+    fn clear_query_editor(&self, cx: &mut Context<'_, Picker<Self>>) {
+        self.set_query_editor("", cx);
     }
 
     fn query_editor_text(&self, cx: &Context<'_, Picker<Self>>) -> String {
@@ -360,6 +399,128 @@ impl CommandPaletteDelegate {
             self.selected = self.matches.len().saturating_sub(1);
         }
     }
+
+    fn is_navigating_history(&self) -> bool {
+        self.history_cursor.is_some()
+    }
+
+    fn reset_history_cursor(&mut self) {
+        self.history_cursor = None;
+        self.history_prefix = None;
+    }
+
+    /// Drop the recall cursor when the live query no longer matches the
+    /// history entry it last recalled -- i.e. the user edited the text
+    /// after recalling. Returns the still-valid cursor, if any.
+    fn validate_history_cursor(&mut self, current_query: &str) -> Option<usize> {
+        if let Some(pos) = self.history_cursor {
+            if self.history.get(pos).map(String::as_str) != Some(current_query) {
+                self.reset_history_cursor();
+            }
+        }
+        self.history_cursor
+    }
+
+    /// Walk one step toward older history, returning the newest entry
+    /// before the cursor that shares the navigation prefix. The first
+    /// step captures `current_query` as that prefix.
+    fn history_previous(&mut self, current_query: &str) -> Option<String> {
+        if self.validate_history_cursor(current_query).is_none() {
+            self.history_prefix = Some(current_query.to_string());
+        }
+        let prefix = self.history_prefix.clone().unwrap_or_default();
+        let start = self.history_cursor.unwrap_or(self.history.len());
+        for i in (0..start).rev() {
+            if self.history.get(i).is_some_and(|e| e.starts_with(&prefix)) {
+                self.history_cursor = Some(i);
+                return self.history.get(i).cloned();
+            }
+        }
+        None
+    }
+
+    /// Walk one step toward newer history, returning the next entry
+    /// after the cursor that shares the navigation prefix. Returns
+    /// `None` once past the newest match, leaving the caller to restore
+    /// the typed prefix.
+    fn history_next(&mut self, current_query: &str) -> Option<String> {
+        let selected = self.validate_history_cursor(current_query)?;
+        let prefix = self.history_prefix.clone().unwrap_or_default();
+        for i in (selected + 1)..self.history.len() {
+            if self.history.get(i).is_some_and(|e| e.starts_with(&prefix)) {
+                self.history_cursor = Some(i);
+                return self.history.get(i).cloned();
+            }
+        }
+        None
+    }
+
+    /// Record the confirmed `query` as the most recent history entry
+    /// and end any in-progress recall. The local copy updates
+    /// immediately; the durable workspace store updates on a deferred
+    /// pass so confirm does not re-enter the workspace lease the
+    /// keystroke dispatch already holds. Empty queries are ignored.
+    fn record_query(
+        &mut self,
+        query: String,
+        window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) {
+        self.reset_history_cursor();
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+        let query = trimmed.to_string();
+        record_query_capped(&mut self.history, query.clone(), HISTORY_LIMIT);
+        let Some(workspace) = self.workspace.upgrade() else {
+            return;
+        };
+        window.defer(cx, move |_window, cx| {
+            workspace.update(cx, |ws, _| ws.push_command_palette_query(query));
+        });
+    }
+
+    /// Handle `PaletteSelectPrev`: recall an older history entry when
+    /// the selection sits at the top of the list or recall is already
+    /// under way. Returns `true` when an entry was recalled, so the
+    /// picker skips its own selection move.
+    fn history_navigate_prev(&mut self, cx: &mut Context<'_, Picker<Self>>) -> bool {
+        if !matches!(self.phase, PalettePhase::Filter) {
+            return false;
+        }
+        if self.selected != 0 && !self.is_navigating_history() {
+            return false;
+        }
+        let current = self.query_editor_text(cx);
+        match self.history_previous(&current) {
+            Some(entry) => {
+                self.set_query_editor(&entry, cx);
+                true
+            },
+            None => false,
+        }
+    }
+
+    /// Handle `PaletteSelectNext`: walk recall toward newer entries
+    /// while navigating, restoring the typed prefix once past the
+    /// newest match. Returns `true` while recall is active so the
+    /// picker skips its own selection move.
+    fn history_navigate_next(&mut self, cx: &mut Context<'_, Picker<Self>>) -> bool {
+        if !matches!(self.phase, PalettePhase::Filter) || !self.is_navigating_history() {
+            return false;
+        }
+        let current = self.query_editor_text(cx);
+        match self.history_next(&current) {
+            Some(entry) => self.set_query_editor(&entry, cx),
+            None => {
+                let prefix = self.history_prefix.take().unwrap_or_default();
+                self.reset_history_cursor();
+                self.set_query_editor(&prefix, cx);
+            },
+        }
+        true
+    }
 }
 
 impl PickerDelegate for CommandPaletteDelegate {
@@ -412,6 +573,8 @@ impl PickerDelegate for CommandPaletteDelegate {
                 let Some(entry) = self.selected_entry() else {
                     return;
                 };
+                let query = self.query_editor_text(cx);
+                self.record_query(query, window, cx);
                 if entry.def.params().is_empty() {
                     dispatch_action(entry, &[], &self.workspace, window, cx);
                     return;
@@ -498,11 +661,15 @@ impl PickerDelegate for CommandPaletteDelegate {
         _window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> bool {
-        if action.kind() == ActionKind::PaletteScopeToggle {
-            self.toggle_scope(cx);
-            return true;
+        match action.kind() {
+            ActionKind::PaletteScopeToggle => {
+                self.toggle_scope(cx);
+                true
+            },
+            ActionKind::PaletteSelectPrev => self.history_navigate_prev(cx),
+            ActionKind::PaletteSelectNext => self.history_navigate_next(cx),
+            _ => false,
         }
-        false
     }
 
     fn keybinding_for_index(
@@ -641,8 +808,10 @@ pub fn open_command_palette(
 ) {
     let weak = cx.weak_entity();
     let availability = Availability::from_workspace(workspace, cx);
+    let history = workspace.command_palette_history().clone();
     workspace.toggle_modal::<Picker<CommandPaletteDelegate>, _>(window, cx, move |window, cx| {
-        let delegate = CommandPaletteDelegate::new(weak, availability);
+        let mut delegate = CommandPaletteDelegate::new(weak, availability);
+        delegate.history = history;
         Picker::new(delegate, window, cx)
     });
 }
@@ -1404,6 +1573,206 @@ mod tests {
             assert!(
                 pane_editor.read_with(vcx, |ed, _| ed.minimap_visible()),
                 "ToggleMinimap must reach the pane editor, not the palette query editor",
+            );
+        }
+    }
+
+    mod query_history {
+        use super::*;
+        use crate::{
+            globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
+            picker::Picker,
+        };
+        use gpui::{TestAppContext, VisualTestContext};
+        use std::{collections::VecDeque, path::PathBuf, sync::Arc};
+        use stoat::host::{FakeFs, FsHost, FsWatchHost};
+        use stoat_host::NoopFsWatcher;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        fn deque(items: &[&str]) -> VecDeque<String> {
+            items.iter().map(|s| s.to_string()).collect()
+        }
+
+        #[test]
+        fn record_query_capped_dedups_and_caps_oldest_first() {
+            let mut h = deque(&["a", "b", "c"]);
+            record_query_capped(&mut h, "b".to_string(), 5);
+            assert_eq!(h, deque(&["a", "c", "b"]), "duplicate moves to most-recent");
+            record_query_capped(&mut h, "d".to_string(), 3);
+            assert_eq!(h, deque(&["c", "b", "d"]), "oldest dropped past the cap");
+        }
+
+        #[test]
+        fn history_previous_walks_newest_to_oldest() {
+            let mut d = new_delegate();
+            d.history = deque(&["old", "mid", "new"]);
+            assert_eq!(d.history_previous(""), Some("new".to_string()));
+            assert_eq!(d.history_previous("new"), Some("mid".to_string()));
+            assert_eq!(d.history_previous("mid"), Some("old".to_string()));
+            assert_eq!(d.history_previous("old"), None);
+        }
+
+        #[test]
+        fn history_next_walks_oldest_to_newest_then_restores() {
+            let mut d = new_delegate();
+            d.history = deque(&["old", "mid", "new"]);
+            assert_eq!(d.history_previous(""), Some("new".to_string()));
+            assert_eq!(d.history_previous("new"), Some("mid".to_string()));
+            assert_eq!(d.history_previous("mid"), Some("old".to_string()));
+            assert_eq!(d.history_next("old"), Some("mid".to_string()));
+            assert_eq!(d.history_next("mid"), Some("new".to_string()));
+            assert_eq!(
+                d.history_next("new"),
+                None,
+                "no entry past the newest; caller restores the prefix",
+            );
+        }
+
+        #[test]
+        fn history_previous_filters_by_typed_prefix() {
+            let mut d = new_delegate();
+            d.history = deque(&["open file", "quit", "open recent"]);
+            assert_eq!(d.history_previous("open"), Some("open recent".to_string()));
+            assert_eq!(
+                d.history_previous("open recent"),
+                Some("open file".to_string()),
+                "prefix walk skips the non-matching `quit` entry",
+            );
+            assert_eq!(d.history_previous("open file"), None);
+        }
+
+        #[test]
+        fn history_cursor_resets_when_query_edited_away() {
+            let mut d = new_delegate();
+            d.history = deque(&["alpha", "beta"]);
+            assert_eq!(d.history_previous(""), Some("beta".to_string()));
+            assert_eq!(
+                d.history_previous("zzz"),
+                None,
+                "editing away from the recalled entry resets recall",
+            );
+            assert!(!d.is_navigating_history());
+        }
+
+        fn install_globals(cx: &mut TestAppContext, fs: Arc<FakeFs>) {
+            cx.update(|cx| {
+                cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+                cx.set_global(FsWatchHostGlobal(
+                    Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
+                ));
+                cx.set_global(ExecutorGlobal(Executor::new(
+                    Arc::new(TestScheduler::new()),
+                )));
+            });
+        }
+
+        fn open_palette(
+            ws: &Entity<Workspace>,
+            vcx: &mut VisualTestContext,
+        ) -> Entity<Picker<CommandPaletteDelegate>> {
+            ws.update_in(vcx, |w, window, cx| {
+                w.dispatch_action(Box::new(stoat_action::OpenCommandPalette), window, cx);
+            });
+            vcx.run_until_parked();
+            ws.read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<CommandPaletteDelegate>>()
+            })
+            .expect("command palette modal active")
+        }
+
+        fn query_text(
+            picker: &Entity<Picker<CommandPaletteDelegate>>,
+            vcx: &mut VisualTestContext,
+        ) -> String {
+            picker.read_with(vcx, |p, cx| {
+                p.query_editor()
+                    .read(cx)
+                    .multi_buffer()
+                    .read(cx)
+                    .as_singleton()
+                    .expect("singleton")
+                    .read(cx)
+                    .text()
+            })
+        }
+
+        fn type_query(
+            picker: &Entity<Picker<CommandPaletteDelegate>>,
+            vcx: &mut VisualTestContext,
+            text: &str,
+        ) {
+            let buffer = picker.read_with(vcx, |p, cx| {
+                p.query_editor()
+                    .read(cx)
+                    .multi_buffer()
+                    .read(cx)
+                    .as_singleton()
+                    .expect("singleton")
+                    .clone()
+            });
+            buffer.update(vcx, |b, cx| {
+                let len = b.text().len();
+                b.edit(0..len, text, cx);
+            });
+            vcx.run_until_parked();
+        }
+
+        #[test]
+        fn palette_select_prev_recalls_workspace_history_newest_first() {
+            let mut cx = TestAppContext::single();
+            let fs = Arc::new(FakeFs::new());
+            install_globals(&mut cx, fs);
+            let (ws, vcx) = cx.add_window_view(|_, cx| {
+                Workspace::new("main".to_string(), PathBuf::from("/tmp/repo"), cx)
+            });
+            vcx.run_until_parked();
+            ws.update(vcx, |w, _| {
+                w.push_command_palette_query("first".to_string());
+                w.push_command_palette_query("second".to_string());
+            });
+
+            let picker = open_palette(&ws, vcx);
+
+            picker.update_in(vcx, |p, window, cx| {
+                assert!(p.handle_action(&stoat_action::PaletteSelectPrev, window, cx));
+            });
+            vcx.run_until_parked();
+            assert_eq!(query_text(&picker, vcx), "second");
+
+            picker.update_in(vcx, |p, window, cx| {
+                assert!(p.handle_action(&stoat_action::PaletteSelectPrev, window, cx));
+            });
+            vcx.run_until_parked();
+            assert_eq!(query_text(&picker, vcx), "first");
+        }
+
+        #[test]
+        fn confirm_records_typed_query_into_workspace_history() {
+            let mut cx = TestAppContext::single();
+            let fs = Arc::new(FakeFs::new());
+            fs.insert_file("/tmp/repo/main.rs", b"hi\n");
+            install_globals(&mut cx, fs);
+            let (ws, vcx) = cx.add_window_view(|_, cx| {
+                Workspace::new("main".to_string(), PathBuf::from("/tmp/repo"), cx)
+            });
+            ws.update(vcx, |w, cx| {
+                w.open_paths(&[PathBuf::from("/tmp/repo/main.rs")], cx)
+            });
+            vcx.run_until_parked();
+
+            let picker = open_palette(&ws, vcx);
+            type_query(&picker, vcx, "ToggleMinimap");
+            picker.update_in(vcx, |p, window, cx| {
+                p.handle_action(&stoat_action::PickerConfirm, window, cx);
+            });
+            vcx.run_until_parked();
+
+            assert_eq!(
+                ws.read_with(vcx, |w, _| w.command_palette_history().clone()),
+                VecDeque::from(vec!["ToggleMinimap".to_string()]),
+                "confirming records the typed search query",
             );
         }
     }

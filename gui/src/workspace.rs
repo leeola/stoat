@@ -142,6 +142,10 @@ pub struct Workspace {
     focus_handle: FocusHandle,
     last_window_title: Option<SharedString>,
     last_motion: Option<LastMotion>,
+    /// Recently confirmed command-palette queries, oldest first.
+    /// Outlives the per-open `CommandPaletteDelegate` so recall
+    /// survives reopening the palette, and feeds workspace persistence.
+    command_palette_history: VecDeque<String>,
     /// Monotonic id for the most recent LSP goto request the
     /// workspace has spawned. The spawn site captures the id at
     /// dispatch and re-checks it before applying the response so a
@@ -402,6 +406,7 @@ impl Workspace {
             focus_handle: cx.focus_handle(),
             last_window_title: None,
             last_motion: None,
+            command_palette_history: VecDeque::new(),
             lsp_goto_request_seq: 0,
             lsp_rename_request_seq: 0,
             frame_timer: Rc::new(RefCell::new(FrameTimer::new())),
@@ -942,6 +947,22 @@ impl Workspace {
         self.is_fresh = false;
     }
 
+    /// Recently confirmed command-palette queries, oldest first.
+    pub fn command_palette_history(&self) -> &VecDeque<String> {
+        &self.command_palette_history
+    }
+
+    /// Record a confirmed command-palette query as the most recent
+    /// entry, deduplicating earlier occurrences and capping the list
+    /// at [`crate::command_palette::HISTORY_LIMIT`].
+    pub fn push_command_palette_query(&mut self, query: String) {
+        crate::command_palette::record_query_capped(
+            &mut self.command_palette_history,
+            query,
+            crate::command_palette::HISTORY_LIMIT,
+        );
+    }
+
     /// Build the serializable v1 snapshot of every part of the
     /// workspace this iteration knows how to round-trip.
     pub fn to_state(&self, cx: &App) -> crate::workspace_persist::WorkspaceStateV1 {
@@ -976,6 +997,7 @@ impl Workspace {
             pane_items,
             docks,
             buffers,
+            command_palette_history: self.command_palette_history.clone(),
         }
     }
 
@@ -1045,6 +1067,7 @@ impl Workspace {
         self.git_root = state.git_root.clone();
         self.name = SharedString::from(state.name.clone());
         self.is_fresh = false;
+        self.command_palette_history = state.command_palette_history;
         self.buffer_registry
             .update(cx, |registry, cx| registry.restore_from(state.buffers, cx));
         self.pane_tree
@@ -15377,6 +15400,35 @@ mod tests {
         assert!(
             restored.read_with(vcx2, |ed, _| ed.minimap_visible()),
             "minimap visibility must round-trip as visible"
+        );
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_command_palette_history() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, _| {
+            w.mark_dirty();
+            w.push_command_palette_query("open file".to_string());
+            w.push_command_palette_query("quit".to_string());
+        });
+
+        let fs: Arc<dyn stoat::host::FsHost> = Arc::new(stoat::host::FakeFs::new());
+        let path = PathBuf::from("/tmp/state/palette_history.ron");
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        assert_eq!(
+            fresh_ws.read_with(vcx2, |w, _| w.command_palette_history().clone()),
+            VecDeque::from(vec!["open file".to_string(), "quit".to_string()]),
+            "confirmed query history must round-trip oldest-first",
         );
     }
 

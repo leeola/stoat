@@ -25,7 +25,7 @@ use crate::{
 };
 use serde::{Deserialize, Serialize};
 use std::{
-    collections::BTreeMap,
+    collections::{BTreeMap, VecDeque},
     ops::Range,
     path::{Path, PathBuf},
 };
@@ -57,6 +57,10 @@ pub struct WorkspaceStateV1 {
     #[serde(default)]
     pub docks: Vec<DockSnapV1>,
     pub buffers: BufferRegistrySnapshot,
+    /// Recently confirmed command-palette queries, oldest first. Empty
+    /// for snapshots written before query history was persisted.
+    #[serde(default)]
+    pub command_palette_history: VecDeque<String>,
 }
 
 /// V1 dock snapshot: position, current visibility (open width /
