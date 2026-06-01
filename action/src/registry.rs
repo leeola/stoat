@@ -103,6 +103,7 @@ use crate::{
             OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
         },
         set::Set,
+        theme::OpenThemePicker,
         workspace::{
             CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
             RenameWorkspace, SetCwd, SwitchWorkspace, ToggleProjectTree,
@@ -147,6 +148,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenCommandPalette::DEF, |_| {
         Ok(Box::new(OpenCommandPalette))
     });
+    add(OpenThemePicker::DEF, |_| Ok(Box::new(OpenThemePicker)));
     add(OpenFileFinder::DEF, |_| Ok(Box::new(OpenFileFinder)));
     add(OpenFileFinderHSplit::DEF, |_| {
         Ok(Box::new(OpenFileFinderHSplit))
@@ -815,6 +817,7 @@ mod tests {
         "ClosePane",
         "CloseOtherPanes",
         "OpenCommandPalette",
+        "OpenThemePicker",
         "OpenFileFinder",
         "OpenFileFinderHSplit",
         "OpenFileFinderVSplit",
@@ -1187,7 +1190,7 @@ mod tests {
         // + 1 ToggleRelativeLineNumbers (cycle gutter line-number mode).
         // + 4 FoldAtCursor / UnfoldAtCursor / FoldAll / UnfoldAll.
         // + 1 OpenTerminalDock (run pane hosted in a bottom dock).
-        assert_eq!(all().count(), 335);
+        assert_eq!(all().count(), 336);
     }
 
     #[test]

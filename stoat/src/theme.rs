@@ -6,7 +6,7 @@
 
 use ratatui::style::{Color, Modifier, Style};
 use snafu::{OptionExt, Snafu};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use stoat_config::{Config, Expr, Setting, Spanned, Statement, ThemeBlock, Value};
 
 #[derive(Debug, Clone)]
@@ -152,6 +152,21 @@ impl Theme {
             bg_alpha,
         })
     }
+}
+
+/// Distinct `theme NAME` block names declared in `config`, in source
+/// order. A name carrying multiple blocks (user overrides layered on a
+/// built-in) appears once, at its first occurrence.
+pub fn list_themes(config: &Config) -> Vec<String> {
+    let mut seen = HashSet::new();
+    config
+        .themes
+        .iter()
+        .filter_map(|block| {
+            let name = &block.node.name.node;
+            seen.insert(name.clone()).then(|| name.clone())
+        })
+        .collect()
 }
 
 fn apply_setting(
@@ -619,6 +634,22 @@ mod tests {
             load_err(src, "light"),
             ThemeError::ThemeNotFound { name, .. } if name == "light"
         ));
+    }
+
+    #[test]
+    fn list_themes_returns_distinct_names_in_source_order() {
+        let src = r##"
+            theme dark { ui.cursor.fg = red; }
+            theme light { ui.cursor.fg = blue; }
+            theme dark { ui.cursor.bg = green; }
+        "##;
+        let (config, errors) = parse(src);
+        assert!(errors.is_empty(), "parse errors: {errors:?}");
+        let config = config.expect("expected successful parse");
+        assert_eq!(
+            list_themes(&config),
+            vec!["dark".to_string(), "light".to_string()]
+        );
     }
 
     #[test]

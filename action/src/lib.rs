@@ -105,6 +105,7 @@ pub use defs::{
         OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
     },
     set::Set,
+    theme::OpenThemePicker,
     workspace::{
         CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
         RenameWorkspace, SetCwd, SwitchWorkspace, ToggleProjectTree,

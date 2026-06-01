@@ -16,4 +16,5 @@ pub mod rebase;
 pub mod review;
 pub mod run;
 pub mod set;
+pub mod theme;
 pub mod workspace;

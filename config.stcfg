@@ -595,6 +595,7 @@ on key {
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
         e -> ToggleProjectTree();
+        T -> OpenThemePicker();
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];

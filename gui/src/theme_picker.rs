@@ -1,0 +1,304 @@
+//! Theme picker modal delegate.
+//!
+//! Lists every theme declared in the active config and applies the
+//! highlighted theme live as the selection moves, so the user sees a
+//! previewed theme before committing. Confirm keeps the previewed
+//! theme; dismiss restores the theme that was active when the picker
+//! opened.
+
+use crate::{
+    picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
+    settings::Settings,
+    theme::{set_active_theme, ActiveTheme, Theme},
+    workspace::Workspace,
+};
+use gpui::{
+    div, AnyElement, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
+    SharedString, Styled, StyledText, Task, Window,
+};
+
+pub struct ThemePickerDelegate {
+    /// Every theme name declared in the config, in source order.
+    themes: Vec<String>,
+    /// Index into [`Self::themes`] plus the matched character indices
+    /// for the active query, ordered for display.
+    matches: Vec<(usize, Vec<u32>)>,
+    selected: usize,
+    /// The theme active when the picker opened. Restored on dismiss so
+    /// arrowing through previews leaves no trace when the user cancels.
+    prior_theme: stoat::theme::Theme,
+}
+
+impl ThemePickerDelegate {
+    /// Build a delegate over `themes`, restoring `prior_theme` on
+    /// dismiss. The row matching `prior_theme`'s name starts selected
+    /// so the highlight reflects the active theme.
+    pub fn new(themes: Vec<String>, prior_theme: stoat::theme::Theme) -> Self {
+        let selected = themes
+            .iter()
+            .position(|name| *name == prior_theme.name)
+            .unwrap_or(0);
+        let mut delegate = Self {
+            themes,
+            matches: Vec::new(),
+            selected,
+            prior_theme,
+        };
+        delegate.set_matches_for_empty_query();
+        delegate
+    }
+
+    fn set_matches_for_empty_query(&mut self) {
+        self.matches = (0..self.themes.len()).map(|i| (i, Vec::new())).collect();
+    }
+
+    fn refilter(&mut self, query: &str) {
+        let trimmed = query.trim();
+        if trimmed.is_empty() {
+            self.set_matches_for_empty_query();
+        } else {
+            let items = self
+                .themes
+                .iter()
+                .enumerate()
+                .map(|(i, name)| (i, name.clone()));
+            match rank_matches(trimmed, items) {
+                Some(ranked) => {
+                    self.matches = ranked
+                        .into_iter()
+                        .map(|m| (m.item, m.matched_indices))
+                        .collect();
+                },
+                None => self.set_matches_for_empty_query(),
+            }
+        }
+
+        if self.selected >= self.matches.len() {
+            self.selected = self.matches.len().saturating_sub(1);
+        }
+    }
+
+    fn selected_theme(&self) -> Option<&str> {
+        let (idx, _) = self.matches.get(self.selected)?;
+        self.themes.get(*idx).map(String::as_str)
+    }
+
+    /// Resolve the highlighted theme from the active config and install
+    /// it as the global theme, repainting the UI. No-op when no theme
+    /// is selected.
+    fn apply_selected(&self, cx: &mut Context<'_, Picker<Self>>) {
+        let Some(name) = self.selected_theme() else {
+            return;
+        };
+        let theme = {
+            let config = &cx.global::<Settings>().config;
+            Theme::from_config(config, name)
+        };
+        set_active_theme(cx, theme);
+    }
+}
+
+impl PickerDelegate for ThemePickerDelegate {
+    fn match_count(&self) -> usize {
+        self.matches.len()
+    }
+
+    fn selected_index(&self) -> usize {
+        self.selected
+    }
+
+    fn set_selected_index(&mut self, ix: usize, _cx: &mut Context<'_, Picker<Self>>) {
+        if ix < self.matches.len() {
+            self.selected = ix;
+        }
+    }
+
+    fn update_matches(&mut self, query: String, _cx: &mut Context<'_, Picker<Self>>) -> Task<()> {
+        self.refilter(&query);
+        Task::ready(())
+    }
+
+    fn confirm(
+        &mut self,
+        _secondary: Option<PickerSecondary>,
+        _window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) {
+        self.apply_selected(cx);
+        cx.emit(DismissEvent);
+    }
+
+    fn dismissed(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        set_active_theme(cx, Theme(self.prior_theme.clone()));
+    }
+
+    fn render_match(
+        &self,
+        ix: usize,
+        selected: bool,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) -> AnyElement {
+        let Some((theme_idx, matched)) = self.matches.get(ix) else {
+            return div().into_any_element();
+        };
+        let Some(name) = self.themes.get(*theme_idx) else {
+            return div().into_any_element();
+        };
+        let color = cx.theme().modal_picker;
+        let runs = match_highlight_runs(
+            name,
+            matched,
+            HighlightStyle {
+                color: Some(gpui::white()),
+                ..Default::default()
+            },
+        );
+        let label = StyledText::new(SharedString::from(name.clone())).with_highlights(runs);
+        let mut row = div().px_2().text_color(color).child(label);
+        if selected {
+            row = row.bg(cx.theme().modal_selection);
+        }
+        row.into_any_element()
+    }
+
+    fn selection_changed(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        self.apply_selected(cx);
+    }
+}
+
+/// Open the theme picker as a modal. Constructed in
+/// [`Workspace::dispatch_action`] when `OpenThemePicker` is dispatched.
+pub fn open_theme_picker(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let themes = stoat::theme::list_themes(&cx.global::<Settings>().config);
+    let prior_theme = cx.global::<Theme>().0.clone();
+    workspace.toggle_modal::<Picker<ThemePickerDelegate>, _>(window, cx, move |window, cx| {
+        Picker::new(ThemePickerDelegate::new(themes, prior_theme), window, cx)
+    });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::globals::ExecutorGlobal;
+    use gpui::{Entity, TestAppContext, VisualTestContext};
+    use std::sync::Arc;
+    use stoat_scheduler::{Executor, TestScheduler};
+
+    const TWO_THEMES: &str = "theme alpha { ui.cursor.fg = red; } \
+                              theme beta { ui.cursor.fg = blue; }";
+
+    fn matched_names(delegate: &ThemePickerDelegate) -> Vec<String> {
+        delegate
+            .matches
+            .iter()
+            .map(|(i, _)| delegate.themes[*i].clone())
+            .collect()
+    }
+
+    fn delegate(themes: &[&str], current: &str) -> ThemePickerDelegate {
+        let prior = Theme::load_from_source(
+            &format!("theme {current} {{ ui.cursor.fg = red; }}"),
+            current,
+        )
+        .0;
+        ThemePickerDelegate::new(themes.iter().map(|s| s.to_string()).collect(), prior)
+    }
+
+    #[test]
+    fn lists_every_theme_in_source_order() {
+        let d = delegate(&["alpha", "beta", "gamma"], "alpha");
+        assert_eq!(d.match_count(), 3);
+        assert_eq!(matched_names(&d), vec!["alpha", "beta", "gamma"]);
+    }
+
+    #[test]
+    fn new_preselects_the_active_theme_row() {
+        let d = delegate(&["alpha", "beta", "gamma"], "beta");
+        assert_eq!(d.selected_index(), 1);
+    }
+
+    #[test]
+    fn refilter_narrows_to_query_matches() {
+        let mut d = delegate(&["solarized", "dracula", "gruvbox"], "solarized");
+        d.refilter("dra");
+        assert_eq!(matched_names(&d), vec!["dracula"]);
+    }
+
+    fn install_globals(cx: &mut TestAppContext, active: &str) {
+        cx.update(|cx| {
+            cx.set_global(ExecutorGlobal(Executor::new(
+                Arc::new(TestScheduler::new()),
+            )));
+            cx.set_global(Settings::load_from_source(TWO_THEMES));
+            let theme = Theme::load_from_source(TWO_THEMES, active);
+            set_active_theme(cx, theme);
+        });
+    }
+
+    fn active_theme_name(vcx: &mut VisualTestContext) -> String {
+        vcx.update(|_, cx| cx.global::<Theme>().0.name.clone())
+    }
+
+    fn build_picker(
+        cx: &mut TestAppContext,
+    ) -> (Entity<Picker<ThemePickerDelegate>>, &mut VisualTestContext) {
+        cx.add_window_view(|window, cx| {
+            let themes = stoat::theme::list_themes(&cx.global::<Settings>().config);
+            let prior = cx.global::<Theme>().0.clone();
+            Picker::new(ThemePickerDelegate::new(themes, prior), window, cx)
+        })
+    }
+
+    #[test]
+    fn selection_change_previews_the_highlighted_theme() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx, "alpha");
+        let (picker, vcx) = build_picker(&mut cx);
+        vcx.run_until_parked();
+
+        picker.update(vcx, |p, cx| p.set_selected_index(1, cx));
+
+        assert_eq!(active_theme_name(vcx), "beta");
+    }
+
+    #[test]
+    fn dismiss_restores_the_theme_active_at_open() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx, "alpha");
+        let (picker, vcx) = build_picker(&mut cx);
+        vcx.run_until_parked();
+
+        picker.update(vcx, |p, cx| p.set_selected_index(1, cx));
+        assert_eq!(active_theme_name(vcx), "beta");
+
+        vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::DismissModal, window, cx);
+            });
+        });
+
+        assert_eq!(active_theme_name(vcx), "alpha");
+    }
+
+    #[test]
+    fn confirm_keeps_the_previewed_theme() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx, "alpha");
+        let (picker, vcx) = build_picker(&mut cx);
+        vcx.run_until_parked();
+
+        picker.update(vcx, |p, cx| p.set_selected_index(1, cx));
+
+        vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerConfirm, window, cx);
+            });
+        });
+
+        assert_eq!(active_theme_name(vcx), "beta");
+    }
+}
