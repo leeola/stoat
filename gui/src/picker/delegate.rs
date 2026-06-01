@@ -1,5 +1,5 @@
 use crate::{editor::Editor, picker::Picker};
-use gpui::{AnyElement, Context, Entity, Task, Window};
+use gpui::{AnyElement, Context, Entity, SharedString, Task, Window};
 use stoat_action::Action;
 
 /// Confirmation modifier carried by [`PickerDelegate::confirm`].
@@ -86,4 +86,35 @@ pub trait PickerDelegate: Sized + 'static {
     /// no-op; preview-bearing delegates override to refresh the
     /// preview content lazily as selection moves.
     fn selection_changed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
+
+    /// Render an optional section label above the result list, between
+    /// the query editor and the matches. Default `None` renders no
+    /// header.
+    fn render_header(&self, _cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        None
+    }
+
+    /// Render an optional element below the result list. Default `None`
+    /// renders no footer.
+    fn render_footer(&self, _cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        None
+    }
+
+    /// Row indices after which the list paints a horizontal group
+    /// divider. Default empty draws no dividers. Indices are match
+    /// positions, not display rows.
+    fn separators_after_indices(&self) -> Vec<usize> {
+        Vec::new()
+    }
+
+    /// The keybinding hint shown at the right edge of row `ix`, already
+    /// formatted for display (e.g. the chord label). Default `None`
+    /// shows no hint.
+    fn keybinding_for_index(
+        &self,
+        _ix: usize,
+        _cx: &mut Context<'_, Picker<Self>>,
+    ) -> Option<SharedString> {
+        None
+    }
 }

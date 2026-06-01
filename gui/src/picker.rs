@@ -3,12 +3,14 @@ mod delegate;
 use crate::{
     editor::{Editor, EditorEvent},
     modal_layer::ModalView,
+    theme::ActiveTheme,
 };
 pub use delegate::{PickerDelegate, PickerSecondary};
 use gpui::{
-    div, uniform_list, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
-    Focusable, HighlightStyle, InteractiveElement, IntoElement, ParentElement, Render,
-    ScrollStrategy, Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    div, px, transparent_black, uniform_list, AppContext, Context, DismissEvent, Entity,
+    EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement, IntoElement,
+    ParentElement, Render, ScrollStrategy, Styled, Subscription, Task, UniformListScrollHandle,
+    WeakEntity, Window,
 };
 use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
@@ -322,8 +324,42 @@ impl<D: PickerDelegate> Render for Picker<D> {
             };
             picker.update(cx, |this, cx| {
                 let selected = this.delegate.selected_index();
+                let separators = this.delegate.separators_after_indices();
+                let separator_color = cx.theme().border_inactive;
+                let keybinding_color = cx.theme().muted_text;
                 range
-                    .map(|ix| this.delegate.render_match(ix, ix == selected, cx))
+                    .map(|ix| {
+                        let match_el = this.delegate.render_match(ix, ix == selected, cx);
+                        let body = match this.delegate.keybinding_for_index(ix, cx) {
+                            Some(keybinding) => div()
+                                .flex()
+                                .flex_row()
+                                .items_center()
+                                .w_full()
+                                .child(div().flex_grow().min_w_0().child(match_el))
+                                .child(
+                                    div()
+                                        .flex_none()
+                                        .px_2()
+                                        .text_color(keybinding_color)
+                                        .child(keybinding),
+                                )
+                                .into_any_element(),
+                            None => match_el,
+                        };
+                        let divider = if separators.contains(&ix) {
+                            separator_color
+                        } else {
+                            transparent_black()
+                        };
+                        div()
+                            .flex()
+                            .flex_col()
+                            .w_full()
+                            .child(body)
+                            .child(div().h(px(1.0)).bg(divider))
+                            .into_any_element()
+                    })
                     .collect()
             })
         })
@@ -331,31 +367,48 @@ impl<D: PickerDelegate> Render for Picker<D> {
         .flex_grow();
 
         let preview = self.delegate.render_preview(cx);
+        let header = self.delegate.render_header(cx);
+        let footer = self.delegate.render_footer(cx);
         match preview {
-            None => div()
-                .flex()
-                .flex_col()
-                .size_full()
-                .track_focus(&self.focus_handle)
-                .child(self.query_editor.clone())
-                .child(list)
-                .into_any_element(),
-            Some(preview) => div()
-                .flex()
-                .flex_row()
-                .size_full()
-                .track_focus(&self.focus_handle)
-                .child(
-                    div()
-                        .flex()
-                        .flex_col()
-                        .w_2_5()
-                        .min_w_0()
-                        .child(self.query_editor.clone())
-                        .child(list),
-                )
-                .child(div().flex_grow().min_w_0().child(preview))
-                .into_any_element(),
+            None => {
+                let mut column = div()
+                    .flex()
+                    .flex_col()
+                    .size_full()
+                    .track_focus(&self.focus_handle)
+                    .child(self.query_editor.clone());
+                if let Some(header) = header {
+                    column = column.child(header);
+                }
+                column = column.child(list);
+                if let Some(footer) = footer {
+                    column = column.child(footer);
+                }
+                column.into_any_element()
+            },
+            Some(preview) => {
+                let mut left = div()
+                    .flex()
+                    .flex_col()
+                    .w_2_5()
+                    .min_w_0()
+                    .child(self.query_editor.clone());
+                if let Some(header) = header {
+                    left = left.child(header);
+                }
+                left = left.child(list);
+                if let Some(footer) = footer {
+                    left = left.child(footer);
+                }
+                div()
+                    .flex()
+                    .flex_row()
+                    .size_full()
+                    .track_focus(&self.focus_handle)
+                    .child(left)
+                    .child(div().flex_grow().min_w_0().child(preview))
+                    .into_any_element()
+            },
         }
     }
 }
@@ -372,7 +425,7 @@ impl<D: PickerDelegate> EventEmitter<DismissEvent> for Picker<D> {}
 mod tests {
     use super::*;
     use crate::globals::ExecutorGlobal;
-    use gpui::{AnyElement, AppContext, TestAppContext, VisualTestContext};
+    use gpui::{AnyElement, AppContext, SharedString, TestAppContext, VisualTestContext};
     use std::sync::{Arc, Mutex};
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -388,6 +441,9 @@ mod tests {
         confirmed: Arc<Mutex<Vec<Option<PickerSecondary>>>>,
         dismissed: Arc<Mutex<u32>>,
         selection_changes: Arc<Mutex<u32>>,
+        with_hooks: bool,
+        header_calls: Arc<Mutex<u32>>,
+        keybinding_calls: Arc<Mutex<u32>>,
     }
 
     impl TestDelegate {
@@ -399,6 +455,9 @@ mod tests {
                 confirmed: Arc::new(Mutex::new(Vec::new())),
                 dismissed: Arc::new(Mutex::new(0)),
                 selection_changes: Arc::new(Mutex::new(0)),
+                with_hooks: false,
+                header_calls: Arc::new(Mutex::new(0)),
+                keybinding_calls: Arc::new(Mutex::new(0)),
             }
         }
     }
@@ -452,6 +511,37 @@ mod tests {
 
         fn selection_changed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {
             *self.selection_changes.lock().expect("test mutex") += 1;
+        }
+
+        fn render_header(&self, _cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+            *self.header_calls.lock().expect("header mutex") += 1;
+            self.with_hooks.then(|| {
+                div()
+                    .child(SharedString::from("Section"))
+                    .into_any_element()
+            })
+        }
+
+        fn render_footer(&self, _cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+            self.with_hooks
+                .then(|| div().child(SharedString::from("Footer")).into_any_element())
+        }
+
+        fn separators_after_indices(&self) -> Vec<usize> {
+            if self.with_hooks {
+                vec![0]
+            } else {
+                Vec::new()
+            }
+        }
+
+        fn keybinding_for_index(
+            &self,
+            _ix: usize,
+            _cx: &mut Context<'_, Picker<Self>>,
+        ) -> Option<SharedString> {
+            *self.keybinding_calls.lock().expect("keybinding mutex") += 1;
+            self.with_hooks.then(|| SharedString::from("ctrl-x"))
         }
     }
 
@@ -519,6 +609,27 @@ mod tests {
         h.picker.update(h.vcx, |p, cx| p.set_selected_index(1, cx));
 
         assert_eq!(h.picker.read_with(h.vcx, |p, _| p.selected_index()), 1);
+    }
+
+    #[test]
+    fn render_invokes_delegate_visual_hooks() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let mut delegate = TestDelegate::new(vec!["alpha".into(), "beta".into()]);
+        delegate.with_hooks = true;
+        let header_calls = delegate.header_calls.clone();
+        let keybinding_calls = delegate.keybinding_calls.clone();
+        let (_picker, vcx) = cx.add_window_view(|window, cx| Picker::new(delegate, window, cx));
+        vcx.run_until_parked();
+
+        assert!(
+            *header_calls.lock().expect("header mutex") > 0,
+            "render_header is invoked during picker render"
+        );
+        assert!(
+            *keybinding_calls.lock().expect("keybinding mutex") > 0,
+            "keybinding_for_index is invoked per rendered row"
+        );
     }
 
     #[test]
