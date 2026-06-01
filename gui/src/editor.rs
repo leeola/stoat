@@ -373,6 +373,47 @@ struct ReviewRenderData {
     moved_spans: Vec<(u32, Range<usize>)>,
 }
 
+/// Build per-row "moved from" provenance for a plain editor from the
+/// buffer's [`stoat::DiffMap`] Moved hunks. Emits a chip only for
+/// intra-file sources (`buffer: None`) with an empty `rel_path`;
+/// cross-file sources keep their filename chip via
+/// [`render::apply_move_chip_overlay`], so the two paths never paint the
+/// same row twice.
+fn collect_move_provenances_from_diff(
+    diff: &stoat::DiffMap,
+) -> Vec<(u32, stoat::review::MoveProvenance)> {
+    let mut out = Vec::new();
+    for hunk in diff.hunks_in_range(0..u32::MAX) {
+        if !matches!(hunk.status, DiffHunkStatus::Moved) {
+            continue;
+        }
+        let Some(detail) = hunk.token_detail.as_ref() else {
+            continue;
+        };
+        let Some(meta) = detail
+            .buffer_spans
+            .iter()
+            .find_map(|span| span.move_metadata.as_ref())
+        else {
+            continue;
+        };
+        let Some(source) = meta.sources.first() else {
+            continue;
+        };
+        if source.buffer.is_some() {
+            continue;
+        }
+        let provenance = stoat::review::MoveProvenance {
+            rel_path: String::new(),
+            line: source.line_range.start,
+        };
+        for row in hunk.buffer_line_range.clone() {
+            out.push((row, provenance.clone()));
+        }
+    }
+    out
+}
+
 impl Editor {
     pub fn new(
         multi_buffer: Entity<MultiBuffer>,
@@ -3636,6 +3677,11 @@ impl Editor {
         let blame_visible_with_data = blame_lines.as_ref().is_some_and(|v| !v.is_empty());
         let metrics = render::gutter_metrics(&display_snapshot, blame_visible_with_data);
         let diff_map_inner = self.diff_map.read(cx).diff().clone();
+        let diff_move_provenances = if self.review_session.is_none() {
+            collect_move_provenances_from_diff(&diff_map_inner)
+        } else {
+            Vec::new()
+        };
         let diagnostic_row_map = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
             (Some(path), Some(set)) => {
                 Some(render::compute_row_severity_for_path(set.read(cx), path))
@@ -3723,7 +3769,11 @@ impl Editor {
             diff_map: &diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
             review_chunk_markers: &review_data.chunk_markers,
-            review_move_provenances: &review_data.provenances,
+            review_move_provenances: if self.review_session.is_some() {
+                &review_data.provenances
+            } else {
+                &diff_move_provenances
+            },
             blame: blame_paint,
             inline_blame: inline_blame_paint,
             indent_guides: indent_guide_paint,
@@ -6265,6 +6315,63 @@ mod tests {
             assert!(data.provenances.is_empty());
             assert!(data.moved_spans.is_empty());
         });
+    }
+
+    #[test]
+    fn collect_move_provenances_from_diff_emits_same_file_chips_only() {
+        use std::sync::Arc;
+        use stoat_language::structural_diff::{BufferRef, MoveMetadata, MoveSource, Side};
+
+        let moved_hunk = |buffer: Option<BufferRef>, range: Range<u32>| stoat::DiffHunk {
+            status: DiffHunkStatus::Moved,
+            staged: false,
+            buffer_start_line: range.start,
+            buffer_line_range: range,
+            base_byte_range: 0..0,
+            anchor_range: None,
+            token_detail: Some(Arc::new(stoat::TokenDetail {
+                buffer_spans: vec![stoat::ChangeSpan {
+                    byte_range: 0..5,
+                    kind: stoat::ChangeKind::Moved,
+                    move_metadata: Some(Arc::new(MoveMetadata {
+                        sources: vec![MoveSource {
+                            buffer,
+                            side: Side::Lhs,
+                            byte_range: 0..0,
+                            line_range: 2..6,
+                        }],
+                    })),
+                }],
+                base_spans: Vec::new(),
+            })),
+        };
+        let cross_file = BufferRef {
+            path: PathBuf::from("/repo/other.rs"),
+            fingerprint: [0u8; 32],
+        };
+        let diff = stoat::DiffMap::from_hunks(
+            [
+                moved_hunk(None, 7..11),
+                moved_hunk(Some(cross_file), 20..21),
+            ],
+            None,
+        );
+
+        let same_file = || stoat::review::MoveProvenance {
+            rel_path: String::new(),
+            line: 2,
+        };
+        assert_eq!(
+            collect_move_provenances_from_diff(&diff),
+            vec![
+                (7, same_file()),
+                (8, same_file()),
+                (9, same_file()),
+                (10, same_file()),
+            ],
+            "intra-file move emits an empty-rel_path chip per row; the cross-file \
+             move is left to apply_move_chip_overlay"
+        );
     }
 
     #[test]
