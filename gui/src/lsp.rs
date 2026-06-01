@@ -7,6 +7,7 @@ pub mod inlay_hints;
 pub mod references;
 pub mod rename;
 pub mod semantic_tokens;
+pub mod signature_help;
 
 pub use code_action::CodeActionPickerDelegate;
 pub use completion::CompletionPopup;
@@ -14,3 +15,4 @@ pub use hover::HoverPopup;
 pub use inlay_hints::InlayHintsManager;
 pub use references::ReferencesPickerDelegate;
 pub use semantic_tokens::SemanticTokensManager;
+pub use signature_help::SignatureHelpManager;

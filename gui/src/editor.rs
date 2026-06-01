@@ -188,6 +188,7 @@ pub struct Editor {
     completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
     inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
     semantic_tokens_manager: Option<Entity<crate::lsp::SemanticTokensManager>>,
+    signature_help_manager: Option<Entity<crate::lsp::SignatureHelpManager>>,
     syntax_map_updater: Option<Entity<crate::syntax_updater::SyntaxMapUpdater>>,
     pending_goto_word_labels: Option<std::collections::BTreeMap<String, usize>>,
     pending_goto_word_input: String,
@@ -430,6 +431,7 @@ impl Editor {
             completion_popup: None,
             inlay_hints_manager: None,
             semantic_tokens_manager: None,
+            signature_help_manager: None,
             syntax_map_updater: None,
             pending_goto_word_labels: None,
             pending_goto_word_input: String::new(),
@@ -2812,6 +2814,25 @@ impl Editor {
 
     pub fn hover_popup(&self) -> Option<&Entity<crate::lsp::HoverPopup>> {
         self.hover_popup.as_ref()
+    }
+
+    /// Construct the [`crate::lsp::SignatureHelpManager`] entity that
+    /// observes this editor's cursor transitions and caches the LSP
+    /// signature-help response for the floating widget. Workspace wiring
+    /// calls this once after [`Self::set_workspace`]; tests that exercise
+    /// the manager directly construct the entity themselves.
+    pub fn install_signature_help(&mut self, cx: &mut Context<'_, Self>) {
+        if self.signature_help_manager.is_some() {
+            return;
+        }
+        let editor = cx.entity();
+        let manager =
+            cx.new(|manager_cx| crate::lsp::SignatureHelpManager::new(editor, manager_cx));
+        self.signature_help_manager = Some(manager);
+    }
+
+    pub fn signature_help_manager(&self) -> Option<&Entity<crate::lsp::SignatureHelpManager>> {
+        self.signature_help_manager.as_ref()
     }
 
     /// Construct the [`crate::lsp::CompletionPopup`] entity that

@@ -1,0 +1,400 @@
+use crate::{
+    editor::{Editor, EditorEvent},
+    globals::{LanguageRegistry, LspHostGlobal},
+};
+use gpui::{Context, Entity, Subscription, Task, WeakEntity};
+use lsp_types::{
+    SignatureHelp, SignatureHelpParams, SignatureInformation, TextDocumentIdentifier,
+    TextDocumentPositionParams, Uri,
+};
+use std::{path::Path, str::FromStr, sync::Arc};
+use stoat::{
+    host::{LanguageServerFeature, LspHost},
+    lsp::util::byte_offset_to_lsp_pos,
+};
+use stoat_text::{Anchor, Bias};
+
+/// Drives `textDocument/signatureHelp` requests as the primary cursor
+/// moves through a function call's argument list. Owned per-editor,
+/// subscribes to the host editor's [`EditorEvent::Changed`] stream and
+/// re-queries whenever the cursor's buffer offset transitions to a new
+/// position. The cached signatures feed the floating widget rendered by
+/// the editor layer.
+///
+/// Behaviour mirrors [`crate::lsp::HoverPopup`]:
+/// - cursor offset equal to `anchored_at` -> no-op (the cache already corresponds to this position)
+/// - cursor offset moved -> drop any in-flight request (its `Task` is replaced and the future
+///   cancelled), clear the cache, and spawn a new request whose completion writes the signatures
+///   back
+///
+/// The language server reports `None` outside a call context, so this
+/// layer needs no syntactic gating; the cursor sitting between a call's
+/// parentheses is what produces signatures.
+///
+/// Each request launches a fresh language server through the global
+/// [`LspHostGlobal`] factory, matching the shape used by
+/// [`crate::lsp::HoverPopup`] and [`crate::lsp::InlayHintsManager`].
+///
+/// FIXME: route signature help through a per-language `LspServer` cache
+/// instead of launching a new child process per request.
+pub struct SignatureHelpManager {
+    editor: WeakEntity<Editor>,
+    anchored_at: Option<Anchor>,
+    signatures: Vec<SignatureInformation>,
+    active_signature: Option<u32>,
+    active_parameter: Option<u32>,
+    pending_task: Option<Task<()>>,
+    /// Monotonic id for the most recent signature-help RPC spawn. The
+    /// spawn captures the id before launching; the response branch
+    /// re-checks it so a late reply for an earlier cursor position
+    /// cannot overwrite the cache's current content.
+    request_seq: u64,
+    _subscription: Subscription,
+}
+
+impl SignatureHelpManager {
+    pub fn new(editor: Entity<Editor>, cx: &mut Context<'_, Self>) -> Self {
+        let weak = editor.downgrade();
+        let subscription = cx.subscribe(&editor, |this, _editor, _event: &EditorEvent, cx| {
+            this.reconcile(cx);
+        });
+        Self {
+            editor: weak,
+            anchored_at: None,
+            signatures: Vec::new(),
+            active_signature: None,
+            active_parameter: None,
+            pending_task: None,
+            request_seq: 0,
+            _subscription: subscription,
+        }
+    }
+
+    pub fn signatures(&self) -> &[SignatureInformation] {
+        &self.signatures
+    }
+
+    pub fn active_signature(&self) -> Option<u32> {
+        self.active_signature
+    }
+
+    pub fn active_parameter(&self) -> Option<u32> {
+        self.active_parameter
+    }
+
+    pub fn anchored_at(&self) -> Option<&Anchor> {
+        self.anchored_at.as_ref()
+    }
+
+    pub(crate) fn bump_request_id(&mut self) -> u64 {
+        self.request_seq += 1;
+        self.request_seq
+    }
+
+    pub(crate) fn request_id(&self) -> u64 {
+        self.request_seq
+    }
+
+    /// Read the host editor's primary cursor offset and reconcile the
+    /// cache against it: sit tight when the cursor has not moved,
+    /// otherwise drop stale signatures and kick off a fresh request.
+    fn reconcile(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.editor.upgrade() else {
+            self.clear();
+            return;
+        };
+        let snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
+        let head = editor.read(cx).selections().newest_anchor().head();
+        let offset = snapshot.resolve_anchor(&head);
+        if self
+            .anchored_at
+            .as_ref()
+            .map(|anchor| snapshot.resolve_anchor(anchor))
+            == Some(offset)
+        {
+            return;
+        }
+        self.pending_task = None;
+        self.signatures.clear();
+        self.active_signature = None;
+        self.active_parameter = None;
+        self.anchored_at = Some(snapshot.anchor_at(offset, Bias::Left));
+        cx.notify();
+
+        let Some(request) = SignatureHelpRequest::build(&editor, offset, cx) else {
+            return;
+        };
+        let request_id = self.bump_request_id();
+        let task = cx.spawn(async move |this, cx| {
+            let outcome = request.run().await;
+            let _ = this.update(cx, |manager, cx| {
+                if manager.request_id() != request_id {
+                    // A newer request superseded this one; the stale
+                    // reply corresponds to a previous cursor position.
+                    return;
+                }
+                manager.store(outcome);
+                cx.notify();
+            });
+        });
+        self.pending_task = Some(task);
+    }
+
+    fn store(&mut self, help: Option<SignatureHelp>) {
+        match help {
+            Some(help) => {
+                self.signatures = help.signatures;
+                self.active_signature = help.active_signature;
+                self.active_parameter = help.active_parameter;
+            },
+            None => {
+                self.signatures.clear();
+                self.active_signature = None;
+                self.active_parameter = None;
+            },
+        }
+    }
+
+    fn clear(&mut self) {
+        self.pending_task = None;
+        self.signatures.clear();
+        self.active_signature = None;
+        self.active_parameter = None;
+        self.anchored_at = None;
+    }
+}
+
+struct SignatureHelpRequest {
+    host: Arc<dyn LspHost>,
+    language: Arc<stoat_language::Language>,
+    workspace_root: std::path::PathBuf,
+    uri: Uri,
+    offset: usize,
+    rope: stoat_text::Rope,
+}
+
+impl SignatureHelpRequest {
+    fn build(
+        editor: &Entity<Editor>,
+        offset: usize,
+        cx: &mut Context<'_, SignatureHelpManager>,
+    ) -> Option<Self> {
+        let path = editor.read(cx).file_path()?.to_path_buf();
+        let host = cx.try_global::<LspHostGlobal>()?.0.clone();
+        let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
+        let uri = path_to_uri(&path)?;
+        let rope = editor
+            .read(cx)
+            .multi_buffer()
+            .read(cx)
+            .snapshot()
+            .rope()
+            .clone();
+        let workspace_root = path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| path.clone());
+        Some(Self {
+            host,
+            language,
+            workspace_root,
+            uri,
+            offset,
+            rope,
+        })
+    }
+
+    async fn run(self) -> Option<SignatureHelp> {
+        let server = match self.host.launch(&self.language, &self.workspace_root).await {
+            Ok(s) => s,
+            Err(err) => {
+                tracing::warn!(target: "stoat_gui::lsp::signature_help", ?err, "failed to launch LSP server");
+                return None;
+            },
+        };
+        // `initialize` is best-effort; test fakes accept requests
+        // without an explicit handshake.
+        let _ = server.initialize(Some(self.uri.clone())).await;
+        if !server.supports_feature(LanguageServerFeature::SignatureHelp) {
+            return None;
+        }
+        let encoding = server.offset_encoding();
+        let position = byte_offset_to_lsp_pos(&self.rope, self.offset, encoding);
+        let params = SignatureHelpParams {
+            context: None,
+            text_document_position_params: TextDocumentPositionParams {
+                text_document: TextDocumentIdentifier { uri: self.uri },
+                position,
+            },
+            work_done_progress_params: Default::default(),
+        };
+        match server.signature_help(params).await {
+            Ok(help) => help,
+            Err(err) => {
+                tracing::warn!(target: "stoat_gui::lsp::signature_help", ?err, "signature help request failed");
+                None
+            },
+        }
+    }
+}
+
+fn path_to_uri(path: &Path) -> Option<Uri> {
+    let path_str = path.to_str()?;
+    Uri::from_str(&format!("file://{path_str}")).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{
+        buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
+        globals::ExecutorGlobal, multi_buffer::MultiBuffer,
+    };
+    use gpui::{AppContext, TestAppContext};
+    use lsp_types::{
+        ParameterInformation, ParameterLabel, ServerCapabilities, SignatureHelpOptions,
+    };
+    use std::path::PathBuf;
+    use stoat::{
+        buffer::BufferId,
+        host::fake::{FakeLsp, FakeLspHost},
+    };
+    use stoat_scheduler::{Executor, TestScheduler};
+
+    fn install_globals(cx: &mut TestAppContext) -> Arc<FakeLsp> {
+        let lsp = Arc::new(FakeLsp::new());
+        let lsp_host = Arc::new(FakeLspHost::new(lsp.clone())) as Arc<dyn LspHost>;
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        cx.update(|cx| {
+            cx.set_global(LspHostGlobal(lsp_host));
+            cx.set_global(LanguageRegistry::standard());
+            cx.set_global(ExecutorGlobal(executor));
+        });
+        lsp
+    }
+
+    fn build_editor(cx: &mut TestAppContext, path: &Path, text: &str) -> Entity<Editor> {
+        let path = path.to_path_buf();
+        cx.update(|cx| {
+            let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), text));
+            let executor = cx.global::<ExecutorGlobal>().0.clone();
+            let multi = cx.new({
+                let buffer = buffer.clone();
+                |cx| MultiBuffer::singleton(buffer, cx)
+            });
+            let display = cx.new({
+                let buffer = buffer.clone();
+                |cx| DisplayMap::new(buffer, executor.clone(), cx)
+            });
+            let diff = cx.new({
+                let buffer = buffer.clone();
+                |cx| DiffMap::new(buffer, cx)
+            });
+            cx.new(|cx| {
+                let mut ed = Editor::new(multi, display, diff, EditorMode::full(), cx);
+                ed.set_file_path(Some(path), cx);
+                ed
+            })
+        })
+    }
+
+    fn sample_help() -> SignatureHelp {
+        SignatureHelp {
+            signatures: vec![SignatureInformation {
+                label: "fn add(x: i32, y: i32) -> i32".to_string(),
+                documentation: None,
+                parameters: Some(vec![
+                    ParameterInformation {
+                        label: ParameterLabel::Simple("x: i32".to_string()),
+                        documentation: None,
+                    },
+                    ParameterInformation {
+                        label: ParameterLabel::Simple("y: i32".to_string()),
+                        documentation: None,
+                    },
+                ]),
+                active_parameter: Some(0),
+            }],
+            active_signature: Some(0),
+            active_parameter: Some(0),
+        }
+    }
+
+    fn signature_help_capabilities() -> ServerCapabilities {
+        ServerCapabilities {
+            signature_help_provider: Some(SignatureHelpOptions::default()),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn caches_signatures_when_cursor_sits_in_call() {
+        let mut cx = TestAppContext::single();
+        let lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        lsp.set_capabilities(signature_help_capabilities());
+        lsp.set_signature_help(path.to_str().unwrap(), 0, 4, sample_help());
+
+        let editor = build_editor(&mut cx, &path, "add()\n");
+        let manager = cx.update(|cx| {
+            let editor_clone = editor.clone();
+            cx.new(|cx| SignatureHelpManager::new(editor_clone, cx))
+        });
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(0, 4, cx));
+        cx.run_until_parked();
+
+        let (signatures, active_parameter, anchored) = manager.read_with(&cx, |m, _| {
+            (
+                m.signatures().to_vec(),
+                m.active_parameter(),
+                m.anchored_at().is_some(),
+            )
+        });
+        assert_eq!(signatures, sample_help().signatures);
+        assert_eq!(active_parameter, Some(0));
+        assert!(anchored, "manager anchors at the cursor it requested for");
+    }
+
+    #[test]
+    fn bump_request_id_increments_and_records_latest() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        let editor = build_editor(&mut cx, &path, "add()\n");
+        let manager = cx.update(|cx| cx.new(|cx| SignatureHelpManager::new(editor.clone(), cx)));
+
+        let first = manager.update(&mut cx, |m, _| m.bump_request_id());
+        let second = manager.update(&mut cx, |m, _| m.bump_request_id());
+
+        assert_eq!(first, 1);
+        assert_eq!(second, 2);
+        assert_eq!(
+            manager.read_with(&cx, |m, _| m.request_id()),
+            2,
+            "request_id must track the most recent bump",
+        );
+    }
+
+    #[test]
+    fn cache_stays_empty_at_unprogrammed_position() {
+        let mut cx = TestAppContext::single();
+        let lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        lsp.set_capabilities(signature_help_capabilities());
+        lsp.set_signature_help(path.to_str().unwrap(), 0, 4, sample_help());
+
+        let editor = build_editor(&mut cx, &path, "add()\n");
+        let manager = cx.update(|cx| {
+            let editor_clone = editor.clone();
+            cx.new(|cx| SignatureHelpManager::new(editor_clone, cx))
+        });
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_grid(0, 0, cx));
+        cx.run_until_parked();
+
+        let signatures = manager.read_with(&cx, |m, _| m.signatures().to_vec());
+        assert!(
+            signatures.is_empty(),
+            "cursor outside the programmed call position yields no signatures"
+        );
+    }
+}
