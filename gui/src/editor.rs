@@ -200,7 +200,7 @@ pub struct Editor {
     minimap: Option<Entity<Editor>>,
     minimap_drag: Option<MinimapDrag>,
     scroll_animation_task: Option<Task<()>>,
-    _subscriptions: [Subscription; 3],
+    _subscriptions: [Subscription; 4],
     _diagnostic_subscription: Option<Subscription>,
     _review_session_subscription: Option<Subscription>,
     _blame_subscription: Option<Subscription>,
@@ -392,6 +392,7 @@ impl Editor {
             cx.emit(EditorEvent::Changed);
             cx.notify();
         });
+        let theme_sub = cx.observe_global::<theme::Theme>(|_, cx| cx.notify());
         let inline_blame_visible = cx
             .try_global::<Settings>()
             .and_then(|s| s.resolved.ui_editor_show_inline_blame)
@@ -441,7 +442,7 @@ impl Editor {
             minimap: None,
             minimap_drag: None,
             scroll_animation_task: None,
-            _subscriptions: [mb_sub, dm_sub, diff_sub],
+            _subscriptions: [mb_sub, dm_sub, diff_sub, theme_sub],
             _diagnostic_subscription: None,
             _review_session_subscription: None,
             _blame_subscription: None,

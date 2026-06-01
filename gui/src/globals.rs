@@ -10,7 +10,10 @@
 //! [`crate::test::TestHarness::set_global`] or directly through
 //! `cx.set_global(...)`.
 
-use crate::{settings::Settings, theme::Theme};
+use crate::{
+    settings::Settings,
+    theme::{self, Theme},
+};
 use gpui::{App, Global};
 use std::sync::{Arc, Mutex};
 use stoat::host::{
@@ -157,7 +160,7 @@ pub struct Globals {
 pub fn install_production_globals(cx: &mut App, globals: Globals) {
     seed_language_highlight_maps(&globals.language_registry.0);
     cx.set_global(globals.settings);
-    cx.set_global(globals.theme);
+    theme::set_active_theme(cx, globals.theme);
     cx.set_global(globals.language_registry);
     cx.set_global(globals.fs_host);
     cx.set_global(globals.fs_watch_host);

@@ -269,6 +269,8 @@ impl Workspace {
                 .input_state_machine
                 .update(cx, |sm, _| sm.set_keymap(keymap));
         });
+        cx.observe_global::<crate::theme::Theme>(|_, cx| cx.notify())
+            .detach();
         let pane_tree_subscription =
             cx.subscribe(&pane_tree, |workspace, _, _: &PaneTreeEvent, cx| {
                 workspace.refresh_pane_subscriptions(cx);

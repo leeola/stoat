@@ -44,6 +44,8 @@ impl Pane {
     ) -> Self {
         cx.observe_global::<crate::settings::Settings>(|_, cx| cx.notify())
             .detach();
+        cx.observe_global::<crate::theme::Theme>(|_, cx| cx.notify())
+            .detach();
         let breadcrumbs = cx.new(|_| Breadcrumbs::new());
         Self {
             pane_id,

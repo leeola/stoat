@@ -468,6 +468,13 @@ impl ActiveTheme for App {
     }
 }
 
+/// Replace the active [`Theme`] global. Triggers the
+/// `observe_global::<Theme>` observers registered by the renderers,
+/// so the UI repaints with the new theme's colors.
+pub fn set_active_theme(cx: &mut App, theme: Theme) {
+    cx.set_global(theme);
+}
+
 fn theme_fg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
     let Some(theme) = cx.try_global::<Theme>() else {
         return fallback;
@@ -616,6 +623,23 @@ mod tests {
             (resolved.selection_editor.a - expected).abs() < 1e-6,
             "expected alpha {expected}, got {}",
             resolved.selection_editor.a
+        );
+    }
+
+    #[test]
+    fn set_active_theme_swaps_resolved_colors() {
+        let cx = TestAppContext::single();
+        let first = Theme::load_from_source("theme a { ui.background.fg = blue; }", "a");
+        let second = Theme::load_from_source("theme b { ui.background.fg = green; }", "b");
+        let (after_first, after_second) = cx.update(|cx| {
+            set_active_theme(cx, first);
+            let after_first = cx.theme().background;
+            set_active_theme(cx, second);
+            (after_first, cx.theme().background)
+        });
+        assert_ne!(
+            after_first, after_second,
+            "set_active_theme swaps the global so resolved colors change"
         );
     }
 }

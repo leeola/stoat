@@ -58,8 +58,10 @@ impl Dock {
         item: Box<dyn ItemHandle>,
         side: DockSide,
         default_extent: u16,
-        _cx: &mut Context<'_, Self>,
+        cx: &mut Context<'_, Self>,
     ) -> Self {
+        cx.observe_global::<crate::theme::Theme>(|_, cx| cx.notify())
+            .detach();
         Self {
             item,
             side,
