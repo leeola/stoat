@@ -53,6 +53,7 @@ mod item;
 mod jumplist_picker;
 mod key_hint_banner;
 mod keymap_loader;
+mod line_ending_picker;
 mod lsp;
 mod lsp_state;
 mod modal_layer;

@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use stoat::buffer::{BufferId, CheckpointId, SharedBuffer, TextBuffer};
+use stoat::buffer::{BufferId, CheckpointId, LineEnding, SharedBuffer, TextBuffer};
 use stoat_language::SyntaxMap;
 use stoat_text::Anchor;
 
@@ -89,6 +89,22 @@ impl Buffer {
             .write()
             .expect("buffer lock poisoned")
             .edit(range, text);
+        cx.emit(BufferEvent::Edited);
+        cx.notify();
+    }
+
+    pub fn line_ending(&self) -> LineEnding {
+        self.inner
+            .read()
+            .expect("buffer lock poisoned")
+            .line_ending()
+    }
+
+    pub fn set_line_ending(&self, target: LineEnding, cx: &mut Context<'_, Self>) {
+        self.inner
+            .write()
+            .expect("buffer lock poisoned")
+            .set_line_ending(target);
         cx.emit(BufferEvent::Edited);
         cx.notify();
     }

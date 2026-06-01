@@ -59,6 +59,7 @@ use crate::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenAbout, OpenHelp,
         },
+        line_ending::OpenLineEndingPicker,
         lsp::{
             CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
             GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker, OpenSymbolPicker,
@@ -149,6 +150,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenCommandPalette))
     });
     add(OpenThemePicker::DEF, |_| Ok(Box::new(OpenThemePicker)));
+    add(OpenLineEndingPicker::DEF, |_| {
+        Ok(Box::new(OpenLineEndingPicker))
+    });
     add(OpenFileFinder::DEF, |_| Ok(Box::new(OpenFileFinder)));
     add(OpenFileFinderHSplit::DEF, |_| {
         Ok(Box::new(OpenFileFinderHSplit))
@@ -818,6 +822,7 @@ mod tests {
         "CloseOtherPanes",
         "OpenCommandPalette",
         "OpenThemePicker",
+        "OpenLineEndingPicker",
         "OpenFileFinder",
         "OpenFileFinderHSplit",
         "OpenFileFinderVSplit",

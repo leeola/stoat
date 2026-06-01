@@ -61,6 +61,7 @@ pub use defs::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
         HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenAbout, OpenHelp,
     },
+    line_ending::OpenLineEndingPicker,
     lsp::{
         CodeAction, FormatSelections, GotoDefinition, GotoImplementation, GotoNextDiagnostic,
         GotoPrevDiagnostic, GotoTypeDefinition, Hover, OpenDiagnosticsPicker, OpenSymbolPicker,

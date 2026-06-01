@@ -678,6 +678,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ToggleDiffHunkPanel
         | ActionKind::OpenTerminalDock
         | ActionKind::OpenThemePicker
+        | ActionKind::OpenLineEndingPicker
         | ActionKind::ToggleMinimap
         | ActionKind::ToggleRelativeLineNumbers
         | ActionKind::FoldAtCursor
