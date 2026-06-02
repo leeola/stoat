@@ -111,7 +111,7 @@ pub use defs::{
     theme::OpenThemePicker,
     workspace::{
         CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
-        RenameWorkspace, SetCwd, SwitchWorkspace, ToggleProjectTree,
+        RenameWorkspace, SetCwd, SwitchWorkspace, ToggleOutlinePanel, ToggleProjectTree,
     },
 };
 pub use kind::ActionKind;

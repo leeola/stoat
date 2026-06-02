@@ -109,7 +109,7 @@ use crate::{
         theme::OpenThemePicker,
         workspace::{
             CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
-            RenameWorkspace, SetCwd, SwitchWorkspace, ToggleProjectTree,
+            RenameWorkspace, SetCwd, SwitchWorkspace, ToggleOutlinePanel, ToggleProjectTree,
         },
     },
     param::{MissingSnafu, WrongKindSnafu},
@@ -733,6 +733,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspacePicker))
     });
     add(ToggleProjectTree::DEF, |_| Ok(Box::new(ToggleProjectTree)));
+    add(ToggleOutlinePanel::DEF, |_| {
+        Ok(Box::new(ToggleOutlinePanel))
+    });
     add(ProjectTreeSelectNext::DEF, |_| {
         Ok(Box::new(ProjectTreeSelectNext))
     });
@@ -989,6 +992,7 @@ mod tests {
         "CloseWorkspace",
         "OpenWorkspacePicker",
         "ToggleProjectTree",
+        "ToggleOutlinePanel",
         "ProjectTreeSelectNext",
         "ProjectTreeSelectPrev",
         "ProjectTreeCollapse",
@@ -1181,6 +1185,7 @@ mod tests {
         // + 1 ToggleTabBar for the per-pane tab bar.
         // + 1 Set runtime-settings palette action.
         // + 1 ToggleProjectTree (opens the project file tree in a dock).
+        // + 1 ToggleOutlinePanel (opens the symbol outline in a right dock).
         // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
         //   routed to the focused project tree dock.
         // + 1 OpenReviewWatch (workspace-watch review session).
@@ -1206,7 +1211,7 @@ mod tests {
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
         // + 1 OpenEncodingPicker (status-bar encoding picker).
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
-        assert_eq!(all().count(), 339);
+        assert_eq!(all().count(), 340);
     }
 
     #[test]

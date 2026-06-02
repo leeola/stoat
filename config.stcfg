@@ -658,6 +658,7 @@ on key {
         Shift-L -> [ToggleDockLeft(), SetMode(normal)];
         Shift-R -> [ToggleDockRight(), SetMode(normal)];
         m -> [ToggleMinimap(), SetMode(normal)];
+        o -> [ToggleOutlinePanel(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == run {

@@ -80,6 +80,13 @@ impl Buffer {
         self.read(|b| b.rope().to_string())
     }
 
+    /// Monotonic edit version, bumped on every mutation. Equal values
+    /// across two reads mean the content has not changed, so callers can
+    /// skip recomputation without comparing text.
+    pub fn version(&self) -> u64 {
+        self.read(|b| b.version())
+    }
+
     pub fn is_dirty(&self) -> bool {
         self.read(|b| b.dirty)
     }

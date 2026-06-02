@@ -18,6 +18,7 @@ pub enum ItemKind {
     Review,
     CommitList,
     ProjectTree,
+    OutlinePanel,
     Unknown,
 }
 

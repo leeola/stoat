@@ -60,6 +60,7 @@ mod lsp;
 mod lsp_state;
 mod modal_layer;
 mod multi_buffer;
+mod outline_panel;
 mod pane;
 mod pane_tree;
 mod panic_hook;

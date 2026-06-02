@@ -64,6 +64,16 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    ToggleOutlinePanelDef,
+    ToggleOutlinePanel,
+    "ToggleOutlinePanel",
+    ActionKind::ToggleOutlinePanel,
+    "toggle the symbol outline panel",
+    "Open a right dock showing the active editor's symbol tree, tracking the cursor and refreshing as the buffer changes, or close it if already open.",
+    ActionPriority::Common
+);
+
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,

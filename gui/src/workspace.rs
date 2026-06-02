@@ -2332,6 +2332,7 @@ impl Workspace {
             ActionKind::ToggleTabBar => self.dispatch_toggle_tab_bar(cx),
             ActionKind::Set => self.dispatch_set(&*action, cx),
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
+            ActionKind::ToggleOutlinePanel => self.dispatch_toggle_outline_panel(cx),
             ActionKind::ProjectTreeSelectNext => {
                 self.update_project_tree(cx, ProjectTree::select_next)
             },
@@ -3633,6 +3634,20 @@ impl Workspace {
         let tree = cx.new(|cx| ProjectTree::new(git_root, fs, cx));
         self.add_dock(Box::new(tree), DockSide::Left, 240, cx);
         self.set_input_mode("project_tree", cx);
+    }
+
+    fn dispatch_toggle_outline_panel(&mut self, cx: &mut Context<'_, Self>) {
+        let existing = self
+            .docks
+            .iter()
+            .position(|d| d.read(cx).item().item_kind(cx) == crate::item::ItemKind::OutlinePanel);
+        if let Some(idx) = existing {
+            self.remove_dock(idx, cx);
+            return;
+        }
+        let workspace = cx.entity();
+        let panel = cx.new(|cx| crate::outline_panel::OutlinePanel::new(workspace, cx));
+        self.add_dock(Box::new(panel), DockSide::Right, 240, cx);
     }
 
     /// Resolve the project tree hosted in a left dock, if one is open.
@@ -9667,6 +9682,33 @@ mod tests {
         vcx.run_until_parked();
 
         assert!(!goto_line_modal_active(&ws, vcx));
+    }
+
+    fn outline_dock_count(ws: &Entity<Workspace>, vcx: &mut VisualTestContext) -> usize {
+        ws.read_with(vcx, |w, cx| {
+            w.docks()
+                .iter()
+                .filter(|d| d.read(cx).item().item_kind(cx) == crate::item::ItemKind::OutlinePanel)
+                .count()
+        })
+    }
+
+    #[test]
+    fn dispatch_toggle_outline_panel_adds_then_removes_right_dock() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleOutlinePanel);
+        vcx.run_until_parked();
+        assert_eq!(
+            outline_dock_count(&ws, vcx),
+            1,
+            "toggle opens the outline dock"
+        );
+
+        dispatch(&ws, vcx, stoat_action::ToggleOutlinePanel);
+        vcx.run_until_parked();
+        assert_eq!(outline_dock_count(&ws, vcx), 0, "toggle again closes it");
     }
 
     #[test]
