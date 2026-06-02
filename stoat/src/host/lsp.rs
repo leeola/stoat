@@ -3,18 +3,18 @@ use lsp_types::{
     ApplyWorkspaceEditParams, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, CodeAction, CodeActionOrCommand, CodeActionParams,
-    CodeActionProviderCapability, ColorInformation, ColorPresentation, ColorPresentationParams,
-    ColorProviderCapability, CompletionItem, CompletionParams, CompletionResponse,
-    ConfigurationParams, DeclarationCapability, Diagnostic, DidChangeConfigurationParams,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentColorParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightParams, DocumentLink,
-    DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandParams, FoldingRange, FoldingRangeParams,
-    GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams, HoverProviderCapability,
-    ImplementationProviderCapability, InitializeResult, InlayHint, InlayHintParams,
-    InlayHintServerCapabilities, Location, MessageType, NumberOrString, OneOf,
+    CodeActionProviderCapability, CodeLens, CodeLensParams, ColorInformation, ColorPresentation,
+    ColorPresentationParams, ColorProviderCapability, CompletionItem, CompletionParams,
+    CompletionResponse, ConfigurationParams, DeclarationCapability, Diagnostic,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentColorParams, DocumentDiagnosticParams,
+    DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightParams, DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams,
+    DocumentSymbolParams, DocumentSymbolResponse, ExecuteCommandParams, FoldingRange,
+    FoldingRangeParams, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverParams,
+    HoverProviderCapability, ImplementationProviderCapability, InitializeResult, InlayHint,
+    InlayHintParams, InlayHintServerCapabilities, Location, MessageType, NumberOrString, OneOf,
     PrepareRenameResponse, ProgressToken, ReferenceParams, RegistrationParams, RenameFilesParams,
     RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
     SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
@@ -378,6 +378,8 @@ pub trait LspServer: Send + Sync {
         params: CodeActionParams,
     ) -> io::Result<Option<Vec<CodeActionOrCommand>>>;
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction>;
+    async fn code_lens(&self, params: CodeLensParams) -> io::Result<Option<Vec<CodeLens>>>;
+    async fn code_lens_resolve(&self, lens: CodeLens) -> io::Result<CodeLens>;
     async fn document_link(
         &self,
         params: DocumentLinkParams,
@@ -668,6 +670,14 @@ impl LspServer for NoopLspServer {
 
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
         Ok(action)
+    }
+
+    async fn code_lens(&self, _params: CodeLensParams) -> io::Result<Option<Vec<CodeLens>>> {
+        Ok(None)
+    }
+
+    async fn code_lens_resolve(&self, lens: CodeLens) -> io::Result<CodeLens> {
+        Ok(lens)
     }
 
     async fn document_link(

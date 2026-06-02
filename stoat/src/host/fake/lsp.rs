@@ -8,26 +8,26 @@ use lsp_types::{
     ApplyWorkspaceEditParams, CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams,
     CallHierarchyItem, CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams,
     CallHierarchyPrepareParams, CodeAction, CodeActionContext, CodeActionOrCommand,
-    CodeActionParams, Color, ColorInformation, ColorPresentation, ColorPresentationParams,
-    CompletionItem, CompletionList, CompletionParams, CompletionResponse, ConfigurationItem,
-    ConfigurationParams, Diagnostic, DiagnosticSeverity, DidChangeConfigurationParams,
-    DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
-    DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
-    DocumentColorParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
-    DocumentFormattingParams, DocumentHighlight, DocumentHighlightKind, DocumentHighlightParams,
-    DocumentLink, DocumentLinkParams, DocumentRangeFormattingParams, DocumentSymbolParams,
-    DocumentSymbolResponse, ExecuteCommandParams, FileChangeType, FileEvent, FileRename,
-    FoldingRange, FoldingRangeParams, FormattingOptions, GotoDefinitionParams,
-    GotoDefinitionResponse, Hover, HoverContents, HoverParams, InitializeResult, InlayHint,
-    InlayHintKind, InlayHintLabel, InlayHintParams, Location, MarkupContent, MarkupKind,
-    MessageType, NumberOrString, PartialResultParams, Position, PositionEncodingKind,
-    PrepareRenameResponse, Range, ReferenceContext, ReferenceParams, RenameFilesParams,
-    RenameParams, SelectionRange, SelectionRangeParams, SemanticTokensParams,
-    SemanticTokensRangeParams, SemanticTokensRangeResult, SemanticTokensResult, ServerCapabilities,
-    SignatureHelp, SignatureHelpParams, SymbolInformation, SymbolKind,
-    TextDocumentContentChangeEvent, TextDocumentIdentifier, TextDocumentItem,
-    TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind, TextEdit,
-    TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
+    CodeActionParams, CodeLens, CodeLensParams, Color, ColorInformation, ColorPresentation,
+    ColorPresentationParams, CompletionItem, CompletionList, CompletionParams, CompletionResponse,
+    ConfigurationItem, ConfigurationParams, Diagnostic, DiagnosticSeverity,
+    DidChangeConfigurationParams, DidChangeTextDocumentParams, DidChangeWatchedFilesParams,
+    DidChangeWorkspaceFoldersParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    DidSaveTextDocumentParams, DocumentColorParams, DocumentDiagnosticParams,
+    DocumentDiagnosticReportResult, DocumentFormattingParams, DocumentHighlight,
+    DocumentHighlightKind, DocumentHighlightParams, DocumentLink, DocumentLinkParams,
+    DocumentRangeFormattingParams, DocumentSymbolParams, DocumentSymbolResponse,
+    ExecuteCommandParams, FileChangeType, FileEvent, FileRename, FoldingRange, FoldingRangeParams,
+    FormattingOptions, GotoDefinitionParams, GotoDefinitionResponse, Hover, HoverContents,
+    HoverParams, InitializeResult, InlayHint, InlayHintKind, InlayHintLabel, InlayHintParams,
+    Location, MarkupContent, MarkupKind, MessageType, NumberOrString, PartialResultParams,
+    Position, PositionEncodingKind, PrepareRenameResponse, Range, ReferenceContext,
+    ReferenceParams, RenameFilesParams, RenameParams, SelectionRange, SelectionRangeParams,
+    SemanticTokensParams, SemanticTokensRangeParams, SemanticTokensRangeResult,
+    SemanticTokensResult, ServerCapabilities, SignatureHelp, SignatureHelpParams,
+    SymbolInformation, SymbolKind, TextDocumentContentChangeEvent, TextDocumentIdentifier,
+    TextDocumentItem, TextDocumentPositionParams, TextDocumentSyncCapability, TextDocumentSyncKind,
+    TextEdit, TypeHierarchyItem, TypeHierarchyPrepareParams, TypeHierarchySubtypesParams,
     TypeHierarchySupertypesParams, Uri, VersionedTextDocumentIdentifier, WorkDoneProgress,
     WorkDoneProgressBegin, WorkDoneProgressParams, WorkspaceEdit, WorkspaceFolder,
     WorkspaceFoldersChangeEvent, WorkspaceSymbolParams, WorkspaceSymbolResponse,
@@ -187,6 +187,7 @@ struct FakeLspState {
     document_symbols: BTreeMap<Uri, DocumentSymbolResponse>,
     signature_helps: BTreeMap<LspKey, SignatureHelp>,
     code_actions: BTreeMap<Uri, Vec<CodeActionOrCommand>>,
+    code_lenses: BTreeMap<Uri, Vec<CodeLens>>,
     call_hierarchy_prepare: BTreeMap<LspKey, Vec<CallHierarchyItem>>,
     call_hierarchy_incoming: BTreeMap<LspKey, Vec<CallHierarchyIncomingCall>>,
     call_hierarchy_outgoing: BTreeMap<LspKey, Vec<CallHierarchyOutgoingCall>>,
@@ -257,6 +258,7 @@ impl FakeLsp {
                 document_symbols: BTreeMap::new(),
                 signature_helps: BTreeMap::new(),
                 code_actions: BTreeMap::new(),
+                code_lenses: BTreeMap::new(),
                 call_hierarchy_prepare: BTreeMap::new(),
                 call_hierarchy_incoming: BTreeMap::new(),
                 call_hierarchy_outgoing: BTreeMap::new(),
@@ -384,6 +386,19 @@ impl FakeLsp {
             .unwrap()
             .code_actions
             .insert(file_uri(path), actions);
+    }
+
+    /// Programs the [`CodeLens`]es returned for a
+    /// `textDocument/codeLens` call against `path`. The resolve step
+    /// (`codeLens/resolve`) is a passthrough on the fake -- tests
+    /// should program lenses with their `command` already populated.
+    /// Replaces any previously seeded lenses for the same document.
+    pub fn set_code_lenses(&self, path: &str, lenses: Vec<CodeLens>) {
+        self.state
+            .lock()
+            .unwrap()
+            .code_lenses
+            .insert(file_uri(path), lenses);
     }
 
     /// Programs the pull-style diagnostic report returned for a
@@ -1626,6 +1641,25 @@ impl LspServer for FakeLsp {
         Ok(action)
     }
 
+    async fn code_lens(&self, params: CodeLensParams) -> io::Result<Option<Vec<CodeLens>>> {
+        self.apply_delay("textDocument/codeLens").await;
+        if let Some(err) = self.take_request_failure("textDocument/codeLens") {
+            return Err(err);
+        }
+        pending_check!(self, lsp_types::request::CodeLensRequest, params);
+        let state = self.state.lock().unwrap();
+        Ok(state.code_lenses.get(&params.text_document.uri).cloned())
+    }
+
+    async fn code_lens_resolve(&self, lens: CodeLens) -> io::Result<CodeLens> {
+        self.apply_delay("codeLens/resolve").await;
+        if let Some(err) = self.take_request_failure("codeLens/resolve") {
+            return Err(err);
+        }
+        pending_check!(self, lsp_types::request::CodeLensResolve, lens);
+        Ok(lens)
+    }
+
     async fn document_link(
         &self,
         params: DocumentLinkParams,
@@ -2214,6 +2248,14 @@ impl LspServer for ArcLspSession {
         self.0.code_action_resolve(action).await
     }
 
+    async fn code_lens(&self, params: CodeLensParams) -> io::Result<Option<Vec<CodeLens>>> {
+        self.0.code_lens(params).await
+    }
+
+    async fn code_lens_resolve(&self, lens: CodeLens) -> io::Result<CodeLens> {
+        self.0.code_lens_resolve(lens).await
+    }
+
     async fn document_link(
         &self,
         params: DocumentLinkParams,
@@ -2596,6 +2638,14 @@ pub fn document_link_params(path: &str) -> DocumentLinkParams {
 
 pub fn document_symbol_params(path: &str) -> DocumentSymbolParams {
     DocumentSymbolParams {
+        text_document: text_doc_id(path),
+        work_done_progress_params: wdp(),
+        partial_result_params: prp(),
+    }
+}
+
+pub fn code_lens_params(path: &str) -> CodeLensParams {
+    CodeLensParams {
         text_document: text_doc_id(path),
         work_done_progress_params: wdp(),
         partial_result_params: prp(),
@@ -3610,6 +3660,38 @@ mod tests {
 
             let miss = lsp
                 .code_action(code_action_params("/src/other.rs", 0, 0, 0, 0))
+                .await
+                .unwrap();
+            assert!(miss.is_none(), "unprogrammed documents return None");
+        });
+    }
+
+    #[test]
+    fn code_lens_programmed_response() {
+        use lsp_types::{Command, Position, Range};
+
+        rt().block_on(async {
+            let lsp = FakeLsp::new();
+            let lenses = vec![CodeLens {
+                range: Range::new(Position::new(3, 0), Position::new(3, 0)),
+                command: Some(Command {
+                    title: "▶ Run test".to_string(),
+                    command: "rust-analyzer.runSingle".to_string(),
+                    arguments: None,
+                }),
+                data: None,
+            }];
+            lsp.set_code_lenses("/src/lib.rs", lenses.clone());
+
+            let hit = lsp
+                .code_lens(code_lens_params("/src/lib.rs"))
+                .await
+                .unwrap()
+                .expect("programmed response");
+            assert_eq!(hit, lenses);
+
+            let miss = lsp
+                .code_lens(code_lens_params("/src/other.rs"))
                 .await
                 .unwrap();
             assert!(miss.is_none(), "unprogrammed documents return None");

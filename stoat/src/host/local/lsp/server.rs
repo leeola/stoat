@@ -6,9 +6,9 @@ use lsp_types::{
     notification::Notification, request::Request, ApplyWorkspaceEditParams,
     CallHierarchyIncomingCall, CallHierarchyIncomingCallsParams, CallHierarchyItem,
     CallHierarchyOutgoingCall, CallHierarchyOutgoingCallsParams, CallHierarchyPrepareParams,
-    ClientCapabilities, ClientInfo, CodeAction, CodeActionOrCommand, CodeActionParams,
-    ColorInformation, ColorPresentation, ColorPresentationParams, CompletionItem, CompletionParams,
-    CompletionResponse, ConfigurationParams, DidChangeConfigurationParams,
+    ClientCapabilities, ClientInfo, CodeAction, CodeActionOrCommand, CodeActionParams, CodeLens,
+    CodeLensParams, ColorInformation, ColorPresentation, ColorPresentationParams, CompletionItem,
+    CompletionParams, CompletionResponse, ConfigurationParams, DidChangeConfigurationParams,
     DidChangeTextDocumentParams, DidChangeWatchedFilesParams, DidChangeWorkspaceFoldersParams,
     DidCloseTextDocumentParams, DidOpenTextDocumentParams, DidSaveTextDocumentParams,
     DocumentColorParams, DocumentDiagnosticParams, DocumentDiagnosticReportResult,
@@ -346,6 +346,16 @@ impl LspServer for LocalLsp {
 
     async fn code_action_resolve(&self, action: CodeAction) -> io::Result<CodeAction> {
         self.request::<lsp_types::request::CodeActionResolveRequest>(action)
+            .await
+    }
+
+    async fn code_lens(&self, params: CodeLensParams) -> io::Result<Option<Vec<CodeLens>>> {
+        self.request::<lsp_types::request::CodeLensRequest>(params)
+            .await
+    }
+
+    async fn code_lens_resolve(&self, lens: CodeLens) -> io::Result<CodeLens> {
+        self.request::<lsp_types::request::CodeLensResolve>(lens)
             .await
     }
 
