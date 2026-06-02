@@ -32,9 +32,10 @@ use crate::{
     settings::Settings,
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
-        diagnostics_badge::DiagnosticsBadge, lsp_progress::LspProgress, mode_badge::ModeBadge,
-        review_progress::ReviewProgress, search_indicator::SearchQueryIndicator,
-        workspace_label::WorkspaceLabel, StatusBar, StatusItemView,
+        diagnostics_badge::DiagnosticsBadge, line_ending::LineEndingItem,
+        lsp_progress::LspProgress, mode_badge::ModeBadge, review_progress::ReviewProgress,
+        search_indicator::SearchQueryIndicator, workspace_label::WorkspaceLabel, StatusBar,
+        StatusItemView,
     },
     theme::{ActiveTheme, DEFAULT_UI_FONT_FAMILY, DEFAULT_UI_FONT_SIZE},
     toast::{Toast, ToastId, ToastView},
@@ -301,6 +302,10 @@ impl Workspace {
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
         let active_file_label = cx.new(|_| ActiveFileLabel::new(git_root.clone()));
         let cursor_position = cx.new(|_| CursorPosition::new());
+        let line_ending_item = {
+            let workspace = cx.weak_entity();
+            cx.new(|_| LineEndingItem::new(workspace))
+        };
         let count_prefix = cx.new(|cx| CountPrefix::new(input_state_machine.clone(), cx));
         let diagnostics_badge = cx.new(|_| DiagnosticsBadge::new());
         let lsp_progress = cx.new(|cx| LspProgress::new(lsp_state.clone(), cx));
@@ -342,6 +347,7 @@ impl Workspace {
             bar.add_left_item(workspace_label.clone(), cx);
             bar.add_left_item(active_file_label.clone(), cx);
             bar.add_right_item(cursor_position.clone(), cx);
+            bar.add_right_item(line_ending_item.clone(), cx);
             bar.add_right_item(count_prefix.clone(), cx);
             bar.add_right_item(lsp_progress.clone(), cx);
             bar.add_right_item(diagnostics_badge.clone(), cx);
@@ -355,6 +361,9 @@ impl Workspace {
             label.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         cursor_position.update(cx, |item, cx| {
+            item.set_active_pane_item(initial_status_item.as_deref(), cx);
+        });
+        line_ending_item.update(cx, |item, cx| {
             item.set_active_pane_item(initial_status_item.as_deref(), cx);
         });
         diagnostics_badge.update(cx, |badge, cx| {
@@ -6817,7 +6826,7 @@ mod tests {
             (bar.left_items().len(), bar.right_items().len())
         });
         assert_eq!(left, 3);
-        assert_eq!(right, 6);
+        assert_eq!(right, 7);
     }
 
     #[test]
