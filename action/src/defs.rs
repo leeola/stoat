@@ -6,6 +6,7 @@ pub mod editor;
 pub mod encoding;
 pub mod file;
 pub mod file_finder;
+pub mod goto_line;
 pub mod help;
 pub mod line_ending;
 pub mod lsp;

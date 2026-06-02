@@ -268,6 +268,7 @@ on key {
         U -> Redo();
         Ctrl-s -> CommitUndoCheckpoint();
         G -> GotoLineNumber();
+        Ctrl-g -> OpenGotoLineModal();
         > -> IndentSelection();
         < -> UnindentSelection();
         = -> FormatSelections();

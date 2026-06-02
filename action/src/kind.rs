@@ -27,6 +27,7 @@ pub enum ActionKind {
     OpenThemePicker,
     OpenLineEndingPicker,
     OpenEncodingPicker,
+    OpenGotoLineModal,
     OpenHelp,
     OpenAbout,
     OpenReview,

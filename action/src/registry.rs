@@ -56,6 +56,7 @@ use crate::{
             OpenChangedFilePicker, OpenConflictPicker, OpenFileFinder, OpenFileFinderHSplit,
             OpenFileFinderVSplit, OpenGitStatus,
         },
+        goto_line::OpenGotoLineModal,
         help::{
             CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
             HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenAbout, OpenHelp,
@@ -157,6 +158,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenEncodingPicker::DEF, |_| {
         Ok(Box::new(OpenEncodingPicker))
     });
+    add(OpenGotoLineModal::DEF, |_| Ok(Box::new(OpenGotoLineModal)));
     add(OpenFileFinder::DEF, |_| Ok(Box::new(OpenFileFinder)));
     add(OpenFileFinderHSplit::DEF, |_| {
         Ok(Box::new(OpenFileFinderHSplit))
@@ -828,6 +830,7 @@ mod tests {
         "OpenThemePicker",
         "OpenLineEndingPicker",
         "OpenEncodingPicker",
+        "OpenGotoLineModal",
         "OpenFileFinder",
         "OpenFileFinderHSplit",
         "OpenFileFinderVSplit",
@@ -1202,7 +1205,8 @@ mod tests {
         // + 1 OpenTerminalDock (run pane hosted in a bottom dock).
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
         // + 1 OpenEncodingPicker (status-bar encoding picker).
-        assert_eq!(all().count(), 338);
+        // + 1 OpenGotoLineModal (go-to-line modal with live preview).
+        assert_eq!(all().count(), 339);
     }
 
     #[test]

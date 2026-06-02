@@ -46,6 +46,7 @@ mod git;
 mod git_status_picker;
 mod global_search;
 mod globals;
+mod goto_line_modal;
 mod help;
 mod input_driver;
 mod input_parse;

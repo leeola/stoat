@@ -58,6 +58,7 @@ pub use defs::{
         OpenChangedFilePicker, OpenConflictPicker, OpenFileFinder, OpenFileFinderHSplit,
         OpenFileFinderVSplit, OpenGitStatus,
     },
+    goto_line::OpenGotoLineModal,
     help::{
         CloseHelp, HelpJumpFirst, HelpJumpLast, HelpScopeToggle, HelpScrollDetailDown,
         HelpScrollDetailUp, HelpSelectNext, HelpSelectPrev, OpenAbout, OpenHelp,

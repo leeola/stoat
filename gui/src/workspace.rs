@@ -2410,6 +2410,9 @@ impl Workspace {
             ActionKind::OpenEncodingPicker => {
                 crate::encoding_picker::open_encoding_picker(self, window, cx)
             },
+            ActionKind::OpenGotoLineModal => {
+                crate::goto_line_modal::open_goto_line_modal(self, window, cx)
+            },
             ActionKind::OpenHelp => crate::help::open_help(self, window, cx),
             ActionKind::OpenAbout => crate::about_modal::open_about(self, window, cx),
             ActionKind::OpenFileFinder => crate::file_finder::open_file_finder(self, window, cx),
@@ -3109,7 +3112,7 @@ impl Workspace {
         });
     }
 
-    fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<Editor>> {
+    pub(crate) fn active_editor(&self, cx: &Context<'_, Self>) -> Option<Entity<Editor>> {
         self.input_state_machine
             .read(cx)
             .active_editor()
@@ -9630,6 +9633,40 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(cursor_offsets(vcx, &editor), vec![11]);
+    }
+
+    fn goto_line_modal_active(ws: &Entity<Workspace>, vcx: &mut VisualTestContext) -> bool {
+        ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::goto_line_modal::GotoLineModal>()
+                .is_some()
+        })
+    }
+
+    #[test]
+    fn dispatch_open_goto_line_modal_opens_modal_over_active_editor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        dispatch(&ws, vcx, stoat_action::OpenGotoLineModal);
+        vcx.run_until_parked();
+
+        assert!(goto_line_modal_active(&ws, vcx));
+    }
+
+    #[test]
+    fn dispatch_open_goto_line_modal_without_active_editor_is_silent() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenGotoLineModal);
+        vcx.run_until_parked();
+
+        assert!(!goto_line_modal_active(&ws, vcx));
     }
 
     #[test]
