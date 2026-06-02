@@ -6,7 +6,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use stoat::buffer::{BufferId, CheckpointId, LineEnding, SharedBuffer, TextBuffer};
+use stoat::buffer::{BufferId, CheckpointId, Encoding, LineEnding, SharedBuffer, TextBuffer};
 use stoat_language::SyntaxMap;
 use stoat_text::Anchor;
 
@@ -105,6 +105,28 @@ impl Buffer {
             .write()
             .expect("buffer lock poisoned")
             .set_line_ending(target);
+        cx.emit(BufferEvent::Edited);
+        cx.notify();
+    }
+
+    pub fn encoding(&self) -> Encoding {
+        self.inner.read().expect("buffer lock poisoned").encoding()
+    }
+
+    /// Record `encoding` and replace the content with `decoded`, the
+    /// text the caller produced by re-decoding the file's bytes. The
+    /// content edit is skipped when `decoded` already matches, but the
+    /// metadata update and [`BufferEvent::Edited`] always fire so the
+    /// status bar reflects the new encoding.
+    pub fn set_encoding(&self, encoding: Encoding, decoded: &str, cx: &mut Context<'_, Self>) {
+        {
+            let mut guard = self.inner.write().expect("buffer lock poisoned");
+            guard.set_encoding(encoding);
+            let current = guard.rope().to_string();
+            if decoded != current {
+                guard.edit(0..current.len(), decoded);
+            }
+        }
         cx.emit(BufferEvent::Edited);
         cx.notify();
     }

@@ -36,6 +36,7 @@ mod display_map;
 mod dock;
 mod editor;
 mod editor_input;
+mod encoding_picker;
 mod executor;
 mod file_finder;
 mod file_icons;

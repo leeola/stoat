@@ -56,7 +56,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
-    buffer::BufferId,
+    buffer::{BufferId, Encoding},
     host::{
         CherryPickOutcome, ConflictedFile, GitApplyError, GitRepo, RebaseError, RebaseTodo,
         RebaseTodoOp, WatchToken,
@@ -1251,6 +1251,59 @@ impl Workspace {
         self.toast_view.update(cx, |view, cx| view.dismiss(id, cx));
     }
 
+    /// Re-decode the active editor's file with `encoding`, replacing the
+    /// buffer's contents. A scratch buffer (no path) records the encoding
+    /// without altering content. A lossy decode raises a warning toast.
+    pub fn apply_encoding_to_active_buffer(
+        &mut self,
+        encoding: Encoding,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(editor) = self
+            .input_state_machine
+            .read(cx)
+            .active_editor()
+            .cloned()
+            .and_then(|weak| weak.upgrade())
+        else {
+            return;
+        };
+        let Some(buffer) = editor
+            .read(cx)
+            .multi_buffer()
+            .read(cx)
+            .as_singleton()
+            .cloned()
+        else {
+            return;
+        };
+
+        let Some(path) = editor.read(cx).file_path().map(Path::to_path_buf) else {
+            let current = buffer.read(cx).text();
+            buffer.update(cx, |b, cx| b.set_encoding(encoding, &current, cx));
+            return;
+        };
+
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        let mut bytes = Vec::new();
+        if let Err(err) = fs.read(&path, &mut bytes) {
+            tracing::warn!(?path, %err, "encoding: re-decode read failed");
+            return;
+        }
+
+        let (text, lossy) = stoat::buffer::decode(&bytes, encoding);
+        buffer.update(cx, |b, cx| b.set_encoding(encoding, &text, cx));
+        if lossy {
+            self.show_toast(
+                Toast::warning(format!(
+                    "Decoded as {} with replacement characters",
+                    encoding.as_str()
+                )),
+                cx,
+            );
+        }
+    }
+
     pub fn status_bar(&self) -> &Entity<StatusBar> {
         &self.status_bar
     }
@@ -2345,6 +2398,9 @@ impl Workspace {
             ActionKind::OpenThemePicker => crate::theme_picker::open_theme_picker(self, window, cx),
             ActionKind::OpenLineEndingPicker => {
                 crate::line_ending_picker::open_line_ending_picker(self, window, cx)
+            },
+            ActionKind::OpenEncodingPicker => {
+                crate::encoding_picker::open_encoding_picker(self, window, cx)
             },
             ActionKind::OpenHelp => crate::help::open_help(self, window, cx),
             ActionKind::OpenAbout => crate::about_modal::open_about(self, window, cx),
@@ -6690,6 +6746,61 @@ mod tests {
         ws.update(&mut cx, |w, cx| w.dismiss_toast(id, cx));
         ws.read_with(&cx, |w, cx| {
             assert!(w.toast_view.read(cx).toasts().is_empty());
+        });
+    }
+
+    #[test]
+    fn apply_encoding_redecodes_active_buffer_from_disk() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", [0x93u8, 0xFA, 0x96, 0x7B]);
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let editor = ws.update(vcx, |w, cx| {
+            w.build_editor_for_path(Path::new("/tmp/repo/a.txt"), cx)
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        ws.update(vcx, |w, cx| {
+            w.apply_encoding_to_active_buffer(Encoding::ShiftJis, cx)
+        });
+        vcx.run_until_parked();
+
+        let (text, encoding) = editor.read_with(vcx, |ed, cx| {
+            let buffer = ed
+                .multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("singleton");
+            (buffer.read(cx).text(), buffer.read(cx).encoding())
+        });
+        assert_eq!(text, "日本");
+        assert_eq!(encoding, Encoding::ShiftJis);
+    }
+
+    #[test]
+    fn apply_encoding_warns_when_decode_is_lossy() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/b.txt", [0xFFu8, 0xFE]);
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let editor = ws.update(vcx, |w, cx| {
+            w.build_editor_for_path(Path::new("/tmp/repo/b.txt"), cx)
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        ws.update(vcx, |w, cx| {
+            w.apply_encoding_to_active_buffer(Encoding::Utf8, cx)
+        });
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.toast_view.read(cx).toasts().len(), 1);
         });
     }
 
