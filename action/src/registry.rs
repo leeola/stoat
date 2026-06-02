@@ -49,6 +49,7 @@ use crate::{
             UnfoldAll, UnfoldAtCursor, UnindentSelection, Yank, YankMainToClipboard,
             YankToClipboard,
         },
+        encoding::OpenEncodingPicker,
         file::OpenFile,
         file_finder::{
             FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker,
@@ -152,6 +153,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenThemePicker::DEF, |_| Ok(Box::new(OpenThemePicker)));
     add(OpenLineEndingPicker::DEF, |_| {
         Ok(Box::new(OpenLineEndingPicker))
+    });
+    add(OpenEncodingPicker::DEF, |_| {
+        Ok(Box::new(OpenEncodingPicker))
     });
     add(OpenFileFinder::DEF, |_| Ok(Box::new(OpenFileFinder)));
     add(OpenFileFinderHSplit::DEF, |_| {
@@ -823,6 +827,7 @@ mod tests {
         "OpenCommandPalette",
         "OpenThemePicker",
         "OpenLineEndingPicker",
+        "OpenEncodingPicker",
         "OpenFileFinder",
         "OpenFileFinderHSplit",
         "OpenFileFinderVSplit",
@@ -1196,7 +1201,8 @@ mod tests {
         // + 4 FoldAtCursor / UnfoldAtCursor / FoldAll / UnfoldAll.
         // + 1 OpenTerminalDock (run pane hosted in a bottom dock).
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
-        assert_eq!(all().count(), 337);
+        // + 1 OpenEncodingPicker (status-bar encoding picker).
+        assert_eq!(all().count(), 338);
     }
 
     #[test]

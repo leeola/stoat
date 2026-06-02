@@ -51,6 +51,7 @@ pub use defs::{
         TriggerCompletion, TrimSelections, Undo, UnfoldAll, UnfoldAtCursor, UnindentSelection,
         Yank, YankMainToClipboard, YankToClipboard,
     },
+    encoding::OpenEncodingPicker,
     file::OpenFile,
     file_finder::{
         FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker,

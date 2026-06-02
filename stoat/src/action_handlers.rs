@@ -679,6 +679,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::OpenTerminalDock
         | ActionKind::OpenThemePicker
         | ActionKind::OpenLineEndingPicker
+        | ActionKind::OpenEncodingPicker
         | ActionKind::ToggleMinimap
         | ActionKind::ToggleRelativeLineNumbers
         | ActionKind::FoldAtCursor
