@@ -5,12 +5,15 @@
 //! active pane and opens a preview targeting the active editor's
 //! buffer. The buffer text is parsed into a small block/inline IR
 //! ([`parse_markdown`]) which the render walks into gpui elements;
-//! fenced code blocks render as monospace text.
+//! fenced code blocks are syntax-highlighted through the fence
+//! language's tree-sitter grammar.
 
 use crate::{
     buffer::{Buffer, BufferEvent},
+    editor::render::convert_highlight_style,
+    globals::LanguageRegistry,
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
-    theme::ActiveTheme,
+    theme::{ActiveTheme, Theme},
 };
 use gpui::{
     div, px, rems, App, Context, Entity, FontStyle, FontWeight, HighlightStyle, IntoElement,
@@ -18,7 +21,10 @@ use gpui::{
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use serde_json::Value;
-use std::ops::Range;
+use std::{ops::Range, path::Path, sync::Arc};
+use stoat::display_map::syntax_theme::SyntaxStyles;
+use stoat_language::{HighlightMap, Language, SyntaxMap};
+use stoat_text::Rope;
 
 /// Inline markdown span. Emphasis/strong/link nest other spans.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -250,6 +256,54 @@ fn heading_level(level: HeadingLevel) -> u8 {
     }
 }
 
+/// Resolve a fenced code block's language tag (e.g. `rust` or `rs`) to a
+/// registered language, trying an exact name match first, then an
+/// extension match via a synthetic `code.<tag>` path.
+fn lookup_language(
+    registry: &stoat_language::LanguageRegistry,
+    tag: &str,
+) -> Option<Arc<Language>> {
+    if let Some(lang) = registry.find_by_name(tag) {
+        return Some(lang);
+    }
+    registry.for_path(Path::new(&format!("code.{tag}")))
+}
+
+/// Tree-sitter highlight runs over a fenced code block. Builds a one-off
+/// syntax map for `code` in the fence language and maps each capture to a
+/// gpui style via a theme-seeded [`HighlightMap`], mirroring the editor's
+/// `apply_syntax_overlay`. Empty when the language is unknown, the parse
+/// fails, or the theme defines no style for any capture.
+fn highlight_code_runs(
+    code: &str,
+    tag: &str,
+    registry: &stoat_language::LanguageRegistry,
+    theme: &stoat::theme::Theme,
+) -> Vec<(Range<usize>, HighlightStyle)> {
+    let Some(language) = lookup_language(registry, tag) else {
+        return Vec::new();
+    };
+    let styles = SyntaxStyles::from_theme(theme);
+    let highlight_map = HighlightMap::new(language.highlight_capture_names(), styles.theme_keys());
+    let rope = Rope::from(code);
+    let mut map = SyntaxMap::new();
+    if map.reparse(&rope, language, 0).is_none() {
+        return Vec::new();
+    }
+    let mut runs = Vec::new();
+    let snapshot = map.snapshot();
+    for capture in snapshot.captures(0..code.len(), &rope, |lang| Some(&lang.highlight_query)) {
+        let highlight_id = highlight_map.get(capture.index);
+        let Some(style_id) = styles.id_for_highlight(highlight_id) else {
+            continue;
+        };
+        let gpui_style = convert_highlight_style(&styles.interner[style_id]);
+        let range = capture.node.byte_range();
+        runs.push((range, gpui_style));
+    }
+    runs
+}
+
 pub struct MarkdownPreview {
     buffer: Entity<Buffer>,
     _subscription: Subscription,
@@ -349,13 +403,25 @@ impl Render for MarkdownPreview {
                     let (text, runs) = build_runs(&content, base, link_color, muted);
                     div().child(StyledText::new(text).with_highlights(runs))
                 },
-                MdBlock::Code { code, .. } => div()
-                    .font_family("monospace")
-                    .bg(code_block_bg)
-                    .px_2()
-                    .py_1()
-                    .text_color(text_color)
-                    .child(SharedString::from(code)),
+                MdBlock::Code { lang, code } => {
+                    let runs = lang.as_deref().and_then(|tag| {
+                        let registry = cx.try_global::<LanguageRegistry>()?;
+                        let theme = cx.try_global::<Theme>()?;
+                        let runs = highlight_code_runs(&code, tag, &registry.0, &theme.0);
+                        (!runs.is_empty()).then_some(runs)
+                    });
+                    let block = div()
+                        .font_family("monospace")
+                        .bg(code_block_bg)
+                        .px_2()
+                        .py_1()
+                        .text_color(text_color);
+                    match runs {
+                        Some(runs) => block
+                            .child(StyledText::new(SharedString::from(code)).with_highlights(runs)),
+                        None => block.child(SharedString::from(code)),
+                    }
+                },
                 MdBlock::ListItem {
                     depth,
                     ordered,
@@ -501,5 +567,35 @@ mod tests {
             vec![(0, "a"), (0, "b"), (1, "c"), (0, "d")],
             "nested item keeps source order and gains depth"
         );
+    }
+
+    #[test]
+    fn lookup_language_finds_known_and_rejects_unknown() {
+        let registry = stoat_language::LanguageRegistry::standard();
+        assert!(lookup_language(&registry, "rust").is_some(), "by name");
+        assert!(lookup_language(&registry, "no-such-language-xyz").is_none());
+    }
+
+    #[test]
+    fn highlights_rust_code_into_runs() {
+        let registry = stoat_language::LanguageRegistry::standard();
+        let theme = stoat::theme::Theme::empty();
+        let code = "fn main() {}\n";
+        let runs = highlight_code_runs(code, "rust", &registry, &theme);
+        assert!(
+            !runs.is_empty(),
+            "rust captures should produce highlight runs"
+        );
+        assert!(
+            runs.iter().all(|(r, _)| r.end <= code.len()),
+            "runs stay within the code bounds"
+        );
+    }
+
+    #[test]
+    fn highlight_code_runs_empty_for_unknown_language() {
+        let registry = stoat_language::LanguageRegistry::standard();
+        let theme = stoat::theme::Theme::empty();
+        assert!(highlight_code_runs("x = 1", "no-such-language-xyz", &registry, &theme).is_empty());
     }
 }
