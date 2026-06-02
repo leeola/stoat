@@ -19,6 +19,7 @@ pub enum ItemKind {
     CommitList,
     ProjectTree,
     OutlinePanel,
+    DiagnosticsPanel,
     Unknown,
 }
 

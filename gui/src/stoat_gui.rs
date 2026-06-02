@@ -28,6 +28,7 @@ mod commit_list;
 mod conflict_item;
 mod conflict_picker;
 mod diagnostics;
+mod diagnostics_panel;
 mod diagnostics_picker;
 mod diff_coordinator;
 mod diff_hunk_panel;

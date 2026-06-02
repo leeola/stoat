@@ -317,6 +317,7 @@ pub enum ActionKind {
     OpenWorkspacePicker,
     ToggleProjectTree,
     ToggleOutlinePanel,
+    ToggleDiagnosticsPanel,
     ProjectTreeSelectNext,
     ProjectTreeSelectPrev,
     ProjectTreeCollapse,

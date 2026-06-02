@@ -74,6 +74,16 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    ToggleDiagnosticsPanelDef,
+    ToggleDiagnosticsPanel,
+    "ToggleDiagnosticsPanel",
+    ActionKind::ToggleDiagnosticsPanel,
+    "toggle the diagnostics panel",
+    "Open a right dock listing every diagnostic across open buffers grouped by file, or close it if already open.",
+    ActionPriority::Common
+);
+
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,

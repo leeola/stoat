@@ -2333,6 +2333,7 @@ impl Workspace {
             ActionKind::Set => self.dispatch_set(&*action, cx),
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
             ActionKind::ToggleOutlinePanel => self.dispatch_toggle_outline_panel(cx),
+            ActionKind::ToggleDiagnosticsPanel => self.dispatch_toggle_diagnostics_panel(cx),
             ActionKind::ProjectTreeSelectNext => {
                 self.update_project_tree(cx, ProjectTree::select_next)
             },
@@ -3648,6 +3649,23 @@ impl Workspace {
         let workspace = cx.entity();
         let panel = cx.new(|cx| crate::outline_panel::OutlinePanel::new(workspace, cx));
         self.add_dock(Box::new(panel), DockSide::Right, 240, cx);
+    }
+
+    fn dispatch_toggle_diagnostics_panel(&mut self, cx: &mut Context<'_, Self>) {
+        let existing = self.docks.iter().position(|d| {
+            d.read(cx).item().item_kind(cx) == crate::item::ItemKind::DiagnosticsPanel
+        });
+        if let Some(idx) = existing {
+            self.remove_dock(idx, cx);
+            return;
+        }
+        let workspace = cx.entity();
+        let diagnostics = self.diagnostics().clone();
+        let git_root = self.git_root().clone();
+        let panel = cx.new(|cx| {
+            crate::diagnostics_panel::DiagnosticsPanel::new(workspace, diagnostics, git_root, cx)
+        });
+        self.add_dock(Box::new(panel), DockSide::Right, 320, cx);
     }
 
     /// Resolve the project tree hosted in a left dock, if one is open.
@@ -9709,6 +9727,30 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleOutlinePanel);
         vcx.run_until_parked();
         assert_eq!(outline_dock_count(&ws, vcx), 0, "toggle again closes it");
+    }
+
+    #[test]
+    fn dispatch_toggle_diagnostics_panel_adds_then_removes_right_dock() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let count = |ws: &Entity<Workspace>, vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.docks()
+                    .iter()
+                    .filter(|d| {
+                        d.read(cx).item().item_kind(cx) == crate::item::ItemKind::DiagnosticsPanel
+                    })
+                    .count()
+            })
+        };
+
+        dispatch(&ws, vcx, stoat_action::ToggleDiagnosticsPanel);
+        vcx.run_until_parked();
+        assert_eq!(count(&ws, vcx), 1, "toggle opens the diagnostics dock");
+
+        dispatch(&ws, vcx, stoat_action::ToggleDiagnosticsPanel);
+        vcx.run_until_parked();
+        assert_eq!(count(&ws, vcx), 0, "toggle again closes it");
     }
 
     #[test]
