@@ -2,6 +2,7 @@ pub mod active_file;
 pub mod count_prefix;
 pub mod cursor_position;
 pub mod diagnostics_badge;
+pub mod encoding;
 pub mod line_ending;
 pub mod lsp_progress;
 pub mod mode_badge;
