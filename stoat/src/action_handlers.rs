@@ -692,6 +692,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ToggleProjectTree
         | ActionKind::ToggleOutlinePanel
         | ActionKind::ToggleDiagnosticsPanel
+        | ActionKind::OpenMarkdownPreview
         | ActionKind::ProjectTreeSelectNext
         | ActionKind::ProjectTreeSelectPrev
         | ActionKind::ProjectTreeCollapse

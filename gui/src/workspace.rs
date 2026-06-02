@@ -2335,6 +2335,7 @@ impl Workspace {
             ActionKind::ToggleProjectTree => self.dispatch_toggle_project_tree(cx),
             ActionKind::ToggleOutlinePanel => self.dispatch_toggle_outline_panel(cx),
             ActionKind::ToggleDiagnosticsPanel => self.dispatch_toggle_diagnostics_panel(cx),
+            ActionKind::OpenMarkdownPreview => self.dispatch_open_markdown_preview(cx),
             ActionKind::ProjectTreeSelectNext => {
                 self.update_project_tree(cx, ProjectTree::select_next)
             },
@@ -3667,6 +3668,31 @@ impl Workspace {
             crate::diagnostics_panel::DiagnosticsPanel::new(workspace, diagnostics, git_root, cx)
         });
         self.add_dock(Box::new(panel), DockSide::Right, 320, cx);
+    }
+
+    fn dispatch_open_markdown_preview(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(editor) = self.active_editor(cx) else {
+            return;
+        };
+        let Some(buffer) = editor
+            .read(cx)
+            .multi_buffer()
+            .read(cx)
+            .as_singleton()
+            .cloned()
+        else {
+            return;
+        };
+        let new_pane_id = self
+            .pane_tree
+            .update(cx, |tree, cx| tree.split(Axis::Vertical, cx));
+        let preview = cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(buffer, cx));
+        let Some(pane) = self.pane_tree.read(cx).pane(new_pane_id).cloned() else {
+            return;
+        };
+        pane.update(cx, |p, cx| {
+            p.add_item(Box::new(preview), cx);
+        });
     }
 
     /// Resolve the project tree hosted in a left dock, if one is open.
@@ -8217,6 +8243,32 @@ mod tests {
             1,
             "new pane should contain exactly one scratch editor",
         );
+    }
+
+    #[test]
+    fn dispatch_open_markdown_preview_splits_and_adds_preview() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "# Title\n\nbody\n");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        dispatch(&ws, vcx, stoat_action::OpenMarkdownPreview);
+        vcx.run_until_parked();
+
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
+        let has_preview = pane_tree.read_with(vcx, |t, cx| {
+            t.split_pane_ids().iter().any(|id| {
+                t.pane(*id).is_some_and(|p| {
+                    p.read(cx)
+                        .items()
+                        .iter()
+                        .any(|it| it.item_kind(cx) == crate::item::ItemKind::MarkdownPreview)
+                })
+            })
+        });
+        assert!(has_preview, "a pane should host the markdown preview");
     }
 
     #[test]

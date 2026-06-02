@@ -20,6 +20,7 @@ pub enum ItemKind {
     ProjectTree,
     OutlinePanel,
     DiagnosticsPanel,
+    MarkdownPreview,
     Unknown,
 }
 

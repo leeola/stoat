@@ -318,6 +318,7 @@ pub enum ActionKind {
     ToggleProjectTree,
     ToggleOutlinePanel,
     ToggleDiagnosticsPanel,
+    OpenMarkdownPreview,
     ProjectTreeSelectNext,
     ProjectTreeSelectPrev,
     ProjectTreeCollapse,

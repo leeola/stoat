@@ -59,6 +59,7 @@ mod keymap_loader;
 mod line_ending_picker;
 mod lsp;
 mod lsp_state;
+mod markdown_preview;
 mod modal_layer;
 mod multi_buffer;
 mod outline_panel;

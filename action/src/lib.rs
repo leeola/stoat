@@ -110,8 +110,8 @@ pub use defs::{
     set::Set,
     theme::OpenThemePicker,
     workspace::{
-        CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenWorkspacePicker, Pwd,
-        RenameWorkspace, SetCwd, SwitchWorkspace, ToggleDiagnosticsPanel, ToggleOutlinePanel,
+        CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenMarkdownPreview, OpenWorkspacePicker,
+        Pwd, RenameWorkspace, SetCwd, SwitchWorkspace, ToggleDiagnosticsPanel, ToggleOutlinePanel,
         ToggleProjectTree,
     },
 };

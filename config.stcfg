@@ -660,6 +660,7 @@ on key {
         m -> [ToggleMinimap(), SetMode(normal)];
         o -> [ToggleOutlinePanel(), SetMode(normal)];
         d -> [ToggleDiagnosticsPanel(), SetMode(normal)];
+        M -> [OpenMarkdownPreview(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == run {

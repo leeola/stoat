@@ -84,6 +84,16 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    OpenMarkdownPreviewDef,
+    OpenMarkdownPreview,
+    "OpenMarkdownPreview",
+    ActionKind::OpenMarkdownPreview,
+    "open markdown preview",
+    "Split the active pane and open a live-updating rendered preview of the active markdown buffer alongside it.",
+    ActionPriority::Common
+);
+
 const RENAME_WORKSPACE_PARAMS: &[ParamDef] = &[ParamDef {
     name: "name",
     kind: ParamKind::String,

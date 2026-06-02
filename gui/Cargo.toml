@@ -25,6 +25,7 @@ gpui.workspace = true
 insta = { version = "1", features = ["json"], optional = true }
 lru = "0.16"
 lsp-types.workspace = true
+pulldown-cmark = { version = "0.13.4", default-features = false }
 ratatui.workspace = true
 regex.workspace = true
 ron.workspace = true
