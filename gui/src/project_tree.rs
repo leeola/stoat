@@ -14,6 +14,7 @@
 
 use crate::{
     file_icons,
+    globals::GitHostGlobal,
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     theme::ActiveTheme,
 };
@@ -22,13 +23,35 @@ use gpui::{
 };
 use serde_json::Value;
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeSet, HashMap},
     path::{Path, PathBuf},
     sync::Arc,
 };
 use stoat::host::FsHost;
 
 const INDENT_SPACES_PER_DEPTH: usize = 2;
+
+/// Git-derived decoration for a tree entry, driving its name color and
+/// strikethrough.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum GitDecoration {
+    Added,
+    Modified,
+    Deleted,
+    Ignored,
+}
+
+/// Classify a changed file from its HEAD presence and on-disk
+/// existence: absent from HEAD means a new (added) file; present in
+/// HEAD and on disk means modified; present in HEAD but gone from disk
+/// means a deletion.
+fn changed_decoration(in_head: bool, on_disk: bool) -> GitDecoration {
+    match (in_head, on_disk) {
+        (false, _) => GitDecoration::Added,
+        (true, true) => GitDecoration::Modified,
+        (true, false) => GitDecoration::Deleted,
+    }
+}
 
 /// One visible row in the flattened tree: a file or directory at a
 /// given nesting `depth` below the root.
@@ -37,6 +60,7 @@ struct Row {
     name: String,
     is_dir: bool,
     depth: usize,
+    decoration: Option<GitDecoration>,
 }
 
 pub struct ProjectTree {
@@ -45,22 +69,59 @@ pub struct ProjectTree {
     expanded: BTreeSet<PathBuf>,
     rows: Vec<Row>,
     selected: usize,
+    /// Decoration for each changed path, refreshed from the git host on
+    /// open and on every `refresh`. Ignored-file decorations are not
+    /// cached here; they are derived per entry in `rebuild`.
+    git_status: HashMap<PathBuf, GitDecoration>,
 }
 
 impl ProjectTree {
     /// Build a tree listing the immediate contents of `git_root`. An
     /// unreadable root yields an empty list rather than an error so the
     /// dock still renders.
-    pub fn new(git_root: PathBuf, fs: Arc<dyn FsHost>, _cx: &mut Context<'_, Self>) -> Self {
-        let expanded = BTreeSet::new();
-        let rows = build_rows(fs.as_ref(), &git_root, &expanded);
-        Self {
+    pub fn new(git_root: PathBuf, fs: Arc<dyn FsHost>, cx: &mut Context<'_, Self>) -> Self {
+        let mut tree = Self {
             git_root,
             fs,
-            expanded,
-            rows,
+            expanded: BTreeSet::new(),
+            rows: Vec::new(),
             selected: 0,
+            git_status: HashMap::new(),
+        };
+        tree.recompute_git_status(cx);
+        tree.rebuild();
+        tree
+    }
+
+    /// Re-read the git host's changed-file set into [`Self::git_status`].
+    /// No-op when no git host is installed (e.g. fs-only tests) or the
+    /// root is not a repository, leaving the tree undecorated.
+    fn recompute_git_status(&mut self, cx: &App) {
+        self.git_status.clear();
+        let repo = cx
+            .try_global::<GitHostGlobal>()
+            .and_then(|g| g.0.discover(&self.git_root));
+        let Some(repo) = repo else {
+            return;
+        };
+        for cf in repo.changed_files() {
+            let in_head = repo.head_content(&cf.path).is_some();
+            let on_disk = self.fs.exists(&cf.path);
+            self.git_status
+                .insert(cf.path, changed_decoration(in_head, on_disk));
         }
+    }
+
+    /// Decoration for `path`: its git change status if any, else
+    /// `Ignored` when the workspace ignore stack excludes it, else none.
+    fn decoration_for(&self, path: &Path) -> Option<GitDecoration> {
+        if let Some(deco) = self.git_status.get(path) {
+            return Some(*deco);
+        }
+        if self.fs.is_ignored(&self.git_root, path) {
+            return Some(GitDecoration::Ignored);
+        }
+        None
     }
 
     /// Move the selection one visible row down, stopping at the last
@@ -134,9 +195,11 @@ impl ProjectTree {
         None
     }
 
-    /// Re-read the directory contents from disk, preserving the set of
-    /// expanded directories and clamping the selection into range.
+    /// Re-read the directory contents and git status from disk,
+    /// preserving the set of expanded directories and clamping the
+    /// selection into range.
     pub fn refresh(&mut self, cx: &mut Context<'_, Self>) {
+        self.recompute_git_status(cx);
         self.rebuild();
         cx.notify();
     }
@@ -157,7 +220,11 @@ impl ProjectTree {
     }
 
     fn rebuild(&mut self) {
-        self.rows = build_rows(self.fs.as_ref(), &self.git_root, &self.expanded);
+        let mut rows = build_rows(self.fs.as_ref(), &self.git_root, &self.expanded);
+        for row in &mut rows {
+            row.decoration = self.decoration_for(&row.path);
+        }
+        self.rows = rows;
         let last = self.rows.len().saturating_sub(1);
         self.selected = self.selected.min(last);
     }
@@ -180,6 +247,17 @@ impl Render for ProjectTree {
             } else {
                 file_icons::color_for_path(&row.path, &theme)
             };
+            let (name_color, struck) = match row.decoration {
+                Some(GitDecoration::Added) => (theme.git_added, false),
+                Some(GitDecoration::Modified) => (theme.git_modified, false),
+                Some(GitDecoration::Deleted) => (theme.git_deleted, true),
+                Some(GitDecoration::Ignored) => (theme.muted_text, true),
+                None => (color, false),
+            };
+            let mut name_el = div().text_color(name_color).child(SharedString::from(name));
+            if struck {
+                name_el = name_el.line_through();
+            }
             let mut el = div()
                 .flex()
                 .items_center()
@@ -192,7 +270,7 @@ impl Render for ProjectTree {
                         .text_color(icon_color)
                         .child(file_icons::icon_for_path(&row.path, row.is_dir)),
                 )
-                .child(SharedString::from(name));
+                .child(name_el);
             if ix == selected {
                 el = el.bg(white().opacity(0.1));
             }
@@ -251,6 +329,7 @@ fn push_entries(
             name,
             is_dir,
             depth,
+            decoration: None,
         });
         if expand_here {
             let child = rows.last().expect("row just pushed").path.clone();
@@ -358,6 +437,86 @@ mod tests {
     fn read_entries_empty_for_unreadable_root() {
         let fs = FakeFs::new();
         assert!(read_entries(&fs, Path::new("/missing")).is_empty());
+    }
+
+    fn decorations(
+        cx: &TestAppContext,
+        tree: &Entity<ProjectTree>,
+    ) -> Vec<(PathBuf, Option<GitDecoration>)> {
+        tree.read_with(cx, |t, _| {
+            t.rows
+                .iter()
+                .map(|r| (r.path.clone(), r.decoration))
+                .collect()
+        })
+    }
+
+    #[test]
+    fn changed_decoration_classifies_by_head_and_disk() {
+        assert_eq!(changed_decoration(false, true), GitDecoration::Added);
+        assert_eq!(changed_decoration(false, false), GitDecoration::Added);
+        assert_eq!(changed_decoration(true, true), GitDecoration::Modified);
+        assert_eq!(changed_decoration(true, false), GitDecoration::Deleted);
+    }
+
+    #[test]
+    fn git_status_decorates_added_modified_and_classifies_deletions() {
+        use crate::globals::GitHostGlobal;
+        use stoat::host::{FakeGit, GitHost};
+
+        let fs = FakeFs::new();
+        fs.insert_dir("/repo");
+        let git = Arc::new(FakeGit::new());
+        {
+            let mut builder = git.add_repo("/repo").with_fs(&fs);
+            builder.added("new.rs", "fresh\n");
+            builder.modified("mod.rs", "old\n", "changed\n");
+            builder.deleted("gone.rs", "was\n");
+        }
+        let fs: Arc<dyn FsHost> = Arc::new(fs);
+
+        let cx = TestAppContext::single();
+        cx.update(|cx| cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>)));
+        let tree = cx.update(|cx| cx.new(|cx| ProjectTree::new(PathBuf::from("/repo"), fs, cx)));
+
+        let decos = decorations(&cx, &tree);
+        let by_name = |name: &str| {
+            decos
+                .iter()
+                .find(|(p, _)| p.ends_with(name))
+                .map(|(_, d)| *d)
+        };
+        assert_eq!(by_name("new.rs"), Some(Some(GitDecoration::Added)));
+        assert_eq!(by_name("mod.rs"), Some(Some(GitDecoration::Modified)));
+        assert_eq!(by_name("gone.rs"), None, "deleted file is not a tree row");
+
+        let gone = tree.read_with(&cx, |t, _| {
+            t.git_status.get(Path::new("/repo/gone.rs")).copied()
+        });
+        assert_eq!(gone, Some(GitDecoration::Deleted));
+    }
+
+    #[test]
+    fn gitignored_entry_is_decorated_ignored() {
+        let fs = FakeFs::new();
+        fs.insert_dir("/repo");
+        fs.insert_file("/repo/.gitignore", "ignored.txt\n");
+        fs.insert_file("/repo/ignored.txt", "");
+        fs.insert_file("/repo/keep.txt", "");
+        let fs: Arc<dyn FsHost> = Arc::new(fs);
+
+        let cx = TestAppContext::single();
+        let tree = cx.update(|cx| cx.new(|cx| ProjectTree::new(PathBuf::from("/repo"), fs, cx)));
+
+        let decos = decorations(&cx, &tree);
+        let by_name = |name: &str| {
+            decos
+                .iter()
+                .find(|(p, _)| p.ends_with(name))
+                .map(|(_, d)| *d)
+        };
+        assert_eq!(by_name("ignored.txt"), Some(Some(GitDecoration::Ignored)));
+        assert_eq!(by_name("keep.txt"), Some(None));
     }
 
     #[test]

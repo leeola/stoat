@@ -329,6 +329,7 @@ impl Workspace {
             |workspace, _, event: &FsWatcherDriverEvent, cx| {
                 let FsWatcherDriverEvent::ExternalEdit { path } = event;
                 workspace.dispatch_review_external_edit(path.clone(), cx);
+                workspace.update_project_tree(cx, |tree, cx| tree.refresh(cx));
             },
         );
         let modal_layer_subscription = cx.observe(&modal_layer, |workspace, layer, cx| {
