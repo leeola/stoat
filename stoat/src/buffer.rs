@@ -1,4 +1,5 @@
 use crate::diff_map::DiffMap;
+use encoding_rs::{GBK, SHIFT_JIS, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252};
 use serde::{Deserialize, Serialize};
 use std::{collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
@@ -38,9 +39,43 @@ impl LineEnding {
     }
 }
 
+/// The character encoding a [`TextBuffer`]'s bytes were decoded from.
+/// Unlike [`LineEnding`], the decoded rope is always UTF-8 and cannot
+/// reveal the original encoding, so this is tracked as metadata.
+/// Re-selecting an encoding re-decodes the file's bytes via [`decode`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum Encoding {
+    #[default]
+    Utf8,
+    Utf8Bom,
+    Utf16Le,
+    Utf16Be,
+    Latin1,
+    ShiftJis,
+    Gbk,
+}
+
+impl Encoding {
+    /// Status-bar label, e.g. `UTF-8`, `Shift-JIS`.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Encoding::Utf8 => "UTF-8",
+            Encoding::Utf8Bom => "UTF-8 BOM",
+            Encoding::Utf16Le => "UTF-16 LE",
+            Encoding::Utf16Be => "UTF-16 BE",
+            Encoding::Latin1 => "Latin-1",
+            Encoding::ShiftJis => "Shift-JIS",
+            Encoding::Gbk => "GBK",
+        }
+    }
+}
+
 pub struct TextBuffer {
     pub snapshot: TextBufferSnapshot,
     pub dirty: bool,
+    /// Character encoding the file's bytes were decoded from. Metadata
+    /// only; the rope content is always UTF-8.
+    encoding: Encoding,
     pub diff_map: Option<DiffMap>,
     next_timestamp: u64,
     buffer_id: BufferId,
@@ -136,6 +171,7 @@ impl TextBuffer {
                 buffer_id,
             },
             dirty: false,
+            encoding: Encoding::Utf8,
             diff_map: None,
             next_timestamp: 1,
             buffer_id,
@@ -528,6 +564,17 @@ impl TextBuffer {
         }
     }
 
+    pub fn encoding(&self) -> Encoding {
+        self.encoding
+    }
+
+    /// Record the encoding the content corresponds to. Metadata only:
+    /// decoding the file's bytes and replacing the text is the caller's
+    /// job, since it requires IO this type does not perform.
+    pub fn set_encoding(&mut self, encoding: Encoding) {
+        self.encoding = encoding;
+    }
+
     pub fn version(&self) -> u64 {
         self.snapshot.version
     }
@@ -823,9 +870,24 @@ fn normalize_line_endings(text: &str, target: LineEnding) -> String {
     out
 }
 
+/// Decode `bytes` as `encoding`, returning the UTF-8 text and whether
+/// the decode was lossy (malformed sequences replaced with U+FFFD).
+pub fn decode(bytes: &[u8], encoding: Encoding) -> (String, bool) {
+    let (text, had_errors) = match encoding {
+        Encoding::Utf8 => UTF_8.decode_without_bom_handling(bytes),
+        Encoding::Utf8Bom => UTF_8.decode_with_bom_removal(bytes),
+        Encoding::Utf16Le => UTF_16LE.decode_without_bom_handling(bytes),
+        Encoding::Utf16Be => UTF_16BE.decode_without_bom_handling(bytes),
+        Encoding::Latin1 => WINDOWS_1252.decode_without_bom_handling(bytes),
+        Encoding::ShiftJis => SHIFT_JIS.decode_without_bom_handling(bytes),
+        Encoding::Gbk => GBK.decode_without_bom_handling(bytes),
+    };
+    (text.into_owned(), had_errors)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{LineEnding, TextBuffer};
+    use super::{Encoding, LineEnding, TextBuffer};
     use stoat_text::{Bias, BufferId, Point};
 
     fn buf(content: &str) -> TextBuffer {
@@ -847,6 +909,34 @@ mod tests {
         assert_eq!(b.rope().to_string(), "a\r\nb\r\nc");
         b.set_line_ending(LineEnding::Lf);
         assert_eq!(b.rope().to_string(), "a\nb\nc");
+    }
+
+    #[test]
+    fn encoding_defaults_to_utf8_and_set_updates_it() {
+        let mut b = buf("x");
+        assert_eq!(b.encoding(), Encoding::Utf8);
+        b.set_encoding(Encoding::ShiftJis);
+        assert_eq!(b.encoding(), Encoding::ShiftJis);
+    }
+
+    #[test]
+    fn decode_maps_encodings_and_flags_lossy() {
+        assert_eq!(
+            super::decode("héllo".as_bytes(), Encoding::Utf8),
+            ("héllo".to_string(), false)
+        );
+        assert_eq!(
+            super::decode(&[0xE9], Encoding::Latin1),
+            ("é".to_string(), false)
+        );
+        assert_eq!(
+            super::decode(&[0x93, 0xFA, 0x96, 0x7B], Encoding::ShiftJis),
+            ("日本".to_string(), false)
+        );
+
+        let (text, lossy) = super::decode(&[0xFF, 0xFE], Encoding::Utf8);
+        assert!(lossy, "invalid utf-8 should be lossy");
+        assert!(text.contains('\u{FFFD}'));
     }
 
     #[test]

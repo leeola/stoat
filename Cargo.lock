@@ -6273,6 +6273,7 @@ dependencies = [
  "brush-parser",
  "compact_str 0.8.1",
  "crossterm",
+ "encoding_rs",
  "etcetera",
  "futures",
  "git2",
