@@ -40,6 +40,19 @@ pub enum LineNumberMode {
     Hybrid,
 }
 
+/// Visible-whitespace rendering mode. `None` draws no whitespace
+/// glyphs (the default); `Boundary` marks only leading and trailing
+/// whitespace; `Selection` marks whitespace inside the active
+/// selection; `All` marks every space and tab. A trailing-whitespace
+/// underline is drawn regardless of this setting.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ShowWhitespace {
+    None,
+    Boundary,
+    Selection,
+    All,
+}
+
 /// Per-tool Claude permission rule lists. Each `Vec<String>` carries
 /// raw regex source as parsed from stcfg; compilation happens at the
 /// host's policy construction so a bad pattern can be reported with
@@ -133,6 +146,10 @@ pub struct Settings {
     /// [`LineNumberMode::Absolute`]. Set via
     /// `ui.editor.line_numbers = relative;` (or `hybrid`).
     pub ui_editor_line_numbers: Option<LineNumberMode>,
+    /// Visible-whitespace rendering mode. `None` defaults to
+    /// [`ShowWhitespace::None`] (no glyphs). Set via
+    /// `ui.editor.show_whitespace = all;` (or `boundary`/`selection`).
+    pub ui_editor_show_whitespace: Option<ShowWhitespace>,
     /// Per-language LSP server commands keyed by language name
     /// (e.g. `rust`, `typescript`). Empty when no
     /// `lsp.<lang>.*` settings are present. Right-hand wins on
@@ -199,6 +216,9 @@ impl Settings {
                 .ui_editor_show_sticky_scroll
                 .or(self.ui_editor_show_sticky_scroll),
             ui_editor_line_numbers: other.ui_editor_line_numbers.or(self.ui_editor_line_numbers),
+            ui_editor_show_whitespace: other
+                .ui_editor_show_whitespace
+                .or(self.ui_editor_show_whitespace),
             language_servers,
         }
     }
@@ -308,6 +328,15 @@ impl Settings {
                 };
                 if let Some(mode) = mode {
                     self.ui_editor_line_numbers = Some(mode);
+                }
+            },
+            ["ui", "editor", "show_whitespace"] => {
+                let mode = match &setting.value.node {
+                    Value::String(s) | Value::Ident(s) => parse_show_whitespace(s),
+                    _ => None,
+                };
+                if let Some(mode) = mode {
+                    self.ui_editor_show_whitespace = Some(mode);
                 }
             },
             ["claude", "permissions", tool, behavior] => {
@@ -461,6 +490,18 @@ impl Settings {
                 self.ui_editor_line_numbers = Some(mode);
                 Ok(())
             },
+            ["ui", "editor", "show_whitespace"] => {
+                let mode = parse_show_whitespace(raw).ok_or_else(|| {
+                    InvalidValueSnafu {
+                        key: path.to_string(),
+                        expected: "none|boundary|selection|all",
+                        got: raw.to_string(),
+                    }
+                    .build()
+                })?;
+                self.ui_editor_show_whitespace = Some(mode);
+                Ok(())
+            },
             _ => UnknownKeySnafu {
                 key: path.to_string(),
             }
@@ -482,6 +523,16 @@ fn parse_line_number_mode(raw: &str) -> Option<LineNumberMode> {
         "absolute" => Some(LineNumberMode::Absolute),
         "relative" => Some(LineNumberMode::Relative),
         "hybrid" => Some(LineNumberMode::Hybrid),
+        _ => None,
+    }
+}
+
+fn parse_show_whitespace(raw: &str) -> Option<ShowWhitespace> {
+    match raw.to_ascii_lowercase().as_str() {
+        "none" | "off" => Some(ShowWhitespace::None),
+        "boundary" => Some(ShowWhitespace::Boundary),
+        "selection" => Some(ShowWhitespace::Selection),
+        "all" => Some(ShowWhitespace::All),
         _ => None,
     }
 }
@@ -603,6 +654,25 @@ mod tests {
     }
 
     #[test]
+    fn apply_runtime_sets_ui_editor_show_whitespace() {
+        for (raw, mode) in [
+            ("all", ShowWhitespace::All),
+            ("boundary", ShowWhitespace::Boundary),
+            ("selection", ShowWhitespace::Selection),
+            ("none", ShowWhitespace::None),
+        ] {
+            let mut s = Settings::default();
+            assert_eq!(s.apply_runtime("ui.editor.show_whitespace", raw), Ok(()));
+            assert_eq!(s.ui_editor_show_whitespace, Some(mode));
+        }
+        let mut s = Settings::default();
+        assert!(matches!(
+            s.apply_runtime("ui.editor.show_whitespace", "sometimes"),
+            Err(SettingsApplyError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
     fn apply_runtime_rejects_unknown_key() {
         let mut s = Settings::default();
         let result = s.apply_runtime("nope.bad.path", "true");
@@ -710,6 +780,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -738,6 +809,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -766,6 +838,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -803,6 +876,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -823,6 +897,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -845,6 +920,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -870,6 +946,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -893,6 +970,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -929,6 +1007,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -957,6 +1036,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -985,6 +1065,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -1022,6 +1103,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings::default();
@@ -1045,6 +1127,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -1073,6 +1156,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -1101,6 +1185,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );
@@ -1126,6 +1211,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -1146,6 +1232,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
@@ -1171,6 +1258,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         let right = Settings {
@@ -1191,6 +1279,7 @@ mod tests {
             ui_editor_show_indent_guides: None,
             ui_editor_show_sticky_scroll: None,
             ui_editor_line_numbers: None,
+            ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
         };
         assert_eq!(
@@ -1213,6 +1302,7 @@ mod tests {
                 ui_editor_show_indent_guides: None,
                 ui_editor_show_sticky_scroll: None,
                 ui_editor_line_numbers: None,
+                ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
             }
         );

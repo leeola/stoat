@@ -35,7 +35,7 @@ use stoat::{
     buffer::BufferId, jumplist::JumpList, multi_buffer::MultiBufferSnapshot,
     review_session::ChunkStatus, selection::SelectionsCollection, DiffHunkStatus, DisplayPoint,
 };
-use stoat_config::LineNumberMode;
+use stoat_config::{LineNumberMode, ShowWhitespace};
 use stoat_text::{
     next_word_start, prev_word_start, Anchor, Bias, OffsetUtf16, Selection, SelectionGoal,
 };
@@ -3741,6 +3741,30 @@ impl Editor {
                 _ => None,
             }
         };
+        let whitespace_paint = match self.cell_size {
+            Some(cell) => {
+                let mode = cx
+                    .try_global::<Settings>()
+                    .and_then(|s| s.resolved.ui_editor_show_whitespace)
+                    .unwrap_or(ShowWhitespace::None);
+                let theme = cx.theme();
+                Some(render::WhitespacePaint {
+                    rows: render::build_whitespace_rows(
+                        &display_snapshot,
+                        &rows,
+                        start as u32..end as u32,
+                        mode,
+                        &selection_paint,
+                    ),
+                    range_start: start as u32,
+                    glyph_color: theme.whitespace,
+                    trailing_color: theme.diagnostic_error,
+                    cell_width: cell.width,
+                    cell_height: cell.height,
+                })
+            },
+            None => None,
+        };
         let line_number_mode = cx
             .try_global::<Settings>()
             .and_then(|s| s.resolved.ui_editor_line_numbers)
@@ -3777,6 +3801,7 @@ impl Editor {
             blame: blame_paint,
             inline_blame: inline_blame_paint,
             indent_guides: indent_guide_paint,
+            whitespace: whitespace_paint,
             metrics,
             fold_chevron_rows: &fold_chevron_rows,
             line_number_color: cx.theme().muted_text,

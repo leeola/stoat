@@ -119,6 +119,9 @@ pub struct ThemeColors {
     pub indent_guide: Hsla,
     /// Indent-guide color for the cursor's active indent level.
     pub indent_guide_active: Hsla,
+    /// Visible-whitespace glyph color: muted dots and arrows drawn for
+    /// spaces and tabs.
+    pub whitespace: Hsla,
     /// Background for the pinned sticky-scroll header at the viewport top.
     pub sticky_header_background: Hsla,
     pub diagnostic_error: Hsla,
@@ -239,6 +242,8 @@ impl ThemeColors {
                 stoat::theme::scope::UI_TEXT_MUTED,
                 palette.text_muted,
             ),
+            whitespace: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_MUTED, palette.text_muted)
+                .opacity(0.3),
             sticky_header_background: theme_bg_or(
                 cx,
                 stoat::theme::scope::UI_TAB_INACTIVE,

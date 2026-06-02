@@ -21,7 +21,7 @@ use stoat::{
     review_session::ChunkStatus,
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
 };
-use stoat_config::LineNumberMode;
+use stoat_config::{LineNumberMode, ShowWhitespace};
 use stoat_text::{Anchor, Bias, Selection};
 
 const NAMED_COLOR_HEX: [u32; 16] = [
@@ -1516,6 +1516,7 @@ pub(crate) struct GutterPaint<'a> {
     pub blame: Option<BlamePaint<'a>>,
     pub inline_blame: Option<InlineBlamePaint<'a>>,
     pub indent_guides: Option<IndentGuidePaint>,
+    pub whitespace: Option<WhitespacePaint>,
     pub metrics: GutterMetrics,
     /// Buffer rows that begin a foldable container, sorted ascending.
     /// Each gets a fold chevron in the gutter column adjacent to the
@@ -1574,6 +1575,35 @@ pub(crate) struct IndentGuidePaint {
     pub line_color: Hsla,
     pub active_color: Hsla,
     pub active_index: Option<u32>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum WsKind {
+    Space,
+    Tab,
+}
+
+/// One whitespace cell to decorate: a glyph (dot/arrow) when the
+/// active mode covers it, and/or a trailing-whitespace underline.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub(crate) struct WsGlyph {
+    column: u32,
+    glyph: Option<char>,
+    trailing: bool,
+}
+
+/// Geometry, colors, and precomputed per-row whitespace decorations.
+/// Carried on [`GutterPaint`] when the editor's cell size is known. The
+/// trailing underline is emitted regardless of the active mode, so this
+/// is present even when `ui.editor.show_whitespace` is
+/// [`ShowWhitespace::None`].
+pub(crate) struct WhitespacePaint {
+    pub rows: Vec<Vec<WsGlyph>>,
+    pub range_start: u32,
+    pub glyph_color: Hsla,
+    pub trailing_color: Hsla,
+    pub cell_width: Pixels,
+    pub cell_height: Pixels,
 }
 
 /// Display tab width for indent-guide column spacing. Mirrors the
@@ -1673,6 +1703,9 @@ pub(crate) fn render_row_with_gutter(
         .child(StyledText::new(SharedString::from(prefix.text)).with_highlights(prefix_runs))
         .child(StyledText::new(body.text).with_highlights(body_runs))
         .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix_runs));
+    for overlay in whitespace_overlay_lines(display_row, paint) {
+        row_el = row_el.child(overlay);
+    }
     if let Some(cell) = inline_blame_cell(display_row, paint) {
         row_el = row_el.child(cell);
     }
@@ -1757,6 +1790,197 @@ fn nearest_nonblank_indent(
         }
     }
     None
+}
+
+fn whitespace_glyph(kind: WsKind) -> char {
+    match kind {
+        WsKind::Space => '\u{00B7}',
+        WsKind::Tab => '\u{2192}',
+    }
+}
+
+/// Whitespace cells of `display_row` as (char-column, kind), plus the
+/// column of the first content char and the column past the last
+/// content char (both `None` for an all-whitespace row). Walks the
+/// display chunks so tab-expansion cells are tagged [`WsKind::Tab`] via
+/// `is_tab` even though they render as spaces.
+fn classify_row_whitespace(
+    snapshot: &DisplaySnapshot,
+    display_row: u32,
+) -> (Vec<(u32, WsKind)>, Option<u32>, Option<u32>) {
+    let mut cells = Vec::new();
+    let mut first_content = None;
+    let mut last_content_end = None;
+    let mut column = 0u32;
+    'outer: for chunk in snapshot.highlighted_chunks(display_row..display_row + 1) {
+        if chunk.is_tab {
+            cells.push((column, WsKind::Tab));
+            column += chunk.text.chars().count() as u32;
+            continue;
+        }
+        for ch in chunk.text.chars() {
+            if ch == '\n' {
+                break 'outer;
+            }
+            if ch == ' ' {
+                cells.push((column, WsKind::Space));
+            } else {
+                if first_content.is_none() {
+                    first_content = Some(column);
+                }
+                last_content_end = Some(column + 1);
+            }
+            column += 1;
+        }
+    }
+    (cells, first_content, last_content_end)
+}
+
+/// Choose which classified whitespace cells get a glyph (per `mode`)
+/// and which carry the always-on trailing underline. Pure: the column
+/// classification, content extents, and selection column ranges are all
+/// supplied by the caller.
+fn select_whitespace_glyphs(
+    cells: &[(u32, WsKind)],
+    first_content: Option<u32>,
+    last_content_end: Option<u32>,
+    mode: ShowWhitespace,
+    selection_cols: &[Range<u32>],
+) -> Vec<WsGlyph> {
+    cells
+        .iter()
+        .filter_map(|&(column, kind)| {
+            let trailing = match last_content_end {
+                Some(end) => column >= end,
+                None => true,
+            };
+            let leading = match first_content {
+                Some(start) => column < start,
+                None => true,
+            };
+            let show_glyph = match mode {
+                ShowWhitespace::None => false,
+                ShowWhitespace::All => true,
+                ShowWhitespace::Boundary => leading || trailing,
+                ShowWhitespace::Selection => selection_cols.iter().any(|r| r.contains(&column)),
+            };
+            if !show_glyph && !trailing {
+                return None;
+            }
+            Some(WsGlyph {
+                column,
+                glyph: show_glyph.then(|| whitespace_glyph(kind)),
+                trailing,
+            })
+        })
+        .collect()
+}
+
+fn byte_to_column(text: &str, byte: usize) -> u32 {
+    text[..byte.min(text.len())].chars().count() as u32
+}
+
+/// Convert a row's byte-range selection spans (from [`SelectionPaint`])
+/// to char-column ranges aligned with [`classify_row_whitespace`].
+fn selection_columns_for_row(
+    row: Option<&RenderedRow>,
+    spans: Option<&Vec<Range<usize>>>,
+) -> Vec<Range<u32>> {
+    let (Some(row), Some(spans)) = (row, spans) else {
+        return Vec::new();
+    };
+    let text: &str = row.text.as_ref();
+    spans
+        .iter()
+        .map(|span| byte_to_column(text, span.start)..byte_to_column(text, span.end))
+        .collect()
+}
+
+/// Per-row whitespace decorations for `range`, indexed from
+/// `range.start`. Wrap-continuation and block rows get no decorations.
+pub(crate) fn build_whitespace_rows(
+    snapshot: &DisplaySnapshot,
+    rows: &[RenderedRow],
+    range: Range<u32>,
+    mode: ShowWhitespace,
+    selection_paint: &SelectionPaint,
+) -> Vec<Vec<WsGlyph>> {
+    (range.start..range.end)
+        .enumerate()
+        .map(|(idx, display_row)| {
+            if snapshot.is_wrap_continuation(display_row)
+                || matches!(
+                    snapshot.classify_row(display_row),
+                    BlockRowKind::Block { .. }
+                )
+            {
+                return Vec::new();
+            }
+            let (cells, first_content, last_content_end) =
+                classify_row_whitespace(snapshot, display_row);
+            let selection_cols = if mode == ShowWhitespace::Selection {
+                selection_columns_for_row(
+                    rows.get(idx),
+                    selection_paint.row_selection_spans.get(&display_row),
+                )
+            } else {
+                Vec::new()
+            };
+            select_whitespace_glyphs(
+                &cells,
+                first_content,
+                last_content_end,
+                mode,
+                &selection_cols,
+            )
+        })
+        .collect()
+}
+
+/// Per-row whitespace overlay elements: a glyph cell for each marked
+/// space/tab and a 1px underline for each trailing-whitespace cell.
+/// Empty when no [`WhitespacePaint`] is present or the row index is out
+/// of range. Painted over the row's blank whitespace cells.
+fn whitespace_overlay_lines(display_row: u32, paint: &GutterPaint<'_>) -> Vec<Div> {
+    let Some(ws) = paint.whitespace.as_ref() else {
+        return Vec::new();
+    };
+    let Some(glyphs) = display_row
+        .checked_sub(ws.range_start)
+        .and_then(|idx| ws.rows.get(idx as usize))
+    else {
+        return Vec::new();
+    };
+    let gutter_cols = paint.metrics.total_width as u32;
+    let cell_w = f32::from(ws.cell_width);
+    let mut out = Vec::new();
+    for g in glyphs {
+        let x = cell_w * (gutter_cols + g.column) as f32;
+        if let Some(glyph) = g.glyph {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(px(0.0))
+                    .w(ws.cell_width)
+                    .h(ws.cell_height)
+                    .text_color(ws.glyph_color)
+                    .child(SharedString::from(glyph.to_string())),
+            );
+        }
+        if g.trailing {
+            out.push(
+                div()
+                    .absolute()
+                    .left(px(x))
+                    .top(ws.cell_height - px(1.0))
+                    .w(ws.cell_width)
+                    .h(px(1.0))
+                    .bg(ws.trailing_color),
+            );
+        }
+    }
+    out
 }
 
 /// Build the trailing inline-blame element for `display_row` when
@@ -2281,6 +2505,91 @@ mod tests {
     }
 
     #[test]
+    fn select_whitespace_glyphs_applies_mode_and_trailing() {
+        // "  x  ": leading spaces 0,1; content at 2; trailing spaces 3,4.
+        let cells = vec![
+            (0, WsKind::Space),
+            (1, WsKind::Space),
+            (3, WsKind::Space),
+            (4, WsKind::Space),
+        ];
+        let dot = |column, trailing| WsGlyph {
+            column,
+            glyph: Some('·'),
+            trailing,
+        };
+        let bare = |column| WsGlyph {
+            column,
+            glyph: None,
+            trailing: true,
+        };
+
+        assert_eq!(
+            select_whitespace_glyphs(&cells, Some(2), Some(3), ShowWhitespace::All, &[]),
+            vec![dot(0, false), dot(1, false), dot(3, true), dot(4, true)]
+        );
+        assert_eq!(
+            select_whitespace_glyphs(&cells, Some(2), Some(3), ShowWhitespace::None, &[]),
+            vec![bare(3), bare(4)]
+        );
+        assert_eq!(
+            select_whitespace_glyphs(&cells, Some(2), Some(3), ShowWhitespace::Selection, &[0..2]),
+            vec![dot(0, false), dot(1, false), bare(3), bare(4)]
+        );
+    }
+
+    #[test]
+    fn select_whitespace_glyphs_boundary_and_tab_and_blank() {
+        // tab(0) x(1) space(2) y(3) space(4); content spans 1..4.
+        let cells = vec![(0, WsKind::Tab), (2, WsKind::Space), (4, WsKind::Space)];
+        assert_eq!(
+            select_whitespace_glyphs(&cells, Some(1), Some(4), ShowWhitespace::Boundary, &[]),
+            vec![
+                WsGlyph {
+                    column: 0,
+                    glyph: Some('→'),
+                    trailing: false
+                },
+                WsGlyph {
+                    column: 4,
+                    glyph: Some('·'),
+                    trailing: true
+                },
+            ]
+        );
+
+        // All-whitespace row: no content, so every cell is trailing.
+        let blank = vec![(0, WsKind::Space), (1, WsKind::Space)];
+        assert_eq!(
+            select_whitespace_glyphs(&blank, None, None, ShowWhitespace::None, &[]),
+            vec![
+                WsGlyph {
+                    column: 0,
+                    glyph: None,
+                    trailing: true
+                },
+                WsGlyph {
+                    column: 1,
+                    glyph: None,
+                    trailing: true
+                },
+            ]
+        );
+    }
+
+    #[test]
+    fn classify_row_whitespace_tags_tab_and_trailing() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "\tx  ");
+        let (cells, first, last) = classify_row_whitespace(&snapshot, 0);
+        assert_eq!(
+            cells,
+            vec![(0, WsKind::Tab), (5, WsKind::Space), (6, WsKind::Space)]
+        );
+        assert_eq!((first, last), (Some(4), Some(5)));
+    }
+
+    #[test]
     fn build_rendered_rows_single_line() {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "hello");
@@ -2407,6 +2716,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2456,6 +2766,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2498,6 +2809,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: chevron_rows,
             line_number_color: rgb(0x808080).into(),
@@ -2551,6 +2863,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2583,6 +2896,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2610,6 +2924,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2647,6 +2962,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2698,6 +3014,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2727,6 +3044,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2805,6 +3123,7 @@ mod tests {
             blame: Some(blame),
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2839,6 +3158,7 @@ mod tests {
             blame: Some(blame),
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2874,6 +3194,7 @@ mod tests {
             blame: Some(blame),
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2910,6 +3231,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2951,6 +3273,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -2989,6 +3312,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -3045,6 +3369,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -3074,6 +3399,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
@@ -3105,6 +3431,7 @@ mod tests {
             blame: None,
             inline_blame: None,
             indent_guides: None,
+            whitespace: None,
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
