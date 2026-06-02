@@ -19,7 +19,7 @@ use std::{
 };
 use stoat::{
     action_handlers::surround::SurroundReplaceStage,
-    keymap::{Keymap, KeymapState, StateValue},
+    keymap::{is_text_input_mode, Keymap, KeymapState, StateValue},
     keymap_state::{arg_as_str, normalize_shift_event, resolve_action},
     register::Register,
 };
@@ -162,7 +162,7 @@ pub enum Operator {}
 /// machinery (observe_keystrokes, dispatch_action, sequence
 /// lowering) will reach for in subsequent items.
 ///
-/// The five predicate-visible fields are stored as [`StateValue`]
+/// The six predicate-visible fields are stored as [`StateValue`]
 /// carriers so [`KeymapState::get`] can hand out borrows directly,
 /// matching `StoatKeymapState`'s storage layout.
 pub struct InputStateMachine {
@@ -171,6 +171,7 @@ pub struct InputStateMachine {
     finder_open: StateValue,
     help_open: StateValue,
     claude_focused: StateValue,
+    input_active: StateValue,
     pending_count: Option<u32>,
     /// Count carried over for dispatch after [`feed`] consumes a
     /// keystroke. `feed` moves `pending_count` into this slot once
@@ -334,6 +335,7 @@ impl InputStateMachine {
             finder_open: StateValue::Bool(false),
             help_open: StateValue::Bool(false),
             claude_focused: StateValue::Bool(false),
+            input_active: StateValue::Bool(false),
             pending_count: None,
             consumed_count: None,
             pending_chord: Vec::new(),
@@ -486,6 +488,7 @@ impl InputStateMachine {
     ) {
         let was_input = self.text_input_allowed();
         self.mode = StateValue::String(mode.into().into());
+        self.sync_input_active();
         let now_input = self.text_input_allowed();
         if !was_input && now_input {
             if let Some(handle) = self.editor_focus_target.as_ref() {
@@ -504,6 +507,7 @@ impl InputStateMachine {
         let new = StateValue::String(mode.into().into());
         if self.mode != new {
             self.mode = new;
+            self.sync_input_active();
             cx.notify();
         }
     }
@@ -596,7 +600,14 @@ impl InputStateMachine {
     /// here enforces the same contract for tests that bypass the
     /// OS path.
     pub fn text_input_allowed(&self) -> bool {
-        matches!(self.mode(), "insert" | "reword_insert" | "prompt" | "run")
+        is_text_input_mode(self.mode())
+    }
+
+    /// Refresh the `input_active` predicate flag from the current
+    /// mode. Called after every `mode` mutation so `get` hands out a
+    /// borrow that tracks [`text_input_allowed`].
+    fn sync_input_active(&mut self) {
+        self.input_active = StateValue::Bool(self.text_input_allowed());
     }
 
     /// Apply a committed IME insert (`insertText` from
@@ -913,6 +924,7 @@ impl InputStateMachine {
     #[cfg(any(test, feature = "test-support"))]
     pub fn set_mode_for_test(&mut self, mode: StateValue) {
         self.mode = mode;
+        self.sync_input_active();
     }
 
     /// Drive one platform keystroke through the input pipeline:
@@ -1220,6 +1232,7 @@ impl KeymapState for InputStateMachine {
             "finder_open" => Some(&self.finder_open),
             "help_open" => Some(&self.help_open),
             "claude_focused" => Some(&self.claude_focused),
+            "input_active" => Some(&self.input_active),
             _ => None,
         }
     }
@@ -1339,6 +1352,38 @@ mod tests {
         cx: &mut TestAppContext,
     ) -> (Entity<InputStateMachine>, &mut VisualTestContext) {
         new_state_machine_with_keymap(cx, empty_keymap())
+    }
+
+    #[test]
+    fn input_active_tracks_text_entry_modes() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine(&mut cx);
+
+        for mode in ["insert", "reword_insert", "prompt", "run"] {
+            sm.update(vcx, |s, _| {
+                s.set_mode_for_test(StateValue::String(mode.into()))
+            });
+            sm.read_with(vcx, |s, _| {
+                assert_eq!(
+                    s.get("input_active"),
+                    Some(&StateValue::Bool(true)),
+                    "{mode}"
+                )
+            });
+        }
+
+        for mode in ["normal", "review", "space"] {
+            sm.update(vcx, |s, _| {
+                s.set_mode_for_test(StateValue::String(mode.into()))
+            });
+            sm.read_with(vcx, |s, _| {
+                assert_eq!(
+                    s.get("input_active"),
+                    Some(&StateValue::Bool(false)),
+                    "{mode}"
+                )
+            });
+        }
     }
 
     fn key(name: &str) -> Keystroke {

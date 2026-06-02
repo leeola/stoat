@@ -12,7 +12,7 @@ use crate::{
         EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspServer,
         NoopFsWatcher, NoopLspServer,
     },
-    keymap::{Keymap, ResolvedAction},
+    keymap::{is_text_input_mode, Keymap, ResolvedAction},
     keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
     pane::{FocusTarget, View},
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
@@ -1673,11 +1673,7 @@ impl Stoat {
             return self.dispatch_global_search_key(key);
         }
 
-        if self.mode == "insert"
-            || self.mode == "reword_insert"
-            || self.mode == "prompt"
-            || self.mode == "run"
-        {
+        if is_text_input_mode(&self.mode) {
             if let Some(effect) = self.handle_insert_key(key) {
                 // If help is open, keep its filtered list in sync after every
                 // text mutation in the prompt input.

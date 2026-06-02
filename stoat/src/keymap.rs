@@ -24,6 +24,14 @@ pub trait KeymapState {
     fn get(&self, field: &str) -> Option<&StateValue>;
 }
 
+/// Whether `mode` is one where a printable key is typed literally as
+/// text rather than dispatched as a binding. The single source for
+/// both the text-input focus gate and the `input_active` predicate
+/// flag exposed through [`KeymapState`].
+pub fn is_text_input_mode(mode: &str) -> bool {
+    matches!(mode, "insert" | "reword_insert" | "prompt" | "run")
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompiledKey {
     pub code: KeyCode,
@@ -885,6 +893,38 @@ mod tests {
 
         let actions = keymap.lookup(&state, &event).expect("should match");
         assert_eq!(actions[0].name, "Quit");
+    }
+
+    #[test]
+    fn question_mark_opens_help_outside_input_modes() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let event = key_event(KeyCode::Char('?'), KeyModifiers::NONE);
+
+        for mode in [
+            "normal",
+            "review",
+            "rebase",
+            "commits",
+            "conflict",
+            "line_select",
+            "space",
+            "project_tree",
+        ] {
+            let state = TestState::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("input_active", StateValue::Bool(false));
+            let actions = keymap.lookup(&state, &event).expect("? should resolve");
+            assert_eq!(actions[0].name, "OpenHelp", "mode {mode}");
+        }
+
+        for mode in ["insert", "prompt", "run", "reword_insert"] {
+            let state = TestState::new()
+                .set("mode", StateValue::String(mode.into()))
+                .set("input_active", StateValue::Bool(true));
+            let resolved = keymap.lookup(&state, &event).map(|a| a[0].name.as_str());
+            assert_ne!(resolved, Some("OpenHelp"), "mode {mode}");
+        }
     }
 
     #[test]

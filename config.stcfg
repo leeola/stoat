@@ -167,7 +167,7 @@ on init {
 }
 
 on key {
-    mode != normal {
+    input_active == false {
         ? -> OpenHelp();
     }
     mode == normal && help_open {
@@ -278,7 +278,6 @@ on key {
         m -> SetMode(match);
         R -> OpenReview();
         / -> OpenSearchInput();
-        ? -> OpenReverseSearchInput();
         n -> SearchNext();
         N -> SearchPrev();
         y -> Yank();

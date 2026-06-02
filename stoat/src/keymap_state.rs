@@ -1,6 +1,6 @@
 use crate::{
     app::Stoat,
-    keymap::{KeymapState, ResolvedAction, ResolvedArg, StateValue},
+    keymap::{is_text_input_mode, KeymapState, ResolvedAction, ResolvedArg, StateValue},
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use stoat_action::Action;
@@ -11,6 +11,7 @@ pub(crate) struct StoatKeymapState {
     help_open: StateValue,
     finder_open: StateValue,
     claude_focused: StateValue,
+    input_active: StateValue,
 }
 
 impl StoatKeymapState {
@@ -31,6 +32,7 @@ impl StoatKeymapState {
             help_open: StateValue::Bool(help_open),
             finder_open: StateValue::Bool(finder_open),
             claude_focused: StateValue::Bool(claude_focused),
+            input_active: StateValue::Bool(is_text_input_mode(mode)),
         }
     }
 
@@ -53,6 +55,7 @@ impl KeymapState for StoatKeymapState {
             "help_open" => Some(&self.help_open),
             "finder_open" => Some(&self.finder_open),
             "claude_focused" => Some(&self.claude_focused),
+            "input_active" => Some(&self.input_active),
             _ => None,
         }
     }
@@ -134,5 +137,28 @@ pub fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action
             tracing::warn!("action `{name}`: {e}");
             None
         },
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn input_active_true_only_for_text_entry_modes() {
+        for mode in ["insert", "reword_insert", "prompt", "run"] {
+            assert_eq!(
+                StoatKeymapState::new(mode).get("input_active"),
+                Some(&StateValue::Bool(true)),
+                "{mode}"
+            );
+        }
+        for mode in ["normal", "review", "space", "rebase"] {
+            assert_eq!(
+                StoatKeymapState::new(mode).get("input_active"),
+                Some(&StateValue::Bool(false)),
+                "{mode}"
+            );
+        }
     }
 }
