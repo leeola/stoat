@@ -1195,7 +1195,8 @@ mod tests {
         // + 1 ToggleRelativeLineNumbers (cycle gutter line-number mode).
         // + 4 FoldAtCursor / UnfoldAtCursor / FoldAll / UnfoldAll.
         // + 1 OpenTerminalDock (run pane hosted in a bottom dock).
-        assert_eq!(all().count(), 336);
+        // + 1 OpenLineEndingPicker (status-bar line-ending picker).
+        assert_eq!(all().count(), 337);
     }
 
     #[test]
