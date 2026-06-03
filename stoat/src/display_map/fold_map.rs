@@ -1064,41 +1064,31 @@ impl FoldSnapshot {
         let target = FoldPoint::new(fold_row, 0);
         let mut cursor = self
             .transforms
-            .cursor::<Dimensions<FoldPoint, FoldOffset>>(());
+            .cursor::<Dimensions<FoldPoint, FoldOffset, InlayPoint>>(());
         cursor.seek(&target, Bias::Left);
-        let Dimensions(transform_start_point, transform_start_offset, _) = *cursor.start();
-        // Within an isomorphic transform, rows in the output map directly to
-        // bytes in the input. Sum the bytes of preceding rows within the
-        // transform to get the exact offset.
-        let rows_into_transform = fold_row - transform_start_point.row();
-        if rows_into_transform == 0 {
+        let Dimensions(transform_start_point, transform_start_offset, transform_start_inlay) =
+            *cursor.start();
+
+        let overshoot_rows = fold_row - transform_start_point.row();
+        if overshoot_rows == 0 {
             return transform_start_offset;
         }
-        let Some(transform) = cursor.item() else {
-            return transform_start_offset;
-        };
-        // For isomorphic transforms, output.len == input.len and the text
-        // mirrors the inlay bytes. Walk the characters of the transform's
-        // fold-line chars until we've crossed `rows_into_transform` newlines.
-        let mut byte_offset = 0u32;
-        let mut newlines_seen = 0u32;
-        if transform.placeholder.is_some() {
-            // Folded transforms span 0 or 1 output row, so multi-row advance
-            // isn't possible here. Return transform start.
-            return transform_start_offset;
+
+        // Only isomorphic transforms span multiple output rows -- placeholders
+        // collapse to a single row -- and within one, output bytes mirror input
+        // bytes. The target row's offset is thus the output base plus the input
+        // span from the transform start, resolved via two O(log n) inlay lookups.
+        match cursor.item() {
+            Some(transform) if transform.placeholder.is_none() => {
+                let target_inlay = InlayPoint::new(transform_start_inlay.row() + overshoot_rows, 0);
+                let target_offset = self.inlay_snapshot.inlay_point_to_offset(target_inlay);
+                let start_offset = self
+                    .inlay_snapshot
+                    .inlay_point_to_offset(transform_start_inlay);
+                FoldOffset(transform_start_offset.0 + (target_offset.0 - start_offset.0))
+            },
+            _ => transform_start_offset,
         }
-        let first_tab_row = transform_start_point.row();
-        for row_within in 0..rows_into_transform {
-            let absolute_row = first_tab_row + row_within;
-            for ch in self.fold_line_chars(absolute_row) {
-                byte_offset += ch.len_utf8() as u32;
-            }
-            // Account for the newline separating rows.
-            byte_offset += 1;
-            newlines_seen += 1;
-        }
-        let _ = newlines_seen;
-        FoldOffset(transform_start_offset.0 + byte_offset as usize)
     }
 
     /// Stream [`Chunk`]s covering `range` in fold-offset space.
@@ -1565,6 +1555,43 @@ mod tests {
         fold_map.fold(anchor_ranges, FoldPlaceholder::default(), &buffer_snapshot);
         let (snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         snapshot
+    }
+
+    #[test]
+    fn row_start_offset_unfolded_matches_rope() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nlong line one\n\nlast");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (_, snap) = FoldMap::new(inlay_snapshot);
+
+        let rope = buffer_snapshot.rope();
+        for row in 0..snap.line_count() {
+            assert_eq!(
+                snap.row_start_offset(row).0,
+                rope.point_to_offset(stoat_text::Point::new(row, 0)),
+                "row {row} start offset"
+            );
+        }
+    }
+
+    #[test]
+    fn row_start_offset_folded_pins_post_fold_rows() {
+        // "line0\nline1\nline2\nline3" with (1,0)..(2,5) folded renders as
+        // "line0\n...\nline3": row 1 is the "..." placeholder, row 2 is "line3".
+        let snap = make_snapshot_with_folds(
+            "line0\nline1\nline2\nline3",
+            vec![(InlayPoint::new(1, 0), InlayPoint::new(2, 5))],
+        );
+        assert_eq!(snap.line_count(), 3);
+        assert_eq!(snap.row_start_offset(0).0, 0);
+        assert_eq!(snap.row_start_offset(1).0, 6, "row 1 after line0");
+        assert_eq!(
+            snap.row_start_offset(2).0,
+            10,
+            "row 2 after placeholder line"
+        );
     }
 
     #[test]
