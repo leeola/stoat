@@ -32,8 +32,13 @@ use lru::LruCache;
 use serde_json::Value;
 use std::{cell::RefCell, num::NonZeroUsize, ops::Range};
 use stoat::{
-    buffer::BufferId, jumplist::JumpList, multi_buffer::MultiBufferSnapshot,
-    review_session::ChunkStatus, selection::SelectionsCollection, DiffHunkStatus, DisplayPoint,
+    buffer::BufferId,
+    display_map::{Block, BlockRowKind},
+    jumplist::JumpList,
+    multi_buffer::MultiBufferSnapshot,
+    review_session::ChunkStatus,
+    selection::SelectionsCollection,
+    DiffHunkStatus, DisplayPoint,
 };
 use stoat_config::{LineNumberMode, ShowWhitespace};
 use stoat_text::{
@@ -3197,6 +3202,9 @@ impl Editor {
         if self.try_toggle_fold_chevron(row, col, cx) {
             return;
         }
+        if self.try_dispatch_code_lens(row, cx) {
+            return;
+        }
         let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
             return;
         };
@@ -3205,6 +3213,27 @@ impl Editor {
                 w.dispatch_action(Box::new(crate::actions::ClickAt { row, col }), window, cx);
             });
         });
+    }
+
+    /// Dispatch the LSP command of the code-lens block at display `row`,
+    /// returning whether a lens block was hit. Lens titles render as
+    /// custom blocks above their range; a click landing on such a row
+    /// runs the lens command instead of moving the cursor. A miss
+    /// returns `false` so the click falls through to cursor placement.
+    fn try_dispatch_code_lens(&mut self, row: u32, cx: &mut Context<'_, Self>) -> bool {
+        let Some(manager) = self.code_lens_manager.clone() else {
+            return false;
+        };
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let BlockRowKind::Block {
+            block: Block::Custom(custom),
+            ..
+        } = display_snapshot.classify_row(row)
+        else {
+            return false;
+        };
+        let id = custom.id;
+        manager.update(cx, |m, mcx| m.dispatch_block(id, mcx))
     }
 
     /// Toggle the fold of the container whose chevron sits at gutter

@@ -3,8 +3,8 @@ use crate::{
     globals::{LanguageRegistry, LspHostGlobal},
 };
 use gpui::{Context, Entity, Subscription, Task, WeakEntity};
-use lsp_types::{CodeLensParams, TextDocumentIdentifier, Uri};
-use std::{path::Path, str::FromStr, sync::Arc};
+use lsp_types::{CodeLensParams, Command, ExecuteCommandParams, TextDocumentIdentifier, Uri};
+use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 use stoat::{
     display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
     host::LspHost,
@@ -30,6 +30,7 @@ use stoat_language::Language;
 pub struct CodeLensManager {
     editor: WeakEntity<Editor>,
     current_block_ids: Vec<CustomBlockId>,
+    commands_by_block: HashMap<CustomBlockId, Command>,
     last_signature: Option<RequestSignature>,
     pending_task: Option<Task<()>>,
     _subscription: Subscription,
@@ -50,6 +51,7 @@ impl CodeLensManager {
         Self {
             editor: weak_editor,
             current_block_ids: Vec::new(),
+            commands_by_block: HashMap::new(),
             last_signature: None,
             pending_task: None,
             _subscription: subscription,
@@ -58,6 +60,49 @@ impl CodeLensManager {
 
     pub fn current_block_count(&self) -> usize {
         self.current_block_ids.len()
+    }
+
+    /// Execute the command of the lens block identified by `id`,
+    /// returning whether `id` named a known lens. The
+    /// `workspace/executeCommand` request runs in the background; the
+    /// editor's click handler calls this when a click lands on a lens
+    /// block row.
+    pub fn dispatch_block(&self, id: CustomBlockId, cx: &mut Context<'_, Self>) -> bool {
+        let Some(command) = self.commands_by_block.get(&id).cloned() else {
+            return false;
+        };
+        let Some(editor) = self.editor.upgrade() else {
+            return false;
+        };
+        let Some(LspTarget {
+            host,
+            language,
+            workspace_root,
+            uri,
+        }) = lsp_target(&editor, cx)
+        else {
+            return false;
+        };
+        cx.spawn(async move |_, _| {
+            let server = match host.launch(&language, &workspace_root).await {
+                Ok(s) => s,
+                Err(err) => {
+                    tracing::warn!(target: "stoat_gui::lsp::code_lens", ?err, "failed to launch LSP server");
+                    return;
+                },
+            };
+            let _ = server.initialize(Some(uri)).await;
+            let params = ExecuteCommandParams {
+                command: command.command,
+                arguments: command.arguments.unwrap_or_default(),
+                work_done_progress_params: Default::default(),
+            };
+            if let Err(err) = server.execute_command(params).await {
+                tracing::warn!(target: "stoat_gui::lsp::code_lens", ?err, "executeCommand request failed");
+            }
+        })
+        .detach();
+        true
     }
 
     fn reconcile(&mut self, cx: &mut Context<'_, Self>) {
@@ -87,7 +132,7 @@ impl CodeLensManager {
         self.pending_task = Some(task);
     }
 
-    fn apply(&mut self, outcome: Option<Vec<(u32, String)>>, cx: &mut Context<'_, Self>) {
+    fn apply(&mut self, outcome: Option<Vec<(u32, String, Command)>>, cx: &mut Context<'_, Self>) {
         let Some(editor) = self.editor.upgrade() else {
             return;
         };
@@ -97,9 +142,12 @@ impl CodeLensManager {
         if remove.is_empty() && lenses.is_empty() {
             return;
         }
+        self.commands_by_block.clear();
+        let mut commands = Vec::with_capacity(lenses.len());
         let blocks: Vec<BlockProperties> = lenses
             .into_iter()
-            .map(|(row, title)| {
+            .map(|(row, title, command)| {
+                commands.push(command);
                 BlockProperties::from_text(
                     BlockPlacement::Above(row),
                     vec![title],
@@ -111,6 +159,7 @@ impl CodeLensManager {
             dm.remove_blocks(remove, dm_cx);
             dm.insert_blocks(blocks, dm_cx)
         });
+        self.commands_by_block = new_ids.iter().copied().zip(commands).collect();
         self.current_block_ids = new_ids;
     }
 }
@@ -126,17 +175,15 @@ struct CodeLensRequest {
 
 impl CodeLensRequest {
     fn build(editor: &Entity<Editor>, cx: &mut Context<'_, CodeLensManager>) -> Option<Self> {
-        let path = editor.read(cx).file_path()?.to_path_buf();
-        let host = cx.try_global::<LspHostGlobal>()?.0.clone();
-        let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
-        let uri = path_to_uri(&path)?;
+        let LspTarget {
+            host,
+            language,
+            workspace_root,
+            uri,
+        } = lsp_target(editor, cx)?;
         let buffer_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
         let max_buffer_row = buffer_snapshot.rope().max_point().row;
         let buffer_version = buffer_snapshot.version();
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
 
         Some(Self {
             host,
@@ -151,7 +198,7 @@ impl CodeLensRequest {
         })
     }
 
-    async fn run(self) -> Option<Vec<(u32, String)>> {
+    async fn run(self) -> Option<Vec<(u32, String, Command)>> {
         let server = match self.host.launch(&self.language, &self.workspace_root).await {
             Ok(s) => s,
             Err(err) => {
@@ -196,10 +243,36 @@ impl CodeLensRequest {
             let Some(command) = command else {
                 continue;
             };
-            out.push((row, command.title));
+            out.push((row, command.title.clone(), command));
         }
         Some(out)
     }
+}
+
+/// LSP launch coordinates for an editor's buffer, resolved from the
+/// installed globals. Shared by request building and command dispatch.
+struct LspTarget {
+    host: Arc<dyn LspHost>,
+    language: Arc<Language>,
+    workspace_root: std::path::PathBuf,
+    uri: Uri,
+}
+
+fn lsp_target(editor: &Entity<Editor>, cx: &mut Context<'_, CodeLensManager>) -> Option<LspTarget> {
+    let path = editor.read(cx).file_path()?.to_path_buf();
+    let host = cx.try_global::<LspHostGlobal>()?.0.clone();
+    let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
+    let uri = path_to_uri(&path)?;
+    let workspace_root = path
+        .parent()
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| path.clone());
+    Some(LspTarget {
+        host,
+        language,
+        workspace_root,
+        uri,
+    })
 }
 
 fn path_to_uri(path: &Path) -> Option<Uri> {
@@ -359,5 +432,47 @@ mod tests {
         touch(&editor, &mut cx);
 
         assert_eq!(manager.read_with(&cx, |m, _| m.current_block_count()), 0);
+    }
+
+    fn lens_block_id(
+        display_map: &Entity<DisplayMap>,
+        cx: &mut TestAppContext,
+        row: u32,
+    ) -> CustomBlockId {
+        use stoat::display_map::{Block, BlockRowKind};
+        display_map.update(cx, |dm, _| match dm.snapshot().classify_row(row) {
+            BlockRowKind::Block {
+                block: Block::Custom(b),
+                ..
+            } => b.id,
+            _ => panic!("expected a custom block at row {row}"),
+        })
+    }
+
+    #[test]
+    fn dispatch_block_executes_command_for_lens() {
+        let mut cx = TestAppContext::single();
+        let lsp = install_globals(&mut cx);
+        lsp.set_capabilities(capabilities_with_code_lens());
+        let path = PathBuf::from("/tmp/dispatch.rs");
+        lsp.set_code_lenses(path.to_str().unwrap(), vec![lens(0, "Run test")]);
+
+        let editor = build_editor(&mut cx, &path, "fn a() {}");
+        let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
+        let manager = cx.update(|cx| {
+            let editor = editor.clone();
+            cx.new(|cx| CodeLensManager::new(editor, cx))
+        });
+        touch(&editor, &mut cx);
+
+        let block_id = lens_block_id(&display_map, &mut cx, 0);
+        assert!(!manager.update(&mut cx, |m, mcx| m
+            .dispatch_block(CustomBlockId(99_999), mcx)));
+        assert!(manager.update(&mut cx, |m, mcx| m.dispatch_block(block_id, mcx)));
+        cx.run_until_parked();
+
+        let executed = lsp.observed_executed_commands();
+        assert_eq!(executed.len(), 1);
+        assert_eq!(executed[0].command, "stoat.test");
     }
 }
