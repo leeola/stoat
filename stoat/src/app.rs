@@ -29,6 +29,7 @@ use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
 use std::{
     io,
+    ops::Range,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -2325,127 +2326,74 @@ impl Stoat {
                 run.push_str(text);
             }
         }
-        let ws = self.active_workspace_mut();
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let buffer = match ws.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
-        {
-            let mut guard = buffer.write().expect("poisoned");
-            guard.edit(offset..offset, text);
-        }
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        let new_offset = offset + text.len();
-        let anchor = new_buf.anchor_at(new_offset, Bias::Right);
-        editor.selections.transform(new_buf, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+        self.edit_at_each_cursor(editor_id, buffer_id, |_rope, offset| {
+            Some((offset..offset, text.to_string()))
         });
     }
 
     fn editor_backspace(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        let ws = self.active_workspace_mut();
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let buffer = match ws.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
-        if offset == 0 {
-            return;
-        }
-        let rope = buf_snapshot.rope();
-        let prev_len = rope
-            .reversed_chars_at(offset)
-            .next()
-            .map(|ch| ch.len_utf8())
-            .unwrap_or(0);
-        let start = offset - prev_len;
-        {
-            let mut guard = buffer.write().expect("poisoned");
-            guard.edit(start..offset, "");
-        }
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        let anchor = new_buf.anchor_at(start, Bias::Right);
-        editor.selections.transform(new_buf, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+        self.edit_at_each_cursor(editor_id, buffer_id, |rope, offset| {
+            if offset == 0 {
+                return None;
+            }
+            let prev_len = rope
+                .reversed_chars_at(offset)
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(0);
+            if prev_len == 0 {
+                return None;
+            }
+            Some(((offset - prev_len)..offset, String::new()))
         });
     }
 
     fn editor_delete_word_backward(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        let ws = self.active_workspace_mut();
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let buffer = match ws.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
-        let start = stoat_text::prev_word_start(buf_snapshot.rope(), offset);
-        if start == offset {
-            return;
-        }
-        {
-            let mut guard = buffer.write().expect("poisoned");
-            guard.edit(start..offset, "");
-        }
-        let new_display = editor.display_map.snapshot();
-        let new_buf = new_display.buffer_snapshot();
-        let anchor = new_buf.anchor_at(start, Bias::Right);
-        editor.selections.transform(new_buf, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
+        self.edit_at_each_cursor(editor_id, buffer_id, |rope, offset| {
+            let start = stoat_text::prev_word_start(rope, offset);
+            if start == offset {
+                return None;
+            }
+            Some((start..offset, String::new()))
         });
     }
 
     fn editor_delete_word_forward(&mut self, editor_id: EditorId, buffer_id: BufferId) {
-        let ws = self.active_workspace_mut();
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let buffer = match ws.buffers.get(buffer_id) {
-            Some(b) => b,
-            None => return,
-        };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
-        let end = stoat_text::next_word_start(buf_snapshot.rope(), offset);
-        if end == offset {
-            return;
-        }
-        let mut guard = buffer.write().expect("poisoned");
-        guard.edit(offset..end, "");
+        self.edit_at_each_cursor(editor_id, buffer_id, |rope, offset| {
+            let end = stoat_text::next_word_start(rope, offset);
+            if end == offset {
+                return None;
+            }
+            Some((offset..end, String::new()))
+        });
     }
 
     fn editor_delete(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        self.edit_at_each_cursor(editor_id, buffer_id, |rope, offset| {
+            let next_len = rope
+                .chars_at(offset)
+                .next()
+                .map(|ch| ch.len_utf8())
+                .unwrap_or(0);
+            if next_len == 0 {
+                return None;
+            }
+            Some((offset..(offset + next_len), String::new()))
+        });
+    }
+
+    /// Apply a per-cursor edit at every selection head, then re-place each
+    /// edited cursor after its replacement. `edit_for` maps a head offset to
+    /// the byte range to replace and the replacement text, or `None` to
+    /// leave that cursor untouched. Edits run lowest-offset-first with a
+    /// running delta so each later range lands at its shifted position;
+    /// ranges that overlap an earlier edit are dropped. Cursors whose edit
+    /// is skipped ride along on their existing anchors, which the applied
+    /// edits shift automatically.
+    fn edit_at_each_cursor<F>(&mut self, editor_id: EditorId, buffer_id: BufferId, edit_for: F)
+    where
+        F: Fn(&stoat_text::Rope, usize) -> Option<(Range<usize>, String)>,
+    {
         let ws = self.active_workspace_mut();
         let editor = match ws.editors.get_mut(editor_id) {
             Some(e) => e,
@@ -2455,22 +2403,59 @@ impl Stoat {
             Some(b) => b,
             None => return,
         };
-        let display_snapshot = editor.display_map.snapshot();
-        let buf_snapshot = display_snapshot.buffer_snapshot();
-        let sel = editor.selections.newest_anchor().clone();
-        let offset = buf_snapshot.resolve_anchor(&sel.head());
-        let rope = buf_snapshot.rope();
-        let next_len = rope
-            .chars_at(offset)
-            .next()
-            .map(|ch| ch.len_utf8())
-            .unwrap_or(0);
-        if next_len == 0 {
+
+        let mut edits: Vec<(usize, Range<usize>, String)> = {
+            let display_snapshot = editor.display_map.snapshot();
+            let buf_snapshot = display_snapshot.buffer_snapshot();
+            let rope = buf_snapshot.rope();
+            let mut per_cursor: Vec<(usize, Range<usize>, String)> = editor
+                .selections
+                .all_anchors()
+                .iter()
+                .filter_map(|s| {
+                    let head = buf_snapshot.resolve_anchor(&s.head());
+                    edit_for(rope, head).map(|(range, text)| (s.id, range, text))
+                })
+                .collect();
+            per_cursor.sort_by_key(|(_, range, _)| range.start);
+            per_cursor
+        };
+
+        let mut last_end = 0;
+        edits.retain(|(_, range, _)| {
+            if range.start < last_end {
+                return false;
+            }
+            last_end = range.end;
+            true
+        });
+        if edits.is_empty() {
             return;
         }
-        let end = offset + next_len;
-        let mut guard = buffer.write().expect("poisoned");
-        guard.edit(offset..end, "");
+
+        let mut new_heads: Vec<(usize, usize)> = Vec::with_capacity(edits.len());
+        {
+            let mut guard = buffer.write().expect("poisoned");
+            let mut delta: isize = 0;
+            for (id, range, text) in &edits {
+                let start = (range.start as isize + delta) as usize;
+                let end = (range.end as isize + delta) as usize;
+                guard.edit(start..end, text);
+                new_heads.push((*id, start + text.len()));
+                delta += text.len() as isize - (range.end - range.start) as isize;
+            }
+        }
+
+        let new_display = editor.display_map.snapshot();
+        let new_buf = new_display.buffer_snapshot();
+        editor.selections.transform(new_buf, |s| {
+            let mut new = s.clone();
+            if let Some(&(_, offset)) = new_heads.iter().find(|(id, _)| *id == s.id) {
+                let anchor = new_buf.anchor_at(offset, Bias::Right);
+                new.collapse_to(anchor, stoat_text::SelectionGoal::None);
+            }
+            new
+        });
     }
 
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {

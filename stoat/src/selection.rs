@@ -4166,6 +4166,34 @@ mod tests {
     }
 
     #[test]
+    fn multi_cursor_insert_and_delete() {
+        edit_primitive_case(
+            "|abc\n|def",
+            "i x",
+            "x|abc\nx|def",
+            "insert at every cursor",
+        );
+        edit_primitive_case(
+            "a|bc\nd|ef",
+            "i backspace",
+            "|bc\n|ef",
+            "backspace at every cursor",
+        );
+        edit_primitive_case(
+            "|abc\n|def",
+            "i delete",
+            "|bc\n|ef",
+            "delete-forward at every cursor",
+        );
+        edit_primitive_case(
+            "foo|\nbar|",
+            "i alt-backspace",
+            "|\n|",
+            "delete word backward at every cursor",
+        );
+    }
+
+    #[test]
     fn multi_cursor_extend_right() {
         edit_primitive_case("|abc", "L", "<|a||>bc", "extend right one char");
         edit_primitive_case("|abc", "L L", "<|ab||>c", "extend right twice");
