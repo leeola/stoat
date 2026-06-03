@@ -2383,6 +2383,7 @@ impl Workspace {
             ActionKind::ProjectTreeExpand => self.update_project_tree(cx, ProjectTree::expand),
             ActionKind::ProjectTreeConfirm => self.dispatch_project_tree_confirm(cx),
             ActionKind::ProjectTreeRefresh => self.update_project_tree(cx, ProjectTree::refresh),
+            ActionKind::DeleteTreeEntry => self.dispatch_delete_tree_entry(window, cx),
             ActionKind::ToggleDiffHunkPanel => self.dispatch_toggle_diff_hunk_panel(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
@@ -3765,6 +3766,45 @@ impl Workspace {
         if let Some(path) = to_open {
             self.open_paths(&[path], cx);
             self.set_input_mode("normal", cx);
+        }
+    }
+
+    /// Open the delete-confirm modal for the selected project-tree entry.
+    /// No-op when no tree is active or the tree is empty.
+    fn dispatch_delete_tree_entry(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(tree) = self.active_project_tree(cx) else {
+            return;
+        };
+        let Some((path, name, is_dir)) = tree.read(cx).selected_entry() else {
+            return;
+        };
+        crate::delete_tree_confirm::open_delete_tree_confirm(self, path, name, is_dir, window, cx);
+    }
+
+    /// Delete `path` from disk -- recursively when `is_dir` -- then refresh
+    /// the project tree and raise a toast reporting success or the IO error.
+    pub(crate) fn delete_tree_path(
+        &mut self,
+        path: PathBuf,
+        is_dir: bool,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
+        let result = if is_dir {
+            fs.remove_dir_all(&path)
+        } else {
+            fs.remove_file(&path)
+        };
+        match result {
+            Ok(()) => {
+                self.show_toast(Toast::success("Deleted 1 item"), cx);
+                self.update_project_tree(cx, ProjectTree::refresh);
+            },
+            Err(err) => {
+                self.show_toast(Toast::error(format!("Delete failed: {err}")), cx);
+            },
         }
     }
 
@@ -8235,6 +8275,26 @@ mod tests {
             "line_select",
             "a pane event on the unchanged active item keeps the submode",
         );
+    }
+
+    #[test]
+    fn delete_tree_path_removes_directory_from_disk() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_dir("/repo/sub");
+        fs.insert_file("/repo/sub/a.rs", "a");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        ws.update_in(vcx, |w, _window, cx| {
+            w.delete_tree_path(PathBuf::from("/repo/sub"), true, cx);
+        });
+
+        assert!(!fs.exists(Path::new("/repo/sub")));
+        assert!(!fs.exists(Path::new("/repo/sub/a.rs")));
     }
 
     #[test]

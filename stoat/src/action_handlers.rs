@@ -699,6 +699,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ProjectTreeExpand
         | ActionKind::ProjectTreeConfirm
         | ActionKind::ProjectTreeRefresh
+        | ActionKind::DeleteTreeEntry
         | ActionKind::OpenGitStatus
         | ActionKind::OpenConflictPicker
         | ActionKind::OpenAbout => UpdateEffect::None,

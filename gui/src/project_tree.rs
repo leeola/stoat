@@ -195,6 +195,14 @@ impl ProjectTree {
         None
     }
 
+    /// The selected row's path, display name, and whether it is a
+    /// directory, or `None` when the tree is empty.
+    pub fn selected_entry(&self) -> Option<(PathBuf, String, bool)> {
+        self.rows
+            .get(self.selected)
+            .map(|row| (row.path.clone(), row.name.clone(), row.is_dir))
+    }
+
     /// Re-read the directory contents and git status from disk,
     /// preserving the set of expanded directories and clamping the
     /// selection into range.

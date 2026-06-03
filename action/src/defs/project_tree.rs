@@ -65,6 +65,17 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    DeleteTreeEntryDef,
+    DeleteTreeEntry,
+    "DeleteTreeEntry",
+    ActionKind::DeleteTreeEntry,
+    "delete the selected tree entry",
+    "Delete the selected project-tree file or directory from disk after \
+     confirmation. Directories are removed recursively.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

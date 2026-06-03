@@ -77,8 +77,8 @@ use crate::{
             PickerSelectPrev,
         },
         project_tree::{
-            ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand, ProjectTreeRefresh,
-            ProjectTreeSelectNext, ProjectTreeSelectPrev,
+            DeleteTreeEntry, ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand,
+            ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
@@ -759,6 +759,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ProjectTreeRefresh::DEF, |_| {
         Ok(Box::new(ProjectTreeRefresh))
     });
+    add(DeleteTreeEntry::DEF, |_| Ok(Box::new(DeleteTreeEntry)));
     add(RenameWorkspace::DEF, |params| {
         let raw = match params.first() {
             Some(p) => p.as_string().context(WrongKindSnafu {
@@ -1008,6 +1009,7 @@ mod tests {
         "ProjectTreeExpand",
         "ProjectTreeConfirm",
         "ProjectTreeRefresh",
+        "DeleteTreeEntry",
         "HelpSelectPrev",
         "HelpSelectNext",
         "HelpScopeToggle",
@@ -1222,7 +1224,7 @@ mod tests {
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
         // + 1 OpenEncodingPicker (status-bar encoding picker).
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
-        assert_eq!(all().count(), 342);
+        assert_eq!(all().count(), 343);
     }
 
     #[test]

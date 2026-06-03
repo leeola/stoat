@@ -731,6 +731,7 @@ on key {
         Space -> ProjectTreeConfirm();
         Enter -> ProjectTreeConfirm();
         R -> ProjectTreeRefresh();
+        d-d -> DeleteTreeEntry();
         : -> OpenCommandPalette();
     }
 }

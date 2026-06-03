@@ -27,6 +27,7 @@ mod command_palette;
 mod commit_list;
 mod conflict_item;
 mod conflict_picker;
+mod delete_tree_confirm;
 mod diagnostics;
 mod diagnostics_panel;
 mod diagnostics_picker;
