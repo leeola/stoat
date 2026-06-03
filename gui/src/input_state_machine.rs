@@ -11,9 +11,9 @@ use crate::{
     workspace::Workspace,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
-use gpui::{Context, FocusHandle, Keystroke, Modifiers, WeakEntity, Window};
+use gpui::{Context, Entity, FocusHandle, Keystroke, Modifiers, WeakEntity, Window};
 use std::{
-    collections::HashMap,
+    collections::{HashMap, HashSet},
     ops::Range,
     time::{Duration, Instant},
 };
@@ -214,11 +214,19 @@ pub struct InputStateMachine {
     /// `:` / `<Esc>` / `:` sequence reopens the modal instead
     /// of eating the second `:`.
     consumed_text_input_char: Option<DuplicateMarker>,
-    /// Active editor that [`text_input`] dispatches IME commits
+    /// Primary editor that [`text_input`] dispatches IME commits
     /// into via [`Editor::apply_text_to_all_cursors`]. Production
     /// callers update this when an editor becomes the workspace's
-    /// focused item; tests stage it directly.
+    /// focused item; tests stage it directly. Also read as the
+    /// focused editor by the workspace's action dispatch helpers.
     active_editor: Option<WeakEntity<Editor>>,
+    /// Extra IME targets registered by surfaces beyond the focused
+    /// pane editor (e.g. an inline input embedded in another view).
+    /// [`text_input`] fans each commit to the primary and every live
+    /// entry here, so typed text can reach several buffers at once.
+    /// Managed independently of [`active_editor`], so they survive the
+    /// workspace reasserting the primary when a modal opens or closes.
+    extra_text_targets: Vec<WeakEntity<Editor>>,
     /// Focus handle to focus when [`transition_mode`] enters an
     /// input mode (insert / reword_insert / prompt / run).
     /// External callers register this when an editor input target
@@ -349,6 +357,7 @@ impl InputStateMachine {
             pending_duplicate_char: None,
             consumed_text_input_char: None,
             active_editor: None,
+            extra_text_targets: Vec::new(),
             editor_focus_target: None,
             pending_find: None,
             pending_mark: None,
@@ -463,6 +472,33 @@ impl InputStateMachine {
     /// only.
     pub fn set_active_editor(&mut self, editor: Option<WeakEntity<Editor>>) {
         self.active_editor = editor;
+    }
+
+    /// Register an extra editor as an IME target so [`text_input`]
+    /// commits reach it alongside the primary [`active_editor`]. Dead
+    /// handles and an existing registration of the same entity are
+    /// dropped first, so repeated registration is idempotent.
+    pub fn register_text_target(&mut self, target: WeakEntity<Editor>, cx: &mut Context<'_, Self>) {
+        let id = target.entity_id();
+        self.extra_text_targets
+            .retain(|t| t.entity_id() != id && t.upgrade().is_some());
+        self.extra_text_targets.push(target);
+        cx.notify();
+    }
+
+    /// Remove an editor previously passed to [`register_text_target`],
+    /// matched by entity id. Notifies only when an entry was removed.
+    pub fn unregister_text_target(
+        &mut self,
+        target: &WeakEntity<Editor>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let id = target.entity_id();
+        let before = self.extra_text_targets.len();
+        self.extra_text_targets.retain(|t| t.entity_id() != id);
+        if self.extra_text_targets.len() != before {
+            cx.notify();
+        }
     }
 
     pub fn editor_focus_target(&self) -> Option<&FocusHandle> {
@@ -663,11 +699,13 @@ impl InputStateMachine {
     /// multi-char commits have no raw twin and originate from the
     /// IME alone.
     ///
-    /// When [`active_editor`] holds a live handle, the commit is
-    /// dispatched through [`Editor::apply_text_to_all_cursors`] so
-    /// the text lands at every cursor; the IME side stays unaware
-    /// of multi-cursor. The fallback (`active_editor` is `None` or
-    /// the weak handle is dead) only records on `last_text_input`.
+    /// The commit is dispatched through
+    /// [`Editor::apply_text_to_all_cursors`] to every live target --
+    /// the primary [`active_editor`] and each entry in
+    /// [`extra_text_targets`], deduplicated by entity id -- so the
+    /// text lands at every cursor of every target; the IME side stays
+    /// unaware of multi-cursor or multi-target. With no live target it
+    /// only records on `last_text_input`.
     pub fn text_input(
         &mut self,
         text: &str,
@@ -716,9 +754,20 @@ impl InputStateMachine {
             armed_at: Instant::now(),
             armed_in_input_mode: true,
         });
-        if let Some(editor) = self.active_editor.as_ref().and_then(WeakEntity::upgrade) {
+        let targets: Vec<Entity<Editor>> = {
+            let mut seen = HashSet::new();
+            self.active_editor
+                .iter()
+                .chain(self.extra_text_targets.iter())
+                .filter_map(WeakEntity::upgrade)
+                .filter(|editor| seen.insert(editor.entity_id()))
+                .collect()
+        };
+        if !targets.is_empty() {
             let text = text.to_string();
-            editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&text, cx));
+            for editor in targets {
+                editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&text, cx));
+            }
         }
         cx.notify();
         Vec::new()
@@ -2009,6 +2058,89 @@ mod tests {
         });
 
         sm.read_with(vcx, |sm, _| assert_eq!(sm.last_text_input(), Some("a")));
+    }
+
+    #[test]
+    fn text_input_fans_out_to_registered_target() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        let primary = new_singleton_editor(vcx, "hello");
+        let extra = new_singleton_editor(vcx, "world");
+        sm.update(vcx, |sm, cx| {
+            sm.set_active_editor(Some(primary.downgrade()));
+            sm.register_text_target(extra.downgrade(), cx);
+        });
+
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("a", None, window, cx)
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(editor_text(vcx, &primary), "ahello");
+        assert_eq!(editor_text(vcx, &extra), "aworld");
+    }
+
+    #[test]
+    fn registered_target_survives_active_editor_reassert() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        let pane = new_singleton_editor(vcx, "pane");
+        let extra = new_singleton_editor(vcx, "extra");
+        sm.update(vcx, |sm, cx| {
+            sm.register_text_target(extra.downgrade(), cx);
+            sm.set_active_editor(Some(pane.downgrade()));
+        });
+
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("x", None, window, cx)
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(editor_text(vcx, &pane), "xpane");
+        assert_eq!(editor_text(vcx, &extra), "xextra");
+    }
+
+    #[test]
+    fn unregister_text_target_stops_delivery() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        let primary = new_singleton_editor(vcx, "hello");
+        let extra = new_singleton_editor(vcx, "world");
+        sm.update(vcx, |sm, cx| {
+            sm.set_active_editor(Some(primary.downgrade()));
+            sm.register_text_target(extra.downgrade(), cx);
+            sm.unregister_text_target(&extra.downgrade(), cx);
+        });
+
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("a", None, window, cx)
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(editor_text(vcx, &primary), "ahello");
+        assert_eq!(editor_text(vcx, &extra), "world");
+    }
+
+    #[test]
+    fn registering_the_primary_does_not_double_apply() {
+        let mut cx = TestAppContext::single();
+        let (sm, vcx) = new_state_machine(&mut cx);
+        set_mode(vcx, &sm, "insert");
+        let editor = new_singleton_editor(vcx, "hello");
+        sm.update(vcx, |sm, cx| {
+            sm.set_active_editor(Some(editor.downgrade()));
+            sm.register_text_target(editor.downgrade(), cx);
+        });
+
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("a", None, window, cx)
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(editor_text(vcx, &editor), "ahello");
     }
 
     #[test]
