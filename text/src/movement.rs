@@ -508,20 +508,14 @@ impl WordTarget {
         )
     }
 
-    /// True when stoat renders the block cursor on the last char of the
-    /// region, so the head is shifted one grapheme back from the run
-    /// boundary [`word_move_range`] reports. The forward motions and
-    /// `PrevEnd` shift; the prev-start motions and `PrevLongEnd` leave
-    /// the head on the boundary.
+    /// True for the one motion whose stored head stays on the last char
+    /// of the region rather than the run boundary `word_move_range`
+    /// reports: `PrevEnd` produces a reversed selection, whose block
+    /// cursor is the head itself, so the head must land on the char.
+    /// Forward motions store the boundary head and let the paint site
+    /// derive the cursor via `cursor_offset`.
     fn shifts_head(self) -> bool {
-        matches!(
-            self,
-            WordTarget::NextStart
-                | WordTarget::NextEnd
-                | WordTarget::NextLongStart
-                | WordTarget::NextLongEnd
-                | WordTarget::PrevEnd
-        )
+        matches!(self, WordTarget::PrevEnd)
     }
 }
 
@@ -576,13 +570,13 @@ pub fn word_move_range(
 
 /// Convert a stoat selection `(start, end, reversed)` through a word
 /// motion into the new selection's `(tail, head)` byte offsets, or
-/// `None` when the motion does not move. `head` is returned in stoat's
-/// convention -- on the last char of the region for every target
-/// except `PrevStart`/`PrevLongStart` -- matching how the editor draws
-/// the block cursor; `tail` is the anchor re-derived by
-/// [`word_move_range`], which is what stops repeated motions from
-/// dragging a stray boundary char. For an extend motion the caller
-/// keeps its own fixed tail and uses only `head`.
+/// `None` when the motion does not move. `head` sits on the run
+/// boundary (one past the last consumed char for forward motions);
+/// paint sites derive the block-cursor cell from it via `cursor_offset`.
+/// `tail` is the anchor re-derived by [`word_move_range`], which is what
+/// stops repeated motions from dragging a stray boundary char. For an
+/// extend motion the caller keeps its own fixed tail and uses only
+/// `head`.
 pub fn word_selection_offsets(
     rope: &Rope,
     start: usize,
@@ -593,34 +587,25 @@ pub fn word_selection_offsets(
 ) -> Option<(usize, usize)> {
     let head = if reversed { start } else { end };
     let collapsed = start == end;
-    // Recover the Helix-convention head (on the run boundary). A
-    // forward selection's stored head is shifted back onto the last
-    // char, so un-shift it; collapsed and reversed heads are already on
-    // the boundary.
-    let head_in = if collapsed || reversed {
-        head
-    } else {
-        head + char_len_at(rope, end)
-    };
-    // Only the sign of `anchor_in - head_in` matters: it selects the
+    // Only the sign of `anchor_in - head` matters: it selects the
     // 1-grapheme collapse direction in `word_move_range`.
     let anchor_in = if !reversed && !collapsed {
-        head_in.saturating_sub(1)
+        head.saturating_sub(1)
     } else {
-        head_in
+        head
     };
     // The anchor is re-derived from the starting cursor and is
     // independent of count, so take it from a single step. The head
     // accumulates across all `count` words, preserving stoat's
     // count-spanning selection.
-    let (tail, first_head) = word_move_range(rope, anchor_in, head_in, target, 1);
-    if (tail, first_head) == (anchor_in, head_in) {
+    let (tail, first_head) = word_move_range(rope, anchor_in, head, target, 1);
+    if (tail, first_head) == (anchor_in, head) {
         return None;
     }
     let head_boundary = if count <= 1 {
         first_head
     } else {
-        word_move_range(rope, anchor_in, head_in, target, count).1
+        word_move_range(rope, anchor_in, head, target, count).1
     };
     let new_head = if target.shifts_head() {
         head_boundary - char_len_before(rope, head_boundary)

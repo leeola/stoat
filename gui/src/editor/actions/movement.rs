@@ -968,8 +968,8 @@ mod tests {
             ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
         });
 
-        assert_eq!(selection_span(&editor, &mut cx), (0, 3, false));
-        assert_eq!(cursor_head_offset(&editor, &mut cx), 3);
+        assert_eq!(selection_span(&editor, &mut cx), (0, 4, false));
+        assert_eq!(cursor_head_offset(&editor, &mut cx), 4);
     }
 
     #[test]
@@ -981,12 +981,12 @@ mod tests {
         editor.update(&mut cx, |ed, cx| {
             ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
         });
-        assert_eq!(selection_span(&editor, &mut cx), (0, 3, false));
+        assert_eq!(selection_span(&editor, &mut cx), (0, 4, false));
 
         editor.update(&mut cx, |ed, cx| {
             ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
         });
-        assert_eq!(selection_span(&editor, &mut cx), (4, 7, false));
+        assert_eq!(selection_span(&editor, &mut cx), (4, 8, false));
     }
 
     #[test]
@@ -999,7 +999,7 @@ mod tests {
             ed.handle_move_word(WordTarget::NextEnd, 1, false, cx)
         });
 
-        assert_eq!(selection_span(&editor, &mut cx), (0, 2, false));
+        assert_eq!(selection_span(&editor, &mut cx), (0, 3, false));
     }
 
     #[test]
@@ -1067,9 +1067,8 @@ mod tests {
         });
 
         // count repeats next_word_start three times (0 -> 4 -> 8 -> 12),
-        // then collapses the trailing position to the char before, leaving
-        // a selection that spans every word traversed.
-        assert_eq!(selection_span(&editor, &mut cx), (0, 11, false));
+        // leaving a boundary-head selection that spans every word traversed.
+        assert_eq!(selection_span(&editor, &mut cx), (0, 12, false));
     }
 
     #[test]
@@ -1082,7 +1081,7 @@ mod tests {
             ed.handle_move_word(WordTarget::NextLongStart, 1, false, cx)
         });
 
-        assert_eq!(selection_span(&editor, &mut cx), (0, 7, false));
+        assert_eq!(selection_span(&editor, &mut cx), (0, 8, false));
     }
 
     #[test]
@@ -1095,9 +1094,9 @@ mod tests {
             ed.handle_move_word(WordTarget::NextStart, 1, false, cx)
         });
 
-        // next_word_start lands on the '.' (offset 3); the forward branch
-        // shifts back one char so the selection covers "foo" only.
-        assert_eq!(selection_span(&editor, &mut cx), (0, 2, false));
+        // next_word_start lands on the '.' (offset 3); the boundary head
+        // sits there, so the selection still covers "foo".
+        assert_eq!(selection_span(&editor, &mut cx), (0, 3, false));
     }
 
     #[test]
@@ -1110,7 +1109,7 @@ mod tests {
             ed.handle_move_word(WordTarget::NextLongEnd, 1, false, cx)
         });
 
-        assert_eq!(selection_span(&editor, &mut cx), (0, 6, false));
+        assert_eq!(selection_span(&editor, &mut cx), (0, 7, false));
     }
 
     #[test]

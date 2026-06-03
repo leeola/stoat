@@ -22,7 +22,7 @@ use stoat::{
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
 };
 use stoat_config::{LineNumberMode, ShowWhitespace};
-use stoat_text::{Anchor, Bias, Selection};
+use stoat_text::{cursor_offset, Anchor, Bias, Selection};
 
 const NAMED_COLOR_HEX: [u32; 16] = [
     0x000000, // 0 Black
@@ -965,7 +965,11 @@ pub(crate) fn compute_selection_paint(
             .iter()
             .find(|s| s.id == id)
             .expect("primary id must come from the selections slice");
-        let head_offset = buffer.resolve_anchor(&primary.head());
+        let head_offset = cursor_offset(
+            buffer.rope(),
+            buffer.resolve_anchor(&primary.tail()),
+            buffer.resolve_anchor(&primary.head()),
+        );
         let head_point = buffer.rope().offset_to_point(head_offset);
         let head_display = snapshot.buffer_to_display(head_point);
         if head_display.row >= start_row && head_display.row < end_row {
@@ -981,7 +985,11 @@ pub(crate) fn compute_selection_paint(
         } else {
             (end_offset, start_offset)
         };
-        let head_offset = buffer.resolve_anchor(&selection.head());
+        let head_offset = cursor_offset(
+            buffer.rope(),
+            buffer.resolve_anchor(&selection.tail()),
+            buffer.resolve_anchor(&selection.head()),
+        );
 
         if lo != hi {
             let lo_point = buffer.rope().offset_to_point(lo);
@@ -3526,7 +3534,7 @@ mod tests {
 
         let paint = compute_selection_paint(&snapshot, &[sel], &rows, 0);
         assert_eq!(paint.row_selection_spans.get(&0), Some(&vec![2..7]));
-        assert_eq!(paint.row_cursors.get(&0), Some(&vec![7usize]));
+        assert_eq!(paint.row_cursors.get(&0), Some(&vec![6usize]));
     }
 
     #[test]
@@ -3541,7 +3549,7 @@ mod tests {
         assert_eq!(paint.row_selection_spans.get(&0), Some(&vec![1..5]));
         assert_eq!(paint.row_selection_spans.get(&1), Some(&vec![0..2]));
         assert_eq!(paint.row_selection_spans.get(&2), None);
-        assert_eq!(paint.row_cursors.get(&1), Some(&vec![2usize]));
+        assert_eq!(paint.row_cursors.get(&1), Some(&vec![1usize]));
     }
 
     #[test]

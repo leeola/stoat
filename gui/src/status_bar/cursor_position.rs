@@ -8,6 +8,7 @@ use gpui::{
     div, App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
     Subscription, WeakEntity, Window,
 };
+use stoat_text::cursor_offset;
 
 /// Status-bar item that surfaces the active editor's primary
 /// cursor as ` {line}:{col} `, with both indices 1-based per the
@@ -100,8 +101,9 @@ fn compute_position(editor: &Editor, cx: &App) -> Option<(u32, u32)> {
     let selections = editor.selections().all_anchors();
     let newest = selections.iter().max_by_key(|s| s.id)?;
     let snapshot = editor.multi_buffer().read(cx).snapshot();
-    let head = newest.head();
-    let offset = snapshot.resolve_anchor(&head);
+    let head = snapshot.resolve_anchor(&newest.head());
+    let tail = snapshot.resolve_anchor(&newest.tail());
+    let offset = cursor_offset(snapshot.rope(), tail, head);
     let point = snapshot.rope().offset_to_point(offset);
     Some((point.row + 1, point.column + 1))
 }

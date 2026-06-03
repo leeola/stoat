@@ -6,6 +6,7 @@ use ratatui::{
     style::{Modifier, Style},
 };
 use std::{collections::BTreeMap, path::Path};
+use stoat_text::cursor_offset;
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -153,8 +154,10 @@ pub(crate) fn render_editor_with_overlay(
     for selection in editor.selections.all_anchors() {
         let start_offset = buffer_snapshot.resolve_anchor(&selection.start);
         let end_offset = buffer_snapshot.resolve_anchor(&selection.end);
-        let head_offset = buffer_snapshot.resolve_anchor(&selection.head());
         let rope = buffer_snapshot.rope();
+        let head_offset = buffer_snapshot.resolve_anchor(&selection.head());
+        let tail_offset = buffer_snapshot.resolve_anchor(&selection.tail());
+        let cursor = cursor_offset(rope, tail_offset, head_offset);
 
         if start_offset != end_offset {
             let mut offset = start_offset;
@@ -163,7 +166,7 @@ pub(crate) fn render_editor_with_overlay(
                 let Some(ch) = chars.next() else {
                     break;
                 };
-                if ch != '\n' && offset != head_offset {
+                if ch != '\n' && offset != cursor {
                     let point = rope.offset_to_point(offset);
                     let display = snapshot.buffer_to_display(point);
                     if display.row >= editor.scroll_row && display.row < end_row {
@@ -179,8 +182,8 @@ pub(crate) fn render_editor_with_overlay(
             }
         }
 
-        let head_point = buffer_snapshot.point_for_anchor(&selection.head());
-        let display = snapshot.buffer_to_display(head_point);
+        let cursor_point = rope.offset_to_point(cursor);
+        let display = snapshot.buffer_to_display(cursor_point);
         if display.row >= editor.scroll_row && display.row < end_row {
             let y = inner.y + (display.row - editor.scroll_row) as u16;
             let x = inner.x + display.column as u16;
@@ -295,7 +298,10 @@ pub(crate) fn editor_cursor_position(editor: &mut EditorState) -> Option<(u32, u
     let snapshot = editor.display_map.snapshot();
     let buffer_snapshot = snapshot.buffer_snapshot();
     let sel = editor.selections.newest_anchor();
-    let point = buffer_snapshot.point_for_anchor(&sel.head());
+    let rope = buffer_snapshot.rope();
+    let head = buffer_snapshot.resolve_anchor(&sel.head());
+    let tail = buffer_snapshot.resolve_anchor(&sel.tail());
+    let point = rope.offset_to_point(cursor_offset(rope, tail, head));
     Some((point.row + 1, point.column + 1))
 }
 

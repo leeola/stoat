@@ -9217,11 +9217,11 @@ mod tests {
 
         dispatch(&ws, vcx, stoat_action::MoveNextWordStart);
         vcx.run_until_parked();
-        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 3)]);
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 4)]);
 
         dispatch(&ws, vcx, stoat_action::RepeatLastMotion);
         vcx.run_until_parked();
-        assert_eq!(selection_offsets(vcx, &editor), vec![(4, 7)]);
+        assert_eq!(selection_offsets(vcx, &editor), vec![(4, 8)]);
     }
 
     #[test]
@@ -9796,7 +9796,7 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::MoveNextWordStart);
         vcx.run_until_parked();
 
-        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 3)]);
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 4)]);
     }
 
     #[test]
@@ -9946,7 +9946,7 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::MoveNextWordStart);
         vcx.run_until_parked();
 
-        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 7)]);
+        assert_eq!(selection_offsets(vcx, &editor), vec![(0, 8)]);
     }
 
     fn seed_primary_offset(vcx: &mut VisualTestContext, editor: &Entity<Editor>, offset: usize) {
@@ -10031,7 +10031,7 @@ mod tests {
         vcx.run_until_parked();
 
         let sel = selection_offsets(vcx, &editor);
-        assert_eq!(sel, vec![(1, 3)]);
+        assert_eq!(sel, vec![(1, 4)]);
     }
 
     #[test]

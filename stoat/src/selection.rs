@@ -3488,9 +3488,9 @@ mod tests {
         );
         assert_eq!(
             h.primary_head_offset(),
-            15,
+            16,
             "long-word treats `foo.bar` as one word, so 3W from offset 0 \
-             advances past `baz qux ` to the space before `quux`"
+             advances past `baz qux ` to the boundary at `quux`'s start"
         );
     }
 
@@ -4014,32 +4014,32 @@ mod tests {
             (
                 "|foo bar baz",
                 "w",
-                "<|foo||> bar baz",
+                "<|foo ||>bar baz",
                 "word-start from line start",
             ),
             (
                 "foo |bar baz",
                 "w",
-                "foo <|bar||> baz",
+                "foo <|bar ||>baz",
                 "word-start mid line",
             ),
             (
                 "|café bar",
                 "w",
-                "<|café||> bar",
+                "<|café ||>bar",
                 "word-start over 2-byte word",
             ),
-            ("|中文 x", "w", "<|中文||> x", "word-start over 3-byte word"),
+            ("|中文 x", "w", "<|中文 ||>x", "word-start over 3-byte word"),
             (
                 "|foo bar baz",
                 "e",
-                "<|fo||>o bar baz",
+                "<|foo||> bar baz",
                 "word-end from line start",
             ),
             (
                 "|café bar",
                 "e",
-                "<|caf||>é bar",
+                "<|café||> bar",
                 "word-end onto 2-byte char",
             ),
             ("foo bar |baz", "b", "foo <||bar |>baz", "prev-word-start"),
