@@ -563,6 +563,12 @@ on key {
         PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
+    mode == prompt && theme_picker_open {
+        Up -> PickerSelectPrev();
+        Down -> PickerSelectNext();
+        Ctrl-p -> PickerSelectPrev();
+        Ctrl-n -> PickerSelectNext();
+    }
     mode == prompt && claude_focused {
         Ctrl-c -> ClaudeInterrupt();
         Tab -> ClaudeFocusNextToolCard();

@@ -687,12 +687,12 @@ impl Workspace {
     /// / `dismiss_modal_by_id` because each of those calls
     /// `cx.notify` on the modal-layer entity.
     ///
-    /// When the command palette, file finder, or help modal becomes
-    /// the top of the stack, captures the prior mode, flips `mode` to
-    /// `prompt`, and sets the matching `palette_open` / `finder_open`
-    /// / `help_open` flag. When that modal is no longer on top (closed
-    /// or buried under another modal), restores the prior mode and
-    /// clears the flag.
+    /// When the command palette, file finder, help modal, or theme
+    /// picker becomes the top of the stack, captures the prior mode,
+    /// flips `mode` to `prompt`, and sets the matching `palette_open` /
+    /// `finder_open` / `help_open` / `theme_picker_open` flag. When that
+    /// modal is no longer on top (closed or buried under another modal),
+    /// restores the prior mode and clears the flag.
     fn refresh_modal_keymap_state(&self, layer: &Entity<ModalLayer>, cx: &mut Context<'_, Self>) {
         let palette_active = layer
             .read(cx)
@@ -705,6 +705,10 @@ impl Workspace {
         let help_active = layer
             .read(cx)
             .active_modal::<crate::help::HelpModal>()
+            .is_some();
+        let theme_picker_active = layer
+            .read(cx)
+            .active_modal::<crate::picker::Picker<crate::theme_picker::ThemePickerDelegate>>()
             .is_some();
         self.input_state_machine.update(cx, |sm, cx_sm| {
             if palette_active {
@@ -735,6 +739,17 @@ impl Workspace {
                 sm.set_help_open(true, cx_sm);
             } else if sm.help_open() {
                 sm.set_help_open(false, cx_sm);
+                if let Some(prev) = sm.take_prev_mode_for_modal() {
+                    sm.set_mode(prev, cx_sm);
+                }
+            }
+
+            if theme_picker_active {
+                sm.capture_prev_mode_for_modal();
+                sm.set_mode("prompt", cx_sm);
+                sm.set_theme_picker_open(true, cx_sm);
+            } else if sm.theme_picker_open() {
+                sm.set_theme_picker_open(false, cx_sm);
                 if let Some(prev) = sm.take_prev_mode_for_modal() {
                     sm.set_mode(prev, cx_sm);
                 }
