@@ -187,6 +187,7 @@ pub struct Editor {
     hover_popup: Option<Entity<crate::lsp::HoverPopup>>,
     completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
     inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
+    code_lens_manager: Option<Entity<crate::lsp::CodeLensManager>>,
     semantic_tokens_manager: Option<Entity<crate::lsp::SemanticTokensManager>>,
     signature_help_manager: Option<Entity<crate::lsp::SignatureHelpManager>>,
     syntax_map_updater: Option<Entity<crate::syntax_updater::SyntaxMapUpdater>>,
@@ -471,6 +472,7 @@ impl Editor {
             hover_popup: None,
             completion_popup: None,
             inlay_hints_manager: None,
+            code_lens_manager: None,
             semantic_tokens_manager: None,
             signature_help_manager: None,
             syntax_map_updater: None,
@@ -2909,6 +2911,25 @@ impl Editor {
 
     pub fn inlay_hints_manager(&self) -> Option<&Entity<crate::lsp::InlayHintsManager>> {
         self.inlay_hints_manager.as_ref()
+    }
+
+    /// Construct the [`crate::lsp::CodeLensManager`] entity that
+    /// observes this editor's buffer edits and drives
+    /// `textDocument/codeLens` requests, rendering each lens as a
+    /// one-row block above its range through the editor's
+    /// [`crate::display_map::DisplayMap`]. Production wiring calls this
+    /// once after [`Self::set_workspace`].
+    pub fn install_code_lens(&mut self, cx: &mut Context<'_, Self>) {
+        if self.code_lens_manager.is_some() {
+            return;
+        }
+        let editor = cx.entity();
+        let manager = cx.new(|mgr_cx| crate::lsp::CodeLensManager::new(editor, mgr_cx));
+        self.code_lens_manager = Some(manager);
+    }
+
+    pub fn code_lens_manager(&self) -> Option<&Entity<crate::lsp::CodeLensManager>> {
+        self.code_lens_manager.as_ref()
     }
 
     /// Aggregate the per-row scrollbar markers from the editor's three

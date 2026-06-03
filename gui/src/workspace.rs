@@ -910,6 +910,7 @@ impl Workspace {
             ed.install_hover_popup(cx);
             ed.install_completion_popup(cx);
             ed.install_inlay_hints(cx);
+            ed.install_code_lens(cx);
             ed.install_semantic_tokens(cx);
             ed.install_signature_help(cx);
             ed.install_syntax_map_updater(cx);

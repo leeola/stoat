@@ -5,7 +5,7 @@ use stoat::{
     buffer::BufferId,
     display_map::{
         highlights::{DecorationHighlight, HighlightStyleInterner, SemanticTokenHighlight},
-        BlockProperties, InlayId, InlayKind,
+        BlockProperties, CustomBlockId, InlayId, InlayKind,
     },
     multi_buffer::MultiBuffer as InnerMultiBuffer,
     DisplayMap as InnerDisplayMap, DisplaySnapshot,
@@ -62,11 +62,23 @@ impl DisplayMap {
         &mut self,
         blocks: Vec<BlockProperties>,
         cx: &mut Context<'_, Self>,
-    ) {
+    ) -> Vec<CustomBlockId> {
         if blocks.is_empty() {
+            return Vec::new();
+        }
+        let ids = self.inner.insert_blocks(blocks);
+        cx.emit(DisplayMapEvent::Changed);
+        cx.notify();
+        ids
+    }
+
+    /// Remove the custom blocks identified by `ids`. A no-op (no event)
+    /// when `ids` is empty. Emits [`DisplayMapEvent::Changed`] otherwise.
+    pub(crate) fn remove_blocks(&mut self, ids: Vec<CustomBlockId>, cx: &mut Context<'_, Self>) {
+        if ids.is_empty() {
             return;
         }
-        self.inner.insert_blocks(blocks);
+        self.inner.remove_blocks(&ids.into_iter().collect());
         cx.emit(DisplayMapEvent::Changed);
         cx.notify();
     }
@@ -307,6 +319,52 @@ mod tests {
         let (_recorder, events) = Recorder::install(&mut cx, &display_map);
 
         display_map.update(&mut cx, |dm, cx| dm.insert_blocks(Vec::new(), cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<DisplayMapEvent>::new());
+    }
+
+    #[test]
+    fn insert_blocks_returns_ids_and_remove_blocks_drops_row() {
+        use stoat::display_map::{BlockPlacement, BlockProperties, BlockStyle};
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "alpha\nbeta");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        let ids = display_map.update(&mut cx, |dm, cx| {
+            dm.insert_blocks(
+                vec![BlockProperties::from_text(
+                    BlockPlacement::Above(0),
+                    vec!["lens".into()],
+                    BlockStyle::Fixed,
+                )],
+                cx,
+            )
+        });
+        cx.run_until_parked();
+        assert_eq!(ids.len(), 1);
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+        assert_eq!(
+            display_map.update(&mut cx, |dm, _| dm.snapshot().max_point().row),
+            2
+        );
+
+        display_map.update(&mut cx, |dm, cx| dm.remove_blocks(ids, cx));
+        cx.run_until_parked();
+        assert_eq!(drain(&events), vec![DisplayMapEvent::Changed]);
+        assert_eq!(
+            display_map.update(&mut cx, |dm, _| dm.snapshot().max_point().row),
+            1
+        );
+    }
+
+    #[test]
+    fn remove_blocks_with_empty_input_does_not_emit() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, display_map) = new_display_map(&mut cx, "x");
+        let (_recorder, events) = Recorder::install(&mut cx, &display_map);
+
+        display_map.update(&mut cx, |dm, cx| dm.remove_blocks(Vec::new(), cx));
         cx.run_until_parked();
 
         assert_eq!(drain(&events), Vec::<DisplayMapEvent>::new());
