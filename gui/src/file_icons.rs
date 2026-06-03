@@ -1,28 +1,18 @@
-//! File-type icon lookups (Nerd Font glyph + tint) keyed by path, for
-//! the path-rendering pickers and the project tree.
+//! File-type icon lookups (glyph + tint) keyed by path, for the
+//! path-rendering pickers and the project tree.
 
 use crate::theme::ThemeColors;
 use gpui::{rgb, Hsla};
 use std::path::Path;
 
-const DIRECTORY: &str = "\u{f07b}";
-const FILE: &str = "\u{f15b}";
-const RUST: &str = "\u{e7a8}";
-const TOML: &str = "\u{e6b2}";
-const MARKDOWN: &str = "\u{e73e}";
-const JS_TS: &str = "\u{e74e}";
-const PYTHON: &str = "\u{e73c}";
-const GO: &str = "\u{e724}";
-const C_FAMILY: &str = "\u{e61e}";
-const JSON: &str = "\u{e60b}";
-const YAML: &str = "\u{e615}";
-const SHELL: &str = "\u{f489}";
-const HTML: &str = "\u{e736}";
-const CSS: &str = "\u{e749}";
-const LOCK: &str = "\u{f023}";
-const DOCKERFILE: &str = "\u{e7b0}";
-const MAKEFILE: &str = "\u{e673}";
-const NODE: &str = "\u{e718}";
+// `.SystemUIFont` carries no folder/document glyph: the Unicode
+// pictographs (U+1F5C0/U+1F5CE) fall through to the LastResort font and
+// render as tofu, while the emoji forms (U+1F4C1/U+1F4C4) resolve to the
+// color-emoji font and ignore the per-kind tint. These SF-native
+// geometric shapes render monochrome and honor `color_for_path`, so the
+// glyph carries only a folder-vs-file distinction and color carries type.
+const DIRECTORY: &str = "\u{25a0}";
+const FILE: &str = "\u{2022}";
 
 /// Recognized file categories, the single classification both
 /// [`icon_for_path`] and [`color_for_path`] map from.
@@ -48,29 +38,14 @@ enum FileKind {
     Other,
 }
 
-/// Nerd Font glyph for `path`. Directories take precedence, then exact
-/// filenames (Dockerfile, Cargo.lock, package.json, Makefile), then the
-/// extension; unrecognized files get a generic file glyph.
+/// Glyph for `path`: a folder marker for directories, a generic file
+/// marker otherwise. File-type distinction is carried by the tint from
+/// [`color_for_path`], not the glyph, since `.SystemUIFont` has no
+/// per-language icons.
 pub fn icon_for_path(path: &Path, is_dir: bool) -> &'static str {
     match classify(path, is_dir) {
         FileKind::Directory => DIRECTORY,
-        FileKind::Rust => RUST,
-        FileKind::Toml => TOML,
-        FileKind::Markdown => MARKDOWN,
-        FileKind::JsTs => JS_TS,
-        FileKind::Python => PYTHON,
-        FileKind::Go => GO,
-        FileKind::CFamily => C_FAMILY,
-        FileKind::Json => JSON,
-        FileKind::Yaml => YAML,
-        FileKind::Shell => SHELL,
-        FileKind::Html => HTML,
-        FileKind::Css => CSS,
-        FileKind::Lock => LOCK,
-        FileKind::Dockerfile => DOCKERFILE,
-        FileKind::Makefile => MAKEFILE,
-        FileKind::Node => NODE,
-        FileKind::Other => FILE,
+        _ => FILE,
     }
 }
 
@@ -137,15 +112,11 @@ mod tests {
     use gpui::TestAppContext;
 
     #[test]
-    fn icon_matches_directory_filename_and_extension() {
-        assert_eq!(icon_for_path(Path::new("foo.rs"), false), RUST);
-        assert_eq!(icon_for_path(Path::new("Cargo.lock"), false), LOCK);
-        assert_ne!(
-            icon_for_path(Path::new("Cargo.lock"), false),
-            TOML,
-            "the lock filename must win over the toml glyph"
-        );
+    fn icon_distinguishes_directory_from_file() {
+        assert_ne!(DIRECTORY, FILE, "folder and file glyphs must differ");
         assert_eq!(icon_for_path(Path::new("subdir"), true), DIRECTORY);
+        assert_eq!(icon_for_path(Path::new("foo.rs"), false), FILE);
+        assert_eq!(icon_for_path(Path::new("Cargo.lock"), false), FILE);
         assert_eq!(icon_for_path(Path::new("notes.xyz"), false), FILE);
     }
 
