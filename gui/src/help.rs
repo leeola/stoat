@@ -21,9 +21,9 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
-    WeakEntity, Window,
+    div, uniform_list, App, AppContext, Context, DismissEvent, Entity, EventEmitter, FocusHandle,
+    Focusable, InteractiveElement, IntoElement, ParentElement, Render, ScrollStrategy,
+    SharedString, Styled, Subscription, UniformListScrollHandle, WeakEntity, Window,
 };
 use stoat::keymap::{ResolvedAction, ResolvedArg};
 use stoat_action::{
@@ -59,6 +59,7 @@ pub struct HelpModal {
     entries: Vec<HelpEntry>,
     filtered: Vec<usize>,
     selected: usize,
+    scroll_handle: UniformListScrollHandle,
     scope: HelpScope,
     detail_scroll: u16,
     _input_subscription: Subscription,
@@ -89,6 +90,7 @@ impl HelpModal {
             entries,
             filtered,
             selected: 0,
+            scroll_handle: UniformListScrollHandle::new(),
             scope: HelpScope::Active,
             detail_scroll: 0,
             _input_subscription: subscription,
@@ -107,11 +109,15 @@ impl HelpModal {
         }
         let max = (self.filtered.len() - 1) as i32;
         self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
+        self.scroll_handle
+            .scroll_to_item(self.selected, ScrollStrategy::Top);
         self.detail_scroll = 0;
     }
 
     fn jump_selection(&mut self, target: usize) {
         self.selected = target.min(self.filtered.len().saturating_sub(1));
+        self.scroll_handle
+            .scroll_to_item(self.selected, ScrollStrategy::Top);
         self.detail_scroll = 0;
     }
 
@@ -357,28 +363,39 @@ impl Render for HelpModal {
         };
 
         let selection_bg = theme.modal_selection;
-        let list_rows: Vec<gpui::AnyElement> = self
-            .filtered
-            .iter()
-            .enumerate()
-            .map(|(row, &entry_idx)| {
-                let entry = &self.entries[entry_idx];
-                let is_selected = row == self.selected;
-                let key_text = entry.key_label.as_deref().unwrap_or("");
-                let row_div = div()
-                    .flex()
-                    .flex_row()
-                    .gap_2()
-                    .child(div().min_w(gpui::px(40.0)).child(key_text.to_string()))
-                    .child(div().child(entry.def.name().to_string()))
-                    .child(div().child(entry.def.short_desc().to_string()));
-                if is_selected {
-                    row_div.bg(selection_bg).into_any_element()
-                } else {
-                    row_div.into_any_element()
-                }
-            })
-            .collect();
+        let handle = cx.entity().downgrade();
+        let list = uniform_list(
+            "help-rows",
+            self.filtered.len(),
+            move |range, _window, cx| {
+                let Some(modal) = handle.upgrade() else {
+                    return Vec::new();
+                };
+                modal.update(cx, |this, _cx| {
+                    range
+                        .map(|row| {
+                            let entry = &this.entries[this.filtered[row]];
+                            let is_selected = row == this.selected;
+                            let key_text = entry.key_label.as_deref().unwrap_or("");
+                            let row_div = div()
+                                .flex()
+                                .flex_row()
+                                .gap_2()
+                                .child(div().min_w(gpui::px(40.0)).child(key_text.to_string()))
+                                .child(div().child(entry.def.name().to_string()))
+                                .child(div().child(entry.def.short_desc().to_string()));
+                            if is_selected {
+                                row_div.bg(selection_bg).into_any_element()
+                            } else {
+                                row_div.into_any_element()
+                            }
+                        })
+                        .collect()
+                })
+            },
+        )
+        .track_scroll(self.scroll_handle.clone())
+        .flex_grow();
 
         let detail_lines = build_detail_lines(self.selected_entry());
         let scroll = self.detail_scroll as usize;
@@ -401,7 +418,7 @@ impl Render for HelpModal {
                     .flex()
                     .flex_row()
                     .flex_grow()
-                    .child(div().flex_grow().children(list_rows))
+                    .child(list)
                     .child(div().flex_grow().children(detail_rows)),
             )
     }
