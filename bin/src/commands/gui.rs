@@ -10,6 +10,7 @@ use stoat_gui::{
     EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals,
     LanguageRegistry, LspHostGlobal, MpscPermissionPromptHost, PermissionPromptHost,
     PermissionPromptHostGlobal, RestoreMode, Settings, ShellHostGlobal, TerminalHostGlobal, Theme,
+    UserSnippetsGlobal,
 };
 use stoat_scheduler::TokioScheduler;
 use tokio::sync::mpsc;
@@ -78,6 +79,7 @@ pub fn run(
         clipboard_host: ClipboardHostGlobal(Arc::new(LocalClipboard)),
         terminal_host: TerminalHostGlobal(Arc::new(LocalTerminalHost)),
         executor: ExecutorGlobal(executor),
+        user_snippets: UserSnippetsGlobal(stoat::snippet::load_user_snippets()),
     };
 
     stoat_gui::run(globals, files, restore, inputs, timeout);

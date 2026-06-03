@@ -117,7 +117,7 @@ pub use globals::{
     install_production_globals, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal,
     ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry,
     LspHostGlobal, MpscPermissionPromptHost, PermissionPromptHost, PermissionPromptHostGlobal,
-    ShellHostGlobal, TerminalHostGlobal,
+    ShellHostGlobal, TerminalHostGlobal, UserSnippetsGlobal,
 };
 
 /// Selects whether [`run`] starts in a fresh workspace or rehydrates

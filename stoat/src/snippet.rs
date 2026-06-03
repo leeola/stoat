@@ -30,6 +30,16 @@ pub struct UserSnippet {
     pub description: Option<String>,
 }
 
+impl UserSnippet {
+    /// The [`body`](Self::body) with its LSP tabstops and placeholders
+    /// resolved to plain text: placeholder defaults are kept, bare
+    /// tabstops are dropped. Used where the snippet is inserted as a
+    /// flat edit rather than an interactive multi-cursor expansion.
+    pub fn expanded_body(&self) -> String {
+        crate::completion::snippet::parse(&self.body).render().text
+    }
+}
+
 /// Load every user snippet, keyed by language name (the snippet file's
 /// stem). Reads `$XDG_CONFIG_HOME/stoat/snippets/<language>.toml`,
 /// blocking on filesystem IO. An absent directory yields an empty map;
@@ -153,6 +163,14 @@ description = "function definition"
     #[test]
     fn entry_without_body_is_an_error() {
         assert!(parse_snippets_toml("[snippet.fn]\ndescription = \"x\"").is_err());
+    }
+
+    #[test]
+    fn expanded_body_inlines_placeholders_and_drops_bare_tabstops() {
+        assert_eq!(
+            snippet("p", "print(${1:msg}, $2)", None).expanded_body(),
+            "print(msg, )"
+        );
     }
 
     #[test]

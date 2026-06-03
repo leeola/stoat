@@ -1,6 +1,6 @@
 use crate::{
     editor::{Editor, EditorEvent},
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::{LanguageRegistry, LspHostGlobal, UserSnippetsGlobal},
     theme::ActiveTheme,
 };
 use gpui::{
@@ -16,6 +16,7 @@ use std::{ops::Range, path::Path, str::FromStr, sync::Arc};
 use stoat::{
     host::{LanguageServerFeature, LspHost},
     lsp::util::{byte_offset_to_lsp_pos, lsp_range_to_byte_range},
+    snippet::UserSnippet,
 };
 
 /// Floating popup that lists completions from the language server
@@ -316,6 +317,10 @@ struct CompletionRequest {
     prefix_range: Range<usize>,
     rope: stoat_text::Rope,
     signature: (usize, String),
+    /// Completion rows for the active language's user snippets whose
+    /// prefix matches the typed text, appended after the server's
+    /// results in [`Self::run`].
+    snippet_entries: Vec<CompletionEntry>,
 }
 
 impl CompletionRequest {
@@ -333,6 +338,11 @@ impl CompletionRequest {
             return None;
         }
         let prefix_text = rope.slice(prefix_range.clone()).to_string();
+        let snippet_entries = cx
+            .try_global::<UserSnippetsGlobal>()
+            .and_then(|g| g.0.get(language.name))
+            .map(|snippets| snippet_completion_entries(snippets, &prefix_text))
+            .unwrap_or_default();
         let workspace_root = path
             .parent()
             .map(Path::to_path_buf)
@@ -346,10 +356,18 @@ impl CompletionRequest {
             prefix_range,
             rope,
             signature: (cursor_offset, prefix_text),
+            snippet_entries,
         })
     }
 
-    async fn run(self) -> Vec<CompletionEntry> {
+    async fn run(mut self) -> Vec<CompletionEntry> {
+        let snippet_entries = std::mem::take(&mut self.snippet_entries);
+        let mut entries = self.lsp_entries().await;
+        entries.extend(snippet_entries);
+        entries
+    }
+
+    async fn lsp_entries(self) -> Vec<CompletionEntry> {
         let server = match self.host.launch(&self.language, &self.workspace_root).await {
             Ok(s) => s,
             Err(err) => {
@@ -422,6 +440,31 @@ fn translate_item(
     }
 }
 
+/// Completion rows for the `snippets` whose prefix starts with the typed
+/// `prefix`, in input order. The inserted text is the snippet body with
+/// tabstops inlined, since the popup applies a flat edit rather than an
+/// interactive expansion.
+fn snippet_completion_entries(snippets: &[UserSnippet], prefix: &str) -> Vec<CompletionEntry> {
+    snippets
+        .iter()
+        .filter(|snippet| snippet.prefix.starts_with(prefix))
+        .map(|snippet| CompletionEntry {
+            label: snippet_label(snippet),
+            insert_text: snippet.expanded_body(),
+            replace_range: None,
+        })
+        .collect()
+}
+
+/// Row label for a user snippet: its prefix, plus the description when
+/// one is set.
+fn snippet_label(snippet: &UserSnippet) -> SharedString {
+    match &snippet.description {
+        Some(description) => format!("{}  {}", snippet.prefix, description).into(),
+        None => snippet.prefix.clone().into(),
+    }
+}
+
 fn word_prefix_range(rope: &stoat_text::Rope, cursor_offset: usize) -> Range<usize> {
     if cursor_offset == 0 || cursor_offset > rope.len() {
         return cursor_offset..cursor_offset;
@@ -454,7 +497,7 @@ mod tests {
         multi_buffer::MultiBuffer, workspace::Workspace,
     };
     use gpui::{AppContext, TestAppContext};
-    use std::path::PathBuf;
+    use std::{collections::HashMap, path::PathBuf};
     use stoat::{
         buffer::BufferId,
         host::fake::{FakeLsp, FakeLspHost},
@@ -697,5 +740,95 @@ mod tests {
         assert_eq!(popup.read_with(&cx, |p, _| p.selected_idx()), 0);
         popup.update(&mut cx, |p, cx| p.select_prev(cx));
         assert_eq!(popup.read_with(&cx, |p, _| p.selected_idx()), 1);
+    }
+
+    #[test]
+    fn snippet_entries_filter_by_prefix_and_inline_body() {
+        let snippets = vec![
+            UserSnippet {
+                prefix: "fn".into(),
+                body: "fn ${1:name}()".into(),
+                description: Some("function".into()),
+            },
+            UserSnippet {
+                prefix: "for".into(),
+                body: "for ${1:x} in ${2:xs}".into(),
+                description: None,
+            },
+            UserSnippet {
+                prefix: "let".into(),
+                body: "let ${1:x};".into(),
+                description: None,
+            },
+        ];
+
+        let entries = snippet_completion_entries(&snippets, "f");
+        assert_eq!(entries.len(), 2);
+        assert_eq!(entries[0].label.as_ref(), "fn  function");
+        assert_eq!(entries[0].insert_text, "fn name()");
+        assert_eq!(entries[1].label.as_ref(), "for");
+        assert_eq!(entries[1].insert_text, "for x in xs");
+    }
+
+    #[test]
+    fn user_snippets_appear_after_lsp_results() {
+        let mut cx = TestAppContext::single();
+        let lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        lsp.set_capabilities(lsp_types::ServerCapabilities {
+            completion_provider: Some(lsp_types::CompletionOptions::default()),
+            ..Default::default()
+        });
+        lsp.set_completions(path.to_str().unwrap(), 0, 2, &["foo_bar"]);
+
+        let language = cx.update(|cx| {
+            cx.global::<LanguageRegistry>()
+                .0
+                .for_path(&path)
+                .unwrap()
+                .name
+        });
+        cx.update(|cx| {
+            cx.set_global(UserSnippetsGlobal(HashMap::from([(
+                language.to_string(),
+                vec![UserSnippet {
+                    prefix: "form".into(),
+                    body: "FORM".into(),
+                    description: None,
+                }],
+            )])));
+        });
+
+        let (workspace, editor) = build_workspace_editor(&mut cx, &path, "fo");
+        set_mode(&mut cx, &workspace, "insert");
+        editor.update(&mut cx, |ed, cx| {
+            let snap = ed.multi_buffer().read(cx).snapshot();
+            let anchor = snap.anchor_at(2, stoat_text::Bias::Left);
+            let selection = stoat_text::Selection {
+                id: 1,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![selection], &snap);
+        });
+        let popup = cx.update(|cx| {
+            let e = editor.clone();
+            cx.new(|cx| CompletionPopup::new(e, cx))
+        });
+        editor.update(&mut cx, |ed, cx| {
+            let buffer = ed.multi_buffer().read(cx).as_singleton().cloned().unwrap();
+            buffer.update(cx, |b, cx| b.edit(2..2, "", cx));
+        });
+        cx.run_until_parked();
+
+        let labels = popup.read_with(&cx, |p, _| {
+            p.items()
+                .iter()
+                .map(|e| e.label.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(labels, vec!["foo_bar".to_string(), "form".to_string()]);
     }
 }

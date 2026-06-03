@@ -15,10 +15,16 @@ use crate::{
     theme::{self, Theme},
 };
 use gpui::{App, Global};
-use std::sync::{Arc, Mutex};
-use stoat::host::{
-    ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost,
-    PermissionPrompt, ShellHost, TerminalHost,
+use std::{
+    collections::HashMap,
+    sync::{Arc, Mutex},
+};
+use stoat::{
+    host::{
+        ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost,
+        PermissionPrompt, ShellHost, TerminalHost,
+    },
+    snippet::UserSnippet,
 };
 use stoat_scheduler::Executor;
 use tokio::sync::mpsc;
@@ -136,6 +142,14 @@ pub struct ExecutorGlobal(pub Executor);
 
 impl Global for ExecutorGlobal {}
 
+/// App-global user snippet store, keyed by language name. Loaded once
+/// at startup from the user's config dir via
+/// [`stoat::snippet::load_user_snippets`]; the completion popup reads
+/// it to offer snippets alongside language-server results.
+pub struct UserSnippetsGlobal(pub HashMap<String, Vec<UserSnippet>>);
+
+impl Global for UserSnippetsGlobal {}
+
 /// All app globals registered at startup. Grows additively as new
 /// global types are introduced; new fields are added by sibling
 /// items in this parent (host-trait globals).
@@ -154,6 +168,7 @@ pub struct Globals {
     pub clipboard_host: ClipboardHostGlobal,
     pub terminal_host: TerminalHostGlobal,
     pub executor: ExecutorGlobal,
+    pub user_snippets: UserSnippetsGlobal,
 }
 
 /// Register the production set of app globals on `cx`.
@@ -173,6 +188,7 @@ pub fn install_production_globals(cx: &mut App, globals: Globals) {
     cx.set_global(globals.clipboard_host);
     cx.set_global(globals.terminal_host);
     cx.set_global(globals.executor);
+    cx.set_global(globals.user_snippets);
 }
 
 /// Install a [`stoat_language::HighlightMap`] on every language in
