@@ -4008,6 +4008,7 @@ impl Render for Editor {
                             .items_center()
                             .px_2()
                             .bg(theme.sticky_header_background)
+                            .text_color(theme.breadcrumb_text)
                             .border_b_1()
                             .border_color(theme.border_inactive)
                             .child(header),
