@@ -425,6 +425,24 @@ mod tests {
     }
 
     #[test]
+    fn yank_word_includes_trailing_cell() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "foo bar baz\n");
+        h.type_keys("w");
+        crate::action_handlers::dispatch(&mut h.stoat, &action::Yank);
+        let stored = h
+            .stoat
+            .registers
+            .read(crate::register::Register::Unnamed)
+            .map(str::to_owned);
+        assert_eq!(
+            stored,
+            Some("foo ".to_string()),
+            "w yanks the word plus its trailing space"
+        );
+    }
+
+    #[test]
     fn yank_collapsed_selection_is_noop() {
         let mut h = TestHarness::with_size(40, 10);
         seed(&mut h, "abc\n");

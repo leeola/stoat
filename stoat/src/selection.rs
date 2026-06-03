@@ -4083,6 +4083,27 @@ mod tests {
     }
 
     #[test]
+    fn word_operator_extent_includes_trailing_cell() {
+        let cases = [
+            (
+                "|foo bar baz",
+                "w d",
+                "|bar baz",
+                "w then delete removes the word and its trailing space",
+            ),
+            (
+                "|foo bar baz",
+                "e d",
+                "| bar baz",
+                "e then delete removes the full word through its last char",
+            ),
+        ];
+        for (input, keys, expected, desc) in cases {
+            edit_primitive_case(input, keys, expected, desc);
+        }
+    }
+
+    #[test]
     fn move_line_bounds_single_cursor() {
         let cases = [
             ("foo |bar", "home", "|foo bar", "home to line start"),
