@@ -4129,6 +4129,13 @@ mod tests {
                 "café |",
                 "delete word backward past 2-byte word",
             ),
+            ("|foo bar", "i alt-delete", "|bar", "delete word forward"),
+            (
+                "|café bar",
+                "i alt-delete",
+                "|bar",
+                "delete word forward past 2-byte word",
+            ),
         ];
         for (input, keys, expected, desc) in cases {
             edit_primitive_case(input, keys, expected, desc);

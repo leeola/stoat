@@ -2213,6 +2213,10 @@ impl Stoat {
                 self.editor_backspace(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
             },
+            KeyCode::Delete if key.modifiers == KeyModifiers::ALT => {
+                self.editor_delete_word_forward(editor_id, buffer_id);
+                Some(UpdateEffect::Redraw)
+            },
             KeyCode::Delete => {
                 self.editor_delete(editor_id, buffer_id);
                 Some(UpdateEffect::Redraw)
@@ -2417,6 +2421,28 @@ impl Stoat {
             new.collapse_to(anchor, stoat_text::SelectionGoal::None);
             new
         });
+    }
+
+    fn editor_delete_word_forward(&mut self, editor_id: EditorId, buffer_id: BufferId) {
+        let ws = self.active_workspace_mut();
+        let editor = match ws.editors.get_mut(editor_id) {
+            Some(e) => e,
+            None => return,
+        };
+        let buffer = match ws.buffers.get(buffer_id) {
+            Some(b) => b,
+            None => return,
+        };
+        let display_snapshot = editor.display_map.snapshot();
+        let buf_snapshot = display_snapshot.buffer_snapshot();
+        let sel = editor.selections.newest_anchor().clone();
+        let offset = buf_snapshot.resolve_anchor(&sel.head());
+        let end = stoat_text::next_word_start(buf_snapshot.rope(), offset);
+        if end == offset {
+            return;
+        }
+        let mut guard = buffer.write().expect("poisoned");
+        guard.edit(offset..end, "");
     }
 
     fn editor_delete(&mut self, editor_id: EditorId, buffer_id: BufferId) {
