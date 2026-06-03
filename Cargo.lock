@@ -6385,6 +6385,7 @@ name = "stoat_gui"
 version = "0.1.0"
 dependencies = [
  "crossterm",
+ "etcetera",
  "gpui",
  "insta",
  "lru",

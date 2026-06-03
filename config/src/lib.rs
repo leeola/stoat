@@ -2,6 +2,7 @@ mod ast;
 mod error;
 mod parser;
 mod settings;
+mod writer;
 
 pub use ast::{
     Action, ActionExpr, Arg, Binding, Config, EventBlock, EventType, Expr, FnDecl, Key, KeyPart,
@@ -12,6 +13,7 @@ pub use settings::{
     ClaudePlacement, LanguageServerCommand, LineNumberMode, MouseCapturePolicy, Settings,
     ShowWhitespace, ToolPermissions,
 };
+pub use writer::set_theme;
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
     parser::parse(source)

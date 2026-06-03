@@ -7,15 +7,19 @@
 //! opened.
 
 use crate::{
+    globals::FsHostGlobal,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     settings::Settings,
     theme::{set_active_theme, ActiveTheme, Theme},
     workspace::Workspace,
 };
+use etcetera::{base_strategy::Xdg, BaseStrategy};
 use gpui::{
     div, AnyElement, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
     SharedString, Styled, StyledText, Task, Window,
 };
+use std::path::{Path, PathBuf};
+use stoat::host::FsHost;
 
 pub struct ThemePickerDelegate {
     /// Every theme name declared in the config, in source order.
@@ -125,6 +129,11 @@ impl PickerDelegate for ThemePickerDelegate {
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         self.apply_selected(cx);
+        if let Some(name) = self.selected_theme() {
+            if let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) {
+                persist_theme(fs.as_ref(), name);
+            }
+        }
         cx.emit(DismissEvent);
     }
 
@@ -164,6 +173,57 @@ impl PickerDelegate for ThemePickerDelegate {
     fn selection_changed(&mut self, cx: &mut Context<'_, Picker<Self>>) {
         self.apply_selected(cx);
     }
+}
+
+/// Persist `name` as the active theme in the user's stcfg config so the
+/// next launch restores it. Best-effort: a failure to resolve the path
+/// is logged and otherwise ignored, since the theme is already applied
+/// for the running session.
+fn persist_theme(fs: &dyn FsHost, name: &str) {
+    let Some(path) = user_config_path() else {
+        tracing::warn!("could not resolve user config path; theme not persisted");
+        return;
+    };
+    write_theme_at(fs, &path, name);
+}
+
+/// Write `theme = "<name>"` into the stcfg file at `path`, creating it
+/// (and its parent directory) when absent and updating the key in place
+/// when present. Best-effort and non-clobbering: a present-but-unreadable
+/// file, a directory-creation failure, or a write failure is logged and
+/// the file is left as-is.
+fn write_theme_at(fs: &dyn FsHost, path: &Path, name: &str) {
+    let existing = if fs.exists(path) {
+        let mut buf = Vec::new();
+        if let Err(err) = fs.read(path, &mut buf) {
+            tracing::warn!(path = %path.display(), ?err, "could not read user config; theme not persisted");
+            return;
+        }
+        String::from_utf8_lossy(&buf).into_owned()
+    } else {
+        String::new()
+    };
+
+    let updated = stoat_config::set_theme(&existing, name);
+
+    if let Some(parent) = path.parent() {
+        if let Err(err) = fs.create_dir_all(parent) {
+            tracing::warn!(path = %parent.display(), ?err, "could not create config dir; theme not persisted");
+            return;
+        }
+    }
+    if let Err(err) = fs.write(path, updated.as_bytes()) {
+        tracing::warn!(path = %path.display(), ?err, "could not write user config; theme not persisted");
+    }
+}
+
+/// Path to the user's stcfg config at `$XDG_CONFIG_HOME/stoat/config.stcfg`.
+/// Mirrors the read-side resolution in the `stoat gui` launcher; the two
+/// must agree for a persisted theme to be restored on the next launch.
+fn user_config_path() -> Option<PathBuf> {
+    Xdg::new()
+        .ok()
+        .map(|xdg| xdg.config_dir().join("stoat").join("config.stcfg"))
 }
 
 /// Open the theme picker as a modal. Constructed in
@@ -300,5 +360,35 @@ mod tests {
         });
 
         assert_eq!(active_theme_name(vcx), "beta");
+    }
+
+    #[test]
+    fn write_theme_at_creates_then_updates_in_place() {
+        let fs = stoat::host::FakeFs::new();
+        let path = Path::new("/cfg/stoat/config.stcfg");
+
+        write_theme_at(&fs, path, "alpha");
+        let created = read_back(&fs, path);
+        assert!(
+            created.contains("theme = \"alpha\";"),
+            "absent file should be created with the theme: {created}"
+        );
+
+        write_theme_at(&fs, path, "beta");
+        let updated = read_back(&fs, path);
+        assert!(
+            updated.contains("theme = \"beta\";"),
+            "value should update: {updated}"
+        );
+        assert!(
+            !updated.contains("alpha"),
+            "old value should be replaced: {updated}"
+        );
+    }
+
+    fn read_back(fs: &stoat::host::FakeFs, path: &Path) -> String {
+        let mut buf = Vec::new();
+        fs.read(path, &mut buf).expect("read written config");
+        String::from_utf8(buf).expect("utf8 config")
     }
 }
