@@ -31,7 +31,7 @@ pub use highlights::{
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
         Arc,
@@ -266,14 +266,14 @@ impl DisplayMap {
         self.id
     }
 
-    pub fn folded_buffers(&self) -> &std::collections::HashSet<BufferId> {
+    pub fn folded_buffers(&self) -> &HashSet<BufferId> {
         self.block_map.folded_buffers()
     }
 
     pub fn set_companion(&mut self, companion: Option<Companion>) {
         if companion.is_none() {
             if let Some(old) = self.companion.take() {
-                let ids: std::collections::HashSet<CustomBlockId> = old
+                let ids: HashSet<CustomBlockId> = old
                     .rhs_custom_block_to_balancing_block
                     .values()
                     .chain(old.lhs_custom_block_to_balancing_block.values())
@@ -299,8 +299,12 @@ impl DisplayMap {
         self.diagnostics_max_severity = severity;
     }
 
-    pub fn insert_blocks(&mut self, blocks: Vec<BlockProperties>) {
-        self.block_map.insert(blocks);
+    pub fn insert_blocks(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
+        self.block_map.insert(blocks)
+    }
+
+    pub fn remove_blocks(&mut self, ids: &HashSet<CustomBlockId>) {
+        self.block_map.remove(ids);
     }
 
     pub fn fold(&mut self, ranges: Vec<std::ops::Range<Point>>) {
@@ -516,6 +520,7 @@ impl DisplayMap {
             && diff_version_now == self.last_diff_version
             && self.fold_map.version_unchanged()
             && self.inlay_map.version_unchanged()
+            && !self.block_map.is_dirty()
             && companion_wrap_data.is_none()
         {
             if let Some(ref cached) = self.cached_snapshot {
@@ -980,6 +985,23 @@ mod tests {
         let v1 = dm.snapshot().version();
         let v2 = dm.snapshot().version();
         assert_eq!(v1, v2);
+    }
+
+    #[test]
+    fn snapshot_reflects_block_insert_and_remove_without_buffer_edit() {
+        use super::{BlockPlacement, BlockProperties, BlockStyle};
+        let mut dm = create_display_map("alpha\nbeta");
+        assert_eq!(dm.snapshot().max_point().row, 1);
+
+        let ids = dm.insert_blocks(vec![BlockProperties::from_text(
+            BlockPlacement::Above(0),
+            vec!["lens".into()],
+            BlockStyle::Fixed,
+        )]);
+        assert_eq!(dm.snapshot().max_point().row, 2);
+
+        dm.remove_blocks(&ids.into_iter().collect());
+        assert_eq!(dm.snapshot().max_point().row, 1);
     }
 
     #[test]

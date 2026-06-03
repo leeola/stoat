@@ -549,6 +549,14 @@ impl BlockMap {
         self.blocks_dirty = true;
     }
 
+    /// Whether the block layer has pending changes not yet folded into a
+    /// synced snapshot. The display-map snapshot cache consults this so a
+    /// block insert or remove invalidates the cache even when the buffer,
+    /// diff, fold, and inlay versions are all unchanged.
+    pub fn is_dirty(&self) -> bool {
+        self.blocks_dirty
+    }
+
     pub fn insert(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
         let mut ids = Vec::with_capacity(blocks.len());
         for props in blocks {
