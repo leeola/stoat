@@ -31,6 +31,7 @@ const THEME_KEYS: &[&str] = &[
     "boolean",
     "number",
     "operator",
+    "punctuation",
     "punctuation.bracket",
     "punctuation.delimiter",
     "property",
@@ -248,7 +249,7 @@ mod tests {
     use super::{theme_scope_for_key, DiffTheme, SyntaxStyles, THEME_KEYS};
     use crate::theme::Theme;
     use stoat_config::parse;
-    use stoat_language::HighlightId;
+    use stoat_language::{HighlightId, HighlightMap};
 
     fn theme_from(src: &str) -> Theme {
         let (config, errors) = parse(src);
@@ -260,6 +261,21 @@ mod tests {
     fn id_for_highlight_returns_none_for_default() {
         let styles = SyntaxStyles::from_theme(&Theme::empty());
         assert!(styles.id_for_highlight(HighlightId::DEFAULT).is_none());
+    }
+
+    #[test]
+    fn punctuation_subtypes_resolve_via_bare_punctuation_stem() {
+        let map = HighlightMap::new(&["punctuation.special", "punctuation.markup"], THEME_KEYS);
+        assert_ne!(
+            map.get(0),
+            HighlightId::DEFAULT,
+            "punctuation.special must resolve, not render unstyled"
+        );
+        assert_ne!(
+            map.get(1),
+            HighlightId::DEFAULT,
+            "punctuation.markup must resolve, not render unstyled"
+        );
     }
 
     #[test]
