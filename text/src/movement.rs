@@ -698,14 +698,14 @@ fn dir_advance(head: usize, ch: char, is_prev: bool) -> usize {
     }
 }
 
-fn char_len_at(rope: &Rope, offset: usize) -> usize {
+pub(crate) fn char_len_at(rope: &Rope, offset: usize) -> usize {
     rope.chars_at(offset)
         .next()
         .map(char::len_utf8)
         .unwrap_or(0)
 }
 
-fn char_len_before(rope: &Rope, offset: usize) -> usize {
+pub(crate) fn char_len_before(rope: &Rope, offset: usize) -> usize {
     rope.reversed_chars_at(offset)
         .next()
         .map(char::len_utf8)

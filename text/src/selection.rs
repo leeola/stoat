@@ -1,3 +1,4 @@
+use crate::{movement, Rope};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, ops::Range};
 
@@ -100,6 +101,20 @@ impl<T: Copy + Ord> Selection<T> {
             self.end = tail;
         }
         self.goal = new_goal;
+    }
+}
+
+/// Left edge of the block cursor for a selection spanning `anchor..head`
+/// as byte offsets into `rope`. Follows Helix's 1-width convention: a
+/// forward selection's cursor sits one char back from the boundary head,
+/// while a collapsed or reversed selection keeps the cursor on `head`.
+/// Steps back by the char length before `head`, so the result stays on a
+/// UTF-8 boundary.
+pub fn cursor_offset(rope: &Rope, anchor: usize, head: usize) -> usize {
+    if head > anchor {
+        head - movement::char_len_before(rope, head)
+    } else {
+        head
     }
 }
 
@@ -215,5 +230,46 @@ mod tests {
     fn range_returns_start_to_end() {
         assert_eq!(sel(2, 7, false).range(), 2..7);
         assert_eq!(sel(2, 7, true).range(), 2..7);
+    }
+
+    #[test]
+    fn cursor_offset_forward_steps_back_one_char() {
+        let r = Rope::from("abc");
+        assert_eq!(
+            cursor_offset(&r, 0, 3),
+            2,
+            "forward cursor sits on the last selected char"
+        );
+    }
+
+    #[test]
+    fn cursor_offset_collapsed_and_reversed_keep_head() {
+        let r = Rope::from("abc");
+        assert_eq!(cursor_offset(&r, 2, 2), 2, "collapsed keeps head");
+        assert_eq!(cursor_offset(&r, 3, 0), 0, "reversed keeps head");
+    }
+
+    #[test]
+    fn cursor_offset_steps_whole_multibyte_chars() {
+        // "ae" with a 2-byte accented e: 'a' [0,1), the accented char [1,3).
+        let two_byte = Rope::from("a\u{e9}");
+        assert_eq!(
+            cursor_offset(&two_byte, 0, 3),
+            1,
+            "steps the full 2-byte char"
+        );
+        assert_eq!(
+            cursor_offset(&two_byte, 0, 1),
+            0,
+            "single-byte head steps to 0"
+        );
+
+        // 'x' [0,1) then a 4-byte CJK ext-B ideograph [1,5).
+        let four_byte = Rope::from("x\u{20000}");
+        assert_eq!(
+            cursor_offset(&four_byte, 0, 5),
+            1,
+            "steps the full 4-byte char"
+        );
     }
 }
