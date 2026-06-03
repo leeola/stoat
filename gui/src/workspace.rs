@@ -106,6 +106,13 @@ pub struct Workspace {
     /// add/remove activity. Cleared when the panel is removed or
     /// when its dock is no longer present.
     diff_hunk_panel: Option<gpui::EntityId>,
+    /// EntityId of the active pane item the last time
+    /// [`Workspace::broadcast_active_pane_item`] ran. The base input
+    /// mode is reasserted from the active item's kind only when this
+    /// changes, so an unrelated pane event cannot clobber an
+    /// in-progress submode (e.g. `line_select`) while the same item
+    /// stays active.
+    last_active_item_id: Option<gpui::EntityId>,
     modal_layer: Entity<ModalLayer>,
     toast_view: Entity<ToastView>,
     status_bar: Entity<StatusBar>,
@@ -402,6 +409,7 @@ impl Workspace {
             right_dock_visible: true,
             bottom_dock_visible: true,
             diff_hunk_panel: None,
+            last_active_item_id: None,
             modal_layer,
             toast_view,
             status_bar,
@@ -1404,6 +1412,19 @@ impl Workspace {
         status_bar.update(cx, |bar, cx| {
             bar.set_active_pane_item(active.as_deref(), cx);
         });
+
+        let active_id = active.as_ref().map(|item| item.item_id());
+        if active_id != self.last_active_item_id {
+            self.last_active_item_id = active_id;
+            let mode = match active.as_ref().map(|item| item.item_kind(cx)) {
+                Some(crate::item::ItemKind::Review) => "review",
+                Some(crate::item::ItemKind::Rebase) => "rebase",
+                Some(crate::item::ItemKind::Conflict) => "conflict",
+                _ => "normal",
+            };
+            self.set_input_mode(mode, cx);
+        }
+
         self.refresh_active_editor_subscription(cx);
         cx.notify();
     }
@@ -6639,6 +6660,7 @@ mod tests {
 
     struct WorkspaceItem {
         label: SharedString,
+        kind: crate::item::ItemKind,
     }
 
     impl Render for WorkspaceItem {
@@ -6654,6 +6676,10 @@ mod tests {
     impl ItemView for WorkspaceItem {
         fn tab_label(&self, _cx: &App) -> SharedString {
             self.label.clone()
+        }
+
+        fn item_kind(&self) -> crate::item::ItemKind {
+            self.kind
         }
 
         fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError>
@@ -6779,7 +6805,8 @@ mod tests {
 
     fn new_item(cx: &mut TestAppContext, label: &str) -> Box<dyn ItemHandle> {
         let label = SharedString::from(label.to_string());
-        let entity = cx.update(|cx| cx.new(|_| WorkspaceItem { label }));
+        let kind = crate::item::ItemKind::Unknown;
+        let entity = cx.update(|cx| cx.new(|_| WorkspaceItem { label, kind }));
         Box::new(entity)
     }
 
@@ -8123,6 +8150,79 @@ mod tests {
     }
 
     #[test]
+    fn active_item_kind_drives_input_mode() {
+        use crate::item::ItemKind;
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane = {
+            let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+            pane_tree
+                .read_with(vcx, |t, _| t.pane(t.focus()).cloned())
+                .expect("focused pane registered")
+        };
+
+        let mode = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.input_state_machine().read(cx).mode().to_string()
+            })
+        };
+
+        for (label, kind, expected) in [
+            ("review", ItemKind::Review, "review"),
+            ("rebase", ItemKind::Rebase, "rebase"),
+            ("conflict", ItemKind::Conflict, "conflict"),
+            ("editor", ItemKind::Editor, "normal"),
+        ] {
+            let item = workspace_item_of_kind(vcx, label, kind);
+            pane.update(vcx, |p, cx| {
+                let index = p.add_item(item, cx);
+                p.activate(index, cx);
+            });
+            vcx.run_until_parked();
+            assert_eq!(mode(vcx), expected, "{label} item drives {expected} mode");
+        }
+    }
+
+    #[test]
+    fn pane_event_preserves_submode_on_unchanged_active_item() {
+        use crate::item::ItemKind;
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane = {
+            let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+            pane_tree
+                .read_with(vcx, |t, _| t.pane(t.focus()).cloned())
+                .expect("focused pane registered")
+        };
+
+        let mode = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.input_state_machine().read(cx).mode().to_string()
+            })
+        };
+
+        let item = workspace_item_of_kind(vcx, "review", ItemKind::Review);
+        pane.update(vcx, |p, cx| {
+            let index = p.add_item(item, cx);
+            p.activate(index, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(mode(vcx), "review", "review item enters review mode");
+
+        ws.update(vcx, |w, cx| w.set_input_mode("line_select", cx));
+        ws.update(vcx, |w, cx| w.broadcast_active_pane_item(cx));
+        vcx.run_until_parked();
+
+        assert_eq!(
+            mode(vcx),
+            "line_select",
+            "a pane event on the unchanged active item keeps the submode",
+        );
+    }
+
+    #[test]
     fn project_tree_confirm_on_file_opens_it_and_exits_mode() {
         use crate::globals::FsHostGlobal;
         use stoat::host::{FakeFs, FsHost};
@@ -8294,8 +8394,16 @@ mod tests {
     }
 
     fn workspace_item(vcx: &mut VisualTestContext, label: &str) -> Box<dyn ItemHandle> {
+        workspace_item_of_kind(vcx, label, crate::item::ItemKind::Unknown)
+    }
+
+    fn workspace_item_of_kind(
+        vcx: &mut VisualTestContext,
+        label: &str,
+        kind: crate::item::ItemKind,
+    ) -> Box<dyn ItemHandle> {
         let label = SharedString::from(label.to_string());
-        let entity = vcx.update(|_, cx| cx.new(|_| WorkspaceItem { label }));
+        let entity = vcx.update(|_, cx| cx.new(|_| WorkspaceItem { label, kind }));
         Box::new(entity)
     }
 
