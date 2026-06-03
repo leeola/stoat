@@ -66,6 +66,10 @@ pub trait FsHost: Send + Sync {
     /// Removes the file at `path`. Errors with `NotFound` if absent.
     fn remove_file(&self, path: &Path) -> io::Result<()>;
 
+    /// Recursively removes the directory at `path` and everything under
+    /// it. Errors with `NotFound` if absent.
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()>;
+
     /// Renames `from` to `to`. Errors with `NotFound` if `from` is absent.
     /// Overwrites `to` if it already exists, matching `std::fs::rename`.
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()>;
@@ -342,6 +346,10 @@ impl FsHost for LocalFs {
 
     fn remove_file(&self, path: &Path) -> io::Result<()> {
         std::fs::remove_file(path)
+    }
+
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        std::fs::remove_dir_all(path)
     }
 
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {

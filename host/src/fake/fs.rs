@@ -28,6 +28,7 @@ pub enum FakeFsOp {
     CreateDirAll { path: PathBuf },
     Canonicalize { path: PathBuf },
     RemoveFile { path: PathBuf },
+    RemoveDirAll { path: PathBuf },
     Rename { from: PathBuf, to: PathBuf },
 }
 
@@ -589,6 +590,27 @@ impl FsHost for FakeFs {
         }
     }
 
+    fn remove_dir_all(&self, path: &Path) -> io::Result<()> {
+        let mut state = self.state.lock().expect("FakeFs lock poisoned");
+        state.ops.push(FakeFsOp::RemoveDirAll {
+            path: path.to_path_buf(),
+        });
+        match state.entries.get(path) {
+            Some(FakeEntry::Dir { .. }) => {
+                state.entries.retain(|entry, _| !entry.starts_with(path));
+                Ok(())
+            },
+            Some(_) => Err(io::Error::new(
+                io::ErrorKind::NotADirectory,
+                "not a directory",
+            )),
+            None => Err(io::Error::new(
+                io::ErrorKind::NotFound,
+                format!("{}: not found", path.display()),
+            )),
+        }
+    }
+
     fn rename(&self, from: &Path, to: &Path) -> io::Result<()> {
         let mut state = self.state.lock().expect("FakeFs lock poisoned");
         state.ops.push(FakeFsOp::Rename {
@@ -817,6 +839,30 @@ mod tests {
         fs.remove_file(Path::new("/link")).unwrap();
         assert!(!fs.exists(Path::new("/link")));
         assert!(fs.exists(Path::new("/target")));
+    }
+
+    #[test]
+    fn remove_dir_all_removes_directory_and_contents() {
+        let fs = FakeFs::new();
+        fs.insert_dir("/repo/sub");
+        fs.insert_file("/repo/sub/a.rs", "a");
+        fs.insert_file("/repo/sub/nested/b.rs", "b");
+        fs.insert_file("/repo/keep.rs", "keep");
+
+        fs.remove_dir_all(Path::new("/repo/sub")).unwrap();
+
+        assert!(!fs.exists(Path::new("/repo/sub")));
+        assert!(!fs.exists(Path::new("/repo/sub/a.rs")));
+        assert!(!fs.exists(Path::new("/repo/sub/nested/b.rs")));
+        assert!(fs.exists(Path::new("/repo/keep.rs")));
+    }
+
+    #[test]
+    fn remove_dir_all_on_file_errors() {
+        let fs = FakeFs::new();
+        fs.insert_file("/repo/a.rs", "a");
+        let err = fs.remove_dir_all(Path::new("/repo/a.rs")).unwrap_err();
+        assert_eq!(err.kind(), io::ErrorKind::NotADirectory);
     }
 
     #[test]
