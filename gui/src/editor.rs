@@ -4021,22 +4021,38 @@ impl Render for Editor {
                     .and_then(|row| sticky_scroll::sticky_header(self, row, cx));
                 if let Some(header) = header {
                     let theme = cx.theme();
-                    root = root.child(
-                        div()
-                            .absolute()
-                            .top_0()
-                            .left_0()
-                            .w_full()
-                            .h(line_height)
-                            .flex()
-                            .items_center()
-                            .px_2()
-                            .bg(theme.sticky_header_background)
-                            .text_color(theme.breadcrumb_text)
-                            .border_b_1()
-                            .border_color(theme.border_inactive)
-                            .child(header),
-                    );
+                    let mut header_row = div()
+                        .absolute()
+                        .top_0()
+                        .left_0()
+                        .w_full()
+                        .h(line_height)
+                        .flex()
+                        .flex_row()
+                        .child(
+                            div()
+                                .flex_1()
+                                .h_full()
+                                .flex()
+                                .items_center()
+                                .px_2()
+                                .bg(theme.sticky_header_background)
+                                .text_color(theme.breadcrumb_text)
+                                .border_b_1()
+                                .border_color(theme.border_inactive)
+                                .child(header),
+                        );
+                    // Reserve the minimap column so the header ends at its left
+                    // edge instead of being painted over by the minimap strip.
+                    if self.minimap.is_some() {
+                        header_row = header_row.child(
+                            div()
+                                .flex_none()
+                                .w(relative(MINIMAP_WIDTH_FRACTION))
+                                .min_w(px(MINIMAP_MIN_WIDTH)),
+                        );
+                    }
+                    root = root.child(header_row);
                 }
             }
         }
