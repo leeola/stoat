@@ -35,11 +35,25 @@ pub(crate) fn render_hints(
     let content_width = bindings_width.max(title_width).max(footer_width);
     let extra_rows = footer.map(|_| 2).unwrap_or(0);
     let box_width = (content_width + border_pad) as u16;
-    let box_height = (rows.len() + border_pad + extra_rows) as u16;
-
-    if box_width > area.width || box_height > area.height {
+    if box_width > area.width {
         return;
     }
+
+    let chrome = border_pad + extra_rows;
+    let capacity = (area.height as usize).saturating_sub(chrome);
+    if capacity == 0 {
+        return;
+    }
+
+    let total = rows.len();
+    let (visible, hidden) = if total <= capacity {
+        (total, 0)
+    } else {
+        let shown = capacity - 1;
+        (shown, total - shown)
+    };
+    let content_rows = visible + usize::from(hidden > 0);
+    let box_height = (content_rows + chrome) as u16;
 
     let x = area.x + area.width.saturating_sub(box_width);
     let y = area.y + area.height.saturating_sub(box_height);
@@ -58,7 +72,7 @@ pub(crate) fn render_hints(
     let key_style = theme.get(crate::theme::scope::UI_KEY_LABEL);
     let action_style = theme.get(crate::theme::scope::UI_TEXT);
 
-    for (i, (key, action)) in rows.iter().enumerate() {
+    for (i, (key, action)) in rows.iter().take(visible).enumerate() {
         let row = inner.y + i as u16;
         if row >= inner.y + inner.height {
             break;
@@ -80,8 +94,21 @@ pub(crate) fn render_hints(
         }
     }
 
+    if hidden > 0 {
+        let more_row = inner.y + visible as u16;
+        let more_text = format!("+{hidden} more");
+        let more_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
+        for (j, ch) in more_text.chars().enumerate() {
+            let col = inner.x + j as u16;
+            if col >= inner.x + inner.width {
+                break;
+            }
+            buf[(col, more_row)].set_char(ch).set_style(more_style);
+        }
+    }
+
     if let Some(footer) = footer {
-        let sep_row = inner.y + rows.len() as u16;
+        let sep_row = inner.y + content_rows as u16;
         let text_row = sep_row + 1;
         if sep_row < inner.y + inner.height {
             let sep_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
