@@ -33,6 +33,7 @@ stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 blake3 = { workspace = true }
 clap.workspace = true
+etcetera.workspace = true
 snafu.workspace = true
 tracing.workspace = true
 tokio = { workspace = true, features = ["time"] }

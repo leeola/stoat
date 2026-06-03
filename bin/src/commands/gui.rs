@@ -1,5 +1,6 @@
+use etcetera::{base_strategy::Xdg, BaseStrategy};
 use snafu::{whatever, ResultExt, Whatever};
-use std::{path::PathBuf, sync::Arc};
+use std::{fs, io::ErrorKind, path::PathBuf, sync::Arc};
 use stoat::host::{
     LocalClipboard, LocalEnv, LocalFs, LocalFsWatcher, LocalGit, LocalLspHost, LocalShell,
     LocalTerminalHost, PermissionCallback, RuleBasedPolicy,
@@ -111,12 +112,36 @@ fn load_default_settings_and_theme() -> (Settings, Theme) {
         return (Settings::default(), Theme::empty());
     };
 
-    let settings = Settings::from_config(config);
+    let mut settings = Settings::from_config(config);
+    if let Some(user_source) = read_user_config() {
+        settings = settings.layer_user_source(&user_source);
+    }
+
     let theme = {
         let name = settings.resolved.theme.as_deref().unwrap_or("default_dark");
         Theme::from_config(&settings.config, name)
     };
     (settings, theme)
+}
+
+/// Read the user's stcfg override at `$XDG_CONFIG_HOME/stoat/config.stcfg`.
+/// Returns `None` when the path cannot be resolved or the file is absent,
+/// so the caller keeps the bundled default; a genuine read error (e.g. a
+/// permissions problem) is logged and also yields `None`.
+fn read_user_config() -> Option<String> {
+    let path = Xdg::new()
+        .ok()?
+        .config_dir()
+        .join("stoat")
+        .join("config.stcfg");
+    match fs::read_to_string(&path) {
+        Ok(source) => Some(source),
+        Err(err) if err.kind() == ErrorKind::NotFound => None,
+        Err(err) => {
+            tracing::warn!(path = %path.display(), ?err, "failed to read user config");
+            None
+        },
+    }
 }
 
 #[cfg(test)]

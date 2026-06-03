@@ -6353,6 +6353,7 @@ version = "0.1.0"
 dependencies = [
  "blake3",
  "clap",
+ "etcetera",
  "git2",
  "insta",
  "snafu",
