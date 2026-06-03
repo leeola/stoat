@@ -122,7 +122,10 @@ struct MinimapDrag {
     start_scroll_y: f64,
     total_lines: f64,
     visible_lines: f64,
-    minimap_height: f64,
+    /// Minimap pixels the thumb travels per editor line, the inverse of the
+    /// thumb placement, so a pointer delta maps back to an editor scroll
+    /// delta as `delta_y / thumb_track_slope`.
+    thumb_track_slope: f64,
 }
 
 /// Entity holding the state a single editor view needs:
@@ -2570,20 +2573,45 @@ impl Editor {
             )
         };
 
-        let Some(thumb) = minimap_thumb_bounds(region, total_lines, visible_lines, start_scroll_y)
-        else {
+        let visible_minimap_lines =
+            f32::from(region.size.height) as f64 / MINIMAP_LINE_HEIGHT as f64;
+        let minimap_scroll_y = calculate_minimap_scroll(
+            total_lines,
+            visible_lines,
+            visible_minimap_lines,
+            start_scroll_y,
+        );
+
+        let Some(thumb) = minimap_thumb_bounds(
+            region,
+            total_lines,
+            visible_lines,
+            start_scroll_y,
+            minimap_scroll_y,
+        ) else {
             return;
         };
         if !thumb.contains(&position) {
             return;
         }
 
+        let line_height = MINIMAP_LINE_HEIGHT as f64;
+        let editor_scrollable = (total_lines - visible_lines).max(0.0);
+        let thumb_track_slope = if total_lines > visible_minimap_lines
+            && visible_minimap_lines > visible_lines
+            && editor_scrollable > 0.0
+        {
+            line_height * (visible_minimap_lines - visible_lines) / editor_scrollable
+        } else {
+            line_height
+        };
+
         self.minimap_drag = Some(MinimapDrag {
             start_mouse_y: position.y,
             start_scroll_y,
             total_lines,
             visible_lines,
-            minimap_height: f32::from(region.size.height) as f64,
+            thumb_track_slope,
         });
         parent.update(cx, |parent, _| {
             parent
@@ -2600,7 +2628,7 @@ impl Editor {
         let Some(drag) = self.minimap_drag else {
             return;
         };
-        if drag.minimap_height <= 0.0 {
+        if drag.thumb_track_slope <= 0.0 {
             return;
         }
         let EditorMode::Minimap { parent } = &self.mode else {
@@ -2611,7 +2639,7 @@ impl Editor {
         };
 
         let delta_y = f32::from(position.y - drag.start_mouse_y) as f64;
-        let delta_rows = delta_y * drag.total_lines / drag.minimap_height;
+        let delta_rows = delta_y / drag.thumb_track_slope;
         let max_scroll = (drag.total_lines - drag.visible_lines).max(0.0);
         let new_y = (drag.start_scroll_y + delta_rows).clamp(0.0, max_scroll);
 
@@ -3881,11 +3909,7 @@ impl Render for Editor {
             .max_point()
             .row as usize
             + 1;
-        let total_rows = if is_minimap {
-            document_rows.min(MAX_MINIMAP_LINES)
-        } else {
-            document_rows
-        };
+        let total_rows = document_rows;
         let handle = cx.entity().downgrade();
         let bounds_handle = handle.clone();
         let list = uniform_list("editor-rows", total_rows, move |range, _window, cx| {
@@ -4062,6 +4086,52 @@ impl Render for Editor {
                 }
             }
 
+            // Follow the parent: scroll the minimap content so the visible
+            // editor window stays in view, and capture the metrics the thumb
+            // overlay needs. The minimap's own height settles a frame behind
+            // here, which is imperceptible while scrolling.
+            let minimap_height = self
+                .text_region_bounds()
+                .map(|b| f32::from(b.size.height) as f64)
+                .unwrap_or(0.0);
+            let tracking = if minimap_height > 0.0 {
+                parent.upgrade().and_then(|parent_editor| {
+                    let parent_editor = parent_editor.read(cx);
+                    let region = parent_editor.text_region_bounds()?;
+                    let cell = parent_editor.cell_size()?;
+                    let line_height = f32::from(cell.height) as f64;
+                    if line_height <= 0.0 {
+                        return None;
+                    }
+                    let visible_editor_lines = f32::from(region.size.height) as f64 / line_height;
+                    let editor_scroll_y = parent_editor.scroll_manager().anchor().offset.y;
+                    let visible_minimap_lines = minimap_height / MINIMAP_LINE_HEIGHT as f64;
+                    let minimap_scroll_y = calculate_minimap_scroll(
+                        total_lines,
+                        visible_editor_lines,
+                        visible_minimap_lines,
+                        editor_scroll_y,
+                    );
+                    Some((visible_editor_lines, editor_scroll_y, minimap_scroll_y))
+                })
+            } else {
+                None
+            };
+
+            if let Some((_, _, minimap_scroll_y)) = tracking {
+                self.scroll_handle
+                    .0
+                    .borrow()
+                    .base_handle
+                    .set_offset(Point::new(
+                        px(0.0),
+                        render::scroll_position_to_pixel_offset_y(
+                            minimap_scroll_y,
+                            px(MINIMAP_LINE_HEIGHT),
+                        ),
+                    ));
+            }
+
             let drag_handle = cx.entity().downgrade();
             let dragging = self.minimap_drag.is_some();
             root = root.child(
@@ -4095,24 +4165,18 @@ impl Render for Editor {
                             });
                         }
 
-                        let Some(parent) = parent.upgrade() else {
-                            return;
-                        };
-                        let parent = parent.read(cx);
-                        let (Some(region), Some(cell)) =
-                            (parent.text_region_bounds(), parent.cell_size())
+                        let Some((visible_editor_lines, editor_scroll_y, minimap_scroll_y)) =
+                            tracking
                         else {
                             return;
                         };
-                        let line_height = f32::from(cell.height) as f64;
-                        if line_height <= 0.0 {
-                            return;
-                        }
-                        let visible_lines = f32::from(region.size.height) as f64 / line_height;
-                        let scroll_y = parent.scroll_manager().anchor().offset.y;
-                        if let Some(thumb) =
-                            minimap_thumb_bounds(bounds, total_lines, visible_lines, scroll_y)
-                        {
+                        if let Some(thumb) = minimap_thumb_bounds(
+                            bounds,
+                            total_lines,
+                            visible_editor_lines,
+                            editor_scroll_y,
+                            minimap_scroll_y,
+                        ) {
                             let theme = cx.theme();
                             window.paint_quad(fill(thumb, theme.minimap_thumb));
                             window.paint_quad(outline(
@@ -4170,11 +4234,6 @@ const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
 const MINIMAP_FONT_SIZE: f32 = 2.0;
 const MINIMAP_LINE_HEIGHT: f32 = 2.5;
 
-/// Upper bound on the rows a minimap paints. Beyond this the overview
-/// stops growing so a very long buffer does not shape thousands of
-/// tiny rows every frame.
-const MAX_MINIMAP_LINES: usize = 200;
-
 /// The minimap column occupies this fraction of the parent editor's
 /// width, floored at [`MINIMAP_MIN_WIDTH`] pixels (roughly 20 columns
 /// at [`MINIMAP_FONT_SIZE`]) so it stays visible in a narrow pane.
@@ -4189,37 +4248,55 @@ const SCROLL_ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_mi
 /// programmatic jumps are worth animating.
 const MIN_ANIMATED_SCROLL_ROWS: f64 = 3.0;
 
+/// Minimap content scroll position, in document lines, that keeps the
+/// visible editor window inside the minimap column. The editor's scroll
+/// fraction (`editor_scroll_y / (total_lines - visible_editor_lines)`) is
+/// applied to the minimap's own scrollable range
+/// (`total_lines - visible_minimap_lines`), so a fully scrolled editor
+/// pins the minimap content to its last page. Returns `0.0` when the whole
+/// document already fits the editor viewport.
+fn calculate_minimap_scroll(
+    total_lines: f64,
+    visible_editor_lines: f64,
+    visible_minimap_lines: f64,
+    editor_scroll_y: f64,
+) -> f64 {
+    let non_visible_lines = (total_lines - visible_editor_lines).max(0.0);
+    if non_visible_lines == 0.0 {
+        return 0.0;
+    }
+    let scroll_percentage = (editor_scroll_y / non_visible_lines).clamp(0.0, 1.0);
+    let minimap_scrollable = (total_lines - visible_minimap_lines).max(0.0);
+    scroll_percentage * minimap_scrollable
+}
+
 /// Bounds of the minimap viewport thumb within `minimap_bounds`: the
-/// overlay rectangle marking which slice of the document the parent
-/// editor currently shows. Returns [`None`] when the whole document fits
-/// the viewport (`total_lines <= visible_editor_lines`), where no thumb
-/// is drawn.
+/// overlay rectangle marking which slice of the document the parent editor
+/// currently shows. Returns [`None`] when the whole document fits the
+/// viewport (`total_lines <= visible_editor_lines`), where no thumb is
+/// drawn.
 ///
-/// The thumb height is `minimap_height * visible_editor_lines /
-/// total_lines`; its top slides down the leftover track in proportion to
-/// how far the editor has scrolled, so a fully scrolled editor pins the
-/// thumb to the minimap's bottom edge.
+/// The thumb shares the scrolled minimap content's coordinate space: its
+/// height is `visible_editor_lines` minimap rows, and its top is the gap
+/// between the editor scroll and the minimap content scroll, both measured
+/// in [`MINIMAP_LINE_HEIGHT`] pixels per line. So while the minimap content
+/// scrolls to follow the editor, the thumb marks exactly the rows the
+/// editor shows.
 fn minimap_thumb_bounds(
     minimap_bounds: Bounds<Pixels>,
     total_lines: f64,
     visible_editor_lines: f64,
     editor_scroll_y: f64,
+    minimap_scroll_y: f64,
 ) -> Option<Bounds<Pixels>> {
     if total_lines <= visible_editor_lines {
         return None;
     }
 
-    let minimap_height = minimap_bounds.size.height;
-    let thumb_height_ratio = (visible_editor_lines / total_lines).clamp(0.0, 1.0);
-    let thumb_height = minimap_height * thumb_height_ratio as f32;
-
-    let max_scroll = (total_lines - visible_editor_lines).max(0.0);
-    let scroll_ratio = if max_scroll > 0.0 {
-        (editor_scroll_y / max_scroll).clamp(0.0, 1.0)
-    } else {
-        0.0
-    };
-    let thumb_y = minimap_bounds.origin.y + (minimap_height - thumb_height) * scroll_ratio as f32;
+    let line_height = MINIMAP_LINE_HEIGHT as f64;
+    let thumb_height = px((visible_editor_lines * line_height) as f32);
+    let thumb_y =
+        minimap_bounds.origin.y + px(((editor_scroll_y - minimap_scroll_y) * line_height) as f32);
 
     Some(Bounds {
         origin: Point::new(minimap_bounds.origin.x, thumb_y),
@@ -5974,32 +6051,48 @@ mod tests {
     }
 
     #[test]
+    fn calculate_minimap_scroll_tracks_editor() {
+        // 500-line doc, 20 editor lines, 80 minimap lines visible. The
+        // minimap can scroll 500 - 80 = 420 lines; at the top it stays at 0,
+        // at the bottom (editor scroll 480) it reaches its last page, and at
+        // half the editor scroll it is half-scrolled.
+        assert_eq!(calculate_minimap_scroll(500.0, 20.0, 80.0, 0.0), 0.0);
+        assert_eq!(calculate_minimap_scroll(500.0, 20.0, 80.0, 480.0), 420.0);
+        assert_eq!(calculate_minimap_scroll(500.0, 20.0, 80.0, 240.0), 210.0);
+        // Whole document fits the editor viewport: no content scroll.
+        assert_eq!(calculate_minimap_scroll(40.0, 50.0, 80.0, 0.0), 0.0);
+    }
+
+    #[test]
     fn minimap_thumb_bounds_none_when_document_fits() {
         let minimap = Bounds {
             origin: Point::new(px(0.0), px(0.0)),
             size: gpui_size(px(20.0), px(200.0)),
         };
-        assert_eq!(minimap_thumb_bounds(minimap, 40.0, 50.0, 0.0), None);
+        assert_eq!(minimap_thumb_bounds(minimap, 40.0, 50.0, 0.0, 0.0), None);
     }
 
     #[test]
-    fn minimap_thumb_bounds_half_scroll_centers_thumb() {
+    fn minimap_thumb_bounds_places_window_in_minimap_space() {
         let minimap = Bounds {
             origin: Point::new(px(0.0), px(0.0)),
             size: gpui_size(px(20.0), px(200.0)),
         };
-        let thumb = minimap_thumb_bounds(minimap, 500.0, 50.0, 225.0)
+        // 500-line doc, 50 visible editor lines, editor scrolled to line 225
+        // with the minimap content scrolled to line 210. Thumb height is
+        // 50 * 2.5 = 125px; its top is (225 - 210) * 2.5 = 37.5px.
+        let thumb = minimap_thumb_bounds(minimap, 500.0, 50.0, 225.0, 210.0)
             .expect("thumb present when document exceeds viewport");
 
-        assert_eq!(thumb.size, gpui_size(px(20.0), px(20.0)));
-        assert_eq!(thumb.origin, Point::new(px(0.0), px(90.0)));
+        assert_eq!(thumb.size, gpui_size(px(20.0), px(125.0)));
+        assert_eq!(thumb.origin, Point::new(px(0.0), px(37.5)));
     }
 
     /// Parent editor (`editor_with_viewport`: 320px / 16px = 20 visible
-    /// lines) over a 500-line buffer, with a visible minimap whose column
-    /// is 200px tall. The thumb therefore spans `200 * 20/500 = 8px` at
-    /// scroll 0, and the minimap-to-document ratio is `200/500 = 0.4`
-    /// px/line.
+    /// lines) over a 500-line buffer, with a visible minimap whose column is
+    /// 200px tall (200 / 2.5 = 80 minimap lines). The thumb spans
+    /// `20 * 2.5 = 50px` at scroll 0 and travels
+    /// `2.5 * (80 - 20) / (500 - 20) = 0.3125px` per editor line.
     fn minimap_drag_fixture(vcx: &mut VisualTestContext) -> (Entity<Editor>, Entity<Editor>) {
         let text = multiline_text(500);
         let (_buffer, editor) = editor_with_viewport(vcx, &text);
@@ -6021,22 +6114,46 @@ mod tests {
     }
 
     #[test]
-    fn minimap_thumb_drag_scrolls_parent_by_delta_over_ratio() {
+    fn minimap_thumb_drag_scrolls_parent_by_thumb_track() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
         let vcx = cx.add_empty_window();
         let (editor, minimap) = minimap_drag_fixture(vcx);
 
+        // Dragging the thumb 100px down the 0.3125px/line track scrolls the
+        // editor 100 / 0.3125 = 320 lines.
         minimap.update(vcx, |mm, cx| {
             mm.minimap_thumb_drag_start(Point::new(px(10.0), px(4.0)), cx);
             mm.minimap_thumb_drag_to(Point::new(px(10.0), px(104.0)), cx);
         });
 
-        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 250);
+        assert_eq!(editor.read_with(vcx, |ed, _| ed.scroll_row()), 320);
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().minimap_thumb_state()),
             Some(scroll::ScrollbarThumbState::Dragging),
         );
+    }
+
+    #[test]
+    fn minimap_render_scrolls_content_to_follow_parent() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (editor, minimap) = minimap_drag_fixture(vcx);
+
+        // Scroll the parent to line 240. With 20 visible editor lines and 80
+        // visible minimap lines over 500, the minimap content follows to
+        // (240/480) * (500-80) = 210 lines; the scroll handle offset is the
+        // negative pixel form, 210 * 2.5 = 525px.
+        editor.update(vcx, |ed, cx| ed.set_scroll_position_y(240.0, cx));
+        minimap.update_in(vcx, |mm, window, cx| {
+            mm.render(window, cx).into_any_element();
+        });
+
+        let offset_y = minimap.read_with(vcx, |mm, _| {
+            f32::from(mm.scroll_handle().0.borrow().base_handle.offset().y)
+        });
+        assert_eq!(offset_y, -525.0);
     }
 
     #[test]
