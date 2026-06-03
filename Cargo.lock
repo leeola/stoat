@@ -6311,6 +6311,7 @@ dependencies = [
  "tempfile",
  "time",
  "tokio",
+ "toml 0.8.23",
  "tracing",
  "unicode-width",
  "vte",

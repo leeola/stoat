@@ -40,6 +40,7 @@ ignore.workspace = true
 nucleo.workspace = true
 tempfile.workspace = true
 ron.workspace = true
+toml.workspace = true
 time.workspace = true
 blake3.workspace = true
 arboard.workspace = true

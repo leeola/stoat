@@ -42,6 +42,7 @@ pub mod review_apply;
 pub mod review_session;
 pub mod run;
 pub mod selection;
+pub mod snippet;
 pub mod theme;
 pub mod ui;
 pub mod workspace;
