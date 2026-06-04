@@ -43,7 +43,7 @@ pub(crate) use lsp::pump_lsp_jumps;
 pub(crate) use review::install_review_session;
 use std::path::Path;
 use stoat_action::{
-    Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewCommit,
+    Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewBranch, OpenReviewCommit,
     OpenReviewCommitRange, OpenReviewWatch, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
 };
 
@@ -536,10 +536,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             UpdateEffect::Redraw
         },
         ActionKind::OpenReviewBranch => {
-            // Branch review is populated per-commit by the GUI; the TUI has
-            // no per-commit builder, so there is nothing to open here.
-            tracing::warn!("OpenReviewBranch is only available in the GUI");
-            UpdateEffect::None
+            let a = action
+                .as_any()
+                .downcast_ref::<OpenReviewBranch>()
+                .expect("OpenReviewBranch action downcast");
+            review::open_review_branch(stoat, &a.workdir, a.base.as_deref());
+            UpdateEffect::Redraw
         },
         ActionKind::OpenReviewAgentEdits => {
             let a = action

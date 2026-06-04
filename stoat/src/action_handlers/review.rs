@@ -2,7 +2,7 @@ use crate::{
     app::{Stoat, UpdateEffect},
     display_map::{BlockPlacement, BlockProperties, BlockStyle, RenderBlock},
     editor_state::{EditorId, EditorState},
-    host::WatchToken,
+    host::{self, WatchToken},
     pane::View,
     review::ReviewFileInput,
     review_session::{ReviewProgress, ReviewSession, ReviewSource, ReviewViewState},
@@ -230,6 +230,13 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
 
 pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
     let Some(session) = scan_commit_range(stoat, workdir, from, to) else {
+        return;
+    };
+    install_review_session(stoat, session);
+}
+
+pub(super) fn open_review_branch(stoat: &mut Stoat, workdir: &Path, base: Option<&str>) {
+    let Some(session) = scan_branch(stoat, workdir, base) else {
         return;
     };
     install_review_session(stoat, session);
@@ -1247,6 +1254,40 @@ fn scan_commit_range(stoat: &Stoat, workdir: &Path, from: &str, to: &str) -> Opt
     )
 }
 
+/// Build a per-commit branch review session: resolve the base, enumerate
+/// the commits in `merge_base(base, HEAD)..HEAD` oldest-first, and add each
+/// commit's diff (commit-tree vs parent) tagged with its sha via
+/// [`ReviewSession::add_commit_files`], so `order` groups commit-by-commit.
+/// Returns `None` when the repo is unknown, the base does not resolve, or no
+/// commit contributes a diff.
+fn scan_branch(stoat: &Stoat, workdir: &Path, base: Option<&str>) -> Option<ReviewSession> {
+    let repo = stoat.git_host.discover(workdir)?;
+    let workdir = repo.workdir()?;
+    let base_sha = host::resolve_review_base(repo.as_ref(), base)?;
+    let mut session = ReviewSession::new(ReviewSource::Branch {
+        workdir: workdir.clone(),
+        base: base.map(String::from),
+    });
+    for commit in repo.branch_commits(&base_sha) {
+        let Some(new_tree) = repo.commit_tree(&commit.sha) else {
+            continue;
+        };
+        let base_tree = match repo.parent_sha(&commit.sha) {
+            Some(parent) => repo.commit_tree(&parent).unwrap_or_default(),
+            None => std::collections::BTreeMap::new(),
+        };
+        let inputs = review_inputs_from_trees(stoat, &workdir, &base_tree, &new_tree);
+        if !inputs.is_empty() {
+            session.set_commit_summary(commit.sha.clone(), commit.summary);
+            session.add_commit_files(commit.sha, inputs);
+        }
+    }
+    if session.order.is_empty() {
+        return None;
+    }
+    Some(session)
+}
+
 /// Build a session from a stored slice of [`crate::review_session::InMemoryFile`].
 /// Mirrors [`scan_agent_edits`] for `ReviewSource::InMemory`-built sessions
 /// so [`review_refresh`] can re-derive hunks instead of being a silent no-op.
@@ -1307,9 +1348,9 @@ fn scan_agent_edits(
     Some(session)
 }
 
-/// Common builder used by [`scan_commit`] / [`scan_commit_range`]. Walks
-/// the union of paths across `base_tree` and `new_tree`, skipping any
-/// pair whose base and buffer contents are equal.
+/// Common builder used by [`scan_commit`] / [`scan_commit_range`]. Builds
+/// the file inputs via [`review_inputs_from_trees`], skipping when no path
+/// differs.
 fn build_session_from_trees(
     stoat: &Stoat,
     source: ReviewSource,
@@ -1317,6 +1358,28 @@ fn build_session_from_trees(
     base_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
     new_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
 ) -> Option<ReviewSession> {
+    let inputs = review_inputs_from_trees(stoat, workdir, base_tree, new_tree);
+    if inputs.is_empty() {
+        return None;
+    }
+    let mut session = ReviewSession::new(source);
+    session.add_files(inputs);
+    if session.order.is_empty() {
+        return None;
+    }
+    Some(session)
+}
+
+/// Build the per-file review inputs for the union of paths across
+/// `base_tree` and `new_tree`, skipping any pair whose base and buffer
+/// contents are equal. Shared by the single-diff [`build_session_from_trees`]
+/// and the per-commit [`scan_branch`].
+fn review_inputs_from_trees(
+    stoat: &Stoat,
+    workdir: &Path,
+    base_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
+    new_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
+) -> Vec<ReviewFileInput> {
     let mut paths: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
     for p in base_tree.keys() {
         paths.insert(p.as_path());
@@ -1324,10 +1387,6 @@ fn build_session_from_trees(
     for p in new_tree.keys() {
         paths.insert(p.as_path());
     }
-    if paths.is_empty() {
-        return None;
-    }
-    let mut session = ReviewSession::new(source);
     let mut inputs: Vec<ReviewFileInput> = Vec::new();
     for rel in paths {
         let base = base_tree.get(rel).cloned().unwrap_or_default();
@@ -1345,11 +1404,7 @@ fn build_session_from_trees(
             buffer_text: Arc::new(buffer),
         });
     }
-    session.add_files(inputs);
-    if session.order.is_empty() {
-        return None;
-    }
-    Some(session)
+    inputs
 }
 
 /// Build a flattened [`ReviewViewState`] and chunk-header [`BlockProperties`]
@@ -1710,6 +1765,45 @@ mod tests {
         assert!(
             h.fake_git.applied_patches(workdir).is_empty(),
             "revert targets the working tree, not the index"
+        );
+    }
+
+    #[test]
+    fn open_review_branch_groups_chunks_by_commit() {
+        use crate::review_session::ReviewSource;
+
+        let mut h = TestHarness::with_size(80, 14);
+        h.stoat.active_workspace_mut().git_root = "/work".into();
+        h.fake_git
+            .add_repo("/work")
+            .commit("c0", &[("a.rs", "v0\n")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+
+        let action = stoat_action::OpenReviewBranch {
+            workdir: PathBuf::from("/work"),
+            base: Some("c0".to_string()),
+        };
+        crate::action_handlers::dispatch(&mut h.stoat, &action);
+        h.settle();
+
+        let order_commits = h.with_review(|s| {
+            s.order
+                .iter()
+                .map(|id| s.chunks[id].commit.clone())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            order_commits,
+            vec![Some("c1".to_string()), Some("c2".to_string())],
+            "each commit on top of base c0 contributes one grouped chunk",
+        );
+        assert!(
+            matches!(
+                h.with_review(|s| s.source.clone()),
+                ReviewSource::Branch { .. }
+            ),
+            "the installed session carries the Branch source",
         );
     }
 
