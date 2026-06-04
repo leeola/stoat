@@ -3932,11 +3932,12 @@ impl Editor {
             line_number_cache: Some(&self.gutter_line_number_cache),
             blame_cache: Some(&self.gutter_blame_cache),
         };
+        let editor_text = cx.theme().editor_text;
         rows.into_iter()
             .enumerate()
             .map(|(idx, row)| {
                 let display_row = (start + idx) as u32;
-                render::render_row_with_gutter(row, display_row, &paint)
+                render::render_row_with_gutter(row, display_row, &paint).text_color(editor_text)
             })
             .collect()
     }

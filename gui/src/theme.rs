@@ -112,6 +112,10 @@ pub struct ThemeColors {
     pub line_highlight: Hsla,
     pub search_match: Hsla,
     pub muted_text: Hsla,
+    /// Base foreground for editor buffer text. Unhighlighted spans --
+    /// notably every glyph of a file with no registered language --
+    /// render in this color; syntax and selection runs layer over it.
+    pub editor_text: Hsla,
     /// Optional color override for end-of-line inline git blame. `None`
     /// falls back to [`Self::muted_text`].
     pub blame_inline: Option<Hsla>,
@@ -238,6 +242,7 @@ impl ThemeColors {
             ),
             search_match: theme_bg_or(cx, stoat::theme::scope::UI_SEARCH_MATCH, palette.warning),
             muted_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_MUTED, palette.text_muted),
+            editor_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT, palette.text),
             blame_inline: None,
             indent_guide: theme_fg_or(cx, stoat::theme::scope::UI_BORDER_INACTIVE, palette.border),
             indent_guide_active: theme_fg_or(
@@ -580,6 +585,7 @@ mod tests {
         let palette = BasePalette::default_dark();
         let theme = cx.update(|cx| cx.theme());
         assert_eq!(theme.background, palette.background);
+        assert_eq!(theme.editor_text, palette.text);
         assert_eq!(theme.statusbar_focused, palette.surface);
         assert_eq!(theme.diagnostic_error, palette.danger);
         assert_eq!(theme.selection_editor, default_selection_color());
