@@ -100,10 +100,10 @@ use crate::{
             QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk,
             ReviewCycleComparisonMode, ReviewEnterLineSelect, ReviewLineSelectAll,
             ReviewLineSelectCancel, ReviewLineSelectStage, ReviewLineSelectToggle,
-            ReviewLineSelectUnstage, ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk,
-            ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress, ReviewRevertHunk,
-            ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow,
-            ReviewToggleStage, ReviewUnstageChunk,
+            ReviewLineSelectUnstage, ReviewNextChunk, ReviewNextCommit, ReviewNextUnreviewedHunk,
+            ReviewPrevChunk, ReviewPrevCommit, ReviewRefresh, ReviewRemoveSelected,
+            ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
+            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{
             OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
@@ -224,6 +224,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(FormatSelections::DEF, |_| Ok(Box::new(FormatSelections)));
     add(ReviewNextChunk::DEF, |_| Ok(Box::new(ReviewNextChunk)));
     add(ReviewPrevChunk::DEF, |_| Ok(Box::new(ReviewPrevChunk)));
+    add(ReviewNextCommit::DEF, |_| Ok(Box::new(ReviewNextCommit)));
+    add(ReviewPrevCommit::DEF, |_| Ok(Box::new(ReviewPrevCommit)));
     add(ReviewStageChunk::DEF, |_| Ok(Box::new(ReviewStageChunk)));
     add(ReviewUnstageChunk::DEF, |_| {
         Ok(Box::new(ReviewUnstageChunk))
@@ -963,6 +965,8 @@ mod tests {
         "TrimSelections",
         "ReviewNextChunk",
         "ReviewPrevChunk",
+        "ReviewNextCommit",
+        "ReviewPrevCommit",
         "ReviewStageChunk",
         "ReviewUnstageChunk",
         "ReviewToggleStage",
@@ -1294,7 +1298,8 @@ mod tests {
         // + 1 OpenEncodingPicker (status-bar encoding picker).
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
         // + 1 OpenReviewBranch (commit-by-commit branch review).
-        assert_eq!(all().count(), 349);
+        // + 2 ReviewNextCommit / ReviewPrevCommit (commit-group navigation).
+        assert_eq!(all().count(), 351);
     }
 
     #[test]

@@ -902,6 +902,55 @@ impl ReviewSession {
         None
     }
 
+    /// Move the cursor to the first chunk of the next commit group in
+    /// `order`. Commit groups are maximal runs of consecutive chunks
+    /// sharing the same [`ReviewChunk::commit`]; branch review builds
+    /// `order` grouped commit-by-commit. Returns `None` when the cursor is
+    /// already in the last group, the session is empty, or there is no
+    /// cursor. Combined-diff sessions form a single group, so this no-ops.
+    pub fn next_commit(&mut self) -> Option<ReviewChunkId> {
+        let idx = self.cursor_order_index()?;
+        let commit = self.commit_at(idx);
+        let next = (idx + 1..self.order.len()).find(|&j| self.commit_at(j) != commit)?;
+        let id = self.order[next];
+        self.cursor.current = Some(id);
+        self.version += 1;
+        Some(id)
+    }
+
+    /// Move the cursor to the first chunk of the previous commit group in
+    /// `order`, jumping past the start of the current group. Returns `None`
+    /// when the cursor is in the first group, the session is empty, or
+    /// there is no cursor.
+    pub fn prev_commit(&mut self) -> Option<ReviewChunkId> {
+        let idx = self.cursor_order_index()?;
+        let group_start = self.group_start(idx);
+        if group_start == 0 {
+            return None;
+        }
+        let id = self.order[self.group_start(group_start - 1)];
+        self.cursor.current = Some(id);
+        self.version += 1;
+        Some(id)
+    }
+
+    /// Source commit of the chunk at `order[idx]`, cloned so commit-group
+    /// membership can be compared as `commit_at(a) == commit_at(b)`.
+    fn commit_at(&self, idx: usize) -> Option<String> {
+        let id = self.order.get(idx)?;
+        self.chunks.get(id)?.commit.clone()
+    }
+
+    /// Start index in `order` of the commit group containing `idx`.
+    fn group_start(&self, idx: usize) -> usize {
+        let commit = self.commit_at(idx);
+        let mut start = idx;
+        while start > 0 && self.commit_at(start - 1) == commit {
+            start -= 1;
+        }
+        start
+    }
+
     pub fn set_status(&mut self, id: ReviewChunkId, status: ChunkStatus) {
         if let Some(chunk) = self.chunks.get_mut(&id) {
             chunk.status = status;
@@ -3557,6 +3606,49 @@ mod tests {
     fn next_unreviewed_no_op_on_empty_session() {
         let mut s = in_memory_session();
         assert_eq!(s.next_unreviewed(), None);
+    }
+
+    fn commit_group(s: &mut ReviewSession, commit: &str, files: &[&str]) -> Vec<ReviewChunkId> {
+        let inputs = files
+            .iter()
+            .map(|f| refresh_input(f, "a\n", "B\n"))
+            .collect();
+        s.add_commit_files(commit.to_string(), inputs)
+            .into_iter()
+            .flatten()
+            .collect()
+    }
+
+    #[test]
+    fn commit_navigation_jumps_between_commit_groups() {
+        let mut s = in_memory_session();
+        let g1 = commit_group(&mut s, "c1", &["a.txt", "b.txt"]);
+        let g2 = commit_group(&mut s, "c2", &["c.txt", "d.txt"]);
+
+        assert_eq!(s.cursor.current, Some(g1[0]));
+        assert_eq!(
+            s.next_commit(),
+            Some(g2[0]),
+            "jump to next group's first chunk"
+        );
+        assert_eq!(s.next_commit(), None, "no group past the last");
+
+        // From mid-group, prev_commit jumps past the current group's start
+        // to the previous group's first chunk.
+        s.cursor.current = Some(g2[1]);
+        assert_eq!(s.prev_commit(), Some(g1[0]));
+        assert_eq!(s.prev_commit(), None, "no group before the first");
+    }
+
+    #[test]
+    fn next_unreviewed_rolls_into_next_commit() {
+        let mut s = in_memory_session();
+        let g1 = commit_group(&mut s, "c1", &["a.txt"]);
+        let g2 = commit_group(&mut s, "c2", &["b.txt"]);
+
+        s.chunks.get_mut(&g1[0]).unwrap().approved = true;
+        assert_eq!(s.cursor.current, Some(g1[0]));
+        assert_eq!(s.next_unreviewed(), Some(g2[0]));
     }
 
     #[test]

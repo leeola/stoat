@@ -485,6 +485,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::FormatSelections => lsp::format_selections(stoat),
         ActionKind::ReviewNextChunk => review::review_step(stoat, review::ReviewStep::Next),
         ActionKind::ReviewPrevChunk => review::review_step(stoat, review::ReviewStep::Prev),
+        ActionKind::ReviewNextCommit => review::review_step(stoat, review::ReviewStep::NextCommit),
+        ActionKind::ReviewPrevCommit => review::review_step(stoat, review::ReviewStep::PrevCommit),
         ActionKind::ReviewStageChunk => review::review_mark(stoat, review::ReviewMark::Stage),
         ActionKind::ReviewUnstageChunk => review::review_mark(stoat, review::ReviewMark::Unstage),
         ActionKind::ReviewToggleStage => review::review_mark(stoat, review::ReviewMark::Toggle),

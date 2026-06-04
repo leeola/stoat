@@ -92,6 +92,28 @@ define_action!(
 );
 
 define_action!(
+    ReviewNextCommitDef,
+    ReviewNextCommit,
+    "ReviewNextCommit",
+    ActionKind::ReviewNextCommit,
+    "jump to the next commit's first chunk",
+    "Move the review cursor to the first chunk of the next commit group in \
+     a commit-by-commit branch review. No-op in single-commit reviews.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    ReviewPrevCommitDef,
+    ReviewPrevCommit,
+    "ReviewPrevCommit",
+    ActionKind::ReviewPrevCommit,
+    "jump to the previous commit's first chunk",
+    "Move the review cursor to the first chunk of the previous commit group \
+     in a commit-by-commit branch review. No-op in single-commit reviews.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewStageChunkDef,
     ReviewStageChunk,
     "ReviewStageChunk",

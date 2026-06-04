@@ -254,6 +254,8 @@ pub(super) fn open_review_agent_edits(stoat: &mut Stoat, edits: &[stoat_action::
 pub(super) enum ReviewStep {
     Next,
     Prev,
+    NextCommit,
+    PrevCommit,
 }
 
 #[derive(Copy, Clone, Debug)]
@@ -274,6 +276,8 @@ pub(super) fn review_step(stoat: &mut Stoat, step: ReviewStep) -> UpdateEffect {
     let moved = match step {
         ReviewStep::Next => session.next(),
         ReviewStep::Prev => session.prev(),
+        ReviewStep::NextCommit => session.next_commit(),
+        ReviewStep::PrevCommit => session.prev_commit(),
     };
     if moved.is_none() {
         return UpdateEffect::None;

@@ -2493,6 +2493,12 @@ impl Workspace {
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
             ActionKind::ReviewNextChunk => self.dispatch_review_step(ReviewStepDir::Next, cx),
             ActionKind::ReviewPrevChunk => self.dispatch_review_step(ReviewStepDir::Prev, cx),
+            ActionKind::ReviewNextCommit => {
+                self.dispatch_review_step(ReviewStepDir::NextCommit, cx)
+            },
+            ActionKind::ReviewPrevCommit => {
+                self.dispatch_review_step(ReviewStepDir::PrevCommit, cx)
+            },
             ActionKind::ReviewStageChunk => {
                 self.dispatch_review_set_status(ReviewStatusChange::Stage, cx)
             },
@@ -4891,6 +4897,8 @@ impl Workspace {
             let new_id = session.update(cx, |session, cx| match dir {
                 ReviewStepDir::Next => session.next(cx),
                 ReviewStepDir::Prev => session.prev(cx),
+                ReviewStepDir::NextCommit => session.next_commit(cx),
+                ReviewStepDir::PrevCommit => session.prev_commit(cx),
             });
             let Some(new_id) = new_id else { return };
             let target = session
@@ -6856,6 +6864,8 @@ fn populate_branch_session(
 enum ReviewStepDir {
     Next,
     Prev,
+    NextCommit,
+    PrevCommit,
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]

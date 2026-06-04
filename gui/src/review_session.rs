@@ -303,6 +303,26 @@ impl ReviewSession {
         Some(id)
     }
 
+    /// Move the cursor to the first chunk of the next commit group. Same
+    /// event semantics as [`Self::next`].
+    pub fn next_commit(&mut self, cx: &mut Context<'_, Self>) -> Option<ReviewChunkId> {
+        let id = self.inner.next_commit()?;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::CursorMoved);
+        cx.notify();
+        Some(id)
+    }
+
+    /// Move the cursor to the first chunk of the previous commit group.
+    /// Same event semantics as [`Self::next`].
+    pub fn prev_commit(&mut self, cx: &mut Context<'_, Self>) -> Option<ReviewChunkId> {
+        let id = self.inner.prev_commit()?;
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::CursorMoved);
+        cx.notify();
+        Some(id)
+    }
+
     /// Fire [`ReviewSessionEvent::Changed`] and notify observers.
     /// Callers use this after mutating the inner session through
     /// a path the wrapper does not yet expose so subscribers

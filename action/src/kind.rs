@@ -245,6 +245,8 @@ pub enum ActionKind {
     FormatSelections,
     ReviewNextChunk,
     ReviewPrevChunk,
+    ReviewNextCommit,
+    ReviewPrevCommit,
     ReviewStageChunk,
     ReviewUnstageChunk,
     ReviewToggleStage,
