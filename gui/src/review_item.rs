@@ -18,7 +18,7 @@ use std::{ops::Range, path::PathBuf, sync::Arc};
 use stoat::{
     buffer::BufferId,
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
-    review_session::{ChunkStatus, ReviewSource},
+    review_session::{ChunkStatus, ReviewSession as InnerSession, ReviewSource},
 };
 use stoat_scheduler::Executor;
 
@@ -203,6 +203,46 @@ struct FileSpec {
     header_block: BlockProperties,
 }
 
+/// Per-file commit-boundary header line: `Some(header)` for the first file
+/// of a commit group that carries a source commit, `None` otherwise (later
+/// files of a group and combined-diff files). One entry per session file,
+/// in file order.
+fn commit_headers(session: &InnerSession) -> Vec<Option<String>> {
+    let progress = session.commit_progress();
+    let mut headers = Vec::with_capacity(session.files.len());
+    let mut prev: Option<Option<String>> = None;
+    for file in &session.files {
+        let boundary = prev.as_ref() != Some(&file.commit);
+        prev = Some(file.commit.clone());
+        let header = file.commit.as_deref().filter(|_| boundary).map(|sha| {
+            let (reviewed, total) = progress
+                .iter()
+                .find(|g| g.commit.as_deref() == Some(sha))
+                .map(|g| (g.reviewed, g.total))
+                .unwrap_or((0, 0));
+            let summary = session.commit_summary(sha).unwrap_or_default();
+            format!(
+                "{}  {}  {}/{} reviewed",
+                short_sha(sha),
+                summary,
+                reviewed,
+                total
+            )
+        });
+        headers.push(header);
+    }
+    headers
+}
+
+/// `Some("Commit X/Y")` when the review spans more than one commit group,
+/// `None` for single-commit and combined-diff reviews.
+fn commit_position_label(session: &InnerSession) -> Option<String> {
+    match session.commit_position() {
+        Some((current, total)) if total > 1 => Some(format!("Commit {current}/{total}")),
+        _ => None,
+    }
+}
+
 fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, Vec<FileSpec>) {
     let session_ref = session.read(cx);
     let inner = session_ref.inner();
@@ -213,7 +253,8 @@ fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, V
     let file_specs = inner
         .files
         .iter()
-        .map(|file| {
+        .zip(commit_headers(inner))
+        .map(|(file, commit_header)| {
             let mut excerpt_ranges = Vec::new();
             let mut deletion_blocks = Vec::new();
             let mut staged_count = 0usize;
@@ -243,15 +284,19 @@ fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, V
                     BlockStyle::Fixed,
                 ));
             }
-            let header_text = format!(
+            let mut header_lines = Vec::new();
+            if let Some(commit_header) = commit_header {
+                header_lines.push(commit_header);
+            }
+            header_lines.push(format!(
                 "> {}   {}/{} staged",
                 file.rel_path,
                 staged_count,
                 file.chunks.len()
-            );
+            ));
             let header_block = BlockProperties::from_text(
                 BlockPlacement::Above(0),
-                vec![header_text],
+                header_lines,
                 BlockStyle::Sticky,
             );
             FileSpec {
@@ -332,6 +377,7 @@ fn build_file_view(
 impl Render for ReviewItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let active = self.active_file_index(cx);
+        let position = commit_position_label(self.session.read(cx).inner());
         let children: Vec<_> = self
             .files
             .iter()
@@ -344,7 +390,12 @@ impl Render for ReviewItem {
                     .child(file.editor.clone())
             })
             .collect();
-        div().flex().flex_col().size_full().children(children)
+        div()
+            .flex()
+            .flex_col()
+            .size_full()
+            .children(position.map(|label| div().px_2().py_1().child(SharedString::from(label))))
+            .children(children)
     }
 }
 
@@ -429,7 +480,7 @@ mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::{path::PathBuf, sync::Arc};
-    use stoat::{review::ReviewFileInput, review_session::ReviewSession as InnerSession};
+    use stoat::review::ReviewFileInput;
     use stoat_scheduler::TestScheduler;
 
     fn install_executor(cx: &mut TestAppContext) {
@@ -464,6 +515,56 @@ mod tests {
                 ReviewSession::new(inner)
             })
         })
+    }
+
+    fn input(name: &str) -> ReviewFileInput {
+        ReviewFileInput {
+            path: PathBuf::from(name),
+            rel_path: name.to_string(),
+            language: None,
+            base_text: Arc::new("a\n".to_string()),
+            buffer_text: Arc::new("B\n".to_string()),
+        }
+    }
+
+    #[test]
+    fn commit_headers_label_group_boundaries() {
+        let mut s = InnerSession::new(ReviewSource::InMemory {
+            files: Arc::new(Vec::new()),
+        });
+        s.set_commit_summary("c1".into(), "first change".into());
+        s.set_commit_summary("c2".into(), "second change".into());
+        let g1 = s.add_commit_files("c1".into(), vec![input("a.txt"), input("b.txt")]);
+        s.add_commit_files("c2".into(), vec![input("c.txt")]);
+        s.set_approved(g1.into_iter().flatten().next().unwrap(), true);
+
+        assert_eq!(
+            commit_headers(&s),
+            vec![
+                Some("c1  first change  1/2 reviewed".to_string()),
+                None,
+                Some("c2  second change  0/1 reviewed".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn commit_position_label_only_for_multi_commit() {
+        let mut multi = InnerSession::new(ReviewSource::InMemory {
+            files: Arc::new(Vec::new()),
+        });
+        multi.add_commit_files("c1".into(), vec![input("a.txt")]);
+        multi.add_commit_files("c2".into(), vec![input("b.txt")]);
+        assert_eq!(
+            commit_position_label(&multi),
+            Some("Commit 1/2".to_string())
+        );
+
+        let mut single = InnerSession::new(ReviewSource::InMemory {
+            files: Arc::new(Vec::new()),
+        });
+        single.add_commit_files("c1".into(), vec![input("a.txt")]);
+        assert_eq!(commit_position_label(&single), None);
     }
 
     fn new_item(cx: &mut TestAppContext, source: ReviewSource) -> Entity<ReviewItem> {

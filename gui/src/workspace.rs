@@ -6855,6 +6855,7 @@ fn populate_branch_session(
     for commit in repo.branch_commits(&base_sha) {
         let inputs = review_inputs_from_commit_trees(workdir, &commit.sha, None, langs, cx);
         if !inputs.is_empty() {
+            session.set_commit_summary(commit.sha.clone(), commit.summary);
             session.add_commit_files(commit.sha, inputs);
         }
     }

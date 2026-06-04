@@ -450,6 +450,10 @@ pub struct ReviewSession {
     /// mode; `None` otherwise. Set by [`Self::enter_line_select`] and
     /// cleared by [`Self::cancel_line_select`].
     pub line_selection: Option<LineSelection>,
+    /// Commit sha -> message subject, set via [`Self::set_commit_summary`]
+    /// when a branch review is built. Empty for the combined-diff sources.
+    /// Read by the review view to label commit-boundary headers.
+    commit_summaries: HashMap<String, String>,
     next_id: u32,
 }
 
@@ -506,6 +510,7 @@ impl ReviewSession {
             watch_tokens: Vec::new(),
             follow: false,
             line_selection: None,
+            commit_summaries: HashMap::new(),
             next_id: 0,
         }
     }
@@ -1696,6 +1701,17 @@ impl ReviewSession {
             prev = Some(commit);
         }
         Some((current, total))
+    }
+
+    /// Record the message subject for a commit in a branch review. Read by
+    /// the review view to label the commit-boundary header.
+    pub fn set_commit_summary(&mut self, sha: String, summary: String) {
+        self.commit_summaries.insert(sha, summary);
+    }
+
+    /// Message subject recorded for `sha`, if any.
+    pub fn commit_summary(&self, sha: &str) -> Option<&str> {
+        self.commit_summaries.get(sha).map(String::as_str)
     }
 
     pub fn is_complete(&self) -> bool {
