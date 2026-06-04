@@ -3592,10 +3592,16 @@ impl Editor {
         if new_y == current_y {
             return;
         }
-        let animate = matches!(
-            strategy,
-            AutoscrollStrategy::Center | AutoscrollStrategy::Top | AutoscrollStrategy::Bottom
-        ) && (new_y - current_y).abs() >= MIN_ANIMATED_SCROLL_ROWS;
+        // The cursor-follow strategies ease even a 1-row slide so following
+        // the cursor stays smooth; the programmatic jumps only ease once the
+        // jump clears the snap threshold.
+        let animate = match strategy {
+            AutoscrollStrategy::Fit | AutoscrollStrategy::Newest => true,
+            AutoscrollStrategy::Center | AutoscrollStrategy::Top | AutoscrollStrategy::Bottom => {
+                (new_y - current_y).abs() >= MIN_ANIMATED_SCROLL_ROWS
+            },
+            _ => false,
+        };
         if animate {
             self.animate_scroll_to(new_y, cx);
         } else {
@@ -5078,27 +5084,41 @@ mod tests {
     #[test]
     fn move_vertical_follows_cursor_with_fit_autoscroll() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
+        let scheduler = install_executor_global_returning_scheduler(&mut cx);
         let vcx = cx.add_empty_window();
         let (_buffer, editor) = editor_with_viewport(vcx, &multiline_text(30));
 
-        // Moving down past the 20-row viewport follows the cursor with a
-        // 3-row bottom margin: cursor row 25 -> view scrolled to row 9.
+        // Moving down past the 20-row viewport eases the follow rather than
+        // snapping: an animation is stored and the position has not yet moved.
         editor.update_in(vcx, |ed, _, cx| {
             ed.handle_move_vertical(1, 25, false, cx);
             ed.apply_pending_autoscroll(cx);
         });
+        editor.read_with(vcx, |ed, _| {
+            assert!(ed.scroll_manager().animation().is_some());
+            assert_eq!(ed.scroll_manager().anchor().offset.y, 0.0);
+        });
+
+        // The eased follow settles a 3-row bottom margin below the cursor:
+        // cursor row 25 -> view scrolled to row 9.
+        vcx.run_until_parked();
+        advance(&scheduler, vcx, 300);
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
             9.0,
         );
 
-        // Moving back up past the top edge follows with a 3-row top margin:
-        // cursor row 5 -> view scrolled to row 2.
+        // Moving back up past the top edge also eases, settling a 3-row top
+        // margin above the cursor: cursor row 5 -> view scrolled to row 2.
         editor.update_in(vcx, |ed, _, cx| {
             ed.handle_move_vertical(-1, 20, false, cx);
             ed.apply_pending_autoscroll(cx);
         });
+        editor.read_with(vcx, |ed, _| {
+            assert!(ed.scroll_manager().animation().is_some());
+        });
+        vcx.run_until_parked();
+        advance(&scheduler, vcx, 300);
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
             2.0,
