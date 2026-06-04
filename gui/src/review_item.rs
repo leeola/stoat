@@ -13,12 +13,13 @@ use gpui::{
     div, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
     Styled, Subscription, Window,
 };
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{ops::Range, path::PathBuf, sync::Arc};
 use stoat::{
     buffer::BufferId,
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
-    review_session::{ChunkStatus, ReviewSession as InnerSession, ReviewSource},
+    review_session::{ChunkFingerprint, ChunkStatus, ReviewSession as InnerSession, ReviewSource},
 };
 use stoat_scheduler::Executor;
 
@@ -399,6 +400,81 @@ impl Render for ReviewItem {
     }
 }
 
+/// Re-scannable subset of [`ReviewSource`] persisted in the workspace
+/// blob. The ephemeral sources (agent edits, in-memory) cannot be
+/// reconstructed across a restart and are not represented.
+#[derive(Serialize, Deserialize)]
+enum ReviewSourcePersist {
+    WorkingTree {
+        workdir: PathBuf,
+    },
+    WorkingTreeUnstaged {
+        workdir: PathBuf,
+    },
+    WorkingTreeStaged {
+        workdir: PathBuf,
+    },
+    WorkspaceWatch {
+        workdir: PathBuf,
+    },
+    Commit {
+        workdir: PathBuf,
+        sha: String,
+    },
+    CommitRange {
+        workdir: PathBuf,
+        from: String,
+        to: String,
+    },
+    Branch {
+        workdir: PathBuf,
+        base: Option<String>,
+    },
+}
+
+/// Persisted review state: the source to re-scan plus the per-chunk
+/// decisions keyed by [`ChunkFingerprint`] so they re-key onto freshly
+/// scanned chunks on restore. Decisions are stored as `Vec` because a JSON
+/// map cannot have a non-string key.
+#[derive(Serialize, Deserialize)]
+struct ReviewPersist {
+    source: ReviewSourcePersist,
+    statuses: Vec<(ChunkFingerprint, ChunkStatus)>,
+    approvals: Vec<ChunkFingerprint>,
+}
+
+/// Re-scannable sources map to `Some`; ephemeral sources to `None`.
+fn source_to_persist(source: &ReviewSource) -> Option<ReviewSourcePersist> {
+    Some(match source {
+        ReviewSource::WorkingTree { workdir } => ReviewSourcePersist::WorkingTree {
+            workdir: workdir.clone(),
+        },
+        ReviewSource::WorkingTreeUnstaged { workdir } => ReviewSourcePersist::WorkingTreeUnstaged {
+            workdir: workdir.clone(),
+        },
+        ReviewSource::WorkingTreeStaged { workdir } => ReviewSourcePersist::WorkingTreeStaged {
+            workdir: workdir.clone(),
+        },
+        ReviewSource::WorkspaceWatch { workdir } => ReviewSourcePersist::WorkspaceWatch {
+            workdir: workdir.clone(),
+        },
+        ReviewSource::Commit { workdir, sha } => ReviewSourcePersist::Commit {
+            workdir: workdir.clone(),
+            sha: sha.clone(),
+        },
+        ReviewSource::CommitRange { workdir, from, to } => ReviewSourcePersist::CommitRange {
+            workdir: workdir.clone(),
+            from: from.clone(),
+            to: to.clone(),
+        },
+        ReviewSource::Branch { workdir, base } => ReviewSourcePersist::Branch {
+            workdir: workdir.clone(),
+            base: base.clone(),
+        },
+        ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => return None,
+    })
+}
+
 impl ItemView for ReviewItem {
     fn tab_label(&self, cx: &App) -> SharedString {
         review_source_label(
@@ -406,6 +482,20 @@ impl ItemView for ReviewItem {
             self.commit_summary.as_deref(),
         )
         .into()
+    }
+
+    fn serialize(&self, cx: &App) -> Value {
+        let session = self.session.read(cx);
+        let inner = session.inner();
+        let Some(source) = source_to_persist(&inner.source) else {
+            return Value::Null;
+        };
+        let persist = ReviewPersist {
+            source,
+            statuses: inner.snapshot_statuses().into_iter().collect(),
+            approvals: inner.snapshot_approvals().into_keys().collect(),
+        };
+        serde_json::to_value(persist).unwrap_or(Value::Null)
     }
 
     fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError> {
@@ -565,6 +655,67 @@ mod tests {
         });
         single.add_commit_files("c1".into(), vec![input("a.txt")]);
         assert_eq!(commit_position_label(&single), None);
+    }
+
+    #[test]
+    fn serialize_persists_rescannable_source_and_decisions() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = InnerSession::new(ReviewSource::Commit {
+                    workdir: PathBuf::from("/repo"),
+                    sha: "abc1234".to_string(),
+                });
+                let ids = inner.add_files(vec![input("a.txt")]);
+                let id = ids[0][0];
+                inner.set_status(id, ChunkStatus::Staged);
+                inner.set_approved(id, true);
+                ReviewSession::new(inner)
+            })
+        });
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+
+        let blob = item.read_with(&cx, |item, app| item.serialize(app));
+        let persist: ReviewPersist = serde_json::from_value(blob).expect("blob parses");
+
+        match persist.source {
+            ReviewSourcePersist::Commit { workdir, sha } => {
+                assert_eq!(workdir, PathBuf::from("/repo"));
+                assert_eq!(sha, "abc1234");
+            },
+            _ => panic!("expected Commit source"),
+        }
+        assert_eq!(persist.statuses.len(), 1, "staged chunk persists a status");
+        assert_eq!(persist.approvals.len(), 1, "approved chunk persists");
+    }
+
+    #[test]
+    fn serialize_is_null_for_ephemeral_source() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = InnerSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
+                inner.add_files(vec![input("a.txt")]);
+                ReviewSession::new(inner)
+            })
+        });
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+        let blob = item.read_with(&cx, |item, app| item.serialize(app));
+        assert_eq!(blob, Value::Null);
     }
 
     fn new_item(cx: &mut TestAppContext, source: ReviewSource) -> Entity<ReviewItem> {
