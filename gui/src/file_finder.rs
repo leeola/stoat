@@ -289,17 +289,12 @@ impl PickerDelegate for FileFinderDelegate {
         if self.preview_rendered_for.as_deref() == Some(path.as_path()) {
             return;
         }
-        let Some(buffer) = self.preview_buffer.clone() else {
-            return;
-        };
         let Some(editor) = self.preview_editor.clone() else {
             return;
         };
         let fs_host = cx.global::<FsHostGlobal>().0.clone();
         let text = read_preview_text(&*fs_host, &path);
-        let len = buffer.read(cx).read(|b| b.rope().len());
-        buffer.update(cx, |b, cx| b.edit(0..len, &text, cx));
-        editor.update(cx, |ed, cx| ed.set_preview_target(path.clone(), cx));
+        editor.update(cx, |ed, cx| ed.set_preview_target(path.clone(), &text, cx));
         self.preview_rendered_for = Some(path);
     }
 

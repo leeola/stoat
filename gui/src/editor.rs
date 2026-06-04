@@ -3100,20 +3100,41 @@ impl Editor {
         self.syntax_map_updater.as_ref()
     }
 
-    /// Retarget a stand-alone preview [`Editor`] at `path`. Updates the
-    /// editor's and singleton buffer's `file_path`, scrolls back to
-    /// the top, drops the current
-    /// [`crate::syntax_updater::SyntaxMapUpdater`], and re-installs it
-    /// so the new path's language drives the syntax pipeline. Used by
-    /// the file finder's preview pane on every selection change.
-    pub fn set_preview_target(&mut self, path: std::path::PathBuf, cx: &mut Context<'_, Self>) {
-        if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
-            buffer.update(cx, |b, cx| b.set_file_path(Some(path.clone()), cx));
+    /// Retarget a stand-alone preview [`Editor`] at `path`, replacing the
+    /// singleton buffer's text with `text`. Drops the prior file's
+    /// [`crate::syntax_updater::SyntaxMapUpdater`] before the text swap so
+    /// it cannot reparse the new content under the old grammar, updates
+    /// the editor's and buffer's `file_path`, scrolls to the top, then
+    /// resolves the new path's language: installs a fresh updater when one
+    /// matches, otherwise clears the buffer's syntax map so no stale
+    /// highlights survive. Used by the file finder's preview pane on every
+    /// selection change.
+    pub fn set_preview_target(
+        &mut self,
+        path: std::path::PathBuf,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.syntax_map_updater = None;
+
+        let singleton = self.multi_buffer.read(cx).as_singleton().cloned();
+        if let Some(buffer) = &singleton {
+            buffer.update(cx, |b, cx| {
+                b.set_file_path(Some(path.clone()), cx);
+                let len = b.read(|t| t.rope().len());
+                b.edit(0..len, text, cx);
+            });
         }
+
         self.set_file_path(Some(path), cx);
         self.set_scroll_row(0, cx);
-        self.syntax_map_updater = None;
+
         self.install_syntax_map_updater(cx);
+        if self.syntax_map_updater.is_none() {
+            if let Some(buffer) = &singleton {
+                buffer.update(cx, |b, cx| b.set_syntax_map(None, cx));
+            }
+        }
     }
 
     /// Arm a `goto_word` jump: store the label set and clear any
@@ -4513,6 +4534,31 @@ mod tests {
         };
         buffer.update(cx, |b, cx| b.set_syntax_map(Some(map), cx));
         (buffer, editor)
+    }
+
+    #[test]
+    fn set_preview_target_clears_syntax_map_for_no_language_file() {
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| cx.set_global(crate::globals::LanguageRegistry::standard()));
+        let (buffer, editor) = new_editor(&mut cx, "fn main() {}");
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_preview_target(PathBuf::from("main.rs"), "fn main() {}", cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            buffer.read_with(&cx, |b, _| b.syntax_map().is_some()),
+            "a recognized language installs a syntax map",
+        );
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_preview_target(PathBuf::from("LICENSE"), "MIT License\n", cx)
+        });
+        cx.run_until_parked();
+        assert!(
+            buffer.read_with(&cx, |b, _| b.syntax_map().is_none()),
+            "retargeting to a no-language file clears the stale syntax map",
+        );
     }
 
     #[test]
