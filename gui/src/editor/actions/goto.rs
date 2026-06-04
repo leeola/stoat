@@ -1,4 +1,6 @@
-use crate::editor::{actions::movement::extend_head, Editor, EditorEvent};
+use crate::editor::{
+    actions::movement::extend_head, scroll::autoscroll::AutoscrollStrategy, Editor, EditorEvent,
+};
 use gpui::Context;
 use stoat_text::{Anchor, Bias, Point, Selection, SelectionGoal};
 
@@ -142,6 +144,7 @@ impl Editor {
             })
             .collect();
         self.selections.replace_with(new_disjoint, &snapshot);
+        self.request_autoscroll(AutoscrollStrategy::Fit, cx);
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -173,6 +176,7 @@ impl Editor {
             })
             .collect();
         self.selections.replace_with(new_disjoint, &snapshot);
+        self.request_autoscroll(AutoscrollStrategy::Fit, cx);
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }

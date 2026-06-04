@@ -5119,6 +5119,37 @@ mod tests {
     }
 
     #[test]
+    fn goto_file_jumps_follow_cursor_with_fit_autoscroll() {
+        let mut cx = TestAppContext::single();
+        let scheduler = install_executor_global_returning_scheduler(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = editor_with_viewport(vcx, &multiline_text(30));
+
+        // G to the last line follows the cursor down: row 29 sits at the
+        // viewport bottom, so the view eases to the max scroll (row 10).
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.handle_goto_last_line(false, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+        pump_scroll_animation(&scheduler, &editor, vcx, 300);
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            10.0,
+        );
+
+        // gg back to the file start eases the view back to the top.
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.handle_goto_file_start(false, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+        pump_scroll_animation(&scheduler, &editor, vcx, 300);
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            0.0,
+        );
+    }
+
+    #[test]
     fn handle_scroll_wheel_pixel_offset_uses_fractional_row_position() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
