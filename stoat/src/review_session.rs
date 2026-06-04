@@ -3652,6 +3652,31 @@ mod tests {
     }
 
     #[test]
+    fn approvals_persist_across_commit_navigation() {
+        let mut s = in_memory_session();
+        let g1 = commit_group(&mut s, "c1", &["a.txt"]);
+        let g2 = commit_group(&mut s, "c2", &["b.txt"]);
+        let g3 = commit_group(&mut s, "c3", &["c.txt"]);
+
+        s.set_approved(g1[0], true);
+        s.set_approved(g3[0], true);
+
+        // Walk forward through every commit and back to the first.
+        assert_eq!(s.next_commit(), Some(g2[0]));
+        assert_eq!(s.next_commit(), Some(g3[0]));
+        assert_eq!(s.prev_commit(), Some(g2[0]));
+        assert_eq!(s.prev_commit(), Some(g1[0]));
+
+        // Approvals survive the round trip; the untouched commit stays
+        // unapproved.
+        let approved: Vec<bool> = [g1[0], g2[0], g3[0]]
+            .iter()
+            .map(|id| s.chunks.get(id).unwrap().approved)
+            .collect();
+        assert_eq!(approved, [true, false, true]);
+    }
+
+    #[test]
     fn reset_progress_clears_status_and_approved_and_resets_cursor() {
         let mut s = in_memory_session();
         let ids = add(
