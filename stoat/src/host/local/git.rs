@@ -253,23 +253,52 @@ impl GitRepo for LocalGitRepo {
             let Ok(commit) = repo.find_commit(oid) else {
                 continue;
             };
-            let sha = oid.to_string();
-            let short_sha = sha.chars().take(7).collect();
-            let summary = commit.summary().unwrap_or_default().trim().to_string();
-            let author = commit.author();
-            let author_name = author.name().unwrap_or_default().to_string();
-            let author_email = author.email().unwrap_or_default().to_string();
-            let time = commit.time().seconds();
-            let parent_count = commit.parent_count() as u32;
-            out.push(CommitInfo {
-                sha,
-                short_sha,
-                summary,
-                author_name,
-                author_email,
-                time,
-                parent_count,
-            });
+            out.push(commit_info(&commit));
+        }
+        out
+    }
+
+    fn merge_base(&self, a: &str, b: &str) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let a_oid = git2::Oid::from_str(a).ok()?;
+        let b_oid = git2::Oid::from_str(b).ok()?;
+        let base = repo.merge_base(a_oid, b_oid).ok()?;
+        Some(base.to_string())
+    }
+
+    fn branch_commits(&self, base: &str) -> Vec<CommitInfo> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let Ok(base_oid) = git2::Oid::from_str(base) else {
+            return Vec::new();
+        };
+        let Ok(head_oid) = repo.head().and_then(|h| h.peel_to_commit()).map(|c| c.id()) else {
+            return Vec::new();
+        };
+        let Ok(merge_base) = repo.merge_base(base_oid, head_oid) else {
+            return Vec::new();
+        };
+
+        let mut walk = match repo.revwalk() {
+            Ok(w) => w,
+            Err(_) => return Vec::new(),
+        };
+        if walk.set_sorting(Sort::TOPOLOGICAL | Sort::REVERSE).is_err() {
+            return Vec::new();
+        }
+        if walk.push(head_oid).is_err() {
+            return Vec::new();
+        }
+        if walk.hide(merge_base).is_err() {
+            return Vec::new();
+        }
+
+        let mut out: Vec<CommitInfo> = Vec::new();
+        for oid_res in walk {
+            let Ok(oid) = oid_res else { continue };
+            let Ok(commit) = repo.find_commit(oid) else {
+                continue;
+            };
+            out.push(commit_info(&commit));
         }
         out
     }
@@ -574,4 +603,19 @@ fn err_msg(e: git2::Error) -> GitApplyError {
         reason: e.message().to_string(),
     }
     .build()
+}
+
+fn commit_info(commit: &git2::Commit<'_>) -> CommitInfo {
+    let sha = commit.id().to_string();
+    let short_sha = sha.chars().take(7).collect();
+    let author = commit.author();
+    CommitInfo {
+        sha,
+        short_sha,
+        summary: commit.summary().unwrap_or_default().trim().to_string(),
+        author_name: author.name().unwrap_or_default().to_string(),
+        author_email: author.email().unwrap_or_default().to_string(),
+        time: commit.time().seconds(),
+        parent_count: commit.parent_count() as u32,
+    }
 }

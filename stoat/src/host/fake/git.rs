@@ -11,7 +11,7 @@ use crate::host::{
     },
 };
 use std::{
-    collections::{BTreeMap, HashMap},
+    collections::{BTreeMap, HashMap, HashSet},
     path::{Path, PathBuf},
     sync::{Arc, Mutex},
 };
@@ -748,6 +748,47 @@ struct FakeCommit {
     time: i64,
 }
 
+fn fake_commit_info(sha: &str, commit: &FakeCommit) -> CommitInfo {
+    CommitInfo {
+        sha: sha.to_string(),
+        short_sha: sha.chars().take(7).collect(),
+        summary: commit.message.lines().next().unwrap_or("").to_string(),
+        author_name: commit.author_name.clone(),
+        author_email: commit.author_email.clone(),
+        time: commit.time,
+        parent_count: commit.parent.as_ref().map(|_| 1).unwrap_or(0),
+    }
+}
+
+/// Lowest common ancestor of `a` and `b` over the fake's linear
+/// first-parent chains, or `None` when either sha is unknown or the two
+/// share no ancestor.
+fn fake_merge_base(commits: &HashMap<String, FakeCommit>, a: &str, b: &str) -> Option<String> {
+    if !commits.contains_key(a) || !commits.contains_key(b) {
+        return None;
+    }
+    let mut a_ancestors = HashSet::new();
+    let mut cursor = Some(a.to_string());
+    while let Some(sha) = cursor {
+        let Some(commit) = commits.get(&sha) else {
+            break;
+        };
+        a_ancestors.insert(sha.clone());
+        cursor = commit.parent.clone();
+    }
+    let mut cursor = Some(b.to_string());
+    while let Some(sha) = cursor {
+        if a_ancestors.contains(&sha) {
+            return Some(sha);
+        }
+        let Some(commit) = commits.get(&sha) else {
+            break;
+        };
+        cursor = commit.parent.clone();
+    }
+    None
+}
+
 impl GitRepo for FakeGitRepo {
     fn workdir(&self) -> Option<PathBuf> {
         Some(self.workdir.clone())
@@ -854,22 +895,42 @@ impl GitRepo for FakeGitRepo {
             let Some(commit) = state.commits.get(&cursor) else {
                 break;
             };
-            let parent_count = commit.parent.as_ref().map(|_| 1).unwrap_or(0);
-            let short_sha = cursor.chars().take(7).collect();
-            out.push(CommitInfo {
-                sha: cursor.clone(),
-                short_sha,
-                summary: commit.message.lines().next().unwrap_or("").to_string(),
-                author_name: commit.author_name.clone(),
-                author_email: commit.author_email.clone(),
-                time: commit.time,
-                parent_count,
-            });
+            out.push(fake_commit_info(&cursor, commit));
             match &commit.parent {
                 Some(p) => cursor = p.clone(),
                 None => break,
             }
         }
+        out
+    }
+
+    fn merge_base(&self, a: &str, b: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        fake_merge_base(&state.commits, a, b)
+    }
+
+    fn branch_commits(&self, base: &str) -> Vec<CommitInfo> {
+        let state = self.state.lock().unwrap();
+        let Some(head) = state.head.clone() else {
+            return Vec::new();
+        };
+        let Some(stop) = fake_merge_base(&state.commits, base, &head) else {
+            return Vec::new();
+        };
+
+        let mut out: Vec<CommitInfo> = Vec::new();
+        let mut cursor = Some(head);
+        while let Some(sha) = cursor {
+            if sha == stop {
+                break;
+            }
+            let Some(commit) = state.commits.get(&sha) else {
+                break;
+            };
+            out.push(fake_commit_info(&sha, commit));
+            cursor = commit.parent.clone();
+        }
+        out.reverse();
         out
     }
 
@@ -1453,6 +1514,57 @@ mod tests {
         assert_eq!(repo.parent_sha("c2").as_deref(), Some("c1"));
         assert!(repo.parent_sha("c1").is_none());
         assert!(repo.parent_sha("missing").is_none());
+    }
+
+    #[test]
+    fn branch_commits_lists_range_oldest_first() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c0", &[("a.rs", "v0")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "v1")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2")])
+            .commit_with_parent("c3", "c2", &[("a.rs", "v3")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        let shas: Vec<String> = repo
+            .branch_commits("c0")
+            .into_iter()
+            .map(|c| c.sha)
+            .collect();
+        assert_eq!(shas, vec!["c1", "c2", "c3"]);
+    }
+
+    #[test]
+    fn branch_commits_empty_when_head_is_base_or_base_unknown() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c0", &[("a.rs", "v0")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "v1")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert!(
+            repo.branch_commits("c1").is_empty(),
+            "HEAD == base adds nothing"
+        );
+        assert!(
+            repo.branch_commits("missing").is_empty(),
+            "unknown base is empty"
+        );
+    }
+
+    #[test]
+    fn merge_base_returns_common_ancestor() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c0", &[("a.rs", "v0")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "v1")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2")]);
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(repo.merge_base("c1", "c2").as_deref(), Some("c1"));
+        assert_eq!(repo.merge_base("c0", "c2").as_deref(), Some("c0"));
+        assert_eq!(repo.merge_base("c2", "c2").as_deref(), Some("c2"));
+        assert!(repo.merge_base("c1", "missing").is_none());
     }
 
     #[test]

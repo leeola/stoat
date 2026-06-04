@@ -278,6 +278,17 @@ pub trait GitRepo: Send + Sync {
     /// scrolls. Empty on orphan branches or when `after` is unknown.
     fn log_commits(&self, after: Option<&str>, limit: usize) -> Vec<CommitInfo>;
 
+    /// Merge-base (lowest common ancestor) of commits `a` and `b`, or
+    /// `None` when either sha is unknown or the two share no ancestor.
+    fn merge_base(&self, a: &str, b: &str) -> Option<String>;
+
+    /// Commits reachable from HEAD but not from `base`
+    /// (`merge_base(base, HEAD)..HEAD`), oldest-first in rebase-replay
+    /// order -- the commits a branch adds on top of `base`. Empty when
+    /// HEAD is orphan, `base` is unknown, or the two share no common
+    /// ancestor.
+    fn branch_commits(&self, base: &str) -> Vec<CommitInfo>;
+
     /// Per-file summary of what changed between `sha` and its first
     /// parent (empty tree for a root commit). Lighter than building a
     /// full review: the left pane of the commit list renders these
