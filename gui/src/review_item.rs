@@ -1,6 +1,7 @@
 use crate::{
     buffer::Buffer,
     buffer_registry::BufferRegistry,
+    diagnostics::DiagnosticSet,
     diff_map::DiffMap,
     display_map::DisplayMap,
     editor::{Editor, EditorMode},
@@ -9,10 +10,11 @@ use crate::{
     multi_buffer::MultiBuffer,
     review_session::{ReviewSession, ReviewSessionEvent},
     theme::Theme,
+    workspace::Workspace,
 };
 use gpui::{
     div, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Subscription, Window,
+    Styled, Subscription, WeakEntity, Window,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -49,7 +51,18 @@ pub struct ReviewItem {
     /// `JumpToPrevMoveSource` cycle. Cleared whenever the
     /// session's chunk cursor moves.
     move_cursor: Option<(ReviewChunkId, usize)>,
+    /// Workspace handle + diagnostics for installing the LSP feature set on
+    /// the right pane. Set by the workspace via [`Self::attach_lsp`]; `None`
+    /// for items built without a workspace (tests). Retained so a rebuild
+    /// re-installs LSP on the freshly-built right panes.
+    lsp: Option<ReviewLsp>,
     _session_subscription: Option<Subscription>,
+}
+
+/// The workspace-only state the right review pane needs to host LSP features.
+struct ReviewLsp {
+    workspace: WeakEntity<Workspace>,
+    diagnostics: Entity<DiagnosticSet>,
 }
 
 /// One file's two-pane view state. The right pane ([`Self::editor`] over the
@@ -77,6 +90,7 @@ impl ReviewItem {
             commit_summary: None,
             buffer_registry: None,
             move_cursor: None,
+            lsp: None,
             _session_subscription: None,
         }
     }
@@ -129,6 +143,7 @@ impl ReviewItem {
             commit_summary: None,
             buffer_registry: Some(buffer_registry.clone()),
             move_cursor: None,
+            lsp: None,
             _session_subscription: Some(subscription),
         };
         item.refresh_decorations(cx);
@@ -173,7 +188,66 @@ impl ReviewItem {
             .collect();
         self.files = files;
         self.refresh_decorations(cx);
+        self.install_lsp(cx);
         cx.notify();
+    }
+
+    /// Attach the workspace state the right pane needs for LSP and install the
+    /// feature set. Called once by the workspace after the item is built; the
+    /// context is retained so [`Self::rebuild_files`] re-installs LSP on the
+    /// freshly-built right panes after an external-edit refresh.
+    pub fn attach_lsp(
+        &mut self,
+        workspace: WeakEntity<Workspace>,
+        diagnostics: Entity<DiagnosticSet>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.lsp = Some(ReviewLsp {
+            workspace,
+            diagnostics,
+        });
+        self.install_lsp(cx);
+    }
+
+    /// Install the normal editor's LSP feature set on each file's right pane,
+    /// mirroring [`crate::workspace::Workspace`]'s `build_editor_for_path`.
+    /// No-op without an attached [`ReviewLsp`] (tests) or when the source is
+    /// not [`ReviewSource::WorkingTree`] -- every other source backs the right
+    /// pane with a synthetic, pathless buffer that is not the on-disk file the
+    /// language server sees. The left pane is never touched, so its
+    /// `file_path`-gated requests no-op.
+    fn install_lsp(&self, cx: &mut Context<'_, Self>) {
+        let Some((workspace, diagnostics)) = self
+            .lsp
+            .as_ref()
+            .map(|lsp| (lsp.workspace.clone(), lsp.diagnostics.clone()))
+        else {
+            return;
+        };
+        let paths: Vec<PathBuf> = {
+            let session = self.session.read(cx);
+            let inner = session.inner();
+            if !matches!(inner.source, ReviewSource::WorkingTree { .. }) {
+                return;
+            }
+            inner.files.iter().map(|file| file.path.clone()).collect()
+        };
+        for (view, path) in self.files.iter().zip(paths) {
+            let workspace = workspace.clone();
+            let diagnostics = diagnostics.clone();
+            view.editor.update(cx, |ed, cx| {
+                ed.set_workspace(Some(workspace));
+                ed.set_file_path(Some(path), cx);
+                ed.set_diagnostic_set(Some(diagnostics), cx);
+                ed.install_hover_popup(cx);
+                ed.install_completion_popup(cx);
+                ed.install_inlay_hints(cx);
+                ed.install_code_lens(cx);
+                ed.install_semantic_tokens(cx);
+                ed.install_signature_help(cx);
+                ed.install_syntax_map_updater(cx);
+            });
+        }
     }
 
     /// Recompute and install the per-side diff highlights -- intra-line change

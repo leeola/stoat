@@ -6446,11 +6446,12 @@ impl Workspace {
 
         let session = cx.new(|_| crate::review_session::ReviewSession::new(inner_session));
         let buffer_registry = self.buffer_registry.clone();
-        Some(
-            cx.new(|cx| {
-                crate::review_item::ReviewItem::from_session(session, &buffer_registry, cx)
-            }),
-        )
+        let review_item = cx
+            .new(|cx| crate::review_item::ReviewItem::from_session(session, &buffer_registry, cx));
+        let workspace = cx.weak_entity();
+        let diagnostics = self.diagnostics.clone();
+        review_item.update(cx, |item, cx| item.attach_lsp(workspace, diagnostics, cx));
+        Some(review_item)
     }
 
     /// Add `item` as a new tab in the focused pane and activate it.
@@ -13931,6 +13932,68 @@ mod tests {
             assert_eq!(item.files().len(), 1);
             assert_eq!(item.files()[0].rel_path, "a.txt");
             assert!(!item.session().read(cx).inner().order.is_empty());
+        });
+    }
+
+    #[test]
+    fn working_tree_review_installs_lsp_on_the_right_pane_only() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEW\nc\n");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .with_fs(&fs)
+            .modified("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        install_full_globals(vcx, fs, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenReview);
+        vcx.run_until_parked();
+
+        let item = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        item.read_with(vcx, |item, cx| {
+            let view = &item.files()[0];
+            assert_eq!(
+                view.editor.read(cx).file_path(),
+                Some(Path::new("/tmp/repo/a.txt")),
+                "the right/on-disk pane gets the file path so LSP attaches",
+            );
+            assert_eq!(
+                view.left_editor.read(cx).file_path(),
+                None,
+                "the left/base pane stays pathless so its LSP requests no-op",
+            );
+        });
+    }
+
+    #[test]
+    fn commit_review_leaves_the_right_pane_pathless() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .commit("p1", &[("a.txt", "v0\n")])
+            .commit_with_parent("c1", "p1", &[("a.txt", "v1\n")]);
+        install_full_globals(vcx, fs, git);
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenReviewCommit {
+                workdir: PathBuf::from("/tmp/repo"),
+                sha: "c1".to_string(),
+            },
+        );
+        vcx.run_until_parked();
+
+        let item = active_pane_review_item(vcx, &ws).expect("review item in focused pane");
+        item.read_with(vcx, |item, cx| {
+            assert_eq!(
+                item.files()[0].editor.read(cx).file_path(),
+                None,
+                "a commit review's right pane is a synthetic buffer, so no LSP attaches",
+            );
         });
     }
 
