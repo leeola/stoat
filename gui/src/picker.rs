@@ -9,8 +9,8 @@ pub use delegate::{PickerDelegate, PickerSecondary};
 use gpui::{
     div, px, transparent_black, uniform_list, AppContext, Context, DismissEvent, Entity,
     EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement, IntoElement,
-    MouseButton, ParentElement, Render, ScrollStrategy, Styled, Subscription, Task,
-    UniformListScrollHandle, WeakEntity, Window,
+    MouseButton, ParentElement, Render, ScrollStrategy, StatefulInteractiveElement, Styled,
+    Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
@@ -358,12 +358,19 @@ impl<D: PickerDelegate> Render for Picker<D> {
                             .flex()
                             .flex_col()
                             .w_full()
+                            .id(("picker-row", ix))
                             // Suppress the modal root's track_focus steal so a
                             // row click leaves the query editor's IME focus
                             // intact and typing keeps reaching it.
                             .on_mouse_down(MouseButton::Left, |_, window, _| {
                                 window.prevent_default()
                             })
+                            // Click selects the row, moving the highlight
+                            // without confirming so the modal stays open and
+                            // typable.
+                            .on_click(cx.listener(move |this, _event, _window, cx| {
+                                this.set_selected_index(ix, cx)
+                            }))
                             .child(body)
                             .child(div().h(px(1.0)).bg(divider))
                             .into_any_element()
@@ -668,6 +675,33 @@ mod tests {
         assert!(
             vcx.update(|window, _| sentinel.is_focused(window)),
             "row click stole focus from the query input"
+        );
+    }
+
+    #[test]
+    fn clicking_a_row_selects_it_without_confirming() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let items: Vec<String> = (0..50).map(|i| format!("item-{i:03}")).collect();
+        let delegate = TestDelegate::new(items);
+        let confirmed = delegate.confirmed.clone();
+        let (picker, vcx) = cx.add_window_view(|window, cx| Picker::new(delegate, window, cx));
+        vcx.run_until_parked();
+
+        // Selection starts on the first row.
+        assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 0);
+
+        // Clicking a row well below the top moves the highlight to the row
+        // under the cursor (deterministic given the test layout).
+        vcx.simulate_click(point(px(100.0), px(500.0)), Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 17);
+
+        // The click selects only -- confirm/open stays on Enter, so the modal
+        // stays open and typable.
+        assert!(
+            confirmed.lock().expect("confirmed mutex").is_empty(),
+            "row click must not confirm the selection"
         );
     }
 
