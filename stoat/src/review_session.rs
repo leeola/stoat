@@ -183,6 +183,12 @@ pub struct ReviewChunk {
     /// [`ChunkStatus::PartiallyStaged`]. Excluded from
     /// [`Self::fingerprint`] -- it is session decision state, not content.
     pub staged_rows: BTreeSet<u32>,
+    /// Source commit this chunk belongs to in a commit-by-commit branch
+    /// review, set via [`ReviewSession::add_commit_files`]. `None` for the
+    /// combined-diff sources (working tree, single commit, range). Read by
+    /// commit-grouped navigation and per-commit progress.
+    #[allow(dead_code)]
+    pub commit: Option<String>,
 }
 
 impl ReviewChunk {
@@ -242,6 +248,12 @@ pub struct ReviewFile {
     pub base_text: Arc<String>,
     pub buffer_text: Arc<String>,
     pub chunks: Vec<ReviewChunkId>,
+    /// Source commit this file's diff belongs to in a commit-by-commit
+    /// branch review, set via [`ReviewSession::add_commit_files`]. `None`
+    /// for the combined-diff sources. The same path may appear once per
+    /// commit that touched it, so this is not unique across files.
+    #[allow(dead_code)]
+    pub commit: Option<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default)]
@@ -507,6 +519,27 @@ impl ReviewSession {
     /// (with an empty chunk list) so that subsequent file indices
     /// stay stable.
     pub fn add_files(&mut self, files: Vec<ReviewFileInput>) -> Vec<Vec<ReviewChunkId>> {
+        self.add_files_tagged(files, None)
+    }
+
+    /// Like [`Self::add_files`] but tags every produced [`ReviewFile`] and
+    /// [`ReviewChunk`] with `commit`. Branch review calls this once per
+    /// commit, oldest-first, so the appended chunks land on `order` grouped
+    /// commit-by-commit. The same path may be added once per commit that
+    /// touched it.
+    pub fn add_commit_files(
+        &mut self,
+        commit: String,
+        files: Vec<ReviewFileInput>,
+    ) -> Vec<Vec<ReviewChunkId>> {
+        self.add_files_tagged(files, Some(commit))
+    }
+
+    fn add_files_tagged(
+        &mut self,
+        files: Vec<ReviewFileInput>,
+        commit: Option<String>,
+    ) -> Vec<Vec<ReviewChunkId>> {
         let hunks_per_file = extract_review_hunks_changeset(&files, 3);
         let mut all_chunk_ids: Vec<Vec<ReviewChunkId>> = Vec::with_capacity(files.len());
 
@@ -537,6 +570,7 @@ impl ReviewSession {
                         status: ChunkStatus::Pending,
                         approved: false,
                         staged_rows: BTreeSet::new(),
+                        commit: commit.clone(),
                     },
                 );
                 self.order.push(id);
@@ -550,6 +584,7 @@ impl ReviewSession {
                 base_text: file.base_text,
                 buffer_text: file.buffer_text,
                 chunks: chunk_ids.clone(),
+                commit: commit.clone(),
             });
 
             all_chunk_ids.push(chunk_ids);
@@ -1038,6 +1073,7 @@ impl ReviewSession {
                     status: ChunkStatus::Pending,
                     approved: false,
                     staged_rows: BTreeSet::new(),
+                    commit: None,
                 },
             );
             new_chunk_ids.push(id);
@@ -1054,6 +1090,7 @@ impl ReviewSession {
             base_text: input.base_text,
             buffer_text: input.buffer_text,
             chunks: new_chunk_ids.clone(),
+            commit: None,
         };
         if let Some(idx) = existing_index {
             self.files[idx] = new_file;
@@ -1164,6 +1201,7 @@ impl ReviewSession {
                     status: ChunkStatus::Pending,
                     approved: false,
                     staged_rows: BTreeSet::new(),
+                    commit: None,
                 },
             );
             new_chunk_ids.push(id);
@@ -1180,6 +1218,7 @@ impl ReviewSession {
             base_text: new_input.base_text,
             buffer_text: new_input.buffer_text,
             chunks: new_chunk_ids.clone(),
+            commit: None,
         };
 
         for id in &new_chunk_ids {
@@ -1761,6 +1800,24 @@ mod tests {
         ReviewSession::new(ReviewSource::WorkingTree {
             workdir: PathBuf::from(workdir),
         })
+    }
+
+    #[test]
+    fn add_commit_files_tags_and_groups_order_by_commit() {
+        let mut s = in_memory_session();
+        s.add_commit_files("c1".into(), vec![refresh_input("a.txt", "a\n", "A\n")]);
+        s.add_commit_files("c2".into(), vec![refresh_input("b.txt", "b\n", "B\n")]);
+
+        let file_commits: Vec<Option<&str>> = s.files.iter().map(|f| f.commit.as_deref()).collect();
+        assert_eq!(file_commits, vec![Some("c1"), Some("c2")]);
+
+        // order is grouped commit-by-commit, and each chunk carries its commit.
+        let order_commits: Vec<Option<&str>> = s
+            .order
+            .iter()
+            .map(|id| s.chunks[id].commit.as_deref())
+            .collect();
+        assert_eq!(order_commits, vec![Some("c1"), Some("c2")]);
     }
 
     #[test]
@@ -2625,6 +2682,7 @@ mod tests {
             status: ChunkStatus::Pending,
             approved: false,
             staged_rows: BTreeSet::new(),
+            commit: None,
         }
     }
 
@@ -2772,6 +2830,7 @@ mod tests {
             base_text: Arc::new(String::new()),
             buffer_text: Arc::new(String::new()),
             chunks: Vec::new(),
+            commit: None,
         });
     }
 
