@@ -14,8 +14,9 @@ pub use defs::{
         ToggleDockRight,
     },
     commits::{
-        CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview, CommitsPageDown,
-        CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
+        CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenBranchReview,
+        CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh,
+        OpenCommits,
     },
     dump::Dump,
     editor::{

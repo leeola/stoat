@@ -108,3 +108,16 @@ define_action!(
      returns to commits mode.",
     ActionPriority::Rare
 );
+
+define_action!(
+    CommitsOpenBranchReviewDef,
+    CommitsOpenBranchReview,
+    "CommitsOpenBranchReview",
+    ActionKind::CommitsOpenBranchReview,
+    "open a branch review from the selected commit",
+    "Open a commit-by-commit branch review using the currently \
+     selected commit as the base: every commit from the selection \
+     (exclusive) up to HEAD loads as its own diff, walked oldest to \
+     newest. Closing the review returns to commits mode.",
+    ActionPriority::Rare
+);

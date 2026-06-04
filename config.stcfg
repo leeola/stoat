@@ -415,6 +415,7 @@ on key {
         r -> CommitsRefresh();
         o -> CommitsOpenReview();
         Enter -> CommitsOpenReview();
+        b -> CommitsOpenBranchReview();
         i -> EnterRebase();
         : -> OpenCommandPalette();
     }

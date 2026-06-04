@@ -7,8 +7,9 @@ use crate::{
             ClaudeToggleToolCardExpand, OpenClaude, ToggleDockLeft, ToggleDockRight,
         },
         commits::{
-            CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenReview,
-            CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh, OpenCommits,
+            CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenBranchReview,
+            CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh,
+            OpenCommits,
         },
         dump::Dump,
         editor::{
@@ -712,6 +713,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(CommitsLast::DEF, |_| Ok(Box::new(CommitsLast)));
     add(CommitsRefresh::DEF, |_| Ok(Box::new(CommitsRefresh)));
     add(CommitsOpenReview::DEF, |_| Ok(Box::new(CommitsOpenReview)));
+    add(CommitsOpenBranchReview::DEF, |_| {
+        Ok(Box::new(CommitsOpenBranchReview))
+    });
     add(EnterRebase::DEF, |_| Ok(Box::new(EnterRebase)));
     add(AbortRebase::DEF, |_| Ok(Box::new(AbortRebase)));
     add(ExecuteRebase::DEF, |_| Ok(Box::new(ExecuteRebase)));
@@ -995,6 +999,7 @@ mod tests {
         "CommitsLast",
         "CommitsRefresh",
         "CommitsOpenReview",
+        "CommitsOpenBranchReview",
         "EnterRebase",
         "AbortRebase",
         "ExecuteRebase",
@@ -1299,7 +1304,8 @@ mod tests {
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
         // + 1 OpenReviewBranch (commit-by-commit branch review).
         // + 2 ReviewNextCommit / ReviewPrevCommit (commit-group navigation).
-        assert_eq!(all().count(), 351);
+        // + 1 CommitsOpenBranchReview (branch review from the commits view).
+        assert_eq!(all().count(), 352);
     }
 
     #[test]

@@ -228,6 +228,23 @@ pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+pub(super) fn commits_open_branch_review(stoat: &mut Stoat) -> UpdateEffect {
+    use crate::review_session::ReviewOrigin;
+
+    let Some((workdir, sha)) = stoat.active_workspace().commits.as_ref().and_then(|s| {
+        s.selected_sha()
+            .map(|sha| (s.workdir.clone(), sha.to_string()))
+    }) else {
+        return UpdateEffect::None;
+    };
+    let Some(mut session) = scan_branch(stoat, &workdir, Some(&sha)) else {
+        return UpdateEffect::None;
+    };
+    session.origin = ReviewOrigin::FromCommits;
+    install_review_session(stoat, session);
+    UpdateEffect::Redraw
+}
+
 pub(super) fn open_review_commit_range(stoat: &mut Stoat, workdir: &Path, from: &str, to: &str) {
     let Some(session) = scan_commit_range(stoat, workdir, from, to) else {
         return;

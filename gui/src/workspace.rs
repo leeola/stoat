@@ -2746,6 +2746,7 @@ impl Workspace {
             ActionKind::CommitsLast => self.dispatch_commits_step(CommitStep::Last, cx),
             ActionKind::CommitsRefresh => self.dispatch_commits_refresh(cx),
             ActionKind::CommitsOpenReview => self.dispatch_commits_open_review(cx),
+            ActionKind::CommitsOpenBranchReview => self.dispatch_commits_open_branch_review(cx),
             ActionKind::CloseCommits => self.dispatch_close_commits(cx),
             ActionKind::ConflictTakeOurs => {
                 self.dispatch_conflict_take_side(ConflictSide::Ours, cx)
@@ -6347,6 +6348,25 @@ impl Workspace {
             (inner.workdir.clone(), sha)
         };
         self.dispatch_open_review_commit(workdir, sha, cx);
+    }
+
+    /// Open a commit-by-commit branch review using the selected commit as
+    /// the base, so the branch above it (base..HEAD) is reviewed
+    /// commit-by-commit. Companion to [`Self::dispatch_commits_open_review`],
+    /// which reviews the single selected commit.
+    fn dispatch_commits_open_branch_review(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(item) = self.active_commit_list(cx) else {
+            return;
+        };
+        let (workdir, sha) = {
+            let state = item.read(cx).state().read(cx);
+            let inner = state.inner();
+            let Some(sha) = inner.selected_sha().map(String::from) else {
+                return;
+            };
+            (inner.workdir.clone(), sha)
+        };
+        self.dispatch_open_review_branch(workdir, Some(sha), cx);
     }
 
     fn dispatch_close_commits(&mut self, cx: &mut Context<'_, Self>) {
@@ -14374,6 +14394,32 @@ mod tests {
             assert!(matches!(
                 review.session().read(cx).inner().source,
                 ReviewSource::Commit { .. },
+            ));
+        });
+    }
+
+    #[test]
+    fn dispatch_commits_open_branch_review_opens_branch_review() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let (item, _state, _git, scheduler) =
+            install_commit_list_in_focused_pane(vcx, &ws, "/tmp/repo", 3);
+        trigger_initial_commits_load(&item, vcx);
+        settle_commits(&scheduler, vcx);
+
+        // Base the branch review on the oldest commit so base..HEAD has
+        // commits to walk.
+        dispatch(&ws, vcx, stoat_action::CommitsLast);
+        settle_commits(&scheduler, vcx);
+
+        dispatch(&ws, vcx, stoat_action::CommitsOpenBranchReview);
+        settle_commits(&scheduler, vcx);
+
+        let review = active_pane_review_item(vcx, &ws).expect("branch review item in focused pane");
+        review.read_with(vcx, |review, cx| {
+            assert!(matches!(
+                review.session().read(cx).inner().source,
+                ReviewSource::Branch { .. },
             ));
         });
     }

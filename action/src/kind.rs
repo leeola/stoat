@@ -285,6 +285,7 @@ pub enum ActionKind {
     CommitsLast,
     CommitsRefresh,
     CommitsOpenReview,
+    CommitsOpenBranchReview,
     ReviewRemoveSelected,
     EnterRebase,
     AbortRebase,

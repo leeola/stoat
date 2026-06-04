@@ -561,6 +561,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::CommitsLast => commits::commits_step(stoat, commits::CommitStep::Last),
         ActionKind::CommitsRefresh => commits::commits_refresh(stoat),
         ActionKind::CommitsOpenReview => review::commits_open_review(stoat),
+        ActionKind::CommitsOpenBranchReview => review::commits_open_branch_review(stoat),
         ActionKind::ReviewRemoveSelected => review::review_remove_selected(stoat),
         ActionKind::EnterRebase => rebase::enter_rebase(stoat),
         ActionKind::AbortRebase => rebase::abort_rebase(stoat),
