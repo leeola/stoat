@@ -671,6 +671,16 @@ define_action!(
 );
 
 define_action!(
+    ReplaceAllInGlobalSearchDef,
+    ReplaceAllInGlobalSearch,
+    "ReplaceAllInGlobalSearch",
+    ActionKind::ReplaceAllInGlobalSearch,
+    "replace every global-search match",
+    "Rewrite every match across the searched files with the global-search replace input's text, then report how many matches in how many files were replaced. Available while the replace input is open.",
+    ActionPriority::Common
+);
+
+define_action!(
     SplitSelectionDef,
     SplitSelection,
     "SplitSelection",

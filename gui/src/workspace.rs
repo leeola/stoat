@@ -46,6 +46,7 @@ use gpui::{
     SharedString, Styled, Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
     WindowOptions,
 };
+use regex::Regex;
 use std::{
     cell::RefCell,
     collections::{HashMap, VecDeque},
@@ -907,6 +908,63 @@ impl Workspace {
         }
     }
 
+    /// Rewrite every match of `pattern` with `replacement` across the
+    /// buffers behind `paths`, returning `(matches_replaced,
+    /// files_changed)`. Each file's buffer is loaded into the registry
+    /// without opening a pane and left dirty for the user to save;
+    /// files already open in a pane are edited through their entity so
+    /// the visible editor refreshes. An invalid `pattern` replaces
+    /// nothing. Spans are recomputed against each buffer's current
+    /// text, so the count reflects what was actually rewritten.
+    pub(crate) fn replace_all_in_paths(
+        &mut self,
+        paths: &[PathBuf],
+        pattern: &str,
+        replacement: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> (usize, usize) {
+        let Ok(regex) = Regex::new(pattern) else {
+            return (0, 0);
+        };
+        let mut matches = 0;
+        let mut files = 0;
+        for path in paths {
+            let text = read_path_or_empty(path, cx);
+            let shared = self
+                .buffer_registry
+                .update(cx, |registry, cx| registry.open(path, &text, cx).1);
+            let current = shared
+                .read()
+                .expect("buffer lock poisoned")
+                .rope()
+                .to_string();
+            let spans: Vec<_> = regex
+                .find_iter(&current)
+                .map(|m| m.start()..m.end())
+                .collect();
+            if spans.is_empty() {
+                continue;
+            }
+
+            matches += spans.len();
+            files += 1;
+            match self.buffer_for_path(path, cx) {
+                Some(buffer) => buffer.update(cx, |b, cx| {
+                    for span in spans.into_iter().rev() {
+                        b.edit(span, replacement, cx);
+                    }
+                }),
+                None => {
+                    let mut guard = shared.write().expect("buffer lock poisoned");
+                    for span in spans.into_iter().rev() {
+                        guard.edit(span, replacement);
+                    }
+                },
+            }
+        }
+        (matches, files)
+    }
+
     /// Construct a fully-wired [`Entity<Editor>`] for `absolute`,
     /// opening (or reusing) the matching buffer in the registry and
     /// installing the LSP / syntax / completion managers. Does not
@@ -1300,6 +1358,11 @@ impl Workspace {
     /// Dismiss the toast with `id` from the overlay, if still showing.
     pub fn dismiss_toast(&mut self, id: ToastId, cx: &mut Context<'_, Self>) {
         self.toast_view.update(cx, |view, cx| view.dismiss(id, cx));
+    }
+
+    #[cfg(test)]
+    pub(crate) fn toast_view(&self) -> &Entity<ToastView> {
+        &self.toast_view
     }
 
     /// Re-decode the active editor's file with `encoding`, replacing the

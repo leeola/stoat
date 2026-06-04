@@ -19,6 +19,7 @@ use crate::{
     globals::{ExecutorGlobal, FsHostGlobal},
     picker::{Picker, PickerDelegate, PickerSecondary},
     theme::ActiveTheme,
+    toast::Toast,
     workspace::Workspace,
 };
 use gpui::{
@@ -26,6 +27,7 @@ use gpui::{
     Task, WeakEntity, Window,
 };
 use std::{
+    collections::HashSet,
     path::{Path, PathBuf},
     sync::Arc,
 };
@@ -51,6 +53,11 @@ pub struct GlobalSearchDelegate {
     /// scans -- typical when the user types faster than scans
     /// complete -- are discarded.
     query_version: u64,
+    /// The trimmed search pattern from the most recent non-empty
+    /// scan. [`ActionKind::ReplaceAllInGlobalSearch`] recompiles it to
+    /// locate match spans; reading the picker's query editor here would
+    /// be a re-entrant borrow.
+    query: String,
     /// When `true`, the replace input is shown below the query and
     /// receives typed text, and each match row previews the
     /// replacement. Toggled by [`ActionKind::ToggleReplaceInGlobalSearch`].
@@ -75,6 +82,7 @@ impl GlobalSearchDelegate {
             entries: Vec::new(),
             selected: 0,
             query_version: 0,
+            query: String::new(),
             replace_active: false,
             replace_editor: None,
         }
@@ -95,6 +103,41 @@ impl GlobalSearchDelegate {
 
     fn selected_entry(&self) -> Option<&SearchMatch> {
         self.entries.get(self.selected)
+    }
+
+    /// Rewrite every match across the searched files with the replace
+    /// input's text and toast the outcome. No-op unless replace mode is
+    /// active with a non-empty pattern. The work is deferred past the
+    /// dispatch lease so the re-entrant workspace update does not panic.
+    fn replace_all(&mut self, window: &mut Window, cx: &mut Context<'_, Picker<Self>>) {
+        if !self.replace_active || self.query.is_empty() {
+            return;
+        }
+        let replacement = self.replace_text(cx);
+        let pattern = self.query.clone();
+        let mut seen = HashSet::new();
+        let paths: Vec<PathBuf> = self
+            .entries
+            .iter()
+            .filter(|entry| seen.insert(entry.path.clone()))
+            .map(|entry| entry.path.clone())
+            .collect();
+        if paths.is_empty() {
+            return;
+        }
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |_window, cx| {
+            let Some(workspace) = workspace.upgrade() else {
+                return;
+            };
+            workspace.update(cx, |w, cx| {
+                let (matches, files) = w.replace_all_in_paths(&paths, &pattern, &replacement, cx);
+                w.show_toast(
+                    Toast::success(format!("Replaced {matches} matches across {files} files")),
+                    cx,
+                );
+            });
+        });
     }
 }
 
@@ -124,6 +167,7 @@ impl PickerDelegate for GlobalSearchDelegate {
             return Task::ready(());
         }
         let pattern = trimmed.to_string();
+        self.query = pattern.clone();
         let fs_host = self.fs_host.clone();
         let git_root = self.git_root.clone();
         let (tx, rx) = tokio::sync::oneshot::channel();
@@ -188,28 +232,34 @@ impl PickerDelegate for GlobalSearchDelegate {
         window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> bool {
-        if action.kind() != ActionKind::ToggleReplaceInGlobalSearch {
-            return false;
-        }
-        self.replace_active = !self.replace_active;
-        if self.replace_active && self.replace_editor.is_none() {
-            self.replace_editor = Some(cx.new(|cx| Editor::single_line(window, cx)));
-        }
-        // The modal observer re-resolves the active text-input target
-        // only on a modal-layer notification, which a delegate-internal
-        // toggle does not raise. Notify it (deferred past the dispatch
-        // lease) so input re-points to the replace editor, or back to the
-        // query editor when toggled off.
-        let workspace = self.workspace.clone();
-        window.defer(cx, move |_window, cx| {
-            if let Some(workspace) = workspace.upgrade() {
-                workspace.update(cx, |w, cx| {
-                    w.modal_layer().update(cx, |_, cx| cx.notify());
+        match action.kind() {
+            ActionKind::ToggleReplaceInGlobalSearch => {
+                self.replace_active = !self.replace_active;
+                if self.replace_active && self.replace_editor.is_none() {
+                    self.replace_editor = Some(cx.new(|cx| Editor::single_line(window, cx)));
+                }
+                // The modal observer re-resolves the active text-input target
+                // only on a modal-layer notification, which a delegate-internal
+                // toggle does not raise. Notify it (deferred past the dispatch
+                // lease) so input re-points to the replace editor, or back to the
+                // query editor when toggled off.
+                let workspace = self.workspace.clone();
+                window.defer(cx, move |_window, cx| {
+                    if let Some(workspace) = workspace.upgrade() {
+                        workspace.update(cx, |w, cx| {
+                            w.modal_layer().update(cx, |_, cx| cx.notify());
+                        });
+                    }
                 });
-            }
-        });
-        cx.notify();
-        true
+                cx.notify();
+                true
+            },
+            ActionKind::ReplaceAllInGlobalSearch => {
+                self.replace_all(window, cx);
+                true
+            },
+            _ => false,
+        }
     }
 
     fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
@@ -701,5 +751,92 @@ mod tests {
             snapshot.resolve_anchor(&sel.head())
         });
         assert_eq!(cursor_offset, expected_offset);
+    }
+
+    fn set_replace_text(
+        picker: &Entity<Picker<GlobalSearchDelegate>>,
+        vcx: &mut VisualTestContext,
+        text: &str,
+    ) {
+        let editor = picker
+            .read_with(vcx, |p, _| p.delegate().replace_editor.clone())
+            .expect("replace editor exists after toggle");
+        let buffer = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("single-line editor has singleton buffer")
+                .clone()
+        });
+        buffer.update(vcx, |b, cx| {
+            let len = b.text().len();
+            b.edit(0..len, text, cx);
+        });
+    }
+
+    fn open_and_read(h: &mut Harness<'_>, rel: &str) -> String {
+        let path = Path::new("/repo").join(rel);
+        h.workspace.update_in(h.vcx, |w, _window, cx| {
+            w.open_paths(std::slice::from_ref(&path), cx);
+        });
+        h.workspace.read_with(h.vcx, |w, cx| {
+            w.buffer_for_path(&path, cx)
+                .expect("buffer open after replace")
+                .read(cx)
+                .text()
+        })
+    }
+
+    #[test]
+    fn replace_all_rewrites_matches_and_toasts() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[
+            ("a.rs", "fn alpha() {}\nlet alpha = alpha;\n"),
+            ("b.rs", "fn alpha() {}\n"),
+        ]);
+        let mut h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_global_search(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        type_query(&mut h, "alpha");
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<GlobalSearchDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("picker is open");
+
+        picker.update_in(h.vcx, |p, window, cx| {
+            p.handle_action(&stoat_action::ToggleReplaceInGlobalSearch, window, cx);
+        });
+        h.vcx.run_until_parked();
+        set_replace_text(&picker, h.vcx, "beta");
+
+        picker.update_in(h.vcx, |p, window, cx| {
+            p.handle_action(&stoat_action::ReplaceAllInGlobalSearch, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            open_and_read(&mut h, "a.rs"),
+            "fn beta() {}\nlet beta = beta;\n"
+        );
+        assert_eq!(open_and_read(&mut h, "b.rs"), "fn beta() {}\n");
+
+        let toasts = h.workspace.read_with(h.vcx, |w, cx| {
+            w.toast_view()
+                .read(cx)
+                .toasts()
+                .iter()
+                .map(|t| t.text.to_string())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            toasts,
+            vec!["Replaced 4 matches across 2 files".to_string()]
+        );
     }
 }

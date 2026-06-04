@@ -575,6 +575,7 @@ on key {
         Ctrl-p -> PickerSelectPrev();
         Ctrl-n -> PickerSelectNext();
         Ctrl-r -> ToggleReplaceInGlobalSearch();
+        Ctrl-Enter -> ReplaceAllInGlobalSearch();
     }
     mode == prompt && claude_focused {
         Ctrl-c -> ClaudeInterrupt();

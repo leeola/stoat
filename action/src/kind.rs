@@ -77,6 +77,7 @@ pub enum ActionKind {
     OpenLastPicker,
     OpenGlobalSearch,
     ToggleReplaceInGlobalSearch,
+    ReplaceAllInGlobalSearch,
     SplitSelection,
     KeepSelections,
     RemoveSelections,

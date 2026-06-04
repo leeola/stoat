@@ -703,7 +703,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::OpenGitStatus
         | ActionKind::OpenConflictPicker
         | ActionKind::OpenAbout
-        | ActionKind::ToggleReplaceInGlobalSearch => UpdateEffect::None,
+        | ActionKind::ToggleReplaceInGlobalSearch
+        | ActionKind::ReplaceAllInGlobalSearch => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());
