@@ -88,6 +88,14 @@ pub enum ReviewSource {
         from: String,
         to: String,
     },
+    /// Commit-by-commit branch review: each commit in
+    /// `merge_base(base, HEAD)..HEAD` loaded as its own
+    /// commit-tree-vs-parent diff, oldest-first. `base` is the
+    /// configurable base ref; `None` detects the default branch.
+    Branch {
+        workdir: PathBuf,
+        base: Option<String>,
+    },
     AgentEdits {
         edits: Arc<Vec<AgentEditProposal>>,
     },
@@ -131,6 +139,7 @@ impl ReviewSource {
             }),
             ReviewSource::WorkspaceWatch { .. }
             | ReviewSource::CommitRange { .. }
+            | ReviewSource::Branch { .. }
             | ReviewSource::AgentEdits { .. }
             | ReviewSource::InMemory { .. } => None,
         }
@@ -1528,7 +1537,8 @@ impl ReviewSession {
             | ReviewSource::WorkingTreeStaged { workdir }
             | ReviewSource::WorkspaceWatch { workdir }
             | ReviewSource::Commit { workdir, .. }
-            | ReviewSource::CommitRange { workdir, .. } => workdir.clone(),
+            | ReviewSource::CommitRange { workdir, .. }
+            | ReviewSource::Branch { workdir, .. } => workdir.clone(),
             ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => return None,
         };
         let chunk = self.chunks.get(&id)?;
@@ -1751,7 +1761,8 @@ pub fn build_chunk_patch(
         | ReviewSource::WorkingTreeStaged { workdir }
         | ReviewSource::WorkspaceWatch { workdir }
         | ReviewSource::Commit { workdir, .. }
-        | ReviewSource::CommitRange { workdir, .. } => workdir.as_path(),
+        | ReviewSource::CommitRange { workdir, .. }
+        | ReviewSource::Branch { workdir, .. } => workdir.as_path(),
         ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => return None,
     };
 

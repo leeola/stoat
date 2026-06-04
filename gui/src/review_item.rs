@@ -411,6 +411,10 @@ fn review_source_label(source: &ReviewSource, commit_summary: Option<&str>) -> S
         ReviewSource::CommitRange { from, to, .. } => {
             format!("Range: {}..{}", short_sha(from), short_sha(to))
         },
+        ReviewSource::Branch { base, .. } => match base {
+            Some(base) => format!("Branch: {base}"),
+            None => String::from("Branch review"),
+        },
         ReviewSource::AgentEdits { .. } => String::from("Agent edits"),
         ReviewSource::InMemory { .. } => String::from("Review: in-memory"),
     }

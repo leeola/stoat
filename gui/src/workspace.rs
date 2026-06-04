@@ -6326,17 +6326,20 @@ impl Workspace {
         action_label: &'static str,
         cx: &mut Context<'_, Self>,
     ) {
-        let inputs = review_inputs_for_source(&source, cx);
-        if inputs.is_empty() {
-            tracing::warn!(
-                action = action_label,
-                "no inputs returned for review source"
-            );
-            return;
+        let mut inner_session = stoat::review_session::ReviewSession::new(source.clone());
+        if let ReviewSource::Branch { workdir, base } = &source {
+            populate_branch_session(&mut inner_session, workdir, base.as_deref(), cx);
+        } else {
+            let inputs = review_inputs_for_source(&source, cx);
+            if inputs.is_empty() {
+                tracing::warn!(
+                    action = action_label,
+                    "no inputs returned for review source"
+                );
+                return;
+            }
+            inner_session.add_files(inputs);
         }
-
-        let mut inner_session = stoat::review_session::ReviewSession::new(source);
-        inner_session.add_files(inputs);
         if inner_session.order.is_empty() {
             tracing::warn!(action = action_label, "no diff hunks to display");
             return;
@@ -6730,6 +6733,22 @@ fn review_inputs_for_source(source: &ReviewSource, cx: &App) -> Vec<ReviewFileIn
         ReviewSource::CommitRange { workdir, from, to } => {
             review_inputs_from_commit_trees(workdir, to, Some(from.as_str()), langs, cx)
         },
+        ReviewSource::Branch { workdir, base } => {
+            // Combined base..HEAD diff -- the refresh fallback until
+            // per-commit refresh lands. Open uses `populate_branch_session`,
+            // which groups the diff commit-by-commit.
+            let git = cx.global::<GitHostGlobal>().0.clone();
+            let Some(repo) = git.discover(workdir) else {
+                return Vec::new();
+            };
+            let (Some(base_sha), Some(head)) = (
+                stoat::host::resolve_review_base(repo.as_ref(), base.as_deref()),
+                repo.resolve_ref("HEAD"),
+            ) else {
+                return Vec::new();
+            };
+            review_inputs_from_commit_trees(workdir, &head, Some(&base_sha), langs, cx)
+        },
         ReviewSource::WorkspaceWatch { .. } => Vec::new(),
     }
 }
@@ -6784,6 +6803,33 @@ fn review_inputs_from_commit_trees(
         });
     }
     inputs
+}
+
+/// Populate `session` with a commit-by-commit branch review: resolve the
+/// base, enumerate the commits in `merge_base(base, HEAD)..HEAD`
+/// oldest-first, and add each commit's diff (commit-tree vs parent) tagged
+/// with its sha via `add_commit_files`, so `order` groups commit-by-commit.
+fn populate_branch_session(
+    session: &mut stoat::review_session::ReviewSession,
+    workdir: &Path,
+    base: Option<&str>,
+    cx: &App,
+) {
+    use crate::globals::{GitHostGlobal, LanguageRegistry};
+    let git = cx.global::<GitHostGlobal>().0.clone();
+    let langs = &cx.global::<LanguageRegistry>().0;
+    let Some(repo) = git.discover(workdir) else {
+        return;
+    };
+    let Some(base_sha) = stoat::host::resolve_review_base(repo.as_ref(), base) else {
+        return;
+    };
+    for commit in repo.branch_commits(&base_sha) {
+        let inputs = review_inputs_from_commit_trees(workdir, &commit.sha, None, langs, cx);
+        if !inputs.is_empty() {
+            session.add_commit_files(commit.sha, inputs);
+        }
+    }
 }
 
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
@@ -6960,6 +7006,45 @@ mod tests {
     use serde_json::Value;
     use std::sync::{Arc, Mutex};
     use stoat::keymap::Keymap;
+
+    #[test]
+    fn populate_branch_session_groups_chunks_by_commit() {
+        use stoat::{
+            host::{fake::FakeGit, GitHost},
+            review_session::{ReviewSession, ReviewSource},
+        };
+
+        let cx = TestAppContext::single();
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo")
+            .commit("c0", &[("a.rs", "v0\n")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "v1\n")])
+            .commit_with_parent("c2", "c1", &[("a.rs", "v2\n")]);
+        cx.update(|cx| {
+            cx.set_global(crate::globals::GitHostGlobal(
+                git.clone() as Arc<dyn GitHost>
+            ));
+            cx.set_global(crate::globals::LanguageRegistry::standard());
+        });
+
+        let mut session = ReviewSession::new(ReviewSource::Branch {
+            workdir: PathBuf::from("/repo"),
+            base: Some("c0".to_string()),
+        });
+        cx.update(|cx| populate_branch_session(&mut session, Path::new("/repo"), Some("c0"), cx));
+
+        // Each of c1 and c2 (on top of base c0) contributes a chunk tagged
+        // with its source commit, grouped commit-by-commit in order.
+        let order_commits: Vec<Option<String>> = session
+            .order
+            .iter()
+            .map(|id| session.chunks[id].commit.clone())
+            .collect();
+        assert_eq!(
+            order_commits,
+            vec![Some("c1".to_string()), Some("c2".to_string())]
+        );
+    }
 
     struct WorkspaceItem {
         label: SharedString,

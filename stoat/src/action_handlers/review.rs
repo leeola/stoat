@@ -1077,6 +1077,9 @@ fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> 
         ReviewSource::CommitRange { workdir, from, to } => {
             scan_commit_range(stoat, workdir, from, to)
         },
+        // Branch review is opened per-commit from the GUI; the TUI rescan
+        // path has no per-commit builder, so it is not rescannable here.
+        ReviewSource::Branch { .. } => None,
         ReviewSource::AgentEdits { edits } => scan_agent_edits(stoat, edits.as_ref()),
         ReviewSource::InMemory { files } => scan_in_memory(stoat, files.as_ref()),
     }
