@@ -13,13 +13,12 @@
 //! external changes while preserving which directories are open.
 
 use crate::{
-    file_icons,
     globals::GitHostGlobal,
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     theme::ActiveTheme,
 };
 use gpui::{
-    div, px, white, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
+    div, white, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
 };
 use serde_json::Value;
 use std::{
@@ -250,11 +249,6 @@ impl Render for ProjectTree {
             } else {
                 row.name.clone()
             };
-            let icon_color = if row.is_dir {
-                theme.muted_text
-            } else {
-                file_icons::color_for_path(&row.path, &theme)
-            };
             let (name_color, struck) = match row.decoration {
                 Some(GitDecoration::Added) => (theme.git_added, false),
                 Some(GitDecoration::Modified) => (theme.git_modified, false),
@@ -272,12 +266,6 @@ impl Render for ProjectTree {
                 .px_2()
                 .text_color(color)
                 .child(SharedString::from(indent))
-                .child(
-                    div()
-                        .mr(px(6.0))
-                        .text_color(icon_color)
-                        .child(file_icons::icon_for_path(&row.path, row.is_dir)),
-                )
                 .child(name_el);
             if ix == selected {
                 el = el.bg(white().opacity(0.1));

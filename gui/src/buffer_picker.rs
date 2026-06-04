@@ -9,13 +9,12 @@
 //! buffers carry no path and are intentionally omitted.
 
 use crate::{
-    file_icons,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
-    div, px, AnyElement, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
+    div, AnyElement, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
     SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use std::path::{Path, PathBuf};
@@ -167,12 +166,6 @@ impl PickerDelegate for BufferPickerDelegate {
             .flex()
             .items_center()
             .px_2()
-            .child(
-                div()
-                    .mr(px(6.0))
-                    .text_color(file_icons::color_for_path(&entry.path, &theme))
-                    .child(file_icons::icon_for_path(&entry.path, false)),
-            )
             .child(div().text_color(color).child(label));
         if selected {
             row = row.bg(theme.modal_selection);

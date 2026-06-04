@@ -11,13 +11,12 @@
 
 use crate::{
     editor::Editor,
-    file_icons,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
-    div, px, AnyElement, Context, DismissEvent, Entity, HighlightStyle, IntoElement, ParentElement,
+    div, AnyElement, Context, DismissEvent, Entity, HighlightStyle, IntoElement, ParentElement,
     SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use stoat::jumplist::JumpList;
@@ -168,12 +167,6 @@ impl PickerDelegate for JumplistPickerDelegate {
         let Some(entry) = self.entries.get(*entry_idx) else {
             return div().into_any_element();
         };
-        // Jumplist rows are positions within the active editor's single
-        // buffer, so every row shares that file's icon.
-        let editor_path = self
-            .editor
-            .upgrade()
-            .and_then(|editor| editor.read(cx).file_path().map(|p| p.to_path_buf()));
         let display = render_row(entry);
         let theme = cx.theme();
         let color = theme.statusbar_text;
@@ -186,16 +179,11 @@ impl PickerDelegate for JumplistPickerDelegate {
             },
         );
         let label = StyledText::new(SharedString::from(display)).with_highlights(runs);
-        let mut row = div().flex().items_center().px_2();
-        if let Some(path) = &editor_path {
-            row = row.child(
-                div()
-                    .mr(px(6.0))
-                    .text_color(file_icons::color_for_path(path, &theme))
-                    .child(file_icons::icon_for_path(path, false)),
-            );
-        }
-        row = row.child(div().text_color(color).child(label));
+        let mut row = div()
+            .flex()
+            .items_center()
+            .px_2()
+            .child(div().text_color(color).child(label));
         if selected {
             row = row.bg(theme.modal_selection);
         }

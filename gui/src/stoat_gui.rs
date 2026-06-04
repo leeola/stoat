@@ -41,7 +41,6 @@ mod editor_input;
 mod encoding_picker;
 mod executor;
 mod file_finder;
-mod file_icons;
 mod fold_actions;
 mod fs_watcher_driver;
 mod git;
