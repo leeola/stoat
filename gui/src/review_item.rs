@@ -410,6 +410,11 @@ fn build_file_view(
         build_pane_editor(buffer.clone(), spec.right_fillers, executor.clone(), cx);
     let (_, left_editor) = build_pane_editor(left_buffer.clone(), spec.left_fillers, executor, cx);
 
+    let left_weak = left_editor.downgrade();
+    let right_weak = editor.downgrade();
+    editor.update(cx, |ed, _| ed.link_scroll(left_weak));
+    left_editor.update(cx, |ed, _| ed.link_scroll(right_weak));
+
     ReviewFileView {
         rel_path: spec.rel_path,
         editor,
@@ -1200,6 +1205,63 @@ mod tests {
                 "file header names the path and staged count: {header:?}",
             );
         });
+    }
+
+    #[test]
+    fn from_session_links_left_and_right_pane_scrolling() {
+        use gpui::{px, size, Modifiers, Point, ScrollDelta, ScrollWheelEvent, TouchPhase};
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let tall: String = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            &tall,
+            &tall.replace("line 5", "LINE 5"),
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+        let vcx = cx.add_empty_window();
+        let item = {
+            let session = session.clone();
+            let registry = registry.clone();
+            vcx.update(|_, cx| cx.new(|cx| ReviewItem::from_session(session, &registry, cx)))
+        };
+        let (right, left) = item.read_with(vcx, |item, _| {
+            let view = &item.files()[0];
+            (view.editor.clone(), view.left_editor.clone())
+        });
+        let cell = size(px(8.0), px(16.0));
+        right.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell, cx));
+        left.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell, cx));
+        vcx.run_until_parked();
+
+        right.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &ScrollWheelEvent {
+                    position: Point::new(px(0.), px(0.)),
+                    delta: ScrollDelta::Lines(Point::new(0., -4.)),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                },
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        let right_row = right.read_with(vcx, |ed, _| ed.scroll_row());
+        assert_eq!(right_row, 4, "the right pane scrolled");
+        assert_eq!(
+            left.read_with(vcx, |ed, _| ed.scroll_row()),
+            right_row,
+            "the left pane mirrors the right pane's scroll",
+        );
     }
 
     fn side(text: &str, line_num: u32) -> ReviewSide {

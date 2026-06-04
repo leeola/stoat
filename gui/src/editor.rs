@@ -149,6 +149,12 @@ pub struct Editor {
     selections: SelectionsCollection,
     scroll_row: u32,
     scroll_manager: scroll::ScrollManager,
+    /// Editors whose scroll mirrors this one. A scroll or autoscroll here is
+    /// pushed to each partner so a linked group -- the two review panes, later
+    /// the three conflict panes -- scrolls as one. Mutual links sync without
+    /// recursion because the receive path does not re-propagate. Dead weak
+    /// handles are skipped.
+    scroll_partners: Vec<WeakEntity<Editor>>,
     /// Accumulator for wheel events arriving within a single executor
     /// tick. The first event spawns a one-shot task that yields and
     /// then drains the accumulator; subsequent events in the same
@@ -455,6 +461,7 @@ impl Editor {
             selections: SelectionsCollection::new(),
             scroll_row: 0,
             scroll_manager: scroll::ScrollManager::new(std::time::Instant::now()),
+            scroll_partners: Vec::new(),
             pending_scroll_delta: None,
             scroll_handle: UniformListScrollHandle::new(),
             jumplist: JumpList::new(),
@@ -616,6 +623,13 @@ impl Editor {
     pub fn request_autoscroll(&mut self, strategy: AutoscrollStrategy, cx: &mut Context<'_, Self>) {
         self.scroll_manager.set_autoscroll_request(Some(strategy));
         cx.notify();
+    }
+
+    /// Mirror this editor's scroll and autoscroll onto `partner`. Call on both
+    /// editors to keep a pair (the two review panes) aligned in either
+    /// direction; register each partner once.
+    pub fn link_scroll(&mut self, partner: WeakEntity<Editor>) {
+        self.scroll_partners.push(partner);
     }
 
     /// Insert `text` at every selection in this editor. Range
@@ -2660,12 +2674,23 @@ impl Editor {
         cx.notify();
     }
 
+    /// Scroll the viewport to fractional row `new_y` and mirror the move to
+    /// any linked scroll partners.
+    fn set_scroll_position_y(&mut self, new_y: f64, cx: &mut Context<'_, Self>) {
+        self.apply_synced_scroll(new_y, cx);
+        self.propagate_scroll(cx);
+    }
+
     /// Scroll the viewport to fractional row `new_y`, updating the scroll
     /// anchor, the tracked [`UniformListScrollHandle`] offset, and the
     /// integer [`Editor::scroll_row`]. Always requests a repaint so sub-row
     /// changes (e.g. a minimap drag in progress) still refresh. No-op until
     /// cell metrics are known.
-    fn set_scroll_position_y(&mut self, new_y: f64, cx: &mut Context<'_, Self>) {
+    ///
+    /// Does NOT propagate to scroll partners -- it is the receive end of
+    /// [`Self::propagate_scroll`], so a mutually-linked pair converges in one
+    /// hop instead of recursing.
+    fn apply_synced_scroll(&mut self, new_y: f64, cx: &mut Context<'_, Self>) {
         let Some(cell) = self.cell_size else {
             return;
         };
@@ -2682,6 +2707,20 @@ impl Editor {
 
         self.set_scroll_row(new_y.floor().max(0.0) as u32, cx);
         cx.notify();
+    }
+
+    /// Push this editor's current scroll position to every live scroll partner
+    /// via [`Self::apply_synced_scroll`] so a linked group scrolls as one.
+    fn propagate_scroll(&mut self, cx: &mut Context<'_, Self>) {
+        if self.scroll_partners.is_empty() {
+            return;
+        }
+        let new_y = self.scroll_manager.anchor().offset.y;
+        for partner in self.scroll_partners.clone() {
+            if let Some(partner) = partner.upgrade() {
+                partner.update(cx, |partner, cx| partner.apply_synced_scroll(new_y, cx));
+            }
+        }
     }
 
     /// Begin an eased scroll to fractional row `target_y`. The animation is
@@ -3505,6 +3544,7 @@ impl Editor {
             .set_offset(Point::new(px(0.0), pixel_offset_y));
         let new_row = scroll_position_y.floor().max(0.0) as u32;
         self.set_scroll_row(new_row, cx);
+        self.propagate_scroll(cx);
     }
 
     /// Consume any pending [`AutoscrollStrategy`] and snap the scroll
@@ -4910,6 +4950,90 @@ mod tests {
             .map(|i| format!("line{i}"))
             .collect::<Vec<_>>()
             .join("\n")
+    }
+
+    #[test]
+    fn linked_editor_mirrors_set_scroll_position() {
+        let mut cx = TestAppContext::single();
+        let (_b1, a) = new_editor(&mut cx, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj");
+        let (_b2, b) = new_editor(&mut cx, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj");
+        a.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        b.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        a.update(&mut cx, |ed, _| ed.link_scroll(b.downgrade()));
+        cx.run_until_parked();
+
+        a.update(&mut cx, |ed, cx| ed.set_scroll_position_y(4.0, cx));
+        cx.run_until_parked();
+
+        b.read_with(&cx, |ed, _| {
+            assert_eq!(ed.scroll_row(), 4, "the partner mirrors the scroll row");
+            assert_eq!(ed.scroll_manager().anchor().offset.y, 4.0);
+        });
+    }
+
+    #[test]
+    fn unlinked_editor_does_not_mirror_scroll() {
+        let mut cx = TestAppContext::single();
+        let (_b1, a) = new_editor(&mut cx, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj");
+        let (_b2, b) = new_editor(&mut cx, "a\nb\nc\nd\ne\nf\ng\nh\ni\nj");
+        a.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        b.update(&mut cx, |ed, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        cx.run_until_parked();
+
+        a.update(&mut cx, |ed, cx| ed.set_scroll_position_y(4.0, cx));
+        cx.run_until_parked();
+
+        b.read_with(&cx, |ed, _| {
+            assert_eq!(ed.scroll_row(), 0, "an unlinked editor is unaffected");
+        });
+    }
+
+    #[test]
+    fn linked_editors_mirror_wheel_both_directions() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let text = (0..20)
+            .map(|i| format!("l{i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let (_b1, a) = new_editor_in_window(vcx, &text);
+        let (_b2, b) = new_editor_in_window(vcx, &text);
+        a.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        b.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell(8.0, 16.0), cx));
+        a.update(vcx, |ed, _| ed.link_scroll(b.downgrade()));
+        b.update(vcx, |ed, _| ed.link_scroll(a.downgrade()));
+        vcx.run_until_parked();
+
+        a.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -3.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+        assert_eq!(a.read_with(vcx, |ed, _| ed.scroll_row()), 3);
+        assert_eq!(
+            b.read_with(vcx, |ed, _| ed.scroll_row()),
+            3,
+            "the partner mirrors a wheel scroll",
+        );
+
+        b.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &wheel_event(gpui::ScrollDelta::Lines(Point::new(0., -2.)), false),
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+        assert_eq!(b.read_with(vcx, |ed, _| ed.scroll_row()), 5);
+        assert_eq!(
+            a.read_with(vcx, |ed, _| ed.scroll_row()),
+            5,
+            "mutual links mirror in both directions without recursing",
+        );
     }
 
     #[test]
