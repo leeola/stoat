@@ -281,6 +281,15 @@ impl Editor {
             return;
         }
         self.selections.replace_with(new_disjoint, &snapshot);
+        let primary_row = self
+            .selections
+            .all_anchors()
+            .iter()
+            .max_by_key(|s| s.id)
+            .map(|sel| snapshot.point_for_anchor(&sel.head()).row);
+        if let Some(row) = primary_row {
+            self.animate_scroll_to(row.saturating_sub(3) as f64, cx);
+        }
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }
@@ -681,7 +690,7 @@ mod tests {
     use super::*;
     use crate::{
         buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        multi_buffer::MultiBuffer,
+        globals::ExecutorGlobal, multi_buffer::MultiBuffer,
     };
     use gpui::{px, AppContext, Bounds, Entity, Point, TestAppContext};
     use std::sync::Arc;
@@ -691,6 +700,7 @@ mod tests {
     fn new_editor(cx: &mut TestAppContext, text: &str) -> Entity<Editor> {
         let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), text)));
         let executor = Executor::new(Arc::new(TestScheduler::new()));
+        cx.update(|cx| cx.set_global(ExecutorGlobal(executor.clone())));
         let multi_buffer = {
             let buffer = buffer.clone();
             cx.update(|cx| cx.new(|cx| MultiBuffer::singleton(buffer, cx)))
@@ -759,6 +769,17 @@ mod tests {
                 &snapshot,
             );
         });
+    }
+
+    fn seed_at_row(editor: &Entity<Editor>, cx: &mut TestAppContext, row: u32) {
+        let offset = editor.update(cx, |ed, cx| {
+            ed.multi_buffer()
+                .read(cx)
+                .snapshot()
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, 0))
+        });
+        seed_at_offset(editor, cx, offset);
     }
 
     #[test]
@@ -957,6 +978,56 @@ mod tests {
         });
 
         assert_eq!(cursor_display_row(&editor, &mut cx), 7);
+    }
+
+    fn page_scroll_target(
+        cx: &mut TestAppContext,
+        start_row: u32,
+        dir: PageDir,
+        half: bool,
+    ) -> Option<f64> {
+        let editor = new_editor(cx, &multiline(50));
+        set_viewport(&editor, cx, 10);
+        seed_at_row(&editor, cx, start_row);
+        editor.update(cx, |ed, cx| ed.handle_page_motion(dir, half, 1, cx));
+        editor.update(cx, |ed, _| {
+            ed.scroll_manager().animation().map(|a| a.target.y)
+        })
+    }
+
+    #[test]
+    fn page_motion_eases_scroll_three_below_top() {
+        let mut cx = TestAppContext::single();
+
+        // Full/half page in either direction eases the primary cursor to 3
+        // rows below the top: scroll target = target_row - 3.
+        assert_eq!(
+            page_scroll_target(&mut cx, 0, PageDir::Down, false),
+            Some(7.0)
+        );
+        assert_eq!(
+            page_scroll_target(&mut cx, 0, PageDir::Down, true),
+            Some(2.0)
+        );
+        assert_eq!(
+            page_scroll_target(&mut cx, 40, PageDir::Up, false),
+            Some(27.0)
+        );
+        assert_eq!(
+            page_scroll_target(&mut cx, 40, PageDir::Up, true),
+            Some(32.0)
+        );
+
+        // The scroll clamps at the buffer ends: row 0 at the top, and the
+        // last content row (49) when paging past the bottom.
+        assert_eq!(
+            page_scroll_target(&mut cx, 2, PageDir::Up, false),
+            Some(0.0)
+        );
+        assert_eq!(
+            page_scroll_target(&mut cx, 45, PageDir::Down, false),
+            Some(46.0)
+        );
     }
 
     #[test]
