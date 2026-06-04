@@ -15,10 +15,11 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{ops::Range, path::PathBuf, sync::Arc};
+use std::{path::PathBuf, sync::Arc};
 use stoat::{
     buffer::BufferId,
     display_map::{BlockPlacement, BlockProperties, BlockStyle},
+    review::ReviewRow,
     review_session::{ChunkFingerprint, ChunkStatus, ReviewSession as InnerSession, ReviewSource},
 };
 use stoat_scheduler::Executor;
@@ -43,15 +44,21 @@ pub struct ReviewItem {
     _session_subscription: Option<Subscription>,
 }
 
-/// One file's view state: the workspace-relative path, the editor
-/// over the file's review excerpts, the underlying multi-buffer
-/// that holds those excerpts, and the source buffer the multi-buffer
-/// reads from.
+/// One file's two-pane view state. The right pane ([`Self::editor`] over the
+/// on-disk [`Self::buffer`]) holds the added/current text and is the pane
+/// review-navigation consumers drive; the left pane ([`Self::left_editor`]
+/// over the read-only [`Self::left_buffer`]) holds the base/removed text.
+/// Both are singleton editors padded with spacer blocks so they stay
+/// line-for-line aligned.
 pub struct ReviewFileView {
     pub rel_path: String,
     pub editor: Entity<Editor>,
     pub multi_buffer: Entity<MultiBuffer>,
     pub buffer: Entity<Buffer>,
+    pub left_editor: Entity<Editor>,
+    pub left_buffer: Entity<Buffer>,
+    /// Header line shown above the two panes (commit boundary + staged count).
+    pub header: String,
 }
 
 impl ReviewItem {
@@ -198,10 +205,92 @@ enum SourceKind {
 struct FileSpec {
     path: PathBuf,
     rel_path: String,
+    base_text: Arc<String>,
     buffer_text: Arc<String>,
-    excerpt_ranges: Vec<Range<usize>>,
-    deletion_blocks: Vec<BlockProperties>,
-    header_block: BlockProperties,
+    /// Spacer blocks padding the left/base pane so it stays row-aligned with
+    /// the right pane (one blank row per added line on the right).
+    left_fillers: Vec<BlockProperties>,
+    /// Spacer blocks padding the right/on-disk pane (one blank row per
+    /// removed line on the left).
+    right_fillers: Vec<BlockProperties>,
+    /// Header line rendered above the file's two panes (commit boundary +
+    /// `> rel_path  N/M staged`).
+    header: String,
+}
+
+/// A blank spacer of `height` rows at `placement`, used to keep the two
+/// review panes line-for-line aligned.
+fn spacer_block(placement: BlockPlacement, height: u32) -> BlockProperties {
+    BlockProperties::from_text(
+        placement,
+        vec![String::new(); height.max(1) as usize],
+        BlockStyle::Fixed,
+    )
+}
+
+/// Walk one chunk's [`ReviewRow`]s and append the spacer blocks that keep the
+/// base (left) and current (right) panes row-aligned: a removed row
+/// (`left:Some,right:None`) inserts a blank on the right at the current-side
+/// position; an added row (`left:None,right:Some`) inserts a blank on the
+/// left at the base-side position. `base_start`/`buffer_start` are the chunk's
+/// 0-based start rows, used to anchor a pure-deletion / pure-addition chunk
+/// that has no opposite-side line to flush against.
+///
+/// [`ReviewSide::line_num`] is 1-based; [`BlockPlacement::Above`] is 0-based.
+fn append_chunk_fillers(
+    rows: &[ReviewRow],
+    base_start: u32,
+    buffer_start: u32,
+    left_fillers: &mut Vec<BlockProperties>,
+    right_fillers: &mut Vec<BlockProperties>,
+) {
+    let mut pending_left = 0u32;
+    let mut pending_right = 0u32;
+    let mut last_left_row: Option<u32> = None;
+    let mut last_right_row: Option<u32> = None;
+
+    for row in rows {
+        let (left, right) = match row {
+            ReviewRow::Context { left, right } => (Some(left), Some(right)),
+            ReviewRow::Changed { left, right } => (left.as_ref(), right.as_ref()),
+        };
+        if let Some(left) = left {
+            let row = left.line_num.saturating_sub(1);
+            if pending_left > 0 {
+                left_fillers.push(spacer_block(BlockPlacement::Above(row), pending_left));
+                pending_left = 0;
+            }
+            last_left_row = Some(row);
+        }
+        if let Some(right) = right {
+            let row = right.line_num.saturating_sub(1);
+            if pending_right > 0 {
+                right_fillers.push(spacer_block(BlockPlacement::Above(row), pending_right));
+                pending_right = 0;
+            }
+            last_right_row = Some(row);
+        }
+        match (left, right) {
+            (Some(_), None) => pending_right += 1,
+            (None, Some(_)) => pending_left += 1,
+            _ => {},
+        }
+    }
+
+    if pending_left > 0 {
+        let placement = match last_left_row {
+            Some(row) => BlockPlacement::Below(row),
+            None => BlockPlacement::Above(base_start),
+        };
+        left_fillers.push(spacer_block(placement, pending_left));
+    }
+    if pending_right > 0 {
+        let placement = match last_right_row {
+            Some(row) => BlockPlacement::Below(row),
+            None => BlockPlacement::Above(buffer_start),
+        };
+        right_fillers.push(spacer_block(placement, pending_right));
+    }
 }
 
 /// Per-file commit-boundary header line: `Some(header)` for the first file
@@ -256,8 +345,8 @@ fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, V
         .iter()
         .zip(commit_headers(inner))
         .map(|(file, commit_header)| {
-            let mut excerpt_ranges = Vec::new();
-            let mut deletion_blocks = Vec::new();
+            let mut left_fillers = Vec::new();
+            let mut right_fillers = Vec::new();
             let mut staged_count = 0usize;
             for chunk_id in &file.chunks {
                 let Some(chunk) = inner.chunks.get(chunk_id) else {
@@ -266,47 +355,32 @@ fn snapshot_session(session: &Entity<ReviewSession>, cx: &App) -> (SourceKind, V
                 if matches!(chunk.status, ChunkStatus::Staged) {
                     staged_count += 1;
                 }
-                if !chunk.buffer_byte_range.is_empty() {
-                    excerpt_ranges.push(chunk.buffer_byte_range.clone());
-                }
-                if chunk.base_byte_range.is_empty() {
-                    continue;
-                }
-                let Some(slice) = file.base_text.get(chunk.base_byte_range.clone()) else {
-                    continue;
-                };
-                let lines: Vec<String> = slice.lines().map(String::from).collect();
-                if lines.is_empty() {
-                    continue;
-                }
-                deletion_blocks.push(BlockProperties::from_text(
-                    BlockPlacement::Above(chunk.buffer_line_range.start),
-                    lines,
-                    BlockStyle::Fixed,
-                ));
+                append_chunk_fillers(
+                    &chunk.hunk.rows,
+                    chunk.base_line_range.start,
+                    chunk.buffer_line_range.start,
+                    &mut left_fillers,
+                    &mut right_fillers,
+                );
             }
-            let mut header_lines = Vec::new();
-            if let Some(commit_header) = commit_header {
-                header_lines.push(commit_header);
-            }
-            header_lines.push(format!(
+            let file_line = format!(
                 "> {}   {}/{} staged",
                 file.rel_path,
                 staged_count,
                 file.chunks.len()
-            ));
-            let header_block = BlockProperties::from_text(
-                BlockPlacement::Above(0),
-                header_lines,
-                BlockStyle::Sticky,
             );
+            let header = match commit_header {
+                Some(commit_header) => format!("{commit_header}   {file_line}"),
+                None => file_line,
+            };
             FileSpec {
                 path: file.path.clone(),
                 rel_path: file.rel_path.clone(),
+                base_text: file.base_text.clone(),
                 buffer_text: file.buffer_text.clone(),
-                excerpt_ranges,
-                deletion_blocks,
-                header_block,
+                left_fillers,
+                right_fillers,
+                header,
             }
         })
         .collect();
@@ -330,32 +404,45 @@ fn build_file_view(
         },
         SourceKind::ReadOnly => cx.new(|_| Buffer::with_text(BufferId::new(0), &spec.buffer_text)),
     };
+    let left_buffer = cx.new(|_| Buffer::with_text(BufferId::new(1), &spec.base_text));
 
+    let (multi_buffer, editor) =
+        build_pane_editor(buffer.clone(), spec.right_fillers, executor.clone(), cx);
+    let (_, left_editor) = build_pane_editor(left_buffer.clone(), spec.left_fillers, executor, cx);
+
+    ReviewFileView {
+        rel_path: spec.rel_path,
+        editor,
+        multi_buffer,
+        buffer,
+        left_editor,
+        left_buffer,
+        header: spec.header,
+    }
+}
+
+/// Build a single review pane: a singleton [`MultiBuffer`] over `buffer`
+/// padded with `fillers` spacer blocks. The singleton (no excerpts) keeps the
+/// editor's tree-sitter syntax overlay active.
+fn build_pane_editor(
+    buffer: Entity<Buffer>,
+    fillers: Vec<BlockProperties>,
+    executor: Executor,
+    cx: &mut Context<'_, ReviewItem>,
+) -> (Entity<MultiBuffer>, Entity<Editor>) {
     let multi_buffer = {
         let buffer = buffer.clone();
-        let excerpt_ranges = spec.excerpt_ranges;
-        cx.new(|cx| {
-            let mut m = MultiBuffer::singleton(buffer.clone(), cx);
-            if !excerpt_ranges.is_empty() {
-                m.insert_excerpts(buffer, excerpt_ranges, cx);
-            }
-            m
-        })
+        cx.new(|cx| MultiBuffer::singleton(buffer, cx))
     };
-
     let display_map = {
         let buffer = buffer.clone();
         cx.new(|cx| DisplayMap::new(buffer, executor, cx))
     };
-    let diff_map = {
-        let buffer = buffer.clone();
-        cx.new(|cx| DiffMap::new(buffer, cx))
-    };
+    let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
 
-    let mut blocks = Vec::with_capacity(spec.deletion_blocks.len() + 1);
-    blocks.push(spec.header_block);
-    blocks.extend(spec.deletion_blocks);
-    display_map.update(cx, |dm, cx| dm.insert_blocks(blocks, cx));
+    if !fillers.is_empty() {
+        display_map.update(cx, |dm, cx| dm.insert_blocks(fillers, cx));
+    }
 
     let editor = cx.new(|cx| {
         Editor::new(
@@ -366,13 +453,7 @@ fn build_file_view(
             cx,
         )
     });
-
-    ReviewFileView {
-        rel_path: spec.rel_path,
-        editor,
-        multi_buffer,
-        buffer,
-    }
+    (multi_buffer, editor)
 }
 
 impl Render for ReviewItem {
@@ -386,9 +467,19 @@ impl Render for ReviewItem {
             .map(|(index, file)| {
                 let dimmed = active.is_some_and(|a| a != index);
                 div()
+                    .flex()
+                    .flex_col()
                     .flex_1()
                     .opacity(if dimmed { 0.6 } else { 1.0 })
-                    .child(file.editor.clone())
+                    .child(div().px_2().child(SharedString::from(file.header.clone())))
+                    .child(
+                        div()
+                            .flex()
+                            .flex_row()
+                            .flex_1()
+                            .child(div().flex_1().child(file.left_editor.clone()))
+                            .child(div().flex_1().child(file.editor.clone())),
+                    )
             })
             .collect();
         div()
@@ -597,7 +688,7 @@ mod tests {
     use super::*;
     use gpui::{AppContext, TestAppContext};
     use std::{path::PathBuf, sync::Arc};
-    use stoat::review::ReviewFileInput;
+    use stoat::review::{ReviewFileInput, ReviewSide};
     use stoat_scheduler::TestScheduler;
 
     fn install_executor(cx: &mut TestAppContext) {
@@ -1010,7 +1101,7 @@ mod tests {
     }
 
     #[test]
-    fn from_session_builds_multi_buffer_per_file() {
+    fn from_session_builds_singleton_panes_per_file() {
         let mut cx = TestAppContext::single();
         install_executor(&mut cx);
         let session = session_with_file(
@@ -1032,65 +1123,57 @@ mod tests {
 
         item.read_with(&cx, |item, cx| {
             let view = &item.files()[0];
-            assert!(!view.multi_buffer.read(cx).is_singleton());
+            assert!(
+                view.multi_buffer.read(cx).is_singleton(),
+                "right pane is a singleton so the tree-sitter overlay stays active",
+            );
+            assert_ne!(
+                view.buffer.entity_id(),
+                view.left_buffer.entity_id(),
+                "the left/base pane is a distinct buffer from the right/on-disk pane",
+            );
         });
     }
 
     #[test]
-    fn from_session_inserts_deletion_blocks_for_modified_chunks() {
+    fn from_session_aligns_left_and_right_panes() {
         let mut cx = TestAppContext::single();
         install_executor(&mut cx);
-        let with_block = session_with_file(
+        let session = session_with_file(
             &mut cx,
             ReviewSource::InMemory {
                 files: Arc::new(Vec::new()),
             },
             "a.txt",
-            "old line\n",
-            "new line\n",
-        );
-        let no_block = session_with_file(
-            &mut cx,
-            ReviewSource::InMemory {
-                files: Arc::new(Vec::new()),
-            },
-            "b.txt",
-            "",
-            "added line\n",
+            "a\nb\nc\n",
+            "a\nB\nc\n",
         );
         let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
 
-        let item_with = cx.update(|cx| {
-            let session = with_block.clone();
-            let registry = registry.clone();
-            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
-        });
-        let item_without = cx.update(|cx| {
-            let session = no_block.clone();
+        let item = cx.update(|cx| {
+            let session = session.clone();
             let registry = registry.clone();
             cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
         });
 
-        let display_with = item_with.read_with(&cx, |item, cx| {
-            item.files()[0].editor.read(cx).display_map().clone()
+        let (left_dm, right_dm) = item.read_with(&cx, |item, cx| {
+            let view = &item.files()[0];
+            (
+                view.left_editor.read(cx).display_map().clone(),
+                view.editor.read(cx).display_map().clone(),
+            )
         });
-        let display_without = item_without.read_with(&cx, |item, cx| {
-            item.files()[0].editor.read(cx).display_map().clone()
-        });
+        let left_rows = left_dm.update(&mut cx, |dm, _| dm.snapshot().max_point().row);
+        let right_rows = right_dm.update(&mut cx, |dm, _| dm.snapshot().max_point().row);
 
-        let max_with = display_with.update(&mut cx, |dm, _| dm.snapshot().max_point().row);
-        let max_without = display_without.update(&mut cx, |dm, _| dm.snapshot().max_point().row);
-
-        assert!(
-            max_with > max_without,
-            "deletion block must add at least one display row \
-             (with_block max_point.row={max_with}, no_block max_point.row={max_without})",
+        assert_eq!(
+            left_rows, right_rows,
+            "spacer fillers keep the base and current panes line-for-line aligned",
         );
     }
 
     #[test]
-    fn from_session_inserts_file_header_block() {
-        use stoat::display_map::BlockRowKind;
+    fn from_session_sets_file_header() {
         let mut cx = TestAppContext::single();
         install_executor(&mut cx);
         let session = session_with_file(
@@ -1110,16 +1193,160 @@ mod tests {
             cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
         });
 
-        let display = item.read_with(&cx, |item, cx| {
-            item.files()[0].editor.read(cx).display_map().clone()
+        item.read_with(&cx, |item, _| {
+            let header = &item.files()[0].header;
+            assert!(
+                header.contains("a.txt") && header.contains("staged"),
+                "file header names the path and staged count: {header:?}",
+            );
         });
-        let row_0_is_block = display.update(&mut cx, |dm, _| {
-            matches!(dm.snapshot().classify_row(0), BlockRowKind::Block { .. })
-        });
-        assert!(
-            row_0_is_block,
-            "row 0 must be the file-header block, not a buffer row",
+    }
+
+    fn side(text: &str, line_num: u32) -> ReviewSide {
+        ReviewSide {
+            text: text.to_string(),
+            line_num,
+            change_spans: Vec::new(),
+            moved_spans: Vec::new(),
+            move_provenance: None,
+        }
+    }
+
+    /// `(placement, height)` of each spacer block, the asserted projection of
+    /// the opaque [`BlockProperties`].
+    type FillerLayout = Vec<(BlockPlacement, Option<u32>)>;
+
+    /// Run [`append_chunk_fillers`] and project each produced block to its
+    /// `(placement, height)` so the spacer layout can be asserted without
+    /// comparing the opaque render closures.
+    fn fillers(
+        rows: &[ReviewRow],
+        base_start: u32,
+        buffer_start: u32,
+    ) -> (FillerLayout, FillerLayout) {
+        let mut left = Vec::new();
+        let mut right = Vec::new();
+        append_chunk_fillers(rows, base_start, buffer_start, &mut left, &mut right);
+        let project =
+            |v: Vec<BlockProperties>| v.into_iter().map(|b| (b.placement, b.height)).collect();
+        (project(left), project(right))
+    }
+
+    #[test]
+    fn fillers_pad_removed_line_on_the_right() {
+        let rows = vec![
+            ReviewRow::Context {
+                left: side("a", 1),
+                right: side("a", 1),
+            },
+            ReviewRow::Changed {
+                left: Some(side("b", 2)),
+                right: None,
+            },
+            ReviewRow::Context {
+                left: side("c", 3),
+                right: side("c", 2),
+            },
+        ];
+        let (left, right) = fillers(&rows, 0, 0);
+        assert!(left.is_empty(), "no added lines means no left spacer");
+        assert_eq!(
+            right,
+            vec![(BlockPlacement::Above(1), Some(1))],
+            "removed line b spaces the right pane above current line c (row 1)",
         );
+    }
+
+    #[test]
+    fn fillers_pad_added_line_on_the_left() {
+        let rows = vec![
+            ReviewRow::Context {
+                left: side("a", 1),
+                right: side("a", 1),
+            },
+            ReviewRow::Changed {
+                left: None,
+                right: Some(side("B", 2)),
+            },
+            ReviewRow::Context {
+                left: side("c", 2),
+                right: side("c", 3),
+            },
+        ];
+        let (left, right) = fillers(&rows, 0, 0);
+        assert_eq!(
+            left,
+            vec![(BlockPlacement::Above(1), Some(1))],
+            "added line B spaces the left pane above base line c (row 1)",
+        );
+        assert!(right.is_empty(), "no removed lines means no right spacer");
+    }
+
+    #[test]
+    fn fillers_interleave_remove_then_add() {
+        let rows = vec![
+            ReviewRow::Context {
+                left: side("a", 1),
+                right: side("a", 1),
+            },
+            ReviewRow::Changed {
+                left: Some(side("b", 2)),
+                right: None,
+            },
+            ReviewRow::Changed {
+                left: None,
+                right: Some(side("B", 2)),
+            },
+            ReviewRow::Context {
+                left: side("c", 3),
+                right: side("c", 3),
+            },
+        ];
+        let (left, right) = fillers(&rows, 0, 0);
+        assert_eq!(left, vec![(BlockPlacement::Above(2), Some(1))]);
+        assert_eq!(right, vec![(BlockPlacement::Above(1), Some(1))]);
+    }
+
+    #[test]
+    fn fillers_trailing_removed_at_eof() {
+        let rows = vec![
+            ReviewRow::Context {
+                left: side("a", 1),
+                right: side("a", 1),
+            },
+            ReviewRow::Changed {
+                left: Some(side("b", 2)),
+                right: None,
+            },
+        ];
+        let (left, right) = fillers(&rows, 0, 0);
+        assert!(left.is_empty());
+        assert_eq!(
+            right,
+            vec![(BlockPlacement::Below(0), Some(1))],
+            "a removal at EOF spaces below the last current line (row 0)",
+        );
+    }
+
+    #[test]
+    fn fillers_pure_addition_anchors_at_buffer_start() {
+        let rows = vec![
+            ReviewRow::Changed {
+                left: None,
+                right: Some(side("x", 1)),
+            },
+            ReviewRow::Changed {
+                left: None,
+                right: Some(side("y", 2)),
+            },
+        ];
+        let (left, right) = fillers(&rows, 0, 0);
+        assert_eq!(
+            left,
+            vec![(BlockPlacement::Above(0), Some(2))],
+            "a pure addition with no base line anchors the left spacer at base_start",
+        );
+        assert!(right.is_empty());
     }
 
     #[test]
