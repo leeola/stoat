@@ -1171,7 +1171,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
-        h.type_keys("ctrl-f");
+        h.type_keys("ctrl-d");
         h.assert_snapshot("snapshot_page_down_scrolls_and_moves_cursor");
     }
 
@@ -1180,7 +1180,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
-        h.type_keys("ctrl-f ctrl-b");
+        h.type_keys("ctrl-d ctrl-u");
         h.assert_snapshot("snapshot_page_up_after_page_down_returns_to_top");
     }
 
@@ -1189,7 +1189,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
-        h.type_keys("ctrl-d");
+        h.type_keys("ctrl-f");
         h.assert_snapshot("snapshot_half_page_down");
     }
 
@@ -1198,7 +1198,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
-        h.type_keys("ctrl-f ctrl-f ctrl-u");
+        h.type_keys("ctrl-d ctrl-d ctrl-b");
         h.assert_snapshot("snapshot_half_page_up_from_bottom");
     }
 
@@ -1207,7 +1207,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", "a\nb\nc\n");
         h.open_file(&path);
-        h.type_keys("ctrl-f");
+        h.type_keys("ctrl-d");
         h.assert_snapshot("snapshot_page_down_clamps_at_last_line");
     }
 
@@ -1216,7 +1216,7 @@ mod tests {
         let mut h = crate::test_harness::TestHarness::with_size(30, 10);
         let path = h.write_file("s.txt", &page_scratch_content());
         h.open_file(&path);
-        h.type_keys("ctrl-b");
+        h.type_keys("ctrl-u");
         h.assert_snapshot("snapshot_page_up_at_top_is_noop");
     }
 

@@ -2,7 +2,7 @@
 source: stoat/src/test_harness.rs
 expression: text
 ---
-actions: ctrl-d
+actions: ctrl-f
 focused: #1 of 1
 mode: normal
 size: 30x10
