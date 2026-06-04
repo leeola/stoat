@@ -209,7 +209,6 @@ pub struct Editor {
     minimap_visible: bool,
     minimap: Option<Entity<Editor>>,
     minimap_drag: Option<MinimapDrag>,
-    scroll_animation_task: Option<Task<()>>,
     _subscriptions: [Subscription; 4],
     _diagnostic_subscription: Option<Subscription>,
     _review_session_subscription: Option<Subscription>,
@@ -494,7 +493,6 @@ impl Editor {
             minimap_visible: false,
             minimap: None,
             minimap_drag: None,
-            scroll_animation_task: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub, theme_sub],
             _diagnostic_subscription: None,
             _review_session_subscription: None,
@@ -2686,28 +2684,21 @@ impl Editor {
         cx.notify();
     }
 
-    /// Begin an eased scroll to fractional row `target_y`, spawning a task
-    /// that steps the animation each frame until it completes. The task is
-    /// retained on the editor; starting a new animation replaces (and so
-    /// cancels) any prior one.
+    /// Begin an eased scroll to fractional row `target_y`. The animation is
+    /// stored on the scroll manager and stepped once per paint from the
+    /// render path, which schedules each successive frame through
+    /// `Window::on_next_frame`; starting a new animation replaces any prior
+    /// one. `cx.notify()` kicks the first paint.
     fn animate_scroll_to(&mut self, target_y: f64, cx: &mut Context<'_, Self>) {
-        let executor = cx.global::<ExecutorGlobal>().0.clone();
         let start = self.scroll_manager.anchor().offset;
+        let now = cx.global::<ExecutorGlobal>().0.now();
         self.scroll_manager.start_scroll_animation(
             start,
             Point::new(start.x, target_y),
-            executor.now(),
+            now,
             SCROLL_ANIMATION_DURATION,
         );
-        self.scroll_animation_task = Some(cx.spawn(async move |editor, cx| loop {
-            executor.timer(SCROLL_ANIMATION_FRAME).await;
-            let still_animating = editor
-                .update(cx, |editor, cx| editor.step_scroll_animation(cx))
-                .unwrap_or(false);
-            if !still_animating {
-                break;
-            }
-        }));
+        cx.notify();
     }
 
     /// Apply one frame of the active scroll animation, sampling the
@@ -3950,9 +3941,18 @@ impl Editor {
 }
 
 impl Render for Editor {
-    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let _span = tracing::trace_span!("editor.render").entered();
         self.apply_pending_autoscroll(cx);
+        if self.scroll_manager.animation().is_some() {
+            let still_animating = self.step_scroll_animation(cx);
+            if still_animating {
+                let editor = cx.entity().downgrade();
+                window.on_next_frame(move |_, cx| {
+                    editor.update(cx, |_, cx| cx.notify()).ok();
+                });
+            }
+        }
         let is_minimap = self.mode.is_minimap();
         let document_rows = self
             .display_map
@@ -4309,8 +4309,6 @@ const MINIMAP_MIN_WIDTH: f32 = 24.0;
 
 /// Duration of an eased programmatic-jump scroll animation.
 const SCROLL_ANIMATION_DURATION: std::time::Duration = std::time::Duration::from_millis(150);
-/// Wake interval of the scroll-animation task (~60 fps).
-const SCROLL_ANIMATION_FRAME: std::time::Duration = std::time::Duration::from_millis(16);
 /// Jumps shorter than this many display rows snap instantly; only larger
 /// programmatic jumps are worth animating.
 const MIN_ANIMATED_SCROLL_ROWS: f64 = 3.0;
@@ -4962,9 +4960,8 @@ mod tests {
             ed.request_autoscroll(AutoscrollStrategy::Top, cx);
             ed.apply_pending_autoscroll(cx);
         });
-        // A 10-row jump animates; drive the animation to completion.
-        vcx.run_until_parked();
-        advance(&scheduler, vcx, 300);
+        // A 10-row jump animates; step it to completion.
+        pump_scroll_animation(&scheduler, &editor, vcx, 300);
 
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
@@ -5000,10 +4997,9 @@ mod tests {
             ed.request_autoscroll(AutoscrollStrategy::Top, cx);
             ed.apply_pending_autoscroll(cx);
         });
-        // A 10-row jump animates; drive it to completion before reading the
+        // A 10-row jump animates; step it to completion before reading the
         // settled pixel offset.
-        vcx.run_until_parked();
-        advance(&scheduler, vcx, 300);
+        pump_scroll_animation(&scheduler, &editor, vcx, 300);
 
         let offset = editor.read_with(vcx, |ed, _| {
             ed.scroll_handle().0.borrow().base_handle.offset()
@@ -5032,14 +5028,13 @@ mod tests {
         });
 
         // Partway through, the position interpolates strictly between the
-        // start and the target row 500.
-        vcx.run_until_parked();
-        advance(&scheduler, vcx, 75);
+        // start and the target row 500, and the animation keeps running.
+        assert!(pump_scroll_animation(&scheduler, &editor, vcx, 75));
         let mid = editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y);
         assert!(mid > 0.0 && mid < 500.0, "midpoint y was {mid}");
 
         // After the duration elapses it settles on the target and clears.
-        advance(&scheduler, vcx, 300);
+        pump_scroll_animation(&scheduler, &editor, vcx, 300);
         editor.read_with(vcx, |ed, _| {
             assert_eq!(ed.scroll_manager().anchor().offset.y, 500.0);
             assert!(ed.scroll_manager().animation().is_none());
@@ -5101,8 +5096,7 @@ mod tests {
 
         // The eased follow settles a 3-row bottom margin below the cursor:
         // cursor row 25 -> view scrolled to row 9.
-        vcx.run_until_parked();
-        advance(&scheduler, vcx, 300);
+        pump_scroll_animation(&scheduler, &editor, vcx, 300);
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
             9.0,
@@ -5117,8 +5111,7 @@ mod tests {
         editor.read_with(vcx, |ed, _| {
             assert!(ed.scroll_manager().animation().is_some());
         });
-        vcx.run_until_parked();
-        advance(&scheduler, vcx, 300);
+        pump_scroll_animation(&scheduler, &editor, vcx, 300);
         assert_eq!(
             editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
             2.0,
@@ -5499,15 +5492,18 @@ mod tests {
         scheduler
     }
 
-    /// Advance both the gpui and stoat clocks by `ms` and pump the queues,
-    /// stepping any in-flight scroll-animation task. The task must already
-    /// have been polled once (via a prior `run_until_parked`) so its first
-    /// timer is registered.
-    fn advance(scheduler: &Arc<TestScheduler>, vcx: &mut VisualTestContext, ms: u64) {
-        let step = std::time::Duration::from_millis(ms);
-        vcx.executor().advance_clock(step);
-        scheduler.advance_clock(step);
-        vcx.run_until_parked();
+    /// Mimic a paint frame for the scroll animation: advance the executor
+    /// clock by `ms` and step the animation once, returning whether it is
+    /// still running. Production drives this from `render` via
+    /// `Window::on_next_frame`, which the test scheduler never fires.
+    fn pump_scroll_animation(
+        scheduler: &Arc<TestScheduler>,
+        editor: &Entity<Editor>,
+        vcx: &mut VisualTestContext,
+        ms: u64,
+    ) -> bool {
+        scheduler.advance_clock(std::time::Duration::from_millis(ms));
+        editor.update_in(vcx, |ed, _, cx| ed.step_scroll_animation(cx))
     }
 
     fn assert_inline_editor_state(
