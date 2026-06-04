@@ -8,6 +8,7 @@ use crate::{
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::MultiBuffer,
     review_session::{ReviewSession, ReviewSessionEvent},
+    theme::Theme,
 };
 use gpui::{
     div, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
@@ -15,14 +16,21 @@ use gpui::{
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::{path::PathBuf, sync::Arc};
+use std::{collections::HashMap, ops::Range, path::PathBuf, sync::Arc};
 use stoat::{
     buffer::BufferId,
-    display_map::{BlockPlacement, BlockProperties, BlockStyle},
-    review::ReviewRow,
-    review_session::{ChunkFingerprint, ChunkStatus, ReviewSession as InnerSession, ReviewSource},
+    display_map::{
+        highlights::{DecorationHighlight, HighlightStyle},
+        BlockPlacement, BlockProperties, BlockStyle,
+    },
+    review::{ReviewRow, ReviewSide},
+    review_session::{
+        ChunkFingerprint, ChunkStatus, ReviewChunk, ReviewChunkId, ReviewFile,
+        ReviewSession as InnerSession, ReviewSource,
+    },
 };
 use stoat_scheduler::Executor;
+use stoat_text::Bias;
 
 /// Pane-hosted review surface. Wraps an [`Entity<ReviewSession>`] and
 /// one [`ReviewFileView`] per file in the session.
@@ -40,7 +48,7 @@ pub struct ReviewItem {
     /// `(chunk, index)` cursor for the `JumpToNextMoveSource` /
     /// `JumpToPrevMoveSource` cycle. Cleared whenever the
     /// session's chunk cursor moves.
-    move_cursor: Option<(stoat::review_session::ReviewChunkId, usize)>,
+    move_cursor: Option<(ReviewChunkId, usize)>,
     _session_subscription: Option<Subscription>,
 }
 
@@ -105,30 +113,33 @@ impl ReviewItem {
             })
             .collect();
         let subscription = cx.subscribe(&session, |this, _, event: &ReviewSessionEvent, cx| {
-            if matches!(event, ReviewSessionEvent::Refreshed) {
-                this.rebuild_files(cx);
-                this.move_cursor = None;
+            match event {
+                ReviewSessionEvent::Refreshed => {
+                    this.rebuild_files(cx);
+                    this.move_cursor = None;
+                },
+                ReviewSessionEvent::Changed => this.refresh_decorations(cx),
+                _ => {},
             }
             cx.notify();
         });
-        Self {
+        let item = Self {
             session,
             files,
             commit_summary: None,
             buffer_registry: Some(buffer_registry.clone()),
             move_cursor: None,
             _session_subscription: Some(subscription),
-        }
+        };
+        item.refresh_decorations(cx);
+        item
     }
 
-    pub fn move_cursor(&self) -> Option<(stoat::review_session::ReviewChunkId, usize)> {
+    pub fn move_cursor(&self) -> Option<(ReviewChunkId, usize)> {
         self.move_cursor
     }
 
-    pub fn set_move_cursor(
-        &mut self,
-        cursor: Option<(stoat::review_session::ReviewChunkId, usize)>,
-    ) {
+    pub fn set_move_cursor(&mut self, cursor: Option<(ReviewChunkId, usize)>) {
         self.move_cursor = cursor;
     }
 
@@ -161,7 +172,29 @@ impl ReviewItem {
             })
             .collect();
         self.files = files;
+        self.refresh_decorations(cx);
         cx.notify();
+    }
+
+    /// Recompute and install the per-side diff highlights -- intra-line change
+    /// spans (added color on the right pane, deleted on the left), move spans,
+    /// and the staged-color variant for staged chunks -- on both panes of every
+    /// file. Run after the panes are built and whenever the session changes so
+    /// staging re-colors live.
+    fn refresh_decorations(&self, cx: &mut Context<'_, Self>) {
+        let per_file: Vec<(Vec<DecorationSpan>, Vec<DecorationSpan>)> = {
+            let session = self.session.read(cx);
+            let inner = session.inner();
+            inner
+                .files
+                .iter()
+                .map(|file| file_decoration_spans(file, &inner.chunks))
+                .collect()
+        };
+        for (view, (left_spans, right_spans)) in self.files.iter().zip(&per_file) {
+            apply_pane_decorations(&view.left_buffer, &view.left_editor, left_spans, cx);
+            apply_pane_decorations(&view.buffer, &view.editor, right_spans, cx);
+        }
     }
 
     /// Attach the commit subject line consumed by [`ItemView::tab_label`]
@@ -459,6 +492,151 @@ fn build_pane_editor(
         )
     });
     (multi_buffer, editor)
+}
+
+/// Which diff highlight a span carries. The theme scope is resolved from this
+/// plus the chunk's staged state by [`decoration_style`].
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum DiffSpan {
+    Added,
+    Deleted,
+    Moved,
+}
+
+/// One decoration span: an absolute byte range into a side's full text, the
+/// highlight it carries, and whether its chunk is staged.
+type DecorationSpan = (Range<usize>, DiffSpan, bool);
+
+/// Decoration spans for one file's left (base) and right (current) panes,
+/// walked from the file's chunks' per-side change/move spans. A line's change
+/// spans are relative to the line text; the absolute byte range is the line's
+/// start offset in the full side text plus the span.
+fn file_decoration_spans(
+    file: &ReviewFile,
+    chunks: &HashMap<ReviewChunkId, ReviewChunk>,
+) -> (Vec<DecorationSpan>, Vec<DecorationSpan>) {
+    let base_starts = line_start_offsets(&file.base_text);
+    let buffer_starts = line_start_offsets(&file.buffer_text);
+    let mut left = Vec::new();
+    let mut right = Vec::new();
+    for chunk_id in &file.chunks {
+        let Some(chunk) = chunks.get(chunk_id) else {
+            continue;
+        };
+        let staged = matches!(chunk.status, ChunkStatus::Staged);
+        for row in &chunk.hunk.rows {
+            let (l, r) = match row {
+                ReviewRow::Context { left, right } => (Some(left), Some(right)),
+                ReviewRow::Changed { left, right } => (left.as_ref(), right.as_ref()),
+            };
+            if let Some(side) = l {
+                push_side_spans(side, &base_starts, DiffSpan::Deleted, staged, &mut left);
+            }
+            if let Some(side) = r {
+                push_side_spans(side, &buffer_starts, DiffSpan::Added, staged, &mut right);
+            }
+        }
+    }
+    (left, right)
+}
+
+/// Append one side's change spans (as `change_kind`) and move spans (as
+/// [`DiffSpan::Moved`]) to `out`, mapping each line-relative span to an
+/// absolute byte range via `line_starts`. [`ReviewSide::line_num`] is 1-based.
+fn push_side_spans(
+    side: &ReviewSide,
+    line_starts: &[usize],
+    change_kind: DiffSpan,
+    staged: bool,
+    out: &mut Vec<DecorationSpan>,
+) {
+    let Some(&start) = line_starts.get(side.line_num.saturating_sub(1) as usize) else {
+        return;
+    };
+    for span in &side.change_spans {
+        out.push((start + span.start..start + span.end, change_kind, staged));
+    }
+    for span in &side.moved_spans {
+        out.push((
+            start + span.start..start + span.end,
+            DiffSpan::Moved,
+            staged,
+        ));
+    }
+}
+
+/// Byte offset of the start of each 0-based line in `text`.
+fn line_start_offsets(text: &str) -> Vec<usize> {
+    let mut starts = vec![0usize];
+    for (i, byte) in text.bytes().enumerate() {
+        if byte == b'\n' {
+            starts.push(i + 1);
+        }
+    }
+    starts
+}
+
+/// Resolve a span's theme scope to a [`HighlightStyle`]. Staged change spans
+/// use the `diff.staged_*` scope variants so staged hunks read distinctly;
+/// move spans always use `diff.moved`.
+fn decoration_style(cx: &App, span: DiffSpan, staged: bool) -> HighlightStyle {
+    use stoat::theme::scope;
+    let scope = match (span, staged) {
+        (DiffSpan::Added, false) => scope::DIFF_ADDED,
+        (DiffSpan::Added, true) => scope::DIFF_STAGED_ADDED,
+        (DiffSpan::Deleted, false) => scope::DIFF_DELETED,
+        (DiffSpan::Deleted, true) => scope::DIFF_STAGED_DELETED,
+        (DiffSpan::Moved, _) => scope::DIFF_MOVED,
+    };
+    let foreground = cx
+        .try_global::<Theme>()
+        .and_then(|t| t.0.try_get(scope))
+        .and_then(|style| style.fg);
+    HighlightStyle {
+        foreground,
+        ..Default::default()
+    }
+}
+
+/// Anchor `spans` against `buffer`'s snapshot and install them as decoration
+/// highlights on `editor`'s display map, clearing the set when empty. Mirrors
+/// the conflict view's decoration refresh.
+fn apply_pane_decorations(
+    buffer: &Entity<Buffer>,
+    editor: &Entity<Editor>,
+    spans: &[DecorationSpan],
+    cx: &mut Context<'_, ReviewItem>,
+) {
+    let buffer_id = buffer.read(cx).read(|b| b.buffer_id());
+    let display_map = editor.read(cx).display_map().clone();
+    if spans.is_empty() {
+        display_map.update(cx, |dm, cx| dm.clear_decoration_highlights(buffer_id, cx));
+        return;
+    }
+    let styles: Vec<HighlightStyle> = spans
+        .iter()
+        .map(|(_, kind, staged)| decoration_style(cx, *kind, *staged))
+        .collect();
+    let decorations: Vec<DecorationHighlight> = display_map.update(cx, |dm, _| {
+        let snap = dm.snapshot();
+        let buffer_snap = snap.buffer_snapshot();
+        spans
+            .iter()
+            .zip(styles)
+            .map(|((range, _, _), style)| {
+                let start = buffer_snap.anchor_at(range.start, Bias::Right);
+                let end = buffer_snap.anchor_at(range.end, Bias::Left);
+                DecorationHighlight {
+                    range: start..end,
+                    style,
+                }
+            })
+            .collect()
+    });
+    let decorations: Arc<[DecorationHighlight]> = Arc::from(decorations);
+    display_map.update(cx, |dm, cx| {
+        dm.set_decoration_highlights(buffer_id, decorations, cx)
+    });
 }
 
 impl Render for ReviewItem {
@@ -1261,6 +1439,120 @@ mod tests {
             left.read_with(vcx, |ed, _| ed.scroll_row()),
             right_row,
             "the left pane mirrors the right pane's scroll",
+        );
+    }
+
+    #[test]
+    fn line_start_offsets_marks_each_line() {
+        assert_eq!(line_start_offsets("ab\ncd\n"), vec![0, 3, 6]);
+        assert_eq!(line_start_offsets("solo"), vec![0]);
+    }
+
+    #[test]
+    fn push_side_spans_maps_change_and_move_spans_to_absolute_bytes() {
+        let side = ReviewSide {
+            text: "hello world".to_string(),
+            line_num: 2,
+            change_spans: std::iter::once(6..11).collect(),
+            moved_spans: std::iter::once(0..5).collect(),
+            move_provenance: None,
+        };
+        let mut out = Vec::new();
+        push_side_spans(&side, &[0, 6, 18], DiffSpan::Deleted, true, &mut out);
+        assert_eq!(
+            out,
+            vec![
+                (12..17, DiffSpan::Deleted, true),
+                (6..11, DiffSpan::Moved, true),
+            ],
+            "line 2 starts at byte 6, so spans shift by 6 and keep their kind/staged",
+        );
+    }
+
+    #[test]
+    fn file_decoration_spans_colors_each_side_by_change() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "hello world\n",
+            "hello WORLD\n",
+        );
+        session.read_with(&cx, |s, _| {
+            let inner = s.inner();
+            let (left, right) = file_decoration_spans(&inner.files[0], &inner.chunks);
+            assert!(
+                !right.is_empty() && right.iter().all(|(_, kind, _)| *kind == DiffSpan::Added),
+                "right pane carries added-change spans: {right:?}",
+            );
+            assert!(
+                !left.is_empty() && left.iter().all(|(_, kind, _)| *kind == DiffSpan::Deleted),
+                "left pane carries deleted-change spans: {left:?}",
+            );
+            assert!(
+                right.iter().all(|(_, _, staged)| !staged),
+                "a pending chunk is not staged",
+            );
+        });
+    }
+
+    #[test]
+    fn file_decoration_spans_marks_staged_chunks() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "hello world\n",
+            "hello WORLD\n",
+        );
+        let id = session.read_with(&cx, |s, _| s.inner().order[0]);
+        session.update(&mut cx, |s, cx| s.set_status(id, ChunkStatus::Staged, cx));
+        session.read_with(&cx, |s, _| {
+            let inner = s.inner();
+            let (_, right) = file_decoration_spans(&inner.files[0], &inner.chunks);
+            assert!(
+                !right.is_empty() && right.iter().all(|(_, _, staged)| *staged),
+                "staging the chunk marks its spans staged: {right:?}",
+            );
+        });
+    }
+
+    #[test]
+    fn from_session_installs_decorations_on_the_right_pane() {
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let session = session_with_file(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+            "a.txt",
+            "hello world\n",
+            "hello WORLD\n",
+        );
+        let registry = cx.update(|cx| cx.new(|_| BufferRegistry::new()));
+        let item = cx.update(|cx| {
+            let session = session.clone();
+            let registry = registry.clone();
+            cx.new(|cx| ReviewItem::from_session(session, &registry, cx))
+        });
+        let dm = item.read_with(&cx, |item, cx| {
+            item.files()[0].editor.read(cx).display_map().clone()
+        });
+        let has_decorations = dm.update(&mut cx, |dm, _| {
+            !dm.snapshot().decoration_highlights().is_empty()
+        });
+        assert!(
+            has_decorations,
+            "the right pane installs diff decoration highlights on build",
         );
     }
 
