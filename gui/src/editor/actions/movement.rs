@@ -1,4 +1,4 @@
-use crate::editor::{Editor, EditorEvent};
+use crate::editor::{scroll::autoscroll::AutoscrollStrategy, Editor, EditorEvent};
 use gpui::Context;
 use stoat::{multi_buffer::MultiBufferSnapshot, DisplayPoint};
 use stoat_text::{
@@ -222,6 +222,7 @@ impl Editor {
             return;
         }
         self.selections.replace_with(new_disjoint, buffer_snapshot);
+        self.request_autoscroll(AutoscrollStrategy::Fit, cx);
         cx.emit(EditorEvent::Changed);
         cx.notify();
     }

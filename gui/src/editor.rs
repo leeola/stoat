@@ -5076,6 +5076,36 @@ mod tests {
     }
 
     #[test]
+    fn move_vertical_follows_cursor_with_fit_autoscroll() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let vcx = cx.add_empty_window();
+        let (_buffer, editor) = editor_with_viewport(vcx, &multiline_text(30));
+
+        // Moving down past the 20-row viewport follows the cursor with a
+        // 3-row bottom margin: cursor row 25 -> view scrolled to row 9.
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.handle_move_vertical(1, 25, false, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            9.0,
+        );
+
+        // Moving back up past the top edge follows with a 3-row top margin:
+        // cursor row 5 -> view scrolled to row 2.
+        editor.update_in(vcx, |ed, _, cx| {
+            ed.handle_move_vertical(-1, 20, false, cx);
+            ed.apply_pending_autoscroll(cx);
+        });
+        assert_eq!(
+            editor.read_with(vcx, |ed, _| ed.scroll_manager().anchor().offset.y),
+            2.0,
+        );
+    }
+
+    #[test]
     fn handle_scroll_wheel_pixel_offset_uses_fractional_row_position() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
