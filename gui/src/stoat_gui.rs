@@ -34,6 +34,7 @@ mod diagnostics_picker;
 mod diff_coordinator;
 mod diff_hunk_panel;
 mod diff_map;
+mod diff_pane;
 mod display_map;
 mod dock;
 mod editor;

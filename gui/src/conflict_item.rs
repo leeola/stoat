@@ -1,11 +1,9 @@
 use crate::{
     buffer::{Buffer, BufferEvent},
-    diff_map::DiffMap,
-    display_map::DisplayMap,
-    editor::{Editor, EditorMode},
+    diff_pane::{build_pane_editor, link_scroll_group},
+    editor::Editor,
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
-    multi_buffer::MultiBuffer,
     theme::{ActiveTheme, Theme},
 };
 use gpui::{
@@ -69,7 +67,7 @@ pub struct ConflictItem {
 /// The handles backing one editor pane. The [`Buffer`] handle is
 /// retained alongside the [`Editor`] so callers can read or rewrite
 /// the buffer text without having to navigate through the editor's
-/// [`MultiBuffer`].
+/// `MultiBuffer`.
 struct SideView {
     buffer: Entity<Buffer>,
     editor: Entity<Editor>,
@@ -80,7 +78,7 @@ impl ConflictItem {
     /// `ours = None` for a deletion) render with a placeholder so the
     /// editor pane stays visible.
     ///
-    /// Reads [`ExecutorGlobal`] for the per-buffer [`DisplayMap`]; the
+    /// Reads [`ExecutorGlobal`] for the per-buffer `DisplayMap`; the
     /// caller must install it before constructing the entity.
     pub fn from_conflicted_file(file: ConflictedFile, cx: &mut Context<'_, Self>) -> Self {
         let ancestor_text = file.ancestor.as_deref().unwrap_or(MISSING_SIDE_PLACEHOLDER);
@@ -92,6 +90,11 @@ impl ConflictItem {
         let ours = build_side_editor(ours_text, cx);
         let theirs = build_side_editor(theirs_text, cx);
         let result = build_side_editor(&result_text, cx);
+
+        // Scroll the three read-only source panes as one group. The result pane
+        // stays independent: its lines diverge from the sources as the merge is
+        // resolved, so syncing its scroll would misalign the rows.
+        link_scroll_group(&[&ancestor.editor, &ours.editor, &theirs.editor], cx);
 
         let result_subscription =
             cx.subscribe(&result.buffer, |this, _, event: &BufferEvent, cx| {
@@ -324,24 +327,8 @@ fn find_enclosing_conflict_block(text: &str, cursor: usize) -> Option<ConflictBl
 
 fn build_side_editor(text: &str, cx: &mut Context<'_, ConflictItem>) -> SideView {
     let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), text));
-    let multi_buffer = {
-        let buffer = buffer.clone();
-        cx.new(|cx| MultiBuffer::singleton(buffer, cx))
-    };
-
     let executor = cx.global::<ExecutorGlobal>().0.clone();
-    let display_map = {
-        let buffer = buffer.clone();
-        cx.new(|cx| DisplayMap::new(buffer, executor, cx))
-    };
-    let diff_map = {
-        let buffer = buffer.clone();
-        cx.new(|cx| DiffMap::new(buffer, cx))
-    };
-
-    let editor =
-        cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
-
+    let (_, editor) = build_pane_editor(buffer.clone(), Vec::new(), executor, cx);
     SideView { buffer, editor }
 }
 
@@ -896,5 +883,78 @@ mod tests {
         item.update(&mut cx, |item, cx| item.take_side(ConflictSide::Ours, cx));
         let text = item.read_with(&cx, |item, cx| item.result.buffer.read(cx).text());
         assert_eq!(text, "no markers here\n");
+    }
+
+    #[test]
+    fn source_panes_scroll_together_result_stays_independent() {
+        use gpui::{px, size, Modifiers, Point, ScrollDelta, ScrollWheelEvent, TouchPhase};
+        let mut cx = TestAppContext::single();
+        install_executor(&mut cx);
+        let tall: String = (0..40)
+            .map(|i| format!("line {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let vcx = cx.add_empty_window();
+        let item = vcx.update(|_, cx| {
+            cx.new(|cx| {
+                ConflictItem::from_conflicted_file(
+                    make_file(
+                        "a.txt",
+                        Some(tall.as_str()),
+                        Some(tall.as_str()),
+                        Some(tall.as_str()),
+                    ),
+                    cx,
+                )
+            })
+        });
+        let (ancestor, ours, theirs, result) = item.read_with(vcx, |item, _| {
+            (
+                item.ancestor.editor.clone(),
+                item.ours.editor.clone(),
+                item.theirs.editor.clone(),
+                item.result.editor.clone(),
+            )
+        });
+        let cell = size(px(8.0), px(16.0));
+        for editor in [&ancestor, &ours, &theirs, &result] {
+            editor.update_in(vcx, |ed, _, cx| ed.set_cell_size(cell, cx));
+        }
+        vcx.run_until_parked();
+
+        ours.update_in(vcx, |ed, window, cx| {
+            ed.handle_scroll_wheel(
+                &ScrollWheelEvent {
+                    position: Point::new(px(0.), px(0.)),
+                    delta: ScrollDelta::Lines(Point::new(0., -4.)),
+                    modifiers: Modifiers::default(),
+                    touch_phase: TouchPhase::Moved,
+                },
+                window,
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            ours.read_with(vcx, |ed, _| ed.scroll_row()),
+            4,
+            "the scrolled source pane moved",
+        );
+        assert_eq!(
+            ancestor.read_with(vcx, |ed, _| ed.scroll_row()),
+            4,
+            "the base pane mirrors the scrolled source pane",
+        );
+        assert_eq!(
+            theirs.read_with(vcx, |ed, _| ed.scroll_row()),
+            4,
+            "the theirs pane mirrors the scrolled source pane",
+        );
+        assert_eq!(
+            result.read_with(vcx, |ed, _| ed.scroll_row()),
+            0,
+            "the result pane is not part of the source scroll group",
+        );
     }
 }

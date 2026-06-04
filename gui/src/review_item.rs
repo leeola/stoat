@@ -2,9 +2,8 @@ use crate::{
     buffer::Buffer,
     buffer_registry::BufferRegistry,
     diagnostics::DiagnosticSet,
-    diff_map::DiffMap,
-    display_map::DisplayMap,
-    editor::{Editor, EditorMode},
+    diff_pane::{build_pane_editor, link_scroll_group},
+    editor::Editor,
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::MultiBuffer,
@@ -104,7 +103,7 @@ impl ReviewItem {
     /// the file's buffer is a fresh read-only [`Buffer`] materialized
     /// from the session's stored `buffer_text`.
     ///
-    /// Reads [`ExecutorGlobal`] for the per-file [`DisplayMap`]; the
+    /// Reads [`ExecutorGlobal`] for the per-file `DisplayMap`; the
     /// caller must install it before constructing the entity.
     pub fn from_session(
         session: Entity<ReviewSession>,
@@ -517,10 +516,7 @@ fn build_file_view(
         build_pane_editor(buffer.clone(), spec.right_fillers, executor.clone(), cx);
     let (_, left_editor) = build_pane_editor(left_buffer.clone(), spec.left_fillers, executor, cx);
 
-    let left_weak = left_editor.downgrade();
-    let right_weak = editor.downgrade();
-    editor.update(cx, |ed, _| ed.link_scroll(left_weak));
-    left_editor.update(cx, |ed, _| ed.link_scroll(right_weak));
+    link_scroll_group(&[&editor, &left_editor], cx);
 
     ReviewFileView {
         rel_path: spec.rel_path,
@@ -531,41 +527,6 @@ fn build_file_view(
         left_buffer,
         header: spec.header,
     }
-}
-
-/// Build a single review pane: a singleton [`MultiBuffer`] over `buffer`
-/// padded with `fillers` spacer blocks. The singleton (no excerpts) keeps the
-/// editor's tree-sitter syntax overlay active.
-fn build_pane_editor(
-    buffer: Entity<Buffer>,
-    fillers: Vec<BlockProperties>,
-    executor: Executor,
-    cx: &mut Context<'_, ReviewItem>,
-) -> (Entity<MultiBuffer>, Entity<Editor>) {
-    let multi_buffer = {
-        let buffer = buffer.clone();
-        cx.new(|cx| MultiBuffer::singleton(buffer, cx))
-    };
-    let display_map = {
-        let buffer = buffer.clone();
-        cx.new(|cx| DisplayMap::new(buffer, executor, cx))
-    };
-    let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
-
-    if !fillers.is_empty() {
-        display_map.update(cx, |dm, cx| dm.insert_blocks(fillers, cx));
-    }
-
-    let editor = cx.new(|cx| {
-        Editor::new(
-            multi_buffer.clone(),
-            display_map,
-            diff_map,
-            EditorMode::full(),
-            cx,
-        )
-    });
-    (multi_buffer, editor)
 }
 
 /// Which diff highlight a span carries. The theme scope is resolved from this
