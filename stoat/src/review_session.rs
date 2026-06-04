@@ -417,14 +417,6 @@ pub enum ReviewOrigin {
     FromRebaseEdit,
 }
 
-// FIXME: Per-chunk Staged/Unstaged/Skipped status not persisted across
-// workspace save/load. [`ReviewChunkId`] is allocated fresh per session, so we
-// cannot simply serialize the HashMap keyed on it. Resolution: assign each
-// chunk a stable fingerprint (e.g. blake3 of pre+post content + base line
-// range) at chunk-creation time, persist a
-// `HashMap<ChunkFingerprint, ChunkStatus>`, and re-key on load. Chunks whose
-// fingerprint no longer matches (underlying file changed externally) degrade
-// to `Pending`.
 #[derive(Clone)]
 pub struct ReviewSession {
     pub source: ReviewSource,

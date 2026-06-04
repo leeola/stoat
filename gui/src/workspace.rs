@@ -66,7 +66,7 @@ use stoat::{
     rebase::{ActiveRebase, RebaseEntry, RebasePause},
     review::{ReviewFileInput, ReviewRow},
     review_apply::remove_chunks_from_buffer,
-    review_session::{build_chunk_patch, ChunkStatus, ReviewSource},
+    review_session::{build_chunk_patch, ChunkFingerprint, ChunkStatus, ReviewSource},
 };
 use stoat_action::ActionKind;
 use stoat_config::LineNumberMode;
@@ -1221,6 +1221,35 @@ impl Workspace {
                         }
                         pane.update(cx, |p, cx| {
                             p.add_item(Box::new(editor), cx);
+                        });
+                        materialized += 1;
+                    },
+                    crate::item::ItemKind::Review => {
+                        let Some(persist) =
+                            crate::review_item::review_persist_from_blob(&snap.blob)
+                        else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping review item with unparseable blob during restore"
+                            );
+                            continue;
+                        };
+                        let source = crate::review_item::source_from_persist(persist.source);
+                        let statuses: HashMap<ChunkFingerprint, ChunkStatus> =
+                            persist.statuses.into_iter().collect();
+                        let approvals: HashMap<ChunkFingerprint, bool> =
+                            persist.approvals.into_iter().map(|fp| (fp, true)).collect();
+                        let Some(review) =
+                            self.build_review_item(source, &statuses, &approvals, cx)
+                        else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping review item with no reviewable content during restore"
+                            );
+                            continue;
+                        };
+                        pane.update(cx, |p, cx| {
+                            p.add_item(Box::new(review), cx);
                         });
                         materialized += 1;
                     },
@@ -6354,31 +6383,54 @@ impl Workspace {
         action_label: &'static str,
         cx: &mut Context<'_, Self>,
     ) {
+        let Some(review_item) =
+            self.build_review_item(source, &HashMap::new(), &HashMap::new(), cx)
+        else {
+            tracing::warn!(
+                action = action_label,
+                "no reviewable content for review source"
+            );
+            return;
+        };
+        self.open_item(Box::new(review_item), cx);
+    }
+
+    /// Build a review item for `source`, re-applying the persisted
+    /// per-chunk `statuses` and `approvals` (keyed by [`ChunkFingerprint`])
+    /// onto the freshly-scanned chunks. Returns `None` when the source
+    /// yields no inputs or no diff hunks. Shared by the `OpenReview*` open
+    /// path (which passes empty decision maps) and workspace restore (which
+    /// passes the decisions parsed from the persisted blob).
+    fn build_review_item(
+        &mut self,
+        source: ReviewSource,
+        statuses: &HashMap<ChunkFingerprint, ChunkStatus>,
+        approvals: &HashMap<ChunkFingerprint, bool>,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Entity<crate::review_item::ReviewItem>> {
         let mut inner_session = stoat::review_session::ReviewSession::new(source.clone());
         if let ReviewSource::Branch { workdir, base } = &source {
             populate_branch_session(&mut inner_session, workdir, base.as_deref(), cx);
         } else {
             let inputs = review_inputs_for_source(&source, cx);
             if inputs.is_empty() {
-                tracing::warn!(
-                    action = action_label,
-                    "no inputs returned for review source"
-                );
-                return;
+                return None;
             }
             inner_session.add_files(inputs);
         }
         if inner_session.order.is_empty() {
-            tracing::warn!(action = action_label, "no diff hunks to display");
-            return;
+            return None;
         }
+        inner_session.apply_statuses(statuses);
+        inner_session.apply_approvals(approvals);
 
         let session = cx.new(|_| crate::review_session::ReviewSession::new(inner_session));
         let buffer_registry = self.buffer_registry.clone();
-        let review_item = cx
-            .new(|cx| crate::review_item::ReviewItem::from_session(session, &buffer_registry, cx));
-
-        self.open_item(Box::new(review_item), cx);
+        Some(
+            cx.new(|cx| {
+                crate::review_item::ReviewItem::from_session(session, &buffer_registry, cx)
+            }),
+        )
     }
 
     /// Add `item` as a new tab in the focused pane and activate it.
@@ -16531,6 +16583,96 @@ mod tests {
                     PathBuf::from("/tmp/repo/foo.rs"),
                 ]
             );
+        });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_review_chunk_decisions() {
+        use stoat::host::{fake::FakeGit, GitHost};
+
+        fn review_item_in(
+            ws: &Entity<Workspace>,
+            vcx: &mut VisualTestContext,
+        ) -> Entity<crate::review_item::ReviewItem> {
+            ws.read_with(vcx, |w, cx| {
+                for id in w.pane_tree().read(cx).split_pane_ids() {
+                    let pane = w
+                        .pane_tree()
+                        .read(cx)
+                        .pane(id)
+                        .expect("pane present")
+                        .read(cx);
+                    for item in pane.items() {
+                        if let Ok(review) = item
+                            .to_any_view()
+                            .downcast::<crate::review_item::ReviewItem>()
+                        {
+                            return review;
+                        }
+                    }
+                }
+                panic!("workspace has no review item");
+            })
+        }
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        git.add_repo("/repo")
+            .commit("c0", &[("a.rs", "v0\n")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "v1\n")]);
+        install_globals_with_fs(&mut cx, fs.clone());
+        cx.update(|cx| {
+            cx.set_global(crate::globals::GitHostGlobal(
+                git.clone() as Arc<dyn GitHost>
+            ));
+            cx.set_global(crate::globals::LanguageRegistry::standard());
+        });
+
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_review_source(
+                ReviewSource::Commit {
+                    workdir: PathBuf::from("/repo"),
+                    sha: "c1".to_string(),
+                },
+                "test",
+                cx,
+            );
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+
+        let session = review_item_in(&ws, vcx).read_with(vcx, |item, _| item.session().clone());
+        let id = session.read_with(vcx, |s, _| s.inner().order[0]);
+        session.update(vcx, |s, cx| {
+            s.set_status(id, ChunkStatus::Staged, cx);
+            s.set_approved(id, true, cx);
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/review.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        review_item_in(&fresh_ws, vcx2).read_with(vcx2, |item, cx| {
+            let inner = item.session().read(cx).inner();
+            let id = inner.order[0];
+            let chunk = &inner.chunks[&id];
+            assert_eq!(
+                chunk.status,
+                ChunkStatus::Staged,
+                "staged status must survive save/restore",
+            );
+            assert!(chunk.approved, "approval must survive save/restore");
         });
     }
 

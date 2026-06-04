@@ -404,7 +404,7 @@ impl Render for ReviewItem {
 /// blob. The ephemeral sources (agent edits, in-memory) cannot be
 /// reconstructed across a restart and are not represented.
 #[derive(Serialize, Deserialize)]
-enum ReviewSourcePersist {
+pub(crate) enum ReviewSourcePersist {
     WorkingTree {
         workdir: PathBuf,
     },
@@ -437,10 +437,10 @@ enum ReviewSourcePersist {
 /// scanned chunks on restore. Decisions are stored as `Vec` because a JSON
 /// map cannot have a non-string key.
 #[derive(Serialize, Deserialize)]
-struct ReviewPersist {
-    source: ReviewSourcePersist,
-    statuses: Vec<(ChunkFingerprint, ChunkStatus)>,
-    approvals: Vec<ChunkFingerprint>,
+pub(crate) struct ReviewPersist {
+    pub(crate) source: ReviewSourcePersist,
+    pub(crate) statuses: Vec<(ChunkFingerprint, ChunkStatus)>,
+    pub(crate) approvals: Vec<ChunkFingerprint>,
 }
 
 /// Re-scannable sources map to `Some`; ephemeral sources to `None`.
@@ -473,6 +473,33 @@ fn source_to_persist(source: &ReviewSource) -> Option<ReviewSourcePersist> {
         },
         ReviewSource::AgentEdits { .. } | ReviewSource::InMemory { .. } => return None,
     })
+}
+
+/// Reconstruct a re-scannable [`ReviewSource`] from its persisted form.
+/// Inverse of [`source_to_persist`].
+pub(crate) fn source_from_persist(persist: ReviewSourcePersist) -> ReviewSource {
+    match persist {
+        ReviewSourcePersist::WorkingTree { workdir } => ReviewSource::WorkingTree { workdir },
+        ReviewSourcePersist::WorkingTreeUnstaged { workdir } => {
+            ReviewSource::WorkingTreeUnstaged { workdir }
+        },
+        ReviewSourcePersist::WorkingTreeStaged { workdir } => {
+            ReviewSource::WorkingTreeStaged { workdir }
+        },
+        ReviewSourcePersist::WorkspaceWatch { workdir } => ReviewSource::WorkspaceWatch { workdir },
+        ReviewSourcePersist::Commit { workdir, sha } => ReviewSource::Commit { workdir, sha },
+        ReviewSourcePersist::CommitRange { workdir, from, to } => {
+            ReviewSource::CommitRange { workdir, from, to }
+        },
+        ReviewSourcePersist::Branch { workdir, base } => ReviewSource::Branch { workdir, base },
+    }
+}
+
+/// Parse a persisted [`ReviewPersist`] out of a pane item's serialized
+/// blob, returning `None` when the blob is absent or its shape does not
+/// match (e.g. the `Value::Null` an ephemeral source serializes to).
+pub(crate) fn review_persist_from_blob(blob: &Value) -> Option<ReviewPersist> {
+    serde_json::from_value(blob.clone()).ok()
 }
 
 impl ItemView for ReviewItem {
@@ -716,6 +743,36 @@ mod tests {
         });
         let blob = item.read_with(&cx, |item, app| item.serialize(app));
         assert_eq!(blob, Value::Null);
+    }
+
+    #[test]
+    fn persist_round_trips_source_through_blob() {
+        let original = ReviewSource::CommitRange {
+            workdir: PathBuf::from("/repo"),
+            from: "1111111".to_string(),
+            to: "2222222".to_string(),
+        };
+        let blob = serde_json::to_value(ReviewPersist {
+            source: source_to_persist(&original).expect("rescannable source persists"),
+            statuses: Vec::new(),
+            approvals: Vec::new(),
+        })
+        .expect("persist serializes");
+
+        let restored = review_persist_from_blob(&blob).expect("blob parses");
+        match source_from_persist(restored.source) {
+            ReviewSource::CommitRange { workdir, from, to } => {
+                assert_eq!(workdir, PathBuf::from("/repo"));
+                assert_eq!(from, "1111111");
+                assert_eq!(to, "2222222");
+            },
+            other => panic!("expected CommitRange, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn review_persist_from_blob_is_none_for_null() {
+        assert!(review_persist_from_blob(&Value::Null).is_none());
     }
 
     fn new_item(cx: &mut TestAppContext, source: ReviewSource) -> Entity<ReviewItem> {
