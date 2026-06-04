@@ -45,9 +45,9 @@ use crate::{
             SplitSelectionOnNewline, SurroundAdd, SurroundDelete, SurroundReplace, SwitchCase,
             SwitchToLowercase, SwitchToUppercase, TillNextChar, TillPrevChar, ToggleBlame,
             ToggleComments, ToggleDiffHunkPanel, ToggleInlineBlame, ToggleMinimap,
-            ToggleRelativeLineNumbers, ToggleTabBar, TriggerCompletion, TrimSelections, Undo,
-            UnfoldAll, UnfoldAtCursor, UnindentSelection, Yank, YankMainToClipboard,
-            YankToClipboard,
+            ToggleRelativeLineNumbers, ToggleReplaceInGlobalSearch, ToggleTabBar,
+            TriggerCompletion, TrimSelections, Undo, UnfoldAll, UnfoldAtCursor, UnindentSelection,
+            Yank, YankMainToClipboard, YankToClipboard,
         },
         encoding::OpenEncodingPicker,
         file::OpenFile,
@@ -411,6 +411,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenWorkspaceDiagnosticsPicker))
     });
     add(OpenGlobalSearch::DEF, |_| Ok(Box::new(OpenGlobalSearch)));
+    add(ToggleReplaceInGlobalSearch::DEF, |_| {
+        Ok(Box::new(ToggleReplaceInGlobalSearch))
+    });
     add(SplitSelection::DEF, |_| Ok(Box::new(SplitSelection)));
     add(KeepSelections::DEF, |_| Ok(Box::new(KeepSelections)));
     add(RemoveSelections::DEF, |_| Ok(Box::new(RemoveSelections)));
@@ -1132,6 +1135,7 @@ mod tests {
         // + 1 OpenDiagnosticsPicker.
         // + 1 OpenWorkspaceDiagnosticsPicker.
         // + 1 OpenGlobalSearch.
+        // + 1 ToggleReplaceInGlobalSearch (global-search replace input toggle).
         // + 1 SplitSelection.
         // + 2 KeepSelections / RemoveSelections.
         // + 2 RecordMacro / ReplayMacro.
@@ -1224,7 +1228,7 @@ mod tests {
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
         // + 1 OpenEncodingPicker (status-bar encoding picker).
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
-        assert_eq!(all().count(), 343);
+        assert_eq!(all().count(), 344);
     }
 
     #[test]

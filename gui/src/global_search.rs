@@ -22,8 +22,8 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, Context, DismissEvent, Entity, IntoElement, ParentElement, Styled, Task,
-    WeakEntity, Window,
+    div, AnyElement, AppContext, Context, DismissEvent, Entity, IntoElement, ParentElement, Styled,
+    Task, WeakEntity, Window,
 };
 use std::{
     path::{Path, PathBuf},
@@ -33,6 +33,7 @@ use stoat::{
     global_search::{perform_search, SearchMatch},
     host::FsHost,
 };
+use stoat_action::{Action, ActionKind};
 use stoat_scheduler::Executor;
 use stoat_text::{Bias, Selection, SelectionGoal};
 
@@ -50,6 +51,13 @@ pub struct GlobalSearchDelegate {
     /// scans -- typical when the user types faster than scans
     /// complete -- are discarded.
     query_version: u64,
+    /// When `true`, the replace input is shown below the query and
+    /// receives typed text, and each match row previews the
+    /// replacement. Toggled by [`ActionKind::ToggleReplaceInGlobalSearch`].
+    replace_active: bool,
+    /// Single-line editor holding the replacement pattern. Created
+    /// lazily the first time replace mode is toggled on.
+    replace_editor: Option<Entity<Editor>>,
 }
 
 impl GlobalSearchDelegate {
@@ -67,7 +75,22 @@ impl GlobalSearchDelegate {
             entries: Vec::new(),
             selected: 0,
             query_version: 0,
+            replace_active: false,
+            replace_editor: None,
         }
+    }
+
+    fn replace_text(&self, cx: &Context<'_, Picker<Self>>) -> String {
+        let Some(editor) = self.replace_editor.as_ref() else {
+            return String::new();
+        };
+        editor
+            .read(cx)
+            .multi_buffer()
+            .read(cx)
+            .as_singleton()
+            .map(|b| b.read(cx).text())
+            .unwrap_or_default()
     }
 
     fn selected_entry(&self) -> Option<&SearchMatch> {
@@ -159,6 +182,58 @@ impl PickerDelegate for GlobalSearchDelegate {
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
+    fn handle_action(
+        &mut self,
+        action: &dyn Action,
+        window: &mut Window,
+        cx: &mut Context<'_, Picker<Self>>,
+    ) -> bool {
+        if action.kind() != ActionKind::ToggleReplaceInGlobalSearch {
+            return false;
+        }
+        self.replace_active = !self.replace_active;
+        if self.replace_active && self.replace_editor.is_none() {
+            self.replace_editor = Some(cx.new(|cx| Editor::single_line(window, cx)));
+        }
+        // The modal observer re-resolves the active text-input target
+        // only on a modal-layer notification, which a delegate-internal
+        // toggle does not raise. Notify it (deferred past the dispatch
+        // lease) so input re-points to the replace editor, or back to the
+        // query editor when toggled off.
+        let workspace = self.workspace.clone();
+        window.defer(cx, move |_window, cx| {
+            if let Some(workspace) = workspace.upgrade() {
+                workspace.update(cx, |w, cx| {
+                    w.modal_layer().update(cx, |_, cx| cx.notify());
+                });
+            }
+        });
+        cx.notify();
+        true
+    }
+
+    fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
+        if self.replace_active {
+            self.replace_editor.as_ref().map(Entity::downgrade)
+        } else {
+            None
+        }
+    }
+
+    fn render_header(&self, cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        if !self.replace_active {
+            return None;
+        }
+        let editor = self.replace_editor.as_ref()?;
+        Some(
+            div()
+                .border_t_1()
+                .border_color(cx.theme().border_inactive)
+                .child(editor.clone())
+                .into_any_element(),
+        )
+    }
+
     fn render_match(
         &self,
         ix: usize,
@@ -170,7 +245,24 @@ impl PickerDelegate for GlobalSearchDelegate {
         };
         let display = render_row(entry, &self.git_root);
         let color = cx.theme().statusbar_text;
-        let mut row = div().px_2().text_color(color).child(display);
+        let mut row = div().px_2().text_color(color);
+        if self.replace_active {
+            let replacement = self.replace_text(cx);
+            row = row
+                .flex()
+                .flex_row()
+                .items_center()
+                .child(div().flex_grow().min_w_0().child(display))
+                .child(
+                    div()
+                        .flex_none()
+                        .px_2()
+                        .text_color(cx.theme().muted_text)
+                        .child(replacement),
+                );
+        } else {
+            row = row.child(display);
+        }
         if selected {
             row = row.bg(cx.theme().modal_selection);
         }
@@ -388,6 +480,86 @@ mod tests {
             "global_search_open should clear after the picker closes"
         );
         assert_eq!(mode, "normal", "mode should restore to the prior value");
+    }
+
+    #[test]
+    fn toggle_activates_replace_and_repoints_input() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_global_search(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<GlobalSearchDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("global search picker is open");
+
+        assert!(
+            !picker.read_with(h.vcx, |p, _| p.delegate().replace_active),
+            "replace inactive before toggle"
+        );
+
+        picker.update_in(h.vcx, |p, window, cx| {
+            p.handle_action(&stoat_action::ToggleReplaceInGlobalSearch, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let (active, replace_id) = picker.read_with(h.vcx, |p, _| {
+            (
+                p.delegate().replace_active,
+                p.delegate().replace_editor.as_ref().map(|e| e.entity_id()),
+            )
+        });
+        assert!(active, "replace active after toggle");
+        assert!(replace_id.is_some(), "replace editor created on activate");
+
+        let active_editor_id = h.workspace.read_with(h.vcx, |w, cx| {
+            w.input_state_machine()
+                .read(cx)
+                .active_editor()
+                .map(|e| e.entity_id())
+        });
+        assert_eq!(
+            active_editor_id, replace_id,
+            "typed text routes to the replace editor while replace mode is active"
+        );
+    }
+
+    #[test]
+    fn toggle_twice_deactivates_replace() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_global_search(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<GlobalSearchDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("global search picker is open");
+
+        for _ in 0..2 {
+            picker.update_in(h.vcx, |p, window, cx| {
+                p.handle_action(&stoat_action::ToggleReplaceInGlobalSearch, window, cx);
+            });
+            h.vcx.run_until_parked();
+        }
+
+        assert!(
+            !picker.read_with(h.vcx, |p, _| p.delegate().replace_active),
+            "replace inactive after toggling twice"
+        );
+        assert!(
+            picker.read_with(h.vcx, |p, _| p.delegate().text_input_editor().is_none()),
+            "text_input_editor falls back to the query editor when replace is off"
+        );
     }
 
     #[test]

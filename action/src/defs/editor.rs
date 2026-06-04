@@ -661,6 +661,16 @@ define_action!(
 );
 
 define_action!(
+    ToggleReplaceInGlobalSearchDef,
+    ToggleReplaceInGlobalSearch,
+    "ToggleReplaceInGlobalSearch",
+    ActionKind::ToggleReplaceInGlobalSearch,
+    "toggle the global-search replace input",
+    "Show or hide the replace input below the global-search query. While visible, typed text edits the replacement pattern and each match row previews it; hide it to return typing to the search query.",
+    ActionPriority::Common
+);
+
+define_action!(
     SplitSelectionDef,
     SplitSelection,
     "SplitSelection",

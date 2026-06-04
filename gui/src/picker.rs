@@ -298,7 +298,9 @@ impl<D: PickerDelegate> ModalView for Picker<D> {
     }
 
     fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
-        Some(self.query_editor.downgrade())
+        self.delegate
+            .text_input_editor()
+            .or_else(|| Some(self.query_editor.downgrade()))
     }
 }
 

@@ -1,5 +1,5 @@
 use crate::{editor::Editor, picker::Picker};
-use gpui::{AnyElement, Context, Entity, SharedString, Task, Window};
+use gpui::{AnyElement, Context, Entity, SharedString, Task, WeakEntity, Window};
 use stoat_action::Action;
 
 /// Confirmation modifier carried by [`PickerDelegate::confirm`].
@@ -70,6 +70,16 @@ pub trait PickerDelegate: Sized + 'static {
         _cx: &mut Context<'_, Picker<Self>>,
     ) -> bool {
         false
+    }
+
+    /// The editor that should receive typed text while this picker is
+    /// the active modal, overriding the picker's query editor. Default
+    /// `None` keeps the query editor as the sole input target.
+    /// Delegates with a secondary input (e.g. a replace field) return
+    /// it here while that field is active so the workspace routes
+    /// keystrokes there exclusively.
+    fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
+        None
     }
 
     /// Render an optional preview pane next to the picker's result

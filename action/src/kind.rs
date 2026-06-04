@@ -76,6 +76,7 @@ pub enum ActionKind {
     OpenWorkspaceDiagnosticsPicker,
     OpenLastPicker,
     OpenGlobalSearch,
+    ToggleReplaceInGlobalSearch,
     SplitSelection,
     KeepSelections,
     RemoveSelections,
