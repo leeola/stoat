@@ -340,6 +340,57 @@ mod tests {
     }
 
     #[test]
+    fn opening_global_search_sets_prompt_mode() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_global_search(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let (open, mode) = h.workspace.read_with(h.vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.global_search_open(), sm.mode().to_string())
+        });
+        assert!(
+            open,
+            "global_search_open should be set while the picker is the active modal"
+        );
+        assert_eq!(
+            mode, "prompt",
+            "mode should be prompt while global search is active"
+        );
+    }
+
+    #[test]
+    fn closing_global_search_restores_mode() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_global_search(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_global_search(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let (open, mode) = h.workspace.read_with(h.vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.global_search_open(), sm.mode().to_string())
+        });
+        assert!(
+            !open,
+            "global_search_open should clear after the picker closes"
+        );
+        assert_eq!(mode, "normal", "mode should restore to the prior value");
+    }
+
+    #[test]
     fn typing_query_populates_entries_from_scan() {
         let mut cx = TestAppContext::single();
         let fake_fs = fake_fs_with_files(&[
