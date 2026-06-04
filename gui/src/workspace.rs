@@ -4936,16 +4936,20 @@ impl Workspace {
                 .inner()
                 .chunks
                 .get(&new_id)
-                .map(|chunk| (chunk.file_index, chunk.buffer_line_range.start));
-            let Some((file_index, buffer_row)) = target else {
+                .map(|chunk| (chunk.file_index, chunk.buffer_byte_range.start));
+            let Some((file_index, offset)) = target else {
                 return;
             };
             let Some(file) = item.files().get(file_index) else {
                 return;
             };
             let editor = file.editor.clone();
+            // Drive the chunk jump through the normal go-to/jumplist path so the
+            // prior position is recorded for Ctrl-O / Ctrl-I and the jumplist
+            // picker, rather than a bespoke cursor-move.
             editor.update(cx, |ed, cx| {
-                ed.set_cursor_at_buffer_row(buffer_row, cx);
+                ed.handle_save_selection(cx);
+                ed.jump_to_offset(offset, cx);
                 ed.request_autoscroll(
                     crate::editor::scroll::autoscroll::AutoscrollStrategy::Center,
                     cx,
@@ -12535,6 +12539,27 @@ mod tests {
         let editor = editor_for_file(vcx, &item, 0);
         let cursor_row = editor_cursor_buffer_row(vcx, &editor);
         assert_eq!(cursor_row, target_row);
+    }
+
+    #[test]
+    fn dispatch_review_next_chunk_records_jumplist_entry() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = new_two_chunk_review_session(vcx);
+        let item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+        let editor = editor_for_file(vcx, &item, 0);
+        assert!(
+            editor.read_with(vcx, |ed, _| ed.jumplist().entries().is_empty()),
+            "the jumplist starts empty",
+        );
+
+        dispatch(&ws, vcx, stoat_action::ReviewNextChunk);
+        vcx.run_until_parked();
+
+        assert!(
+            !editor.read_with(vcx, |ed, _| ed.jumplist().entries().is_empty()),
+            "stepping to the next chunk records the prior position on the jumplist",
+        );
     }
 
     #[test]
