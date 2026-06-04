@@ -303,6 +303,12 @@ impl GitRepo for LocalGitRepo {
         out
     }
 
+    fn resolve_ref(&self, name: &str) -> Option<String> {
+        let repo = self.repo.lock().expect("git repo lock");
+        let commit = repo.revparse_single(name).ok()?.peel_to_commit().ok()?;
+        Some(commit.id().to_string())
+    }
+
     fn amend_head(
         &self,
         tree: &BTreeMap<PathBuf, String>,

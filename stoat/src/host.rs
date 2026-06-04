@@ -41,9 +41,9 @@ pub use fake::{
     FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp, FakeLspHost, FakeRepoBuilder,
 };
 pub use git::{
-    BlameLine, ChangedFile, CherryPickOutcome, CommitFileChange, CommitFileChangeKind, CommitInfo,
-    ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo, RebaseError, RebaseTodo,
-    RebaseTodoOp, RewriteResult,
+    resolve_review_base, BlameLine, ChangedFile, CherryPickOutcome, CommitFileChange,
+    CommitFileChangeKind, CommitInfo, ConflictedFile, DiffStatus, GitApplyError, GitHost, GitRepo,
+    RebaseError, RebaseTodo, RebaseTodoOp, RewriteResult,
 };
 pub use local::{LocalClipboard, LocalGit, LocalLspHost, LocalTerminalHost};
 pub use lsp::{

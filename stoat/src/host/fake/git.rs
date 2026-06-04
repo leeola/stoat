@@ -628,6 +628,22 @@ impl<'a> FakeRepoBuilder<'a> {
         self
     }
 
+    /// Seed a named ref (branch or tag) pointing at `sha`, resolvable via
+    /// [`GitRepo::resolve_ref`].
+    pub fn branch(&mut self, name: &str, sha: &str) -> &mut Self {
+        let name = name.to_string();
+        let sha = sha.to_string();
+        self.mutate_repo(|state| {
+            state.refs.insert(name, sha);
+        });
+        self
+    }
+
+    /// Seed HEAD's upstream (`@{upstream}`) pointing at `sha`.
+    pub fn upstream(&mut self, sha: &str) -> &mut Self {
+        self.branch("@{upstream}", sha)
+    }
+
     /// Program the repo to return `Err(GitApplyError::Backend(message))`
     /// for every subsequent call to [`GitRepo::apply_to_index`] until
     /// [`Self::clear_apply_failure`] is called. The failing calls still
@@ -704,6 +720,10 @@ struct FakeRepoState {
     /// The tip of the simulated branch. Defaults to the last inserted
     /// commit, overridable via [`FakeRepoBuilder::set_head`].
     head: Option<String>,
+    /// Named refs (branches, tags, and `@{upstream}`) keyed by spec,
+    /// seeded via [`FakeRepoBuilder::branch`] / [`FakeRepoBuilder::upstream`]
+    /// and resolved by [`GitRepo::resolve_ref`].
+    refs: HashMap<String, String>,
     /// When set, rewrite/rebase calls that touch this sha return a
     /// conflict error without mutating state. Used by error-path tests.
     conflict_at: Option<String>,
@@ -932,6 +952,17 @@ impl GitRepo for FakeGitRepo {
         }
         out.reverse();
         out
+    }
+
+    fn resolve_ref(&self, name: &str) -> Option<String> {
+        let state = self.state.lock().unwrap();
+        if name == "HEAD" {
+            return state.head.clone();
+        }
+        if let Some(sha) = state.refs.get(name) {
+            return Some(sha.clone());
+        }
+        state.commits.contains_key(name).then(|| name.to_string())
     }
 
     fn amend_head(
@@ -1565,6 +1596,77 @@ mod tests {
         assert_eq!(repo.merge_base("c0", "c2").as_deref(), Some("c0"));
         assert_eq!(repo.merge_base("c2", "c2").as_deref(), Some("c2"));
         assert!(repo.merge_base("c1", "missing").is_none());
+    }
+
+    #[test]
+    fn resolve_ref_resolves_head_named_refs_and_shas() {
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("c0", &[("a.rs", "v0")])
+            .commit_with_parent("c1", "c0", &[("a.rs", "v1")])
+            .branch("main", "c0")
+            .upstream("c1");
+        let repo = host.discover(&workdir()).unwrap();
+
+        assert_eq!(repo.resolve_ref("HEAD").as_deref(), Some("c1"));
+        assert_eq!(repo.resolve_ref("main").as_deref(), Some("c0"));
+        assert_eq!(repo.resolve_ref("@{upstream}").as_deref(), Some("c1"));
+        assert_eq!(repo.resolve_ref("c0").as_deref(), Some("c0"));
+        assert!(repo.resolve_ref("nope").is_none());
+    }
+
+    #[test]
+    fn resolve_review_base_explicit_and_default_branch() {
+        use crate::host::resolve_review_base;
+        let host = FakeGit::new();
+        host.add_repo(workdir())
+            .commit("base", &[("a.rs", "v0")])
+            .commit_with_parent("tip", "base", &[("a.rs", "v1")])
+            .branch("main", "base");
+        let repo = host.discover(&workdir()).unwrap();
+
+        // An explicit ref is used directly, bypassing detection.
+        assert_eq!(
+            resolve_review_base(repo.as_ref(), Some("tip")).as_deref(),
+            Some("tip")
+        );
+        // Default base = merge-base(HEAD=tip, main=base) = base.
+        assert_eq!(
+            resolve_review_base(repo.as_ref(), None).as_deref(),
+            Some("base")
+        );
+    }
+
+    #[test]
+    fn resolve_review_base_falls_back_master_then_upstream() {
+        use crate::host::resolve_review_base;
+
+        let master = FakeGit::new();
+        master
+            .add_repo(workdir())
+            .commit("base", &[("a.rs", "v0")])
+            .commit_with_parent("tip", "base", &[("a.rs", "v1")])
+            .branch("master", "base");
+        assert_eq!(
+            resolve_review_base(master.discover(&workdir()).unwrap().as_ref(), None).as_deref(),
+            Some("base")
+        );
+
+        let upstream = FakeGit::new();
+        upstream
+            .add_repo(workdir())
+            .commit("base", &[("a.rs", "v0")])
+            .commit_with_parent("tip", "base", &[("a.rs", "v1")])
+            .upstream("base");
+        assert_eq!(
+            resolve_review_base(upstream.discover(&workdir()).unwrap().as_ref(), None).as_deref(),
+            Some("base")
+        );
+
+        // No main/master/upstream: nothing to resolve.
+        let bare = FakeGit::new();
+        bare.add_repo(workdir()).commit("base", &[("a.rs", "v0")]);
+        assert!(resolve_review_base(bare.discover(&workdir()).unwrap().as_ref(), None).is_none());
     }
 
     #[test]

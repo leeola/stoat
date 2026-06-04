@@ -289,6 +289,12 @@ pub trait GitRepo: Send + Sync {
     /// ancestor.
     fn branch_commits(&self, base: &str) -> Vec<CommitInfo>;
 
+    /// Resolve a revision spec -- a branch or tag name, full or
+    /// abbreviated sha, `HEAD`, or `@{upstream}` -- to the full sha of
+    /// the commit it names. `None` when the spec does not resolve
+    /// (unknown ref, orphan `HEAD`, no upstream).
+    fn resolve_ref(&self, name: &str) -> Option<String>;
+
     /// Per-file summary of what changed between `sha` and its first
     /// parent (empty tree for a root commit). Lighter than building a
     /// full review: the left pane of the commit list renders these
@@ -390,4 +396,28 @@ pub trait GitRepo: Send + Sync {
     /// `Err(GitApplyError::Backend(..))` when the sha is unknown or
     /// the checkout fails.
     fn restore_tree(&self, sha: &str) -> Result<(), GitApplyError>;
+}
+
+/// Resolve the base commit a branch review diffs against. An explicit
+/// `base` ref is resolved via [`GitRepo::resolve_ref`] and used directly
+/// (bypassing detection -- the configurable case); otherwise HEAD is
+/// merge-based against the repo's default branch: the first of `main`,
+/// `master`, or HEAD's upstream (`@{upstream}`) that resolves. `None` on
+/// an orphan HEAD, an unknown explicit ref, or when no default branch is
+/// detectable.
+///
+/// The explicit ref is used as-is rather than merge-based; this is
+/// observationally equivalent at the review layer because
+/// [`GitRepo::branch_commits`] re-derives the merge-base from whatever
+/// base it is handed.
+pub fn resolve_review_base(repo: &dyn GitRepo, base: Option<&str>) -> Option<String> {
+    if let Some(explicit) = base {
+        return repo.resolve_ref(explicit);
+    }
+    let head = repo.resolve_ref("HEAD")?;
+    let default = repo
+        .resolve_ref("main")
+        .or_else(|| repo.resolve_ref("master"))
+        .or_else(|| repo.resolve_ref("@{upstream}"))?;
+    repo.merge_base(&head, &default)
 }
