@@ -740,6 +740,7 @@ on key {
         Enter -> ProjectTreeConfirm();
         R -> ProjectTreeRefresh();
         d-d -> DeleteTreeEntry();
+        r -> RenameTreeEntry();
         : -> OpenCommandPalette();
     }
 }

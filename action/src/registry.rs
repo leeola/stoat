@@ -79,7 +79,7 @@ use crate::{
         },
         project_tree::{
             DeleteTreeEntry, ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand,
-            ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev,
+            ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev, RenameTreeEntry,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
@@ -767,6 +767,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(ProjectTreeRefresh))
     });
     add(DeleteTreeEntry::DEF, |_| Ok(Box::new(DeleteTreeEntry)));
+    add(RenameTreeEntry::DEF, |_| Ok(Box::new(RenameTreeEntry)));
     add(RenameWorkspace::DEF, |params| {
         let raw = match params.first() {
             Some(p) => p.as_string().context(WrongKindSnafu {
@@ -1210,6 +1211,7 @@ mod tests {
         // + 1 OpenMarkdownPreview (split-pane rendered markdown preview).
         // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
         //   routed to the focused project tree dock.
+        // + 1 RenameTreeEntry (inline project-tree rename).
         // + 1 OpenReviewWatch (workspace-watch review session).
         // + 1 OpenAbout (build info modal).
         // + 2 ReviewApproveHunk / ReviewToggleApproval.
@@ -1233,7 +1235,7 @@ mod tests {
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
         // + 1 OpenEncodingPicker (status-bar encoding picker).
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
-        assert_eq!(all().count(), 345);
+        assert_eq!(all().count(), 346);
     }
 
     #[test]

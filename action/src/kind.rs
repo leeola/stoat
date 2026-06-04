@@ -328,6 +328,7 @@ pub enum ActionKind {
     ProjectTreeConfirm,
     ProjectTreeRefresh,
     DeleteTreeEntry,
+    RenameTreeEntry,
     SubmitPromptInput,
     CancelPromptInput,
     PromptInsertNewline,

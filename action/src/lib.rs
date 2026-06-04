@@ -81,7 +81,7 @@ pub use defs::{
     },
     project_tree::{
         DeleteTreeEntry, ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand,
-        ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev,
+        ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev, RenameTreeEntry,
     },
     prompt::{
         CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,

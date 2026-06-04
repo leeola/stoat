@@ -342,12 +342,7 @@ impl Workspace {
         );
         let modal_layer_subscription = cx.observe(&modal_layer, |workspace, layer, cx| {
             workspace.refresh_modal_keymap_state(&layer, cx);
-            match layer.read(cx).active_text_input_editor(cx) {
-                Some(editor) => workspace
-                    .input_state_machine
-                    .update(cx, |sm, _| sm.set_active_editor(Some(editor))),
-                None => workspace.broadcast_active_editor(cx),
-            }
+            workspace.refresh_active_text_input(cx);
         });
         let initial_status_item: Option<Box<dyn ItemHandle>> = {
             let tree = pane_tree.read(cx);
@@ -1636,6 +1631,29 @@ impl Workspace {
         SharedString::from(format!("{} -- {}{}", self.name, label, dirty))
     }
 
+    /// Resolve and install the current text-input target into the
+    /// [`InputStateMachine`]'s `active_editor`. Precedence: a project
+    /// tree's in-edit inline rename row, then the active modal's text
+    /// input, then the focused pane editor. Called whenever any of
+    /// those change so typed text and editor edit-actions route to the
+    /// one editor that should receive them.
+    fn refresh_active_text_input(&mut self, cx: &mut Context<'_, Self>) {
+        if let Some(editor) = self
+            .active_project_tree(cx)
+            .and_then(|tree| tree.read(cx).editing_editor())
+        {
+            self.input_state_machine
+                .update(cx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+            return;
+        }
+        match self.modal_layer.read(cx).active_text_input_editor(cx) {
+            Some(editor) => self
+                .input_state_machine
+                .update(cx, |sm, _| sm.set_active_editor(Some(editor))),
+            None => self.broadcast_active_editor(cx),
+        }
+    }
+
     /// Push the focused pane's active editor (if any) into the
     /// [`InputStateMachine`]'s `active_editor` and
     /// `editor_focus_target` slots. The active item is either an
@@ -2465,6 +2483,9 @@ impl Workspace {
             ActionKind::ProjectTreeConfirm => self.dispatch_project_tree_confirm(cx),
             ActionKind::ProjectTreeRefresh => self.update_project_tree(cx, ProjectTree::refresh),
             ActionKind::DeleteTreeEntry => self.dispatch_delete_tree_entry(window, cx),
+            ActionKind::RenameTreeEntry => self.dispatch_rename_tree_entry(window, cx),
+            ActionKind::SubmitPromptInput => self.dispatch_commit_tree_rename(cx),
+            ActionKind::CancelPromptInput => self.dispatch_cancel_tree_rename(cx),
             ActionKind::ToggleDiffHunkPanel => self.dispatch_toggle_diff_hunk_panel(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
@@ -3887,6 +3908,77 @@ impl Workspace {
                 self.show_toast(Toast::error(format!("Delete failed: {err}")), cx);
             },
         }
+    }
+
+    /// Begin an inline rename of the selected project-tree entry: open
+    /// the row editor seeded with the current name, switch to `prompt`
+    /// mode so typed text and editor edit-actions route to it, and
+    /// point the active editor at it. No-op when no tree is active or
+    /// the tree is empty.
+    fn dispatch_rename_tree_entry(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        let Some(tree) = self.active_project_tree(cx) else {
+            return;
+        };
+        if !tree.update(cx, |tree, cx| tree.begin_rename(window, cx)) {
+            return;
+        }
+        self.set_input_mode("prompt", cx);
+        self.refresh_active_text_input(cx);
+    }
+
+    /// Commit the in-progress project-tree rename: rename the entry on
+    /// disk, refresh the tree, and restore `project_tree` mode. A blank
+    /// or unchanged name exits without touching disk. No-op when no
+    /// rename is in progress -- the shared `SubmitPromptInput` binding
+    /// also fires for modal prompts, which the modal layer consumes
+    /// before this point.
+    fn dispatch_commit_tree_rename(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(tree) = self.active_project_tree(cx) else {
+            return;
+        };
+        let Some((old_path, new_name)) = tree.read(cx).rename_target(cx) else {
+            return;
+        };
+        tree.update(cx, |tree, cx| tree.end_rename(cx));
+        self.set_input_mode("project_tree", cx);
+        self.refresh_active_text_input(cx);
+
+        let new_name = new_name.trim();
+        let unchanged = old_path.file_name().and_then(|name| name.to_str()) == Some(new_name);
+        if new_name.is_empty() || unchanged {
+            return;
+        }
+        let Some(parent) = old_path.parent() else {
+            return;
+        };
+        let new_path = parent.join(new_name);
+        let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
+        match fs.rename(&old_path, &new_path) {
+            Ok(()) => {
+                self.show_toast(Toast::success(format!("Renamed to {new_name}")), cx);
+                self.update_project_tree(cx, ProjectTree::refresh);
+            },
+            Err(err) => {
+                self.show_toast(Toast::error(format!("Rename failed: {err}")), cx);
+            },
+        }
+    }
+
+    /// Cancel the in-progress project-tree rename without touching disk,
+    /// restoring `project_tree` mode. No-op when no rename is in
+    /// progress.
+    fn dispatch_cancel_tree_rename(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(tree) = self.active_project_tree(cx) else {
+            return;
+        };
+        if tree.read(cx).editing_editor().is_none() {
+            return;
+        }
+        tree.update(cx, |tree, cx| tree.end_rename(cx));
+        self.set_input_mode("project_tree", cx);
+        self.refresh_active_text_input(cx);
     }
 
     /// Set the input state machine's mode without focus side effects.
@@ -8316,6 +8408,128 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
         vcx.run_until_parked();
         assert_eq!(mode(vcx), "normal", "closing returns to normal mode");
+    }
+
+    fn seed_tree_rename_editor(ws: &Entity<Workspace>, vcx: &mut VisualTestContext, text: &str) {
+        let editor = ws
+            .read_with(vcx, |w, cx| {
+                w.active_project_tree(cx)
+                    .and_then(|tree| tree.read(cx).editing_editor())
+            })
+            .expect("tree has an inline rename editor");
+        let buffer = editor.read_with(vcx, |ed, cx| {
+            ed.multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .expect("single-line editor has singleton buffer")
+                .clone()
+        });
+        buffer.update(vcx, |b, cx| {
+            let len = b.text().len();
+            b.edit(0..len, text, cx);
+        });
+    }
+
+    #[test]
+    fn rename_tree_entry_enters_prompt_mode_with_row_editor_active() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/old.txt", "");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::RenameTreeEntry);
+        vcx.run_until_parked();
+
+        let (mode, active_id, editing_id) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            let active = sm
+                .active_editor()
+                .and_then(|e| e.upgrade())
+                .map(|e| e.entity_id());
+            let editing = w
+                .active_project_tree(cx)
+                .and_then(|tree| tree.read(cx).editing_editor())
+                .map(|e| e.entity_id());
+            (sm.mode().to_string(), active, editing)
+        });
+        assert_eq!(mode, "prompt", "rename enters prompt mode");
+        assert!(editing_id.is_some(), "tree has an inline rename editor");
+        assert_eq!(
+            active_id, editing_id,
+            "the row editor is the sole active text target"
+        );
+    }
+
+    #[test]
+    fn rename_tree_entry_commit_renames_on_disk() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/old.txt", "hi");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::RenameTreeEntry);
+        vcx.run_until_parked();
+        seed_tree_rename_editor(&ws, vcx, "new.txt");
+        dispatch(&ws, vcx, stoat_action::SubmitPromptInput);
+        vcx.run_until_parked();
+
+        assert!(fs.exists(Path::new("/repo/new.txt")), "renamed file exists");
+        assert!(!fs.exists(Path::new("/repo/old.txt")), "old name is gone");
+        let mode = ws.read_with(vcx, |w, cx| {
+            w.input_state_machine().read(cx).mode().to_string()
+        });
+        assert_eq!(mode, "project_tree", "commit restores project_tree mode");
+    }
+
+    #[test]
+    fn rename_tree_entry_cancel_keeps_name_and_restores_mode() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/old.txt", "");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::RenameTreeEntry);
+        vcx.run_until_parked();
+        seed_tree_rename_editor(&ws, vcx, "new.txt");
+        dispatch(&ws, vcx, stoat_action::CancelPromptInput);
+        vcx.run_until_parked();
+
+        assert!(
+            fs.exists(Path::new("/repo/old.txt")),
+            "cancel keeps the original name"
+        );
+        assert!(
+            !fs.exists(Path::new("/repo/new.txt")),
+            "no rename happens on cancel"
+        );
+        let (mode, editing) = ws.read_with(vcx, |w, cx| {
+            (
+                w.input_state_machine().read(cx).mode().to_string(),
+                w.active_project_tree(cx)
+                    .and_then(|tree| tree.read(cx).editing_editor())
+                    .is_some(),
+            )
+        });
+        assert_eq!(mode, "project_tree", "cancel restores project_tree mode");
+        assert!(!editing, "cancel clears the inline editor");
     }
 
     #[test]

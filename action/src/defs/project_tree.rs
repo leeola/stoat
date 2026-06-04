@@ -76,6 +76,18 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    RenameTreeEntryDef,
+    RenameTreeEntry,
+    "RenameTreeEntry",
+    ActionKind::RenameTreeEntry,
+    "rename the selected tree entry",
+    "Edit the selected project-tree entry's name inline, pre-filled with \
+     its current name. Enter renames the file or directory on disk; \
+     Escape cancels.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

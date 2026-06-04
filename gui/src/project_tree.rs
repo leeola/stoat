@@ -13,12 +13,14 @@
 //! external changes while preserving which directories are open.
 
 use crate::{
+    editor::Editor,
     globals::GitHostGlobal,
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     theme::ActiveTheme,
 };
 use gpui::{
-    div, white, App, Context, IntoElement, ParentElement, Render, SharedString, Styled, Window,
+    div, white, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
+    Styled, Window,
 };
 use serde_json::Value;
 use std::{
@@ -62,6 +64,13 @@ struct Row {
     decoration: Option<GitDecoration>,
 }
 
+/// Active inline-rename state: the single-line editor overlaying the
+/// edited row in place of its name label, and the path being renamed.
+struct RenameEdit {
+    editor: Entity<Editor>,
+    path: PathBuf,
+}
+
 pub struct ProjectTree {
     git_root: PathBuf,
     fs: Arc<dyn FsHost>,
@@ -72,6 +81,10 @@ pub struct ProjectTree {
     /// open and on every `refresh`. Ignored-file decorations are not
     /// cached here; they are derived per entry in `rebuild`.
     git_status: HashMap<PathBuf, GitDecoration>,
+    /// `Some` while a row is being renamed inline; drives both the
+    /// row's editor overlay and the workspace's active-text-input
+    /// routing via [`Self::editing_editor`].
+    editing: Option<RenameEdit>,
 }
 
 impl ProjectTree {
@@ -86,6 +99,7 @@ impl ProjectTree {
             rows: Vec::new(),
             selected: 0,
             git_status: HashMap::new(),
+            editing: None,
         };
         tree.recompute_git_status(cx);
         tree.rebuild();
@@ -202,6 +216,53 @@ impl ProjectTree {
             .map(|row| (row.path.clone(), row.name.clone(), row.is_dir))
     }
 
+    /// The editor overlaying the row currently being renamed, if any.
+    /// The workspace routes typed text to it as the sole active editor
+    /// while a rename is in progress.
+    pub(crate) fn editing_editor(&self) -> Option<Entity<Editor>> {
+        self.editing.as_ref().map(|edit| edit.editor.clone())
+    }
+
+    /// Begin renaming the selected entry: open a single-line editor
+    /// seeded with its current name. Returns `false` without starting
+    /// an edit when the tree is empty.
+    pub(crate) fn begin_rename(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
+        let Some(row) = self.rows.get(self.selected) else {
+            return false;
+        };
+        let name = row.name.clone();
+        let path = row.path.clone();
+        let editor = cx.new(|cx| Editor::single_line(window, cx));
+        seed_editor_text(&editor, &name, cx);
+        self.editing = Some(RenameEdit { editor, path });
+        cx.notify();
+        true
+    }
+
+    /// The path being renamed and the editor's current text, while a
+    /// rename is in progress. The caller validates the name and applies
+    /// the [`FsHost::rename`].
+    pub(crate) fn rename_target(&self, cx: &App) -> Option<(PathBuf, String)> {
+        let edit = self.editing.as_ref()?;
+        let text = edit
+            .editor
+            .read(cx)
+            .multi_buffer()
+            .read(cx)
+            .as_singleton()
+            .map(|buffer| buffer.read(cx).text())
+            .unwrap_or_default();
+        Some((edit.path.clone(), text))
+    }
+
+    /// Exit inline-rename mode, discarding the editor. Drives both the
+    /// commit and cancel paths; commit refreshes the tree separately.
+    pub(crate) fn end_rename(&mut self, cx: &mut Context<'_, Self>) {
+        if self.editing.take().is_some() {
+            cx.notify();
+        }
+    }
+
     /// Re-read the directory contents and git status from disk,
     /// preserving the set of expanded directories and clamping the
     /// selection into range.
@@ -242,31 +303,40 @@ impl Render for ProjectTree {
         let theme = cx.theme();
         let color = theme.statusbar_text;
         let selected = self.selected;
+        let editing = self
+            .editing
+            .as_ref()
+            .map(|edit| (edit.path.clone(), edit.editor.clone()));
         let rows = self.rows.iter().enumerate().map(|(ix, row)| {
             let indent = " ".repeat(row.depth * INDENT_SPACES_PER_DEPTH);
-            let name = if row.is_dir {
-                format!("{}/", row.name)
-            } else {
-                row.name.clone()
-            };
-            let (name_color, struck) = match row.decoration {
-                Some(GitDecoration::Added) => (theme.git_added, false),
-                Some(GitDecoration::Modified) => (theme.git_modified, false),
-                Some(GitDecoration::Deleted) => (theme.git_deleted, true),
-                Some(GitDecoration::Ignored) => (theme.muted_text, true),
-                None => (color, false),
-            };
-            let mut name_el = div().text_color(name_color).child(SharedString::from(name));
-            if struck {
-                name_el = name_el.line_through();
-            }
             let mut el = div()
                 .flex()
                 .items_center()
                 .px_2()
                 .text_color(color)
-                .child(SharedString::from(indent))
-                .child(name_el);
+                .child(SharedString::from(indent));
+            el = match editing.as_ref().filter(|(path, _)| path == &row.path) {
+                Some((_, editor)) => el.child(editor.clone()),
+                None => {
+                    let name = if row.is_dir {
+                        format!("{}/", row.name)
+                    } else {
+                        row.name.clone()
+                    };
+                    let (name_color, struck) = match row.decoration {
+                        Some(GitDecoration::Added) => (theme.git_added, false),
+                        Some(GitDecoration::Modified) => (theme.git_modified, false),
+                        Some(GitDecoration::Deleted) => (theme.git_deleted, true),
+                        Some(GitDecoration::Ignored) => (theme.muted_text, true),
+                        None => (color, false),
+                    };
+                    let mut name_el = div().text_color(name_color).child(SharedString::from(name));
+                    if struck {
+                        name_el = name_el.line_through();
+                    }
+                    el.child(name_el)
+                },
+            };
             if ix == selected {
                 el = el.bg(white().opacity(0.1));
             }
@@ -298,6 +368,24 @@ impl ItemView for ProjectTree {
         }
         .fail()
     }
+}
+
+/// Replace `editor`'s single-line buffer contents with `text`, seeding
+/// the inline rename input with the entry's current name.
+fn seed_editor_text(editor: &Entity<Editor>, text: &str, cx: &mut Context<'_, ProjectTree>) {
+    let Some(buffer) = editor
+        .read(cx)
+        .multi_buffer()
+        .read(cx)
+        .as_singleton()
+        .cloned()
+    else {
+        return;
+    };
+    let len = buffer.read(cx).text().len();
+    buffer.update(cx, |b, cx| {
+        b.edit(0..len, text, cx);
+    });
 }
 
 /// Flatten the tree under `root` into visible rows. Directories listed
@@ -629,6 +717,39 @@ mod tests {
                 (PathBuf::from("/repo/a.txt"), 0),
                 (PathBuf::from("/repo/readme.md"), 0),
             ]
+        );
+    }
+
+    #[test]
+    fn begin_rename_seeds_current_name_and_end_clears() {
+        use crate::globals::ExecutorGlobal;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let mut cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.set_global(ExecutorGlobal(Executor::new(
+                Arc::new(TestScheduler::new()),
+            )))
+        });
+        let fs: Arc<dyn FsHost> = sample_fs();
+        let (tree, vcx) =
+            cx.add_window_view(|_window, cx| ProjectTree::new(PathBuf::from("/repo"), fs, cx));
+
+        let started = tree.update_in(vcx, |t, window, cx| t.begin_rename(window, cx));
+        assert!(
+            started,
+            "begin_rename starts an edit when a row is selected"
+        );
+        assert_eq!(
+            tree.read_with(vcx, |t, cx| t.rename_target(cx)),
+            Some((PathBuf::from("/repo/src"), "src".to_string())),
+            "the editor is seeded with the selected entry's current name"
+        );
+
+        tree.update(vcx, |t, cx| t.end_rename(cx));
+        assert!(
+            tree.read_with(vcx, |t, _| t.editing_editor().is_none()),
+            "end_rename clears the inline editor"
         );
     }
 }
