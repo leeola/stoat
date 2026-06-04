@@ -96,13 +96,14 @@ use crate::{
         review::{
             CloseReview, GitToggleStageHunk, GitToggleStageLine, GitUnstageHunk, JumpToMoveSource,
             JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
-            OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch, QueryMoveRelationships,
-            ReviewApplyStaged, ReviewApproveHunk, ReviewCycleComparisonMode, ReviewEnterLineSelect,
-            ReviewLineSelectAll, ReviewLineSelectCancel, ReviewLineSelectStage,
-            ReviewLineSelectToggle, ReviewLineSelectUnstage, ReviewNextChunk,
-            ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewRefresh, ReviewRemoveSelected,
-            ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
-            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
+            OpenReviewBranch, OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch,
+            QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk,
+            ReviewCycleComparisonMode, ReviewEnterLineSelect, ReviewLineSelectAll,
+            ReviewLineSelectCancel, ReviewLineSelectStage, ReviewLineSelectToggle,
+            ReviewLineSelectUnstage, ReviewNextChunk, ReviewNextUnreviewedHunk, ReviewPrevChunk,
+            ReviewRefresh, ReviewRemoveSelected, ReviewResetProgress, ReviewRevertHunk,
+            ReviewSkipChunk, ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow,
+            ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{
             OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
@@ -341,6 +342,32 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             workdir: PathBuf::from(workdir),
             from: from.to_owned(),
             to: to.to_owned(),
+        }))
+    });
+    add(OpenReviewBranch::DEF, |params| {
+        let workdir = params
+            .first()
+            .context(MissingSnafu { name: "workdir" })?
+            .as_string()
+            .context(WrongKindSnafu {
+                name: "workdir",
+                expected: ParamKind::String,
+            })?;
+        let base = match params.get(1) {
+            Some(param) => Some(
+                param
+                    .as_string()
+                    .context(WrongKindSnafu {
+                        name: "base",
+                        expected: ParamKind::String,
+                    })?
+                    .to_owned(),
+            ),
+            None => None,
+        };
+        Ok(Box::new(OpenReviewBranch {
+            workdir: PathBuf::from(workdir),
+            base,
         }))
     });
     add(AddSelectionBelow::DEF, |_| Ok(Box::new(AddSelectionBelow)));
@@ -1103,6 +1130,31 @@ mod tests {
     }
 
     #[test]
+    fn open_review_branch_factory_parses_workdir_and_optional_base() {
+        let entry = lookup("OpenReviewBranch").expect("OpenReviewBranch");
+
+        let with_base = (entry.create)(&[
+            ParamValue::String("/repo".into()),
+            ParamValue::String("main".into()),
+        ])
+        .expect("create with base");
+        let a = with_base
+            .as_any()
+            .downcast_ref::<OpenReviewBranch>()
+            .expect("downcast");
+        assert_eq!(a.workdir, PathBuf::from("/repo"));
+        assert_eq!(a.base, Some("main".to_string()));
+
+        let without_base =
+            (entry.create)(&[ParamValue::String("/repo".into())]).expect("create without base");
+        let a = without_base
+            .as_any()
+            .downcast_ref::<OpenReviewBranch>()
+            .expect("downcast");
+        assert_eq!(a.base, None);
+    }
+
+    #[test]
     fn all_returns_complete_list() {
         // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
@@ -1241,7 +1293,8 @@ mod tests {
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
         // + 1 OpenEncodingPicker (status-bar encoding picker).
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
-        assert_eq!(all().count(), 348);
+        // + 1 OpenReviewBranch (commit-by-commit branch review).
+        assert_eq!(all().count(), 349);
     }
 
     #[test]

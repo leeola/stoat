@@ -533,6 +533,12 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             review::open_review_commit_range(stoat, &a.workdir, &a.from, &a.to);
             UpdateEffect::Redraw
         },
+        ActionKind::OpenReviewBranch => {
+            // Branch review is populated per-commit by the GUI; the TUI has
+            // no per-commit builder, so there is nothing to open here.
+            tracing::warn!("OpenReviewBranch is only available in the GUI");
+            UpdateEffect::None
+        },
         ActionKind::OpenReviewAgentEdits => {
             let a = action
                 .as_any()

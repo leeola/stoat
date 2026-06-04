@@ -2683,6 +2683,16 @@ impl Workspace {
                     self.dispatch_open_review_commit_range(workdir, from, to, cx);
                 }
             },
+            ActionKind::OpenReviewBranch => {
+                if let Some(action) = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::OpenReviewBranch>()
+                {
+                    let workdir = action.workdir.clone();
+                    let base = action.base.clone();
+                    self.dispatch_open_review_branch(workdir, base, cx);
+                }
+            },
             ActionKind::OpenReviewAgentEdits => {
                 if let Some(action) = action
                     .as_any()
@@ -6184,6 +6194,16 @@ impl Workspace {
     ) {
         let source = ReviewSource::CommitRange { workdir, from, to };
         self.open_review_source(source, "OpenReviewCommitRange", cx);
+    }
+
+    fn dispatch_open_review_branch(
+        &mut self,
+        workdir: PathBuf,
+        base: Option<String>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let source = ReviewSource::Branch { workdir, base };
+        self.open_review_source(source, "OpenReviewBranch", cx);
     }
 
     fn dispatch_open_review_agent_edits(

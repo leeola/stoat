@@ -271,6 +271,7 @@ pub enum ActionKind {
     CloseReview,
     OpenReviewCommit,
     OpenReviewCommitRange,
+    OpenReviewBranch,
     OpenReviewAgentEdits,
     OpenCommits,
     CloseCommits,

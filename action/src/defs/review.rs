@@ -495,6 +495,68 @@ impl Action for OpenReviewCommitRange {
     }
 }
 
+const OPEN_REVIEW_BRANCH_PARAMS: &[ParamDef] = &[
+    ParamDef {
+        name: "workdir",
+        kind: ParamKind::String,
+        required: true,
+        description: "Absolute path of a directory inside the target repository.",
+    },
+    ParamDef {
+        name: "base",
+        kind: ParamKind::String,
+        required: false,
+        description: "Base ref to diff the branch against. \
+                      Defaults to the repository's default branch when omitted.",
+    },
+];
+
+#[derive(Debug)]
+pub struct OpenReviewBranchDef;
+
+impl ActionDef for OpenReviewBranchDef {
+    fn name(&self) -> &'static str {
+        "OpenReviewBranch"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::OpenReviewBranch
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        OPEN_REVIEW_BRANCH_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "review a branch commit by commit"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Open a review session that walks each commit in the branch \
+         (merge-base(base, HEAD)..HEAD) as its own diff, oldest first."
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct OpenReviewBranch {
+    pub workdir: PathBuf,
+    pub base: Option<String>,
+}
+
+impl OpenReviewBranch {
+    pub const DEF: &OpenReviewBranchDef = &OpenReviewBranchDef;
+}
+
+impl Action for OpenReviewBranch {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 /// Palette-invisible because the path is supplied by the filesystem
 /// watcher dispatch, not user input. Triggers a session rescan and
 /// jumps the cursor to the first chunk in the affected file.
