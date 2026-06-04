@@ -974,9 +974,11 @@ impl Workspace {
             let buffer = buffer.clone();
             cx.new(|cx| DiffMap::new(buffer, cx))
         };
+        let weak_workspace = cx.weak_entity();
         let editor =
             cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
         editor.update(cx, |ed, cx| {
+            ed.set_workspace(Some(weak_workspace));
             ed.install_syntax_map_updater(cx);
         });
         (buffer, editor)

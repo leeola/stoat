@@ -2836,6 +2836,27 @@ impl Editor {
         self.workspace = workspace;
     }
 
+    /// Whether this editor is the workspace's active text target -- the
+    /// editor the input pipeline is currently driving. The primary
+    /// block cursor paints only while this holds, so a background buffer
+    /// under an open modal and the file-finder's read-only preview show
+    /// no cursor. An editor with no workspace wired ([`set_workspace`]
+    /// not called: unit-test editors, the minimap) is treated as active
+    /// so its cursor renders as before; the minimap suppresses the
+    /// cursor band through its own mode gate regardless.
+    fn is_active_text_target(&self, cx: &Context<'_, Self>) -> bool {
+        let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) else {
+            return true;
+        };
+        workspace
+            .read(cx)
+            .input_state_machine()
+            .read(cx)
+            .active_editor()
+            .map(|editor| editor.entity_id())
+            == Some(cx.entity_id())
+    }
+
     pub fn text_region_bounds(&self) -> Option<Bounds<Pixels>> {
         self.text_region_bounds
     }
@@ -3725,6 +3746,7 @@ impl Editor {
         let cursor_color = cx.theme().cursor;
         let cursor_text_color = cx.theme().cursor_text;
         let active_line_color = cx.theme().line_highlight;
+        let is_active = self.is_active_text_target(cx);
 
         let rows: Vec<render::RenderedRow> = rows
             .into_iter()
@@ -3740,6 +3762,7 @@ impl Editor {
                     cursor_text_color,
                     active_line_color,
                     is_minimap,
+                    is_active,
                 )
             })
             .collect();

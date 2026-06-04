@@ -1062,6 +1062,7 @@ pub(crate) fn apply_selection_paint(
     cursor_text_color: Hsla,
     active_line_color: Hsla,
     is_minimap: bool,
+    is_active: bool,
 ) -> RenderedRow {
     let RenderedRow {
         text,
@@ -1074,12 +1075,13 @@ pub(crate) fn apply_selection_paint(
         .row_selection_spans
         .get(&display_row)
         .unwrap_or(&empty);
-    // In minimap mode the per-character cursor band is invisible at
-    // 2px and keeping the rest of the overlay logic identical means
-    // ignoring cursor offsets entirely. The active-line band remains
-    // visible as a horizontal stripe, so the rest of the function
-    // runs unchanged.
-    let cursor_offsets: &[usize] = if is_minimap {
+    // The per-character cursor band is suppressed in two cases: minimap
+    // mode (invisible at 2px, so dropping cursor offsets keeps the rest
+    // of the overlay logic identical) and a non-active editor (the block
+    // cursor renders only on the editor the input pipeline is driving).
+    // The active-line band stays visible as a horizontal stripe in both
+    // cases, so the rest of the function runs unchanged.
+    let cursor_offsets: &[usize] = if is_minimap || !is_active {
         &[]
     } else {
         paint
@@ -3696,6 +3698,7 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         assert_merged_paint_valid(&painted);
@@ -3733,11 +3736,56 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
         assert_eq!(painted.text.as_ref(), "hello ");
         assert_merged_paint_valid(&painted);
         assert_eq!(style_at(&painted, 0).background_color, None);
         assert_eq!(style_at(&painted, 5).background_color, Some(cursor_color));
+    }
+
+    #[test]
+    fn apply_selection_paint_suppresses_cursor_when_inactive() {
+        let syntax_style = gpui::HighlightStyle {
+            color: Some(rgb(0xff8800).into()),
+            ..Default::default()
+        };
+        let mut paint = SelectionPaint::default();
+        paint.row_cursors.insert(0, vec![2]);
+        let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
+        let cursor_color: Hsla = rgb(0xc8d6ff).into();
+        let cursor_text_color: Hsla = rgb(0x101010).into();
+        let active_line_color: Hsla = rgb(0x2a2a2a).into();
+        let paint_with = |is_active| {
+            apply_selection_paint(
+                RenderedRow {
+                    text: SharedString::from("hello"),
+                    runs: vec![(0..5, syntax_style)],
+                },
+                0,
+                &paint,
+                selection_color,
+                cursor_color,
+                cursor_text_color,
+                active_line_color,
+                false,
+                is_active,
+            )
+        };
+
+        let active = paint_with(true);
+        assert_eq!(
+            style_at(&active, 2).background_color,
+            Some(cursor_color),
+            "the active editor paints the block cursor",
+        );
+
+        let inactive = paint_with(false);
+        assert_eq!(
+            style_at(&inactive, 2).background_color,
+            None,
+            "a non-active editor paints no cursor band",
+        );
     }
 
     #[test]
@@ -3763,6 +3811,7 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         assert_merged_paint_valid(&painted);
@@ -3809,6 +3858,7 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         assert_merged_paint_valid(&painted);
@@ -3845,6 +3895,7 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
         assert_eq!(painted.text.as_ref(), "hello");
         // No overlay touches row 0, so the fast path returns the input
@@ -3871,6 +3922,7 @@ mod tests {
             rgb(0xffffff).into(),
             rgb(0x000000).into(),
             false,
+            true,
         );
         assert_eq!(
             painted.text.as_ref().as_ptr(),
@@ -3906,6 +3958,7 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
         assert_merged_paint_valid(&painted);
         assert_eq!(
@@ -3947,6 +4000,7 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
         assert_eq!(painted.text.as_ref(), " ");
         assert_merged_paint_valid(&painted);
@@ -3984,6 +4038,7 @@ mod tests {
             cursor_text_color,
             active_line_color,
             false,
+            true,
         );
 
         assert_eq!(painted.text.as_ref(), "hello");
