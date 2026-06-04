@@ -37,30 +37,36 @@ const DUPLICATE_DROP_WINDOW: Duration = Duration::from_millis(50);
 /// committed character we expect to see again from the paired
 /// event; `armed_at` bounds how long that wait stays valid;
 /// `armed_in_input_mode` distinguishes the two flavors of the
-/// macOS pair:
+/// macOS pair; `expects_twin` records whether a same-keypress
+/// twin is actually coming.
 ///
 /// - Forward direction ([`pending_duplicate_char`]): `armed_in_input_mode = true`. The IME commit
 ///   landed while text input was already accepted, so the raw key twin should arrive in the same
 ///   input mode.
 /// - Inverse direction ([`consumed_text_input_char`]): `armed_in_input_mode = false`. The commit
-///   was routed through `feed` because text input wasn't accepted; the dispatched action focuses an
-///   input target, so the macOS redelivery should arrive in an input mode that didn't exist at arm
-///   time.
+///   was routed through `feed` because text input wasn't accepted; the redelivery arrives either in
+///   a newly focused input mode (the dispatched action changed mode) or in the same disallowed mode
+///   (it did not).
 ///
-/// The consume rule (in [`try_consume_duplicate`]) treats a
-/// mismatch between current and armed mode as the consume
-/// signal and a match as the "we're back where we started --
-/// the pair is no longer expected" signal that clears the
-/// marker without dropping anything. The mode label removes
-/// the need to clear markers from composition handlers, which
-/// the prior one-shot design did defensively and which proved
-/// to over-clear when a focus-change IME callback fired
-/// between arming and the real paired delivery.
+/// `expects_twin` separates the two input sources that arm the
+/// inverse slot. The macOS dual-fire arms through `feed`
+/// (observe_keystrokes) and a `text_input` twin for the same
+/// keypress follows, so the slot drops a same-mode redelivery.
+/// The IME-only `--inputs` driver arms through `text_input` and
+/// fires one event per key with no twin, so a same-mode keystroke
+/// is a genuine repeat and must dispatch -- `expects_twin` is
+/// clear and the slot proceeds. A mode-crossing redelivery drops
+/// in either case, because the focus-change twin arrives on both
+/// paths. This, with the mode label, removes the need to clear
+/// markers from composition handlers, which the prior one-shot
+/// design did defensively and which over-cleared when a
+/// focus-change IME callback fired between arming and delivery.
 #[derive(Clone, Copy, Debug)]
 struct DuplicateMarker {
     char: char,
     armed_at: Instant,
     armed_in_input_mode: bool,
+    expects_twin: bool,
 }
 
 /// Outcome of [`try_consume_duplicate`].
@@ -82,24 +88,26 @@ enum DuplicateOutcome {
 /// the check. Each marker's `armed_in_input_mode` flag encodes
 /// where the consume site sits relative to the arm site:
 ///
-/// | armed | current | semantic            | outcome        |
-/// |-------|---------|---------------------|----------------|
-/// | true  | true    | forward pair        | drop on match  |
-/// | true  | false   | left input mode     | clear, proceed |
-/// | false | true    | inverse pair        | drop on match  |
-/// | false | false   | back to source mode | clear, proceed |
+/// | armed | current | expects_twin | semantic              | outcome        |
+/// |-------|---------|--------------|-----------------------|----------------|
+/// | true  | true    | -            | forward pair          | drop on match  |
+/// | true  | false   | -            | forward, left mode    | clear, proceed |
+/// | false | true    | -            | inverse pair, crossed | drop on match  |
+/// | false | false   | true         | inverse twin, same    | drop on match  |
+/// | false | false   | false        | inverse, no twin      | clear, proceed |
 ///
 /// The forward marker arms with `armed_in_input_mode = true`
-/// and consumes when the current mode is still an input mode;
-/// the inverse marker arms with `false` and consumes when the
-/// current mode has crossed into an input mode (because the
-/// dispatched action focused one). In either case the consume
-/// fires only when the marker is set, the stored `char`
-/// matches `ch`, and the marker is younger than
-/// [`DUPLICATE_DROP_WINDOW`]. Expired markers, mode-mismatched
-/// markers in the "clear, proceed" rows, and non-matching
-/// chars in the consume rows all leave the slot empty so a
-/// later legitimate keypress is never eaten by a stale entry.
+/// and consumes only while the current mode is still an input
+/// mode; leaving that mode clears the slot. The inverse marker
+/// arms with `false`. It always drops a mode-crossing twin on a
+/// char match (the focus-change redelivery), but drops a
+/// same-mode twin only when `expects_twin` -- i.e. when `feed`
+/// armed the slot for a macOS dual-fire keypress, not when the
+/// IME-only driver armed it through `text_input`. Every consume
+/// fires only when the marker is set, the stored `char` matches
+/// `ch`, and the marker is younger than [`DUPLICATE_DROP_WINDOW`].
+/// All other rows clear the slot and proceed, so a later
+/// legitimate keypress is never eaten by a stale entry.
 fn try_consume_duplicate(
     marker: &mut Option<DuplicateMarker>,
     ch: char,
@@ -113,9 +121,12 @@ fn try_consume_duplicate(
         return DuplicateOutcome::Proceed;
     }
     if currently_in_input_mode == state.armed_in_input_mode {
-        // Forward marker: same flavor -- this is the consume site.
-        // Inverse marker: same flavor -- modal closed without
-        // consuming, clear stale slot.
+        // Same flavor as arm. For the forward marker this is the
+        // consume site (IME commit, raw twin in the same input
+        // mode). For the inverse marker it means the dispatched
+        // action left the mode unchanged (e.g. MoveDown stays in
+        // normal), so the twin arrives here rather than in a
+        // crossed mode.
         // We disambiguate via `armed_in_input_mode == true` ↔ forward.
         if state.armed_in_input_mode {
             if state.char == ch {
@@ -124,16 +135,21 @@ fn try_consume_duplicate(
             }
             return DuplicateOutcome::Proceed;
         }
-        // Inverse marker, back to disallowed mode without a
-        // paired redelivery -- the pair is no longer coming, so
-        // clear and let the current event run normally.
+        // Drop the same-mode twin only for the macOS dual-fire,
+        // where `feed` armed the slot and a `text_input` twin
+        // follows. The IME-only driver arms via `text_input` with
+        // no twin, so a same-mode keystroke is a genuine repeat:
+        // clear and let it dispatch.
         *marker = None;
+        if state.expects_twin && state.char == ch {
+            return DuplicateOutcome::Drop;
+        }
         return DuplicateOutcome::Proceed;
     }
     // Mode boundary crossed since arm. For the inverse marker
-    // this is the consume site; for the forward marker it
-    // means the original IME pair will never arrive in a
-    // different mode, so clear.
+    // this is the consume site (the focus-change redelivery in
+    // the new mode); for the forward marker it means the original
+    // IME pair will never arrive in a different mode, so clear.
     if !state.armed_in_input_mode {
         if state.char == ch {
             *marker = None;
@@ -201,18 +217,22 @@ pub struct InputStateMachine {
     /// input mode clears the slot so a later non-paired
     /// keystroke is never eaten.
     pending_duplicate_char: Option<DuplicateMarker>,
-    /// Inverse duplicate-drop marker: armed by [`text_input`]
-    /// when a single-char commit in a disallowed mode is
-    /// routed through [`feed`] and resolves to at least one
-    /// action (e.g. `:` dispatching `OpenCommandPalette` from
-    /// normal mode). The dispatched action focuses an input
-    /// target, and the macOS focus-change IME redelivery lands
-    /// as a second [`text_input`] in the new mode -- which
-    /// [`try_consume_duplicate`] drops within
-    /// [`DUPLICATE_DROP_WINDOW`]. Returning to the armed mode
-    /// without consuming clears the slot, so an
-    /// `:` / `<Esc>` / `:` sequence reopens the modal instead
-    /// of eating the second `:`.
+    /// Inverse duplicate-drop marker. The macOS dual-fire arms it
+    /// through [`feed`] (`expects_twin = true`); the IME-only
+    /// `--inputs` driver arms it through [`text_input`] when a
+    /// single-char commit in a disallowed mode routes through
+    /// [`feed`] and resolves an action (`expects_twin = false`).
+    /// A mode-changing action (`:` -> `OpenCommandPalette`) sends
+    /// the focus-change redelivery as a second [`text_input`] in
+    /// the new mode, which [`try_consume_duplicate`] drops on a
+    /// char match within [`DUPLICATE_DROP_WINDOW`]. A
+    /// non-mode-changing action (`j` -> `MoveDown`) sends the twin
+    /// in the same disallowed mode, dropped only when
+    /// `expects_twin` so an IME-only repeat still dispatches. The
+    /// `:` / `<Esc>` / `:` reopen is preserved on both paths:
+    /// macOS reopens through [`feed`] (which never consults this
+    /// marker), and the driver's second `:` finds `expects_twin`
+    /// clear and redispatches instead of being eaten.
     consumed_text_input_char: Option<DuplicateMarker>,
     /// Primary editor that [`text_input`] dispatches IME commits
     /// into via [`Editor::apply_text_to_all_cursors`]. Production
@@ -743,6 +763,7 @@ impl InputStateMachine {
                         char: ch,
                         armed_at: Instant::now(),
                         armed_in_input_mode: false,
+                        expects_twin: false,
                     });
             return actions;
         }
@@ -753,6 +774,7 @@ impl InputStateMachine {
             char: ch,
             armed_at: Instant::now(),
             armed_in_input_mode: true,
+            expects_twin: true,
         });
         let targets: Vec<Entity<Editor>> = {
             let mut seen = HashSet::new();
@@ -1281,6 +1303,7 @@ impl InputStateMachine {
                     char: ch,
                     armed_at: Instant::now(),
                     armed_in_input_mode: false,
+                    expects_twin: true,
                 });
             }
         }

@@ -7846,6 +7846,39 @@ mod tests {
     }
 
     #[test]
+    fn keystroke_j_with_paired_text_input_moves_cursor_one_row() {
+        use gpui::EntityInputHandler;
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor_input = ws.read_with(vcx, |w, _| w.editor_input().clone());
+        let editor = new_singleton_editor(vcx, "r0\nr1\nr2\nr3\n");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        vcx.simulate_keystrokes("j");
+        vcx.run_until_parked();
+        assert_eq!(
+            editor_cursor_buffer_row(vcx, &editor),
+            1,
+            "control: feed('j') alone (no IME twin in normal mode) advances one row"
+        );
+
+        // macOS fires both paths per keypress; supply the IME twin
+        // that simulate_keystrokes omits in normal mode.
+        vcx.simulate_keystrokes("j");
+        editor_input.update_in(vcx, |ei, window, cx| {
+            ei.replace_text_in_range(None, "j", window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            editor_cursor_buffer_row(vcx, &editor),
+            2,
+            "feed('j') plus its text_input('j') IME twin must advance exactly one row, not two"
+        );
+    }
+
+    #[test]
     fn keystroke_space_p_chord_with_paired_text_input_keeps_finder_query_empty() {
         use crate::{
             file_finder::FileFinderDelegate,
