@@ -78,8 +78,9 @@ use crate::{
             PickerSelectPrev,
         },
         project_tree::{
-            DeleteTreeEntry, ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand,
-            ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev, RenameTreeEntry,
+            DeleteTreeEntry, NewFileInTree, NewFolderInTree, ProjectTreeCollapse,
+            ProjectTreeConfirm, ProjectTreeExpand, ProjectTreeRefresh, ProjectTreeSelectNext,
+            ProjectTreeSelectPrev, RenameTreeEntry,
         },
         prompt::{
             CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,
@@ -768,6 +769,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(DeleteTreeEntry::DEF, |_| Ok(Box::new(DeleteTreeEntry)));
     add(RenameTreeEntry::DEF, |_| Ok(Box::new(RenameTreeEntry)));
+    add(NewFileInTree::DEF, |_| Ok(Box::new(NewFileInTree)));
+    add(NewFolderInTree::DEF, |_| Ok(Box::new(NewFolderInTree)));
     add(RenameWorkspace::DEF, |params| {
         let raw = match params.first() {
             Some(p) => p.as_string().context(WrongKindSnafu {
@@ -1018,6 +1021,8 @@ mod tests {
         "ProjectTreeConfirm",
         "ProjectTreeRefresh",
         "DeleteTreeEntry",
+        "NewFileInTree",
+        "NewFolderInTree",
         "HelpSelectPrev",
         "HelpSelectNext",
         "HelpScopeToggle",
@@ -1212,6 +1217,7 @@ mod tests {
         // + 6 ProjectTree navigation (SelectNext/SelectPrev/Collapse/Expand/ Confirm/Refresh)
         //   routed to the focused project tree dock.
         // + 1 RenameTreeEntry (inline project-tree rename).
+        // + 2 NewFileInTree / NewFolderInTree (inline project-tree create).
         // + 1 OpenReviewWatch (workspace-watch review session).
         // + 1 OpenAbout (build info modal).
         // + 2 ReviewApproveHunk / ReviewToggleApproval.
@@ -1235,7 +1241,7 @@ mod tests {
         // + 1 OpenLineEndingPicker (status-bar line-ending picker).
         // + 1 OpenEncodingPicker (status-bar encoding picker).
         // + 1 OpenGotoLineModal (go-to-line modal with live preview).
-        assert_eq!(all().count(), 346);
+        assert_eq!(all().count(), 348);
     }
 
     #[test]

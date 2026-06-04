@@ -156,6 +156,39 @@ mod tests {
         assert_eq!(actions[0].name, "GotoLineEnd");
     }
 
+    fn project_tree_state() -> TestState {
+        let mut values = HashMap::new();
+        values.insert("mode".into(), StateValue::String("project_tree".into()));
+        TestState { values }
+    }
+
+    fn char_event(c: char) -> crossterm::event::KeyEvent {
+        crossterm::event::KeyEvent::new(
+            crossterm::event::KeyCode::Char(c),
+            crossterm::event::KeyModifiers::NONE,
+        )
+    }
+
+    #[test]
+    fn default_keymap_a_in_project_tree_creates_new_file() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&project_tree_state(), &char_event('a'))
+            .expect("`a` has a project_tree binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "NewFileInTree");
+    }
+
+    #[test]
+    fn default_keymap_shift_a_in_project_tree_creates_new_folder() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&project_tree_state(), &char_event('A'))
+            .expect("`A` has a project_tree binding");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "NewFolderInTree");
+    }
+
     fn alt_event(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
         crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT)
     }

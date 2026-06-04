@@ -741,6 +741,8 @@ on key {
         R -> ProjectTreeRefresh();
         d-d -> DeleteTreeEntry();
         r -> RenameTreeEntry();
+        a -> NewFileInTree();
+        A -> NewFolderInTree();
         : -> OpenCommandPalette();
     }
 }

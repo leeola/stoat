@@ -1633,10 +1633,10 @@ impl Workspace {
 
     /// Resolve and install the current text-input target into the
     /// [`InputStateMachine`]'s `active_editor`. Precedence: a project
-    /// tree's in-edit inline rename row, then the active modal's text
-    /// input, then the focused pane editor. Called whenever any of
-    /// those change so typed text and editor edit-actions route to the
-    /// one editor that should receive them.
+    /// tree's in-edit inline row (rename or new entry), then the active
+    /// modal's text input, then the focused pane editor. Called whenever
+    /// any of those change so typed text and editor edit-actions route to
+    /// the one editor that should receive them.
     fn refresh_active_text_input(&mut self, cx: &mut Context<'_, Self>) {
         if let Some(editor) = self
             .active_project_tree(cx)
@@ -2484,8 +2484,10 @@ impl Workspace {
             ActionKind::ProjectTreeRefresh => self.update_project_tree(cx, ProjectTree::refresh),
             ActionKind::DeleteTreeEntry => self.dispatch_delete_tree_entry(window, cx),
             ActionKind::RenameTreeEntry => self.dispatch_rename_tree_entry(window, cx),
-            ActionKind::SubmitPromptInput => self.dispatch_commit_tree_rename(cx),
-            ActionKind::CancelPromptInput => self.dispatch_cancel_tree_rename(cx),
+            ActionKind::NewFileInTree => self.dispatch_new_tree_entry(false, window, cx),
+            ActionKind::NewFolderInTree => self.dispatch_new_tree_entry(true, window, cx),
+            ActionKind::SubmitPromptInput => self.dispatch_commit_tree_edit(cx),
+            ActionKind::CancelPromptInput => self.dispatch_cancel_tree_edit(cx),
             ActionKind::ToggleDiffHunkPanel => self.dispatch_toggle_diff_hunk_panel(cx),
             ActionKind::JumpBackward => self.dispatch_jump(JumpDir::Backward, cx),
             ActionKind::JumpForward => self.dispatch_jump(JumpDir::Forward, cx),
@@ -3926,23 +3928,61 @@ impl Workspace {
         self.refresh_active_text_input(cx);
     }
 
-    /// Commit the in-progress project-tree rename: rename the entry on
-    /// disk, refresh the tree, and restore `project_tree` mode. A blank
-    /// or unchanged name exits without touching disk. No-op when no
-    /// rename is in progress -- the shared `SubmitPromptInput` binding
-    /// also fires for modal prompts, which the modal layer consumes
-    /// before this point.
-    fn dispatch_commit_tree_rename(&mut self, cx: &mut Context<'_, Self>) {
+    /// Begin creating a new file (`is_dir` false) or folder (`is_dir`
+    /// true) in the project tree: open the inline input for a child of
+    /// the selected directory (or the selected entry's parent), switch
+    /// to `prompt` mode so typed text routes to it, and point the active
+    /// editor at it. No-op when no tree is active.
+    fn dispatch_new_tree_entry(
+        &mut self,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) {
         let Some(tree) = self.active_project_tree(cx) else {
             return;
         };
-        let Some((old_path, new_name)) = tree.read(cx).rename_target(cx) else {
+        if !tree.update(cx, |tree, cx| tree.begin_create(is_dir, window, cx)) {
+            return;
+        }
+        self.set_input_mode("prompt", cx);
+        self.refresh_active_text_input(cx);
+    }
+
+    /// Commit the in-progress project-tree edit: for a rename, rename the
+    /// entry on disk; for a create, write the new file or directory. Then
+    /// refresh the tree and restore `project_tree` mode. A blank name
+    /// exits without touching disk. No-op when no edit is in progress --
+    /// the shared `SubmitPromptInput` binding also fires for modal
+    /// prompts, which the modal layer consumes before this point.
+    fn dispatch_commit_tree_edit(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(tree) = self.active_project_tree(cx) else {
             return;
         };
-        tree.update(cx, |tree, cx| tree.end_rename(cx));
+        let create = tree.read(cx).create_target(cx);
+        let rename = tree.read(cx).rename_target(cx);
+        if create.is_none() && rename.is_none() {
+            return;
+        }
+        tree.update(cx, |tree, cx| tree.end_edit(cx));
         self.set_input_mode("project_tree", cx);
         self.refresh_active_text_input(cx);
 
+        if let Some((parent, is_dir, name)) = create {
+            self.commit_new_tree_entry(parent, is_dir, &name, cx);
+        } else if let Some((old_path, new_name)) = rename {
+            self.commit_tree_rename(old_path, &new_name, cx);
+        }
+    }
+
+    /// Rename `old_path` to `new_name` within its parent and refresh the
+    /// tree. A blank or unchanged name is a no-op.
+    fn commit_tree_rename(
+        &mut self,
+        old_path: PathBuf,
+        new_name: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
         let new_name = new_name.trim();
         let unchanged = old_path.file_name().and_then(|name| name.to_str()) == Some(new_name);
         if new_name.is_empty() || unchanged {
@@ -3966,17 +4006,52 @@ impl Workspace {
         }
     }
 
-    /// Cancel the in-progress project-tree rename without touching disk,
-    /// restoring `project_tree` mode. No-op when no rename is in
-    /// progress.
-    fn dispatch_cancel_tree_rename(&mut self, cx: &mut Context<'_, Self>) {
+    /// Create a new file (`is_dir` false) or directory (`is_dir` true)
+    /// named `name` inside `parent` and refresh the tree. A blank name is
+    /// a no-op.
+    fn commit_new_tree_entry(
+        &mut self,
+        parent: PathBuf,
+        is_dir: bool,
+        name: &str,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let name = name.trim();
+        if name.is_empty() {
+            return;
+        }
+        let new_path = parent.join(name);
+        let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
+        let result = if is_dir {
+            fs.create_dir_all(&new_path)
+        } else {
+            fs.write(&new_path, b"")
+        };
+        match result {
+            Ok(()) => {
+                let kind = if is_dir { "folder" } else { "file" };
+                self.show_toast(Toast::success(format!("Created {kind} {name}")), cx);
+                self.update_project_tree(cx, ProjectTree::refresh);
+            },
+            Err(err) => {
+                self.show_toast(Toast::error(format!("Create failed: {err}")), cx);
+            },
+        }
+    }
+
+    /// Cancel the in-progress project-tree edit (rename or create)
+    /// without touching disk, restoring `project_tree` mode. No-op when
+    /// no edit is in progress.
+    fn dispatch_cancel_tree_edit(&mut self, cx: &mut Context<'_, Self>) {
         let Some(tree) = self.active_project_tree(cx) else {
             return;
         };
         if tree.read(cx).editing_editor().is_none() {
             return;
         }
-        tree.update(cx, |tree, cx| tree.end_rename(cx));
+        tree.update(cx, |tree, cx| tree.end_edit(cx));
         self.set_input_mode("project_tree", cx);
         self.refresh_active_text_input(cx);
     }
@@ -8519,6 +8594,145 @@ mod tests {
         assert!(
             !fs.exists(Path::new("/repo/new.txt")),
             "no rename happens on cancel"
+        );
+        let (mode, editing) = ws.read_with(vcx, |w, cx| {
+            (
+                w.input_state_machine().read(cx).mode().to_string(),
+                w.active_project_tree(cx)
+                    .and_then(|tree| tree.read(cx).editing_editor())
+                    .is_some(),
+            )
+        });
+        assert_eq!(mode, "project_tree", "cancel restores project_tree mode");
+        assert!(!editing, "cancel clears the inline editor");
+    }
+
+    #[test]
+    fn new_file_in_tree_enters_prompt_mode_with_row_editor_active() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/old.txt", "");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::NewFileInTree);
+        vcx.run_until_parked();
+
+        let (mode, active_id, editing_id) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            let active = sm
+                .active_editor()
+                .and_then(|e| e.upgrade())
+                .map(|e| e.entity_id());
+            let editing = w
+                .active_project_tree(cx)
+                .and_then(|tree| tree.read(cx).editing_editor())
+                .map(|e| e.entity_id());
+            (sm.mode().to_string(), active, editing)
+        });
+        assert_eq!(mode, "prompt", "new file enters prompt mode");
+        assert!(editing_id.is_some(), "tree has an inline create editor");
+        assert_eq!(
+            active_id, editing_id,
+            "the create input is the sole active text target"
+        );
+    }
+
+    #[test]
+    fn new_file_in_tree_commit_creates_file() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/old.txt", "");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::NewFileInTree);
+        vcx.run_until_parked();
+        seed_tree_rename_editor(&ws, vcx, "fresh.txt");
+        dispatch(&ws, vcx, stoat_action::SubmitPromptInput);
+        vcx.run_until_parked();
+
+        assert!(
+            fs.exists(Path::new("/repo/fresh.txt")),
+            "new file is created in the selected entry's parent"
+        );
+        assert!(
+            fs.exists(Path::new("/repo/old.txt")),
+            "the selected entry is untouched"
+        );
+        let mode = ws.read_with(vcx, |w, cx| {
+            w.input_state_machine().read(cx).mode().to_string()
+        });
+        assert_eq!(mode, "project_tree", "commit restores project_tree mode");
+    }
+
+    #[test]
+    fn new_folder_in_tree_commit_creates_dir() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_dir("/repo/src");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::NewFolderInTree);
+        vcx.run_until_parked();
+        seed_tree_rename_editor(&ws, vcx, "sub");
+        dispatch(&ws, vcx, stoat_action::SubmitPromptInput);
+        vcx.run_until_parked();
+
+        let is_dir = fs
+            .metadata(Path::new("/repo/src/sub"))
+            .ok()
+            .flatten()
+            .map(|m| m.is_dir);
+        assert_eq!(
+            is_dir,
+            Some(true),
+            "new folder is created as a directory inside the selected dir"
+        );
+        let mode = ws.read_with(vcx, |w, cx| {
+            w.input_state_machine().read(cx).mode().to_string()
+        });
+        assert_eq!(mode, "project_tree", "commit restores project_tree mode");
+    }
+
+    #[test]
+    fn new_file_in_tree_cancel_creates_nothing() {
+        use crate::globals::FsHostGlobal;
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/repo/old.txt", "");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/repo");
+
+        dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::NewFileInTree);
+        vcx.run_until_parked();
+        seed_tree_rename_editor(&ws, vcx, "fresh.txt");
+        dispatch(&ws, vcx, stoat_action::CancelPromptInput);
+        vcx.run_until_parked();
+
+        assert!(
+            !fs.exists(Path::new("/repo/fresh.txt")),
+            "cancel creates no file"
         );
         let (mode, editing) = ws.read_with(vcx, |w, cx| {
             (

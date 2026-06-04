@@ -88,6 +88,30 @@ define_action!(
     ActionPriority::Rare
 );
 
+define_action!(
+    NewFileInTreeDef,
+    NewFileInTree,
+    "NewFileInTree",
+    ActionKind::NewFileInTree,
+    "create a new file in the tree",
+    "Open an inline input for a new file in the selected directory, or in \
+     the selected entry's parent. Enter creates an empty file on disk; \
+     Escape cancels.",
+    ActionPriority::Rare
+);
+
+define_action!(
+    NewFolderInTreeDef,
+    NewFolderInTree,
+    "NewFolderInTree",
+    ActionKind::NewFolderInTree,
+    "create a new folder in the tree",
+    "Open an inline input for a new directory in the selected directory, or \
+     in the selected entry's parent. Enter creates the directory on disk; \
+     Escape cancels.",
+    ActionPriority::Rare
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;

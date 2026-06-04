@@ -80,8 +80,9 @@ pub use defs::{
         PickerSelectPrev,
     },
     project_tree::{
-        DeleteTreeEntry, ProjectTreeCollapse, ProjectTreeConfirm, ProjectTreeExpand,
-        ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev, RenameTreeEntry,
+        DeleteTreeEntry, NewFileInTree, NewFolderInTree, ProjectTreeCollapse, ProjectTreeConfirm,
+        ProjectTreeExpand, ProjectTreeRefresh, ProjectTreeSelectNext, ProjectTreeSelectPrev,
+        RenameTreeEntry,
     },
     prompt::{
         CancelPromptInput, PaletteScopeToggle, PaletteSelectNext, PaletteSelectPrev,

@@ -19,8 +19,8 @@ use crate::{
     theme::ActiveTheme,
 };
 use gpui::{
-    div, white, App, AppContext, Context, Entity, IntoElement, ParentElement, Render, SharedString,
-    Styled, Window,
+    div, white, App, AppContext, Context, Div, Entity, Hsla, IntoElement, ParentElement, Render,
+    SharedString, Styled, Window,
 };
 use serde_json::Value;
 use std::{
@@ -64,11 +64,21 @@ struct Row {
     decoration: Option<GitDecoration>,
 }
 
-/// Active inline-rename state: the single-line editor overlaying the
-/// edited row in place of its name label, and the path being renamed.
-struct RenameEdit {
+/// What an in-progress inline edit commits to on Enter.
+enum EditAction {
+    /// Rename the existing entry at `path` to the editor's text.
+    Rename { path: PathBuf },
+    /// Create a file (`is_dir` false) or directory (`is_dir` true)
+    /// named by the editor's text inside `parent`.
+    Create { parent: PathBuf, is_dir: bool },
+}
+
+/// Active inline-edit state: the single-line editor shown in the tree --
+/// overlaying the edited row for a rename, or as a fresh child row for a
+/// create -- and what committing it does.
+struct RowEdit {
     editor: Entity<Editor>,
-    path: PathBuf,
+    action: EditAction,
 }
 
 pub struct ProjectTree {
@@ -81,10 +91,10 @@ pub struct ProjectTree {
     /// open and on every `refresh`. Ignored-file decorations are not
     /// cached here; they are derived per entry in `rebuild`.
     git_status: HashMap<PathBuf, GitDecoration>,
-    /// `Some` while a row is being renamed inline; drives both the
-    /// row's editor overlay and the workspace's active-text-input
-    /// routing via [`Self::editing_editor`].
-    editing: Option<RenameEdit>,
+    /// `Some` while a row is being renamed or a new entry named inline;
+    /// drives both the inline editor's rendering and the workspace's
+    /// active-text-input routing via [`Self::editing_editor`].
+    editing: Option<RowEdit>,
 }
 
 impl ProjectTree {
@@ -216,9 +226,9 @@ impl ProjectTree {
             .map(|row| (row.path.clone(), row.name.clone(), row.is_dir))
     }
 
-    /// The editor overlaying the row currently being renamed, if any.
-    /// The workspace routes typed text to it as the sole active editor
-    /// while a rename is in progress.
+    /// The inline editor shown for the in-progress rename or create, if
+    /// any. The workspace routes typed text to it as the sole active
+    /// editor while an edit is in progress.
     pub(crate) fn editing_editor(&self) -> Option<Entity<Editor>> {
         self.editing.as_ref().map(|edit| edit.editor.clone())
     }
@@ -234,7 +244,43 @@ impl ProjectTree {
         let path = row.path.clone();
         let editor = cx.new(|cx| Editor::single_line(window, cx));
         seed_editor_text(&editor, &name, cx);
-        self.editing = Some(RenameEdit { editor, path });
+        self.editing = Some(RowEdit {
+            editor,
+            action: EditAction::Rename { path },
+        });
+        cx.notify();
+        true
+    }
+
+    /// Begin creating a new entry: open an empty single-line editor for a
+    /// fresh child of the selected directory (expanding it so the input
+    /// shows), or of the selected entry's parent when a file is selected,
+    /// or of the tree root when empty. `is_dir` selects file vs folder.
+    pub(crate) fn begin_create(
+        &mut self,
+        is_dir: bool,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let parent = match self.rows.get(self.selected) {
+            Some(row) if row.is_dir => {
+                let dir = row.path.clone();
+                self.expanded.insert(dir.clone());
+                self.rebuild();
+                dir
+            },
+            Some(row) => row
+                .path
+                .parent()
+                .map(Path::to_path_buf)
+                .unwrap_or_else(|| self.git_root.clone()),
+            None => self.git_root.clone(),
+        };
+        let editor = cx.new(|cx| Editor::single_line(window, cx));
+        self.editing = Some(RowEdit {
+            editor,
+            action: EditAction::Create { parent, is_dir },
+        });
         cx.notify();
         true
     }
@@ -244,20 +290,27 @@ impl ProjectTree {
     /// the [`FsHost::rename`].
     pub(crate) fn rename_target(&self, cx: &App) -> Option<(PathBuf, String)> {
         let edit = self.editing.as_ref()?;
-        let text = edit
-            .editor
-            .read(cx)
-            .multi_buffer()
-            .read(cx)
-            .as_singleton()
-            .map(|buffer| buffer.read(cx).text())
-            .unwrap_or_default();
-        Some((edit.path.clone(), text))
+        let EditAction::Rename { path } = &edit.action else {
+            return None;
+        };
+        Some((path.clone(), editor_line(&edit.editor, cx)))
     }
 
-    /// Exit inline-rename mode, discarding the editor. Drives both the
-    /// commit and cancel paths; commit refreshes the tree separately.
-    pub(crate) fn end_rename(&mut self, cx: &mut Context<'_, Self>) {
+    /// The parent directory, kind, and the editor's current text, while a
+    /// new-entry create is in progress. The caller validates the name and
+    /// creates the file or directory.
+    pub(crate) fn create_target(&self, cx: &App) -> Option<(PathBuf, bool, String)> {
+        let edit = self.editing.as_ref()?;
+        let EditAction::Create { parent, is_dir } = &edit.action else {
+            return None;
+        };
+        Some((parent.clone(), *is_dir, editor_line(&edit.editor, cx)))
+    }
+
+    /// Exit inline-edit mode (rename or create), discarding the editor.
+    /// Drives both the commit and cancel paths; commit refreshes the tree
+    /// separately.
+    pub(crate) fn end_edit(&mut self, cx: &mut Context<'_, Self>) {
         if self.editing.take().is_some() {
             cx.notify();
         }
@@ -303,11 +356,34 @@ impl Render for ProjectTree {
         let theme = cx.theme();
         let color = theme.statusbar_text;
         let selected = self.selected;
-        let editing = self
-            .editing
-            .as_ref()
-            .map(|edit| (edit.path.clone(), edit.editor.clone()));
-        let rows = self.rows.iter().enumerate().map(|(ix, row)| {
+
+        let rename_overlay = match self.editing.as_ref() {
+            Some(RowEdit {
+                editor,
+                action: EditAction::Rename { path },
+            }) => Some((path.clone(), editor.clone())),
+            _ => None,
+        };
+        let create_input = match self.editing.as_ref() {
+            Some(RowEdit {
+                editor,
+                action: EditAction::Create { .. },
+            }) => {
+                let (after, depth) = match self.rows.get(selected) {
+                    Some(row) if row.is_dir => (Some(selected), row.depth + 1),
+                    Some(row) => (Some(selected), row.depth),
+                    None => (None, 0),
+                };
+                Some((after, depth, editor.clone()))
+            },
+            _ => None,
+        };
+
+        let mut elements: Vec<Div> = Vec::with_capacity(self.rows.len() + 1);
+        if let Some((None, depth, editor)) = &create_input {
+            elements.push(input_row(*depth, editor.clone(), color));
+        }
+        for (ix, row) in self.rows.iter().enumerate() {
             let indent = " ".repeat(row.depth * INDENT_SPACES_PER_DEPTH);
             let mut el = div()
                 .flex()
@@ -315,7 +391,10 @@ impl Render for ProjectTree {
                 .px_2()
                 .text_color(color)
                 .child(SharedString::from(indent));
-            el = match editing.as_ref().filter(|(path, _)| path == &row.path) {
+            el = match rename_overlay
+                .as_ref()
+                .filter(|(path, _)| path == &row.path)
+            {
                 Some((_, editor)) => el.child(editor.clone()),
                 None => {
                     let name = if row.is_dir {
@@ -340,9 +419,15 @@ impl Render for ProjectTree {
             if ix == selected {
                 el = el.bg(white().opacity(0.1));
             }
-            el
-        });
-        div().flex().flex_col().size_full().children(rows)
+            elements.push(el);
+
+            if let Some((Some(after), depth, editor)) = &create_input {
+                if *after == ix {
+                    elements.push(input_row(*depth, editor.clone(), color));
+                }
+            }
+        }
+        div().flex().flex_col().size_full().children(elements)
     }
 }
 
@@ -368,6 +453,31 @@ impl ItemView for ProjectTree {
         }
         .fail()
     }
+}
+
+/// Build the inline create-input row: indentation to `depth` followed
+/// by the single-line editor where the new entry's name is typed.
+fn input_row(depth: usize, editor: Entity<Editor>, color: Hsla) -> Div {
+    let indent = " ".repeat(depth * INDENT_SPACES_PER_DEPTH);
+    div()
+        .flex()
+        .items_center()
+        .px_2()
+        .text_color(color)
+        .child(SharedString::from(indent))
+        .child(editor)
+}
+
+/// The single-line editor's current text, or empty when it has no
+/// singleton buffer.
+fn editor_line(editor: &Entity<Editor>, cx: &App) -> String {
+    editor
+        .read(cx)
+        .multi_buffer()
+        .read(cx)
+        .as_singleton()
+        .map(|buffer| buffer.read(cx).text())
+        .unwrap_or_default()
 }
 
 /// Replace `editor`'s single-line buffer contents with `text`, seeding
@@ -746,10 +856,10 @@ mod tests {
             "the editor is seeded with the selected entry's current name"
         );
 
-        tree.update(vcx, |t, cx| t.end_rename(cx));
+        tree.update(vcx, |t, cx| t.end_edit(cx));
         assert!(
             tree.read_with(vcx, |t, _| t.editing_editor().is_none()),
-            "end_rename clears the inline editor"
+            "end_edit clears the inline editor"
         );
     }
 }

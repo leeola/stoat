@@ -701,6 +701,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::ProjectTreeRefresh
         | ActionKind::DeleteTreeEntry
         | ActionKind::RenameTreeEntry
+        | ActionKind::NewFileInTree
+        | ActionKind::NewFolderInTree
         | ActionKind::OpenGitStatus
         | ActionKind::OpenConflictPicker
         | ActionKind::OpenAbout
