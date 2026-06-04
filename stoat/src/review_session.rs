@@ -978,7 +978,12 @@ impl ReviewSession {
     /// cross-file move chips referencing other paths may go stale
     /// until a whole-session refresh.
     pub fn upsert_file(&mut self, input: ReviewFileInput) -> Vec<ReviewChunkId> {
-        let existing_index = self.files.iter().position(|f| f.path == input.path);
+        // Single-file refresh targets combined-diff files only; per-commit
+        // branch files (`commit` set) share paths and must not be matched.
+        let existing_index = self
+            .files
+            .iter()
+            .position(|f| f.path == input.path && f.commit.is_none());
 
         let inputs = vec![input];
         let mut hunks_per_file = extract_review_hunks_changeset(&inputs, 3);
@@ -1145,7 +1150,13 @@ impl ReviewSession {
     /// cursor, it adopts the first new chunk; cursors on other
     /// files are left alone.
     pub fn refresh_file(&mut self, path: &std::path::Path, new_input: ReviewFileInput) {
-        let Some(file_index) = self.files.iter().position(|f| f.path == path) else {
+        // Combined-diff files only; per-commit branch files share paths and
+        // are refreshed by whole-session rebuild, not single-file refresh.
+        let Some(file_index) = self
+            .files
+            .iter()
+            .position(|f| f.path == path && f.commit.is_none())
+        else {
             return;
         };
 
@@ -1829,6 +1840,33 @@ mod tests {
             .map(|id| s.chunks[id].commit.as_deref())
             .collect();
         assert_eq!(order_commits, vec![Some("c1"), Some("c2")]);
+    }
+
+    #[test]
+    fn single_file_refresh_skips_per_commit_files() {
+        let mut s = in_memory_session();
+        s.add_commit_files("c1".into(), vec![refresh_input("a.txt", "a\n", "A\n")]);
+        s.add_commit_files("c2".into(), vec![refresh_input("a.txt", "A\n", "B\n")]);
+
+        // A single-file refresh/upsert targets only combined-diff files
+        // (commit None), so the per-commit a.txt entries are never matched
+        // and survive unchanged.
+        s.refresh_file(
+            std::path::Path::new("a.txt"),
+            refresh_input("a.txt", "x\n", "y\n"),
+        );
+        s.upsert_file(refresh_input("a.txt", "x\n", "y\n"));
+
+        let per_commit: Vec<Option<String>> = s
+            .files
+            .iter()
+            .filter(|f| f.commit.is_some())
+            .map(|f| f.commit.clone())
+            .collect();
+        assert_eq!(
+            per_commit,
+            vec![Some("c1".to_string()), Some("c2".to_string())]
+        );
     }
 
     #[test]
