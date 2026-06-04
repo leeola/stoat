@@ -9,8 +9,8 @@ pub use delegate::{PickerDelegate, PickerSecondary};
 use gpui::{
     div, px, transparent_black, uniform_list, AppContext, Context, DismissEvent, Entity,
     EventEmitter, FocusHandle, Focusable, HighlightStyle, InteractiveElement, IntoElement,
-    ParentElement, Render, ScrollStrategy, Styled, Subscription, Task, UniformListScrollHandle,
-    WeakEntity, Window,
+    MouseButton, ParentElement, Render, ScrollStrategy, Styled, Subscription, Task,
+    UniformListScrollHandle, WeakEntity, Window,
 };
 use std::ops::Range;
 pub use stoat::fuzzy::{match_and_rank, RankedMatch};
@@ -358,6 +358,12 @@ impl<D: PickerDelegate> Render for Picker<D> {
                             .flex()
                             .flex_col()
                             .w_full()
+                            // Suppress the modal root's track_focus steal so a
+                            // row click leaves the query editor's IME focus
+                            // intact and typing keeps reaching it.
+                            .on_mouse_down(MouseButton::Left, |_, window, _| {
+                                window.prevent_default()
+                            })
                             .child(body)
                             .child(div().h(px(1.0)).bg(divider))
                             .into_any_element()
@@ -427,7 +433,9 @@ impl<D: PickerDelegate> EventEmitter<DismissEvent> for Picker<D> {}
 mod tests {
     use super::*;
     use crate::globals::ExecutorGlobal;
-    use gpui::{AnyElement, AppContext, SharedString, TestAppContext, VisualTestContext};
+    use gpui::{
+        point, AnyElement, AppContext, Modifiers, SharedString, TestAppContext, VisualTestContext,
+    };
     use std::sync::{Arc, Mutex};
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -631,6 +639,35 @@ mod tests {
         assert!(
             *keybinding_calls.lock().expect("keybinding mutex") > 0,
             "keybinding_for_index is invoked per rendered row"
+        );
+    }
+
+    #[test]
+    fn clicking_a_row_preserves_external_focus() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let items: Vec<String> = (0..50).map(|i| format!("item-{i:03}")).collect();
+        let (_picker, vcx) =
+            cx.add_window_view(|window, cx| Picker::new(TestDelegate::new(items), window, cx));
+        vcx.run_until_parked();
+
+        // A picker modal focuses the workspace EditorInput (which owns IME) on
+        // open; stand in for it with a sentinel handle and focus it.
+        let sentinel = vcx.update(|window, cx| {
+            let handle = cx.focus_handle();
+            window.focus(&handle);
+            handle
+        });
+        assert!(vcx.update(|window, _| sentinel.is_focused(window)));
+
+        // A mouse-down on a row must not steal focus to the picker, or the IME
+        // stops routing keystrokes to the query editor.
+        vcx.simulate_click(point(px(100.0), px(500.0)), Modifiers::default());
+        vcx.run_until_parked();
+
+        assert!(
+            vcx.update(|window, _| sentinel.is_focused(window)),
+            "row click stole focus from the query input"
         );
     }
 
