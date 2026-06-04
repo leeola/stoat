@@ -297,6 +297,17 @@ impl ReviewProgress {
     }
 }
 
+/// Reviewed/total chunk counts for one commit group in a commit-by-commit
+/// branch review. Produced by [`ReviewSession::commit_progress`], one per
+/// maximal run of consecutive same-commit chunks in `order`. `commit` is
+/// `None` for the single group of a combined-diff review.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommitProgress {
+    pub commit: Option<String>,
+    pub reviewed: usize,
+    pub total: usize,
+}
+
 /// UI-facing cache derived from a [`ReviewSession`]. Attached to an editor
 /// so `render_review` can paint without walking the session on every frame,
 /// and so navigation handlers can map a chunk id to a display row.
@@ -1637,6 +1648,54 @@ impl ReviewSession {
             }
         }
         p
+    }
+
+    /// Per-commit-group reviewed/total counts in `order` group order. Each
+    /// group is a maximal run of consecutive same-[`ReviewChunk::commit`]
+    /// chunks; a combined-diff review yields a single `None`-commit group.
+    /// `reviewed` counts approved chunks.
+    pub fn commit_progress(&self) -> Vec<CommitProgress> {
+        let mut groups: Vec<CommitProgress> = Vec::new();
+        for id in &self.order {
+            let Some(chunk) = self.chunks.get(id) else {
+                continue;
+            };
+            if groups
+                .last()
+                .map(|g| g.commit != chunk.commit)
+                .unwrap_or(true)
+            {
+                groups.push(CommitProgress {
+                    commit: chunk.commit.clone(),
+                    reviewed: 0,
+                    total: 0,
+                });
+            }
+            let group = groups.last_mut().expect("just pushed a group");
+            group.total += 1;
+            if chunk.approved {
+                group.reviewed += 1;
+            }
+        }
+        groups
+    }
+
+    /// 1-based index of the commit group under the cursor and the total
+    /// group count, or `None` when the session is empty or has no cursor.
+    /// A combined-diff review reports `Some((1, 1))`.
+    pub fn commit_position(&self) -> Option<(usize, usize)> {
+        let idx = self.cursor_order_index()?;
+        let total = self.commit_progress().len();
+        let mut current = 0;
+        let mut prev: Option<Option<String>> = None;
+        for i in 0..=idx {
+            let commit = self.commit_at(i);
+            if prev.as_ref() != Some(&commit) {
+                current += 1;
+            }
+            prev = Some(commit);
+        }
+        Some((current, total))
     }
 
     pub fn is_complete(&self) -> bool {
@@ -3674,6 +3733,46 @@ mod tests {
             .map(|id| s.chunks.get(id).unwrap().approved)
             .collect();
         assert_eq!(approved, [true, false, true]);
+    }
+
+    #[test]
+    fn commit_progress_and_position_track_groups() {
+        let mut s = in_memory_session();
+        let g1 = commit_group(&mut s, "c1", &["a.txt", "b.txt"]);
+        commit_group(&mut s, "c2", &["c.txt"]);
+
+        s.set_approved(g1[0], true);
+
+        assert_eq!(
+            s.commit_progress(),
+            vec![
+                CommitProgress {
+                    commit: Some("c1".into()),
+                    reviewed: 1,
+                    total: 2,
+                },
+                CommitProgress {
+                    commit: Some("c2".into()),
+                    reviewed: 0,
+                    total: 1,
+                },
+            ]
+        );
+
+        assert_eq!(s.commit_position(), Some((1, 2)));
+        s.next_commit();
+        assert_eq!(s.commit_position(), Some((2, 2)));
+    }
+
+    #[test]
+    fn commit_progress_single_group_for_combined_diff() {
+        let mut s = in_memory_session();
+        add(&mut s, "a.txt", "a\nb\nc\n", "A\nb\nC\n");
+
+        let groups = s.commit_progress();
+        assert_eq!(groups.len(), 1, "combined diff forms one group");
+        assert_eq!(groups[0].commit, None);
+        assert_eq!(s.commit_position(), Some((1, 1)));
     }
 
     #[test]
