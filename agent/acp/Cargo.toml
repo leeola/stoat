@@ -15,6 +15,7 @@ stoat_scheduler = { path = "../../scheduler" }
 tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
+stoat = { path = "../../stoat", features = ["test-support"] }
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
 
 [lints]

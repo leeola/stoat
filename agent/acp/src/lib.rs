@@ -7,13 +7,17 @@
 //! client capabilities, then spawns [`AcpSession`] handles that send
 //! `session/prompt` and `session/cancel`. A router task demuxes the
 //! streamed `session/update` notifications into [`AgentMessage`] and
-//! routes them by session to the matching [`AgentSession::recv`].
+//! routes them by session to the matching [`AgentSession::recv`]; a
+//! second task answers the agent's `fs/read_text_file` and
+//! `fs/write_text_file` requests through the injected [`FsHost`].
 
 mod demux;
+mod fs;
 mod schema;
 
 use crate::{
     demux::{demux_session_update, SessionUpdateNotification, SESSION_UPDATE},
+    fs::{handle_fs_request, method_not_found},
     schema::{
         CancelParams, ClientCapabilities, ContentBlock, FileSystemCapabilities, InitializeParams,
         NewSessionParams, NewSessionResult, PromptParams, INITIALIZE, PROTOCOL_VERSION,
@@ -30,8 +34,10 @@ use std::{
         Arc, Mutex,
     },
 };
-use stoat::host::{AgentConnection, AgentMessage, AgentSession};
-use stoat_agent_claude_code::jsonrpc::{Incoming, JsonRpcPeer, TransportError};
+use stoat::host::{AgentConnection, AgentMessage, AgentSession, FsHost};
+use stoat_agent_claude_code::jsonrpc::{
+    Incoming, IncomingNotification, IncomingRequest, JsonRpcPeer, TransportError,
+};
 use stoat_scheduler::{Executor, Task};
 use tokio::sync::{mpsc, Mutex as AsyncMutex};
 
@@ -69,17 +75,22 @@ pub struct AcpConnection {
     /// The task demuxing inbound `session/update` notifications to the
     /// per-session channels; held so it stays scheduled.
     _router: Task<()>,
+    /// The task answering inbound `fs/*` requests through the injected
+    /// [`FsHost`]; held so it stays scheduled.
+    _request_router: Task<()>,
 }
 
 impl AcpConnection {
     /// Run the ACP `initialize` handshake over an established transport,
     /// advertising filesystem read/write and terminal client
     /// capabilities, and return a ready connection. New sessions open in
-    /// `cwd`. `incoming` carries the agent's inbound frames; its
-    /// `session/update` notifications are demuxed and routed to sessions.
+    /// `cwd`. `incoming` carries the agent's inbound frames: its
+    /// `session/update` notifications are demuxed and routed to sessions,
+    /// and its `fs/*` requests are answered through `fs`.
     pub async fn connect(
         peer: JsonRpcPeer,
         incoming: Incoming,
+        fs: Arc<dyn FsHost>,
         executor: Executor,
         cwd: impl Into<String>,
     ) -> Result<Self, AcpError> {
@@ -98,14 +109,21 @@ impl AcpConnection {
         peer.request(INITIALIZE, Some(params))
             .await
             .context(TransportSnafu)?;
+
+        let Incoming {
+            requests,
+            notifications,
+        } = incoming;
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
-        let router = executor.spawn(route_notifications(incoming, Arc::clone(&routes)));
+        let router = executor.spawn(route_notifications(notifications, Arc::clone(&routes)));
+        let request_router = executor.spawn(route_requests(requests, fs));
         Ok(Self {
             peer,
             executor,
             cwd: cwd.into(),
             routes,
             _router: router,
+            _request_router: request_router,
         })
     }
 }
@@ -113,10 +131,12 @@ impl AcpConnection {
 /// Drain the connection's inbound notifications, demux each
 /// `session/update`, and forward the resulting [`AgentMessage`] to the
 /// matching session's channel. Other notifications, and updates with no
-/// host-facing event, are dropped. Inbound agent->client requests are
-/// left for later items and ignored here.
-async fn route_notifications(mut incoming: Incoming, routes: Routes) {
-    while let Some(notif) = incoming.notifications.recv().await {
+/// host-facing event, are dropped.
+async fn route_notifications(
+    mut notifications: mpsc::UnboundedReceiver<IncomingNotification>,
+    routes: Routes,
+) {
+    while let Some(notif) = notifications.recv().await {
         if notif.method != SESSION_UPDATE {
             continue;
         }
@@ -132,6 +152,20 @@ async fn route_notifications(mut incoming: Incoming, routes: Routes) {
         if let Some(tx) = routes.lock().expect("routes mutex").get(&update.session_id) {
             let _ = tx.send(message);
         }
+    }
+}
+
+/// Drain the connection's inbound requests, answering `fs/read_text_file`
+/// and `fs/write_text_file` through `fs` and rejecting every other method
+/// with a method-not-found error.
+async fn route_requests(
+    mut requests: mpsc::UnboundedReceiver<IncomingRequest>,
+    fs: Arc<dyn FsHost>,
+) {
+    while let Some(req) = requests.recv().await {
+        let response = handle_fs_request(&req.method, req.params.as_ref(), &fs)
+            .unwrap_or_else(|| Err(method_not_found(&req.method)));
+        let _ = req.respond(response);
     }
 }
 
@@ -245,14 +279,18 @@ impl AgentSession for AcpSession {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
-    use std::path::PathBuf;
-    use stoat::host::{ToolCallContent, ToolCallLocation, ToolKind};
+    use std::path::{Path, PathBuf};
+    use stoat::host::{FakeFs, ToolCallContent, ToolCallLocation, ToolKind};
     use stoat_agent_claude_code::jsonrpc::Incoming;
     use stoat_scheduler::TokioScheduler;
     use tokio::sync::mpsc;
 
     fn executor() -> Executor {
         Arc::new(TokioScheduler::new(tokio::runtime::Handle::current())).executor()
+    }
+
+    fn fake_fs() -> Arc<dyn FsHost> {
+        Arc::new(FakeFs::new())
     }
 
     /// Drive the agent end of a duplex: answer
@@ -303,7 +341,7 @@ mod tests {
         let ((client, client_in), (server, server_in)) = JsonRpcPeer::duplex(executor);
         let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
         let agent = fake_agent(executor, server_in, seen_tx);
-        let conn = AcpConnection::connect(client, client_in, executor.clone(), "/work")
+        let conn = AcpConnection::connect(client, client_in, fake_fs(), executor.clone(), "/work")
             .await
             .expect("connect");
         let init = seen_rx.recv().await.expect("initialize seen");
@@ -318,7 +356,7 @@ mod tests {
         let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
         let _agent = fake_agent(&executor, server_in, seen_tx);
 
-        let _conn = AcpConnection::connect(client, client_in, executor.clone(), "/work")
+        let _conn = AcpConnection::connect(client, client_in, fake_fs(), executor.clone(), "/work")
             .await
             .expect("connect");
 
@@ -498,5 +536,67 @@ mod tests {
             },
             other => panic!("expected Plan, got {other:?}"),
         }
+    }
+
+    /// Connect with `fs` injected and return the agent-end peer (so a test
+    /// can send agent->client requests) plus the handles to keep alive.
+    async fn connected_with_fs(
+        executor: &Executor,
+        fs: Arc<dyn FsHost>,
+    ) -> (JsonRpcPeer, (Task<()>, AcpConnection)) {
+        let ((client, client_in), (server, server_in)) = JsonRpcPeer::duplex(executor);
+        let (seen_tx, _seen) = mpsc::unbounded_channel();
+        let agent = fake_agent(executor, server_in, seen_tx);
+        let conn = AcpConnection::connect(client, client_in, fs, executor.clone(), "/work")
+            .await
+            .expect("connect");
+        (server, (agent, conn))
+    }
+
+    #[tokio::test]
+    async fn agent_fs_read_request_is_answered_from_fs() {
+        let executor = executor();
+        let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
+        fs.write(Path::new("/greeting.txt"), b"hi there").unwrap();
+        let (server, _keep) = connected_with_fs(&executor, fs).await;
+
+        let response = server
+            .request(
+                "fs/read_text_file",
+                Some(json!({ "path": "/greeting.txt" })),
+            )
+            .await
+            .expect("fs/read response");
+        assert_eq!(response, json!({ "content": "hi there" }));
+    }
+
+    #[tokio::test]
+    async fn agent_fs_write_request_persists_to_fs() {
+        let executor = executor();
+        let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
+        let (server, _keep) = connected_with_fs(&executor, Arc::clone(&fs)).await;
+
+        server
+            .request(
+                "fs/write_text_file",
+                Some(json!({ "path": "/out.txt", "content": "saved" })),
+            )
+            .await
+            .expect("fs/write response");
+
+        let mut buf = Vec::new();
+        fs.read(Path::new("/out.txt"), &mut buf).unwrap();
+        assert_eq!(buf, b"saved");
+    }
+
+    #[tokio::test]
+    async fn agent_unknown_request_is_rejected() {
+        let executor = executor();
+        let (server, _keep) = connected_with_fs(&executor, fake_fs()).await;
+
+        let result = server
+            .request("fs/chmod", Some(json!({ "path": "/x" })))
+            .await;
+        assert!(result.is_err(), "unknown method should be rejected");
     }
 }
