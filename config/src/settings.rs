@@ -156,6 +156,12 @@ pub struct Settings {
     /// merge: an override naming one language replaces that key
     /// entirely without touching others.
     pub language_servers: BTreeMap<String, LanguageServerCommand>,
+    /// Per-pane-item-kind input mode to land in when an item of that
+    /// kind becomes active, keyed by the kind's lowercase name (e.g.
+    /// `editor`, `review`, `rebase`). Set via `ui.item_mode.<kind> =
+    /// "<mode>";`. Consumers fall back to a built-in default for kinds
+    /// absent from the map. Right-hand wins on merge per key.
+    pub item_modes: BTreeMap<String, String>,
 }
 
 impl Settings {
@@ -186,6 +192,8 @@ impl Settings {
         claude_permissions.extend(other.claude_permissions);
         let mut language_servers = self.language_servers;
         language_servers.extend(other.language_servers);
+        let mut item_modes = self.item_modes;
+        item_modes.extend(other.item_modes);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
             claude_default_placement: other
@@ -220,6 +228,7 @@ impl Settings {
                 .ui_editor_show_whitespace
                 .or(self.ui_editor_show_whitespace),
             language_servers,
+            item_modes,
         }
     }
 
@@ -254,6 +263,11 @@ impl Settings {
             ["ui", "mode_badge", name] => {
                 if let Value::String(badge) | Value::Ident(badge) = &setting.value.node {
                     self.mode_badges.insert((*name).to_string(), badge.clone());
+                }
+            },
+            ["ui", "item_mode", kind] => {
+                if let Value::String(mode) | Value::Ident(mode) = &setting.value.node {
+                    self.item_modes.insert((*kind).to_string(), mode.clone());
                 }
             },
             ["mouse", "capture"] => {
@@ -782,6 +796,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -811,6 +826,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -840,6 +856,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -878,6 +895,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: Some(true),
@@ -899,6 +917,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
@@ -922,6 +941,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -948,6 +968,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
@@ -972,6 +993,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1009,6 +1031,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1038,6 +1061,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1067,6 +1091,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1105,6 +1130,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         let right = Settings::default();
         assert_eq!(
@@ -1129,6 +1155,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1158,6 +1185,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1187,6 +1215,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1213,6 +1242,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
@@ -1234,6 +1264,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         assert_eq!(left.merge(right).theme, Some("b".into()));
     }
@@ -1260,6 +1291,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         let right = Settings {
             text_proto_log: None,
@@ -1281,6 +1313,7 @@ mod tests {
             ui_editor_line_numbers: None,
             ui_editor_show_whitespace: None,
             language_servers: BTreeMap::new(),
+            item_modes: BTreeMap::new(),
         };
         assert_eq!(
             left.merge(right),
@@ -1304,6 +1337,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: BTreeMap::new(),
+                item_modes: BTreeMap::new(),
             }
         );
     }
@@ -1423,6 +1457,51 @@ mod tests {
                 ("foo".to_string(), "FOO".to_string()),
                 ("bar".to_string(), "BAR".to_string()),
                 ("shared".to_string(), "R".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn from_config_extracts_item_modes_string_and_ident() {
+        let config = parse_ok(
+            r#"on init {
+                ui.item_mode.review = "review";
+                ui.item_mode.rebase = rebase;
+            }"#,
+        );
+        assert_eq!(
+            Settings::from_config(&config).item_modes,
+            BTreeMap::from([
+                ("review".to_string(), "review".to_string()),
+                ("rebase".to_string(), "rebase".to_string()),
+            ])
+        );
+    }
+
+    #[test]
+    fn from_config_ignores_wrong_type_item_mode() {
+        let config = parse_ok("on init { ui.item_mode.review = true; }");
+        assert!(Settings::from_config(&config).item_modes.is_empty());
+    }
+
+    #[test]
+    fn merge_extends_item_modes_with_right_winning() {
+        let left = Settings {
+            item_modes: BTreeMap::from([
+                ("review".to_string(), "review".to_string()),
+                ("conflict".to_string(), "normal".to_string()),
+            ]),
+            ..Settings::default()
+        };
+        let right = Settings {
+            item_modes: BTreeMap::from([("conflict".to_string(), "conflict".to_string())]),
+            ..Settings::default()
+        };
+        assert_eq!(
+            left.merge(right).item_modes,
+            BTreeMap::from([
+                ("review".to_string(), "review".to_string()),
+                ("conflict".to_string(), "conflict".to_string()),
             ])
         );
     }

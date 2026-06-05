@@ -1080,6 +1080,7 @@ mod tests {
                 ui_editor_line_numbers: None,
                 ui_editor_show_whitespace: None,
                 language_servers: std::collections::BTreeMap::new(),
+                item_modes: std::collections::BTreeMap::new(),
             },
         );
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::SplitRight);
