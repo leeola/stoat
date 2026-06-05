@@ -605,6 +605,13 @@ impl Workspace {
         &self.pane_tree
     }
 
+    /// EntityId of the focused pane's active item, or `None` before the
+    /// first activation. Items compare against this to tell whether they
+    /// are the focused item (e.g. to draw a focused vs hollow cursor).
+    pub fn active_item_id(&self) -> Option<gpui::EntityId> {
+        self.last_active_item_id
+    }
+
     pub fn rebase_active(&self) -> Option<&ActiveRebase> {
         self.rebase_active.as_ref()
     }

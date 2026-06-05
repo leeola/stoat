@@ -194,6 +194,14 @@ impl Run {
         Some(mouse::point_to_grid(elem, cell))
     }
 
+    /// Whether this run pane is the workspace's focused pane item, so the
+    /// render can draw a filled rather than hollow cursor.
+    fn is_pane_focused(&self, cx: &Context<'_, Self>) -> bool {
+        self.workspace
+            .upgrade()
+            .is_some_and(|ws| ws.read(cx).active_item_id() == Some(cx.entity_id()))
+    }
+
     /// Forward a mouse event to the program as a report when the active
     /// block enabled a mouse mode and Shift is not held. Returns whether
     /// the event was consumed (so callers fall back to local selection on
@@ -556,6 +564,7 @@ impl Render for Run {
         let (font_family, font_size) = editor_font(cx);
         let mut body = div().flex().flex_col().flex_grow().w_full();
         let active = self.blocks.len().saturating_sub(1);
+        let focused = self.is_pane_focused(cx);
         for (idx, block) in self.blocks.iter().enumerate() {
             let cursor = (idx == active)
                 .then_some(self.cell_size)
@@ -567,6 +576,7 @@ impl Render for Run {
                         col,
                         shape: block.grid.cursor_shape(),
                         cell,
+                        focused,
                     }
                 });
             body = body.child(render::render_block(block, cursor));
@@ -1095,6 +1105,17 @@ mod tests {
             r.report_mouse(0, false, true, point(px(25.), px(30.)), shift, cx)
         });
         assert!(!consumed, "shift should fall back to local selection");
+    }
+
+    #[test]
+    fn cursor_focus_tracks_active_item() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        let focused = run.update(h.vcx, |r, cx| r.is_pane_focused(cx));
+        assert!(focused, "a freshly opened run pane is the focused item");
     }
 
     #[test]

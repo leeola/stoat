@@ -33,6 +33,8 @@ pub(crate) struct CursorRender {
     pub col: usize,
     pub shape: CursorShape,
     pub cell: Size<Pixels>,
+    /// Filled when the pane is focused; a hollow outline otherwise.
+    pub focused: bool,
 }
 
 /// The overlay size for a cursor shape within one cell: a full block, a
@@ -58,13 +60,17 @@ fn cursor_overlay(cursor: &CursorRender) -> Div {
         CursorShape::Underline => cursor.cell.height - size.height,
         _ => px(0.),
     };
-    div()
+    let base = div()
         .absolute()
         .left(cursor.cell.width * cursor.col as f32)
         .top(top)
         .w(size.width)
-        .h(size.height)
-        .bg(CURSOR_COLOR)
+        .h(size.height);
+    if cursor.focused {
+        base.bg(CURSOR_COLOR)
+    } else {
+        base.border_1().border_color(CURSOR_COLOR)
+    }
 }
 
 /// Named-color hex table mirroring
