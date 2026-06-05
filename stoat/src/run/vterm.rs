@@ -123,6 +123,13 @@ pub struct VtermGrid {
     /// (`?1049h`/`?47h`). `Some` iff currently on the alt screen;
     /// restored on `?1049l`/`?47l`.
     saved_screen: Option<SavedScreen>,
+    /// Top/bottom margins (0-based, inclusive) of the DECSTBM scroll
+    /// region. Line feeds at the bottom margin scroll only within these
+    /// rows; `None` scrolls the whole buffer.
+    scroll_region: Option<(usize, usize)>,
+    /// Cursor position stashed by DECSC/SCOSC (`s`), restored by
+    /// DECRC/SCORC (`u`).
+    saved_cursor: Option<(usize, usize)>,
     /// Persisted across `feed` calls so escape sequences whose bytes
     /// straddle two PTY reads finish parsing on the second call instead
     /// of being dropped at the chunk boundary.
@@ -151,6 +158,8 @@ impl VtermGrid {
             pen_bg: None,
             pen_modifiers: TermModifier::empty(),
             saved_screen: None,
+            scroll_region: None,
+            saved_cursor: None,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
         }
@@ -286,6 +295,33 @@ impl VtermGrid {
         }
     }
 
+    /// Advance the cursor one row. Inside a scroll region whose bottom
+    /// margin the cursor sits on, scroll the region's rows up by one
+    /// instead of growing the buffer.
+    fn line_feed(&mut self) {
+        if let Some((top, bottom)) = self.scroll_region {
+            if self.cursor_row >= bottom {
+                self.scroll_region_up(top, bottom);
+                return;
+            }
+        }
+        self.cursor_row += 1;
+        self.ensure_row(self.cursor_row);
+    }
+
+    /// Drop the top margin row and insert a blank at the bottom margin,
+    /// scrolling `top..=bottom` up by one and leaving rows outside the
+    /// region untouched.
+    fn scroll_region_up(&mut self, top: usize, bottom: usize) {
+        if top >= self.cells.len() || top > bottom {
+            return;
+        }
+        self.cells.remove(top);
+        let insert_at = bottom.min(self.cells.len());
+        self.cells
+            .insert(insert_at, vec![StyledCell::default(); self.width as usize]);
+    }
+
     fn put_char(&mut self, ch: char) {
         let w = self.width as usize;
         self.ensure_row(self.cursor_row);
@@ -316,8 +352,7 @@ impl vte::Perform for VtermGrid {
         match byte {
             b'\n' => {
                 self.cursor_col = 0;
-                self.cursor_row += 1;
-                self.ensure_row(self.cursor_row);
+                self.line_feed();
             },
             b'\r' => {
                 self.cursor_col = 0;
@@ -498,6 +533,34 @@ impl vte::Perform for VtermGrid {
                 let n = first_param(&params_vec, 1) as usize;
                 self.cursor_col = self.cursor_col.saturating_sub(n);
             },
+            'H' | 'f' => {
+                let row = first_param(&params_vec, 1) as usize;
+                let col = param_at(&params_vec, 1, 1) as usize;
+                self.cursor_row = row - 1;
+                self.cursor_col = (col - 1).min(self.width as usize - 1);
+                self.ensure_row(self.cursor_row);
+            },
+            'r' => {
+                if params_vec.len() >= 2 {
+                    let top = first_param(&params_vec, 1) as usize;
+                    let bottom = param_at(&params_vec, 1, 1) as usize;
+                    self.scroll_region = (top < bottom).then(|| (top - 1, bottom - 1));
+                } else {
+                    self.scroll_region = None;
+                }
+                self.cursor_row = 0;
+                self.cursor_col = 0;
+            },
+            's' => {
+                self.saved_cursor = Some((self.cursor_row, self.cursor_col));
+            },
+            'u' => {
+                if let Some((row, col)) = self.saved_cursor {
+                    self.cursor_row = row;
+                    self.cursor_col = col;
+                    self.ensure_row(self.cursor_row);
+                }
+            },
             'K' => {
                 let mode = first_param(&params_vec, 0);
                 self.ensure_row(self.cursor_row);
@@ -565,8 +628,14 @@ impl vte::Perform for VtermGrid {
 }
 
 fn first_param(params: &[u16], default: u16) -> u16 {
+    param_at(params, 0, default)
+}
+
+/// The `idx`th CSI parameter, falling back to `default` when absent or
+/// zero (a zero parameter means "use the default" per the spec).
+fn param_at(params: &[u16], idx: usize, default: u16) -> u16 {
     params
-        .first()
+        .get(idx)
         .copied()
         .filter(|&v| v != 0)
         .unwrap_or(default)

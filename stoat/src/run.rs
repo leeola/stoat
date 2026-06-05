@@ -228,6 +228,28 @@ mod tests {
     }
 
     #[test]
+    fn grid_cup_positions_absolutely() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"\x1b[2;3HX");
+        assert_eq!(grid.row(1)[2].ch, 'X');
+    }
+
+    #[test]
+    fn grid_save_and_restore_cursor() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"\x1b[3;4H\x1b[s\x1b[1;1H\x1b[uZ");
+        assert_eq!(grid.row(2)[3].ch, 'Z');
+    }
+
+    #[test]
+    fn grid_scroll_region_scrolls_within_margins() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"A\r\nB\r\nC\r\nD");
+        grid.feed(b"\x1b[2;4r\x1b[4;1H\nE");
+        assert_eq!(grid.text_in(0..10, 0..4), "A\nC\nD\nE");
+    }
+
+    #[test]
     fn grid_ansi_color_applies() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"\x1b[31mR\x1b[0mN");
