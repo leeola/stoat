@@ -108,6 +108,20 @@ struct SavedScreen {
     cursor_col: usize,
 }
 
+/// Mouse-tracking mode a program enabled, selecting which events the run
+/// pane forwards as mouse reports.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MouseProtocol {
+    /// No tracking; the pane does local selection.
+    None,
+    /// `?1000`: press and release only.
+    Press,
+    /// `?1002`: press, release, and drag (motion with a button held).
+    ButtonEvent,
+    /// `?1003`: the above plus button-less motion.
+    AnyEvent,
+}
+
 pub struct VtermGrid {
     cells: VecDeque<Vec<StyledCell>>,
     cursor_row: usize,
@@ -130,6 +144,10 @@ pub struct VtermGrid {
     /// Cursor position stashed by DECSC/SCOSC (`s`), restored by
     /// DECRC/SCORC (`u`).
     saved_cursor: Option<(usize, usize)>,
+    /// Mouse-tracking mode set via `?1000`/`?1002`/`?1003`.
+    mouse_protocol: MouseProtocol,
+    /// Whether mouse reports use SGR encoding (`?1006`) rather than X10.
+    mouse_sgr: bool,
     /// Persisted across `feed` calls so escape sequences whose bytes
     /// straddle two PTY reads finish parsing on the second call instead
     /// of being dropped at the chunk boundary.
@@ -160,6 +178,8 @@ impl VtermGrid {
             saved_screen: None,
             scroll_region: None,
             saved_cursor: None,
+            mouse_protocol: MouseProtocol::None,
+            mouse_sgr: false,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
         }
@@ -198,6 +218,49 @@ impl VtermGrid {
             self.cursor_row = saved.cursor_row;
             self.cursor_col = saved.cursor_col;
         }
+    }
+
+    /// Apply the DEC private modes in `params` (`?...h` sets, `?...l`
+    /// resets). Unknown modes are ignored.
+    fn set_private_modes(&mut self, params: &[u16], set: bool) {
+        let mouse = |proto| if set { proto } else { MouseProtocol::None };
+        for &param in params {
+            match param {
+                1049 | 47 => {
+                    if set {
+                        self.enter_alt_screen();
+                    } else {
+                        self.leave_alt_screen();
+                    }
+                },
+                1000 => self.mouse_protocol = mouse(MouseProtocol::Press),
+                1002 => self.mouse_protocol = mouse(MouseProtocol::ButtonEvent),
+                1003 => self.mouse_protocol = mouse(MouseProtocol::AnyEvent),
+                1006 => self.mouse_sgr = set,
+                _ => {},
+            }
+        }
+    }
+
+    /// The active mouse-tracking mode.
+    pub fn mouse_protocol(&self) -> MouseProtocol {
+        self.mouse_protocol
+    }
+
+    /// Encode a mouse event as report bytes in the grid's current
+    /// encoding (`?1006` SGR or X10), or `None` if the position is
+    /// outside what X10 can express. `button` is the base button code
+    /// plus the motion (32) and scroll (64) bits; `mods` adds shift (4),
+    /// alt (8), and control (16).
+    pub fn encode_mouse(
+        &self,
+        button: u8,
+        mods: u8,
+        col: u16,
+        row: u16,
+        pressed: bool,
+    ) -> Option<Vec<u8>> {
+        encode_mouse_report(self.mouse_sgr, button, mods, col, row, pressed)
     }
 
     pub fn line_count(&self) -> usize {
@@ -420,12 +483,8 @@ impl vte::Perform for VtermGrid {
     ) {
         let params_vec: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
-        if intermediates == [b'?'] && (params_vec.contains(&1049) || params_vec.contains(&47)) {
-            match action {
-                'h' => self.enter_alt_screen(),
-                'l' => self.leave_alt_screen(),
-                _ => {},
-            }
+        if intermediates == [b'?'] && (action == 'h' || action == 'l') {
+            self.set_private_modes(&params_vec, action == 'h');
             return;
         }
 
@@ -639,6 +698,37 @@ fn param_at(params: &[u16], idx: usize, default: u16) -> u16 {
         .copied()
         .filter(|&v| v != 0)
         .unwrap_or(default)
+}
+
+/// Encode a mouse event. SGR (`?1006`) carries the button and 0-based
+/// position as decimals with an `M`/`m` press/release suffix; X10 packs
+/// them into single bytes offset by 32 and is limited to positions under
+/// 223, with button 3 standing in for any release.
+fn encode_mouse_report(
+    sgr: bool,
+    button: u8,
+    mods: u8,
+    col: u16,
+    row: u16,
+    pressed: bool,
+) -> Option<Vec<u8>> {
+    let cb = button + mods;
+    if sgr {
+        let suffix = if pressed { 'M' } else { 'm' };
+        return Some(format!("\x1b[<{};{};{}{}", cb, col + 1, row + 1, suffix).into_bytes());
+    }
+    if col >= 223 || row >= 223 {
+        return None;
+    }
+    let cb = if pressed { cb } else { 3 + mods };
+    Some(vec![
+        0x1b,
+        b'[',
+        b'M',
+        32 + cb,
+        32 + 1 + col as u8,
+        32 + 1 + row as u8,
+    ])
 }
 
 /// A two-anchor selection over a [`VtermGrid`]. Coordinates are

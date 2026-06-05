@@ -9,7 +9,9 @@ pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
-pub use vterm::{GridSelection, OutputBlock, StyledCell, TermColor, TermModifier, VtermGrid};
+pub use vterm::{
+    GridSelection, MouseProtocol, OutputBlock, StyledCell, TermColor, TermModifier, VtermGrid,
+};
 
 new_key_type! {
     pub struct RunId;
@@ -247,6 +249,44 @@ mod tests {
         grid.feed(b"A\r\nB\r\nC\r\nD");
         grid.feed(b"\x1b[2;4r\x1b[4;1H\nE");
         assert_eq!(grid.text_in(0..10, 0..4), "A\nC\nD\nE");
+    }
+
+    #[test]
+    fn grid_tracks_mouse_protocol() {
+        let mut grid = VtermGrid::new(10);
+        assert_eq!(grid.mouse_protocol(), MouseProtocol::None);
+        grid.feed(b"\x1b[?1002h");
+        assert_eq!(grid.mouse_protocol(), MouseProtocol::ButtonEvent);
+        grid.feed(b"\x1b[?1002l");
+        assert_eq!(grid.mouse_protocol(), MouseProtocol::None);
+    }
+
+    #[test]
+    fn grid_encodes_mouse_sgr_and_x10() {
+        let mut grid = VtermGrid::new(10);
+        assert_eq!(
+            grid.encode_mouse(0, 0, 4, 2, true),
+            Some(vec![0x1b, b'[', b'M', 32, 37, 35])
+        );
+        grid.feed(b"\x1b[?1006h");
+        assert_eq!(
+            grid.encode_mouse(0, 0, 4, 2, true),
+            Some(b"\x1b[<0;5;3M".to_vec())
+        );
+        assert_eq!(
+            grid.encode_mouse(0, 0, 4, 2, false),
+            Some(b"\x1b[<0;5;3m".to_vec())
+        );
+    }
+
+    #[test]
+    fn grid_x10_release_is_button_3_and_clamps_range() {
+        let grid = VtermGrid::new(10);
+        assert_eq!(
+            grid.encode_mouse(2, 0, 1, 1, false),
+            Some(vec![0x1b, b'[', b'M', 35, 34, 34])
+        );
+        assert_eq!(grid.encode_mouse(0, 0, 300, 0, true), None);
     }
 
     #[test]
