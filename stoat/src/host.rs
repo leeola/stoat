@@ -39,8 +39,9 @@ pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
     terminal::{inject_done, inject_output, FakeTerminalHost, FakeTerminalSession},
-    workspace_symbol_params, FakeClaudeCode, FakeClaudeCodeHost, FakeClipboard, FakeEnv, FakeFs,
-    FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp, FakeLspHost, FakeRepoBuilder,
+    workspace_symbol_params, FakeAgentConnection, FakeAgentSession, FakeClaudeCode,
+    FakeClaudeCodeHost, FakeClipboard, FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp,
+    FakeLspHost, FakeRepoBuilder,
 };
 pub use git::{
     resolve_review_base, BlameLine, ChangedFile, CherryPickOutcome, CommitFileChange,
