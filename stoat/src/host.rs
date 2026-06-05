@@ -8,6 +8,7 @@
 //! - Borrowed paths (`&Path` inputs)
 //! - Small `Copy` return types for metadata
 
+pub mod agent;
 pub mod claude_code;
 pub mod clipboard;
 #[cfg(any(test, feature = "test-support"))]
@@ -21,6 +22,7 @@ pub mod local;
 pub mod lsp;
 pub mod terminal;
 
+pub use agent::{AgentConnection, AgentSession, AgentSessionCapabilities};
 pub use claude_code::{
     AgentMessage, ApprovalDecision, BashDenialPolicy, ChainedPermissionPolicy, ClaudeCodeHost,
     ClaudeCodeSession, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
