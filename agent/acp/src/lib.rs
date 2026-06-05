@@ -5,20 +5,25 @@
 //!
 //! [`AcpConnection::connect`] runs the `initialize` handshake advertising
 //! client capabilities, then spawns [`AcpSession`] handles that send
-//! `session/prompt` and `session/cancel`. The streamed `session/update`
-//! demux that drives [`AgentSession::recv`] is implemented separately;
-//! until then `recv` yields nothing.
+//! `session/prompt` and `session/cancel`. A router task demuxes the
+//! streamed `session/update` notifications into [`AgentMessage`] and
+//! routes them by session to the matching [`AgentSession::recv`].
 
+mod demux;
 mod schema;
 
-use crate::schema::{
-    CancelParams, ClientCapabilities, ContentBlock, FileSystemCapabilities, InitializeParams,
-    NewSessionParams, NewSessionResult, PromptParams, INITIALIZE, PROTOCOL_VERSION, SESSION_CANCEL,
-    SESSION_NEW, SESSION_PROMPT,
+use crate::{
+    demux::{demux_session_update, SessionUpdateNotification, SESSION_UPDATE},
+    schema::{
+        CancelParams, ClientCapabilities, ContentBlock, FileSystemCapabilities, InitializeParams,
+        NewSessionParams, NewSessionResult, PromptParams, INITIALIZE, PROTOCOL_VERSION,
+        SESSION_CANCEL, SESSION_NEW, SESSION_PROMPT,
+    },
 };
 use async_trait::async_trait;
 use snafu::{Location, ResultExt, Snafu};
 use std::{
+    collections::HashMap,
     io,
     sync::{
         atomic::{AtomicBool, Ordering},
@@ -26,8 +31,13 @@ use std::{
     },
 };
 use stoat::host::{AgentConnection, AgentMessage, AgentSession};
-use stoat_agent_claude_code::jsonrpc::{JsonRpcPeer, TransportError};
+use stoat_agent_claude_code::jsonrpc::{Incoming, JsonRpcPeer, TransportError};
 use stoat_scheduler::{Executor, Task};
+use tokio::sync::{mpsc, Mutex as AsyncMutex};
+
+/// Per-session [`AgentMessage`] senders the router routes demuxed
+/// `session/update` events to, keyed by ACP session id.
+type Routes = Arc<Mutex<HashMap<String, mpsc::UnboundedSender<AgentMessage>>>>;
 
 /// Failure modes of [`AcpConnection::connect`].
 #[derive(Debug, Snafu)]
@@ -55,15 +65,21 @@ pub struct AcpConnection {
     peer: Arc<JsonRpcPeer>,
     executor: Executor,
     cwd: String,
+    routes: Routes,
+    /// The task demuxing inbound `session/update` notifications to the
+    /// per-session channels; held so it stays scheduled.
+    _router: Task<()>,
 }
 
 impl AcpConnection {
     /// Run the ACP `initialize` handshake over an established transport,
     /// advertising filesystem read/write and terminal client
     /// capabilities, and return a ready connection. New sessions open in
-    /// `cwd`.
+    /// `cwd`. `incoming` carries the agent's inbound frames; its
+    /// `session/update` notifications are demuxed and routed to sessions.
     pub async fn connect(
         peer: JsonRpcPeer,
+        incoming: Incoming,
         executor: Executor,
         cwd: impl Into<String>,
     ) -> Result<Self, AcpError> {
@@ -82,11 +98,40 @@ impl AcpConnection {
         peer.request(INITIALIZE, Some(params))
             .await
             .context(TransportSnafu)?;
+        let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
+        let router = executor.spawn(route_notifications(incoming, Arc::clone(&routes)));
         Ok(Self {
             peer,
             executor,
             cwd: cwd.into(),
+            routes,
+            _router: router,
         })
+    }
+}
+
+/// Drain the connection's inbound notifications, demux each
+/// `session/update`, and forward the resulting [`AgentMessage`] to the
+/// matching session's channel. Other notifications, and updates with no
+/// host-facing event, are dropped. Inbound agent->client requests are
+/// left for later items and ignored here.
+async fn route_notifications(mut incoming: Incoming, routes: Routes) {
+    while let Some(notif) = incoming.notifications.recv().await {
+        if notif.method != SESSION_UPDATE {
+            continue;
+        }
+        let Some(params) = notif.params else {
+            continue;
+        };
+        let Ok(update) = serde_json::from_value::<SessionUpdateNotification>(params) else {
+            continue;
+        };
+        let Some(message) = demux_session_update(&update.update) else {
+            continue;
+        };
+        if let Some(tx) = routes.lock().expect("routes mutex").get(&update.session_id) {
+            let _ = tx.send(message);
+        }
     }
 }
 
@@ -103,17 +148,23 @@ impl AgentConnection for AcpConnection {
             .await
             .map_err(io::Error::other)?;
         let session: NewSessionResult = serde_json::from_value(result).map_err(io::Error::other)?;
+        let (tx, rx) = mpsc::unbounded_channel();
+        self.routes
+            .lock()
+            .expect("routes mutex")
+            .insert(session.session_id.clone(), tx);
         Ok(Box::new(AcpSession::new(
             Arc::clone(&self.peer),
             self.executor.clone(),
             session.session_id,
+            rx,
         )))
     }
 }
 
 /// One ACP conversation. Sends `session/prompt` and `session/cancel`
-/// over the shared transport; the streamed agent output is delivered by
-/// the (separate) `session/update` demux.
+/// over the shared transport; receives the streamed agent output the
+/// connection's router demuxes from `session/update`.
 struct AcpSession {
     peer: Arc<JsonRpcPeer>,
     executor: Executor,
@@ -123,16 +174,26 @@ struct AcpSession {
     /// frame is actually sent -- dropping a [`Task`] cancels it -- and
     /// replaced when the next prompt starts.
     turn: Mutex<Option<Task<()>>>,
+    /// Demuxed `session/update` events for this session, fed by the
+    /// connection's router. Async mutex so [`Self::recv`] can hold it
+    /// across the await without blocking the scheduler.
+    recv_rx: AsyncMutex<mpsc::UnboundedReceiver<AgentMessage>>,
 }
 
 impl AcpSession {
-    fn new(peer: Arc<JsonRpcPeer>, executor: Executor, session_id: String) -> Self {
+    fn new(
+        peer: Arc<JsonRpcPeer>,
+        executor: Executor,
+        session_id: String,
+        recv_rx: mpsc::UnboundedReceiver<AgentMessage>,
+    ) -> Self {
         Self {
             peer,
             executor,
             session_id,
             alive: AtomicBool::new(true),
             turn: Mutex::new(None),
+            recv_rx: AsyncMutex::new(recv_rx),
         }
     }
 }
@@ -147,8 +208,9 @@ impl AgentSession for AcpSession {
         .map_err(io::Error::other)?;
         let peer = Arc::clone(&self.peer);
         let task = self.executor.spawn(async move {
-            // FIXME: route the turn-end stop reason into `recv` once the
-            // session/update demux lands.
+            // FIXME: the session/prompt response (turn-end stop reason) is
+            // discarded; surface it as a turn-boundary AgentMessage if a
+            // consumer needs an explicit end-of-turn signal.
             let _ = peer.request(SESSION_PROMPT, Some(params)).await;
         });
         *self.turn.lock().expect("turn mutex") = Some(task);
@@ -166,10 +228,7 @@ impl AgentSession for AcpSession {
     }
 
     async fn recv(&self) -> Option<AgentMessage> {
-        // FIXME: demux the session/update notification stream into
-        // AgentMessage once that item lands; until then the session
-        // streams no events.
-        None
+        self.recv_rx.lock().await.recv().await
     }
 
     fn is_alive(&self) -> bool {
@@ -237,27 +296,27 @@ mod tests {
     ) -> (
         AcpConnection,
         mpsc::UnboundedReceiver<(String, Value)>,
-        (Task<()>, JsonRpcPeer, Incoming),
+        (Task<()>, JsonRpcPeer),
     ) {
         let ((client, client_in), (server, server_in)) = JsonRpcPeer::duplex(executor);
         let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
         let agent = fake_agent(executor, server_in, seen_tx);
-        let conn = AcpConnection::connect(client, executor.clone(), "/work")
+        let conn = AcpConnection::connect(client, client_in, executor.clone(), "/work")
             .await
             .expect("connect");
         let init = seen_rx.recv().await.expect("initialize seen");
         assert_eq!(init.0, "initialize");
-        (conn, seen_rx, (agent, server, client_in))
+        (conn, seen_rx, (agent, server))
     }
 
     #[tokio::test]
     async fn connect_runs_initialize_with_client_capabilities() {
         let executor = executor();
-        let ((client, _client_in), (_server, server_in)) = JsonRpcPeer::duplex(&executor);
+        let ((client, client_in), (_server, server_in)) = JsonRpcPeer::duplex(&executor);
         let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
         let _agent = fake_agent(&executor, server_in, seen_tx);
 
-        let _conn = AcpConnection::connect(client, executor.clone(), "/work")
+        let _conn = AcpConnection::connect(client, client_in, executor.clone(), "/work")
             .await
             .expect("connect");
 
@@ -313,5 +372,53 @@ mod tests {
         let (method, params) = seen_rx.recv().await.expect("session/cancel seen");
         assert_eq!(method, "session/cancel");
         assert_eq!(params["sessionId"], json!("sess-1"));
+    }
+
+    /// Push a `session/update` from the agent end and return the
+    /// [`AgentMessage`] the session's `recv` yields.
+    async fn recv_after_update(update: Value) -> AgentMessage {
+        let executor = executor();
+        let (conn, mut seen_rx, keep) = connected(&executor).await;
+        let (_agent, server) = keep;
+        let session = conn.new_session().await.expect("new_session");
+        let _ = seen_rx.recv().await.expect("session/new seen");
+
+        server
+            .notify(
+                "session/update",
+                Some(json!({ "sessionId": "sess-1", "update": update })),
+            )
+            .expect("notify session/update");
+
+        session.recv().await.expect("recv yields a message")
+    }
+
+    #[tokio::test]
+    async fn agent_message_chunk_reaches_recv_as_text() {
+        let message = recv_after_update(json!({
+            "sessionUpdate": "agent_message_chunk",
+            "content": { "type": "text", "text": "hi there" },
+        }))
+        .await;
+        match message {
+            AgentMessage::Text { text } => assert_eq!(text, "hi there"),
+            other => panic!("expected Text, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn agent_thought_chunk_reaches_recv_as_thinking() {
+        let message = recv_after_update(json!({
+            "sessionUpdate": "agent_thought_chunk",
+            "content": { "type": "text", "text": "pondering" },
+        }))
+        .await;
+        match message {
+            AgentMessage::Thinking { text, signature } => {
+                assert_eq!(text, "pondering");
+                assert!(signature.is_empty());
+            },
+            other => panic!("expected Thinking, got {other:?}"),
+        }
     }
 }

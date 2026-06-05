@@ -12,6 +12,7 @@ snafu.workspace = true
 stoat = { path = "../../stoat" }
 stoat_agent_claude_code = { path = "../claude_code" }
 stoat_scheduler = { path = "../../scheduler" }
+tokio = { workspace = true, features = ["sync"] }
 
 [dev-dependencies]
 tokio = { workspace = true, features = ["macros", "rt", "rt-multi-thread"] }
