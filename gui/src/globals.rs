@@ -19,6 +19,8 @@ use std::{
     collections::HashMap,
     sync::{Arc, Mutex},
 };
+#[cfg(any(test, feature = "test-support"))]
+use stoat::host::AgentConnection;
 use stoat::{
     host::{
         ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost,
@@ -81,6 +83,19 @@ impl Global for GitHostGlobal {}
 pub struct ClaudeCodeHostGlobal(pub Arc<dyn ClaudeCodeHost>);
 
 impl Global for ClaudeCodeHostGlobal {}
+
+/// App-global wrapper for [`Arc<dyn AgentConnection>`], the ACP agent
+/// host. Test-support only for now: the harness installs it so UI/app
+/// tests can resolve an agent host from globals against a fake. A
+/// production consumer (and a [`Globals`] field) lands with the ACP
+/// live-path wiring; until then nothing reads the stored handle outside
+/// tests.
+#[cfg(any(test, feature = "test-support"))]
+#[cfg_attr(all(feature = "test-support", not(test)), allow(dead_code))]
+pub struct AgentConnectionGlobal(pub Arc<dyn AgentConnection>);
+
+#[cfg(any(test, feature = "test-support"))]
+impl Global for AgentConnectionGlobal {}
 
 /// App-global wrapper for [`Arc<dyn ClipboardHost>`].
 pub struct ClipboardHostGlobal(pub Arc<dyn ClipboardHost>);

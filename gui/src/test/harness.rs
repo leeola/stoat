@@ -1,7 +1,8 @@
 use crate::{
     globals::{
-        ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal, FsHostGlobal,
-        FsWatchHostGlobal, GitHostGlobal, LspHostGlobal, ShellHostGlobal, TerminalHostGlobal,
+        AgentConnectionGlobal, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal,
+        ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, LspHostGlobal,
+        ShellHostGlobal, TerminalHostGlobal,
     },
     workspace::Workspace,
 };
@@ -12,11 +13,11 @@ use gpui::{
 use std::{sync::Arc, time::Duration};
 use stoat::host::{
     fake::{
-        terminal::FakeTerminalSession, FakeClaudeCodeHost, FakeClipboard, FakeGit, FakeLsp,
-        FakeLspHost, FakeTerminalHost,
+        terminal::FakeTerminalSession, FakeAgentConnection, FakeClaudeCodeHost, FakeClipboard,
+        FakeGit, FakeLsp, FakeLspHost, FakeTerminalHost,
     },
-    ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost, ShellHost,
-    TerminalHost,
+    AgentConnection, ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost,
+    ShellHost, TerminalHost,
 };
 use stoat_host::{FakeEnv, FakeFs, FakeFsWatcher, FakeShell};
 use stoat_scheduler::TestScheduler;
@@ -32,6 +33,7 @@ pub struct TestHarness {
     lsp: Arc<FakeLsp>,
     git: Arc<FakeGit>,
     claude: Arc<FakeClaudeCodeHost>,
+    agent: Arc<FakeAgentConnection>,
     clipboard: Arc<FakeClipboard>,
     terminal: Arc<FakeTerminalSession>,
     scheduler: Arc<TestScheduler>,
@@ -59,6 +61,7 @@ impl TestHarness {
         let lsp = Arc::new(FakeLsp::new());
         let git = Arc::new(FakeGit::new());
         let claude = Arc::new(FakeClaudeCodeHost::new());
+        let agent = Arc::new(FakeAgentConnection::new());
         let clipboard = Arc::new(FakeClipboard::new());
         let terminal = Arc::new(FakeTerminalSession::new());
         let scheduler = Arc::new(TestScheduler::new());
@@ -74,6 +77,7 @@ impl TestHarness {
             lsp,
             git,
             claude,
+            agent,
             clipboard,
             terminal,
             scheduler,
@@ -90,6 +94,7 @@ impl TestHarness {
         let lsp = self.lsp.clone();
         let git = self.git.clone();
         let claude = self.claude.clone();
+        let agent = self.agent.clone();
         let clipboard = self.clipboard.clone();
         let terminal = self.terminal.clone();
         let executor = self.scheduler.executor();
@@ -103,6 +108,7 @@ impl TestHarness {
             ));
             cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
             cx.set_global(ClaudeCodeHostGlobal(claude as Arc<dyn ClaudeCodeHost>));
+            cx.set_global(AgentConnectionGlobal(agent as Arc<dyn AgentConnection>));
             cx.set_global(ClipboardHostGlobal(clipboard as Arc<dyn ClipboardHost>));
             cx.set_global(TerminalHostGlobal(
                 Arc::new(FakeTerminalHost::new(terminal)) as Arc<dyn TerminalHost>,
@@ -233,6 +239,13 @@ impl TestHarness {
             .update(|cx| cx.set_global(ClaudeCodeHostGlobal(arc)));
     }
 
+    pub fn set_agent_connection(&mut self, fake: Arc<FakeAgentConnection>) {
+        self.agent = fake.clone();
+        let arc = fake as Arc<dyn AgentConnection>;
+        self.cx
+            .update(|cx| cx.set_global(AgentConnectionGlobal(arc)));
+    }
+
     pub fn set_clipboard_host(&mut self, fake: Arc<FakeClipboard>) {
         self.clipboard = fake.clone();
         let arc = fake as Arc<dyn ClipboardHost>;
@@ -275,6 +288,10 @@ impl TestHarness {
 
     pub fn claude(&self) -> &Arc<FakeClaudeCodeHost> {
         &self.claude
+    }
+
+    pub fn agent(&self) -> &Arc<FakeAgentConnection> {
+        &self.agent
     }
 
     pub fn clipboard(&self) -> &Arc<FakeClipboard> {
@@ -395,6 +412,10 @@ mod tests {
                 "ClaudeCodeHostGlobal missing"
             );
             assert!(
+                cx.has_global::<AgentConnectionGlobal>(),
+                "AgentConnectionGlobal missing"
+            );
+            assert!(
                 cx.has_global::<ClipboardHostGlobal>(),
                 "ClipboardHostGlobal missing"
             );
@@ -418,5 +439,19 @@ mod tests {
             .cx
             .read(|cx| Arc::as_ptr(&cx.global::<FsHostGlobal>().0) as *const ());
         assert_eq!(registered_ptr, next_ptr as *const ());
+    }
+
+    #[test]
+    fn set_agent_connection_replaces_global() {
+        let mut harness = TestHarness::new();
+        let next = Arc::new(FakeAgentConnection::new());
+        let next_ptr = Arc::as_ptr(&next) as *const ();
+        harness.set_agent_connection(next);
+
+        assert_eq!(Arc::as_ptr(harness.agent()) as *const (), next_ptr);
+        let registered_ptr = harness
+            .cx
+            .read(|cx| Arc::as_ptr(&cx.global::<AgentConnectionGlobal>().0) as *const ());
+        assert_eq!(registered_ptr, next_ptr);
     }
 }
