@@ -212,8 +212,6 @@ pub struct Editor {
     blame_state: Option<Entity<crate::git::blame::BlameState>>,
     blame_visible: bool,
     inline_blame_visible: bool,
-    minimap_visible: bool,
-    minimap: Option<Entity<Editor>>,
     minimap_drag: Option<MinimapDrag>,
     _subscriptions: [Subscription; 4],
     _diagnostic_subscription: Option<Subscription>,
@@ -497,8 +495,6 @@ impl Editor {
             blame_state: None,
             blame_visible: false,
             inline_blame_visible,
-            minimap_visible: false,
-            minimap: None,
             minimap_drag: None,
             _subscriptions: [mb_sub, dm_sub, diff_sub, theme_sub],
             _diagnostic_subscription: None,
@@ -2483,66 +2479,49 @@ impl Editor {
         cx.notify();
     }
 
-    pub fn minimap_visible(&self) -> bool {
-        self.minimap_visible
-    }
-
-    /// The minimap child editor, present only while the minimap is
-    /// visible. It mirrors this editor in [`EditorMode::Minimap`],
-    /// sharing the display and diff maps so it reflects the same
-    /// content without an independent layout pass.
-    pub fn minimap(&self) -> Option<&Entity<Editor>> {
-        self.minimap.as_ref()
-    }
-
-    /// Flip the per-editor minimap visibility. Toggling on constructs
-    /// the [`EditorMode::Minimap`] child via [`Self::make_minimap`] and
-    /// retains it; toggling off drops it. Toggling does not affect this
-    /// editor's own viewport or selections.
-    pub fn set_minimap_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
-        if self.minimap_visible == visible {
-            return;
+    /// The editor this minimap mirrors, or `None` when this editor is
+    /// not a minimap. The workspace reads it to detect whether the
+    /// active editor changed before rebuilding the overview column.
+    pub(crate) fn minimap_target(&self) -> Option<WeakEntity<Editor>> {
+        match &self.mode {
+            EditorMode::Minimap { parent } => Some(parent.clone()),
+            _ => None,
         }
-        self.minimap_visible = visible;
-        if visible {
-            if self.minimap.is_none() {
-                let minimap = self.make_minimap(cx);
-                self.minimap = Some(minimap);
-            }
-        } else {
-            self.minimap = None;
-        }
-        cx.emit(EditorEvent::Changed);
-        cx.notify();
     }
 
-    /// Construct an [`EditorMode::Minimap`] child of this editor. The
-    /// child shares this editor's [`MultiBuffer`], [`DisplayMap`], and
+    /// Construct an [`EditorMode::Minimap`] mirror of `target`. The
+    /// mirror shares `target`'s [`MultiBuffer`], [`DisplayMap`], and
     /// [`DiffMap`] entities so it reflects the same content and diff
-    /// state, and holds a [`WeakEntity`] back-reference to this editor
-    /// as its scroll and paint anchor. The reduced font and viewport
-    /// thumb are applied by the minimap render path.
-    fn make_minimap(&self, cx: &mut Context<'_, Self>) -> Entity<Editor> {
-        let multi_buffer = self.multi_buffer.clone();
-        let display_map = self.display_map.clone();
-        let diff_map = self.diff_map.clone();
-        let parent = cx.entity().downgrade();
+    /// state, and holds a [`WeakEntity`] back-reference to `target` as
+    /// its scroll and paint anchor. The reduced font and viewport thumb
+    /// are applied by the minimap render path.
+    ///
+    /// Reads `target`, so the caller must not be mid-`update` on it: the
+    /// workspace owns the mirror and builds it from its own context,
+    /// never from inside the target editor's update.
+    pub(crate) fn make_minimap_for(target: &Entity<Editor>, cx: &mut App) -> Entity<Editor> {
+        let (multi_buffer, display_map, diff_map) = {
+            let target = target.read(cx);
+            (
+                target.multi_buffer.clone(),
+                target.display_map.clone(),
+                target.diff_map.clone(),
+            )
+        };
+        let parent = target.downgrade();
+        let observed = target.clone();
         cx.new(|cx| {
             let minimap = Editor::new(
                 multi_buffer,
                 display_map,
                 diff_map,
-                EditorMode::Minimap {
-                    parent: parent.clone(),
-                },
+                EditorMode::Minimap { parent },
                 cx,
             );
-            // Refresh scrollbar markers when the parent's diagnostics or
+            // Refresh scrollbar markers when the target's diagnostics or
             // search state change; its diff_map is shared, so hunk
             // changes already repaint via that subscription.
-            if let Some(parent) = parent.upgrade() {
-                cx.observe(&parent, |_, _, cx| cx.notify()).detach();
-            }
+            cx.observe(&observed, |_, _, cx| cx.notify()).detach();
             minimap
         })
     }
@@ -4064,7 +4043,6 @@ impl Render for Editor {
         let hover_popup = self.hover_popup.clone();
         let completion_popup = self.completion_popup.clone();
         let signature_help = self.signature_help_manager.clone();
-        let minimap = self.minimap.clone();
         let mut root = div()
             .relative()
             .w_full()
@@ -4112,7 +4090,7 @@ impl Render for Editor {
                     .and_then(|row| sticky_scroll::sticky_header(self, row, cx));
                 if let Some(header) = header {
                     let theme = cx.theme();
-                    let mut header_row = div()
+                    let header_row = div()
                         .absolute()
                         .top_0()
                         .left_0()
@@ -4133,31 +4111,9 @@ impl Render for Editor {
                                 .border_color(theme.border_inactive)
                                 .child(header),
                         );
-                    // Reserve the minimap column so the header ends at its left
-                    // edge instead of being painted over by the minimap strip.
-                    if self.minimap.is_some() {
-                        header_row = header_row.child(
-                            div()
-                                .flex_none()
-                                .w(relative(MINIMAP_WIDTH_FRACTION))
-                                .min_w(px(MINIMAP_MIN_WIDTH)),
-                        );
-                    }
                     root = root.child(header_row);
                 }
             }
-        }
-        if let Some(minimap) = minimap {
-            root = root.child(
-                div()
-                    .absolute()
-                    .top_0()
-                    .right_0()
-                    .h_full()
-                    .w(relative(MINIMAP_WIDTH_FRACTION))
-                    .min_w(px(MINIMAP_MIN_WIDTH))
-                    .child(minimap),
-            );
         }
         if let EditorMode::Minimap { parent } = &self.mode {
             let parent = parent.clone();
@@ -4355,11 +4311,13 @@ const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
 const MINIMAP_FONT_SIZE: f32 = 2.0;
 const MINIMAP_LINE_HEIGHT: f32 = 2.5;
 
-/// The minimap column occupies this fraction of the parent editor's
-/// width, floored at [`MINIMAP_MIN_WIDTH`] pixels (roughly 20 columns
-/// at [`MINIMAP_FONT_SIZE`]) so it stays visible in a narrow pane.
-const MINIMAP_WIDTH_FRACTION: f32 = 0.15;
-const MINIMAP_MIN_WIDTH: f32 = 24.0;
+/// The minimap overlay occupies this fraction of the workspace width,
+/// floored at [`MINIMAP_MIN_WIDTH`] pixels (roughly 20 columns at
+/// [`MINIMAP_FONT_SIZE`]) so it stays visible in a narrow window. Read
+/// by [`crate::workspace::Workspace`]'s render to size the right-edge
+/// overlay.
+pub(crate) const MINIMAP_WIDTH_FRACTION: f32 = 0.15;
+pub(crate) const MINIMAP_MIN_WIDTH: f32 = 24.0;
 
 /// Duration of an eased programmatic-jump scroll animation.
 const SCROLL_ANIMATION_DURATION: std::time::Duration = std::time::Duration::from_millis(150);
@@ -6224,11 +6182,8 @@ mod tests {
                 )),
                 cx,
             );
-            ed.set_minimap_visible(true, cx);
         });
-        let minimap = editor
-            .read_with(vcx, |ed, _| ed.minimap().cloned())
-            .expect("minimap child constructed");
+        let minimap = vcx.update(|_, cx| Editor::make_minimap_for(&editor, cx));
 
         let search_color = vcx.read(|cx| cx.theme().search_match);
         let bg_colors: Vec<Option<gpui::Hsla>> = minimap.update(vcx, |mm, cx| {
@@ -6281,10 +6236,7 @@ mod tests {
             .join("\n");
         let (_buffer, editor) = new_editor(&mut cx, &text);
         let vcx = cx.add_empty_window();
-        editor.update(vcx, |ed, cx| ed.set_minimap_visible(true, cx));
-        let minimap = editor
-            .read_with(vcx, |ed, _| ed.minimap().cloned())
-            .expect("minimap child constructed");
+        let minimap = vcx.update(|_, cx| Editor::make_minimap_for(&editor, cx));
 
         let parent_built = editor.update_in(vcx, |ed, window, cx| {
             ed.render(window, cx).into_any_element();
@@ -6338,11 +6290,8 @@ mod tests {
             ed.set_file_path(Some(path.clone()), cx);
             ed.set_diagnostic_set(Some(diag_set.clone()), cx);
             ed.set_search_state(Some(SearchState::new("line", SearchDirection::Forward)), cx);
-            ed.set_minimap_visible(true, cx);
         });
-        let minimap = editor
-            .read_with(vcx, |ed, _| ed.minimap().cloned())
-            .expect("minimap child constructed");
+        let minimap = vcx.update(|_, cx| Editor::make_minimap_for(&editor, cx));
 
         let built = minimap.update_in(vcx, |mm, window, cx| {
             mm.render(window, cx).into_any_element();
@@ -6397,10 +6346,7 @@ mod tests {
     fn minimap_drag_fixture(vcx: &mut VisualTestContext) -> (Entity<Editor>, Entity<Editor>) {
         let text = multiline_text(500);
         let (_buffer, editor) = editor_with_viewport(vcx, &text);
-        editor.update(vcx, |ed, cx| ed.set_minimap_visible(true, cx));
-        let minimap = editor
-            .read_with(vcx, |ed, _| ed.minimap().cloned())
-            .expect("minimap child constructed");
+        let minimap = vcx.update(|_, cx| Editor::make_minimap_for(&editor, cx));
         minimap.update(vcx, |mm, cx| {
             mm.set_text_region_bounds(
                 Bounds {

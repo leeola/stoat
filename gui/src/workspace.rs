@@ -8,7 +8,7 @@ use crate::{
     diff_map::DiffMap,
     display_map::DisplayMap,
     dock::{Dock, DockSide},
-    editor::{Editor, EditorEvent, EditorMode},
+    editor::{Editor, EditorEvent, EditorMode, MINIMAP_MIN_WIDTH, MINIMAP_WIDTH_FRACTION},
     editor_input::EditorInput,
     fold_actions,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
@@ -41,10 +41,10 @@ use crate::{
     toast::{Toast, ToastId, ToastView},
 };
 use gpui::{
-    deferred, div, px, size, App, AppContext, BorrowAppContext, Bounds, Context, DismissEvent,
-    Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
-    WindowOptions,
+    deferred, div, px, relative, size, App, AppContext, BorrowAppContext, Bounds, Context,
+    DismissEvent, Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, Task, TitlebarOptions, WeakEntity,
+    Window, WindowBounds, WindowOptions,
 };
 use regex::Regex;
 use std::{
@@ -118,6 +118,15 @@ pub struct Workspace {
     toast_view: Entity<ToastView>,
     status_bar: Entity<StatusBar>,
     key_hint_banner: Entity<KeyHintBanner>,
+    /// Whether the minimap overview column is shown. Workspace-level:
+    /// a single minimap follows the focused pane's active editor rather
+    /// than each editor owning one. Persisted via [`WorkspaceStateV1`].
+    minimap_visible: bool,
+    /// The minimap mirror of the active editor, present while
+    /// [`Self::minimap_visible`] holds and an editor is focused.
+    /// Rebuilt by [`Self::refresh_minimap`] when the active editor
+    /// changes and rendered as a right-edge overlay.
+    minimap: Option<Entity<Editor>>,
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
     lsp_state: Entity<LspState>,
@@ -409,6 +418,8 @@ impl Workspace {
             toast_view,
             status_bar,
             key_hint_banner,
+            minimap_visible: false,
+            minimap: None,
             input_state_machine,
             editor_input,
             lsp_state,
@@ -1132,6 +1143,7 @@ impl Workspace {
             docks,
             buffers,
             command_palette_history: self.command_palette_history.clone(),
+            minimap_visible: self.minimap_visible,
         }
     }
 
@@ -1282,16 +1294,8 @@ impl Workspace {
                     p.activate(active, cx);
                 });
             }
-            let active_editor = pane
-                .read(cx)
-                .active_item()
-                .and_then(|item| item.to_any_view().downcast::<Editor>().ok());
-            if let Some(editor) = active_editor {
-                editor.update(cx, |ed, cx| {
-                    ed.set_minimap_visible(items.minimap_visible, cx)
-                });
-            }
         }
+        self.minimap_visible = state.minimap_visible;
         self.pane_tree
             .update(cx, |tree, cx| tree.set_focus(state.focused_pane, cx));
 
@@ -1321,6 +1325,7 @@ impl Workspace {
                 d.set_visibility(snap.visibility, cx);
             });
         }
+        self.broadcast_active_editor(cx);
     }
 
     /// Read and apply the persisted state at `path`.
@@ -1762,6 +1767,7 @@ impl Workspace {
             sm.set_active_editor(weak_editor);
             sm.set_editor_focus_target(focus_target);
         });
+        self.refresh_minimap(cx);
     }
 
     /// Extract the editor a pane item exposes to the workspace's
@@ -3567,16 +3573,61 @@ impl Workspace {
             .update(cx, |coord, cx| coord.refresh(buffer_id, path, cx));
     }
 
-    /// Flip the active editor's minimap visibility and repaint. The
-    /// minimap is a reduced-scale mirror column painted alongside the
-    /// editor by sibling work; this only toggles the visibility flag.
-    /// No-op when no editor is focused.
+    #[cfg(test)]
+    pub(crate) fn minimap_visible(&self) -> bool {
+        self.minimap_visible
+    }
+
+    /// The minimap mirror currently following the active editor, or
+    /// `None` when the minimap is hidden or no editor is focused.
+    #[cfg(test)]
+    pub(crate) fn minimap(&self) -> Option<&Entity<Editor>> {
+        self.minimap.as_ref()
+    }
+
+    /// Flip whether the minimap overview column is shown and rebuild or
+    /// drop the mirror accordingly. The single workspace minimap follows
+    /// the focused pane's active editor rather than each editor owning
+    /// one.
     fn dispatch_toggle_minimap(&mut self, cx: &mut Context<'_, Self>) {
-        let Some(editor) = self.active_editor(cx) else {
+        self.set_minimap_visible(!self.minimap_visible, cx);
+    }
+
+    /// Set whether the minimap overview column is shown, rebuilding or
+    /// dropping the mirror to match.
+    pub(crate) fn set_minimap_visible(&mut self, visible: bool, cx: &mut Context<'_, Self>) {
+        if self.minimap_visible == visible {
             return;
-        };
-        let new_visible = !editor.read(cx).minimap_visible();
-        editor.update(cx, |ed, cx| ed.set_minimap_visible(new_visible, cx));
+        }
+        self.minimap_visible = visible;
+        self.refresh_minimap(cx);
+    }
+
+    /// Point the minimap mirror at the active editor (the same source
+    /// [`Self::broadcast_active_editor`] feeds the input pipeline),
+    /// rebuilding it only when the target changes so re-broadcasts on
+    /// unrelated pane events do not churn the mirror. Drops the mirror
+    /// when the minimap is hidden or no editor is active. Repaints when
+    /// the mirror is added, removed, or retargeted.
+    fn refresh_minimap(&mut self, cx: &mut Context<'_, Self>) {
+        let target = self
+            .minimap_visible
+            .then(|| self.active_editor(cx))
+            .flatten();
+        let target_id = target.as_ref().map(Entity::entity_id);
+        let current_id = self
+            .minimap
+            .as_ref()
+            .and_then(|mm| mm.read(cx).minimap_target())
+            .and_then(|w| w.upgrade())
+            .map(|e| e.entity_id());
+        if target_id == current_id {
+            return;
+        }
+        self.minimap = target
+            .as_ref()
+            .map(|target| Editor::make_minimap_for(target, cx));
+        cx.notify();
     }
 
     /// Apply a runtime `Set { key, value }` action against the
@@ -7148,6 +7199,16 @@ impl Render for Workspace {
                     .child(self.status_bar.clone()),
             )
             .children(right_docks)
+            .children(self.minimap.clone().map(|minimap| {
+                div()
+                    .absolute()
+                    .top_0()
+                    .right_0()
+                    .h_full()
+                    .w(relative(MINIMAP_WIDTH_FRACTION))
+                    .min_w(px(MINIMAP_MIN_WIDTH))
+                    .child(minimap)
+            }))
             .child(self.key_hint_banner.clone())
             .child(deferred(self.modal_layer.clone()));
         if render_stats_enabled(cx) {
@@ -16733,43 +16794,52 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_toggle_minimap_flips_visibility_on_active_editor() {
+    fn dispatch_toggle_minimap_flips_workspace_visibility() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
         let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
         sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
 
-        editor.read_with(vcx, |ed, _| assert!(!ed.minimap_visible()));
+        ws.read_with(vcx, |w, _| assert!(!w.minimap_visible()));
         dispatch(&ws, vcx, stoat_action::ToggleMinimap);
         vcx.run_until_parked();
-        editor.read_with(vcx, |ed, _| assert!(ed.minimap_visible()));
+        ws.read_with(vcx, |w, _| assert!(w.minimap_visible()));
 
         dispatch(&ws, vcx, stoat_action::ToggleMinimap);
         vcx.run_until_parked();
-        editor.read_with(vcx, |ed, _| assert!(!ed.minimap_visible()));
+        ws.read_with(vcx, |w, _| assert!(!w.minimap_visible()));
     }
 
     #[test]
-    fn toggle_minimap_constructs_and_drops_minimap_child() {
+    fn toggle_minimap_constructs_and_drops_workspace_minimap() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let editor = new_singleton_editor(vcx, "alpha\nbeta\ngamma");
         let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
         sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
 
-        editor.read_with(vcx, |ed, _| assert!(ed.minimap().is_none()));
+        ws.read_with(vcx, |w, _| assert!(w.minimap().is_none()));
 
         dispatch(&ws, vcx, stoat_action::ToggleMinimap);
         vcx.run_until_parked();
-        let minimap = editor
-            .read_with(vcx, |ed, _| ed.minimap().cloned())
-            .expect("minimap child constructed on toggle-on");
+        let minimap = ws
+            .read_with(vcx, |w, _| w.minimap().cloned())
+            .expect("workspace minimap constructed on toggle-on");
         minimap.read_with(vcx, |mm, _| assert!(mm.mode().is_minimap()));
+        let target_id = minimap
+            .read_with(vcx, |mm, _| mm.minimap_target())
+            .and_then(|w| w.upgrade())
+            .map(|e| e.entity_id());
+        assert_eq!(
+            target_id,
+            Some(editor.entity_id()),
+            "minimap mirrors the active editor"
+        );
 
         dispatch(&ws, vcx, stoat_action::ToggleMinimap);
         vcx.run_until_parked();
-        editor.read_with(vcx, |ed, _| assert!(ed.minimap().is_none()));
+        ws.read_with(vcx, |w, _| assert!(w.minimap().is_none()));
     }
 
     #[test]
@@ -17193,18 +17263,6 @@ mod tests {
 
     #[test]
     fn save_then_restore_round_trips_minimap_visibility() {
-        fn focused_editor(
-            ws: &Entity<Workspace>,
-            vcx: &mut VisualTestContext,
-        ) -> Option<Entity<Editor>> {
-            ws.read_with(vcx, |w, cx| {
-                let tree = w.pane_tree().read(cx);
-                let pane = tree.pane(tree.focus()).expect("focused pane").read(cx);
-                pane.active_item()
-                    .and_then(|item| item.to_any_view().downcast::<Editor>().ok())
-            })
-        }
-
         let mut cx = TestAppContext::single();
         let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
         fs.insert_file("/tmp/repo/foo.rs", b"hello foo\n");
@@ -17212,13 +17270,10 @@ mod tests {
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         ws.update(vcx, |w, cx| {
             w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            w.set_minimap_visible(true, cx);
             w.mark_dirty();
         });
         vcx.run_until_parked();
-
-        focused_editor(&ws, vcx)
-            .expect("active editor")
-            .update(vcx, |ed, cx| ed.set_minimap_visible(true, cx));
 
         let path = PathBuf::from("/tmp/state/minimap.ron");
         let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
@@ -17232,9 +17287,8 @@ mod tests {
         });
         vcx2.run_until_parked();
 
-        let restored = focused_editor(&fresh_ws, vcx2).expect("restored editor");
         assert!(
-            restored.read_with(vcx2, |ed, _| ed.minimap_visible()),
+            fresh_ws.read_with(vcx2, |w, _| w.minimap_visible()),
             "minimap visibility must round-trip as visible"
         );
     }

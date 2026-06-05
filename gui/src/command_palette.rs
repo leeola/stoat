@@ -1559,7 +1559,7 @@ mod tests {
                 delegate.selected = 0;
             });
 
-            assert!(!pane_editor.read_with(vcx, |ed, _| ed.minimap_visible()));
+            assert!(!ws.read_with(vcx, |w, _| w.minimap_visible()));
 
             picker.update_in(vcx, |p, window, cx| {
                 p.handle_action(&stoat_action::PickerConfirm, window, cx)
@@ -1571,8 +1571,19 @@ mod tests {
                 "palette must dismiss itself when confirming a zero-param action",
             );
             assert!(
-                pane_editor.read_with(vcx, |ed, _| ed.minimap_visible()),
-                "ToggleMinimap must reach the pane editor, not the palette query editor",
+                ws.read_with(vcx, |w, _| w.minimap_visible()),
+                "ToggleMinimap must reach the workspace, not the palette query editor",
+            );
+            let minimap_target = ws.read_with(vcx, |w, cx| {
+                w.minimap()
+                    .and_then(|mm| mm.read(cx).minimap_target())
+                    .and_then(|weak| weak.upgrade())
+                    .map(|editor| editor.entity_id())
+            });
+            assert_eq!(
+                minimap_target,
+                Some(pane_editor.entity_id()),
+                "minimap mirrors the pane editor, not the palette query editor",
             );
         }
     }

@@ -61,6 +61,13 @@ pub struct WorkspaceStateV1 {
     /// for snapshots written before query history was persisted.
     #[serde(default)]
     pub command_palette_history: VecDeque<String>,
+    /// Whether the minimap overview column is shown. Workspace-level:
+    /// one minimap follows the active editor. Defaults to `true` so
+    /// snapshots written before the minimap moved to the workspace
+    /// restore with the overview column shown, matching the prior
+    /// per-pane default.
+    #[serde(default = "default_true")]
+    pub minimap_visible: bool,
 }
 
 /// V1 dock snapshot: position, current visibility (open width /
@@ -102,11 +109,6 @@ pub struct PaneItemsV1 {
     #[serde(default)]
     pub items: Vec<ItemSnap>,
     pub active_index: usize,
-    /// Minimap visibility for the pane, taken from its active editor.
-    /// Defaults to `true` so workspaces saved before minimaps were
-    /// persisted restore with the overview column shown.
-    #[serde(default = "default_true")]
-    pub minimap_visible: bool,
 }
 
 fn default_true() -> bool {
@@ -148,9 +150,7 @@ pub(crate) fn folds_from_blob(blob: &serde_json::Value) -> Vec<Range<Point>> {
 /// Walk every item in `pane` and record its kind + serialized
 /// blob. Pane order is preserved so the restore path adds items
 /// in the same sequence; the `active_index` carries over from the
-/// pane's own active-item counter. `minimap_visible` is read from
-/// the active item when it is an [`Editor`], else defaults to
-/// `true`.
+/// pane's own active-item counter.
 pub(crate) fn snapshot_pane_items(
     pane: &crate::pane::Pane,
     cx: &gpui::App,
@@ -164,15 +164,9 @@ pub(crate) fn snapshot_pane_items(
             blob: item.serialize(cx),
         })
         .collect();
-    let minimap_visible = pane
-        .active_item()
-        .and_then(|item| item.to_any_view().downcast::<Editor>().ok())
-        .map(|editor| editor.read(cx).minimap_visible())
-        .unwrap_or(true);
     PaneItemsV1 {
         items,
         active_index: pane.active_index(),
-        minimap_visible,
     }
 }
 
