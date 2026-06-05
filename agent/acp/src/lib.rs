@@ -13,12 +13,14 @@
 
 mod demux;
 mod fs;
+mod permission;
 mod rpc;
 mod schema;
 
 use crate::{
     demux::{demux_session_update, SessionUpdateNotification, SESSION_UPDATE},
     fs::handle_fs_request,
+    permission::{handle_permission_request, SESSION_REQUEST_PERMISSION},
     rpc::method_not_found,
     schema::{
         CancelParams, ClientCapabilities, ContentBlock, FileSystemCapabilities, InitializeParams,
@@ -36,7 +38,7 @@ use std::{
         Arc, Mutex,
     },
 };
-use stoat::host::{AgentConnection, AgentMessage, AgentSession, FsHost};
+use stoat::host::{AgentConnection, AgentMessage, AgentSession, FsHost, PermissionPrompt};
 use stoat_agent_claude_code::jsonrpc::{
     Incoming, IncomingNotification, IncomingRequest, JsonRpcPeer, TransportError,
 };
@@ -88,11 +90,13 @@ impl AcpConnection {
     /// capabilities, and return a ready connection. New sessions open in
     /// `cwd`. `incoming` carries the agent's inbound frames: its
     /// `session/update` notifications are demuxed and routed to sessions,
-    /// and its `fs/*` requests are answered through `fs`.
+    /// its `fs/*` requests are answered through `fs`, and each
+    /// `session/request_permission` is surfaced over `permission_tx`.
     pub async fn connect(
         peer: JsonRpcPeer,
         incoming: Incoming,
         fs: Arc<dyn FsHost>,
+        permission_tx: mpsc::Sender<PermissionPrompt>,
         executor: Executor,
         cwd: impl Into<String>,
     ) -> Result<Self, AcpError> {
@@ -118,7 +122,12 @@ impl AcpConnection {
         } = incoming;
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let router = executor.spawn(route_notifications(notifications, Arc::clone(&routes)));
-        let request_router = executor.spawn(route_requests(requests, fs));
+        let request_router = executor.spawn(route_requests(
+            requests,
+            fs,
+            permission_tx,
+            executor.clone(),
+        ));
         Ok(Self {
             peer,
             executor,
@@ -157,17 +166,28 @@ async fn route_notifications(
     }
 }
 
-/// Drain the connection's inbound requests, answering `fs/read_text_file`
-/// and `fs/write_text_file` through `fs` and rejecting every other method
-/// with a method-not-found error.
+/// Drain the connection's inbound requests: answer `fs/*` through `fs`,
+/// surface each `session/request_permission` over `permission_tx`, and
+/// reject every other method with a method-not-found error. The
+/// permission handler awaits the user, so it is spawned to keep the loop
+/// answering other requests meanwhile.
 async fn route_requests(
     mut requests: mpsc::UnboundedReceiver<IncomingRequest>,
     fs: Arc<dyn FsHost>,
+    permission_tx: mpsc::Sender<PermissionPrompt>,
+    executor: Executor,
 ) {
     while let Some(req) = requests.recv().await {
-        let response = handle_fs_request(&req.method, req.params.as_ref(), &fs)
-            .unwrap_or_else(|| Err(method_not_found(&req.method)));
-        let _ = req.respond(response);
+        if let Some(response) = handle_fs_request(&req.method, req.params.as_ref(), &fs) {
+            let _ = req.respond(response);
+        } else if req.method == SESSION_REQUEST_PERMISSION {
+            executor
+                .spawn(handle_permission_request(req, permission_tx.clone()))
+                .detach();
+        } else {
+            let rejection = Err(method_not_found(&req.method));
+            let _ = req.respond(rejection);
+        }
     }
 }
 
@@ -282,7 +302,7 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
-    use stoat::host::{FakeFs, ToolCallContent, ToolCallLocation, ToolKind};
+    use stoat::host::{ApprovalDecision, FakeFs, ToolCallContent, ToolCallLocation, ToolKind};
     use stoat_agent_claude_code::jsonrpc::Incoming;
     use stoat_scheduler::TokioScheduler;
     use tokio::sync::mpsc;
@@ -293,6 +313,12 @@ mod tests {
 
     fn fake_fs() -> Arc<dyn FsHost> {
         Arc::new(FakeFs::new())
+    }
+
+    /// A permission sender whose receiver is dropped, for tests that
+    /// never trigger a permission request.
+    fn fake_permission_tx() -> mpsc::Sender<PermissionPrompt> {
+        mpsc::channel(1).0
     }
 
     /// Drive the agent end of a duplex: answer
@@ -343,9 +369,16 @@ mod tests {
         let ((client, client_in), (server, server_in)) = JsonRpcPeer::duplex(executor);
         let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
         let agent = fake_agent(executor, server_in, seen_tx);
-        let conn = AcpConnection::connect(client, client_in, fake_fs(), executor.clone(), "/work")
-            .await
-            .expect("connect");
+        let conn = AcpConnection::connect(
+            client,
+            client_in,
+            fake_fs(),
+            fake_permission_tx(),
+            executor.clone(),
+            "/work",
+        )
+        .await
+        .expect("connect");
         let init = seen_rx.recv().await.expect("initialize seen");
         assert_eq!(init.0, "initialize");
         (conn, seen_rx, (agent, server))
@@ -358,9 +391,16 @@ mod tests {
         let (seen_tx, mut seen_rx) = mpsc::unbounded_channel();
         let _agent = fake_agent(&executor, server_in, seen_tx);
 
-        let _conn = AcpConnection::connect(client, client_in, fake_fs(), executor.clone(), "/work")
-            .await
-            .expect("connect");
+        let _conn = AcpConnection::connect(
+            client,
+            client_in,
+            fake_fs(),
+            fake_permission_tx(),
+            executor.clone(),
+            "/work",
+        )
+        .await
+        .expect("connect");
 
         let (method, params) = seen_rx.recv().await.expect("initialize seen");
         assert_eq!(method, "initialize");
@@ -540,18 +580,27 @@ mod tests {
         }
     }
 
-    /// Connect with `fs` injected and return the agent-end peer (so a test
-    /// can send agent->client requests) plus the handles to keep alive.
+    /// Connect with `fs` and `permission_tx` injected and return the
+    /// agent-end peer (so a test can send agent->client requests) plus the
+    /// handles to keep alive.
     async fn connected_with_fs(
         executor: &Executor,
         fs: Arc<dyn FsHost>,
+        permission_tx: mpsc::Sender<PermissionPrompt>,
     ) -> (JsonRpcPeer, (Task<()>, AcpConnection)) {
         let ((client, client_in), (server, server_in)) = JsonRpcPeer::duplex(executor);
         let (seen_tx, _seen) = mpsc::unbounded_channel();
         let agent = fake_agent(executor, server_in, seen_tx);
-        let conn = AcpConnection::connect(client, client_in, fs, executor.clone(), "/work")
-            .await
-            .expect("connect");
+        let conn = AcpConnection::connect(
+            client,
+            client_in,
+            fs,
+            permission_tx,
+            executor.clone(),
+            "/work",
+        )
+        .await
+        .expect("connect");
         (server, (agent, conn))
     }
 
@@ -560,7 +609,7 @@ mod tests {
         let executor = executor();
         let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
         fs.write(Path::new("/greeting.txt"), b"hi there").unwrap();
-        let (server, _keep) = connected_with_fs(&executor, fs).await;
+        let (server, _keep) = connected_with_fs(&executor, fs, fake_permission_tx()).await;
 
         let response = server
             .request(
@@ -576,7 +625,8 @@ mod tests {
     async fn agent_fs_write_request_persists_to_fs() {
         let executor = executor();
         let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
-        let (server, _keep) = connected_with_fs(&executor, Arc::clone(&fs)).await;
+        let (server, _keep) =
+            connected_with_fs(&executor, Arc::clone(&fs), fake_permission_tx()).await;
 
         server
             .request(
@@ -594,11 +644,65 @@ mod tests {
     #[tokio::test]
     async fn agent_unknown_request_is_rejected() {
         let executor = executor();
-        let (server, _keep) = connected_with_fs(&executor, fake_fs()).await;
+        let (server, _keep) = connected_with_fs(&executor, fake_fs(), fake_permission_tx()).await;
 
         let result = server
             .request("fs/chmod", Some(json!({ "path": "/x" })))
             .await;
         assert!(result.is_err(), "unknown method should be rejected");
+    }
+
+    fn permission_request() -> Value {
+        json!({
+            "sessionId": "sess-1",
+            "toolCall": { "toolCallId": "tc-1", "title": "Bash", "rawInput": "ls" },
+            "options": [
+                { "optionId": "ok", "kind": "allow_once" },
+                { "optionId": "no", "kind": "reject_once" },
+            ],
+        })
+    }
+
+    #[tokio::test]
+    async fn agent_permission_request_returns_user_choice() {
+        let executor = executor();
+        let (permission_tx, mut permission_rx) = mpsc::channel(4);
+        let (server, _keep) = connected_with_fs(&executor, fake_fs(), permission_tx).await;
+
+        let user = executor.spawn(async move {
+            let prompt = permission_rx.recv().await.expect("prompt surfaced");
+            assert_eq!(prompt.tool, "Bash");
+            assert_eq!(prompt.input, "ls");
+            let _ = prompt.response_tx.send(ApprovalDecision::AllowOnce);
+        });
+
+        let response = server
+            .request(SESSION_REQUEST_PERMISSION, Some(permission_request()))
+            .await
+            .expect("permission response");
+        assert_eq!(
+            response,
+            json!({ "outcome": { "outcome": "selected", "optionId": "ok" } })
+        );
+        user.await;
+    }
+
+    #[tokio::test]
+    async fn agent_permission_request_cancelled_when_dismissed() {
+        let executor = executor();
+        let (permission_tx, mut permission_rx) = mpsc::channel(4);
+        let (server, _keep) = connected_with_fs(&executor, fake_fs(), permission_tx).await;
+
+        let user = executor.spawn(async move {
+            let prompt = permission_rx.recv().await.expect("prompt surfaced");
+            drop(prompt.response_tx);
+        });
+
+        let response = server
+            .request(SESSION_REQUEST_PERMISSION, Some(permission_request()))
+            .await
+            .expect("permission response");
+        assert_eq!(response, json!({ "outcome": { "outcome": "cancelled" } }));
+        user.await;
     }
 }
