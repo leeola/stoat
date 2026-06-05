@@ -1314,7 +1314,13 @@ impl InputStateMachine {
         }
 
         if let Some(ch) = arming_candidate {
-            if !in_input_mode_at_entry && !actions.is_empty() {
+            // Gate on a matched binding, not a dispatchable action: a
+            // `SetMode` binding transitions the mode via `transition_mode`
+            // and resolves to no action (it is absent from the registry),
+            // yet it still consumes the keypress. Without arming here the
+            // IME twin re-enters `feed` in the post-transition mode and
+            // dispatches that mode's binding for the same char.
+            if !in_input_mode_at_entry && !resolved.is_empty() {
                 self.consumed_text_input_char = Some(DuplicateMarker {
                     char: ch,
                     armed_at: Instant::now(),
@@ -2000,6 +2006,36 @@ mod tests {
             kinds,
             vec![stoat_action::ActionKind::Quit],
             "after the modal closes back to normal the second ':' must dispatch the action again, not be eaten by the stale marker",
+        );
+    }
+
+    #[test]
+    fn setmode_into_submode_drops_paired_text_input_twin() {
+        let mut cx = TestAppContext::single();
+        let keymap = compile_keymap(
+            "on key { mode == space { b -> SetMode(space_buffer); } mode == space_buffer { b -> Quit(); } }",
+        );
+        let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
+        set_mode(vcx, &sm, "space");
+        let stroke = key("b");
+        let (entry, second) = feed_in_app(vcx, &sm, |sm, window, cx| {
+            let entry_feed = quit_kinds(sm.feed(&stroke, window, cx));
+            let entry_twin = quit_kinds(sm.text_input("b", None, window, cx));
+            let second_feed = quit_kinds(sm.feed(&stroke, window, cx));
+            let second_twin = quit_kinds(sm.text_input("b", None, window, cx));
+            (
+                [entry_feed, entry_twin].concat(),
+                [second_feed, second_twin].concat(),
+            )
+        });
+        assert!(
+            entry.is_empty(),
+            "`space b` only enters space_buffer; its IME twin must not redispatch as space_buffer's own `b`, got {entry:?}",
+        );
+        assert_eq!(
+            second,
+            vec![stoat_action::ActionKind::Quit],
+            "the explicit second `b` (`space b b`) dispatches the submode binding exactly once",
         );
     }
 
