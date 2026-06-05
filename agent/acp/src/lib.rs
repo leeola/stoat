@@ -16,6 +16,7 @@ mod fs;
 mod permission;
 mod rpc;
 mod schema;
+mod terminal;
 
 use crate::{
     demux::{demux_session_update, SessionUpdateNotification, SESSION_UPDATE},
@@ -27,6 +28,7 @@ use crate::{
         NewSessionParams, NewSessionResult, PromptParams, INITIALIZE, PROTOCOL_VERSION,
         SESSION_CANCEL, SESSION_NEW, SESSION_PROMPT,
     },
+    terminal::{handle_terminal_request, is_terminal_method, TerminalRegistry},
 };
 use async_trait::async_trait;
 use snafu::{Location, ResultExt, Snafu};
@@ -38,7 +40,9 @@ use std::{
         Arc, Mutex,
     },
 };
-use stoat::host::{AgentConnection, AgentMessage, AgentSession, FsHost, PermissionPrompt};
+use stoat::host::{
+    AgentConnection, AgentMessage, AgentSession, FsHost, PermissionPrompt, TerminalHost,
+};
 use stoat_agent_claude_code::jsonrpc::{
     Incoming, IncomingNotification, IncomingRequest, JsonRpcPeer, TransportError,
 };
@@ -69,11 +73,12 @@ pub enum AcpError {
 }
 
 /// The client-side dependencies the connection answers the agent's
-/// inbound requests with: filesystem access and the permission prompt
-/// channel.
+/// inbound requests with: filesystem access, the permission prompt
+/// channel, and the terminal host that runs the agent's commands.
 pub struct ClientHandlers {
     pub fs: Arc<dyn FsHost>,
     pub permission_tx: mpsc::Sender<PermissionPrompt>,
+    pub terminal_host: Arc<dyn TerminalHost>,
 }
 
 /// An established ACP connection: a session manager over the JSON-RPC
@@ -128,19 +133,26 @@ impl AcpConnection {
             requests,
             notifications,
         } = incoming;
-        let ClientHandlers { fs, permission_tx } = handlers;
+        let ClientHandlers {
+            fs,
+            permission_tx,
+            terminal_host,
+        } = handlers;
+        let cwd = cwd.into();
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let router = executor.spawn(route_notifications(notifications, Arc::clone(&routes)));
         let request_router = executor.spawn(route_requests(
             requests,
             fs,
             permission_tx,
+            terminal_host,
             executor.clone(),
+            cwd.clone(),
         ));
         Ok(Self {
             peer,
             executor,
-            cwd: cwd.into(),
+            cwd,
             routes,
             _router: router,
             _request_router: request_router,
@@ -176,22 +188,36 @@ async fn route_notifications(
 }
 
 /// Drain the connection's inbound requests: answer `fs/*` through `fs`,
-/// surface each `session/request_permission` over `permission_tx`, and
-/// reject every other method with a method-not-found error. The
-/// permission handler awaits the user, so it is spawned to keep the loop
-/// answering other requests meanwhile.
+/// surface each `session/request_permission` over `permission_tx`, run
+/// `terminal/*` through `terminal_host`, and reject every other method
+/// with a method-not-found error. The permission and terminal handlers
+/// may await (the user, a command's exit), so they are spawned to keep
+/// the loop answering other requests meanwhile.
 async fn route_requests(
     mut requests: mpsc::UnboundedReceiver<IncomingRequest>,
     fs: Arc<dyn FsHost>,
     permission_tx: mpsc::Sender<PermissionPrompt>,
+    terminal_host: Arc<dyn TerminalHost>,
     executor: Executor,
+    cwd: String,
 ) {
+    let registry = TerminalRegistry::new();
     while let Some(req) = requests.recv().await {
         if let Some(response) = handle_fs_request(&req.method, req.params.as_ref(), &fs) {
             let _ = req.respond(response);
         } else if req.method == SESSION_REQUEST_PERMISSION {
             executor
                 .spawn(handle_permission_request(req, permission_tx.clone()))
+                .detach();
+        } else if is_terminal_method(&req.method) {
+            executor
+                .spawn(handle_terminal_request(
+                    req,
+                    Arc::clone(&terminal_host),
+                    registry.clone(),
+                    executor.clone(),
+                    cwd.clone(),
+                ))
                 .detach();
         } else {
             let rejection = Err(method_not_found(&req.method));
@@ -311,7 +337,10 @@ mod tests {
     use super::*;
     use serde_json::{json, Value};
     use std::path::{Path, PathBuf};
-    use stoat::host::{ApprovalDecision, FakeFs, ToolCallContent, ToolCallLocation, ToolKind};
+    use stoat::host::{
+        ApprovalDecision, FakeFs, FakeTerminalHost, FakeTerminalSession, ToolCallContent,
+        ToolCallLocation, ToolKind,
+    };
     use stoat_agent_claude_code::jsonrpc::Incoming;
     use stoat_scheduler::TokioScheduler;
     use tokio::sync::mpsc;
@@ -322,6 +351,12 @@ mod tests {
 
     fn fake_fs() -> Arc<dyn FsHost> {
         Arc::new(FakeFs::new())
+    }
+
+    /// A terminal host over a fresh fake session, for tests that never
+    /// run a command.
+    fn fake_terminal_host() -> Arc<dyn TerminalHost> {
+        Arc::new(FakeTerminalHost::new(Arc::new(FakeTerminalSession::new())))
     }
 
     /// A permission sender whose receiver is dropped, for tests that
@@ -336,6 +371,7 @@ mod tests {
         ClientHandlers {
             fs: fake_fs(),
             permission_tx: fake_permission_tx(),
+            terminal_host: fake_terminal_host(),
         }
     }
 
@@ -610,7 +646,36 @@ mod tests {
         let conn = AcpConnection::connect(
             client,
             client_in,
-            ClientHandlers { fs, permission_tx },
+            ClientHandlers {
+                fs,
+                permission_tx,
+                terminal_host: fake_terminal_host(),
+            },
+            executor.clone(),
+            "/work",
+        )
+        .await
+        .expect("connect");
+        (server, (agent, conn))
+    }
+
+    /// Connect with `terminal_host` injected, returning the agent-end peer
+    /// and the handles to keep alive.
+    async fn connected_with_terminal(
+        executor: &Executor,
+        terminal_host: Arc<dyn TerminalHost>,
+    ) -> (JsonRpcPeer, (Task<()>, AcpConnection)) {
+        let ((client, client_in), (server, server_in)) = JsonRpcPeer::duplex(executor);
+        let (seen_tx, _seen) = mpsc::unbounded_channel();
+        let agent = fake_agent(executor, server_in, seen_tx);
+        let conn = AcpConnection::connect(
+            client,
+            client_in,
+            ClientHandlers {
+                fs: fake_fs(),
+                permission_tx: fake_permission_tx(),
+                terminal_host,
+            },
             executor.clone(),
             "/work",
         )
@@ -719,5 +784,41 @@ mod tests {
             .expect("permission response");
         assert_eq!(response, json!({ "outcome": { "outcome": "cancelled" } }));
         user.await;
+    }
+
+    #[tokio::test]
+    async fn agent_terminal_create_output_and_wait() {
+        let executor = executor();
+        let session = Arc::new(FakeTerminalSession::new());
+        let host = Arc::new(FakeTerminalHost::new(session.clone()));
+        let (server, _keep) = connected_with_terminal(&executor, host).await;
+
+        let created = server
+            .request(
+                "terminal/create",
+                Some(json!({ "command": "echo", "args": ["hi"] })),
+            )
+            .await
+            .expect("create response");
+        let id = created["terminalId"]
+            .as_str()
+            .expect("terminalId")
+            .to_string();
+
+        session.push_output(b"hi\n");
+        session.finish(0);
+
+        let exit = server
+            .request("terminal/wait_for_exit", Some(json!({ "terminalId": id })))
+            .await
+            .expect("wait response");
+        assert_eq!(exit, json!({ "exitStatus": { "exitCode": 0 } }));
+
+        let out = server
+            .request("terminal/output", Some(json!({ "terminalId": id })))
+            .await
+            .expect("output response");
+        assert_eq!(out["output"], json!("hi\n"));
+        assert_eq!(out["exitStatus"], json!({ "exitCode": 0 }));
     }
 }
