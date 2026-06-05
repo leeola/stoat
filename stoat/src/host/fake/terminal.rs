@@ -13,13 +13,14 @@ use tokio::sync::mpsc;
 
 pub struct FakeTerminalSession {
     state: Mutex<FakeTerminalState>,
-    read_tx: mpsc::Sender<Vec<u8>>,
+    read_tx: Mutex<Option<mpsc::Sender<Vec<u8>>>>,
     read_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
 }
 
 struct FakeTerminalState {
     sent: Vec<Vec<u8>>,
     killed: bool,
+    exit_code: Option<i32>,
 }
 
 impl FakeTerminalSession {
@@ -29,14 +30,25 @@ impl FakeTerminalSession {
             state: Mutex::new(FakeTerminalState {
                 sent: Vec::new(),
                 killed: false,
+                exit_code: None,
             }),
-            read_tx: tx,
+            read_tx: Mutex::new(Some(tx)),
             read_rx: tokio::sync::Mutex::new(rx),
         }
     }
 
     pub fn push_output(&self, data: &[u8]) {
-        let _ = self.read_tx.try_send(data.to_vec());
+        if let Some(tx) = self.read_tx.lock().unwrap().as_ref() {
+            let _ = tx.try_send(data.to_vec());
+        }
+    }
+
+    /// Signal that the command finished with `exit_code`: closes the
+    /// read channel so a pending `read` returns `Ok(0)`, and records the
+    /// code for `try_wait`.
+    pub fn finish(&self, exit_code: i32) {
+        self.read_tx.lock().unwrap().take();
+        self.state.lock().unwrap().exit_code = Some(exit_code);
     }
 
     pub fn sent_bytes(&self) -> Vec<Vec<u8>> {
@@ -101,6 +113,10 @@ impl TerminalSession for FakeTerminalSession {
         self.state.lock().unwrap().killed = true;
         Ok(())
     }
+
+    async fn try_wait(&self) -> io::Result<Option<i32>> {
+        Ok(self.state.lock().unwrap().exit_code)
+    }
 }
 
 /// Factory fake that hands out boxes wrapping the shared
@@ -141,6 +157,10 @@ impl TerminalSession for ArcTerminalSession {
 
     async fn kill(&self) -> io::Result<()> {
         self.0.kill().await
+    }
+
+    async fn try_wait(&self) -> io::Result<Option<i32>> {
+        self.0.try_wait().await
     }
 }
 
@@ -201,6 +221,20 @@ mod tests {
             let mut buf = [0u8; 64];
             let n = fake.read(&mut buf).await.unwrap();
             assert_eq!(&buf[..n], b"hello");
+        });
+    }
+
+    #[test]
+    fn finish_records_exit_and_signals_eof() {
+        rt().block_on(async {
+            let fake = FakeTerminalSession::new();
+            assert_eq!(fake.try_wait().await.unwrap(), None);
+
+            fake.finish(7);
+            assert_eq!(fake.try_wait().await.unwrap(), Some(7));
+
+            let mut buf = [0u8; 8];
+            assert_eq!(fake.read(&mut buf).await.unwrap(), 0);
         });
     }
 

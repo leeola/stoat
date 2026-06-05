@@ -24,6 +24,11 @@ pub trait TerminalSession: Send + Sync {
     async fn write(&self, data: &[u8]) -> io::Result<()>;
     async fn read(&self, buf: &mut [u8]) -> io::Result<usize>;
     async fn kill(&self) -> io::Result<()>;
+
+    /// The exit code if the command has finished, or `None` if it is
+    /// still running. Non-blocking; callers detect completion via a
+    /// `read` returning `Ok(0)` and then read the code here.
+    async fn try_wait(&self) -> io::Result<Option<i32>>;
 }
 
 /// Factory that opens new PTY-backed terminal sessions.
@@ -105,6 +110,14 @@ impl TerminalSession for PtyTerminalSession {
             .lock()
             .map_err(|e| io::Error::other(e.to_string()))?;
         child.kill().map_err(io::Error::other)
+    }
+
+    async fn try_wait(&self) -> io::Result<Option<i32>> {
+        let mut child = self
+            .child
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        Ok(child.try_wait()?.map(|status| status.exit_code() as i32))
     }
 }
 
