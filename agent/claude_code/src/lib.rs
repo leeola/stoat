@@ -1,6 +1,7 @@
 pub mod auth;
 pub mod claude_code;
 mod host_adapter;
+pub mod jsonrpc;
 pub mod launcher;
 pub mod messages;
 pub mod model_prefs;
