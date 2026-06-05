@@ -2,7 +2,8 @@
 //! handlers, routed through the injected [`FsHost`] so tests stay pure
 //! against `FakeFs`.
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use crate::rpc::{error, parse_params, INTERNAL_ERROR, INVALID_PARAMS};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::{io, path::Path, sync::Arc};
 use stoat::host::FsHost;
@@ -10,10 +11,6 @@ use stoat_agent_claude_code::jsonrpc::RpcError;
 
 pub(crate) const FS_READ_TEXT_FILE: &str = "fs/read_text_file";
 pub(crate) const FS_WRITE_TEXT_FILE: &str = "fs/write_text_file";
-
-const INVALID_PARAMS: i64 = -32602;
-const INTERNAL_ERROR: i64 = -32603;
-const METHOD_NOT_FOUND: i64 = -32601;
 
 /// Answer an agent->client fs request through `fs`, or `None` if `method`
 /// is not an fs request this module owns (the caller rejects it).
@@ -26,15 +23,6 @@ pub(crate) fn handle_fs_request(
         FS_READ_TEXT_FILE => Some(read_text_file(params, fs)),
         FS_WRITE_TEXT_FILE => Some(write_text_file(params, fs)),
         _ => None,
-    }
-}
-
-/// A JSON-RPC method-not-found error for `method`.
-pub(crate) fn method_not_found(method: &str) -> RpcError {
-    RpcError {
-        code: METHOD_NOT_FOUND,
-        message: format!("method not found: {method}"),
-        data: None,
     }
 }
 
@@ -100,26 +88,12 @@ fn slice_lines(content: &str, line: Option<u32>, limit: Option<u32>) -> String {
     lines.join("\n")
 }
 
-fn parse_params<T: DeserializeOwned>(params: Option<&Value>) -> Result<T, RpcError> {
-    let value = params.ok_or_else(|| error(INVALID_PARAMS, "missing params"))?;
-    serde_json::from_value(value.clone())
-        .map_err(|source| error(INVALID_PARAMS, &source.to_string()))
-}
-
 fn to_value<T: Serialize>(value: T) -> Result<Value, RpcError> {
-    serde_json::to_value(value).map_err(|source| error(INTERNAL_ERROR, &source.to_string()))
+    serde_json::to_value(value).map_err(|source| error(INTERNAL_ERROR, source.to_string()))
 }
 
 fn io_error(source: &io::Error) -> RpcError {
-    error(INTERNAL_ERROR, &source.to_string())
-}
-
-fn error(code: i64, message: &str) -> RpcError {
-    RpcError {
-        code,
-        message: message.to_string(),
-        data: None,
-    }
+    error(INTERNAL_ERROR, source.to_string())
 }
 
 #[cfg(test)]

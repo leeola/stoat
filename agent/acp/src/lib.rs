@@ -13,11 +13,13 @@
 
 mod demux;
 mod fs;
+mod rpc;
 mod schema;
 
 use crate::{
     demux::{demux_session_update, SessionUpdateNotification, SESSION_UPDATE},
-    fs::{handle_fs_request, method_not_found},
+    fs::handle_fs_request,
+    rpc::method_not_found,
     schema::{
         CancelParams, ClientCapabilities, ContentBlock, FileSystemCapabilities, InitializeParams,
         NewSessionParams, NewSessionResult, PromptParams, INITIALIZE, PROTOCOL_VERSION,
