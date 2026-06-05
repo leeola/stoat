@@ -14,18 +14,24 @@
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use snafu::{Location, ResultExt, Snafu};
+use snafu::{Location, OptionExt, ResultExt, Snafu};
 use std::{
     collections::HashMap,
+    process::Stdio,
     sync::{
         Arc, Mutex,
         atomic::{AtomicU64, Ordering},
     },
 };
+use stoat_log::TextProtoLog;
 use stoat_scheduler::{Executor, Task};
-use tokio::sync::{
-    mpsc::{self, UnboundedReceiver, UnboundedSender},
-    oneshot,
+use tokio::{
+    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
+    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    sync::{
+        mpsc::{self, UnboundedReceiver, UnboundedSender},
+        oneshot,
+    },
 };
 
 /// JSON-RPC 2.0 error object returned by a peer in place of a result.
@@ -68,6 +74,24 @@ pub enum TransportError {
     },
 }
 
+/// Failure modes of [`JsonRpcPeer::spawn`].
+#[derive(Debug, Snafu)]
+#[snafu(visibility(pub(crate)))]
+pub enum SpawnError {
+    #[snafu(display("failed to spawn JSON-RPC child process"))]
+    Spawn {
+        source: std::io::Error,
+        #[snafu(implicit)]
+        location: Location,
+    },
+
+    #[snafu(display("spawned child is missing a stdio handle"))]
+    Stdio {
+        #[snafu(implicit)]
+        location: Location,
+    },
+}
+
 /// Outbound requests awaiting their correlated response, keyed by the
 /// `u64` id assigned when the request was sent.
 type PendingResponses = Arc<Mutex<HashMap<u64, oneshot::Sender<Result<Value, RpcError>>>>>;
@@ -83,6 +107,9 @@ pub struct JsonRpcPeer {
     /// Dispatch loop plus, for a spawned child, the stdio pump tasks.
     /// Held only to keep them scheduled; never awaited.
     _tasks: Vec<Task<()>>,
+    /// The spawned child, held so its `kill_on_drop` fires when this peer
+    /// drops. `None` for the in-memory duplex.
+    _child: Option<Child>,
 }
 
 /// The inbound half of a [`JsonRpcPeer`]: requests the peer must answer
@@ -181,6 +208,41 @@ impl JsonRpcPeer {
         (a, b)
     }
 
+    /// Spawn `command` as a child with piped stdin/stdout/stderr and run
+    /// the JSON-RPC protocol over its newline-framed stdio. Inbound stdout
+    /// lines feed the dispatch loop; outbound frames are written to stdin
+    /// with a trailing newline. When present, `tx_log`/`rx_log` capture a
+    /// byte-faithful transcript of each direction; stderr is drained to the
+    /// tracing log. The child is killed when the returned peer drops. All
+    /// three stdio pumps and the dispatch loop run on `executor`.
+    pub fn spawn(
+        mut command: Command,
+        executor: &Executor,
+        tx_log: Option<Arc<TextProtoLog>>,
+        rx_log: Option<Arc<TextProtoLog>>,
+    ) -> Result<(JsonRpcPeer, Incoming), SpawnError> {
+        command
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .kill_on_drop(true);
+        let mut child = command.spawn().context(SpawnSnafu)?;
+        let stdin = child.stdin.take().context(StdioSnafu)?;
+        let stdout = child.stdout.take().context(StdioSnafu)?;
+        let stderr = child.stderr.take().context(StdioSnafu)?;
+
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let read_task = executor.spawn(read_stdout(stdout, incoming_tx, rx_log));
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let write_task = executor.spawn(write_stdin(stdin, outgoing_rx, tx_log));
+        let stderr_task = executor.spawn(drain_stderr(stderr));
+
+        let (mut peer, incoming) = Self::over_lines(incoming_rx, outgoing_tx, executor);
+        peer._tasks.extend([read_task, write_task, stderr_task]);
+        peer._child = Some(child);
+        Ok((peer, incoming))
+    }
+
     /// Build a peer over a line-framed transport: `incoming` yields one
     /// decoded JSON text per inbound frame, `outgoing` accepts one per
     /// outbound frame (the caller appends framing if a wire needs it; the
@@ -238,6 +300,7 @@ impl JsonRpcPeer {
             next_id: AtomicU64::new(1),
             pending,
             _tasks: vec![dispatch],
+            _child: None,
         };
         (
             peer,
@@ -366,6 +429,76 @@ fn parse_frame(line: &str) -> Parsed {
             None => Parsed::Malformed,
         },
         _ => Parsed::Malformed,
+    }
+}
+
+async fn read_stdout(
+    stdout: ChildStdout,
+    incoming: UnboundedSender<String>,
+    rx_log: Option<Arc<TextProtoLog>>,
+) {
+    let mut reader = BufReader::new(stdout);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                if trimmed.is_empty() {
+                    continue;
+                }
+                if let Some(log) = &rx_log {
+                    log.record(trimmed);
+                }
+                if incoming.send(trimmed.to_string()).is_err() {
+                    break;
+                }
+            },
+            Err(err) => {
+                tracing::error!(%err, "JSON-RPC stdout read failed");
+                break;
+            },
+        }
+    }
+}
+
+async fn write_stdin(
+    mut stdin: ChildStdin,
+    mut outgoing: UnboundedReceiver<String>,
+    tx_log: Option<Arc<TextProtoLog>>,
+) {
+    while let Some(line) = outgoing.recv().await {
+        if let Some(log) = &tx_log {
+            log.record(&line);
+        }
+        if stdin.write_all(line.as_bytes()).await.is_err()
+            || stdin.write_all(b"\n").await.is_err()
+            || stdin.flush().await.is_err()
+        {
+            break;
+        }
+    }
+}
+
+async fn drain_stderr(stderr: ChildStderr) {
+    let mut reader = BufReader::new(stderr);
+    let mut line = String::new();
+    loop {
+        line.clear();
+        match reader.read_line(&mut line).await {
+            Ok(0) => break,
+            Ok(_) => {
+                let trimmed = line.trim_end_matches(['\n', '\r']);
+                if !trimmed.is_empty() {
+                    tracing::warn!(stderr = %trimmed, "JSON-RPC child stderr");
+                }
+            },
+            Err(err) => {
+                tracing::error!(%err, "JSON-RPC stderr read failed");
+                break;
+            },
+        }
     }
 }
 
@@ -508,5 +641,34 @@ mod tests {
             ),
             "expected Canceled/Closed, got {err:?}",
         );
+    }
+
+    #[tokio::test]
+    async fn spawn_round_trips_a_frame_through_child_stdio() {
+        if !std::path::Path::new("/bin/sh").exists() {
+            eprintln!("skipping: no /bin/sh");
+            return;
+        }
+        let executor = executor();
+        // `head -n 1` reads one stdin line, echoes it, and exits (flushing
+        // on exit), so a frame the peer sends returns as an inbound frame --
+        // exercising the spawn + stdin-write + stdout-read pumps end to end.
+        let mut command = Command::new("/bin/sh");
+        command.arg("-c").arg("head -n 1");
+        let (peer, mut incoming) =
+            JsonRpcPeer::spawn(command, &executor, None, None).expect("spawn child");
+
+        peer.notify("ping", Some(serde_json::json!({ "n": 1 })))
+            .expect("notify enqueues");
+
+        let notif = tokio::time::timeout(
+            std::time::Duration::from_secs(5),
+            incoming.notifications.recv(),
+        )
+        .await
+        .expect("frame echoed within timeout")
+        .expect("frame echoed back through child stdio");
+        assert_eq!(notif.method, "ping");
+        assert_eq!(notif.params, Some(serde_json::json!({ "n": 1 })));
     }
 }
