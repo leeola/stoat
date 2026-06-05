@@ -201,6 +201,22 @@ mod tests {
     }
 
     #[test]
+    fn grid_scrollback_caps_oldest_rows() {
+        let mut grid = VtermGrid::new_with_scrollback(10, 3);
+        grid.feed(b"0\r\n1\r\n2\r\n3\r\n4");
+        assert_eq!(grid.line_count(), 3);
+        assert_eq!(grid.text_in(0..10, 0..3), "2\n3\n4");
+    }
+
+    #[test]
+    fn grid_under_cap_keeps_all_rows() {
+        let mut grid = VtermGrid::new_with_scrollback(10, 5);
+        grid.feed(b"a\r\nb\r\nc");
+        assert_eq!(grid.line_count(), 3);
+        assert_eq!(grid.text_in(0..10, 0..3), "a\nb\nc");
+    }
+
+    #[test]
     fn grid_ansi_color_applies() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"\x1b[31mR\x1b[0mN");

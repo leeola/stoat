@@ -1,5 +1,15 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
-use std::ops::{BitOrAssign, Range, SubAssign};
+use std::{
+    collections::VecDeque,
+    ops::{BitOrAssign, Range, SubAssign},
+};
+
+/// Default scrollback cap (rows retained beyond the visible output).
+/// Matches the common terminal default; [`VtermGrid::new`] uses it.
+const DEFAULT_SCROLLBACK: usize = 10_000;
+
+/// Upper bound a caller may request via [`VtermGrid::new_with_scrollback`].
+const MAX_SCROLLBACK: usize = 100_000;
 
 /// SGR foreground / background color stored per [`StyledCell`].
 /// Variants mirror the standard ANSI SGR color set (8 base colors,
@@ -91,10 +101,13 @@ impl Default for StyledCell {
 }
 
 pub struct VtermGrid {
-    cells: Vec<Vec<StyledCell>>,
+    cells: VecDeque<Vec<StyledCell>>,
     cursor_row: usize,
     cursor_col: usize,
     width: u16,
+    /// Most rows retained. Once `cells` exceeds this the oldest rows are
+    /// evicted from the front, bounding memory for long-running output.
+    scrollback_limit: usize,
     pen_fg: Option<TermColor>,
     pen_bg: Option<TermColor>,
     pen_modifiers: TermModifier,
@@ -111,11 +124,20 @@ pub struct VtermGrid {
 
 impl VtermGrid {
     pub fn new(width: u16) -> Self {
+        Self::new_with_scrollback(width, DEFAULT_SCROLLBACK)
+    }
+
+    /// As [`Self::new`] but with an explicit scrollback cap, clamped to
+    /// `[1, MAX_SCROLLBACK]`.
+    pub fn new_with_scrollback(width: u16, scrollback_limit: usize) -> Self {
+        let mut cells = VecDeque::new();
+        cells.push_back(vec![StyledCell::default(); width as usize]);
         Self {
-            cells: vec![vec![StyledCell::default(); width as usize]],
+            cells,
             cursor_row: 0,
             cursor_col: 0,
             width,
+            scrollback_limit: scrollback_limit.clamp(1, MAX_SCROLLBACK),
             pen_fg: None,
             pen_bg: None,
             pen_modifiers: TermModifier::empty(),
@@ -185,7 +207,7 @@ impl VtermGrid {
         let col_end = cols.end.min(width);
 
         let mut lines: Vec<String> = Vec::with_capacity(row_end - row_start);
-        for row in &self.cells[row_start..row_end] {
+        for row in self.cells.range(row_start..row_end) {
             let slice_end = col_end.min(row.len());
             let raw: String = if col_start >= slice_end {
                 String::new()
@@ -205,10 +227,18 @@ impl VtermGrid {
         self.parser = parser;
     }
 
+    /// Grow `cells` so `row` is addressable, then enforce the scrollback
+    /// cap. Only ever called with `cursor_row`, so eviction subtracts the
+    /// evicted count from `cursor_row` to keep it on the same row.
     fn ensure_row(&mut self, row: usize) {
         while self.cells.len() <= row {
             self.cells
-                .push(vec![StyledCell::default(); self.width as usize]);
+                .push_back(vec![StyledCell::default(); self.width as usize]);
+        }
+        let evicted = self.cells.len().saturating_sub(self.scrollback_limit);
+        if evicted > 0 {
+            self.cells.drain(0..evicted);
+            self.cursor_row = self.cursor_row.saturating_sub(evicted);
         }
     }
 
