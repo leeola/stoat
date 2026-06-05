@@ -555,8 +555,21 @@ impl Render for Run {
         let cwd_label = SharedString::from(self.cwd.display().to_string());
         let (font_family, font_size) = editor_font(cx);
         let mut body = div().flex().flex_col().flex_grow().w_full();
-        for block in &self.blocks {
-            body = body.child(render::render_block(block));
+        let active = self.blocks.len().saturating_sub(1);
+        for (idx, block) in self.blocks.iter().enumerate() {
+            let cursor = (idx == active)
+                .then_some(self.cell_size)
+                .flatten()
+                .map(|cell| {
+                    let (row, col) = block.grid.cursor_position();
+                    render::CursorRender {
+                        row,
+                        col,
+                        shape: block.grid.cursor_shape(),
+                        cell,
+                    }
+                });
+            body = body.child(render::render_block(block, cursor));
         }
         let bounds_handle = cx.weak_entity();
         let cell_family = font_family.clone();

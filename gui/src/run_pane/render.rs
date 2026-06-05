@@ -9,10 +9,63 @@
 
 use gpui::{
     div, px, AnyElement, Div, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement,
-    ParentElement, SharedString, StrikethroughStyle, Styled, StyledText, UnderlineStyle,
+    ParentElement, Pixels, SharedString, Size, StrikethroughStyle, Styled, StyledText,
+    UnderlineStyle,
 };
 use std::ops::Range;
-use stoat::run::{GridSelection, OutputBlock, StyledCell, TermColor, TermModifier, VtermGrid};
+use stoat::run::{
+    CursorShape, GridSelection, OutputBlock, StyledCell, TermColor, TermModifier, VtermGrid,
+};
+
+/// Translucent fill for the terminal cursor so the character shows
+/// through a block cursor.
+const CURSOR_COLOR: Hsla = Hsla {
+    h: 0.,
+    s: 0.,
+    l: 0.75,
+    a: 0.5,
+};
+
+/// Where the cursor sits and what shape to draw, passed to the active
+/// block's render so it can overlay the cursor cell.
+pub(crate) struct CursorRender {
+    pub row: usize,
+    pub col: usize,
+    pub shape: CursorShape,
+    pub cell: Size<Pixels>,
+}
+
+/// The overlay size for a cursor shape within one cell: a full block, a
+/// baseline underline strip, or a left-edge bar.
+fn cursor_dimensions(shape: CursorShape, cell: Size<Pixels>) -> Size<Pixels> {
+    let thickness = px(2.);
+    match shape {
+        CursorShape::Block => cell,
+        CursorShape::Underline => Size {
+            width: cell.width,
+            height: thickness,
+        },
+        CursorShape::Bar => Size {
+            width: thickness,
+            height: cell.height,
+        },
+    }
+}
+
+fn cursor_overlay(cursor: &CursorRender) -> Div {
+    let size = cursor_dimensions(cursor.shape, cursor.cell);
+    let top = match cursor.shape {
+        CursorShape::Underline => cursor.cell.height - size.height,
+        _ => px(0.),
+    };
+    div()
+        .absolute()
+        .left(cursor.cell.width * cursor.col as f32)
+        .top(top)
+        .w(size.width)
+        .h(size.height)
+        .bg(CURSOR_COLOR)
+}
 
 /// Named-color hex table mirroring
 /// `gui/src/editor/render.rs::NAMED_COLOR_HEX`. Indexed-color and
@@ -111,6 +164,7 @@ pub(crate) fn render_grid_row(
     grid: &VtermGrid,
     row_idx: usize,
     selection: Option<&GridSelection>,
+    cursor: Option<&CursorRender>,
 ) -> Div {
     let row = grid.row(row_idx);
     let row_u16 = u16::try_from(row_idx).unwrap_or(u16::MAX);
@@ -127,20 +181,26 @@ pub(crate) fn render_grid_row(
         }
         runs.push((start..end, cell_style(cell, selected)));
     }
-    div().child(StyledText::new(SharedString::from(text)).with_highlights(runs))
+    let text = div().child(StyledText::new(SharedString::from(text)).with_highlights(runs));
+    match cursor {
+        Some(cursor) => div().relative().child(text).child(cursor_overlay(cursor)),
+        None => text,
+    }
 }
 
-pub(crate) fn render_block(block: &OutputBlock) -> AnyElement {
+pub(crate) fn render_block(block: &OutputBlock, cursor: Option<CursorRender>) -> AnyElement {
     let header = div()
         .px_2()
         .py_1()
         .child(SharedString::from(format!("$ {}", block.command)));
     let mut col = div().flex().flex_col().w_full().child(header);
     for row_idx in 0..block.grid.line_count() {
+        let row_cursor = cursor.as_ref().filter(|c| c.row == row_idx);
         col = col.child(div().px_2().child(render_grid_row(
             &block.grid,
             row_idx,
             block.selection.as_ref(),
+            row_cursor,
         )));
     }
     if let Some(err) = &block.error {
@@ -250,11 +310,34 @@ mod tests {
     fn render_grid_row_emits_cell_text() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"hello");
-        let _ = render_grid_row(&grid, 0, None);
+        let _ = render_grid_row(&grid, 0, None, None);
         let row_chars: String = grid.row(0).iter().map(|c| c.ch).collect();
         assert!(
             row_chars.starts_with("hello"),
             "row text should preserve fed bytes: {row_chars:?}",
+        );
+    }
+
+    #[test]
+    fn cursor_dimensions_per_shape() {
+        let cell = Size {
+            width: px(10.),
+            height: px(20.),
+        };
+        assert_eq!(cursor_dimensions(CursorShape::Block, cell), cell);
+        assert_eq!(
+            cursor_dimensions(CursorShape::Underline, cell),
+            Size {
+                width: px(10.),
+                height: px(2.),
+            }
+        );
+        assert_eq!(
+            cursor_dimensions(CursorShape::Bar, cell),
+            Size {
+                width: px(2.),
+                height: px(20.),
+            }
         );
     }
 }

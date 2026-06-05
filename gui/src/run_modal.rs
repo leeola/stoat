@@ -145,7 +145,7 @@ impl Render for RunModal {
             .track_focus(&self.focus_handle)
             .child(div().px_2().py_1().text_color(accent).child(header));
         for block in &self.blocks {
-            body = body.child(render::render_block(block));
+            body = body.child(render::render_block(block, None));
         }
         body
     }
