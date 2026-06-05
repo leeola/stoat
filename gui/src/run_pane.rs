@@ -71,6 +71,10 @@ pub struct Run {
     /// Monospace cell metrics measured during the render's
     /// canvas prepaint via `text_system().em_advance`.
     cell_size: Option<Size<Pixels>>,
+    /// Last `(rows, cols)` pushed to the session's PTY. Resizes are
+    /// skipped while this is unchanged so sub-cell pixel jitter does not
+    /// spam SIGWINCH at the child.
+    last_terminal_size: Option<(u16, u16)>,
     _spawn_task: Option<Task<()>>,
 }
 
@@ -98,6 +102,7 @@ impl Run {
             workspace,
             output_bounds: None,
             cell_size: None,
+            last_terminal_size: None,
             _spawn_task: Some(spawn_task),
         }
     }
@@ -107,6 +112,7 @@ impl Run {
             return;
         }
         self.output_bounds = Some(bounds);
+        self.sync_terminal_size();
         cx.notify();
     }
 
@@ -115,7 +121,35 @@ impl Run {
             return;
         }
         self.cell_size = Some(size);
+        self.sync_terminal_size();
         cx.notify();
+    }
+
+    /// Resize the PTY to match the current output bounds and cell size,
+    /// skipping the call when the cell dimensions are unchanged so
+    /// sub-cell pixel changes do not spam the child with SIGWINCH.
+    fn sync_terminal_size(&mut self) {
+        let (Some(bounds), Some(cell)) = (self.output_bounds, self.cell_size) else {
+            return;
+        };
+        let Some(session) = self.session.clone() else {
+            return;
+        };
+        let Some(size) = terminal_cells(bounds, cell) else {
+            return;
+        };
+        if self.last_terminal_size == Some(size) {
+            return;
+        }
+        self.last_terminal_size = Some(size);
+        let (rows, cols) = size;
+        if let Err(err) = session.resize(rows, cols) {
+            tracing::warn!(
+                target: "stoat_gui::run_pane",
+                ?err,
+                "run pane pty resize failed"
+            );
+        }
     }
 
     fn dispatch_grid_click(
@@ -281,6 +315,22 @@ impl Run {
     }
 }
 
+/// Whole character cells that fit in `bounds` at `cell` size, floored and
+/// clamped to at least one row and column. `None` when the cell has no
+/// area, which avoids dividing by zero before the first measurement.
+fn terminal_cells(bounds: Bounds<Pixels>, cell: Size<Pixels>) -> Option<(u16, u16)> {
+    let cell_w: f32 = cell.width.into();
+    let cell_h: f32 = cell.height.into();
+    if cell_w <= 0.0 || cell_h <= 0.0 {
+        return None;
+    }
+    let width: f32 = bounds.size.width.into();
+    let height: f32 = bounds.size.height.into();
+    let cols = ((width / cell_w) as u16).max(1);
+    let rows = ((height / cell_h) as u16).max(1);
+    Some((rows, cols))
+}
+
 async fn install_session(
     host: Arc<dyn TerminalHost>,
     cwd: PathBuf,
@@ -313,6 +363,7 @@ async fn install_session(
     let pending = {
         let Ok(pending) = this.update(cx, |run, _| {
             run.session = Some(session.clone());
+            run.sync_terminal_size();
             std::mem::take(&mut run.pending_writes)
         }) else {
             return;
@@ -799,6 +850,37 @@ mod tests {
         h.vcx.run_until_parked();
 
         assert_eq!(h.terminal.sent_strings(), vec!["echo hi\n".to_string()]);
+    }
+
+    #[test]
+    fn terminal_cells_floors_to_whole_cells() {
+        let bounds = Bounds {
+            origin: point(px(0.), px(0.)),
+            size: size(px(100.), px(60.)),
+        };
+        assert_eq!(
+            terminal_cells(bounds, size(px(10.), px(20.))),
+            Some((3, 10))
+        );
+        assert_eq!(terminal_cells(bounds, size(px(0.), px(0.))), None);
+    }
+
+    #[test]
+    fn resize_pushes_cell_size_to_session() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+
+        // Rendering measures the pane bounds and cell size; the session's
+        // PTY must have been resized to the matching whole-cell grid.
+        let expected = run.read_with(h.vcx, |r, _| {
+            let bounds = r.output_bounds?;
+            let cell = r.cell_size?;
+            terminal_cells(bounds, cell)
+        });
+        assert!(expected.is_some(), "render should measure the pane");
+        assert_eq!(h.terminal.last_size(), expected);
     }
 
     #[test]
