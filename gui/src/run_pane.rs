@@ -884,6 +884,26 @@ mod tests {
     }
 
     #[test]
+    fn alt_screen_buffer_renders_in_active_block() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+
+        run.update(h.vcx, |r, cx| {
+            r.on_read(b"main-screen", cx);
+            r.on_read(b"\x1b[?1049h", cx);
+            r.on_read(b"ALT", cx);
+        });
+
+        let visible = run.read_with(h.vcx, |r, _| {
+            r.blocks
+                .last()
+                .map(|b| b.grid.text_in(0..SHELL_WIDTH as usize, 0..1))
+        });
+        assert_eq!(visible, Some("ALT".to_string()));
+    }
+
+    #[test]
     fn submit_queues_when_session_not_ready() {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);
