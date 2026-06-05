@@ -263,6 +263,7 @@ impl PickerDelegate for FileFinderDelegate {
                     });
                 }
                 ws.open_paths(&[path], cx);
+                ws.reset_input_mode_for_navigation(cx);
             });
         });
         cx.emit(DismissEvent);

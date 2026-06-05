@@ -131,7 +131,10 @@ impl PickerDelegate for BufferPickerDelegate {
         // Defer past the keystroke observer's outer `Workspace::update`
         // lease so the re-entrant update does not panic.
         window.defer(cx, move |_window, cx| {
-            workspace.update(cx, |ws, cx| ws.open_paths(&[path], cx));
+            workspace.update(cx, |ws, cx| {
+                ws.open_paths(&[path], cx);
+                ws.reset_input_mode_for_navigation(cx);
+            });
         });
         cx.emit(DismissEvent);
     }

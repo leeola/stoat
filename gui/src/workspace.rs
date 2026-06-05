@@ -1550,12 +1550,7 @@ impl Workspace {
         let active_id = active.as_ref().map(|item| item.item_id());
         if active_id != self.last_active_item_id {
             self.last_active_item_id = active_id;
-            let mode = match active.as_ref().map(|item| item.item_kind(cx)) {
-                Some(crate::item::ItemKind::Review) => "review",
-                Some(crate::item::ItemKind::Rebase) => "rebase",
-                Some(crate::item::ItemKind::Conflict) => "conflict",
-                _ => "normal",
-            };
+            let mode = item_default_input_mode(active.as_ref().map(|item| item.item_kind(cx)));
             self.set_input_mode(mode, cx);
         }
 
@@ -4168,6 +4163,23 @@ impl Workspace {
     fn set_input_mode(&self, mode: &str, cx: &mut Context<'_, Self>) {
         self.input_state_machine
             .update(cx, |sm, cx_sm| sm.set_mode(mode, cx_sm));
+    }
+
+    /// Force the focused pane's active item into its default input mode,
+    /// overriding the unchanged-active-item guard in
+    /// [`Self::broadcast_active_pane_item`] and discarding any modal
+    /// prev-mode capture. The file finder and buffer picker call this on
+    /// confirm so navigating to an already-open buffer lands in the
+    /// buffer's default mode rather than the leader submode the picker was
+    /// launched from, which would otherwise survive both the guard's
+    /// skipped reset and the modal's prev-mode restore.
+    pub(crate) fn reset_input_mode_for_navigation(&self, cx: &mut Context<'_, Self>) {
+        let mode =
+            item_default_input_mode(self.active_pane_item(cx).map(|item| item.item_kind(cx)));
+        self.input_state_machine.update(cx, |sm, cx_sm| {
+            sm.take_prev_mode_for_modal();
+            sm.set_mode(mode, cx_sm);
+        });
     }
 
     fn dispatch_jump(&mut self, dir: JumpDir, cx: &mut Context<'_, Self>) {
@@ -7165,6 +7177,18 @@ fn ui_font(cx: &App) -> (SharedString, f32) {
     )
 }
 
+/// Default input mode for a pane item of `kind`, the lone hardcoded
+/// per-destination landing mode. `None` (an empty pane) and every kind
+/// outside the explicit arms fall back to `normal`.
+fn item_default_input_mode(kind: Option<crate::item::ItemKind>) -> &'static str {
+    match kind {
+        Some(crate::item::ItemKind::Review) => "review",
+        Some(crate::item::ItemKind::Rebase) => "rebase",
+        Some(crate::item::ItemKind::Conflict) => "conflict",
+        _ => "normal",
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -9151,6 +9175,60 @@ mod tests {
             mode(vcx),
             "line_select",
             "a pane event on the unchanged active item keeps the submode",
+        );
+    }
+
+    #[test]
+    fn picker_confirm_resets_leader_submode_to_normal() {
+        use crate::{
+            buffer_picker::{open_buffer_picker, BufferPickerDelegate},
+            picker::Picker,
+        };
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"hello\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let mode = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.input_state_machine().read(cx).mode().to_string()
+            })
+        };
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/a.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        // Launch the picker from a leader submode so the modal captures it
+        // as the prior mode to restore on dismiss.
+        ws.update(vcx, |w, cx| w.set_input_mode("space", cx));
+        ws.update_in(vcx, open_buffer_picker);
+        vcx.run_until_parked();
+
+        let picker = ws
+            .read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<BufferPickerDelegate>>()
+            })
+            .expect("buffer picker is the active modal");
+
+        // Confirm a.rs, already the focused pane's active item, so
+        // broadcast_active_pane_item's unchanged-item guard skips its reset.
+        vcx.update(|window, cx| {
+            picker.update(cx, |p, cx| {
+                p.handle_action(&stoat_action::PickerConfirm, window, cx);
+            })
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            mode(vcx),
+            "normal",
+            "confirming the picker onto the already-active buffer resets the leader submode to normal",
         );
     }
 
