@@ -245,6 +245,8 @@ impl AgentSession for AcpSession {
 mod tests {
     use super::*;
     use serde_json::{json, Value};
+    use std::path::PathBuf;
+    use stoat::host::{ToolCallContent, ToolCallLocation, ToolKind};
     use stoat_agent_claude_code::jsonrpc::Incoming;
     use stoat_scheduler::TokioScheduler;
     use tokio::sync::mpsc;
@@ -419,6 +421,82 @@ mod tests {
                 assert!(signature.is_empty());
             },
             other => panic!("expected Thinking, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn tool_call_maps_kind_title_diff_and_location() {
+        let message = recv_after_update(json!({
+            "sessionUpdate": "tool_call",
+            "toolCallId": "tc-1",
+            "kind": "execute",
+            "title": "Run tests",
+            "status": "pending",
+            "content": [{ "type": "diff", "path": "/a.rs", "oldText": "x", "newText": "y" }],
+            "locations": [{ "path": "/a.rs", "line": 3 }],
+        }))
+        .await;
+        match message {
+            AgentMessage::ToolUse {
+                id,
+                kind,
+                title,
+                content,
+                locations,
+                ..
+            } => {
+                assert_eq!(id, "tc-1");
+                assert_eq!(kind, ToolKind::Execute);
+                assert_eq!(title, "Run tests");
+                assert_eq!(
+                    content,
+                    vec![ToolCallContent::Diff {
+                        path: PathBuf::from("/a.rs"),
+                        old_text: Some("x".to_string()),
+                        new_text: "y".to_string(),
+                    }]
+                );
+                assert_eq!(
+                    locations,
+                    vec![ToolCallLocation {
+                        path: PathBuf::from("/a.rs"),
+                        line: Some(3),
+                    }]
+                );
+            },
+            other => panic!("expected ToolUse, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn current_mode_update_maps_to_mode_changed() {
+        let message = recv_after_update(json!({
+            "sessionUpdate": "current_mode_update",
+            "currentModeId": "plan",
+        }))
+        .await;
+        match message {
+            AgentMessage::ModeChanged { mode } => assert_eq!(mode, "plan"),
+            other => panic!("expected ModeChanged, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn plan_maps_entries() {
+        let message = recv_after_update(json!({
+            "sessionUpdate": "plan",
+            "entries": [
+                { "content": "Write the parser", "priority": "high", "status": "in_progress" },
+            ],
+        }))
+        .await;
+        match message {
+            AgentMessage::Plan { entries } => {
+                assert_eq!(entries.len(), 1);
+                assert_eq!(entries[0].content, "Write the parser");
+                assert_eq!(entries[0].priority, "high");
+            },
+            other => panic!("expected Plan, got {other:?}"),
         }
     }
 }
