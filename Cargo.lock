@@ -6327,6 +6327,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "stoat_agent_acp"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "serde",
+ "serde_json",
+ "snafu",
+ "stoat",
+ "stoat_agent_claude_code",
+ "stoat_scheduler",
+ "tokio",
+]
+
+[[package]]
 name = "stoat_agent_claude_code"
 version = "0.1.0"
 dependencies = [
