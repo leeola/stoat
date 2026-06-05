@@ -197,4 +197,24 @@ mod tests {
             "message should name the offending value: {message}",
         );
     }
+
+    #[test]
+    fn default_config_parses_and_resolves_item_modes() {
+        let (config, errors) = stoat_config::parse(DEFAULT_CONFIG);
+        assert!(
+            errors.is_empty(),
+            "bundled default config must parse cleanly: {}",
+            stoat_config::format_errors(DEFAULT_CONFIG, &errors),
+        );
+        let settings = Settings::from_config(config.expect("default config parses"));
+        assert_eq!(
+            settings
+                .resolved
+                .item_modes
+                .get("conflict")
+                .map(String::as_str),
+            Some("conflict"),
+            "ui.item_mode.conflict from the default config resolves",
+        );
+    }
 }

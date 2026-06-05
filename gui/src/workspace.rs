@@ -1550,8 +1550,8 @@ impl Workspace {
         let active_id = active.as_ref().map(|item| item.item_id());
         if active_id != self.last_active_item_id {
             self.last_active_item_id = active_id;
-            let mode = item_default_input_mode(active.as_ref().map(|item| item.item_kind(cx)));
-            self.set_input_mode(mode, cx);
+            let mode = item_input_mode(active.as_ref().map(|item| item.item_kind(cx)), cx);
+            self.set_input_mode(&mode, cx);
         }
 
         self.refresh_active_editor_subscription(cx);
@@ -4174,8 +4174,7 @@ impl Workspace {
     /// launched from, which would otherwise survive both the guard's
     /// skipped reset and the modal's prev-mode restore.
     pub(crate) fn reset_input_mode_for_navigation(&self, cx: &mut Context<'_, Self>) {
-        let mode =
-            item_default_input_mode(self.active_pane_item(cx).map(|item| item.item_kind(cx)));
+        let mode = item_input_mode(self.active_pane_item(cx).map(|item| item.item_kind(cx)), cx);
         self.input_state_machine.update(cx, |sm, cx_sm| {
             sm.take_prev_mode_for_modal();
             sm.set_mode(mode, cx_sm);
@@ -7177,15 +7176,53 @@ fn ui_font(cx: &App) -> (SharedString, f32) {
     )
 }
 
-/// Default input mode for a pane item of `kind`, the lone hardcoded
-/// per-destination landing mode. `None` (an empty pane) and every kind
-/// outside the explicit arms fall back to `normal`.
+/// Input mode an item of `kind` lands in when it becomes active: the
+/// user's `ui.item_mode.<kind>` override when set, otherwise the
+/// built-in default from [`item_default_input_mode`]. Reads the
+/// resolved [`Settings`] global; with no global installed (or no
+/// override for the kind) every kind uses its built-in default.
+fn item_input_mode(kind: Option<crate::item::ItemKind>, cx: &App) -> String {
+    let configured = kind.and_then(|kind| {
+        let name = item_kind_config_name(kind);
+        cx.try_global::<Settings>()?
+            .resolved
+            .item_modes
+            .get(name)
+            .cloned()
+    });
+    configured.unwrap_or_else(|| item_default_input_mode(kind).to_string())
+}
+
+/// Built-in default landing mode for `kind`, applied when no
+/// `ui.item_mode` override is configured. Preserves the historical
+/// mapping: review/rebase/conflict items land in their namesake mode,
+/// every other kind (and an empty pane) lands in `normal`.
 fn item_default_input_mode(kind: Option<crate::item::ItemKind>) -> &'static str {
     match kind {
         Some(crate::item::ItemKind::Review) => "review",
         Some(crate::item::ItemKind::Rebase) => "rebase",
         Some(crate::item::ItemKind::Conflict) => "conflict",
         _ => "normal",
+    }
+}
+
+/// Lowercase config-key name for `kind`, the `<kind>` in
+/// `ui.item_mode.<kind>` used to look up its configured landing mode.
+fn item_kind_config_name(kind: crate::item::ItemKind) -> &'static str {
+    use crate::item::ItemKind;
+    match kind {
+        ItemKind::Editor => "editor",
+        ItemKind::Run => "run",
+        ItemKind::Claude => "claude",
+        ItemKind::Conflict => "conflict",
+        ItemKind::Rebase => "rebase",
+        ItemKind::Review => "review",
+        ItemKind::CommitList => "commit_list",
+        ItemKind::ProjectTree => "project_tree",
+        ItemKind::OutlinePanel => "outline_panel",
+        ItemKind::DiagnosticsPanel => "diagnostics_panel",
+        ItemKind::MarkdownPreview => "markdown_preview",
+        ItemKind::Unknown => "unknown",
     }
 }
 
@@ -9124,6 +9161,8 @@ mod tests {
             })
         };
 
+        // No Settings global installed: each kind falls back to its
+        // built-in default mapping.
         for (label, kind, expected) in [
             ("review", ItemKind::Review, "review"),
             ("rebase", ItemKind::Rebase, "rebase"),
@@ -9138,6 +9177,24 @@ mod tests {
             vcx.run_until_parked();
             assert_eq!(mode(vcx), expected, "{label} item drives {expected} mode");
         }
+
+        // A `ui.item_mode` override drives the landing mode off config.
+        vcx.update(|_, cx| {
+            cx.set_global(Settings::load_from_source(
+                r#"on init { ui.item_mode.editor = "insert"; }"#,
+            ));
+        });
+        let item = workspace_item_of_kind(vcx, "editor_override", ItemKind::Editor);
+        pane.update(vcx, |p, cx| {
+            let index = p.add_item(item, cx);
+            p.activate(index, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            mode(vcx),
+            "insert",
+            "ui.item_mode.editor overrides the editor landing mode",
+        );
     }
 
     #[test]
