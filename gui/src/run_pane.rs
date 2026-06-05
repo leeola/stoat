@@ -32,13 +32,14 @@ use crate::{
 };
 use gpui::{
     canvas, div, font, point, px, size, App, AppContext, Bounds, Context, InteractiveElement,
-    IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent, ParentElement, Pixels, Point, Render,
-    SharedString, Size, Styled, Task, WeakEntity, Window,
+    IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size,
+    Styled, Task, WeakEntity, Window,
 };
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{GridSelection, OutputBlock},
+    run::{GridSelection, MouseProtocol, OutputBlock},
 };
 
 const SHELL_WIDTH: u16 = 80;
@@ -191,6 +192,56 @@ impl Run {
         let cell = self.cell_size?;
         let elem = point(position.x - bounds.origin.x, position.y - bounds.origin.y);
         Some(mouse::point_to_grid(elem, cell))
+    }
+
+    /// Forward a mouse event to the program as a report when the active
+    /// block enabled a mouse mode and Shift is not held. Returns whether
+    /// the event was consumed (so callers fall back to local selection on
+    /// `false`). `button` is the base button or scroll code; `motion`
+    /// marks drag/move events, only reported under button-event and
+    /// any-event tracking.
+    fn report_mouse(
+        &mut self,
+        button: u8,
+        motion: bool,
+        pressed: bool,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let Some(block) = self.blocks.last() else {
+            return false;
+        };
+        let protocol = block.grid.mouse_protocol();
+        let reporting = match protocol {
+            MouseProtocol::None => false,
+            MouseProtocol::Press => !motion,
+            MouseProtocol::ButtonEvent | MouseProtocol::AnyEvent => true,
+        };
+        if !reporting || modifiers.shift {
+            return false;
+        }
+        let Some((row, col)) = self.position_to_grid(position) else {
+            return false;
+        };
+        let mut mods = 0;
+        if modifiers.alt {
+            mods += 8;
+        }
+        if modifiers.control {
+            mods += 16;
+        }
+        let code = button + if motion { 32 } else { 0 };
+        let Some(bytes) = block
+            .grid
+            .encode_mouse(code, mods, col as u16, row as u16, pressed)
+        else {
+            return false;
+        };
+        if let Some(session) = self.session.clone() {
+            spawn_write_bytes(session, bytes, cx);
+        }
+        true
     }
 
     pub fn submit(&mut self, cx: &mut Context<'_, Self>) {
@@ -402,16 +453,42 @@ async fn install_session(
 }
 
 fn spawn_write(session: Arc<dyn TerminalSession>, text: String, cx: &mut Context<'_, Run>) {
+    spawn_write_bytes(session, text.into_bytes(), cx);
+}
+
+/// Write raw bytes to the session. Mouse reports are not always valid
+/// UTF-8 (X10 packs the position into high bytes), so this takes a byte
+/// vector rather than a string.
+fn spawn_write_bytes(session: Arc<dyn TerminalSession>, bytes: Vec<u8>, cx: &mut Context<'_, Run>) {
     cx.spawn(async move |_, _| {
-        if let Err(err) = session.write(text.as_bytes()).await {
+        if let Err(err) = session.write(&bytes).await {
             tracing::warn!(
                 target: "stoat_gui::run_pane",
                 ?err,
-                "run submit write failed"
+                "run pane write failed"
             );
         }
     })
     .detach();
+}
+
+/// The X10/SGR base button code for a pressed/released button, or `None`
+/// for buttons that have no standard report code.
+fn mouse_button_code(button: MouseButton) -> Option<u8> {
+    match button {
+        MouseButton::Left => Some(0),
+        MouseButton::Middle => Some(1),
+        MouseButton::Right => Some(2),
+        _ => None,
+    }
+}
+
+/// Whether a scroll delta moves the content up (toward older lines).
+fn scroll_is_up(delta: &ScrollDelta) -> bool {
+    match delta {
+        ScrollDelta::Lines(p) => p.y > 0.0,
+        ScrollDelta::Pixels(p) => p.y > px(0.),
+    }
 }
 
 fn read_input_text(input: &gpui::Entity<Editor>, cx: &App) -> String {
@@ -515,13 +592,57 @@ impl Render for Run {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
-                    this.dispatch_grid_click(event.position, window, cx);
+                    if !this.report_mouse(0, false, true, event.position, event.modifiers, cx) {
+                        this.dispatch_grid_click(event.position, window, cx);
+                    }
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.report_mouse(1, false, true, event.position, event.modifiers, cx);
+                }),
+            )
+            .on_mouse_down(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseDownEvent, _window, cx| {
+                    this.report_mouse(2, false, true, event.position, event.modifiers, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Left,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.report_mouse(0, false, false, event.position, event.modifiers, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Middle,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.report_mouse(1, false, false, event.position, event.modifiers, cx);
+                }),
+            )
+            .on_mouse_up(
+                MouseButton::Right,
+                cx.listener(|this, event: &MouseUpEvent, _window, cx| {
+                    this.report_mouse(2, false, false, event.position, event.modifiers, cx);
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
-                if event.dragging() {
-                    this.dispatch_grid_drag(event.position, window, cx);
+                match event.pressed_button.and_then(mouse_button_code) {
+                    Some(code) => {
+                        if !this.report_mouse(code, true, true, event.position, event.modifiers, cx)
+                        {
+                            this.dispatch_grid_drag(event.position, window, cx);
+                        }
+                    },
+                    None => {
+                        this.report_mouse(3, true, true, event.position, event.modifiers, cx);
+                    },
                 }
+            }))
+            .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
+                let code = if scroll_is_up(&event.delta) { 64 } else { 65 };
+                this.report_mouse(code, false, true, event.position, event.modifiers, cx);
             }));
         div()
             .flex()
@@ -901,6 +1022,66 @@ mod tests {
                 .map(|b| b.grid.text_in(0..SHELL_WIDTH as usize, 0..1))
         });
         assert_eq!(visible, Some("ALT".to_string()));
+    }
+
+    fn arm_mouse_mode(run: &Entity<Run>, h: &mut Harness<'_>, modes: &'static [u8]) {
+        run.update(h.vcx, |r, cx| {
+            r.on_read(modes, cx);
+            r.set_cell_size(size(px(10.), px(20.)), cx);
+            r.set_output_bounds(
+                Bounds {
+                    origin: point(px(0.), px(0.)),
+                    size: size(px(800.), px(400.)),
+                },
+                cx,
+            );
+        });
+    }
+
+    #[test]
+    fn mouse_press_reports_in_active_mode() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+        arm_mouse_mode(&run, &mut h, b"\x1b[?1000h\x1b[?1006h");
+
+        let consumed = run.update(h.vcx, |r, cx| {
+            r.report_mouse(
+                0,
+                false,
+                true,
+                point(px(25.), px(30.)),
+                Modifiers::default(),
+                cx,
+            )
+        });
+        h.vcx.run_until_parked();
+
+        assert!(consumed);
+        let report = h.terminal.sent_bytes().last().cloned().unwrap_or_default();
+        assert!(
+            report.starts_with(b"\x1b[<0;") && report.ends_with(b"M"),
+            "expected an SGR button-0 press report, got {report:?}"
+        );
+    }
+
+    #[test]
+    fn mouse_shift_falls_back_to_selection() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+        h.vcx.run_until_parked();
+        arm_mouse_mode(&run, &mut h, b"\x1b[?1000h");
+
+        let consumed = run.update(h.vcx, |r, cx| {
+            let shift = Modifiers {
+                shift: true,
+                ..Default::default()
+            };
+            r.report_mouse(0, false, true, point(px(25.), px(30.)), shift, cx)
+        });
+        assert!(!consumed, "shift should fall back to local selection");
     }
 
     #[test]
