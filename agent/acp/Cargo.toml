@@ -12,7 +12,7 @@ snafu.workspace = true
 stoat = { path = "../../stoat" }
 stoat_agent_claude_code = { path = "../claude_code" }
 stoat_scheduler = { path = "../../scheduler" }
-tokio = { workspace = true, features = ["sync"] }
+tokio = { workspace = true, features = ["process", "sync"] }
 
 [dev-dependencies]
 stoat = { path = "../../stoat", features = ["test-support"] }

@@ -13,6 +13,7 @@
 
 mod demux;
 mod fs;
+mod launch;
 mod permission;
 mod rpc;
 mod schema;
@@ -31,6 +32,7 @@ use crate::{
     terminal::{handle_terminal_request, is_terminal_method, TerminalRegistry},
 };
 use async_trait::async_trait;
+pub use launch::{launch, LaunchError};
 use snafu::{Location, ResultExt, Snafu};
 use std::{
     collections::HashMap,
