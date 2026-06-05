@@ -4225,6 +4225,20 @@ impl Render for Editor {
                 None
             };
 
+            // On the first render after the minimap appears, its own text
+            // region is not yet measured (the paint-time setter runs after
+            // this render), so `tracking` is `None` and the thumb cannot be
+            // placed. The setter's `cx.notify()` does not schedule a fresh
+            // render, so without this the thumb would not paint until an
+            // unrelated parent notify (a scroll or cursor move) re-rendered
+            // the minimap. Request the next frame until the metrics resolve.
+            if tracking.is_none() {
+                let minimap = cx.entity().downgrade();
+                window.on_next_frame(move |_, cx| {
+                    minimap.update(cx, |_, cx| cx.notify()).ok();
+                });
+            }
+
             if let Some((_, _, minimap_scroll_y)) = tracking {
                 self.scroll_handle
                     .0
