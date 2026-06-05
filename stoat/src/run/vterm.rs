@@ -1,4 +1,5 @@
 use base64::{engine::general_purpose::STANDARD, Engine};
+use regex::Regex;
 use std::{
     collections::VecDeque,
     ops::{BitOrAssign, Range, SubAssign},
@@ -269,6 +270,34 @@ impl VtermGrid {
     /// The cursor's current `(row, col)` cell position.
     pub fn cursor_position(&self) -> (usize, usize) {
         (self.cursor_row, self.cursor_col)
+    }
+
+    /// Find every match of the regex `query` in the grid, one inclusive
+    /// single-row [`GridSelection`] per match. An invalid regex yields no
+    /// matches. Matches do not span rows.
+    pub fn search(&self, query: &str) -> Vec<GridSelection> {
+        let Ok(re) = Regex::new(query) else {
+            return Vec::new();
+        };
+        let mut matches = Vec::new();
+        for (row_idx, cells) in self.cells.iter().enumerate() {
+            let Ok(row) = u16::try_from(row_idx) else {
+                break;
+            };
+            let text: String = cells.iter().map(|c| c.ch).collect();
+            for m in re.find_iter(&text) {
+                let start = text[..m.start()].chars().count();
+                let end = text[..m.end()].chars().count();
+                if end == start {
+                    continue;
+                }
+                matches.push(GridSelection {
+                    anchor: (start as u16, row),
+                    head: ((end - 1) as u16, row),
+                });
+            }
+        }
+        matches
     }
 
     /// Encode a mouse event as report bytes in the grid's current

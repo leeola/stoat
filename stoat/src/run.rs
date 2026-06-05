@@ -311,6 +311,27 @@ mod tests {
     }
 
     #[test]
+    fn grid_search_finds_literal_matches() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"hello world\r\nhello again");
+        let matches = grid.search("hello");
+        assert_eq!(matches.len(), 2);
+        assert_eq!(matches[0].bounds(), ((0, 0), (4, 0)));
+        assert_eq!(matches[1].bounds(), ((0, 1), (4, 1)));
+    }
+
+    #[test]
+    fn grid_search_regex_and_empty() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"abc123def");
+        let matches = grid.search(r"\d+");
+        assert_eq!(matches.len(), 1);
+        assert_eq!(matches[0].bounds(), ((3, 0), (5, 0)));
+        assert!(grid.search("zzz").is_empty());
+        assert!(grid.search("[bad").is_empty());
+    }
+
+    #[test]
     fn grid_ansi_color_applies() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"\x1b[31mR\x1b[0mN");
