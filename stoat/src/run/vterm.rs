@@ -300,6 +300,45 @@ impl VtermGrid {
         matches
     }
 
+    /// Detect clickable links in the grid: `http`/`https` URLs and
+    /// `path:line:col` references whose path part looks like a path
+    /// (contains `/` or `.`). Each is one inclusive single-row link.
+    pub fn links(&self) -> Vec<TerminalLink> {
+        let url_re = Regex::new(r"https?://[^\s]+").expect("valid url regex");
+        let path_re = Regex::new(r"([^\s:]+):(\d+)(?::(\d+))?").expect("valid path regex");
+        let mut links = Vec::new();
+        for (row_idx, cells) in self.cells.iter().enumerate() {
+            let Ok(row) = u16::try_from(row_idx) else {
+                break;
+            };
+            let text: String = cells.iter().map(|c| c.ch).collect();
+            for m in url_re.find_iter(&text) {
+                links.push(TerminalLink {
+                    selection: selection_for(&text, m.start(), m.end(), row),
+                    target: LinkTarget::Url(m.as_str().to_string()),
+                });
+            }
+            for cap in path_re.captures_iter(&text) {
+                let whole = cap.get(0).expect("whole match present");
+                let path = cap.get(1).expect("path group present").as_str();
+                if !path.contains('/') && !path.contains('.') {
+                    continue;
+                }
+                let line = cap.get(2).and_then(|m| m.as_str().parse().ok());
+                let column = cap.get(3).and_then(|m| m.as_str().parse().ok());
+                links.push(TerminalLink {
+                    selection: selection_for(&text, whole.start(), whole.end(), row),
+                    target: LinkTarget::Path {
+                        path: path.to_string(),
+                        line,
+                        column,
+                    },
+                });
+            }
+        }
+        links
+    }
+
     /// Encode a mouse event as report bytes in the grid's current
     /// encoding (`?1006` SGR or X10), or `None` if the position is
     /// outside what X10 can express. `button` is the base button code
@@ -748,6 +787,17 @@ impl vte::Perform for VtermGrid {
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
 }
 
+/// Inclusive single-row selection spanning the byte range `[start, end)`
+/// of a row's text, with byte offsets mapped to cell columns.
+fn selection_for(text: &str, start: usize, end: usize, row: u16) -> GridSelection {
+    let anchor_col = text[..start].chars().count() as u16;
+    let head_col = (text[..end].chars().count().max(1) - 1) as u16;
+    GridSelection {
+        anchor: (anchor_col, row),
+        head: (head_col, row),
+    }
+}
+
 fn first_param(params: &[u16], default: u16) -> u16 {
     param_at(params, 0, default)
 }
@@ -803,6 +853,26 @@ fn encode_mouse_report(
 pub struct GridSelection {
     pub anchor: (u16, u16),
     pub head: (u16, u16),
+}
+
+/// A clickable target detected in the grid by [`VtermGrid::links`].
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum LinkTarget {
+    /// An `http`/`https` URL.
+    Url(String),
+    /// A file path with an optional `line` and `column`.
+    Path {
+        path: String,
+        line: Option<u32>,
+        column: Option<u32>,
+    },
+}
+
+/// A detected link: the cells it spans and where it points.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TerminalLink {
+    pub selection: GridSelection,
+    pub target: LinkTarget,
 }
 
 impl GridSelection {

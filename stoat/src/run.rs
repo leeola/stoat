@@ -10,8 +10,8 @@ use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
 pub use vterm::{
-    CursorShape, GridSelection, MouseProtocol, OutputBlock, StyledCell, TermColor, TermModifier,
-    VtermGrid,
+    CursorShape, GridSelection, LinkTarget, MouseProtocol, OutputBlock, StyledCell, TermColor,
+    TermModifier, TerminalLink, VtermGrid,
 };
 
 new_key_type! {
@@ -329,6 +329,32 @@ mod tests {
         assert_eq!(matches[0].bounds(), ((3, 0), (5, 0)));
         assert!(grid.search("zzz").is_empty());
         assert!(grid.search("[bad").is_empty());
+    }
+
+    #[test]
+    fn grid_links_detect_url_and_path() {
+        let mut grid = VtermGrid::new(40);
+        grid.feed(b"see https://x.io and src/x.rs:12:3 ok");
+        let links = grid.links();
+        assert_eq!(links.len(), 2);
+        assert_eq!(links[0].target, LinkTarget::Url("https://x.io".to_string()));
+        assert_eq!(links[0].selection.bounds().0, (4, 0));
+        assert_eq!(
+            links[1].target,
+            LinkTarget::Path {
+                path: "src/x.rs".to_string(),
+                line: Some(12),
+                column: Some(3),
+            }
+        );
+        assert_eq!(links[1].selection.bounds().0, (21, 0));
+    }
+
+    #[test]
+    fn grid_links_ignore_bare_number_colon() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"error 42:10 here");
+        assert!(grid.links().is_empty());
     }
 
     #[test]
