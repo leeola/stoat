@@ -26,7 +26,7 @@ pub struct Args {
     /// Restore the most-recently-used workspace for this repository instead
     /// of starting in a fresh one. `continue` is a Rust keyword so the field
     /// is named `continue_`; clap exposes it as `--continue` / `-c`.
-    #[arg(short = 'c', long = "continue")]
+    #[arg(short = 'c', long = "continue", global = true)]
     pub continue_: bool,
 
     /// Walk ancestors of the current directory and reopen the workspace
@@ -35,7 +35,12 @@ pub struct Args {
     /// parent, ...) most recently saved a workspace; falls back to a
     /// fresh workspace anchored at cwd when no ancestor has any state.
     /// Mutually exclusive with `--continue`.
-    #[arg(short = 'r', long = "resume", conflicts_with = "continue_")]
+    #[arg(
+        short = 'r',
+        long = "resume",
+        conflicts_with = "continue_",
+        global = true
+    )]
     pub resume: bool,
 
     /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
@@ -119,4 +124,36 @@ pub fn run() -> Result<(), Whatever> {
 fn print_gui_hint() -> Result<(), Whatever> {
     eprintln!("use `stoat gui`");
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Args;
+    use clap::Parser;
+
+    #[test]
+    fn resume_parses_after_gui_subcommand() {
+        let args = Args::try_parse_from(["stoat", "gui", "-r"]).expect("`gui -r` parses");
+        assert!(args.resume);
+        assert!(!args.continue_);
+    }
+
+    #[test]
+    fn continue_parses_after_gui_subcommand() {
+        let args =
+            Args::try_parse_from(["stoat", "gui", "--continue"]).expect("`gui --continue` parses");
+        assert!(args.continue_);
+        assert!(!args.resume);
+    }
+
+    #[test]
+    fn resume_parses_before_gui_subcommand() {
+        let args = Args::try_parse_from(["stoat", "-r", "gui"]).expect("`-r gui` parses");
+        assert!(args.resume);
+    }
+
+    #[test]
+    fn resume_and_continue_conflict() {
+        assert!(Args::try_parse_from(["stoat", "gui", "-r", "-c"]).is_err());
+    }
 }
