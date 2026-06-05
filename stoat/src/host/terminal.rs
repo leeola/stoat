@@ -14,6 +14,7 @@ pub struct SpawnArgs {
     pub env: Vec<(String, String)>,
     pub cwd: PathBuf,
     pub width: u16,
+    pub rows: u16,
 }
 
 /// Per-PTY I/O handle returned by [`TerminalHost::spawn`].
@@ -29,6 +30,11 @@ pub trait TerminalSession: Send + Sync {
     /// still running. Non-blocking; callers detect completion via a
     /// `read` returning `Ok(0)` and then read the code here.
     async fn try_wait(&self) -> io::Result<Option<i32>>;
+
+    /// Resize the PTY to `rows` x `cols` character cells, which signals
+    /// the foreground process (SIGWINCH on Unix). Synchronous so the
+    /// renderer can call it inline as the cell grid changes.
+    fn resize(&self, rows: u16, cols: u16) -> io::Result<()>;
 }
 
 /// Factory that opens new PTY-backed terminal sessions.
@@ -41,6 +47,7 @@ pub trait TerminalHost: Send + Sync {
 }
 
 pub struct PtyTerminalSession {
+    master: Mutex<Box<dyn portable_pty::MasterPty + Send>>,
     writer: Mutex<Box<dyn io::Write + Send>>,
     child: Mutex<Box<dyn portable_pty::Child + Send + Sync>>,
     read_rx: tokio::sync::Mutex<mpsc::Receiver<Vec<u8>>>,
@@ -49,6 +56,7 @@ pub struct PtyTerminalSession {
 
 impl PtyTerminalSession {
     pub(crate) fn new(
+        master: Box<dyn portable_pty::MasterPty + Send>,
         writer: Box<dyn io::Write + Send>,
         child: Box<dyn portable_pty::Child + Send + Sync>,
         reader: Box<dyn io::Read + Send>,
@@ -60,6 +68,7 @@ impl PtyTerminalSession {
         });
 
         Self {
+            master: Mutex::new(master),
             writer: Mutex::new(writer),
             child: Mutex::new(child),
             read_rx: tokio::sync::Mutex::new(rx),
@@ -119,6 +128,21 @@ impl TerminalSession for PtyTerminalSession {
             .map_err(|e| io::Error::other(e.to_string()))?;
         Ok(child.try_wait()?.map(|status| status.exit_code() as i32))
     }
+
+    fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
+        let master = self
+            .master
+            .lock()
+            .map_err(|e| io::Error::other(e.to_string()))?;
+        master
+            .resize(portable_pty::PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(io::Error::other)
+    }
 }
 
 /// Synchronous PTY-open helper shared between
@@ -130,7 +154,7 @@ pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> 
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system
         .openpty(portable_pty::PtySize {
-            rows: 24,
+            rows: args.rows,
             cols: args.width,
             pixel_width: 0,
             pixel_height: 0,
@@ -148,7 +172,7 @@ pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> 
     let writer = pair.master.take_writer().map_err(io::Error::other)?;
     let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
 
-    Ok(PtyTerminalSession::new(writer, child, reader))
+    Ok(PtyTerminalSession::new(pair.master, writer, child, reader))
 }
 
 fn blocking_read_loop(mut reader: Box<dyn io::Read + Send>, tx: mpsc::Sender<Vec<u8>>) {
@@ -186,6 +210,7 @@ mod tests {
                 env: vec![("TERM".into(), "dumb".into())],
                 cwd: std::env::temp_dir(),
                 width: 80,
+                rows: 24,
             };
             let session = host.spawn(args).await.expect("spawn");
             let mut collected = Vec::new();

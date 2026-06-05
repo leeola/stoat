@@ -99,6 +99,7 @@ async fn run_oneshot(
         env: vec![("TERM".into(), "dumb".into())],
         cwd,
         width: SHELL_WIDTH,
+        rows: 24,
     };
     let session: Arc<dyn TerminalSession> = match host.spawn(args).await {
         Ok(session) => Arc::from(session),

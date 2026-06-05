@@ -21,6 +21,7 @@ struct FakeTerminalState {
     sent: Vec<Vec<u8>>,
     killed: bool,
     exit_code: Option<i32>,
+    size: Option<(u16, u16)>,
 }
 
 impl FakeTerminalSession {
@@ -31,6 +32,7 @@ impl FakeTerminalSession {
                 sent: Vec::new(),
                 killed: false,
                 exit_code: None,
+                size: None,
             }),
             read_tx: Mutex::new(Some(tx)),
             read_rx: tokio::sync::Mutex::new(rx),
@@ -82,6 +84,12 @@ impl FakeTerminalSession {
     pub fn was_killed(&self) -> bool {
         self.state.lock().unwrap().killed
     }
+
+    /// The last `(rows, cols)` passed to [`TerminalSession::resize`], or
+    /// `None` if it has not been resized.
+    pub fn last_size(&self) -> Option<(u16, u16)> {
+        self.state.lock().unwrap().size
+    }
 }
 
 impl Default for FakeTerminalSession {
@@ -116,6 +124,11 @@ impl TerminalSession for FakeTerminalSession {
 
     async fn try_wait(&self) -> io::Result<Option<i32>> {
         Ok(self.state.lock().unwrap().exit_code)
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
+        self.state.lock().unwrap().size = Some((rows, cols));
+        Ok(())
     }
 }
 
@@ -161,6 +174,10 @@ impl TerminalSession for ArcTerminalSession {
 
     async fn try_wait(&self) -> io::Result<Option<i32>> {
         self.0.try_wait().await
+    }
+
+    fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
+        self.0.resize(rows, cols)
     }
 }
 
@@ -211,6 +228,14 @@ mod tests {
             fake.kill().await.unwrap();
             assert!(fake.was_killed());
         });
+    }
+
+    #[test]
+    fn records_resize() {
+        let fake = FakeTerminalSession::new();
+        assert_eq!(fake.last_size(), None);
+        fake.resize(40, 120).unwrap();
+        assert_eq!(fake.last_size(), Some((40, 120)));
     }
 
     #[test]

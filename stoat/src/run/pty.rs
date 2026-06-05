@@ -62,6 +62,7 @@ pub fn spawn_shell(
         ],
         cwd: cwd.to_path_buf(),
         width,
+        rows: 24,
     };
     let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
     executor
@@ -85,6 +86,7 @@ pub fn spawn_oneshot(
         env: vec![("TERM".into(), "dumb".into())],
         cwd: cwd.to_path_buf(),
         width,
+        rows: 24,
     };
     let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
     executor

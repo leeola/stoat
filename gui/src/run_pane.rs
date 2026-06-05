@@ -297,6 +297,7 @@ async fn install_session(
         ],
         cwd,
         width: SHELL_WIDTH,
+        rows: 24,
     };
     let session: Arc<dyn TerminalSession> = match host.spawn(args).await {
         Ok(s) => Arc::from(s),

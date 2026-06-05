@@ -74,6 +74,7 @@ async fn create(
         env: params.env.into_iter().map(|e| (e.name, e.value)).collect(),
         cwd: params.cwd.map_or_else(|| PathBuf::from(cwd), PathBuf::from),
         width: DEFAULT_WIDTH,
+        rows: 24,
     };
     let session = terminal_host
         .spawn(args)
