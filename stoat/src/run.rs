@@ -10,7 +10,8 @@ use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
 pub use vterm::{
-    GridSelection, MouseProtocol, OutputBlock, StyledCell, TermColor, TermModifier, VtermGrid,
+    CursorShape, GridSelection, MouseProtocol, OutputBlock, StyledCell, TermColor, TermModifier,
+    VtermGrid,
 };
 
 new_key_type! {
@@ -287,6 +288,26 @@ mod tests {
             Some(vec![0x1b, b'[', b'M', 35, 34, 34])
         );
         assert_eq!(grid.encode_mouse(0, 0, 300, 0, true), None);
+    }
+
+    #[test]
+    fn grid_decscusr_selects_cursor_shape() {
+        let mut grid = VtermGrid::new(10);
+        assert_eq!(grid.cursor_shape(), CursorShape::Block);
+        grid.feed(b"\x1b[5 q");
+        assert_eq!(grid.cursor_shape(), CursorShape::Bar);
+        grid.feed(b"\x1b[3 q");
+        assert_eq!(grid.cursor_shape(), CursorShape::Underline);
+        grid.feed(b"\x1b[2 q");
+        assert_eq!(grid.cursor_shape(), CursorShape::Block);
+    }
+
+    #[test]
+    fn grid_cursor_position_tracks_writes() {
+        let mut grid = VtermGrid::new(10);
+        assert_eq!(grid.cursor_position(), (0, 0));
+        grid.feed(b"ab\r\nc");
+        assert_eq!(grid.cursor_position(), (1, 1));
     }
 
     #[test]

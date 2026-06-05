@@ -122,6 +122,17 @@ pub enum MouseProtocol {
     AnyEvent,
 }
 
+/// Cursor shape selected via DECSCUSR (`CSI Ps SP q`).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CursorShape {
+    /// Full-cell block (DECSCUSR 0/1/2). The default.
+    Block,
+    /// Underline at the cell's baseline (DECSCUSR 3/4).
+    Underline,
+    /// Vertical bar at the cell's left edge (DECSCUSR 5/6).
+    Bar,
+}
+
 pub struct VtermGrid {
     cells: VecDeque<Vec<StyledCell>>,
     cursor_row: usize,
@@ -148,6 +159,8 @@ pub struct VtermGrid {
     mouse_protocol: MouseProtocol,
     /// Whether mouse reports use SGR encoding (`?1006`) rather than X10.
     mouse_sgr: bool,
+    /// Cursor shape selected via DECSCUSR.
+    cursor_shape: CursorShape,
     /// Persisted across `feed` calls so escape sequences whose bytes
     /// straddle two PTY reads finish parsing on the second call instead
     /// of being dropped at the chunk boundary.
@@ -180,6 +193,7 @@ impl VtermGrid {
             saved_cursor: None,
             mouse_protocol: MouseProtocol::None,
             mouse_sgr: false,
+            cursor_shape: CursorShape::Block,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
         }
@@ -245,6 +259,16 @@ impl VtermGrid {
     /// The active mouse-tracking mode.
     pub fn mouse_protocol(&self) -> MouseProtocol {
         self.mouse_protocol
+    }
+
+    /// The cursor shape selected via DECSCUSR.
+    pub fn cursor_shape(&self) -> CursorShape {
+        self.cursor_shape
+    }
+
+    /// The cursor's current `(row, col)` cell position.
+    pub fn cursor_position(&self) -> (usize, usize) {
+        (self.cursor_row, self.cursor_col)
     }
 
     /// Encode a mouse event as report bytes in the grid's current
@@ -485,6 +509,15 @@ impl vte::Perform for VtermGrid {
 
         if intermediates == [b'?'] && (action == 'h' || action == 'l') {
             self.set_private_modes(&params_vec, action == 'h');
+            return;
+        }
+
+        if intermediates == [b' '] && action == 'q' {
+            self.cursor_shape = match first_param(&params_vec, 0) {
+                3 | 4 => CursorShape::Underline,
+                5 | 6 => CursorShape::Bar,
+                _ => CursorShape::Block,
+            };
             return;
         }
 
