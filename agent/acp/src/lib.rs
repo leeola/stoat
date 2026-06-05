@@ -68,6 +68,14 @@ pub enum AcpError {
     },
 }
 
+/// The client-side dependencies the connection answers the agent's
+/// inbound requests with: filesystem access and the permission prompt
+/// channel.
+pub struct ClientHandlers {
+    pub fs: Arc<dyn FsHost>,
+    pub permission_tx: mpsc::Sender<PermissionPrompt>,
+}
+
 /// An established ACP connection: a session manager over the JSON-RPC
 /// transport. Construct with [`Self::connect`]; spawn conversations with
 /// [`AgentConnection::new_session`].
@@ -90,13 +98,13 @@ impl AcpConnection {
     /// capabilities, and return a ready connection. New sessions open in
     /// `cwd`. `incoming` carries the agent's inbound frames: its
     /// `session/update` notifications are demuxed and routed to sessions,
-    /// its `fs/*` requests are answered through `fs`, and each
-    /// `session/request_permission` is surfaced over `permission_tx`.
+    /// its `fs/*` requests are answered through `handlers.fs`, and each
+    /// `session/request_permission` is surfaced over
+    /// `handlers.permission_tx`.
     pub async fn connect(
         peer: JsonRpcPeer,
         incoming: Incoming,
-        fs: Arc<dyn FsHost>,
-        permission_tx: mpsc::Sender<PermissionPrompt>,
+        handlers: ClientHandlers,
         executor: Executor,
         cwd: impl Into<String>,
     ) -> Result<Self, AcpError> {
@@ -120,6 +128,7 @@ impl AcpConnection {
             requests,
             notifications,
         } = incoming;
+        let ClientHandlers { fs, permission_tx } = handlers;
         let routes: Routes = Arc::new(Mutex::new(HashMap::new()));
         let router = executor.spawn(route_notifications(notifications, Arc::clone(&routes)));
         let request_router = executor.spawn(route_requests(
@@ -321,6 +330,15 @@ mod tests {
         mpsc::channel(1).0
     }
 
+    /// Handlers wired to fakes, for tests that exercise neither fs nor
+    /// permission.
+    fn fake_handlers() -> ClientHandlers {
+        ClientHandlers {
+            fs: fake_fs(),
+            permission_tx: fake_permission_tx(),
+        }
+    }
+
     /// Drive the agent end of a duplex: answer
     /// initialize/session-new/session-prompt requests with canned results
     /// and forward every received (method, params) to `seen` so a test can
@@ -372,8 +390,7 @@ mod tests {
         let conn = AcpConnection::connect(
             client,
             client_in,
-            fake_fs(),
-            fake_permission_tx(),
+            fake_handlers(),
             executor.clone(),
             "/work",
         )
@@ -394,8 +411,7 @@ mod tests {
         let _conn = AcpConnection::connect(
             client,
             client_in,
-            fake_fs(),
-            fake_permission_tx(),
+            fake_handlers(),
             executor.clone(),
             "/work",
         )
@@ -594,8 +610,7 @@ mod tests {
         let conn = AcpConnection::connect(
             client,
             client_in,
-            fs,
-            permission_tx,
+            ClientHandlers { fs, permission_tx },
             executor.clone(),
             "/work",
         )
