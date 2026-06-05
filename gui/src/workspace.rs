@@ -683,12 +683,12 @@ impl Workspace {
     /// `cx.notify` on the modal-layer entity.
     ///
     /// When the command palette, file finder, help modal, theme
-    /// picker, or global search becomes the top of the stack, captures
-    /// the prior mode, flips `mode` to `prompt`, and sets the matching
-    /// `palette_open` / `finder_open` / `help_open` / `theme_picker_open`
-    /// / `global_search_open` flag. When that modal is no longer on top
-    /// (closed or buried under another modal), restores the prior mode
-    /// and clears the flag.
+    /// picker, global search, or buffer picker becomes the top of the
+    /// stack, captures the prior mode, flips `mode` to `prompt`, and
+    /// sets the matching `palette_open` / `finder_open` / `help_open` /
+    /// `theme_picker_open` / `global_search_open` / `buffer_picker_open`
+    /// flag. When that modal is no longer on top (closed or buried under
+    /// another modal), restores the prior mode and clears the flag.
     fn refresh_modal_keymap_state(&self, layer: &Entity<ModalLayer>, cx: &mut Context<'_, Self>) {
         let palette_active = layer
             .read(cx)
@@ -709,6 +709,10 @@ impl Workspace {
         let global_search_active = layer
             .read(cx)
             .active_modal::<crate::picker::Picker<crate::global_search::GlobalSearchDelegate>>()
+            .is_some();
+        let buffer_picker_active = layer
+            .read(cx)
+            .active_modal::<crate::picker::Picker<crate::buffer_picker::BufferPickerDelegate>>()
             .is_some();
         self.input_state_machine.update(cx, |sm, cx_sm| {
             if palette_active {
@@ -761,6 +765,17 @@ impl Workspace {
                 sm.set_global_search_open(true, cx_sm);
             } else if sm.global_search_open() {
                 sm.set_global_search_open(false, cx_sm);
+                if let Some(prev) = sm.take_prev_mode_for_modal() {
+                    sm.set_mode(prev, cx_sm);
+                }
+            }
+
+            if buffer_picker_active {
+                sm.capture_prev_mode_for_modal();
+                sm.set_mode("prompt", cx_sm);
+                sm.set_buffer_picker_open(true, cx_sm);
+            } else if sm.buffer_picker_open() {
+                sm.set_buffer_picker_open(false, cx_sm);
                 if let Some(prev) = sm.take_prev_mode_for_modal() {
                     sm.set_mode(prev, cx_sm);
                 }
@@ -7938,6 +7953,86 @@ mod tests {
         assert!(
             !finder_open,
             "finder_open should clear after the finder modal closes"
+        );
+        assert_eq!(mode, "normal", "mode should restore to the prior value");
+    }
+
+    #[test]
+    fn opening_buffer_picker_enters_prompt_and_dismisses_on_one_escape() {
+        use gpui::{Keystroke, Modifiers};
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenBufferPicker);
+        vcx.run_until_parked();
+
+        let (open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.buffer_picker_open(), sm.mode().to_string())
+        });
+        assert!(
+            open,
+            "buffer_picker_open should be true while the picker is active"
+        );
+        assert_eq!(
+            mode, "prompt",
+            "mode should be prompt while the buffer picker is active"
+        );
+
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        let key = |name: &str| Keystroke {
+            modifiers: Modifiers::default(),
+            key: name.into(),
+            key_char: None,
+        };
+        let down = sm.update_in(vcx, |sm, window, cx| {
+            let down = key("down");
+            sm.feed(&down, window, cx)
+                .iter()
+                .map(|a| a.kind())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            down,
+            vec![ActionKind::PickerSelectNext],
+            "Down must navigate the buffer picker in prompt mode"
+        );
+
+        let escape = sm.update_in(vcx, |sm, window, cx| {
+            let escape = key("escape");
+            sm.feed(&escape, window, cx)
+                .iter()
+                .map(|a| a.kind())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(
+            escape,
+            vec![ActionKind::CancelPromptInput],
+            "a single Escape must resolve to CancelPromptInput, dismissing the picker in one press"
+        );
+    }
+
+    #[test]
+    fn closing_buffer_picker_clears_flag_and_restores_mode() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenBufferPicker);
+        vcx.run_until_parked();
+
+        ws.update_in(vcx, |w, window, cx| {
+            w.dismiss_modal(window, cx);
+        });
+        vcx.run_until_parked();
+
+        let (open, mode) = ws.read_with(vcx, |w, cx| {
+            let sm = w.input_state_machine().read(cx);
+            (sm.buffer_picker_open(), sm.mode().to_string())
+        });
+        assert!(
+            !open,
+            "buffer_picker_open should clear after the picker modal closes"
         );
         assert_eq!(mode, "normal", "mode should restore to the prior value");
     }

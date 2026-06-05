@@ -570,6 +570,12 @@ on key {
         Ctrl-p -> PickerSelectPrev();
         Ctrl-n -> PickerSelectNext();
     }
+    mode == prompt && buffer_picker_open {
+        Up -> PickerSelectPrev();
+        Down -> PickerSelectNext();
+        Ctrl-p -> PickerSelectPrev();
+        Ctrl-n -> PickerSelectNext();
+    }
     mode == prompt && global_search_open {
         Up -> PickerSelectPrev();
         Down -> PickerSelectNext();

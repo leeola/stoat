@@ -178,7 +178,7 @@ pub enum Operator {}
 /// machinery (observe_keystrokes, dispatch_action, sequence
 /// lowering) will reach for in subsequent items.
 ///
-/// The eight predicate-visible fields are stored as [`StateValue`]
+/// The nine predicate-visible fields are stored as [`StateValue`]
 /// carriers so [`KeymapState::get`] can hand out borrows directly,
 /// matching `StoatKeymapState`'s storage layout.
 pub struct InputStateMachine {
@@ -188,6 +188,7 @@ pub struct InputStateMachine {
     help_open: StateValue,
     theme_picker_open: StateValue,
     global_search_open: StateValue,
+    buffer_picker_open: StateValue,
     claude_focused: StateValue,
     input_active: StateValue,
     pending_count: Option<u32>,
@@ -366,6 +367,7 @@ impl InputStateMachine {
             help_open: StateValue::Bool(false),
             theme_picker_open: StateValue::Bool(false),
             global_search_open: StateValue::Bool(false),
+            buffer_picker_open: StateValue::Bool(false),
             claude_focused: StateValue::Bool(false),
             input_active: StateValue::Bool(false),
             pending_count: None,
@@ -425,6 +427,10 @@ impl InputStateMachine {
 
     pub fn global_search_open(&self) -> bool {
         matches!(self.global_search_open, StateValue::Bool(true))
+    }
+
+    pub fn buffer_picker_open(&self) -> bool {
+        matches!(self.buffer_picker_open, StateValue::Bool(true))
     }
 
     pub fn claude_focused(&self) -> bool {
@@ -626,6 +632,16 @@ impl InputStateMachine {
         let new = StateValue::Bool(open);
         if self.global_search_open != new {
             self.global_search_open = new;
+            cx.notify();
+        }
+    }
+
+    /// Set the `buffer_picker_open` keymap-state flag. No-ops on
+    /// unchanged value so observers don't see redundant notifications.
+    pub fn set_buffer_picker_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {
+        let new = StateValue::Bool(open);
+        if self.buffer_picker_open != new {
+            self.buffer_picker_open = new;
             cx.notify();
         }
     }
@@ -1343,6 +1359,7 @@ impl KeymapState for InputStateMachine {
             "help_open" => Some(&self.help_open),
             "theme_picker_open" => Some(&self.theme_picker_open),
             "global_search_open" => Some(&self.global_search_open),
+            "buffer_picker_open" => Some(&self.buffer_picker_open),
             "claude_focused" => Some(&self.claude_focused),
             "input_active" => Some(&self.input_active),
             _ => None,
@@ -1541,6 +1558,7 @@ mod tests {
             assert!(!sm.help_open());
             assert!(!sm.theme_picker_open());
             assert!(!sm.global_search_open());
+            assert!(!sm.buffer_picker_open());
             assert!(!sm.claude_focused());
             assert_eq!(sm.pending_count(), None);
             assert!(sm.pending_chord().is_empty());
