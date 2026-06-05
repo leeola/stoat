@@ -2479,15 +2479,6 @@ impl Stoat {
                         );
                     }
                 }
-                if block.grid.alt_screen_detected {
-                    block.error = Some("this command requires a full terminal".into());
-                    block.finished = true;
-                    block.grid.alt_screen_detected = false;
-                    if let Some(handle) = &mut run_state.shell_handle {
-                        handle.kill();
-                    }
-                    run_state.shell_handle = None;
-                }
                 UpdateEffect::Redraw
             },
             PtyNotification::CommandDone {

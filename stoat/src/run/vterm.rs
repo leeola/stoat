@@ -100,6 +100,14 @@ impl Default for StyledCell {
     }
 }
 
+/// The main screen and cursor stashed while an alternate screen is
+/// active, restored when the program leaves it.
+struct SavedScreen {
+    cells: VecDeque<Vec<StyledCell>>,
+    cursor_row: usize,
+    cursor_col: usize,
+}
+
 pub struct VtermGrid {
     cells: VecDeque<Vec<StyledCell>>,
     cursor_row: usize,
@@ -111,7 +119,10 @@ pub struct VtermGrid {
     pen_fg: Option<TermColor>,
     pen_bg: Option<TermColor>,
     pen_modifiers: TermModifier,
-    pub alt_screen_detected: bool,
+    /// The main screen, saved while an alternate screen is active
+    /// (`?1049h`/`?47h`). `Some` iff currently on the alt screen;
+    /// restored on `?1049l`/`?47l`.
+    saved_screen: Option<SavedScreen>,
     /// Persisted across `feed` calls so escape sequences whose bytes
     /// straddle two PTY reads finish parsing on the second call instead
     /// of being dropped at the chunk boundary.
@@ -130,10 +141,8 @@ impl VtermGrid {
     /// As [`Self::new`] but with an explicit scrollback cap, clamped to
     /// `[1, MAX_SCROLLBACK]`.
     pub fn new_with_scrollback(width: u16, scrollback_limit: usize) -> Self {
-        let mut cells = VecDeque::new();
-        cells.push_back(vec![StyledCell::default(); width as usize]);
         Self {
-            cells,
+            cells: Self::blank_screen(width),
             cursor_row: 0,
             cursor_col: 0,
             width,
@@ -141,9 +150,44 @@ impl VtermGrid {
             pen_fg: None,
             pen_bg: None,
             pen_modifiers: TermModifier::empty(),
-            alt_screen_detected: false,
+            saved_screen: None,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
+        }
+    }
+
+    /// A single blank row at the given width -- the starting state of a
+    /// screen and what the alt screen swaps in.
+    fn blank_screen(width: u16) -> VecDeque<Vec<StyledCell>> {
+        let mut cells = VecDeque::new();
+        cells.push_back(vec![StyledCell::default(); width as usize]);
+        cells
+    }
+
+    /// Enter the alternate screen: stash the main screen and cursor, swap
+    /// in a blank screen, and home the cursor. A no-op if already on the
+    /// alt screen.
+    fn enter_alt_screen(&mut self) {
+        if self.saved_screen.is_some() {
+            return;
+        }
+        let cells = std::mem::replace(&mut self.cells, Self::blank_screen(self.width));
+        self.saved_screen = Some(SavedScreen {
+            cells,
+            cursor_row: self.cursor_row,
+            cursor_col: self.cursor_col,
+        });
+        self.cursor_row = 0;
+        self.cursor_col = 0;
+    }
+
+    /// Leave the alternate screen, restoring the saved main screen and
+    /// cursor. A no-op if not on the alt screen.
+    fn leave_alt_screen(&mut self) {
+        if let Some(saved) = self.saved_screen.take() {
+            self.cells = saved.cells;
+            self.cursor_row = saved.cursor_row;
+            self.cursor_col = saved.cursor_col;
         }
     }
 
@@ -341,11 +385,12 @@ impl vte::Perform for VtermGrid {
     ) {
         let params_vec: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
-        if intermediates == [b'?']
-            && action == 'h'
-            && (params_vec.contains(&1049) || params_vec.contains(&47))
-        {
-            self.alt_screen_detected = true;
+        if intermediates == [b'?'] && (params_vec.contains(&1049) || params_vec.contains(&47)) {
+            match action {
+                'h' => self.enter_alt_screen(),
+                'l' => self.leave_alt_screen(),
+                _ => {},
+            }
             return;
         }
 

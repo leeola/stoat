@@ -217,6 +217,17 @@ mod tests {
     }
 
     #[test]
+    fn grid_alt_screen_saves_and_restores() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"main");
+        grid.feed(b"\x1b[?1049h");
+        grid.feed(b"alt");
+        assert_eq!(grid.text_in(0..10, 0..1), "alt");
+        grid.feed(b"\x1b[?1049l");
+        assert_eq!(grid.text_in(0..10, 0..1), "main");
+    }
+
+    #[test]
     fn grid_ansi_color_applies() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"\x1b[31mR\x1b[0mN");
