@@ -6,6 +6,7 @@ use gpui::{
     div, AnyElement, AppContext, Context, Entity, EventEmitter, FocusHandle, InteractiveElement,
     IntoElement, MouseButton, ParentElement, Render, Styled, WeakEntity, Window,
 };
+use std::path::PathBuf;
 use stoat::pane::PaneId;
 
 /// Pane entity holding a tab list of [`ItemHandle`]s plus an active
@@ -29,8 +30,17 @@ pub struct Pane {
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum PaneEvent {
-    ItemAdded { index: usize },
-    ItemRemoved { index: usize },
+    ItemAdded {
+        index: usize,
+    },
+    /// A tab left the pane. `path` is the file path of the removed
+    /// item's buffer when it was a path-bound editor, so the workspace
+    /// can drop the buffer from its registry once no pane shows it.
+    /// `None` for scratch editors and non-editor items.
+    ItemRemoved {
+        index: usize,
+        path: Option<PathBuf>,
+    },
     ActiveItemChanged,
 }
 
@@ -183,6 +193,11 @@ impl Pane {
             return None;
         }
         let removed = self.items.remove(index);
+        let path = removed
+            .to_any_view()
+            .downcast::<Editor>()
+            .ok()
+            .and_then(|editor| editor.read(cx).file_path().map(|p| p.to_path_buf()));
         let active_changed = if self.items.is_empty() {
             self.active_index = 0;
             false
@@ -195,7 +210,7 @@ impl Pane {
         } else {
             false
         };
-        cx.emit(PaneEvent::ItemRemoved { index });
+        cx.emit(PaneEvent::ItemRemoved { index, path });
         if active_changed {
             cx.emit(PaneEvent::ActiveItemChanged);
         }
@@ -291,9 +306,8 @@ mod tests {
     }
 
     fn new_pane(cx: &mut TestAppContext) -> Entity<Pane> {
-        let workspace = cx.update(|cx| {
-            cx.new(|cx| Workspace::new("test", std::path::PathBuf::from("/tmp/repo"), cx))
-        });
+        let workspace =
+            cx.update(|cx| cx.new(|cx| Workspace::new("test", PathBuf::from("/tmp/repo"), cx)));
         let weak = workspace.downgrade();
         cx.update(|cx| cx.new(|cx| Pane::new(PaneId::default(), weak, cx)))
     }
@@ -479,7 +493,13 @@ mod tests {
         cx.run_until_parked();
 
         assert!(removed.is_some());
-        assert_eq!(drain(&events), vec![PaneEvent::ItemRemoved { index: 0 }]);
+        assert_eq!(
+            drain(&events),
+            vec![PaneEvent::ItemRemoved {
+                index: 0,
+                path: None
+            }]
+        );
         // active_index stays 0, now referring to former item b.
         assert_eq!(pane.read_with(&cx, |p, _| p.active_index()), 0);
         assert_eq!(pane.read_with(&cx, |p, _| p.len()), 1);
@@ -507,7 +527,10 @@ mod tests {
         assert_eq!(
             drain(&events),
             vec![
-                PaneEvent::ItemRemoved { index: 0 },
+                PaneEvent::ItemRemoved {
+                    index: 0,
+                    path: None
+                },
                 PaneEvent::ActiveItemChanged,
             ]
         );
@@ -534,7 +557,10 @@ mod tests {
         assert_eq!(
             drain(&events),
             vec![
-                PaneEvent::ItemRemoved { index: 1 },
+                PaneEvent::ItemRemoved {
+                    index: 1,
+                    path: None
+                },
                 PaneEvent::ActiveItemChanged,
             ]
         );
@@ -677,9 +703,8 @@ mod tests {
     #[test]
     fn mouse_down_dispatches_set_active_pane() {
         let mut cx = TestAppContext::single();
-        let workspace = cx.update(|cx| {
-            cx.new(|cx| Workspace::new("main", std::path::PathBuf::from("/tmp/repo"), cx))
-        });
+        let workspace =
+            cx.update(|cx| cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx)));
         let pane_tree = workspace.read_with(&cx, |w, _| w.pane_tree().clone());
         let new_pane_id = pane_tree.update(&mut cx, |t, cx| t.split(Axis::Vertical, cx));
         let original_id = pane_tree.update(&mut cx, |t, cx| {
@@ -698,9 +723,8 @@ mod tests {
     }
 
     fn workspace_weak(cx: &mut TestAppContext) -> WeakEntity<Workspace> {
-        let workspace = cx.update(|cx| {
-            cx.new(|cx| Workspace::new("main", std::path::PathBuf::from("/tmp/repo"), cx))
-        });
+        let workspace =
+            cx.update(|cx| cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx)));
         workspace.downgrade()
     }
 

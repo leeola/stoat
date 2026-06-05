@@ -296,9 +296,8 @@ impl Workspace {
         let initial_pane_subscriptions: Vec<Subscription> = initial_panes
             .into_iter()
             .map(|pane| {
-                cx.subscribe(&pane, |workspace, _, _event: &PaneEvent, cx| {
-                    workspace.broadcast_active_pane_item(cx);
-                    workspace.broadcast_active_editor(cx);
+                cx.subscribe(&pane, |workspace, _, event: &PaneEvent, cx| {
+                    workspace.react_to_pane_event(event, cx);
                 })
             })
             .collect();
@@ -1637,12 +1636,60 @@ impl Workspace {
         self._pane_subscriptions = panes
             .into_iter()
             .map(|pane| {
-                cx.subscribe(&pane, |workspace, _, _event: &PaneEvent, cx| {
-                    workspace.broadcast_active_pane_item(cx);
-                    workspace.broadcast_active_editor(cx);
+                cx.subscribe(&pane, |workspace, _, event: &PaneEvent, cx| {
+                    workspace.react_to_pane_event(event, cx);
                 })
             })
             .collect();
+    }
+
+    /// Handle a [`PaneEvent`] from any pane: refresh the
+    /// window-title and status-bar reads of the active item, then
+    /// drop a buffer from the registry when its last pane view just
+    /// closed (see [`Self::drop_orphaned_buffer`]).
+    fn react_to_pane_event(&mut self, event: &PaneEvent, cx: &mut Context<'_, Self>) {
+        self.broadcast_active_pane_item(cx);
+        self.broadcast_active_editor(cx);
+        self.drop_orphaned_buffer(event, cx);
+    }
+
+    /// On a [`PaneEvent::ItemRemoved`] for a path-bound editor, drop
+    /// the backing buffer from the [`BufferRegistry`] when no pane
+    /// still shows that path, so the buffer picker stops listing a
+    /// file nothing has open. A path still visible in another pane is
+    /// kept, since [`BufferRegistry::open`] dedups by path and one
+    /// buffer can back tabs in several panes. Scratch editors and
+    /// non-editor items carry no path and are ignored.
+    fn drop_orphaned_buffer(&mut self, event: &PaneEvent, cx: &mut Context<'_, Self>) {
+        let PaneEvent::ItemRemoved {
+            path: Some(path), ..
+        } = event
+        else {
+            return;
+        };
+        if self.path_is_open_in_any_pane(path, cx) {
+            return;
+        }
+        let Some(id) = self.buffer_registry.read(cx).id_for_path(path) else {
+            return;
+        };
+        self.buffer_registry
+            .update(cx, |reg, cx| reg.remove(id, cx));
+    }
+
+    /// Whether any pane currently shows an editor bound to `path`.
+    fn path_is_open_in_any_pane(&self, path: &Path, cx: &App) -> bool {
+        let tree = self.pane_tree.read(cx);
+        tree.split_pane_ids()
+            .into_iter()
+            .filter_map(|id| tree.pane(id))
+            .any(|pane| {
+                pane.read(cx).items().iter().any(|item| {
+                    item.to_any_view()
+                        .downcast::<Editor>()
+                        .is_ok_and(|editor| editor.read(cx).file_path() == Some(path))
+                })
+            })
     }
 
     /// Format the OS-level window title from the workspace name plus
@@ -9571,6 +9618,110 @@ mod tests {
         vcx.run_until_parked();
 
         assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn close_buffer_drops_orphaned_buffer_from_registry() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"foo\n");
+        fs.insert_file("/tmp/repo/bar.rs", b"bar\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+            w.open_paths(&[PathBuf::from("/tmp/repo/bar.rs")], cx);
+        });
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            let reg = w.buffer_registry().read(cx);
+            assert_eq!(
+                reg.id_for_path(Path::new("/tmp/repo/bar.rs")),
+                None,
+                "closing the active bar.rs tab must drop it from the registry",
+            );
+            assert!(
+                reg.id_for_path(Path::new("/tmp/repo/foo.rs")).is_some(),
+                "foo.rs is still open in the pane and must stay registered",
+            );
+        });
+    }
+
+    #[test]
+    fn removing_a_tab_directly_drops_orphaned_buffer() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"foo\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+        });
+        vcx.run_until_parked();
+
+        let pane = ws
+            .read_with(vcx, |w, cx| {
+                let tree = w.pane_tree().read(cx);
+                tree.pane(tree.focus()).cloned()
+            })
+            .expect("focused pane present");
+        pane.update(vcx, |p, cx| {
+            p.remove_item(0, cx);
+        });
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(
+                w.buffer_registry()
+                    .read(cx)
+                    .id_for_path(Path::new("/tmp/repo/foo.rs")),
+                None,
+                "a middle-click close (direct Pane::remove_item) must drop the buffer too",
+            );
+        });
+    }
+
+    #[test]
+    fn closing_a_tab_keeps_buffer_shown_in_another_pane() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"foo\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(
+                &[
+                    PathBuf::from("/tmp/repo/foo.rs"),
+                    PathBuf::from("/tmp/repo/foo.rs"),
+                ],
+                cx,
+            );
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count()),
+            2
+        );
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert!(
+                w.buffer_registry()
+                    .read(cx)
+                    .id_for_path(Path::new("/tmp/repo/foo.rs"))
+                    .is_some(),
+                "foo.rs still shown in the other pane must stay registered",
+            );
+        });
     }
 
     #[test]
