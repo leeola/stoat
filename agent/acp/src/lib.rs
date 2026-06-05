@@ -245,12 +245,13 @@ impl AgentConnection for AcpConnection {
         self.routes
             .lock()
             .expect("routes mutex")
-            .insert(session.session_id.clone(), tx);
+            .insert(session.session_id.clone(), tx.clone());
         Ok(Box::new(AcpSession::new(
             Arc::clone(&self.peer),
             self.executor.clone(),
             session.session_id,
             rx,
+            tx,
         )))
     }
 }
@@ -271,6 +272,10 @@ struct AcpSession {
     /// connection's router. Async mutex so [`Self::recv`] can hold it
     /// across the await without blocking the scheduler.
     recv_rx: AsyncMutex<mpsc::UnboundedReceiver<AgentMessage>>,
+    /// A clone of the sender feeding [`Self::recv_rx`], so a finished
+    /// `session/prompt` can push its turn-end message onto the same
+    /// channel the `session/update` router uses.
+    recv_tx: mpsc::UnboundedSender<AgentMessage>,
 }
 
 impl AcpSession {
@@ -279,6 +284,7 @@ impl AcpSession {
         executor: Executor,
         session_id: String,
         recv_rx: mpsc::UnboundedReceiver<AgentMessage>,
+        recv_tx: mpsc::UnboundedSender<AgentMessage>,
     ) -> Self {
         Self {
             peer,
@@ -287,6 +293,7 @@ impl AcpSession {
             alive: AtomicBool::new(true),
             turn: Mutex::new(None),
             recv_rx: AsyncMutex::new(recv_rx),
+            recv_tx,
         }
     }
 }
@@ -300,11 +307,18 @@ impl AgentSession for AcpSession {
         })
         .map_err(io::Error::other)?;
         let peer = Arc::clone(&self.peer);
+        let recv_tx = self.recv_tx.clone();
         let task = self.executor.spawn(async move {
-            // FIXME: the session/prompt response (turn-end stop reason) is
-            // discarded; surface it as a turn-boundary AgentMessage if a
-            // consumer needs an explicit end-of-turn signal.
-            let _ = peer.request(SESSION_PROMPT, Some(params)).await;
+            // The session/prompt response is the turn's stop reason; ACP
+            // carries no per-turn metrics, so surface it as a zero-valued
+            // Result -- the same end-of-turn signal the Claude path emits.
+            if peer.request(SESSION_PROMPT, Some(params)).await.is_ok() {
+                let _ = recv_tx.send(AgentMessage::Result {
+                    cost_usd: 0.0,
+                    duration_ms: 0,
+                    num_turns: 0,
+                });
+            }
         });
         *self.turn.lock().expect("turn mutex") = Some(task);
         Ok(())
@@ -494,6 +508,22 @@ mod tests {
             params["prompt"],
             json!([{ "type": "text", "text": "hello" }])
         );
+    }
+
+    #[tokio::test]
+    async fn prompt_response_reaches_recv_as_turn_end() {
+        let executor = executor();
+        let (conn, mut seen_rx, _keep) = connected(&executor).await;
+        let session = conn.new_session().await.expect("new_session");
+        let _ = seen_rx.recv().await.expect("session/new seen");
+
+        session.prompt("hello").await.expect("prompt");
+        let _ = seen_rx.recv().await.expect("session/prompt seen");
+
+        match session.recv().await {
+            Some(AgentMessage::Result { num_turns, .. }) => assert_eq!(num_turns, 0),
+            other => panic!("expected turn-end Result, got {other:?}"),
+        }
     }
 
     #[tokio::test]
