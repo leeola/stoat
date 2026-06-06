@@ -30,7 +30,11 @@ use gpui::{
     ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled, Task,
     WeakEntity, Window,
 };
-use std::{path::PathBuf, sync::Arc};
+use std::{
+    path::PathBuf,
+    sync::Arc,
+    time::{Duration, Instant},
+};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
     run::{MouseProtocol, VtermGrid},
@@ -40,6 +44,23 @@ use stoat::{
 /// like the run pane's blocks -- the grid stays this wide while the PTY
 /// is resized to the measured cell dimensions.
 const TERMINAL_WIDTH: u16 = 80;
+
+/// Minimum interval between foreground-process-name polls.
+const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(500);
+
+/// Known agent CLIs recognized in the terminal tab label. Matched against
+/// the foreground process's command name.
+const KNOWN_AGENTS: &[&str] = &[
+    "claude", "codex", "aider", "gemini", "copilot", "crush", "amp",
+];
+
+/// The canonical agent name if `process_name` is a recognized agent CLI.
+fn matched_agent(process_name: &str) -> Option<&'static str> {
+    KNOWN_AGENTS
+        .iter()
+        .copied()
+        .find(|&agent| agent == process_name)
+}
 
 pub(crate) struct Terminal {
     grid: VtermGrid,
@@ -60,6 +81,11 @@ pub(crate) struct Terminal {
     /// Last `(rows, cols)` pushed to the PTY; resizes are skipped while
     /// unchanged so sub-cell pixel jitter does not spam SIGWINCH.
     last_terminal_size: Option<(u16, u16)>,
+    /// Cached foreground process name driving the tab label, refreshed
+    /// (throttled) as output arrives. `foreground_checked_at` bounds the
+    /// refresh rate so a chatty program does not poll every chunk.
+    foreground_name: Option<String>,
+    foreground_checked_at: Option<Instant>,
     _spawn_task: Option<Task<()>>,
 }
 
@@ -94,6 +120,8 @@ impl Terminal {
             output_bounds: None,
             cell_size: None,
             last_terminal_size: None,
+            foreground_name: None,
+            foreground_checked_at: None,
             _spawn_task: Some(spawn_task),
         }
     }
@@ -119,7 +147,25 @@ impl Terminal {
     /// Append `chunk` to the grid and request a repaint.
     pub(crate) fn on_read(&mut self, chunk: &[u8], cx: &mut Context<'_, Self>) {
         self.grid.feed(chunk);
+        self.refresh_foreground_name();
         cx.notify();
+    }
+
+    /// Re-read the session's foreground process name, throttled to at most
+    /// once per [`FOREGROUND_POLL_INTERVAL`] so a chatty program does not
+    /// poll on every output chunk.
+    fn refresh_foreground_name(&mut self) {
+        let now = Instant::now();
+        if self
+            .foreground_checked_at
+            .is_some_and(|at| now.duration_since(at) < FOREGROUND_POLL_INTERVAL)
+        {
+            return;
+        }
+        self.foreground_checked_at = Some(now);
+        if let Some(session) = &self.session {
+            self.foreground_name = session.foreground_process_name();
+        }
     }
 
     /// Resize the PTY to match the current bounds and cell size, skipping
@@ -293,7 +339,10 @@ fn spawn_write_bytes(
 
 impl ItemView for Terminal {
     fn tab_label(&self, _cx: &App) -> SharedString {
-        SharedString::from("Terminal")
+        match self.foreground_name.as_deref().and_then(matched_agent) {
+            Some(agent) => SharedString::from(agent),
+            None => SharedString::from("Terminal"),
+        }
     }
 
     fn deserialize(
@@ -555,6 +604,50 @@ mod tests {
         let (program, args) = term.read_with(h.vcx, |t, _| (t.program.clone(), t.args.clone()));
         assert_eq!(program, "claude");
         assert!(args.is_empty(), "claude is launched with no extra args");
+    }
+
+    #[test]
+    fn matched_agent_recognizes_known_clis() {
+        assert_eq!(matched_agent("claude"), Some("claude"));
+        assert_eq!(matched_agent("codex"), Some("codex"));
+        assert_eq!(matched_agent("bash"), None);
+        assert_eq!(matched_agent("coreutils"), None);
+    }
+
+    #[test]
+    fn tab_label_reflects_recognized_agent() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = open_terminal(&mut h);
+
+        term.update(h.vcx, |t, _| t.foreground_name = Some("claude".into()));
+        assert_eq!(
+            term.read_with(h.vcx, |t, cx| t.tab_label(cx)),
+            SharedString::from("claude"),
+        );
+
+        term.update(h.vcx, |t, _| t.foreground_name = Some("bash".into()));
+        assert_eq!(
+            term.read_with(h.vcx, |t, cx| t.tab_label(cx)),
+            SharedString::from("Terminal"),
+            "non-agent foreground keeps the default label",
+        );
+    }
+
+    #[test]
+    fn on_read_refreshes_foreground_name_from_session() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = open_terminal(&mut h);
+        h.vcx.run_until_parked();
+
+        h.terminal.set_foreground_name("claude");
+        term.update(h.vcx, |t, cx| t.on_read(b"x", cx));
+
+        assert_eq!(
+            term.read_with(h.vcx, |t, _| t.foreground_name.clone()),
+            Some("claude".to_string()),
+        );
     }
 
     #[test]
