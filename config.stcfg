@@ -30,8 +30,11 @@ theme default_dark {
     ui.goto_word.label  = { fg: "#eeee00", modifiers: [bold] };
     ui.goto_word.prefix = { fg: "#666600" };
 
+    ui.surface.elevated = { bg: "#252529" };
+
     ui.border.focused.fg = chrome;
     ui.border.inactive.fg = "#2a2a2a";
+    ui.border.variant.fg = "#353539";
 
     ui.modal.help.fg = accent;
     ui.modal.hints.fg = warning;

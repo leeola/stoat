@@ -95,8 +95,18 @@ impl BasePalette {
 /// signal than highlighting text under the cursor.
 pub struct ThemeColors {
     pub background: Hsla,
+    /// Elevated-surface fill for floating surfaces (popovers, modals,
+    /// docks) that sit above the app background. Not yet read by any
+    /// renderer; the surface-elevation styling helpers consume it.
+    #[allow(dead_code)]
+    pub elevated_surface: Hsla,
     pub border_inactive: Hsla,
     pub border_focused: Hsla,
+    /// Deemphasized divider border, dimmer than [`Self::border_focused`]
+    /// and [`Self::border_inactive`]. Not yet read by any renderer; the
+    /// surface-elevation styling helpers consume it.
+    #[allow(dead_code)]
+    pub border_variant: Hsla,
     pub statusbar_focused: Hsla,
     pub statusbar_text: Hsla,
     pub tab_inactive: Hsla,
@@ -203,12 +213,18 @@ impl ThemeColors {
         let palette = BasePalette::default_dark();
         Self {
             background: theme_fg_or(cx, stoat::theme::scope::UI_BACKGROUND, palette.background),
+            elevated_surface: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_SURFACE_ELEVATED,
+                palette.surface,
+            ),
             border_inactive: theme_fg_or(
                 cx,
                 stoat::theme::scope::UI_BORDER_INACTIVE,
                 palette.border,
             ),
             border_focused: theme_fg_or(cx, stoat::theme::scope::UI_BORDER_FOCUSED, palette.accent),
+            border_variant: theme_fg_or(cx, stoat::theme::scope::UI_BORDER_VARIANT, palette.border),
             statusbar_focused: theme_bg_or(
                 cx,
                 stoat::theme::scope::UI_STATUSBAR_FOCUSED,
@@ -583,6 +599,8 @@ mod tests {
         let palette = BasePalette::default_dark();
         let theme = cx.update(|cx| cx.theme());
         assert_eq!(theme.background, palette.background);
+        assert_eq!(theme.elevated_surface, palette.surface);
+        assert_eq!(theme.border_variant, palette.border);
         assert_eq!(theme.editor_text, palette.text);
         assert_eq!(theme.statusbar_focused, palette.surface);
         assert_eq!(theme.diagnostic_error, palette.danger);
@@ -619,6 +637,22 @@ mod tests {
         });
         assert_ne!(resolved.background, palette.background);
         assert_ne!(resolved.diagnostic_error, palette.danger);
+    }
+
+    #[test]
+    fn cx_theme_resolves_elevation_scopes_from_installed_theme() {
+        let cx = TestAppContext::single();
+        let theme_src = Theme::load_from_source(
+            r##"theme custom { ui.surface.elevated.bg = "#252529"; ui.border.variant.fg = "#353539"; }"##,
+            "custom",
+        );
+        let palette = BasePalette::default_dark();
+        let resolved = cx.update(|cx| {
+            cx.set_global(theme_src);
+            cx.theme()
+        });
+        assert_ne!(resolved.elevated_surface, palette.surface);
+        assert_ne!(resolved.border_variant, palette.border);
     }
 
     #[test]

@@ -478,6 +478,7 @@ pub enum ThemeError {
 /// capture names with fallback.
 pub mod scope {
     pub const UI_BACKGROUND: &str = "ui.background";
+    pub const UI_SURFACE_ELEVATED: &str = "ui.surface.elevated";
     pub const UI_TEXT: &str = "ui.text";
     pub const UI_TEXT_MUTED: &str = "ui.text.muted";
     pub const UI_TEXT_DIM: &str = "ui.text.dim";
@@ -499,6 +500,7 @@ pub mod scope {
 
     pub const UI_BORDER_FOCUSED: &str = "ui.border.focused";
     pub const UI_BORDER_INACTIVE: &str = "ui.border.inactive";
+    pub const UI_BORDER_VARIANT: &str = "ui.border.variant";
 
     pub const UI_MODAL_HELP: &str = "ui.modal.help";
     pub const UI_MODAL_HINTS: &str = "ui.modal.hints";
