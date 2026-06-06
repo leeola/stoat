@@ -1341,6 +1341,20 @@ impl Workspace {
                         });
                         materialized += 1;
                     },
+                    crate::item::ItemKind::Run => {
+                        let cwd = snap
+                            .blob
+                            .get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| self.git_root.clone());
+                        let weak = cx.weak_entity();
+                        let run = cx.new(|cx| crate::run_pane::Run::restored(weak, cwd, cx));
+                        pane.update(cx, |p, cx| {
+                            p.add_item(Box::new(run), cx);
+                        });
+                        materialized += 1;
+                    },
                     other => {
                         tracing::info!(
                             pane_id = ?pane_id,
@@ -17386,6 +17400,80 @@ mod tests {
             .expect("args array in the restored blob");
         assert_eq!(args.len(), 1);
         assert_eq!(args[0].as_str(), Some("--foo"));
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_run_pane() {
+        use crate::item::ItemKind;
+        use stoat::host::{
+            fake::{terminal::FakeTerminalSession, FakeTerminalHost},
+            TerminalHost,
+        };
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        cx.update(|cx| {
+            let host: Arc<dyn TerminalHost> =
+                Arc::new(FakeTerminalHost::new(Arc::new(FakeTerminalSession::new())));
+            cx.set_global(crate::globals::TerminalHostGlobal(host));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update_in(vcx, |w, window, cx| {
+            let weak = cx.weak_entity();
+            let run = cx.new(|cx| {
+                crate::run_pane::Run::new(weak, PathBuf::from("/tmp/repo/sub"), window, cx)
+            });
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .cloned()
+                .expect("focused pane present");
+            pane.update(cx, |p, cx| {
+                let index = p.add_item(Box::new(run), cx);
+                p.activate(index, cx);
+            });
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/run-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+        assert!(fs_dyn.exists(&path), "dirty workspace must write");
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        let blob = fresh_ws.read_with(vcx2, |w, cx| {
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if item.item_kind(cx) == ItemKind::Run {
+                        return Some(item.serialize(cx));
+                    }
+                }
+            }
+            None
+        });
+        let blob = blob.expect("restored workspace reopens the run pane");
+        assert_eq!(
+            blob.get("cwd").and_then(|v| v.as_str()),
+            Some("/tmp/repo/sub"),
+            "the run pane cwd survives save and restore",
+        );
     }
 
     #[test]

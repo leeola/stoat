@@ -92,6 +92,26 @@ impl Run {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let input = cx.new(|cx| Editor::auto_height(1, 8, window, cx));
+        Self::with_input(workspace, cwd, input, cx)
+    }
+
+    /// Build a run pane for the workspace restore path, which has no
+    /// window: the input editor is constructed window-free.
+    pub(crate) fn restored(
+        workspace: WeakEntity<Workspace>,
+        cwd: PathBuf,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let input = cx.new(|cx| Editor::auto_height_windowless(1, 8, cx));
+        Self::with_input(workspace, cwd, input, cx)
+    }
+
+    fn with_input(
+        workspace: WeakEntity<Workspace>,
+        cwd: PathBuf,
+        input: Entity<Editor>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let host = cx.global::<TerminalHostGlobal>().0.clone();
         let cwd_clone = cwd.clone();
         let spawn_task = cx.spawn(async move |this, cx| {
@@ -592,7 +612,7 @@ impl ItemView for Run {
         _cx: &mut Context<'_, Self>,
     ) -> Result<Self, ItemError> {
         DeserializeSnafu {
-            reason: "run pane deserialize not yet implemented",
+            reason: "run pane restore is materialized by the workspace dispatch, not deserialize",
         }
         .fail()
     }

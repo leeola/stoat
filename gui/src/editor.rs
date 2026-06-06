@@ -544,7 +544,31 @@ impl Editor {
         )
     }
 
+    /// Window-free counterpart to [`Self::auto_height`], for restore
+    /// paths that have no window (e.g. workspace reload).
+    pub(crate) fn auto_height_windowless(
+        min_lines: usize,
+        max_lines: usize,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        Self::new_inline_windowless(
+            EditorMode::AutoHeight {
+                min_lines,
+                max_lines: Some(max_lines),
+            },
+            cx,
+        )
+    }
+
     fn new_inline(mode: EditorMode, _window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+        Self::new_inline_windowless(mode, cx)
+    }
+
+    /// Build an inline-mode editor without a window. Inline
+    /// construction does not consult the window, so restore paths that
+    /// have none (e.g. workspace reload) build their editors here;
+    /// [`Self::new_inline`] forwards to it.
+    fn new_inline_windowless(mode: EditorMode, cx: &mut Context<'_, Self>) -> Self {
         let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), ""));
         let multi_buffer = cx.new({
             let buffer = buffer.clone();
