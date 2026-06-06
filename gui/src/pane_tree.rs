@@ -186,7 +186,7 @@ impl PaneTree {
                 let color = if self.inner.focus() == *pane_id {
                     cx.theme().border_focused
                 } else {
-                    cx.theme().border_inactive
+                    cx.theme().border_variant
                 };
                 div()
                     .flex_1()

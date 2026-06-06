@@ -192,7 +192,15 @@ impl Render for Dock {
                 MINIMIZED_STRIP_WIDTH_PX,
             ),
             DockVisibility::Open { width } => {
-                along_main(div(), f32::from(width)).child(self.item.to_any_view())
+                let panel = along_main(div(), f32::from(width))
+                    .bg(theme.elevated_surface)
+                    .border_color(theme.border_variant);
+                let panel = match self.side {
+                    DockSide::Left => panel.border_r_1(),
+                    DockSide::Right => panel.border_l_1(),
+                    DockSide::Bottom => panel.border_t_1(),
+                };
+                panel.child(self.item.to_any_view())
             },
         }
     }
