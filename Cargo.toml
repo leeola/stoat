@@ -14,6 +14,23 @@ members = [
   "log",
   "text",
 ]
+# `agent/acp` (ACP, Zed "Way 1") is excluded from the default build: the
+# near-term Claude Code path is the embedded terminal, not ACP. It stays a
+# workspace member so the code remains in-tree and buildable on demand
+# (`cargo build -p stoat_agent_acp`, or any `--workspace` invocation).
+default-members = [
+  "action",
+  "agent/claude_code",
+  "bin",
+  "config",
+  "gui",
+  "host",
+  "language",
+  "scheduler",
+  "stoat",
+  "log",
+  "text",
+]
 
 [workspace.package]
 edition = "2021"
