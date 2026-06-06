@@ -77,9 +77,12 @@ pub(super) fn run_submit_command(stoat: &mut Stoat, command: &str) -> UpdateEffe
         Some(s) => s,
         None => return UpdateEffect::None,
     };
-    run_state
-        .blocks
-        .push(OutputBlock::new(command.to_owned(), width));
+    run_state.blocks.push(OutputBlock::new(
+        command.to_owned(),
+        width,
+        executor.now(),
+        run_state.cwd.clone(),
+    ));
 
     if let Some(handle) = &mut run_state.shell_handle {
         handle.send_command(command);

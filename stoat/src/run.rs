@@ -9,7 +9,7 @@ use crate::{
 pub use key_encode::encode_key;
 pub use pty::{spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
-use std::path::PathBuf;
+use std::{path::PathBuf, time::Instant};
 use stoat_scheduler::Executor;
 pub use vterm::{
     BlockStatus, CommandMark, CursorShape, GridSelection, LinkTarget, MouseProtocol, OutputBlock,
@@ -71,7 +71,7 @@ impl RunState {
     /// and clears the started flag. Gating on `Start` keeps the shell's
     /// startup `D` mark -- emitted before the first command runs -- from
     /// finishing the block prematurely.
-    pub(crate) fn apply_command_marks(&mut self, marks: &[CommandMark]) {
+    pub(crate) fn apply_command_marks(&mut self, marks: &[CommandMark], now: Instant) {
         for mark in marks {
             match mark {
                 CommandMark::Start => self.command_started = true,
@@ -79,8 +79,7 @@ impl RunState {
                     if self.command_started {
                         self.command_started = false;
                         if let Some(block) = self.blocks.last_mut() {
-                            block.finished = true;
-                            block.exit_status = *exit;
+                            block.finish(*exit, now);
                         }
                     }
                 },
@@ -185,6 +184,7 @@ impl RunState {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
 
     #[test]
     fn grid_default_empty() {
@@ -684,7 +684,7 @@ mod tests {
 
     #[test]
     fn block_status_reflects_finished_and_exit() {
-        let mut block = OutputBlock::new("cmd".into(), 10);
+        let mut block = OutputBlock::new("cmd".into(), 10, Instant::now(), PathBuf::from("/w"));
         assert_eq!(block.status(), BlockStatus::Running);
         block.finished = true;
         block.exit_status = Some(0);
@@ -693,6 +693,18 @@ mod tests {
         assert_eq!(block.status(), BlockStatus::Failed(Some(2)));
         block.exit_status = None;
         assert_eq!(block.status(), BlockStatus::Failed(None));
+    }
+
+    #[test]
+    fn block_records_cwd_and_derives_duration_on_finish() {
+        let start = Instant::now();
+        let mut block = OutputBlock::new("cmd".into(), 10, start, PathBuf::from("/work"));
+        assert_eq!(block.cwd, PathBuf::from("/work"));
+        assert_eq!(block.duration(), None);
+
+        block.finish(Some(0), start + Duration::from_millis(1500));
+        assert_eq!(block.ended_at, Some(start + Duration::from_millis(1500)));
+        assert_eq!(block.duration(), Some(Duration::from_millis(1500)));
     }
 
     #[test]

@@ -3,6 +3,8 @@ use regex::Regex;
 use std::{
     collections::VecDeque,
     ops::{BitOrAssign, Range, SubAssign},
+    path::PathBuf,
+    time::{Duration, Instant},
 };
 
 /// Default scrollback cap (rows retained beyond the visible output).
@@ -1047,10 +1049,17 @@ pub struct OutputBlock {
     /// populated by mouse-drag handlers and consumed by the run-pane
     /// renderer to paint reverse-video over the covered cells.
     pub selection: Option<GridSelection>,
+    /// Monotonic instant the block was created (command submitted).
+    pub started_at: Instant,
+    /// Monotonic instant the command finished, set by [`Self::finish`].
+    /// `None` while the command is still running.
+    pub ended_at: Option<Instant>,
+    /// Working directory the command ran in, snapshotted at creation.
+    pub cwd: PathBuf,
 }
 
 impl OutputBlock {
-    pub fn new(command: String, width: u16) -> Self {
+    pub fn new(command: String, width: u16, started_at: Instant, cwd: PathBuf) -> Self {
         Self {
             command,
             grid: VtermGrid::new(width),
@@ -1058,11 +1067,28 @@ impl OutputBlock {
             exit_status: None,
             error: None,
             selection: None,
+            started_at,
+            ended_at: None,
+            cwd,
         }
     }
 
     pub fn feed(&mut self, bytes: &[u8]) {
         self.grid.feed(bytes);
+    }
+
+    /// Mark the command finished with its exit status, stamping the end
+    /// instant at `now` so [`Self::duration`] can report a run time.
+    pub fn finish(&mut self, exit_status: Option<i32>, now: Instant) {
+        self.finished = true;
+        self.exit_status = exit_status;
+        self.ended_at = Some(now);
+    }
+
+    /// Run time from creation to completion, or `None` while running.
+    pub fn duration(&self) -> Option<Duration> {
+        self.ended_at
+            .map(|ended| ended.saturating_duration_since(self.started_at))
     }
 
     pub fn status(&self) -> BlockStatus {

@@ -24,7 +24,7 @@ pub(crate) mod render;
 use crate::{
     dock::DockSide,
     editor::Editor,
-    globals::TerminalHostGlobal,
+    globals::{ExecutorGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
     settings::Settings,
     theme::{ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
@@ -270,8 +270,13 @@ impl Run {
     pub fn submit_command(&mut self, command: String, cx: &mut Context<'_, Self>) {
         self.history.push(command.clone());
         self.history_idx = None;
-        self.blocks
-            .push(OutputBlock::new(command.clone(), SHELL_WIDTH));
+        let now = cx.global::<ExecutorGlobal>().0.now();
+        self.blocks.push(OutputBlock::new(
+            command.clone(),
+            SHELL_WIDTH,
+            now,
+            self.cwd.clone(),
+        ));
         let line = format!("{command}\n");
         match self.session.as_ref() {
             Some(session) => spawn_write(session.clone(), line, cx),
@@ -339,13 +344,18 @@ impl Run {
     /// after a command lands in its own region rather than the closed
     /// block.
     pub fn on_read(&mut self, chunk: &[u8], cx: &mut Context<'_, Self>) {
+        let now = cx.global::<ExecutorGlobal>().0.now();
         let start_fresh = match self.blocks.last() {
             None => true,
             Some(block) => block.finished,
         };
         if start_fresh {
-            self.blocks
-                .push(OutputBlock::new(String::new(), SHELL_WIDTH));
+            self.blocks.push(OutputBlock::new(
+                String::new(),
+                SHELL_WIDTH,
+                now,
+                self.cwd.clone(),
+            ));
         }
         let active = self
             .blocks
@@ -355,8 +365,7 @@ impl Run {
         let marks: Vec<CommandMark> = active.grid.command_marks.drain(..).collect();
         for mark in marks {
             if let CommandMark::Done { exit } = mark {
-                active.finished = true;
-                active.exit_status = exit;
+                active.finish(exit, now);
             }
         }
         cx.notify();

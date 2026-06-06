@@ -691,6 +691,7 @@ impl TestHarness {
 
     pub fn submit_run(&mut self, text: &str) {
         use crate::{pane::View, run::OutputBlock};
+        let now = self.stoat.executor.now();
         let ws = self.stoat.active_workspace_mut();
         let focused = ws.panes.focus();
         let View::Run(id) = ws.panes.pane(focused).view else {
@@ -699,9 +700,12 @@ impl TestHarness {
         let run_state = ws.runs.get_mut(id).expect("run state exists");
         run_state.history.push(text.to_owned());
         let width = ws.panes.pane(focused).area.width.saturating_sub(2).max(20);
-        run_state
-            .blocks
-            .push(OutputBlock::new(text.to_owned(), width));
+        run_state.blocks.push(OutputBlock::new(
+            text.to_owned(),
+            width,
+            now,
+            run_state.cwd.clone(),
+        ));
         self.capture("submit_run");
     }
 

@@ -181,7 +181,7 @@ mod tests {
         workspace::Workspace,
     };
     use gpui::{px, size, Entity, TestAppContext, VisualTestContext};
-    use std::{path::PathBuf, sync::Arc};
+    use std::{path::PathBuf, sync::Arc, time::Instant};
     use stoat::{
         host::{
             fake::{terminal::FakeTerminalSession, FakeClipboard, FakeFs, FakeTerminalHost},
@@ -229,7 +229,12 @@ mod tests {
 
     fn push_block(run: &Entity<Run>, vcx: &mut VisualTestContext, command: &str) {
         run.update(vcx, |r, _| {
-            r.blocks.push(OutputBlock::new(command.into(), 80));
+            r.blocks.push(OutputBlock::new(
+                command.into(),
+                80,
+                Instant::now(),
+                PathBuf::from("."),
+            ));
         });
     }
 

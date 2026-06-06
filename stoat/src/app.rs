@@ -2432,6 +2432,7 @@ impl Stoat {
 
     pub(crate) fn handle_pty_notification(&mut self, notif: PtyNotification) -> UpdateEffect {
         let clipboard_host = self.clipboard_host.clone();
+        let now = self.executor.now();
         let ws = self.active_workspace_mut();
         match notif {
             PtyNotification::Output { run_id, data } => {
@@ -2452,7 +2453,7 @@ impl Stoat {
                         );
                     }
                 }
-                run_state.apply_command_marks(&marks);
+                run_state.apply_command_marks(&marks, now);
                 UpdateEffect::Redraw
             },
             PtyNotification::CommandDone {
@@ -2466,8 +2467,7 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 if !block.finished {
-                    block.finished = true;
-                    block.exit_status = exit_status;
+                    block.finish(exit_status, now);
                 }
                 UpdateEffect::Redraw
             },
@@ -3915,6 +3915,26 @@ mod tests {
         h.inject_run_output(run_id, b"\x1b]133;C\x07\x1b]133;D;1\x07");
         h.submit_run("sleep 9");
         h.assert_snapshot("run_block_status_markers");
+    }
+
+    #[test]
+    fn run_block_records_duration_and_cwd() {
+        use std::time::Duration;
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        h.submit_run("sleep 2");
+        h.advance_clock(Duration::from_secs(2));
+        h.inject_run_output(run_id, b"\x1b]133;C\x07\x1b]133;D;0\x07");
+
+        let run_state = h
+            .stoat
+            .active_workspace()
+            .runs
+            .get(run_id)
+            .expect("run state exists");
+        let block = run_state.active_block().expect("active block exists");
+        assert_eq!(block.duration(), Some(Duration::from_secs(2)));
+        assert_eq!(block.cwd, run_state.cwd);
     }
 
     fn open_scratch_file(h: &mut crate::test_harness::TestHarness, contents: &str) -> PathBuf {
