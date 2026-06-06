@@ -59,6 +59,11 @@ pub fn spawn_shell(
             ("PS1".into(), String::new()),
             ("PS2".into(), String::new()),
             ("TERM".into(), "dumb".into()),
+            ("PS0".into(), "\x1b]133;C\x07".into()),
+            (
+                "PROMPT_COMMAND".into(),
+                "printf '\\033]133;D;%s\\007' \"$?\"".into(),
+            ),
         ],
         cwd: cwd.to_path_buf(),
         width,

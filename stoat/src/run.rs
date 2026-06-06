@@ -12,8 +12,8 @@ use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
 pub use vterm::{
-    CursorShape, GridSelection, LinkTarget, MouseProtocol, OutputBlock, StyledCell, TermColor,
-    TermModifier, TerminalLink, VtermGrid,
+    CommandMark, CursorShape, GridSelection, LinkTarget, MouseProtocol, OutputBlock, StyledCell,
+    TermColor, TermModifier, TerminalLink, VtermGrid,
 };
 
 new_key_type! {
@@ -530,6 +530,30 @@ mod tests {
         let mut grid = VtermGrid::new(20);
         grid.feed(b"\x1b]7;http://host/path\x07");
         assert_eq!(grid.cwd(), None);
+    }
+
+    #[test]
+    fn osc133_c_marks_command_start() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]133;C\x07");
+        assert_eq!(grid.command_marks, vec![CommandMark::Start]);
+    }
+
+    #[test]
+    fn osc133_d_marks_command_done_with_exit() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]133;D;0\x07");
+        assert_eq!(
+            grid.command_marks,
+            vec![CommandMark::Done { exit: Some(0) }]
+        );
+    }
+
+    #[test]
+    fn osc133_d_without_exit_has_no_code() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]133;D\x07");
+        assert_eq!(grid.command_marks, vec![CommandMark::Done { exit: None }]);
     }
 
     #[test]

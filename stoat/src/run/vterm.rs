@@ -173,6 +173,19 @@ pub struct VtermGrid {
     /// Working directory most recently reported via OSC 7, overwritten on
     /// each report. Exposed through [`Self::cwd`].
     cwd: Option<String>,
+    /// OSC 133 command boundaries decoded from the input stream. Callers
+    /// drain after [`Self::feed`] to bound command blocks and capture
+    /// exit status; the grid does not own block lifecycle.
+    pub command_marks: Vec<CommandMark>,
+}
+
+/// Shell-integration command boundary reported via OSC 133. `Start` is
+/// the `C` mark (command output begins); `Done` is the `D;<exit>` mark
+/// (command finished), carrying the exit code when the shell supplies it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandMark {
+    Start,
+    Done { exit: Option<i32> },
 }
 
 impl VtermGrid {
@@ -201,6 +214,7 @@ impl VtermGrid {
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
             cwd: None,
+            command_marks: Vec::new(),
         }
     }
 
@@ -571,6 +585,25 @@ impl vte::Perform for VtermGrid {
         if code == b"7" {
             if let Some(path) = params.get(1).copied().and_then(parse_osc7_cwd) {
                 self.cwd = Some(path);
+            }
+            return;
+        }
+
+        // OSC 133 -- shell-integration command marks: ESC ] 133 ; C ST
+        // (command output start) and ESC ] 133 ; D [ ; <exit> ] ST
+        // (command done). PS0/PROMPT_COMMAND in the spawned shell emit
+        // these, so command boundaries need no echoed sentinel line.
+        if code == b"133" {
+            match params.get(1).copied() {
+                Some(b"C") => self.command_marks.push(CommandMark::Start),
+                Some(b"D") => {
+                    let exit = params
+                        .get(2)
+                        .and_then(|p| std::str::from_utf8(p).ok())
+                        .and_then(|s| s.parse().ok());
+                    self.command_marks.push(CommandMark::Done { exit });
+                },
+                _ => {},
             }
             return;
         }
