@@ -242,6 +242,16 @@ mod tests {
     }
 
     #[test]
+    fn grid_is_alt_screen_tracks_enter_and_leave() {
+        let mut grid = VtermGrid::new(10);
+        assert!(!grid.is_alt_screen());
+        grid.feed(b"\x1b[?1049h");
+        assert!(grid.is_alt_screen());
+        grid.feed(b"\x1b[?1049l");
+        assert!(!grid.is_alt_screen());
+    }
+
+    #[test]
     fn grid_resize_widens_and_pads_rows() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"hi");

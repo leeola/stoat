@@ -33,8 +33,9 @@ use crate::{
 use gpui::{
     canvas, div, font, point, px, size, App, AppContext, Bounds, Context, Entity,
     InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
-    SharedString, Size, Styled, Task, WeakEntity, Window,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollHandle,
+    ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement, Styled, Task, WeakEntity,
+    Window,
 };
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
@@ -76,6 +77,10 @@ pub struct Run {
     /// skipped while this is unchanged so sub-cell pixel jitter does not
     /// spam SIGWINCH at the child.
     last_terminal_size: Option<(u16, u16)>,
+    /// Scroll position of the block-list viewport, tracked when not
+    /// forwarding the wheel to a full-screen program (see
+    /// [`Self::should_forward_scroll`]).
+    scroll_handle: ScrollHandle,
     _spawn_task: Option<Task<()>>,
 }
 
@@ -104,6 +109,7 @@ impl Run {
             output_bounds: None,
             cell_size: None,
             last_terminal_size: None,
+            scroll_handle: ScrollHandle::new(),
             _spawn_task: Some(spawn_task),
         }
     }
@@ -200,6 +206,14 @@ impl Run {
         self.workspace
             .upgrade()
             .is_some_and(|ws| ws.read(cx).active_item_id() == Some(cx.entity_id()))
+    }
+
+    /// Whether the scroll wheel should be forwarded to the program rather
+    /// than scrolling the block-list viewport. True while the active block
+    /// is on the alternate screen, where a full-screen program owns the
+    /// view and expects scroll input.
+    fn should_forward_scroll(&self) -> bool {
+        self.blocks.last().is_some_and(|b| b.grid.is_alt_screen())
     }
 
     /// Forward a mouse event to the program as a report when the active
@@ -618,6 +632,14 @@ impl Render for Run {
                 });
             body = body.child(render::render_block(block, cursor, &theme));
         }
+        let body = if self.should_forward_scroll() {
+            body.into_any_element()
+        } else {
+            body.id("run_scrollback")
+                .overflow_y_scroll()
+                .track_scroll(&self.scroll_handle)
+                .into_any_element()
+        };
         let bounds_handle = cx.weak_entity();
         let cell_family = font_family.clone();
         let bounds_capture = canvas(
@@ -645,6 +667,8 @@ impl Render for Run {
         .size_full();
         let output_layer = div()
             .relative()
+            .flex()
+            .flex_col()
             .flex_grow()
             .w_full()
             .child(body)
@@ -701,8 +725,10 @@ impl Render for Run {
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                let code = if scroll_is_up(&event.delta) { 64 } else { 65 };
-                this.report_mouse(code, false, true, event.position, event.modifiers, cx);
+                if this.should_forward_scroll() {
+                    let code = if scroll_is_up(&event.delta) { 64 } else { 65 };
+                    this.report_mouse(code, false, true, event.position, event.modifiers, cx);
+                }
             }));
         div()
             .flex()
@@ -1148,6 +1174,19 @@ mod tests {
         });
         assert!(!finished, "post-command output must land in a fresh block");
         assert_eq!(row0, "next");
+    }
+
+    #[test]
+    fn scroll_forwards_to_program_only_under_alt_screen() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+
+        run.update(h.vcx, |r, cx| r.on_read(b"plain output", cx));
+        assert!(!run.read_with(h.vcx, |r, _| r.should_forward_scroll()));
+
+        run.update(h.vcx, |r, cx| r.on_read(b"\x1b[?1049h", cx));
+        assert!(run.read_with(h.vcx, |r, _| r.should_forward_scroll()));
     }
 
     fn arm_mouse_mode(run: &Entity<Run>, h: &mut Harness<'_>, modes: &'static [u8]) {

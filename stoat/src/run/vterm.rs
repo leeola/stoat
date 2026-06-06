@@ -282,6 +282,14 @@ impl VtermGrid {
         self.mouse_protocol
     }
 
+    /// Whether the grid is currently on the alternate screen (entered via
+    /// `?1049h`/`?47h`). Full-screen programs use the alt screen, so the
+    /// run pane forwards scroll to the program rather than scrolling its
+    /// own block viewport while it is active.
+    pub fn is_alt_screen(&self) -> bool {
+        self.saved_screen.is_some()
+    }
+
     /// The cursor shape selected via DECSCUSR.
     pub fn cursor_shape(&self) -> CursorShape {
         self.cursor_shape
