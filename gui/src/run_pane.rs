@@ -39,7 +39,7 @@ use gpui::{
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{GridSelection, MouseProtocol, OutputBlock},
+    run::{CommandMark, GridSelection, MouseProtocol, OutputBlock},
 };
 
 const SHELL_WIDTH: u16 = 80;
@@ -331,12 +331,19 @@ impl Run {
         cx.notify();
     }
 
-    /// Append `chunk` to the active block's `VtermGrid`. Creates a
-    /// synthetic empty-command block when bytes arrive before any
-    /// submit (e.g. a shell-prompt banner the spawned process emits
-    /// before the user types).
+    /// Append `chunk` to the active block's `VtermGrid`, then apply the
+    /// OSC 133 command marks it produced: a `D` (done) mark finishes the
+    /// active block with its exit code. A fresh block is started when
+    /// none exists yet (e.g. a shell-prompt banner before the first
+    /// submit) or when the previous block already finished, so output
+    /// after a command lands in its own region rather than the closed
+    /// block.
     pub fn on_read(&mut self, chunk: &[u8], cx: &mut Context<'_, Self>) {
-        if self.blocks.is_empty() {
+        let start_fresh = match self.blocks.last() {
+            None => true,
+            Some(block) => block.finished,
+        };
+        if start_fresh {
             self.blocks
                 .push(OutputBlock::new(String::new(), SHELL_WIDTH));
         }
@@ -345,6 +352,13 @@ impl Run {
             .last_mut()
             .expect("blocks non-empty after push above");
         active.grid.feed(chunk);
+        let marks: Vec<CommandMark> = active.grid.command_marks.drain(..).collect();
+        for mark in marks {
+            if let CommandMark::Done { exit } = mark {
+                active.finished = true;
+                active.exit_status = exit;
+            }
+        }
         cx.notify();
     }
 
@@ -1092,6 +1106,46 @@ mod tests {
                 .map(|b| b.grid.text_in(0..SHELL_WIDTH as usize, 0..1))
         });
         assert_eq!(visible, Some("ALT".to_string()));
+    }
+
+    #[test]
+    fn osc133_done_mark_finishes_active_block() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+
+        run.update(h.vcx, |r, cx| {
+            r.on_read(b"ok\r\n\x1b]133;D;0\x07", cx);
+        });
+
+        let (finished, exit) = run.read_with(h.vcx, |r, _| {
+            let block = r.blocks.last().expect("block");
+            (block.finished, block.exit_status)
+        });
+        assert!(finished);
+        assert_eq!(exit, Some(0));
+    }
+
+    #[test]
+    fn output_after_finished_block_starts_a_fresh_block() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = open_run(&mut h);
+
+        run.update(h.vcx, |r, cx| {
+            r.on_read(b"done\x1b]133;D;0\x07", cx);
+            r.on_read(b"next", cx);
+        });
+
+        let (finished, row0) = run.read_with(h.vcx, |r, _| {
+            let block = r.blocks.last().expect("block");
+            (
+                block.finished,
+                block.grid.text_in(0..SHELL_WIDTH as usize, 0..1),
+            )
+        });
+        assert!(!finished, "post-command output must land in a fresh block");
+        assert_eq!(row0, "next");
     }
 
     fn arm_mouse_mode(run: &Entity<Run>, h: &mut Harness<'_>, modes: &'static [u8]) {
