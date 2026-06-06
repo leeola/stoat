@@ -738,7 +738,11 @@ impl InputStateMachine {
     /// only delivery route for printable keys (macOS sends no raw
     /// key twin while the IME handler is focused), so this is how
     /// normal-mode bindings such as `:` and `space p` reach the
-    /// matcher. In an input mode the text is instead recorded as the
+    /// matcher. A focused terminal short-circuits that route: the
+    /// committed text is written straight to its PTY as bytes
+    /// (mirroring [`feed`]'s terminal branch), so typed and
+    /// IME-composed text reaches the running program rather than the
+    /// keymap. In an input mode the text is instead recorded as the
     /// most recent input, in-flight composition state is cleared,
     /// and an empty action list is returned.
     ///
@@ -795,6 +799,20 @@ impl InputStateMachine {
             }
         }
         if !in_input_mode {
+            // A focused terminal owns committed IME text: write it to its
+            // PTY as bytes rather than feeding it through the keymap. This
+            // fulfils the promise of `feed`'s terminal branch, which leaves
+            // plain printables to this path, and mirrors Zed's terminal
+            // `commit_text`. The text delivered here is the composed result
+            // (dead-key / CJK output), so writing it preserves composition.
+            if let Some(terminal) = self.active_terminal.as_ref().and_then(WeakEntity::upgrade) {
+                if !text.is_empty() {
+                    terminal.update(cx, |term, cx| {
+                        term.write_to_pty(text.as_bytes().to_vec(), cx)
+                    });
+                }
+                return Vec::new();
+            }
             let mut actions = Vec::new();
             for ch in text.chars() {
                 let keystroke = Keystroke {
@@ -1485,7 +1503,8 @@ fn unmodified_ascii_digit(event: &KeyEvent) -> Option<u32> {
 mod tests {
     use super::*;
     use gpui::{AppContext, Entity, Modifiers, TestAppContext, VisualTestContext};
-    use std::path::PathBuf;
+    use std::{path::PathBuf, sync::Arc};
+    use stoat::host::fake::terminal::FakeTerminalSession;
     use stoat_config::Config;
 
     fn empty_keymap() -> Keymap {
@@ -1582,21 +1601,25 @@ mod tests {
         sm.update_in(vcx, f)
     }
 
-    #[test]
-    fn focused_terminal_receives_encoded_control_keys() {
+    fn focused_terminal_sm(
+        cx: &mut TestAppContext,
+    ) -> (
+        Arc<FakeTerminalSession>,
+        Entity<InputStateMachine>,
+        Entity<Terminal>,
+        &mut VisualTestContext,
+    ) {
         use crate::globals::{
             ClipboardHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal,
             TerminalHostGlobal,
         };
-        use std::sync::Arc;
         use stoat::host::{
-            fake::{terminal::FakeTerminalSession, FakeClipboard, FakeFs, FakeTerminalHost},
+            fake::{FakeClipboard, FakeFs, FakeTerminalHost},
             ClipboardHost, FsHost, FsWatchHost, TerminalHost,
         };
         use stoat_host::NoopFsWatcher;
         use stoat_scheduler::{Executor, TestScheduler};
 
-        let mut cx = TestAppContext::single();
         let session = Arc::new(FakeTerminalSession::new());
         cx.update({
             let session = session.clone();
@@ -1637,6 +1660,13 @@ mod tests {
         sm.update(vcx, |sm, _| {
             sm.set_active_terminal(Some(terminal.downgrade()))
         });
+        (session, sm, terminal, vcx)
+    }
+
+    #[test]
+    fn focused_terminal_receives_encoded_control_keys() {
+        let mut cx = TestAppContext::single();
+        let (session, sm, _terminal, vcx) = focused_terminal_sm(&mut cx);
 
         let ctrl = Modifiers {
             control: true,
@@ -1673,6 +1703,40 @@ mod tests {
             session.sent_bytes().len(),
             3,
             "a text-input mode suppresses terminal key routing",
+        );
+    }
+
+    #[test]
+    fn focused_terminal_receives_committed_ime_text() {
+        let mut cx = TestAppContext::single();
+        let (session, sm, _terminal, vcx) = focused_terminal_sm(&mut cx);
+
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("a", None, window, cx);
+        });
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("世界", None, window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            session.sent_bytes(),
+            vec![b"a".to_vec(), "世界".as_bytes().to_vec()],
+            "committed printable and multi-char IME text reach the PTY as bytes",
+        );
+
+        // A text-input mode (e.g. a picker over the terminal) keeps the
+        // commit on the editor fan-out, not the PTY.
+        sm.update(vcx, |sm, _| {
+            sm.set_mode_for_test(StateValue::String("prompt".into()))
+        });
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.text_input("x", None, window, cx);
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            session.sent_bytes().len(),
+            2,
+            "a text-input mode routes the commit to the editor, not the terminal",
         );
     }
 
