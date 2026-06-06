@@ -25,6 +25,16 @@ define_action!(
 );
 
 define_action!(
+    OpenClaudeTerminalDef,
+    OpenClaudeTerminal,
+    "OpenClaudeTerminal",
+    ActionKind::OpenClaudeTerminal,
+    "open claude terminal",
+    "Open a terminal pane running the claude CLI in the project root.",
+    ActionPriority::Common
+);
+
+define_action!(
     RunSubmitDef,
     RunSubmit,
     "RunSubmit",

@@ -25,9 +25,10 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    canvas, div, font, point, px, size, App, Bounds, Context, InteractiveElement, IntoElement,
-    Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels,
-    Point, Render, ScrollWheelEvent, SharedString, Size, Styled, Task, WeakEntity, Window,
+    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, InteractiveElement,
+    IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled, Task,
+    WeakEntity, Window,
 };
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
@@ -44,6 +45,10 @@ pub(crate) struct Terminal {
     grid: VtermGrid,
     session: Option<Arc<dyn TerminalSession>>,
     cwd: PathBuf,
+    /// Program and arguments the session was launched with. Read back by
+    /// [`install_session`] to build the spawn args.
+    program: String,
+    args: Vec<String>,
     workspace: WeakEntity<Workspace>,
     /// Pixel bounds of the grid surface captured by the canvas
     /// prepaint each frame; mouse handlers subtract the origin before
@@ -64,17 +69,27 @@ impl Terminal {
         cwd: PathBuf,
         cx: &mut Context<'_, Self>,
     ) -> Self {
+        Self::with_command(workspace, cwd, "bash".into(), Vec::new(), cx)
+    }
+
+    /// Open a terminal running `program` with `args` in `cwd`.
+    pub(crate) fn with_command(
+        workspace: WeakEntity<Workspace>,
+        cwd: PathBuf,
+        program: String,
+        args: Vec<String>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let host = cx.global::<TerminalHostGlobal>().0.clone();
-        let spawn_task = cx.spawn({
-            let cwd = cwd.clone();
-            async move |this, cx| {
-                install_session(host, cwd, this, cx).await;
-            }
+        let spawn_task = cx.spawn(async move |this, cx| {
+            install_session(host, this, cx).await;
         });
         Self {
             grid: VtermGrid::new(TERMINAL_WIDTH),
             session: None,
             cwd,
+            program,
+            args,
             workspace,
             output_bounds: None,
             cell_size: None,
@@ -197,19 +212,23 @@ impl Terminal {
 
 async fn install_session(
     host: Arc<dyn TerminalHost>,
-    cwd: PathBuf,
     this: WeakEntity<Terminal>,
     cx: &mut gpui::AsyncApp,
 ) {
-    let args = SpawnArgs {
-        program: "bash".into(),
-        args: Vec::new(),
+    let Ok((program, args, cwd)) = this.update(cx, |term, _| {
+        (term.program.clone(), term.args.clone(), term.cwd.clone())
+    }) else {
+        return;
+    };
+    let spawn_args = SpawnArgs {
+        program,
+        args,
         env: vec![("TERM".into(), "xterm-256color".into())],
         cwd,
         width: TERMINAL_WIDTH,
         rows: 24,
     };
-    let session: Arc<dyn TerminalSession> = match host.spawn(args).await {
+    let session: Arc<dyn TerminalSession> = match host.spawn(spawn_args).await {
         Ok(s) => Arc::from(s),
         Err(err) => {
             tracing::warn!(
@@ -408,6 +427,23 @@ impl Render for Terminal {
     }
 }
 
+/// Dispatch [`stoat_action::OpenClaudeTerminal`]. Opens a full-screen
+/// terminal running the `claude` CLI in the workspace's git root and adds
+/// it to the focused pane.
+pub fn dispatch_open_claude_terminal(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    let pane_id = workspace.pane_tree().read(cx).focus();
+    let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
+        return;
+    };
+    let cwd = workspace.git_root().clone();
+    let weak_workspace = cx.weak_entity();
+    let terminal =
+        cx.new(|cx| Terminal::with_command(weak_workspace, cwd, "claude".into(), Vec::new(), cx));
+    pane.update(cx, |p, cx| {
+        p.add_item(Box::new(terminal), cx);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -505,6 +541,20 @@ mod tests {
         let term = open_terminal(&mut h);
         let kind = term.read_with(h.vcx, |t, _| t.item_kind());
         assert_eq!(kind, ItemKind::Terminal);
+    }
+
+    #[test]
+    fn open_claude_terminal_runs_the_claude_cli() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_open_claude_terminal(w, cx);
+        });
+
+        let term = focused_terminal(&mut h).expect("claude terminal is the focused item");
+        let (program, args) = term.read_with(h.vcx, |t, _| (t.program.clone(), t.args.clone()));
+        assert_eq!(program, "claude");
+        assert!(args.is_empty(), "claude is launched with no extra args");
     }
 
     #[test]

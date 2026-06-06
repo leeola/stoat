@@ -2741,6 +2741,9 @@ impl Workspace {
                 crate::claude_chat::dispatch_claude_toggle_follow(self, cx)
             },
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
+            ActionKind::OpenClaudeTerminal => {
+                crate::terminal_view::dispatch_open_claude_terminal(self, cx)
+            },
             ActionKind::OpenTerminalDock => {
                 crate::run_pane::dispatch_open_terminal_dock(self, window, cx)
             },

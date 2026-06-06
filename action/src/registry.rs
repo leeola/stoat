@@ -107,7 +107,8 @@ use crate::{
             ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{
-            OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
+            OpenClaudeTerminal, OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev,
+            RunInterrupt, RunSubmit,
         },
         set::Set,
         theme::OpenThemePicker,
@@ -665,6 +666,9 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     });
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
     add(OpenTerminalDock::DEF, |_| Ok(Box::new(OpenTerminalDock)));
+    add(OpenClaudeTerminal::DEF, |_| {
+        Ok(Box::new(OpenClaudeTerminal))
+    });
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
@@ -1025,6 +1029,7 @@ mod tests {
         "ConflictAbort",
         "OpenRun",
         "OpenTerminalDock",
+        "OpenClaudeTerminal",
         "RunSubmit",
         "RunInterrupt",
         "RunHistoryPrev",
@@ -1305,7 +1310,8 @@ mod tests {
         // + 1 OpenReviewBranch (commit-by-commit branch review).
         // + 2 ReviewNextCommit / ReviewPrevCommit (commit-group navigation).
         // + 1 CommitsOpenBranchReview (branch review from the commits view).
-        assert_eq!(all().count(), 352);
+        // + 1 OpenClaudeTerminal (terminal pane running the claude CLI).
+        assert_eq!(all().count(), 353);
     }
 
     #[test]

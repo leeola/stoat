@@ -209,6 +209,7 @@ pub enum ActionKind {
     AlignSelections,
     OpenRun,
     OpenTerminalDock,
+    OpenClaudeTerminal,
     RunSubmit,
     RunInterrupt,
     Run,

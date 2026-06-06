@@ -109,7 +109,8 @@ pub use defs::{
         ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
     },
     run::{
-        OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev, RunInterrupt, RunSubmit,
+        OpenClaudeTerminal, OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev,
+        RunInterrupt, RunSubmit,
     },
     set::Set,
     theme::OpenThemePicker,
