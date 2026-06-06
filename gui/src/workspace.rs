@@ -82,7 +82,6 @@ use stoat_config::LineNumberMode;
 pub struct Workspace {
     name: SharedString,
     uid: stoat::workspace::WorkspaceUid,
-    is_fresh: bool,
     git_root: PathBuf,
     pane_tree: Entity<PaneTree>,
     buffer_registry: Entity<BufferRegistry>,
@@ -402,7 +401,6 @@ impl Workspace {
         Self {
             name,
             uid,
-            is_fresh: true,
             git_root,
             pane_tree,
             buffer_registry,
@@ -1084,14 +1082,42 @@ impl Workspace {
         self.uid
     }
 
-    pub fn is_fresh(&self) -> bool {
-        self.is_fresh
-    }
-
-    /// Mark the workspace as no longer fresh. Persistence skips
-    /// fresh workspaces so abandoned sessions never write state.
-    pub fn mark_dirty(&mut self) {
-        self.is_fresh = false;
+    /// True when the workspace looks freshly opened and unused: no
+    /// docks, a single un-split pane, and that pane holding at most one
+    /// empty, unsaved scratch editor. The save paths skip persisting a
+    /// fresh workspace, so a session the user opened but never touched
+    /// leaves no state file behind. Any opened file, edit, split, dock,
+    /// or non-editor pane item makes it non-fresh.
+    pub fn is_fresh(&self, cx: &App) -> bool {
+        if !self.docks.is_empty() {
+            return false;
+        }
+        let tree = self.pane_tree.read(cx);
+        let pane_ids = tree.split_pane_ids();
+        let [pane_id] = pane_ids.as_slice() else {
+            return false;
+        };
+        let Some(pane) = tree.pane(*pane_id) else {
+            return false;
+        };
+        let pane = pane.read(cx);
+        let item = match pane.items() {
+            [] => return true,
+            [item] => item,
+            _ => return false,
+        };
+        let Ok(editor) = item.to_any_view().downcast::<Editor>() else {
+            return false;
+        };
+        let editor = editor.read(cx);
+        // The initial scratch buffer is standalone (not registered in
+        // `buffer_registry`), so its emptiness is read from the editor.
+        editor.file_path().is_none()
+            && editor
+                .multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .is_some_and(|buffer| buffer.read(cx).text().is_empty())
     }
 
     /// Recently confirmed command-palette queries, oldest first.
@@ -1158,7 +1184,7 @@ impl Workspace {
     /// triggers (periodic timer, release observer) where there is
     /// no surface to propagate an error to.
     pub fn save_state_to_default_path(&self, cx: &App) {
-        if self.is_fresh {
+        if self.is_fresh(cx) {
             return;
         }
         let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) else {
@@ -1186,7 +1212,7 @@ impl Workspace {
         fs: &dyn stoat::host::FsHost,
         cx: &App,
     ) -> std::io::Result<()> {
-        if self.is_fresh {
+        if self.is_fresh(cx) {
             return Ok(());
         }
         if let Some(parent) = path.parent() {
@@ -1214,7 +1240,6 @@ impl Workspace {
         self.uid = state.uid;
         self.git_root = state.git_root.clone();
         self.name = SharedString::from(state.name.clone());
-        self.is_fresh = false;
         self.command_palette_history = state.command_palette_history;
         self.buffer_registry
             .update(cx, |registry, cx| registry.restore_from(state.buffers, cx));
@@ -17155,6 +17180,67 @@ mod tests {
         );
     }
 
+    /// Seed the focused pane with an empty, unsaved scratch editor
+    /// (mirroring the app's startup state) and return its buffer handle.
+    fn seed_scratch_editor(ws: &Entity<Workspace>, vcx: &mut VisualTestContext) -> Entity<Buffer> {
+        ws.update(vcx, |w, cx| {
+            let (buffer, editor) = w.build_preview_editor(cx);
+            let focus = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(focus)
+                .cloned()
+                .expect("focused pane");
+            pane.update(cx, |p, cx| {
+                p.add_item(Box::new(editor), cx);
+            });
+            buffer
+        })
+    }
+
+    #[test]
+    fn fresh_workspace_is_fresh() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        seed_scratch_editor(&ws, vcx);
+        assert!(
+            ws.read_with(vcx, |w, cx| w.is_fresh(cx)),
+            "a single empty scratch editor is fresh"
+        );
+    }
+
+    #[test]
+    fn typing_in_scratch_breaks_freshness() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let buffer = seed_scratch_editor(&ws, vcx);
+        buffer.update(vcx, |b, cx| b.edit(0..0, "x", cx));
+        assert!(!ws.read_with(vcx, |w, cx| w.is_fresh(cx)));
+    }
+
+    #[test]
+    fn opening_file_breaks_freshness() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/note.txt", b"hello");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/note.txt")], cx);
+        });
+        vcx.run_until_parked();
+        assert!(!ws.read_with(vcx, |w, cx| w.is_fresh(cx)));
+    }
+
+    #[test]
+    fn splitting_pane_breaks_freshness() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        dispatch(&ws, vcx, stoat_action::SplitDown);
+        assert!(!ws.read_with(vcx, |w, cx| w.is_fresh(cx)));
+    }
+
     #[test]
     fn save_then_restore_round_trips_pane_tree_and_editor_paths() {
         let mut cx = TestAppContext::single();
@@ -17171,7 +17257,6 @@ mod tests {
                 ],
                 cx,
             );
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let pane_count_before = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count());
@@ -17257,7 +17342,6 @@ mod tests {
                 let index = p.add_item(Box::new(term), cx);
                 p.activate(index, cx);
             });
-            w.mark_dirty();
         });
         vcx.run_until_parked();
 
@@ -17357,7 +17441,6 @@ mod tests {
                 "test",
                 cx,
             );
-            w.mark_dirty();
         });
         vcx.run_until_parked();
 
@@ -17404,7 +17487,6 @@ mod tests {
         ws.update(vcx, |w, cx| {
             w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
             w.set_minimap_visible(true, cx);
-            w.mark_dirty();
         });
         vcx.run_until_parked();
 
@@ -17430,8 +17512,8 @@ mod tests {
     fn save_then_restore_round_trips_command_palette_history() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        dispatch(&ws, vcx, stoat_action::SplitDown);
         ws.update(vcx, |w, _| {
-            w.mark_dirty();
             w.push_command_palette_query("open file".to_string());
             w.push_command_palette_query("quit".to_string());
         });
@@ -17464,7 +17546,6 @@ mod tests {
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         ws.update(vcx, |w, cx| {
             w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let original_uid = ws.read_with(vcx, |w, _| w.uid());
@@ -17502,7 +17583,6 @@ mod tests {
                     dm_cx,
                 )
             });
-            w.mark_dirty();
         });
         vcx.run_until_parked();
 
@@ -17539,7 +17619,6 @@ mod tests {
             w.open_paths(&[PathBuf::from("/tmp/repo/outline.rs")], cx);
             let dock_editor = w.build_editor_for_path(Path::new("/tmp/repo/outline.rs"), cx);
             w.add_dock(Box::new(dock_editor), DockSide::Left, 220, cx);
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let path = PathBuf::from("/tmp/state/dock-round-trip.ron");
@@ -17578,7 +17657,6 @@ mod tests {
         ws.update(vcx, |w, cx| {
             let dock_editor = w.build_editor_for_path(Path::new("/tmp/repo/term.rs"), cx);
             w.add_dock(Box::new(dock_editor), DockSide::Bottom, 200, cx);
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let path = PathBuf::from("/tmp/state/bottom-dock.ron");
@@ -17615,7 +17693,6 @@ mod tests {
             w.docks()[0].update(cx, |d, cx| {
                 d.set_visibility(DockVisibility::Minimized, cx);
             });
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let path = PathBuf::from("/tmp/state/dock-visibility.ron");
@@ -17648,7 +17725,6 @@ mod tests {
             w.add_dock(Box::new(left), DockSide::Left, 200, cx);
             let right = w.build_editor_for_path(Path::new("/tmp/repo/right.rs"), cx);
             w.add_dock(Box::new(right), DockSide::Right, 240, cx);
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let path = PathBuf::from("/tmp/state/multi-dock.ron");
@@ -17681,7 +17757,6 @@ mod tests {
 
         dispatch(&ws, vcx, stoat_action::ToggleProjectTree);
         dispatch(&ws, vcx, stoat_action::ProjectTreeExpand);
-        ws.update(vcx, |w, _| w.mark_dirty());
         vcx.run_until_parked();
 
         let path = PathBuf::from("/tmp/state/project-tree.ron");
@@ -17735,7 +17810,6 @@ mod tests {
             pane.update(cx, |p, cx| {
                 p.add_item(Box::new(rebase), cx);
             });
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let state = ws.read_with(vcx, |w, cx| w.to_state(cx));
@@ -17768,7 +17842,6 @@ mod tests {
             pane.update(cx, |p, cx| {
                 p.add_item(Box::new(rebase), cx);
             });
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let path = PathBuf::from("/tmp/state/mixed-items.ron");
@@ -17823,7 +17896,7 @@ mod tests {
         install_globals_with_fs(&mut cx, fs.clone());
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
-        ws.update(vcx, |w, _| w.mark_dirty());
+        dispatch(&ws, vcx, stoat_action::SplitDown);
 
         let uid = ws.read_with(vcx, |w, _| w.uid());
         let expected_path =
@@ -17862,7 +17935,7 @@ mod tests {
     fn save_state_to_default_path_no_op_without_fs_host() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
-        ws.update(vcx, |w, _| w.mark_dirty());
+        dispatch(&ws, vcx, stoat_action::SplitDown);
 
         ws.read_with(vcx, |w, cx| w.save_state_to_default_path(cx));
     }
@@ -17881,7 +17954,7 @@ mod tests {
         });
         let (ws, vcx) = cx
             .add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
-        ws.update(vcx, |w, _| w.mark_dirty());
+        dispatch(&ws, vcx, stoat_action::SplitDown);
         let uid = ws.read_with(vcx, |w, _| w.uid());
         let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
         let expected_path =
@@ -17912,7 +17985,6 @@ mod tests {
         let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
         ws.update(vcx, |w, cx| {
             w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
-            w.mark_dirty();
         });
         vcx.run_until_parked();
         let state_dir =

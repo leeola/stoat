@@ -180,6 +180,7 @@ mod tests {
     use super::*;
     use gpui::TestAppContext;
     use std::sync::Arc;
+    use stoat::pane::Axis;
     use stoat_scheduler::{Executor, TestScheduler};
 
     fn install_executor_global(cx: &mut TestAppContext) {
@@ -237,7 +238,11 @@ mod tests {
 
         let cwd = std::env::current_dir().expect("current_dir");
         let workspace = cx.update(|cx| cx.new(|cx| Workspace::new("main", cwd.clone(), cx)));
-        workspace.update(&mut cx, |w, _| w.mark_dirty());
+        workspace.update(&mut cx, |w, cx| {
+            w.pane_tree().clone().update(cx, |tree, cx| {
+                tree.split(Axis::Vertical, cx);
+            });
+        });
         let uid = workspace.read_with(&cx, |w, _| w.uid());
         let expected_path =
             stoat::workspace::persist::state_path_for(&cwd, uid, &*fs_global).expect("state path");
