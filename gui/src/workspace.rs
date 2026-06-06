@@ -1293,9 +1293,29 @@ impl Workspace {
                             .and_then(|v| v.as_str())
                             .map(PathBuf::from)
                             .unwrap_or_else(|| self.git_root.clone());
+                        let program = snap
+                            .blob
+                            .get("program")
+                            .and_then(|v| v.as_str())
+                            .unwrap_or("bash")
+                            .to_string();
+                        let args = snap
+                            .blob
+                            .get("args")
+                            .and_then(|v| v.as_array())
+                            .map(|items| {
+                                items
+                                    .iter()
+                                    .filter_map(|v| v.as_str().map(String::from))
+                                    .collect()
+                            })
+                            .unwrap_or_default();
                         let weak = cx.weak_entity();
-                        let terminal =
-                            cx.new(|cx| crate::terminal_view::Terminal::new(weak, cwd, cx));
+                        let terminal = cx.new(|cx| {
+                            crate::terminal_view::Terminal::with_command(
+                                weak, cwd, program, args, cx,
+                            )
+                        });
                         pane.update(cx, |p, cx| {
                             p.add_item(Box::new(terminal), cx);
                         });
@@ -17219,7 +17239,13 @@ mod tests {
         ws.update(vcx, |w, cx| {
             let weak = cx.weak_entity();
             let term = cx.new(|cx| {
-                crate::terminal_view::Terminal::new(weak, PathBuf::from("/tmp/repo/sub"), cx)
+                crate::terminal_view::Terminal::with_command(
+                    weak,
+                    PathBuf::from("/tmp/repo/sub"),
+                    "claude".into(),
+                    vec!["--foo".into()],
+                    cx,
+                )
             });
             let pane_id = w.pane_tree().read(cx).focus();
             let pane = w
@@ -17249,8 +17275,7 @@ mod tests {
         });
         vcx2.run_until_parked();
 
-        let kinds: Vec<ItemKind> = fresh_ws.read_with(vcx2, |w, cx| {
-            let mut kinds = Vec::new();
+        let blob = fresh_ws.read_with(vcx2, |w, cx| {
             for id in w.pane_tree().read(cx).split_pane_ids() {
                 let pane = w
                     .pane_tree()
@@ -17259,16 +17284,25 @@ mod tests {
                     .expect("pane present")
                     .read(cx);
                 for item in pane.items() {
-                    kinds.push(item.item_kind(cx));
+                    if item.item_kind(cx) == ItemKind::Terminal {
+                        return Some(item.serialize(cx));
+                    }
                 }
             }
-            kinds
+            None
         });
+        let blob = blob.expect("restored workspace reopens the terminal pane");
         assert_eq!(
-            kinds,
-            vec![ItemKind::Terminal],
-            "restored workspace reopens the terminal pane",
+            blob.get("program").and_then(|v| v.as_str()),
+            Some("claude"),
+            "the launched program survives save and restore",
         );
+        let args = blob
+            .get("args")
+            .and_then(|v| v.as_array())
+            .expect("args array in the restored blob");
+        assert_eq!(args.len(), 1);
+        assert_eq!(args[0].as_str(), Some("--foo"));
     }
 
     #[test]

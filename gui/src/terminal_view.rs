@@ -6,7 +6,7 @@
 //! command-line input: the grid is the whole surface, so an interactive
 //! TUI running in the PTY paints directly into it.
 //!
-//! [`Terminal::new`] spawns the session in the background via
+//! [`Terminal::with_command`] spawns the session in the background via
 //! [`TerminalHost`]; once installed, the same task loops on
 //! [`TerminalSession::read`] and feeds each chunk into the grid through
 //! [`Terminal::on_read`]. The render measures cell metrics in its canvas
@@ -97,14 +97,6 @@ pub(crate) struct Terminal {
 }
 
 impl Terminal {
-    pub(crate) fn new(
-        workspace: WeakEntity<Workspace>,
-        cwd: PathBuf,
-        cx: &mut Context<'_, Self>,
-    ) -> Self {
-        Self::with_command(workspace, cwd, "bash".into(), Vec::new(), cx)
-    }
-
     /// Open a terminal running `program` with `args` in `cwd`.
     pub(crate) fn with_command(
         workspace: WeakEntity<Workspace>,
@@ -372,6 +364,8 @@ impl ItemView for Terminal {
     fn serialize(&self, _cx: &App) -> serde_json::Value {
         serde_json::json!({
             "cwd": self.cwd.to_string_lossy(),
+            "program": self.program,
+            "args": self.args,
         })
     }
 }
@@ -561,7 +555,9 @@ mod tests {
     fn open_terminal(h: &mut Harness<'_>) -> Entity<Terminal> {
         h.workspace.update_in(h.vcx, |w, _window, cx| {
             let weak = cx.weak_entity();
-            let term = cx.new(|cx| Terminal::new(weak, PathBuf::from("/repo"), cx));
+            let term = cx.new(|cx| {
+                Terminal::with_command(weak, PathBuf::from("/repo"), "bash".into(), Vec::new(), cx)
+            });
             let pane_id = w.pane_tree().read(cx).focus();
             if let Some(pane) = w.pane_tree().read(cx).pane(pane_id).cloned() {
                 pane.update(cx, |p, cx| p.add_item(Box::new(term), cx));
