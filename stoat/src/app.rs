@@ -18,7 +18,7 @@ use crate::{
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
     register,
-    run::{GridSelection, PtyNotification},
+    run::{CommandMark, GridSelection, PtyNotification},
     workspace::{Workspace, WorkspaceId},
     workspace_picker::{PickerOutcome, WorkspacePicker},
 };
@@ -2442,6 +2442,7 @@ impl Stoat {
                     return UpdateEffect::None;
                 };
                 block.feed(&data);
+                let marks: Vec<CommandMark> = block.grid.command_marks.drain(..).collect();
                 for text in block.grid.clipboard_writes.drain(..) {
                     if let Err(err) = clipboard_host.set(&text) {
                         tracing::warn!(
@@ -2451,6 +2452,7 @@ impl Stoat {
                         );
                     }
                 }
+                run_state.apply_command_marks(&marks);
                 UpdateEffect::Redraw
             },
             PtyNotification::CommandDone {
@@ -3868,6 +3870,39 @@ mod tests {
         drag_select_ell_in_hello(&mut h);
         assert_eq!(h.fake_clipboard().writes(), vec!["ell"]);
         assert!(h.fake_clipboard().osc52_emits().is_empty());
+    }
+
+    #[test]
+    fn osc133_done_mark_finishes_block_only_after_command_start() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        h.submit_run("false");
+
+        let block_state = |h: &crate::test_harness::TestHarness| {
+            let block = h
+                .stoat
+                .active_workspace()
+                .runs
+                .get(run_id)
+                .expect("run state exists")
+                .active_block()
+                .expect("active block exists");
+            (block.finished, block.exit_status)
+        };
+
+        h.inject_run_output(run_id, b"\x1b]133;D;0\x07");
+        assert_eq!(
+            block_state(&h),
+            (false, None),
+            "shell startup D mark must not finish the block",
+        );
+
+        h.inject_run_output(run_id, b"false\r\n\x1b]133;C\x07\x1b]133;D;1\x07");
+        assert_eq!(
+            block_state(&h),
+            (true, Some(1)),
+            "command's own D mark finishes the block with its exit code",
+        );
     }
 
     fn open_scratch_file(h: &mut crate::test_harness::TestHarness, contents: &str) -> PathBuf {

@@ -28,6 +28,11 @@ pub struct RunState {
     pub shell_handle: Option<ShellHandle>,
     pub history: Vec<String>,
     pub history_cursor: Option<usize>,
+    /// Whether the active block's command has begun executing, set by the
+    /// OSC 133 `C` mark. Gates [`Self::apply_command_marks`] so the shell's
+    /// startup `D` mark -- emitted before the first command runs -- does not
+    /// finish the block before its command has started.
+    command_started: bool,
 }
 
 impl RunState {
@@ -44,6 +49,7 @@ impl RunState {
             shell_handle: None,
             history: Vec::new(),
             history_cursor: None,
+            command_started: false,
         }
     }
 
@@ -57,6 +63,29 @@ impl RunState {
 
     pub fn is_running(&self) -> bool {
         self.blocks.last().is_some_and(|b| !b.finished)
+    }
+
+    /// Apply OSC 133 command marks drained from the active block's grid. A
+    /// `Start` (`C`) mark records that the command's output has begun; a
+    /// `Done` (`D`) mark then finishes the active block with its exit code
+    /// and clears the started flag. Gating on `Start` keeps the shell's
+    /// startup `D` mark -- emitted before the first command runs -- from
+    /// finishing the block prematurely.
+    pub(crate) fn apply_command_marks(&mut self, marks: &[CommandMark]) {
+        for mark in marks {
+            match mark {
+                CommandMark::Start => self.command_started = true,
+                CommandMark::Done { exit } => {
+                    if self.command_started {
+                        self.command_started = false;
+                        if let Some(block) = self.blocks.last_mut() {
+                            block.finished = true;
+                            block.exit_status = *exit;
+                        }
+                    }
+                },
+            }
+        }
     }
 
     pub fn history_up(&mut self, ws: &mut Workspace) {
@@ -160,20 +189,6 @@ impl RunState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use pty::parse_sentinel_line;
-
-    #[test]
-    fn parse_sentinel_valid() {
-        assert_eq!(parse_sentinel_line("__STOAT_5__ 0"), Some(0));
-        assert_eq!(parse_sentinel_line("__STOAT_5__ 127"), Some(127));
-    }
-
-    #[test]
-    fn parse_sentinel_invalid() {
-        assert_eq!(parse_sentinel_line("hello"), None);
-        assert_eq!(parse_sentinel_line("__STOAT_5__"), None);
-        assert_eq!(parse_sentinel_line("__STOAT_5__ abc"), None);
-    }
 
     #[test]
     fn grid_default_empty() {

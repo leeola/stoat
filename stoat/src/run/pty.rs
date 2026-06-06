@@ -17,20 +17,16 @@ pub enum PtyNotification {
 
 pub struct ShellHandle {
     session: Arc<dyn TerminalSession>,
-    pub active_sentinel: Option<String>,
 }
 
 impl ShellHandle {
     pub(crate) fn new(session: Arc<dyn TerminalSession>) -> Self {
-        Self {
-            session,
-            active_sentinel: None,
-        }
+        Self { session }
     }
 
-    pub fn send_command(&self, command: &str, sentinel: &str) {
+    pub fn send_command(&self, command: &str) {
         use futures::FutureExt;
-        let payload = format!("{command}\necho {sentinel} $?\n");
+        let payload = format!("{command}\n");
         let _ = self.session.write(payload.as_bytes()).now_or_never();
     }
 
@@ -83,7 +79,6 @@ async fn reader_task(
     tx: mpsc::Sender<PtyNotification>,
 ) {
     let mut buf = [0u8; 4096];
-    let mut line_buf = String::new();
 
     loop {
         let n = match session.read(&mut buf).await {
@@ -91,39 +86,10 @@ async fn reader_task(
             Ok(n) => n,
         };
 
-        let chunk = &buf[..n];
-        let mut output_start = 0;
-
-        for (i, &byte) in chunk.iter().enumerate() {
-            if byte == b'\n' || i == n - 1 {
-                let end = if byte == b'\n' { i } else { i + 1 };
-                if let Ok(segment) = std::str::from_utf8(&chunk[output_start..end]) {
-                    line_buf.push_str(segment.trim_end_matches('\r'));
-                }
-
-                if line_buf.starts_with("__STOAT_") && line_buf.contains("__") {
-                    if let Some(status) = parse_sentinel_line(&line_buf) {
-                        let _ = tx
-                            .send(PtyNotification::CommandDone {
-                                run_id,
-                                exit_status: Some(status),
-                            })
-                            .await;
-                        line_buf.clear();
-                        output_start = end + 1;
-                        continue;
-                    }
-                }
-
-                line_buf.clear();
-                output_start = end + 1;
-            }
-        }
-
         if tx
             .send(PtyNotification::Output {
                 run_id,
-                data: chunk.to_vec(),
+                data: buf[..n].to_vec(),
             })
             .await
             .is_err()
@@ -138,11 +104,4 @@ async fn reader_task(
             exit_status: None,
         })
         .await;
-}
-
-pub(super) fn parse_sentinel_line(line: &str) -> Option<i32> {
-    let rest = line.strip_prefix("__STOAT_")?;
-    let after_id = rest.find("__ ")?;
-    let status_str = &rest[after_id + 3..];
-    status_str.trim().parse().ok()
 }
