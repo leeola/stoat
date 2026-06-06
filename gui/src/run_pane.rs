@@ -27,7 +27,7 @@ use crate::{
     globals::TerminalHostGlobal,
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
     settings::Settings,
-    theme::{DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
+    theme::{ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
     workspace::Workspace,
 };
 use gpui::{
@@ -570,9 +570,10 @@ impl Render for Run {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let cwd_label = SharedString::from(self.cwd.display().to_string());
         let (font_family, font_size) = editor_font(cx);
-        let mut body = div().flex().flex_col().flex_grow().w_full();
+        let mut body = div().flex().flex_col().flex_grow().w_full().gap_2();
         let active = self.blocks.len().saturating_sub(1);
         let focused = self.is_pane_focused(cx);
+        let theme = cx.theme();
         for (idx, block) in self.blocks.iter().enumerate() {
             let cursor = (idx == active)
                 .then_some(self.cell_size)
@@ -587,7 +588,14 @@ impl Render for Run {
                         focused,
                     }
                 });
-            body = body.child(render::render_block(block, cursor));
+            let gutter = if !block.finished {
+                theme.border_variant
+            } else if block.exit_status == Some(0) {
+                theme.success
+            } else {
+                theme.error
+            };
+            body = body.child(render::render_block(block, cursor, gutter));
         }
         let bounds_handle = cx.weak_entity();
         let cell_family = font_family.clone();

@@ -194,7 +194,11 @@ pub(crate) fn render_grid_row(
     }
 }
 
-pub(crate) fn render_block(block: &OutputBlock, cursor: Option<CursorRender>) -> AnyElement {
+pub(crate) fn render_block(
+    block: &OutputBlock,
+    cursor: Option<CursorRender>,
+    gutter: Hsla,
+) -> AnyElement {
     let header = div()
         .px_2()
         .py_1()
@@ -222,7 +226,13 @@ pub(crate) fn render_block(block: &OutputBlock, cursor: Option<CursorRender>) ->
             );
         }
     }
-    col.into_any_element()
+    div()
+        .w_full()
+        .py_1()
+        .border_l_2()
+        .border_color(gutter)
+        .child(col)
+        .into_any_element()
 }
 
 #[cfg(test)]
