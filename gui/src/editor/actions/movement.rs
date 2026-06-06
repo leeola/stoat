@@ -2,7 +2,8 @@ use crate::editor::{scroll::autoscroll::AutoscrollStrategy, Editor, EditorEvent}
 use gpui::Context;
 use stoat::{multi_buffer::MultiBufferSnapshot, DisplayPoint};
 use stoat_text::{
-    word_selection_offsets, Anchor, Bias, Selection, SelectionGoal, WordTarget as TextWordTarget,
+    cursor_offset, word_selection_offsets, Anchor, Bias, Selection, SelectionGoal,
+    WordTarget as TextWordTarget,
 };
 
 /// Vertical-only page-style motion direction. `Up` walks toward
@@ -179,14 +180,18 @@ impl Editor {
             .all_anchors()
             .iter()
             .map(|sel| {
-                let head_anchor = sel.head();
-                let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
-                let head_display = display_snapshot.buffer_to_display(head_point);
+                let cursor_off = cursor_offset(
+                    buffer_snapshot.rope(),
+                    buffer_snapshot.resolve_anchor(&sel.tail()),
+                    buffer_snapshot.resolve_anchor(&sel.head()),
+                );
+                let cursor_point = buffer_snapshot.rope().offset_to_point(cursor_off);
+                let cursor_display = display_snapshot.buffer_to_display(cursor_point);
                 let goal_col = match sel.goal {
                     SelectionGoal::Column(c) => c,
-                    SelectionGoal::None => head_display.column,
+                    SelectionGoal::None => cursor_display.column,
                 };
-                let new_row_i = (head_display.row as i64).saturating_add(scaled_delta);
+                let new_row_i = (cursor_display.row as i64).saturating_add(scaled_delta);
                 if new_row_i < 0 || new_row_i > max_row as i64 {
                     return sel.clone();
                 }
@@ -198,7 +203,7 @@ impl Editor {
                     return sel.clone();
                 };
                 let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
-                if offset == buffer_snapshot.resolve_anchor(&head_anchor) {
+                if offset == cursor_off {
                     return sel.clone();
                 }
                 moved = true;
@@ -857,6 +862,39 @@ mod tests {
         editor.update(&mut cx, |ed, cx| ed.handle_move_vertical(-1, 1, false, cx));
 
         assert_eq!(cursor_display_row(&editor, &mut cx), 1);
+    }
+
+    #[test]
+    fn move_vertical_after_line_select_advances_one_row() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "abc\ndef\nghi\njkl");
+        seed_at_offset(&editor, &mut cx, 0);
+        editor.update(&mut cx, |ed, cx| ed.select_line_below(1, cx));
+
+        editor.update(&mut cx, |ed, cx| ed.handle_move_vertical(1, 1, false, cx));
+
+        assert_eq!(
+            cursor_display_row(&editor, &mut cx),
+            1,
+            "j lands exactly one row below the selected line",
+        );
+    }
+
+    #[test]
+    fn move_vertical_up_after_line_select_retreats_one_row() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, "abc\ndef\nghi\njkl");
+        // Cursor on the "def" row.
+        seed_at_offset(&editor, &mut cx, 4);
+        editor.update(&mut cx, |ed, cx| ed.select_line_below(1, cx));
+
+        editor.update(&mut cx, |ed, cx| ed.handle_move_vertical(-1, 1, false, cx));
+
+        assert_eq!(
+            cursor_display_row(&editor, &mut cx),
+            0,
+            "k lands exactly one row above the selected line",
+        );
     }
 
     #[test]
