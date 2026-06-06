@@ -1286,6 +1286,21 @@ impl Workspace {
                         });
                         materialized += 1;
                     },
+                    crate::item::ItemKind::Terminal => {
+                        let cwd = snap
+                            .blob
+                            .get("cwd")
+                            .and_then(|v| v.as_str())
+                            .map(PathBuf::from)
+                            .unwrap_or_else(|| self.git_root.clone());
+                        let weak = cx.weak_entity();
+                        let terminal =
+                            cx.new(|cx| crate::terminal_view::Terminal::new(weak, cwd, cx));
+                        pane.update(cx, |p, cx| {
+                            p.add_item(Box::new(terminal), cx);
+                        });
+                        materialized += 1;
+                    },
                     other => {
                         tracing::info!(
                             pane_id = ?pane_id,
@@ -7281,6 +7296,7 @@ fn item_kind_config_name(kind: crate::item::ItemKind) -> &'static str {
     match kind {
         ItemKind::Editor => "editor",
         ItemKind::Run => "run",
+        ItemKind::Terminal => "terminal",
         ItemKind::Claude => "claude",
         ItemKind::Conflict => "conflict",
         ItemKind::Rebase => "rebase",
@@ -9236,6 +9252,7 @@ mod tests {
             ("rebase", ItemKind::Rebase, "rebase"),
             ("conflict", ItemKind::Conflict, "conflict"),
             ("editor", ItemKind::Editor, "normal"),
+            ("terminal", ItemKind::Terminal, "normal"),
         ] {
             let item = workspace_item_of_kind(vcx, label, kind);
             pane.update(vcx, |p, cx| {
@@ -17176,6 +17193,79 @@ mod tests {
                 ]
             );
         });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_terminal_pane() {
+        use crate::item::ItemKind;
+        use stoat::host::{
+            fake::{terminal::FakeTerminalSession, FakeTerminalHost},
+            TerminalHost,
+        };
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        cx.update(|cx| {
+            let host: Arc<dyn TerminalHost> =
+                Arc::new(FakeTerminalHost::new(Arc::new(FakeTerminalSession::new())));
+            cx.set_global(crate::globals::TerminalHostGlobal(host));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            let weak = cx.weak_entity();
+            let term = cx.new(|cx| {
+                crate::terminal_view::Terminal::new(weak, PathBuf::from("/tmp/repo/sub"), cx)
+            });
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .cloned()
+                .expect("focused pane present");
+            pane.update(cx, |p, cx| {
+                let index = p.add_item(Box::new(term), cx);
+                p.activate(index, cx);
+            });
+            w.mark_dirty();
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/terminal-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+        assert!(fs_dyn.exists(&path), "dirty workspace must write");
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        let kinds: Vec<ItemKind> = fresh_ws.read_with(vcx2, |w, cx| {
+            let mut kinds = Vec::new();
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    kinds.push(item.item_kind(cx));
+                }
+            }
+            kinds
+        });
+        assert_eq!(
+            kinds,
+            vec![ItemKind::Terminal],
+            "restored workspace reopens the terminal pane",
+        );
     }
 
     #[test]

@@ -377,7 +377,7 @@ impl Run {
 /// Whole character cells that fit in `bounds` at `cell` size, floored and
 /// clamped to at least one row and column. `None` when the cell has no
 /// area, which avoids dividing by zero before the first measurement.
-fn terminal_cells(bounds: Bounds<Pixels>, cell: Size<Pixels>) -> Option<(u16, u16)> {
+pub(crate) fn terminal_cells(bounds: Bounds<Pixels>, cell: Size<Pixels>) -> Option<(u16, u16)> {
     let cell_w: f32 = cell.width.into();
     let cell_h: f32 = cell.height.into();
     if cell_w <= 0.0 || cell_h <= 0.0 {
@@ -482,7 +482,7 @@ fn spawn_write_bytes(session: Arc<dyn TerminalSession>, bytes: Vec<u8>, cx: &mut
 
 /// The X10/SGR base button code for a pressed/released button, or `None`
 /// for buttons that have no standard report code.
-fn mouse_button_code(button: MouseButton) -> Option<u8> {
+pub(crate) fn mouse_button_code(button: MouseButton) -> Option<u8> {
     match button {
         MouseButton::Left => Some(0),
         MouseButton::Middle => Some(1),
@@ -492,7 +492,7 @@ fn mouse_button_code(button: MouseButton) -> Option<u8> {
 }
 
 /// Whether a scroll delta moves the content up (toward older lines).
-fn scroll_is_up(delta: &ScrollDelta) -> bool {
+pub(crate) fn scroll_is_up(delta: &ScrollDelta) -> bool {
     match delta {
         ScrollDelta::Lines(p) => p.y > 0.0,
         ScrollDelta::Pixels(p) => p.y > px(0.),
@@ -684,9 +684,9 @@ impl Render for Run {
 /// it. The editor uses the same constant for cell-height math; the
 /// run pane mirrors it so cached cell rows line up with the
 /// rendered grid.
-const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
+pub(crate) const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
 
-fn editor_font(cx: &App) -> (SharedString, f32) {
+pub(crate) fn editor_font(cx: &App) -> (SharedString, f32) {
     let (family, size) = match cx.try_global::<Settings>() {
         Some(settings) => (
             settings.resolved.editor_font_family.clone(),

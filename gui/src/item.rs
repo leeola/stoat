@@ -12,6 +12,7 @@ use snafu::Snafu;
 pub enum ItemKind {
     Editor,
     Run,
+    Terminal,
     Claude,
     Conflict,
     Rebase,
