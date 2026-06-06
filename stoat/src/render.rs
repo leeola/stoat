@@ -253,11 +253,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         &stoat.theme,
         buf,
     );
-    if let Some(run_id) = stoat.modal_run {
-        if let Some(run_state) = ws.runs.get(run_id) {
-            run_pane::render_modal_run(run_state, &stoat.theme, size, buf);
-        }
-    } else if let Some(help) = &stoat.help {
+    if let Some(help) = &stoat.help {
         help::render_help(
             help,
             &stoat.mode,

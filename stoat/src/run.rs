@@ -7,7 +7,7 @@ use crate::{
     workspace::Workspace,
 };
 pub use key_encode::encode_key;
-pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
+pub use pty::{spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
@@ -28,7 +28,6 @@ pub struct RunState {
     pub shell_handle: Option<ShellHandle>,
     pub history: Vec<String>,
     pub history_cursor: Option<usize>,
-    pub title: Option<String>,
 }
 
 impl RunState {
@@ -45,7 +44,6 @@ impl RunState {
             shell_handle: None,
             history: Vec::new(),
             history_cursor: None,
-            title: None,
         }
     }
 

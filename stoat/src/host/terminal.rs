@@ -4,9 +4,8 @@ use std::{io, path::PathBuf, sync::Mutex};
 use tokio::sync::mpsc;
 
 /// Process-spawn parameters for [`TerminalHost::spawn`]. Carries
-/// the data both [`crate::run::spawn_shell`] (the persistent
-/// shell variant) and [`crate::run::spawn_oneshot`] (the single
-/// command variant) need to build a [`portable_pty::CommandBuilder`].
+/// the data [`crate::run::spawn_shell`] needs to build a
+/// [`portable_pty::CommandBuilder`].
 #[derive(Debug, Clone)]
 pub struct SpawnArgs {
     pub program: String,
@@ -189,9 +188,9 @@ fn process_name_for_pid(_pid: libc::pid_t) -> Option<String> {
 
 /// Synchronous PTY-open helper shared between
 /// [`LocalTerminalHost::spawn`] and the legacy
-/// [`crate::run::spawn_shell`] / [`crate::run::spawn_oneshot`]
-/// entry points. Lives here so both call sites use the same
-/// portable-pty boilerplate without an async detour.
+/// [`crate::run::spawn_shell`] entry point. Lives here so both
+/// call sites use the same portable-pty boilerplate without an
+/// async detour.
 pub(crate) fn open_local_pty(args: SpawnArgs) -> io::Result<PtyTerminalSession> {
     let pty_system = portable_pty::native_pty_system();
     let pair = pty_system

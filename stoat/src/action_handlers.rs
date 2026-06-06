@@ -425,7 +425,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
                 .as_any()
                 .downcast_ref::<Run>()
                 .expect("Run action downcast");
-            run::run_command(stoat, &cmd.command)
+            run::open_run(stoat);
+            run::run_submit_command(stoat, &cmd.command)
         },
         ActionKind::OpenClaude => claude::open_claude(stoat),
         ActionKind::ClaudeSubmit => claude::claude_submit(stoat),

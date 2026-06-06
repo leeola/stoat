@@ -17,8 +17,6 @@ pub(super) fn open_run(stoat: &mut Stoat) -> UpdateEffect {
 }
 
 pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
-    let pty_tx = stoat.pty_tx.clone();
-    let executor = stoat.executor.clone();
     let active_idx = stoat.active_workspace;
     let ws = &mut stoat.workspaces[active_idx];
     let focused = ws.panes.focus();
@@ -35,14 +33,6 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     }
 
-    {
-        let Some(run_state) = ws.runs.get_mut(id) else {
-            return UpdateEffect::None;
-        };
-        run_state.history.push(text.clone());
-        run_state.history_cursor = None;
-    }
-
     let input_ref = {
         let Some(run_state) = ws.runs.get(id) else {
             return UpdateEffect::None;
@@ -51,6 +41,35 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     };
     input_ref.replace_text(ws, "");
 
+    run_submit_command(stoat, &text)
+}
+
+/// Submit `command` as a new block in the focused Run pane: record it in
+/// history, append the block, and send it to the pane's shell, spawning
+/// the shell on first use. No-op when the focused pane is not a Run pane
+/// or `command` is empty. The programmatic counterpart to [`run_submit`],
+/// which sources the command from the pane's input editor.
+pub(super) fn run_submit_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
+    if command.is_empty() {
+        return UpdateEffect::None;
+    }
+    let pty_tx = stoat.pty_tx.clone();
+    let executor = stoat.executor.clone();
+    let active_idx = stoat.active_workspace;
+    let ws = &mut stoat.workspaces[active_idx];
+    let focused = ws.panes.focus();
+    let View::Run(id) = ws.panes.pane(focused).view else {
+        return UpdateEffect::None;
+    };
+
+    {
+        let Some(run_state) = ws.runs.get_mut(id) else {
+            return UpdateEffect::None;
+        };
+        run_state.history.push(command.to_owned());
+        run_state.history_cursor = None;
+    }
+
     let pane_area = ws.panes.pane(focused).area;
     let width = pane_area.width.saturating_sub(2).max(20);
 
@@ -58,17 +77,19 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
         Some(s) => s,
         None => return UpdateEffect::None,
     };
-    run_state.blocks.push(OutputBlock::new(text.clone(), width));
+    run_state
+        .blocks
+        .push(OutputBlock::new(command.to_owned(), width));
 
     if let Some(handle) = &mut run_state.shell_handle {
         let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
-        handle.send_command(&text, &sentinel);
+        handle.send_command(command, &sentinel);
     } else if let Ok(handle) = crate::run::spawn_shell(&executor, &run_state.cwd, width, pty_tx, id)
     {
         let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
         run_state.shell_handle = Some(handle);
         if let Some(h) = &mut run_state.shell_handle {
-            h.send_command(&text, &sentinel);
+            h.send_command(command, &sentinel);
         }
     }
 
@@ -156,41 +177,4 @@ pub(super) fn run_history_next(stoat: &mut Stoat) -> UpdateEffect {
         input.replace_text(ws, "");
     }
     UpdateEffect::Redraw
-}
-
-pub(super) fn run_command(stoat: &mut Stoat, command: &str) -> UpdateEffect {
-    let pty_tx = stoat.pty_tx.clone();
-    let executor = stoat.executor.clone();
-    let ws = stoat.active_workspace();
-    let cwd = ws.git_root.clone();
-    let focused_area = ws.panes.pane(ws.panes.focus()).area;
-    let width = focused_area.width.saturating_sub(8).max(20);
-
-    let active_idx = stoat.active_workspace;
-    let ws = &mut stoat.workspaces[active_idx];
-    let mut state = RunState::new(cwd.clone(), ws, executor);
-    state.title = Some(command.to_owned());
-    state
-        .blocks
-        .push(OutputBlock::new(command.to_owned(), width));
-    let id = ws.runs.insert(state);
-
-    match crate::run::spawn_oneshot(&stoat.executor, command, &cwd, width, pty_tx, id) {
-        Ok(handle) => {
-            let ws = stoat.active_workspace_mut();
-            if let Some(run_state) = ws.runs.get_mut(id) {
-                run_state.shell_handle = Some(handle);
-            }
-            stoat.modal_run = Some(id);
-            UpdateEffect::Redraw
-        },
-        Err(e) => {
-            tracing::warn!("failed to spawn command: {e}");
-            let ws = stoat.active_workspace_mut();
-            if let Some(state) = ws.runs.remove(id) {
-                state.dispose(ws);
-            }
-            UpdateEffect::None
-        },
-    }
 }

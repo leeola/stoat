@@ -79,7 +79,7 @@ impl Availability {
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|d| d.view.clone()),
         };
         let claude_focused = matches!(focused_view, Some(View::Claude(_)));
-        let run_focused = matches!(focused_view, Some(View::Run(_))) || stoat.modal_run.is_some();
+        let run_focused = matches!(focused_view, Some(View::Run(_)));
 
         Self {
             in_rebase_plan: ws.rebase.is_some(),

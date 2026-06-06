@@ -72,30 +72,6 @@ pub fn spawn_shell(
     Ok(ShellHandle::new(session))
 }
 
-pub fn spawn_oneshot(
-    executor: &Executor,
-    command: &str,
-    cwd: &Path,
-    width: u16,
-    pty_tx: mpsc::Sender<PtyNotification>,
-    run_id: RunId,
-) -> std::io::Result<ShellHandle> {
-    let args = SpawnArgs {
-        program: "bash".into(),
-        args: vec!["-c".into(), command.to_string()],
-        env: vec![("TERM".into(), "dumb".into())],
-        cwd: cwd.to_path_buf(),
-        width,
-        rows: 24,
-    };
-    let session: Arc<dyn TerminalSession> = Arc::new(open_local_pty(args)?);
-    executor
-        .spawn(reader_task(session.clone(), run_id, pty_tx))
-        .detach();
-
-    Ok(ShellHandle::new(session))
-}
-
 async fn reader_task(
     session: Arc<dyn TerminalSession>,
     run_id: RunId,

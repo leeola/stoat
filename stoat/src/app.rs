@@ -18,7 +18,7 @@ use crate::{
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
     register,
-    run::{GridSelection, PtyNotification, RunId},
+    run::{GridSelection, PtyNotification},
     workspace::{Workspace, WorkspaceId},
     workspace_picker::{PickerOutcome, WorkspacePicker},
 };
@@ -167,7 +167,6 @@ pub struct Stoat {
     /// blocking pool). Multiple notifications collapse into one
     /// pending wake-up.
     pub(crate) redraw_notify: Arc<tokio::sync::Notify>,
-    pub(crate) modal_run: Option<RunId>,
     pub(crate) render_tick: u64,
     /// Accumulated digit prefix for the next motion (Vim-style
     /// `<count>j` etc.). Filled by `handle_key` when a digit press
@@ -637,7 +636,6 @@ impl Stoat {
             pty_tx,
             pty_rx,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
-            modal_run: None,
             render_tick: 0,
             pending_count: None,
             pending_find: None,
@@ -1556,18 +1554,6 @@ impl Stoat {
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if let Some(run_id) = self.modal_run {
-                let ws = self.active_workspace_mut();
-                if let Some(run_state) = ws.runs.get_mut(run_id) {
-                    if let Some(handle) = &mut run_state.shell_handle {
-                        handle.kill();
-                    }
-                    if let Some(block) = run_state.active_block_mut() {
-                        block.finished = true;
-                    }
-                }
-                return UpdateEffect::Redraw;
-            }
             if self.help.is_some() {
                 action_handlers::close_help(self);
                 return UpdateEffect::Redraw;
@@ -1630,20 +1616,6 @@ impl Stoat {
         };
         if !is_record_macro_toggle {
             action_handlers::macro_recording::capture(self, &key);
-        }
-
-        if let Some(run_id) = self.modal_run {
-            let finished = self
-                .active_workspace()
-                .runs
-                .get(run_id)
-                .is_some_and(|r| !r.is_running());
-            if finished && key.code == KeyCode::Esc {
-                self.active_workspace_mut().runs.remove(run_id);
-                self.modal_run = None;
-                return UpdateEffect::Redraw;
-            }
-            return UpdateEffect::None;
         }
 
         if self.workspace_picker.is_some() {
@@ -3365,7 +3337,7 @@ fn detail_for_message(message: &AgentMessage) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::buffer::TextBuffer;
+    use crate::{buffer::TextBuffer, run::RunId};
     use std::path::{Path, PathBuf};
 
     /// When `parse_buffer_step` aborts on the deadline, the prior state
