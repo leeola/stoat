@@ -3177,6 +3177,8 @@ impl Workspace {
                     );
                 }
             },
+            ActionKind::IncreaseFontSize => crate::editor::adjust_editor_font_size(1.0, cx),
+            ActionKind::DecreaseFontSize => crate::editor::adjust_editor_font_size(-1.0, cx),
             other => {
                 tracing::trace!(target: "stoat::dispatch", "unrouted action: {other:?}");
             },
