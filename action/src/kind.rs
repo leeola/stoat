@@ -375,4 +375,6 @@ pub enum ActionKind {
     PickerConfirm,
     PickerConfirmSplitRight,
     PickerConfirmSplitDown,
+    IncreaseFontSize,
+    DecreaseFontSize,
 }

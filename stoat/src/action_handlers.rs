@@ -720,6 +720,10 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::OpenAbout
         | ActionKind::ToggleReplaceInGlobalSearch
         | ActionKind::ReplaceAllInGlobalSearch
+        // Editor font zoom is a GUI-only runtime override; the ratatui
+        // TUI cannot resize its own terminal font.
+        | ActionKind::IncreaseFontSize
+        | ActionKind::DecreaseFontSize
         // The Way-2 terminal is a GUI-only item view; the ratatui TUI has
         // no surface to host it.
         | ActionKind::OpenClaudeTerminal => UpdateEffect::None,

@@ -1,6 +1,6 @@
 use crate::{
     defs::{
-        app::{DismissModal, Quit, QuitAll},
+        app::{DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll},
         claude::{
             ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeJumpToFocusedCard,
             ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
@@ -142,6 +142,8 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
     add(DismissModal::DEF, |_| Ok(Box::new(DismissModal)));
+    add(IncreaseFontSize::DEF, |_| Ok(Box::new(IncreaseFontSize)));
+    add(DecreaseFontSize::DEF, |_| Ok(Box::new(DecreaseFontSize)));
     add(SplitRight::DEF, |_| Ok(Box::new(SplitRight)));
     add(SplitDown::DEF, |_| Ok(Box::new(SplitDown)));
     add(SplitNewRight::DEF, |_| Ok(Box::new(SplitNewRight)));
@@ -1311,7 +1313,8 @@ mod tests {
         // + 2 ReviewNextCommit / ReviewPrevCommit (commit-group navigation).
         // + 1 CommitsOpenBranchReview (branch review from the commits view).
         // + 1 OpenClaudeTerminal (terminal pane running the claude CLI).
-        assert_eq!(all().count(), 353);
+        // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
+        assert_eq!(all().count(), 355);
     }
 
     #[test]

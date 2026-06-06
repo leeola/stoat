@@ -30,6 +30,26 @@ define_action!(
     ActionPriority::Common
 );
 
+define_action!(
+    IncreaseFontSizeDef,
+    IncreaseFontSize,
+    "IncreaseFontSize",
+    ActionKind::IncreaseFontSize,
+    "increase the editor font size",
+    "Scale the editor buffer font up one step for the current session. The override is session-only (not persisted) and affects only the editor buffer font, not the UI or terminal fonts.",
+    ActionPriority::Common
+);
+
+define_action!(
+    DecreaseFontSizeDef,
+    DecreaseFontSize,
+    "DecreaseFontSize",
+    ActionKind::DecreaseFontSize,
+    "decrease the editor font size",
+    "Scale the editor buffer font down one step for the current session. The override is session-only (not persisted) and affects only the editor buffer font, not the UI or terminal fonts.",
+    ActionPriority::Common
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,6 +76,20 @@ mod tests {
         assert_eq!(DismissModal.kind(), ActionKind::DismissModal);
         assert_eq!(DismissModal.def().name(), "DismissModal");
         assert!(DismissModal.def().params().is_empty());
+    }
+
+    #[test]
+    fn increase_font_size() {
+        assert_eq!(IncreaseFontSize.kind(), ActionKind::IncreaseFontSize);
+        assert_eq!(IncreaseFontSize.def().name(), "IncreaseFontSize");
+        assert!(IncreaseFontSize.def().params().is_empty());
+    }
+
+    #[test]
+    fn decrease_font_size() {
+        assert_eq!(DecreaseFontSize.kind(), ActionKind::DecreaseFontSize);
+        assert_eq!(DecreaseFontSize.def().name(), "DecreaseFontSize");
+        assert!(DecreaseFontSize.def().params().is_empty());
     }
 
     #[test]
