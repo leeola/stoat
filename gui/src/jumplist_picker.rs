@@ -155,12 +155,7 @@ impl PickerDelegate for JumplistPickerDelegate {
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let Some((entry_idx, matched)) = self.matches.get(ix) else {
             return div().into_any_element();
         };
@@ -179,15 +174,12 @@ impl PickerDelegate for JumplistPickerDelegate {
             },
         );
         let label = StyledText::new(SharedString::from(display)).with_highlights(runs);
-        let mut row = div()
+        div()
             .flex()
             .items_center()
             .px_2()
-            .child(div().text_color(color).child(label));
-        if selected {
-            row = row.bg(theme.modal_selection);
-        }
-        row.into_any_element()
+            .child(div().text_color(color).child(label))
+            .into_any_element()
     }
 }
 

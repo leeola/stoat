@@ -79,23 +79,15 @@ impl PickerDelegate for EncodingPickerDelegate {
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let Some(&option) = self.options.get(ix) else {
             return div().into_any_element();
         };
-        let mut row = div()
+        div()
             .px_2()
             .text_color(cx.theme().modal_picker)
-            .child(SharedString::from(option.as_str()));
-        if selected {
-            row = row.bg(cx.theme().modal_selection);
-        }
-        row.into_any_element()
+            .child(SharedString::from(option.as_str()))
+            .into_any_element()
     }
 }
 

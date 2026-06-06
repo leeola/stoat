@@ -143,23 +143,18 @@ impl PickerDelegate for CodeActionPickerDelegate {
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let title = self
             .entries
             .get(ix)
             .map(|e| e.title().to_string())
             .unwrap_or_default();
         let color = cx.theme().statusbar_text;
-        let mut row = div().px_2().text_color(color).child(title);
-        if selected {
-            row = row.bg(cx.theme().modal_selection);
-        }
-        row.into_any_element()
+        div()
+            .px_2()
+            .text_color(color)
+            .child(title)
+            .into_any_element()
     }
 }
 

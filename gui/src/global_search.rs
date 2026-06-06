@@ -284,12 +284,7 @@ impl PickerDelegate for GlobalSearchDelegate {
         )
     }
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let Some(entry) = self.entries.get(ix) else {
             return div().into_any_element();
         };
@@ -312,9 +307,6 @@ impl PickerDelegate for GlobalSearchDelegate {
                 );
         } else {
             row = row.child(display);
-        }
-        if selected {
-            row = row.bg(cx.theme().modal_selection);
         }
         row.into_any_element()
     }

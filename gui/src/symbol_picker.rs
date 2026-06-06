@@ -158,12 +158,7 @@ impl PickerDelegate for SymbolPickerDelegate {
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let Some((entry_idx, matched)) = self.matches.get(ix) else {
             return div().into_any_element();
         };
@@ -180,11 +175,11 @@ impl PickerDelegate for SymbolPickerDelegate {
             },
         );
         let label = StyledText::new(SharedString::from(entry.title.clone())).with_highlights(runs);
-        let mut row = div().px_2().text_color(color).child(label);
-        if selected {
-            row = row.bg(cx.theme().modal_selection);
-        }
-        row.into_any_element()
+        div()
+            .px_2()
+            .text_color(color)
+            .child(label)
+            .into_any_element()
     }
 }
 

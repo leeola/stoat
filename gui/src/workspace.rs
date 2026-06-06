@@ -12082,12 +12082,7 @@ mod tests {
             ) {
             }
             fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
-            fn render_match(
-                &self,
-                _ix: usize,
-                _selected: bool,
-                _cx: &mut Context<'_, Picker<Self>>,
-            ) -> AnyElement {
+            fn render_match(&self, _ix: usize, _cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
                 div().into_any_element()
             }
         }

@@ -157,12 +157,7 @@ impl PickerDelegate for WorkspaceSymbolPickerDelegate {
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let Some(entry) = self.entries.get(ix) else {
             return div().into_any_element();
         };
@@ -173,11 +168,11 @@ impl PickerDelegate for WorkspaceSymbolPickerDelegate {
             entry.position.line + 1
         );
         let color = cx.theme().statusbar_text;
-        let mut row = div().px_2().text_color(color).child(display);
-        if selected {
-            row = row.bg(cx.theme().modal_selection);
-        }
-        row.into_any_element()
+        div()
+            .px_2()
+            .text_color(color)
+            .child(display)
+            .into_any_element()
     }
 }
 

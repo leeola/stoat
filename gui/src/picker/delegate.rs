@@ -1,5 +1,5 @@
-use crate::{editor::Editor, picker::Picker};
-use gpui::{AnyElement, Context, Entity, SharedString, Task, WeakEntity, Window};
+use crate::{editor::Editor, picker::Picker, theme::ActiveTheme};
+use gpui::{AnyElement, App, Context, Entity, Hsla, SharedString, Task, WeakEntity, Window};
 use stoat_action::Action;
 
 /// Confirmation modifier carried by [`PickerDelegate::confirm`].
@@ -44,12 +44,14 @@ pub trait PickerDelegate: Sized + 'static {
 
     fn dismissed(&mut self, cx: &mut Context<'_, Picker<Self>>);
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement;
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement;
+
+    /// Background color for the selected (and hovered) row, painted as a
+    /// rounded inset band by the shared picker. Defaults to the modal
+    /// selection color; override to give a picker a distinct selection.
+    fn selected_background(&self, cx: &App) -> Hsla {
+        cx.theme().modal_selection
+    }
 
     /// Invoked once during [`Picker::new`] after the query editor is
     /// constructed. Lets delegates that need to mutate the query

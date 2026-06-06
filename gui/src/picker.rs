@@ -329,9 +329,10 @@ impl<D: PickerDelegate> Render for Picker<D> {
                 let separators = this.delegate.separators_after_indices();
                 let separator_color = cx.theme().border_inactive;
                 let keybinding_color = cx.theme().muted_text;
+                let selected_bg = this.delegate.selected_background(cx);
                 range
                     .map(|ix| {
-                        let match_el = this.delegate.render_match(ix, ix == selected, cx);
+                        let match_el = this.delegate.render_match(ix, cx);
                         let body = match this.delegate.keybinding_for_index(ix, cx) {
                             Some(keybinding) => div()
                                 .flex()
@@ -354,6 +355,15 @@ impl<D: PickerDelegate> Render for Picker<D> {
                         } else {
                             transparent_black()
                         };
+                        let mut band = div()
+                            .w_full()
+                            .rounded_sm()
+                            .py_0p5()
+                            .hover(move |s| s.bg(selected_bg))
+                            .child(body);
+                        if ix == selected {
+                            band = band.bg(selected_bg);
+                        }
                         div()
                             .flex()
                             .flex_col()
@@ -371,7 +381,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                             .on_click(cx.listener(move |this, _event, _window, cx| {
                                 this.set_selected_index(ix, cx)
                             }))
-                            .child(body)
+                            .child(div().px_1().child(band))
                             .child(div().h(px(1.0)).bg(divider))
                             .into_any_element()
                     })
@@ -517,12 +527,7 @@ mod tests {
             *self.dismissed.lock().expect("test dismissed mutex") += 1;
         }
 
-        fn render_match(
-            &self,
-            ix: usize,
-            _selected: bool,
-            _cx: &mut Context<'_, Picker<Self>>,
-        ) -> AnyElement {
+        fn render_match(&self, ix: usize, _cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
             div().child(self.items[ix].clone()).into_any_element()
         }
 
@@ -692,10 +697,11 @@ mod tests {
         assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 0);
 
         // Clicking a row well below the top moves the highlight to the row
-        // under the cursor (deterministic given the test layout).
+        // under the cursor (deterministic given the test layout: the row
+        // index follows the padded row height).
         vcx.simulate_click(point(px(100.0), px(500.0)), Modifiers::default());
         vcx.run_until_parked();
-        assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 17);
+        assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 15);
 
         // The click selects only -- confirm/open stays on Enter, so the modal
         // stays open and typable.

@@ -338,12 +338,7 @@ impl PickerDelegate for FileFinderDelegate {
         )
     }
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let Some((path_idx, matched)) = self.matches.get(ix) else {
             return div().into_any_element();
         };
@@ -362,15 +357,12 @@ impl PickerDelegate for FileFinderDelegate {
             },
         );
         let label = StyledText::new(SharedString::from(display)).with_highlights(runs);
-        let mut row = div()
+        div()
             .flex()
             .items_center()
             .px_2()
-            .child(div().truncate().text_color(color).child(label));
-        if selected {
-            row = row.bg(theme.modal_selection);
-        }
-        row.into_any_element()
+            .child(div().truncate().text_color(color).child(label))
+            .into_any_element()
     }
 }
 

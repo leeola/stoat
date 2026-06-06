@@ -8,8 +8,8 @@ use crate::{
     theme::ActiveTheme,
 };
 use gpui::{
-    div, AnyElement, App, AppContext, Context, Entity, EventEmitter, IntoElement, ParentElement,
-    Render, SharedString, Styled, Subscription, Task, Window,
+    div, AnyElement, App, AppContext, Context, Entity, EventEmitter, Hsla, IntoElement,
+    ParentElement, Render, SharedString, Styled, Subscription, Task, Window,
 };
 use serde_json::Value;
 use std::{
@@ -557,12 +557,7 @@ impl PickerDelegate for CommitListDelegate {
         // FIXME: CloseCommits handler is wired in TODO.md line 21.
     }
 
-    fn render_match(
-        &self,
-        ix: usize,
-        selected: bool,
-        cx: &mut Context<'_, Picker<Self>>,
-    ) -> AnyElement {
+    fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
         let parts = {
             let s = self.state.read(cx);
             s.inner.commits.get(ix).map(commit_row_parts)
@@ -587,10 +582,11 @@ impl PickerDelegate for CommitListDelegate {
                         .child(SharedString::from(parts.metadata)),
                 );
         }
-        if selected {
-            row = row.bg(theme.selection);
-        }
         row.into_any_element()
+    }
+
+    fn selected_background(&self, cx: &App) -> Hsla {
+        cx.theme().selection
     }
 }
 
