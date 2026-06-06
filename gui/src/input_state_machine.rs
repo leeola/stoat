@@ -8,6 +8,7 @@ use crate::{
         actions::{marks::MarkRequest, movement::FindKind, textobject::TextobjectMode},
         Editor,
     },
+    terminal_view::Terminal,
     workspace::Workspace,
 };
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
@@ -22,6 +23,7 @@ use stoat::{
     keymap::{is_text_input_mode, Keymap, KeymapState, StateValue},
     keymap_state::{arg_as_str, normalize_shift_event, resolve_action},
     register::Register,
+    run::encode_key,
 };
 use stoat_config::KeyPart;
 
@@ -242,6 +244,12 @@ pub struct InputStateMachine {
     /// focused item; tests stage it directly. Also read as the
     /// focused editor by the workspace's action dispatch helpers.
     active_editor: Option<WeakEntity<Editor>>,
+    /// The terminal that owns the active pane, if any. When set,
+    /// [`feed`] forwards control/named/modified keys straight to its
+    /// PTY (plain printables are left to the IME path) instead of
+    /// resolving keymap bindings. Set by the workspace when a terminal
+    /// becomes the focused item, mirroring [`active_editor`].
+    active_terminal: Option<WeakEntity<Terminal>>,
     /// Extra IME targets registered by surfaces beyond the focused
     /// pane editor (e.g. an inline input embedded in another view).
     /// [`text_input`] fans each commit to the primary and every live
@@ -381,6 +389,7 @@ impl InputStateMachine {
             pending_duplicate_char: None,
             consumed_text_input_char: None,
             active_editor: None,
+            active_terminal: None,
             extra_text_targets: Vec::new(),
             editor_focus_target: None,
             pending_find: None,
@@ -504,6 +513,13 @@ impl InputStateMachine {
     /// only.
     pub fn set_active_editor(&mut self, editor: Option<WeakEntity<Editor>>) {
         self.active_editor = editor;
+    }
+
+    /// Set the terminal that [`feed`] forwards keystrokes to. Production
+    /// code calls this when the workspace's focused item becomes (or
+    /// stops being) a terminal; `None` returns `feed` to keymap dispatch.
+    pub(crate) fn set_active_terminal(&mut self, terminal: Option<WeakEntity<Terminal>>) {
+        self.active_terminal = terminal;
     }
 
     /// Register an extra editor as an IME target so [`text_input`]
@@ -1095,6 +1111,25 @@ impl InputStateMachine {
         };
         let event = normalize_shift_event(event);
 
+        // A focused terminal captures input: control/named/modified keys
+        // are encoded straight to its PTY, while plain printables are
+        // left to the IME path (see `text_input`). Bypasses the keymap
+        // and pending-char machinery, but only outside a text-input mode
+        // -- a picker or the command palette opened over the terminal
+        // sets `prompt` mode, and must keep receiving its own keys.
+        if !self.text_input_allowed() {
+            if let Some(terminal) = self.active_terminal.as_ref().and_then(WeakEntity::upgrade) {
+                let plain_printable =
+                    matches!(event.code, KeyCode::Char(_)) && event.modifiers.is_empty();
+                if !plain_printable {
+                    if let Some(bytes) = encode_key(event) {
+                        terminal.update(cx, |term, cx| term.write_to_pty(bytes, cx));
+                    }
+                }
+                return Vec::new();
+            }
+        }
+
         let in_input_mode_at_entry = self.text_input_allowed();
         let arming_candidate = match event.code {
             KeyCode::Char(ch) if event.modifiers.is_empty() => Some(ch),
@@ -1545,6 +1580,100 @@ mod tests {
         f: impl FnOnce(&mut InputStateMachine, &mut Window, &mut Context<'_, InputStateMachine>) -> R,
     ) -> R {
         sm.update_in(vcx, f)
+    }
+
+    #[test]
+    fn focused_terminal_receives_encoded_control_keys() {
+        use crate::globals::{
+            ClipboardHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal,
+            TerminalHostGlobal,
+        };
+        use std::sync::Arc;
+        use stoat::host::{
+            fake::{terminal::FakeTerminalSession, FakeClipboard, FakeFs, FakeTerminalHost},
+            ClipboardHost, FsHost, FsWatchHost, TerminalHost,
+        };
+        use stoat_host::NoopFsWatcher;
+        use stoat_scheduler::{Executor, TestScheduler};
+
+        let mut cx = TestAppContext::single();
+        let session = Arc::new(FakeTerminalSession::new());
+        cx.update({
+            let session = session.clone();
+            move |cx| {
+                cx.set_global(ExecutorGlobal(Executor::new(
+                    Arc::new(TestScheduler::new()),
+                )));
+                cx.set_global(FsHostGlobal(Arc::new(FakeFs::new()) as Arc<dyn FsHost>));
+                cx.set_global(FsWatchHostGlobal(
+                    Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
+                ));
+                cx.set_global(ClipboardHostGlobal(
+                    Arc::new(FakeClipboard::new()) as Arc<dyn ClipboardHost>
+                ));
+                cx.set_global(TerminalHostGlobal(
+                    Arc::new(FakeTerminalHost::new(session)) as Arc<dyn TerminalHost>
+                ));
+            }
+        });
+
+        let (workspace, vcx) =
+            cx.add_window_view(|_, cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+        let weak_ws = workspace.downgrade();
+        let sm =
+            vcx.update(|_, cx| cx.new(|_| InputStateMachine::new(weak_ws.clone(), empty_keymap())));
+        let terminal = vcx.update(|_, cx| {
+            cx.new(|cx| {
+                Terminal::with_command(
+                    weak_ws,
+                    PathBuf::from("/tmp/repo"),
+                    "bash".into(),
+                    Vec::new(),
+                    cx,
+                )
+            })
+        });
+        vcx.run_until_parked();
+        sm.update(vcx, |sm, _| {
+            sm.set_active_terminal(Some(terminal.downgrade()))
+        });
+
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&key_with("c", ctrl), window, cx)
+        });
+        feed_in_app(vcx, &sm, |sm, window, cx| sm.feed(&key("up"), window, cx));
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&key("enter"), window, cx)
+        });
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&key_with_char("a", "a", Modifiers::default()), window, cx)
+        });
+        vcx.run_until_parked();
+
+        assert_eq!(
+            session.sent_bytes(),
+            vec![vec![0x03], b"\x1b[A".to_vec(), b"\r".to_vec()],
+            "control/named keys reach the PTY; the plain printable is left to the IME path",
+        );
+
+        // A text-input mode (e.g. a picker opened over the terminal)
+        // suppresses terminal routing so the modal keeps its keys.
+        sm.update(vcx, |sm, _| {
+            sm.set_mode_for_test(StateValue::String("prompt".into()))
+        });
+        feed_in_app(vcx, &sm, |sm, window, cx| {
+            sm.feed(&key_with("c", ctrl), window, cx)
+        });
+        vcx.run_until_parked();
+        assert_eq!(
+            session.sent_bytes().len(),
+            3,
+            "a text-input mode suppresses terminal key routing",
+        );
     }
 
     #[test]

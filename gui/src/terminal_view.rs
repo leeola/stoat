@@ -25,10 +25,10 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, InteractiveElement,
-    IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size, Styled, Task,
-    WeakEntity, Window,
+    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, FocusHandle, Focusable,
+    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size,
+    Styled, Task, WeakEntity, Window,
 };
 use std::{
     path::{Path, PathBuf},
@@ -93,6 +93,10 @@ pub(crate) struct Terminal {
     /// refresh rate so a chatty program does not poll every chunk.
     foreground_name: Option<String>,
     foreground_checked_at: Option<Instant>,
+    /// Focus handle so the terminal is a focusable element: gpui routes
+    /// IME input to the focused element, and the keystroke pipeline runs
+    /// at the window level once anything in the window holds focus.
+    focus_handle: FocusHandle,
     _spawn_task: Option<Task<()>>,
 }
 
@@ -121,7 +125,17 @@ impl Terminal {
             last_terminal_size: None,
             foreground_name: None,
             foreground_checked_at: None,
+            focus_handle: cx.focus_handle(),
             _spawn_task: Some(spawn_task),
+        }
+    }
+
+    /// Forward `bytes` to the PTY off the foreground thread. Used by the
+    /// input pipeline to write encoded keystrokes to the focused
+    /// terminal; a no-op until the session is installed.
+    pub(crate) fn write_to_pty(&self, bytes: Vec<u8>, cx: &mut Context<'_, Self>) {
+        if let Some(session) = self.session.clone() {
+            spawn_write_bytes(session, bytes, cx);
         }
     }
 
@@ -471,12 +485,19 @@ impl Render for Terminal {
                 this.report_mouse(code, false, true, event.position, event.modifiers, cx);
             }));
         div()
+            .track_focus(&self.focus_handle)
             .flex()
             .flex_col()
             .size_full()
             .font_family(font_family)
             .text_size(px(font_size))
             .child(output_layer)
+    }
+}
+
+impl Focusable for Terminal {
+    fn focus_handle(&self, _cx: &App) -> FocusHandle {
+        self.focus_handle.clone()
     }
 }
 
@@ -509,7 +530,8 @@ mod tests {
         workspace::Workspace,
     };
     use gpui::{
-        point, px, size, AppContext, Bounds, Entity, Modifiers, TestAppContext, VisualTestContext,
+        point, px, size, AppContext, Bounds, Entity, Keystroke, Modifiers, TestAppContext,
+        VisualTestContext,
     };
     use stoat::host::{
         fake::{terminal::FakeTerminalSession, FakeClipboard, FakeFs, FakeTerminalHost},
@@ -772,5 +794,33 @@ mod tests {
             )
         });
         assert!(!consumed, "no mouse mode means the report is not consumed");
+    }
+
+    #[test]
+    fn focused_terminal_routes_control_keys_through_the_workspace() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        open_terminal(&mut h);
+        // Adding the terminal makes it the active item; the pane event
+        // drives the workspace broadcast that sets `active_terminal`.
+        h.vcx.run_until_parked();
+
+        let sm = h
+            .workspace
+            .read_with(h.vcx, |w, _| w.input_state_machine().clone());
+        sm.update_in(h.vcx, |sm, window, cx| {
+            let ctrl_c = Keystroke {
+                modifiers: Modifiers {
+                    control: true,
+                    ..Modifiers::default()
+                },
+                key: "c".into(),
+                key_char: None,
+            };
+            sm.feed(&ctrl_c, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        h.terminal.assert_sent(0, b"\x03");
     }
 }

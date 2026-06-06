@@ -1832,15 +1832,21 @@ impl Workspace {
     /// save / save-selection / jump dispatch helpers on [`Workspace`]
     /// that look up the active editor through the state machine.
     fn broadcast_active_editor(&mut self, cx: &mut Context<'_, Self>) {
-        let editor = self
-            .active_pane_item(cx)
+        let item = self.active_pane_item(cx);
+        let editor = item
+            .as_ref()
             .and_then(|item| Self::editor_for_pane_item(item.as_ref(), cx));
+        let terminal = item
+            .as_ref()
+            .and_then(|item| Self::terminal_for_pane_item(item.as_ref()));
         let focus_target = editor
             .as_ref()
             .map(|_| self.editor_input.read(cx).focus_handle().clone());
         let weak_editor = editor.as_ref().map(Entity::downgrade);
+        let weak_terminal = terminal.as_ref().map(Entity::downgrade);
         self.input_state_machine.update(cx, |sm, _| {
             sm.set_active_editor(weak_editor);
+            sm.set_active_terminal(weak_terminal);
             sm.set_editor_focus_target(focus_target);
         });
         self.refresh_minimap(cx);
@@ -1861,6 +1867,17 @@ impl Workspace {
             return Some(run.read(cx).input.clone());
         }
         None
+    }
+
+    /// Extract the [`crate::terminal_view::Terminal`] a pane item is, if
+    /// any, so the input pipeline can forward keystrokes to its PTY.
+    /// Mirrors [`Self::editor_for_pane_item`] for the Way-2 terminal.
+    fn terminal_for_pane_item(
+        item: &dyn ItemHandle,
+    ) -> Option<Entity<crate::terminal_view::Terminal>> {
+        item.to_any_view()
+            .downcast::<crate::terminal_view::Terminal>()
+            .ok()
     }
 
     pub fn input_state_machine(&self) -> &Entity<InputStateMachine> {
