@@ -425,7 +425,7 @@ impl Render for Terminal {
         let mut body = div().flex().flex_col().flex_grow().w_full();
         for row_idx in 0..self.grid.line_count() {
             let row_cursor = cursor.as_ref().filter(|c| c.row == row_idx);
-            body = body.child(render_grid_row(&self.grid, row_idx, None, row_cursor));
+            body = body.child(render_grid_row(&self.grid, row_idx, None, None, row_cursor));
         }
         let bounds_handle = cx.weak_entity();
         let cell_family = font_family.clone();

@@ -40,7 +40,7 @@ use gpui::{
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{CommandMark, GridSelection, LinkTarget, MouseProtocol, OutputBlock},
+    run::{CommandMark, GridSelection, LinkTarget, MouseProtocol, OutputBlock, TerminalLink},
 };
 
 const SHELL_WIDTH: u16 = 80;
@@ -88,6 +88,10 @@ pub struct Run {
     /// inter-block gaps, and scroll offset that [`Self::position_to_grid`]
     /// alone ignores.
     block_grid_bounds: Vec<Bounds<Pixels>>,
+    /// The link currently under the cursor while Ctrl/Cmd is held, as a
+    /// `(block index, selection)` pair. Drives the hover underline; cleared
+    /// when the modifier is released or the cursor leaves every link.
+    hovered_link: Option<(usize, GridSelection)>,
     _spawn_task: Option<Task<()>>,
 }
 
@@ -138,6 +142,7 @@ impl Run {
             last_terminal_size: None,
             scroll_handle: ScrollHandle::new(),
             block_grid_bounds: Vec::new(),
+            hovered_link: None,
             _spawn_task: Some(spawn_task),
         }
     }
@@ -238,16 +243,12 @@ impl Run {
         Some(mouse::point_to_grid(elem, cell))
     }
 
-    /// Open the link under `position`, if any, returning whether one was
-    /// opened. Resolves the position against each block's captured grid
-    /// bounds (so the correct block and cell are found regardless of scroll
-    /// or header offset) and hit-tests that block's [`VtermGrid::links`]:
-    /// a covering [`LinkTarget::Path`] opens via [`Workspace::open_paths`]
-    /// and a [`LinkTarget::Url`] via the [`OpenHostGlobal`].
-    fn open_link_at(&self, position: Point<Pixels>, cx: &mut Context<'_, Self>) -> bool {
-        let Some(cell) = self.cell_size else {
-            return false;
-        };
+    /// The link under `position`, if any, as a `(block index, link)` pair.
+    /// Resolves the position against each block's captured grid bounds (so
+    /// the correct block and cell are found regardless of scroll or header
+    /// offset) and hit-tests that block's [`VtermGrid::links`].
+    fn link_at(&self, position: Point<Pixels>) -> Option<(usize, TerminalLink)> {
+        let cell = self.cell_size?;
         // Grid rows carry `px_2` horizontal padding in `render::render_block`;
         // subtract it so column 0 lands on the first character.
         let row_pad = px(8.);
@@ -264,29 +265,59 @@ impl Run {
             );
             let (row, col) = mouse::point_to_grid(elem, cell);
             let (row, col) = (row as u16, col as u16);
-            let target = block
+            if let Some(link) = block
                 .grid
                 .links()
                 .into_iter()
-                .find_map(|link| link.selection.contains(col, row).then_some(link.target));
-            match target {
-                Some(LinkTarget::Path { path, .. }) => {
-                    if let Some(workspace) = self.workspace.upgrade() {
-                        workspace.update(cx, |w, cx| w.open_paths(&[PathBuf::from(path)], cx));
-                    }
-                    return true;
-                },
-                Some(LinkTarget::Url(url)) => {
-                    if let Some(open_host) = cx.try_global::<OpenHostGlobal>().map(|g| g.0.clone())
-                    {
-                        open_host.open_url(&url, cx);
-                    }
-                    return true;
-                },
-                None => {},
+                .find(|link| link.selection.contains(col, row))
+            {
+                return Some((idx, link));
             }
         }
-        false
+        None
+    }
+
+    /// Open the link under `position`, if any, returning whether one was
+    /// opened. A covering [`LinkTarget::Path`] opens via
+    /// [`Workspace::open_paths`] and a [`LinkTarget::Url`] via the
+    /// [`OpenHostGlobal`].
+    fn open_link_at(&self, position: Point<Pixels>, cx: &mut Context<'_, Self>) -> bool {
+        let Some((_, link)) = self.link_at(position) else {
+            return false;
+        };
+        match link.target {
+            LinkTarget::Path { path, .. } => {
+                if let Some(workspace) = self.workspace.upgrade() {
+                    workspace.update(cx, |w, cx| w.open_paths(&[PathBuf::from(path)], cx));
+                }
+            },
+            LinkTarget::Url(url) => {
+                if let Some(open_host) = cx.try_global::<OpenHostGlobal>().map(|g| g.0.clone()) {
+                    open_host.open_url(&url, cx);
+                }
+            },
+        }
+        true
+    }
+
+    /// Update [`Self::hovered_link`] for a pointer at `position`. With
+    /// Ctrl/Cmd held, the link under the cursor (if any) is marked so the
+    /// render underlines it; otherwise the hover is cleared. Notifies only
+    /// on a change.
+    fn update_hover(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let next = (modifiers.control || modifiers.platform)
+            .then(|| self.link_at(position))
+            .flatten()
+            .map(|(idx, link)| (idx, link.selection));
+        if self.hovered_link != next {
+            self.hovered_link = next;
+            cx.notify();
+        }
     }
 
     /// Whether this run pane is the workspace's focused pane item, so the
@@ -732,9 +763,15 @@ impl Render for Run {
                 .size_full()
                 .into_any_element()
             };
+            let hovered = self
+                .hovered_link
+                .as_ref()
+                .filter(|t| t.0 == idx)
+                .map(|(_, sel)| sel);
             body = body.child(render::render_block(
                 block,
                 cursor,
+                hovered,
                 &theme,
                 grid_bounds_capture,
             ));
@@ -824,6 +861,7 @@ impl Render for Run {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.update_hover(event.position, event.modifiers, cx);
                 match event.pressed_button.and_then(mouse_button_code) {
                     Some(code) => {
                         if !this.report_mouse(code, true, true, event.position, event.modifiers, cx)
@@ -1201,6 +1239,53 @@ mod tests {
 
         assert!(opened, "a url link under the click is opened");
         assert_eq!(fake.opened(), vec!["https://example.com".to_string()]);
+    }
+
+    #[test]
+    fn ctrl_hover_marks_the_link_under_the_cursor() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = run_with_path_link(&mut h);
+        let ctrl = Modifiers {
+            control: true,
+            ..Modifiers::default()
+        };
+
+        run.update(h.vcx, |r, cx| {
+            r.update_hover(point(px(30.), px(10.)), ctrl, cx)
+        });
+        let expected =
+            run.read_with(h.vcx, |r, _| {
+                r.blocks[0].grid.links().into_iter().find_map(|l| {
+                    matches!(l.target, LinkTarget::Path { .. }).then_some(l.selection)
+                })
+            });
+        assert_eq!(
+            run.read_with(h.vcx, |r, _| r.hovered_link),
+            expected.map(|sel| (0, sel)),
+            "ctrl-hover over a link marks it for underline",
+        );
+
+        run.update(h.vcx, |r, cx| {
+            r.update_hover(point(px(30.), px(10.)), Modifiers::default(), cx)
+        });
+        assert_eq!(
+            run.read_with(h.vcx, |r, _| r.hovered_link),
+            None,
+            "releasing the modifier clears the hover",
+        );
+
+        run.update(h.vcx, |r, cx| {
+            r.update_hover(point(px(30.), px(10.)), ctrl, cx)
+        });
+        run.update(h.vcx, |r, cx| {
+            r.update_hover(point(px(500.), px(10.)), ctrl, cx)
+        });
+        assert_eq!(
+            run.read_with(h.vcx, |r, _| r.hovered_link),
+            None,
+            "moving off every link clears the hover",
+        );
     }
 
     #[test]

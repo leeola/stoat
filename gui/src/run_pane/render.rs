@@ -172,6 +172,7 @@ pub(crate) fn render_grid_row(
     grid: &VtermGrid,
     row_idx: usize,
     selection: Option<&GridSelection>,
+    hovered: Option<&GridSelection>,
     cursor: Option<&CursorRender>,
 ) -> Div {
     let row = grid.row(row_idx);
@@ -181,13 +182,22 @@ pub(crate) fn render_grid_row(
     for (col, cell) in row.iter().enumerate() {
         let col_u16 = u16::try_from(col).unwrap_or(u16::MAX);
         let selected = selection.is_some_and(|sel| sel.contains(col_u16, row_u16));
+        let hovered_cell = hovered.is_some_and(|sel| sel.contains(col_u16, row_u16));
         let start = text.len();
         text.push(cell.ch);
         let end = text.len();
-        if cell_is_blank_unstyled(cell) && !selected {
+        if cell_is_blank_unstyled(cell) && !selected && !hovered_cell {
             continue;
         }
-        runs.push((start..end, cell_style(cell, selected)));
+        let mut style = cell_style(cell, selected);
+        if hovered_cell {
+            style.underline = Some(UnderlineStyle {
+                thickness: px(1.0),
+                color: None,
+                wavy: false,
+            });
+        }
+        runs.push((start..end, style));
     }
     let text = div().child(StyledText::new(SharedString::from(text)).with_highlights(runs));
     match cursor {
@@ -199,6 +209,7 @@ pub(crate) fn render_grid_row(
 pub(crate) fn render_block(
     block: &OutputBlock,
     cursor: Option<CursorRender>,
+    hovered: Option<&GridSelection>,
     theme: &ThemeColors,
     grid_bounds_capture: AnyElement,
 ) -> AnyElement {
@@ -226,6 +237,7 @@ pub(crate) fn render_block(
             &block.grid,
             row_idx,
             block.selection.as_ref(),
+            hovered,
             row_cursor,
         )));
     }
@@ -340,7 +352,11 @@ mod tests {
     fn render_grid_row_emits_cell_text() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"hello");
-        let _ = render_grid_row(&grid, 0, None, None);
+        let hovered = GridSelection {
+            anchor: (0, 0),
+            head: (2, 0),
+        };
+        let _ = render_grid_row(&grid, 0, None, Some(&hovered), None);
         let row_chars: String = grid.row(0).iter().map(|c| c.ch).collect();
         assert!(
             row_chars.starts_with("hello"),
