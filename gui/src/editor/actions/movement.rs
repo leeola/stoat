@@ -263,8 +263,12 @@ impl Editor {
             .all_anchors()
             .iter()
             .map(|sel| {
-                let head = sel.head();
-                let current_row = snapshot.point_for_anchor(&head).row;
+                let cursor_off = cursor_offset(
+                    snapshot.rope(),
+                    snapshot.resolve_anchor(&sel.tail()),
+                    snapshot.resolve_anchor(&sel.head()),
+                );
+                let current_row = snapshot.rope().offset_to_point(cursor_off).row;
                 let target_row = match dir {
                     PageDir::Up => current_row.saturating_sub(delta),
                     PageDir::Down => current_row.saturating_add(delta).min(max_row),
@@ -975,6 +979,44 @@ mod tests {
         });
 
         assert_eq!(cursor_display_row(&editor, &mut cx), 10);
+    }
+
+    #[test]
+    fn page_motion_down_after_line_select_starts_from_cursor() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(50));
+        seed_at_offset(&editor, &mut cx, 0);
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.select_line_below(1, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_page_motion(PageDir::Down, false, 1, cx)
+        });
+
+        assert_eq!(
+            cursor_display_row(&editor, &mut cx),
+            10,
+            "page down sources from the cursor row (0), not the head row",
+        );
+    }
+
+    #[test]
+    fn page_motion_up_after_line_select_starts_from_cursor() {
+        let mut cx = TestAppContext::single();
+        let editor = new_editor(&mut cx, &multiline(50));
+        seed_at_offset(&editor, &mut cx, 110);
+        set_viewport(&editor, &mut cx, 10);
+        editor.update(&mut cx, |ed, cx| ed.select_line_below(1, cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.handle_page_motion(PageDir::Up, false, 1, cx)
+        });
+
+        assert_eq!(
+            cursor_display_row(&editor, &mut cx),
+            10,
+            "page up sources from the cursor row (20), not the head row",
+        );
     }
 
     #[test]
