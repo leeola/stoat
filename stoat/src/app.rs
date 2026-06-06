@@ -3905,6 +3905,18 @@ mod tests {
         );
     }
 
+    #[test]
+    fn snapshot_run_block_status_markers() {
+        let mut h = Stoat::test();
+        let run_id = h.open_run();
+        h.submit_run("echo hi");
+        h.inject_run_output(run_id, b"\x1b]133;C\x07hi\r\n\x1b]133;D;0\x07");
+        h.submit_run("false");
+        h.inject_run_output(run_id, b"\x1b]133;C\x07\x1b]133;D;1\x07");
+        h.submit_run("sleep 9");
+        h.assert_snapshot("run_block_status_markers");
+    }
+
     fn open_scratch_file(h: &mut crate::test_harness::TestHarness, contents: &str) -> PathBuf {
         let path = PathBuf::from("/ws/buf.txt");
         h.fake_fs()

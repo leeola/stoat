@@ -1,0 +1,33 @@
+---
+source: stoat/src/test_harness.rs
+expression: text
+---
+actions: submit_run
+focused: #1 of 1
+mode: run
+size: 80x24
+---
+[0m[38;2;78;201;176m$ echo hi[0m
+hi
+
+[0m[38;2;78;201;176m[exit 0][0m
+
+[0m[38;2;78;201;176m$ false[0m
+
+[0m[38;2;244;71;71m[exit 1][0m
+
+[0m[38;2;78;201;176m$ sleep 9[0m
+
+[0m[38;2;220;220;170m[running][0m
+
+
+
+
+
+
+
+
+
+
+[0m[38;2;79;193;255m$ [0m[7m [0m
+[0m[1m[30m[48;2;197;134;192m RUN [0m[1m[38;2;204;204;204m[48;2;30;30;30m (unnamed) [0m[38;2;204;204;204m[48;2;30;30;30m[run]                                                           [0m

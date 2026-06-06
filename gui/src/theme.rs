@@ -161,6 +161,10 @@ pub struct ThemeColors {
     pub dock_minimized_border: Hsla,
     pub error: Hsla,
     pub success: Hsla,
+    /// Foreground for the run-pane "running" status marker. Pairs with
+    /// [`Self::success`]/[`Self::error`] (the finished-block markers) so
+    /// the three command states read as distinct colors.
+    pub badge_active: Hsla,
     pub chat_user: Hsla,
     pub chat_text: Hsla,
     pub chat_meta: Hsla,
@@ -345,6 +349,7 @@ impl ThemeColors {
             ),
             error: theme_fg_or(cx, stoat::theme::scope::UI_ERROR, palette.danger),
             success: palette.success,
+            badge_active: theme_fg_or(cx, stoat::theme::scope::UI_BADGE_ACTIVE, palette.warning),
             chat_user: theme_fg_or(cx, stoat::theme::scope::CHAT_USER, palette.success),
             chat_text: theme_fg_or(cx, stoat::theme::scope::CHAT_TEXT, palette.text),
             chat_meta: theme_fg_or(cx, stoat::theme::scope::CHAT_META, palette.text_muted),

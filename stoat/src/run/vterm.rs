@@ -1064,4 +1064,39 @@ impl OutputBlock {
     pub fn feed(&mut self, bytes: &[u8]) {
         self.grid.feed(bytes);
     }
+
+    pub fn status(&self) -> BlockStatus {
+        if !self.finished {
+            BlockStatus::Running
+        } else if self.exit_status == Some(0) {
+            BlockStatus::Succeeded
+        } else {
+            BlockStatus::Failed(self.exit_status)
+        }
+    }
+}
+
+/// Lifecycle state of an [`OutputBlock`], derived from its
+/// `finished`/`exit_status`. Drives the run-pane status affordance in
+/// both the TUI and GUI renderers, which map each variant to a theme
+/// color; [`BlockStatus::label`] supplies the shared marker text.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BlockStatus {
+    Running,
+    Succeeded,
+    Failed(Option<i32>),
+}
+
+impl BlockStatus {
+    /// Marker shown beneath the block. Finished commands render their
+    /// exit code; a command the shell ended without reporting a code
+    /// renders as `[exit ?]`.
+    pub fn label(self) -> String {
+        match self {
+            BlockStatus::Running => "[running]".to_string(),
+            BlockStatus::Succeeded => "[exit 0]".to_string(),
+            BlockStatus::Failed(Some(code)) => format!("[exit {code}]"),
+            BlockStatus::Failed(None) => "[exit ?]".to_string(),
+        }
+    }
 }

@@ -39,7 +39,7 @@ use gpui::{
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{CommandMark, GridSelection, MouseProtocol, OutputBlock},
+    run::{BlockStatus, CommandMark, GridSelection, MouseProtocol, OutputBlock},
 };
 
 const SHELL_WIDTH: u16 = 80;
@@ -607,14 +607,12 @@ impl Render for Run {
                         focused,
                     }
                 });
-            let gutter = if !block.finished {
-                theme.border_variant
-            } else if block.exit_status == Some(0) {
-                theme.success
-            } else {
-                theme.error
+            let (gutter, marker_color) = match block.status() {
+                BlockStatus::Running => (theme.border_variant, theme.badge_active),
+                BlockStatus::Succeeded => (theme.success, theme.success),
+                BlockStatus::Failed(_) => (theme.error, theme.error),
             };
-            body = body.child(render::render_block(block, cursor, gutter));
+            body = body.child(render::render_block(block, cursor, gutter, marker_color));
         }
         let bounds_handle = cx.weak_entity();
         let cell_family = font_family.clone();

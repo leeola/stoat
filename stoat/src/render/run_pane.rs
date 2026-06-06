@@ -1,6 +1,6 @@
 use crate::{
     render::text::write_str,
-    run::{GridSelection, RunState, TermColor, TermModifier},
+    run::{BlockStatus, GridSelection, RunState, TermColor, TermModifier},
 };
 use ratatui::{
     buffer::Buffer,
@@ -83,10 +83,7 @@ pub(crate) fn render_run_pane(
         if let Some(err) = &block.error {
             output_lines.push(OutputLine::Error(err.as_str()));
         }
-        if block.finished {
-            let status = block.exit_status.unwrap_or(-1);
-            output_lines.push(OutputLine::Status(status));
-        }
+        output_lines.push(OutputLine::Status(block.status()));
         output_lines.push(OutputLine::Blank);
     }
 
@@ -145,21 +142,14 @@ pub(crate) fn render_run_pane(
                     theme.get(crate::theme::scope::UI_ERROR),
                 );
             },
-            OutputLine::Status(code) => {
-                let label = if *code == 0 {
-                    String::new()
-                } else {
-                    format!("[exit {}]", code)
-                };
-                if !label.is_empty() {
-                    write_str(
-                        buf,
-                        area.x,
-                        y,
-                        &label,
-                        theme.get(crate::theme::scope::UI_TEXT_MUTED),
-                    );
-                }
+            OutputLine::Status(status) => {
+                write_str(
+                    buf,
+                    area.x,
+                    y,
+                    &status.label(),
+                    theme.get(status_scope(*status)),
+                );
             },
             OutputLine::Blank => {},
         }
@@ -184,6 +174,15 @@ enum OutputLine<'a> {
     CommandHeader(&'a str),
     GridRow(&'a crate::run::VtermGrid, usize, Option<&'a GridSelection>),
     Error(&'a str),
-    Status(i32),
+    Status(BlockStatus),
     Blank,
+}
+
+fn status_scope(status: BlockStatus) -> &'static str {
+    use crate::theme::scope;
+    match status {
+        BlockStatus::Running => scope::UI_BADGE_ACTIVE,
+        BlockStatus::Succeeded => scope::UI_BADGE_COMPLETE,
+        BlockStatus::Failed(_) => scope::UI_BADGE_ERROR,
+    }
 }

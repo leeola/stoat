@@ -198,6 +198,7 @@ pub(crate) fn render_block(
     block: &OutputBlock,
     cursor: Option<CursorRender>,
     gutter: Hsla,
+    marker_color: Hsla,
 ) -> AnyElement {
     let header = div()
         .px_2()
@@ -216,16 +217,12 @@ pub(crate) fn render_block(
     if let Some(err) = &block.error {
         col = col.child(div().px_2().child(SharedString::from(err.clone())));
     }
-    if block.finished {
-        let status = block.exit_status.unwrap_or(-1);
-        if status != 0 {
-            col = col.child(
-                div()
-                    .px_2()
-                    .child(SharedString::from(format!("[exit {status}]"))),
-            );
-        }
-    }
+    col = col.child(
+        div()
+            .px_2()
+            .text_color(marker_color)
+            .child(SharedString::from(block.status().label())),
+    );
     div()
         .w_full()
         .py_1()

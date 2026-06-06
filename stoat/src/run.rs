@@ -12,8 +12,8 @@ use slotmap::new_key_type;
 use std::path::PathBuf;
 use stoat_scheduler::Executor;
 pub use vterm::{
-    CommandMark, CursorShape, GridSelection, LinkTarget, MouseProtocol, OutputBlock, StyledCell,
-    TermColor, TermModifier, TerminalLink, VtermGrid,
+    BlockStatus, CommandMark, CursorShape, GridSelection, LinkTarget, MouseProtocol, OutputBlock,
+    StyledCell, TermColor, TermModifier, TerminalLink, VtermGrid,
 };
 
 new_key_type! {
@@ -156,9 +156,7 @@ impl RunState {
             if block.error.is_some() {
                 idx += 1;
             }
-            if block.finished {
-                idx += 1;
-            }
+            idx += 1;
             idx += 1;
         }
         let active_grid_start = idx + 1;
@@ -168,9 +166,7 @@ impl RunState {
         if active.error.is_some() {
             total += 1;
         }
-        if active.finished {
-            total += 1;
-        }
+        total += 1;
         total += 1;
 
         let start = total.saturating_sub(output_height + self.scroll_offset);
@@ -684,5 +680,26 @@ mod tests {
             head: (2, 2),
         };
         assert_eq!(grid.text_for_selection(&sel), "pha\nbeta\ngam");
+    }
+
+    #[test]
+    fn block_status_reflects_finished_and_exit() {
+        let mut block = OutputBlock::new("cmd".into(), 10);
+        assert_eq!(block.status(), BlockStatus::Running);
+        block.finished = true;
+        block.exit_status = Some(0);
+        assert_eq!(block.status(), BlockStatus::Succeeded);
+        block.exit_status = Some(2);
+        assert_eq!(block.status(), BlockStatus::Failed(Some(2)));
+        block.exit_status = None;
+        assert_eq!(block.status(), BlockStatus::Failed(None));
+    }
+
+    #[test]
+    fn block_status_labels() {
+        assert_eq!(BlockStatus::Running.label(), "[running]");
+        assert_eq!(BlockStatus::Succeeded.label(), "[exit 0]");
+        assert_eq!(BlockStatus::Failed(Some(2)).label(), "[exit 2]");
+        assert_eq!(BlockStatus::Failed(None).label(), "[exit ?]");
     }
 }
