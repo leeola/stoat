@@ -31,10 +31,10 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, InteractiveElement,
-    IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
-    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size,
-    Styled, Task, WeakEntity, Window,
+    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, Entity,
+    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
+    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent,
+    SharedString, Size, Styled, Task, WeakEntity, Window,
 };
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
@@ -45,7 +45,7 @@ use stoat::{
 const SHELL_WIDTH: u16 = 80;
 
 pub struct Run {
-    pub(crate) input: gpui::Entity<Editor>,
+    pub(crate) input: Entity<Editor>,
     pub(crate) blocks: Vec<OutputBlock>,
     cwd: PathBuf,
     pub(crate) history: Vec<String>,
@@ -260,6 +260,14 @@ impl Run {
         }
         let command = trimmed.to_string();
         clear_input(&self.input, cx);
+        self.submit_command(command, cx);
+    }
+
+    /// Append `command` as a new output block, record it in history, and
+    /// send it to the session (or queue to [`Self::pending_writes`] when
+    /// the session has not landed yet). The programmatic counterpart to
+    /// [`Self::submit`], which sources the command from the input editor.
+    pub fn submit_command(&mut self, command: String, cx: &mut Context<'_, Self>) {
         self.history.push(command.clone());
         self.history_idx = None;
         self.blocks
@@ -499,7 +507,7 @@ pub(crate) fn scroll_is_up(delta: &ScrollDelta) -> bool {
     }
 }
 
-fn read_input_text(input: &gpui::Entity<Editor>, cx: &App) -> String {
+fn read_input_text(input: &Entity<Editor>, cx: &App) -> String {
     let editor = input.read(cx);
     editor
         .multi_buffer()
@@ -509,11 +517,11 @@ fn read_input_text(input: &gpui::Entity<Editor>, cx: &App) -> String {
         .unwrap_or_default()
 }
 
-fn clear_input(input: &gpui::Entity<Editor>, cx: &mut Context<'_, Run>) {
+fn clear_input(input: &Entity<Editor>, cx: &mut Context<'_, Run>) {
     set_input_text(input, "", cx);
 }
 
-fn set_input_text(input: &gpui::Entity<Editor>, text: &str, cx: &mut Context<'_, Run>) {
+fn set_input_text(input: &Entity<Editor>, text: &str, cx: &mut Context<'_, Run>) {
     let Some(buffer) = input
         .read(cx)
         .multi_buffer()
@@ -722,6 +730,29 @@ pub fn dispatch_open_run(
     });
 }
 
+/// Dispatch the [`stoat_action::Run`] action: run `command` as a block
+/// in a [`Run`] pane. Reuses the focused pane's `Run` when its active
+/// item is already one; otherwise opens a fresh `Run` in the focused
+/// pane via [`dispatch_open_run`], then submits the command.
+pub fn dispatch_run(
+    workspace: &mut Workspace,
+    command: String,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
+    let run = match focused_run_pane(workspace, cx) {
+        Some(run) => run,
+        None => {
+            dispatch_open_run(workspace, window, cx);
+            let Some(run) = focused_run_pane(workspace, cx) else {
+                return;
+            };
+            run
+        },
+    };
+    run.update(cx, |r, cx| r.submit_command(command, cx));
+}
+
 /// Dispatch the [`stoat_action::OpenTerminalDock`] action. Opens a
 /// [`Run`] pane as a bottom dock anchored at the workspace's git
 /// root. When a run dock already exists, toggles its visibility
@@ -781,15 +812,18 @@ fn with_focused_run(
     cx: &mut Context<'_, Workspace>,
     f: impl FnOnce(&mut Run, &mut Context<'_, Run>),
 ) {
+    if let Some(run) = focused_run_pane(workspace, cx) {
+        run.update(cx, f);
+    }
+}
+
+/// The focused pane's active item as a [`Run`], or `None` when the pane
+/// is empty or its active item is not a run pane.
+fn focused_run_pane(workspace: &Workspace, cx: &App) -> Option<Entity<Run>> {
     let pane_id = workspace.pane_tree().read(cx).focus();
-    let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
-        return;
-    };
-    let active_view = pane.read(cx).active_item().map(ItemHandle::to_any_view);
-    let Some(run) = active_view.and_then(|v| v.downcast::<Run>().ok()) else {
-        return;
-    };
-    run.update(cx, f);
+    let pane = workspace.pane_tree().read(cx).pane(pane_id).cloned()?;
+    let view = pane.read(cx).active_item().map(ItemHandle::to_any_view)?;
+    view.downcast::<Run>().ok()
 }
 
 #[cfg(test)]

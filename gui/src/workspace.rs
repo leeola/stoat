@@ -537,9 +537,9 @@ impl Workspace {
         });
     }
 
-    /// Open a one-shot run overlay for the `Run` action's command. The
-    /// overlay spawns the command, streams its output, and is dismissed
-    /// when done; distinct from the persistent run pane (`OpenRun`).
+    /// Run the `Run` action's command as a block in a [`crate::run_pane`]
+    /// pane, opening or reusing one in the focused pane. Replaces the
+    /// former one-shot modal overlay.
     fn dispatch_run(
         &mut self,
         action: &dyn stoat_action::Action,
@@ -549,12 +549,7 @@ impl Workspace {
         let Some(run) = action.as_any().downcast_ref::<stoat_action::Run>() else {
             return;
         };
-        let command = run.command.clone();
-        let cwd = self.git_root.clone();
-        self.modal_layer.update(cx, |layer, cx| {
-            let modal = cx.new(|cx| crate::run_modal::RunModal::new(command, cwd, cx));
-            layer.show_modal(modal, window, cx);
-        });
+        crate::run_pane::dispatch_run(self, run.command.clone(), window, cx);
     }
 
     /// Write a `.dump` archive of the current workspace under
@@ -8790,7 +8785,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_run_opens_run_modal() {
+    fn dispatch_run_submits_command_as_block_in_run_pane() {
         use stoat::host::{
             fake::terminal::{FakeTerminalHost, FakeTerminalSession},
             TerminalHost,
@@ -8811,13 +8806,22 @@ mod tests {
         );
         vcx.run_until_parked();
 
-        let opened = ws.read_with(vcx, |w, cx| {
-            w.modal_layer
+        let commands = ws.read_with(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w.pane_tree().read(cx).pane(pane_id).cloned().unwrap();
+            let run = pane
                 .read(cx)
-                .active_modal::<crate::run_modal::RunModal>()
-                .is_some()
+                .active_item()
+                .map(ItemHandle::to_any_view)
+                .and_then(|v| v.downcast::<crate::run_pane::Run>().ok())
+                .expect("Run action makes a run pane the focused item");
+            run.read(cx)
+                .blocks
+                .iter()
+                .map(|b| b.command.clone())
+                .collect::<Vec<_>>()
         });
-        assert!(opened, "Run should open a run modal overlay");
+        assert_eq!(commands, vec!["echo hi".to_string()]);
     }
 
     #[test]

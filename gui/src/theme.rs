@@ -190,7 +190,6 @@ pub struct ThemeColors {
     pub vcs_conflict_ours: Hsla,
     pub vcs_conflict_theirs: Hsla,
     pub ui_modal_help: Hsla,
-    pub ui_modal_run: Hsla,
     pub dev_stats_text: Hsla,
     pub dev_stats_background: Hsla,
     pub dev_stats_border: Hsla,
@@ -436,7 +435,6 @@ impl ThemeColors {
                 palette.accent,
             ),
             ui_modal_help: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_HELP, palette.accent),
-            ui_modal_run: theme_fg_or(cx, stoat::theme::scope::UI_MODAL_RUN, palette.warning),
             dev_stats_text: theme_fg_or(
                 cx,
                 stoat::theme::scope::UI_DEV_STATS_TEXT,
@@ -605,7 +603,6 @@ mod tests {
         assert_eq!(theme.vcs_conflict_ours, palette.success);
         assert_eq!(theme.vcs_conflict_theirs, palette.accent);
         assert_eq!(theme.ui_modal_help, palette.accent);
-        assert_eq!(theme.ui_modal_run, palette.warning);
     }
 
     #[test]
