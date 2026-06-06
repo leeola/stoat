@@ -157,6 +157,7 @@ fn resolve_key(key: &Key) -> Option<KeyCode> {
         Key::Char(c) => Some(KeyCode::Char(*c)),
         Key::Named(name) => match name.as_str() {
             "Space" => Some(KeyCode::Char(' ')),
+            "Minus" => Some(KeyCode::Char('-')),
             "Escape" | "Esc" => Some(KeyCode::Esc),
             "Enter" | "Return" => Some(KeyCode::Enter),
             "Tab" => Some(KeyCode::Tab),
@@ -925,6 +926,25 @@ mod tests {
             let resolved = keymap.lookup(&state, &event).map(|a| a[0].name.as_str());
             assert_ne!(resolved, Some("OpenHelp"), "mode {mode}");
         }
+    }
+
+    #[test]
+    fn cmd_equals_and_cmd_minus_adjust_font_size_outside_input_modes() {
+        let config = parse_config(crate::app::DEFAULT_KEYMAP);
+        let keymap = Keymap::compile(&config);
+        let state = TestState::new()
+            .set("mode", StateValue::String("normal".into()))
+            .set("input_active", StateValue::Bool(false));
+
+        let increase = keymap
+            .lookup(&state, &key_event(KeyCode::Char('='), KeyModifiers::SUPER))
+            .expect("Cmd-= should resolve");
+        assert_eq!(increase[0].name, "IncreaseFontSize");
+
+        let decrease = keymap
+            .lookup(&state, &key_event(KeyCode::Char('-'), KeyModifiers::SUPER))
+            .expect("Cmd-Minus should resolve");
+        assert_eq!(decrease[0].name, "DecreaseFontSize");
     }
 
     #[test]
