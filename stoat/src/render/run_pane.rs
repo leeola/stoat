@@ -1,6 +1,6 @@
 use crate::{
     render::text::write_str,
-    run::{BlockStatus, GridSelection, RunState, TermColor, TermModifier},
+    run::{BlockStatus, GridSelection, OutputBlock, RunState, TermColor, TermModifier},
 };
 use ratatui::{
     buffer::Buffer,
@@ -72,7 +72,7 @@ pub(crate) fn render_run_pane(
 
     let mut output_lines: Vec<OutputLine<'_>> = Vec::new();
     for block in &run_state.blocks {
-        output_lines.push(OutputLine::CommandHeader(block.command.as_str()));
+        output_lines.push(OutputLine::CommandHeader(block));
         for row_idx in 0..block.grid.line_count() {
             output_lines.push(OutputLine::GridRow(
                 &block.grid,
@@ -93,12 +93,26 @@ pub(crate) fn render_run_pane(
     for (i, line) in output_lines.iter().skip(start).take(visible).enumerate() {
         let y = area.y + i as u16;
         match line {
-            OutputLine::CommandHeader(cmd) => {
+            OutputLine::CommandHeader(block) => {
                 let cmd_style = theme.get(crate::theme::scope::UI_BADGE_COMPLETE);
+                let meta_style = theme.get(crate::theme::scope::UI_TEXT_MUTED);
                 write_str(buf, area.x, y, "$ ", cmd_style);
-                let max_w = (area.width as usize).saturating_sub(2);
-                let display: String = cmd.chars().take(max_w).collect();
+
+                let total = area.width as usize;
+                let meta = block.header_meta();
+                let meta_w = meta.chars().count();
+                let meta_fits = meta_w > 0 && meta_w + 3 <= total;
+                let cmd_avail = if meta_fits {
+                    total - 2 - meta_w - 1
+                } else {
+                    total.saturating_sub(2)
+                };
+                let display: String = block.command.chars().take(cmd_avail).collect();
                 write_str(buf, area.x + 2, y, &display, cmd_style);
+                if meta_fits {
+                    let meta_x = area.x + (total - meta_w) as u16;
+                    write_str(buf, meta_x, y, &meta, meta_style);
+                }
             },
             OutputLine::GridRow(grid, row_idx, selection) => {
                 let row = grid.row(*row_idx);
@@ -171,7 +185,7 @@ pub(crate) fn render_run_pane(
 }
 
 enum OutputLine<'a> {
-    CommandHeader(&'a str),
+    CommandHeader(&'a OutputBlock),
     GridRow(&'a crate::run::VtermGrid, usize, Option<&'a GridSelection>),
     Error(&'a str),
     Status(BlockStatus),

@@ -7,6 +7,7 @@
 //! carry fg/bg/modifier styling, and selection swaps fg/bg to
 //! reproduce the TUI's `Modifier::REVERSED` highlight.
 
+use crate::theme::ThemeColors;
 use gpui::{
     div, px, AnyElement, Div, FontStyle, FontWeight, HighlightStyle, Hsla, IntoElement,
     ParentElement, Pixels, SharedString, Size, StrikethroughStyle, Styled, StyledText,
@@ -14,7 +15,8 @@ use gpui::{
 };
 use std::ops::Range;
 use stoat::run::{
-    CursorShape, GridSelection, OutputBlock, StyledCell, TermColor, TermModifier, VtermGrid,
+    BlockStatus, CursorShape, GridSelection, OutputBlock, StyledCell, TermColor, TermModifier,
+    VtermGrid,
 };
 
 /// Translucent fill for the terminal cursor so the character shows
@@ -197,13 +199,25 @@ pub(crate) fn render_grid_row(
 pub(crate) fn render_block(
     block: &OutputBlock,
     cursor: Option<CursorRender>,
-    gutter: Hsla,
-    marker_color: Hsla,
+    theme: &ThemeColors,
 ) -> AnyElement {
+    let status = block.status();
+    let (gutter, marker_color) = match status {
+        BlockStatus::Running => (theme.border_variant, theme.badge_active),
+        BlockStatus::Succeeded => (theme.success, theme.success),
+        BlockStatus::Failed(_) => (theme.error, theme.error),
+    };
     let header = div()
         .px_2()
         .py_1()
-        .child(SharedString::from(format!("$ {}", block.command)));
+        .flex()
+        .justify_between()
+        .child(SharedString::from(format!("$ {}", block.command)))
+        .child(
+            div()
+                .text_color(theme.muted_text)
+                .child(SharedString::from(block.header_meta())),
+        );
     let mut col = div().flex().flex_col().w_full().child(header);
     for row_idx in 0..block.grid.line_count() {
         let row_cursor = cursor.as_ref().filter(|c| c.row == row_idx);
@@ -221,7 +235,7 @@ pub(crate) fn render_block(
         div()
             .px_2()
             .text_color(marker_color)
-            .child(SharedString::from(block.status().label())),
+            .child(SharedString::from(status.label())),
     );
     div()
         .w_full()

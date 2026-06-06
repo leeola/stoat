@@ -708,6 +708,22 @@ mod tests {
     }
 
     #[test]
+    fn block_header_meta_formats_cwd_and_duration() {
+        let start = Instant::now();
+        let mut block = OutputBlock::new("ls".into(), 10, start, PathBuf::from("/work"));
+        assert_eq!(block.duration_label(), None);
+        assert_eq!(block.header_meta(), "/work");
+
+        block.finish(Some(0), start + Duration::from_millis(250));
+        assert_eq!(block.duration_label(), Some("250ms".to_string()));
+        assert_eq!(block.header_meta(), "/work  250ms");
+
+        let mut secs = OutputBlock::new("x".into(), 10, start, PathBuf::from("/w"));
+        secs.finish(Some(0), start + Duration::from_millis(1500));
+        assert_eq!(secs.duration_label(), Some("1.5s".to_string()));
+    }
+
+    #[test]
     fn block_status_labels() {
         assert_eq!(BlockStatus::Running.label(), "[running]");
         assert_eq!(BlockStatus::Succeeded.label(), "[exit 0]");

@@ -1091,6 +1091,21 @@ impl OutputBlock {
             .map(|ended| ended.saturating_duration_since(self.started_at))
     }
 
+    /// Human-readable run time, or `None` while the command runs.
+    pub fn duration_label(&self) -> Option<String> {
+        self.duration().map(format_duration)
+    }
+
+    /// Header metadata: the cwd the command ran in, followed by the run
+    /// duration once it has finished.
+    pub fn header_meta(&self) -> String {
+        let cwd = self.cwd.display();
+        match self.duration_label() {
+            Some(duration) => format!("{cwd}  {duration}"),
+            None => cwd.to_string(),
+        }
+    }
+
     pub fn status(&self) -> BlockStatus {
         if !self.finished {
             BlockStatus::Running
@@ -1099,6 +1114,17 @@ impl OutputBlock {
         } else {
             BlockStatus::Failed(self.exit_status)
         }
+    }
+}
+
+/// Format a run duration compactly: whole milliseconds under one second,
+/// otherwise seconds to one decimal place.
+fn format_duration(d: Duration) -> String {
+    let ms = d.as_millis();
+    if ms < 1000 {
+        format!("{ms}ms")
+    } else {
+        format!("{:.1}s", d.as_secs_f64())
     }
 }
 
