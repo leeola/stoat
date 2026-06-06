@@ -367,6 +367,32 @@ impl VtermGrid {
         self.width
     }
 
+    /// Resize the grid to `width` columns, truncating or blank-padding
+    /// every row (including the stashed alt screen) to match and clamping
+    /// the cursor into the new bounds. Existing per-row content is kept; no
+    /// reflow of wrapped lines is performed. A no-op when `width` is
+    /// unchanged or zero.
+    pub fn resize(&mut self, width: u16) {
+        if width == 0 || width == self.width {
+            return;
+        }
+        self.width = width;
+        let cols = width as usize;
+        for row in &mut self.cells {
+            row.resize(cols, StyledCell::default());
+        }
+        if let Some(saved) = self.saved_screen.as_mut() {
+            for row in &mut saved.cells {
+                row.resize(cols, StyledCell::default());
+            }
+            saved.cursor_col = saved.cursor_col.min(cols);
+        }
+        self.cursor_col = self.cursor_col.min(cols);
+        if let Some((_, col)) = self.saved_cursor.as_mut() {
+            *col = (*col).min(cols);
+        }
+    }
+
     /// Extract the row-major text covered by `selection`. Single-row
     /// selections cover columns `[low_col, high_col]` inclusive;
     /// multi-row selections cover `[low_col, end-of-row]` on the first

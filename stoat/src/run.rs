@@ -233,6 +233,57 @@ mod tests {
     }
 
     #[test]
+    fn grid_resize_widens_and_pads_rows() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"hi");
+        grid.resize(20);
+        assert_eq!(grid.width(), 20);
+        assert_eq!(grid.row(0).len(), 20);
+        assert_eq!(grid.text_in(0..20, 0..1), "hi");
+    }
+
+    #[test]
+    fn grid_resize_narrows_and_truncates_rows() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"0123456789");
+        grid.resize(5);
+        assert_eq!(grid.width(), 5);
+        assert_eq!(grid.row(0).len(), 5);
+        assert_eq!(grid.text_in(0..5, 0..1), "01234");
+    }
+
+    #[test]
+    fn grid_resize_clamps_cursor_into_bounds() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"\x1b[1;10H");
+        grid.resize(5);
+        assert_eq!(grid.cursor_position(), (0, 5));
+    }
+
+    #[test]
+    fn grid_resize_on_alt_screen_resizes_saved_main() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"main");
+        grid.feed(b"\x1b[?1049h");
+        grid.resize(20);
+        grid.feed(b"\x1b[?1049l");
+        assert_eq!(grid.width(), 20);
+        assert_eq!(grid.row(0).len(), 20);
+        assert_eq!(grid.text_in(0..20, 0..1), "main");
+    }
+
+    #[test]
+    fn grid_resize_is_noop_when_unchanged_or_zero() {
+        let mut grid = VtermGrid::new(10);
+        grid.feed(b"hi");
+        grid.resize(10);
+        grid.resize(0);
+        assert_eq!(grid.width(), 10);
+        assert_eq!(grid.row(0).len(), 10);
+        assert_eq!(grid.text_in(0..10, 0..1), "hi");
+    }
+
+    #[test]
     fn grid_cup_positions_absolutely() {
         let mut grid = VtermGrid::new(10);
         grid.feed(b"\x1b[2;3HX");

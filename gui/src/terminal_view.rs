@@ -124,6 +124,7 @@ impl Terminal {
         }
         self.last_terminal_size = Some(size);
         let (rows, cols) = size;
+        self.grid.resize(cols);
         if let Err(err) = session.resize(rows, cols) {
             tracing::warn!(
                 target: "stoat_gui::terminal_view",
@@ -536,6 +537,28 @@ mod tests {
         });
         assert!(expected.is_some(), "render should measure the pane");
         assert_eq!(h.terminal.last_size(), expected);
+    }
+
+    #[test]
+    fn grid_width_tracks_measured_columns() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = open_terminal(&mut h);
+        h.vcx.run_until_parked();
+
+        let (grid_width, measured_cols) = term.read_with(h.vcx, |t, _| {
+            let cols = t
+                .output_bounds
+                .zip(t.cell_size)
+                .and_then(|(bounds, cell)| terminal_cells(bounds, cell))
+                .map(|(_, cols)| cols);
+            (t.grid.width(), cols)
+        });
+        assert_eq!(
+            Some(grid_width),
+            measured_cols,
+            "grid width tracks the measured PTY column count"
+        );
     }
 
     #[test]
