@@ -177,8 +177,11 @@ impl Render for ToastView {
                 .px_2()
                 .py_1()
                 .rounded_md()
+                .border_1()
+                .border_color(theme.border_variant)
                 .bg(bg)
                 .text_color(text_color)
+                .shadow_md()
                 .child(div().child(toast.text.clone()));
 
             if let Some(action) = &toast.action {
