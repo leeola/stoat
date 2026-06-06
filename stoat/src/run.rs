@@ -1,3 +1,4 @@
+pub mod key_encode;
 pub mod pty;
 pub mod vterm;
 
@@ -5,6 +6,7 @@ use crate::{
     input_view::{InputView, SubmitTarget},
     workspace::Workspace,
 };
+pub use key_encode::encode_key;
 pub use pty::{spawn_oneshot, spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
 use std::path::PathBuf;
