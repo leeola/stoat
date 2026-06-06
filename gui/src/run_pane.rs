@@ -24,7 +24,7 @@ pub(crate) mod render;
 use crate::{
     dock::DockSide,
     editor::Editor,
-    globals::{ExecutorGlobal, TerminalHostGlobal},
+    globals::{ExecutorGlobal, OpenHostGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
     settings::Settings,
     theme::{ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
@@ -238,12 +238,12 @@ impl Run {
         Some(mouse::point_to_grid(elem, cell))
     }
 
-    /// Open the file-path link under `position`, if any, returning whether
-    /// one was opened. Resolves the position against each block's captured
-    /// grid bounds (so the correct block and cell are found regardless of
-    /// scroll or header offset), hit-tests that block's [`VtermGrid::links`],
-    /// and opens a covering [`LinkTarget::Path`] via [`Workspace::open_paths`].
-    /// URL links are handled separately and ignored here.
+    /// Open the link under `position`, if any, returning whether one was
+    /// opened. Resolves the position against each block's captured grid
+    /// bounds (so the correct block and cell are found regardless of scroll
+    /// or header offset) and hit-tests that block's [`VtermGrid::links`]:
+    /// a covering [`LinkTarget::Path`] opens via [`Workspace::open_paths`]
+    /// and a [`LinkTarget::Url`] via the [`OpenHostGlobal`].
     fn open_link_at(&self, position: Point<Pixels>, cx: &mut Context<'_, Self>) -> bool {
         let Some(cell) = self.cell_size else {
             return false;
@@ -264,21 +264,26 @@ impl Run {
             );
             let (row, col) = mouse::point_to_grid(elem, cell);
             let (row, col) = (row as u16, col as u16);
-            let path = block
+            let target = block
                 .grid
                 .links()
                 .into_iter()
-                .find_map(|link| match link.target {
-                    LinkTarget::Path { path, .. } if link.selection.contains(col, row) => {
-                        Some(path)
-                    },
-                    _ => None,
-                });
-            if let Some(path) = path {
-                if let Some(workspace) = self.workspace.upgrade() {
-                    workspace.update(cx, |w, cx| w.open_paths(&[PathBuf::from(path)], cx));
-                }
-                return true;
+                .find_map(|link| link.selection.contains(col, row).then_some(link.target));
+            match target {
+                Some(LinkTarget::Path { path, .. }) => {
+                    if let Some(workspace) = self.workspace.upgrade() {
+                        workspace.update(cx, |w, cx| w.open_paths(&[PathBuf::from(path)], cx));
+                    }
+                    return true;
+                },
+                Some(LinkTarget::Url(url)) => {
+                    if let Some(open_host) = cx.try_global::<OpenHostGlobal>().map(|g| g.0.clone())
+                    {
+                        open_host.open_url(&url, cx);
+                    }
+                    return true;
+                },
+                None => {},
             }
         }
         false
@@ -996,6 +1001,7 @@ mod tests {
             ClipboardHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal,
             TerminalHostGlobal,
         },
+        open_host::{FakeOpenHost, OpenHost},
         workspace::Workspace,
     };
     use gpui::{Entity, TestAppContext, VisualTestContext};
@@ -1161,6 +1167,40 @@ mod tests {
             focused_run(&mut h).is_some(),
             "the run pane stays active when no link is hit",
         );
+    }
+
+    #[test]
+    fn ctrl_click_on_url_link_opens_it() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let fake = Arc::new(FakeOpenHost::new());
+
+        let run = open_run(&mut h);
+        {
+            let fake = fake.clone();
+            run.update(h.vcx, move |_r, cx| {
+                cx.set_global(OpenHostGlobal(fake as Arc<dyn OpenHost>));
+            });
+        }
+        h.vcx.run_until_parked();
+        type_into_input(&run, &mut h, "echo");
+        run.update(h.vcx, |r, cx| r.submit(cx));
+        h.terminal.push_output(b"see https://example.com now\n");
+        h.vcx.run_until_parked();
+        run.update(h.vcx, |r, _| {
+            r.cell_size = Some(size(px(10.), px(20.)));
+            r.block_grid_bounds = vec![Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(800.), px(400.)),
+            }];
+        });
+
+        // (x 110, y 10) maps to column 10, row 0 -- inside the url span
+        // ("https://example.com" occupies columns 4..22).
+        let opened = run.update(h.vcx, |r, cx| r.open_link_at(point(px(110.), px(10.)), cx));
+
+        assert!(opened, "a url link under the click is opened");
+        assert_eq!(fake.opened(), vec!["https://example.com".to_string()]);
     }
 
     #[test]

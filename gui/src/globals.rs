@@ -11,6 +11,7 @@
 //! `cx.set_global(...)`.
 
 use crate::{
+    open_host::{GpuiOpenHost, OpenHost},
     settings::Settings,
     theme::{self, Theme},
 };
@@ -101,6 +102,11 @@ impl Global for AgentConnectionGlobal {}
 pub struct ClipboardHostGlobal(pub Arc<dyn ClipboardHost>);
 
 impl Global for ClipboardHostGlobal {}
+
+/// App-global wrapper for [`Arc<dyn OpenHost>`].
+pub struct OpenHostGlobal(pub Arc<dyn OpenHost>);
+
+impl Global for OpenHostGlobal {}
 
 /// App-global wrapper for [`Arc<dyn TerminalHost>`].
 pub struct TerminalHostGlobal(pub Arc<dyn TerminalHost>);
@@ -201,6 +207,7 @@ pub fn install_production_globals(cx: &mut App, globals: Globals) {
     cx.set_global(globals.claude_code_host);
     cx.set_global(globals.permission_prompt_host);
     cx.set_global(globals.clipboard_host);
+    cx.set_global(OpenHostGlobal(Arc::new(GpuiOpenHost)));
     cx.set_global(globals.terminal_host);
     cx.set_global(globals.executor);
     cx.set_global(globals.user_snippets);

@@ -64,6 +64,7 @@ mod lsp_state;
 mod markdown_preview;
 mod modal_layer;
 mod multi_buffer;
+mod open_host;
 mod outline_panel;
 mod pane;
 mod pane_tree;
