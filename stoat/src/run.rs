@@ -514,6 +514,27 @@ mod tests {
     }
 
     #[test]
+    fn osc7_sets_cwd_from_file_uri() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]7;file://host/Users/lee/projects\x07");
+        assert_eq!(grid.cwd(), Some("/Users/lee/projects"));
+    }
+
+    #[test]
+    fn osc7_percent_decodes_the_path() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]7;file://host/tmp/a%20b\x07");
+        assert_eq!(grid.cwd(), Some("/tmp/a b"));
+    }
+
+    #[test]
+    fn osc7_ignores_non_file_uri() {
+        let mut grid = VtermGrid::new(20);
+        grid.feed(b"\x1b]7;http://host/path\x07");
+        assert_eq!(grid.cwd(), None);
+    }
+
+    #[test]
     fn grid_selection_bounds_normalizes_drag_direction() {
         let forward = GridSelection {
             anchor: (3, 1),

@@ -170,6 +170,9 @@ pub struct VtermGrid {
     /// Callers drain after [`Self::feed`] and forward to a clipboard
     /// host; the grid does not own clipboard side effects.
     pub clipboard_writes: Vec<String>,
+    /// Working directory most recently reported via OSC 7, overwritten on
+    /// each report. Exposed through [`Self::cwd`].
+    cwd: Option<String>,
 }
 
 impl VtermGrid {
@@ -197,6 +200,7 @@ impl VtermGrid {
             cursor_shape: CursorShape::Block,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
+            cwd: None,
         }
     }
 
@@ -365,6 +369,12 @@ impl VtermGrid {
 
     pub fn width(&self) -> u16 {
         self.width
+    }
+
+    /// The working directory most recently reported via OSC 7, or `None`
+    /// when the program has not reported one.
+    pub fn cwd(&self) -> Option<&str> {
+        self.cwd.as_deref()
     }
 
     /// Resize the grid to `width` columns, truncating or blank-padding
@@ -554,13 +564,24 @@ impl vte::Perform for VtermGrid {
     fn put(&mut self, _byte: u8) {}
     fn unhook(&mut self) {}
     fn osc_dispatch(&mut self, params: &[&[u8]], _bell_terminated: bool) {
+        let code = params.first().copied().unwrap_or_default();
+
+        // OSC 7 -- the program's working directory as a file URI:
+        // ESC ] 7 ; file://<host>/<path> ST. Overwrite the tracked cwd.
+        if code == b"7" {
+            if let Some(path) = params.get(1).copied().and_then(parse_osc7_cwd) {
+                self.cwd = Some(path);
+            }
+            return;
+        }
+
         // OSC 52 -- "set clipboard". Format: ESC ] 52 ; <Pc> ; <Pd> ST,
         // where <Pc> is the selection ("c" / "p" / "s" / mixed / empty)
         // and <Pd> is base64-encoded text. We honour writes targeted at
         // the system clipboard ("c", empty, or mixed including "c") and
         // ignore primary-only ("p") since the editor has no separate
         // primary-selection plumbing yet.
-        if params.len() < 3 || params[0] != b"52" {
+        if params.len() < 3 || code != b"52" {
             return;
         }
         let selection = params[1];
@@ -811,6 +832,50 @@ impl vte::Perform for VtermGrid {
     }
 
     fn esc_dispatch(&mut self, _intermediates: &[u8], _ignore: bool, _byte: u8) {}
+}
+
+/// Extract the path from an OSC 7 `file://<host>/<path>` URI, percent-decoded.
+/// `None` for a non-`file` scheme or non-UTF-8 input.
+fn parse_osc7_cwd(uri: &[u8]) -> Option<String> {
+    let uri = std::str::from_utf8(uri).ok()?;
+    let after_scheme = uri.strip_prefix("file://")?;
+    let path_start = after_scheme.find('/')?;
+    Some(percent_decode(&after_scheme[path_start..]))
+}
+
+/// Decode `%XX` escapes in `s`, passing other bytes through.
+fn percent_decode(s: &str) -> String {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        match (bytes[i], bytes.get(i + 1), bytes.get(i + 2)) {
+            (b'%', Some(&hi), Some(&lo)) => match (hex_val(hi), hex_val(lo)) {
+                (Some(hi), Some(lo)) => {
+                    out.push((hi << 4) | lo);
+                    i += 3;
+                },
+                _ => {
+                    out.push(bytes[i]);
+                    i += 1;
+                },
+            },
+            _ => {
+                out.push(bytes[i]);
+                i += 1;
+            },
+        }
+    }
+    String::from_utf8_lossy(&out).into_owned()
+}
+
+fn hex_val(b: u8) -> Option<u8> {
+    match b {
+        b'0'..=b'9' => Some(b - b'0'),
+        b'a'..=b'f' => Some(b - b'a' + 10),
+        b'A'..=b'F' => Some(b - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// Inclusive single-row selection spanning the byte range `[start, end)`

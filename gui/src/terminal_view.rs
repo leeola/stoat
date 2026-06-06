@@ -31,7 +31,7 @@ use gpui::{
     WeakEntity, Window,
 };
 use std::{
-    path::PathBuf,
+    path::{Path, PathBuf},
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -60,6 +60,13 @@ fn matched_agent(process_name: &str) -> Option<&'static str> {
         .iter()
         .copied()
         .find(|&agent| agent == process_name)
+}
+
+/// The final component of `path`, used as a compact label for the cwd.
+fn cwd_basename(path: &str) -> Option<String> {
+    Path::new(path)
+        .file_name()
+        .map(|name| name.to_string_lossy().into_owned())
 }
 
 pub(crate) struct Terminal {
@@ -339,10 +346,13 @@ fn spawn_write_bytes(
 
 impl ItemView for Terminal {
     fn tab_label(&self, _cx: &App) -> SharedString {
-        match self.foreground_name.as_deref().and_then(matched_agent) {
-            Some(agent) => SharedString::from(agent),
-            None => SharedString::from("Terminal"),
+        if let Some(agent) = self.foreground_name.as_deref().and_then(matched_agent) {
+            return SharedString::from(agent);
         }
+        if let Some(dir) = self.grid.cwd().and_then(cwd_basename) {
+            return SharedString::from(dir);
+        }
+        SharedString::from("Terminal")
     }
 
     fn deserialize(
@@ -631,6 +641,22 @@ mod tests {
             term.read_with(h.vcx, |t, cx| t.tab_label(cx)),
             SharedString::from("Terminal"),
             "non-agent foreground keeps the default label",
+        );
+    }
+
+    #[test]
+    fn tab_label_falls_back_to_cwd_basename() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = open_terminal(&mut h);
+
+        term.update(h.vcx, |t, cx| {
+            t.on_read(b"\x1b]7;file://host/Users/lee/stoat\x07", cx)
+        });
+        assert_eq!(
+            term.read_with(h.vcx, |t, cx| t.tab_label(cx)),
+            SharedString::from("stoat"),
+            "with no agent, the tab shows the cwd directory name",
         );
     }
 
