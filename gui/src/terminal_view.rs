@@ -15,7 +15,7 @@
 //! [`crate::run_pane::render`].
 
 use crate::{
-    globals::TerminalHostGlobal,
+    globals::{ClipboardHostGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     run_pane::{
         editor_font, mouse, mouse_button_code,
@@ -137,6 +137,30 @@ impl Terminal {
         if let Some(session) = self.session.clone() {
             spawn_write_bytes(session, bytes, cx);
         }
+    }
+
+    /// Read the system clipboard and write it to the PTY, wrapped in
+    /// bracketed-paste markers when the program enabled `?2004h` (see
+    /// [`VtermGrid::wrap_paste`]). A no-op when the clipboard is empty or
+    /// unavailable.
+    pub(crate) fn paste(&self, cx: &mut Context<'_, Self>) {
+        let Some(clipboard) = cx.try_global::<ClipboardHostGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
+        let text = match clipboard.get() {
+            Ok(Some(text)) if !text.is_empty() => text,
+            Ok(_) => return,
+            Err(err) => {
+                tracing::warn!(
+                    target: "stoat_gui::terminal_view",
+                    ?err,
+                    "terminal clipboard get failed"
+                );
+                return;
+            },
+        };
+        let bytes = self.grid.wrap_paste(&text);
+        self.write_to_pty(bytes, cx);
     }
 
     pub(crate) fn set_output_bounds(&mut self, bounds: Bounds<Pixels>, cx: &mut Context<'_, Self>) {
@@ -540,10 +564,13 @@ mod tests {
     use stoat_host::NoopFsWatcher;
     use stoat_scheduler::{Executor, TestScheduler};
 
-    fn install_globals(cx: &mut TestAppContext, terminal: Arc<FakeTerminalSession>) {
+    fn install_globals(
+        cx: &mut TestAppContext,
+        terminal: Arc<FakeTerminalSession>,
+        clipboard: Arc<FakeClipboard>,
+    ) {
         let executor = Executor::new(Arc::new(TestScheduler::new()));
         let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
-        let clipboard: Arc<dyn ClipboardHost> = Arc::new(FakeClipboard::new());
         let terminal_host: Arc<dyn TerminalHost> = Arc::new(FakeTerminalHost::new(terminal));
         cx.update(|cx| {
             cx.set_global(ExecutorGlobal(executor));
@@ -551,7 +578,7 @@ mod tests {
             cx.set_global(FsWatchHostGlobal(
                 Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
             ));
-            cx.set_global(ClipboardHostGlobal(clipboard));
+            cx.set_global(ClipboardHostGlobal(clipboard as Arc<dyn ClipboardHost>));
             cx.set_global(TerminalHostGlobal(terminal_host));
         });
     }
@@ -559,17 +586,20 @@ mod tests {
     struct Harness<'a> {
         workspace: Entity<Workspace>,
         terminal: Arc<FakeTerminalSession>,
+        clipboard: Arc<FakeClipboard>,
         vcx: &'a mut VisualTestContext,
     }
 
     fn new_harness(cx: &mut TestAppContext) -> Harness<'_> {
         let terminal = Arc::new(FakeTerminalSession::new());
-        install_globals(cx, terminal.clone());
+        let clipboard = Arc::new(FakeClipboard::new());
+        install_globals(cx, terminal.clone(), clipboard.clone());
         let (workspace, vcx) =
             cx.add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/repo"), cx));
         Harness {
             workspace,
             terminal,
+            clipboard,
             vcx,
         }
     }
@@ -822,5 +852,51 @@ mod tests {
         h.vcx.run_until_parked();
 
         h.terminal.assert_sent(0, b"\x03");
+    }
+
+    fn feed_cmd_v(h: &mut Harness<'_>) {
+        let sm = h
+            .workspace
+            .read_with(h.vcx, |w, _| w.input_state_machine().clone());
+        sm.update_in(h.vcx, |sm, window, cx| {
+            let cmd_v = Keystroke {
+                modifiers: Modifiers {
+                    platform: true,
+                    ..Modifiers::default()
+                },
+                key: "v".into(),
+                key_char: None,
+            };
+            sm.feed(&cmd_v, window, cx);
+        });
+    }
+
+    #[test]
+    fn cmd_v_pastes_clipboard_raw_when_not_bracketed() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        open_terminal(&mut h);
+        h.vcx.run_until_parked();
+        h.clipboard.set("hello").expect("seed clipboard");
+
+        feed_cmd_v(&mut h);
+        h.vcx.run_until_parked();
+
+        h.terminal.assert_sent(0, b"hello");
+    }
+
+    #[test]
+    fn cmd_v_wraps_paste_when_program_enabled_bracketed_mode() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = open_terminal(&mut h);
+        h.vcx.run_until_parked();
+        term.update(h.vcx, |t, cx| t.on_read(b"\x1b[?2004h", cx));
+        h.clipboard.set("hi").expect("seed clipboard");
+
+        feed_cmd_v(&mut h);
+        h.vcx.run_until_parked();
+
+        h.terminal.assert_sent(0, b"\x1b[200~hi\x1b[201~");
     }
 }

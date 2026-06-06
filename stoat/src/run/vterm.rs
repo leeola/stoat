@@ -162,6 +162,10 @@ pub struct VtermGrid {
     mouse_protocol: MouseProtocol,
     /// Whether mouse reports use SGR encoding (`?1006`) rather than X10.
     mouse_sgr: bool,
+    /// Whether the program enabled bracketed-paste mode (`?2004h`). When
+    /// set, pasted clipboard text is wrapped in paste markers before being
+    /// written to the PTY; see [`Self::wrap_paste`].
+    bracketed_paste: bool,
     /// Cursor shape selected via DECSCUSR.
     cursor_shape: CursorShape,
     /// Persisted across `feed` calls so escape sequences whose bytes
@@ -212,6 +216,7 @@ impl VtermGrid {
             saved_cursor: None,
             mouse_protocol: MouseProtocol::None,
             mouse_sgr: false,
+            bracketed_paste: false,
             cursor_shape: CursorShape::Block,
             parser: vte::Parser::new(),
             clipboard_writes: Vec::new(),
@@ -272,6 +277,7 @@ impl VtermGrid {
                 1002 => self.mouse_protocol = mouse(MouseProtocol::ButtonEvent),
                 1003 => self.mouse_protocol = mouse(MouseProtocol::AnyEvent),
                 1006 => self.mouse_sgr = set,
+                2004 => self.bracketed_paste = set,
                 _ => {},
             }
         }
@@ -288,6 +294,21 @@ impl VtermGrid {
     /// own block viewport while it is active.
     pub fn is_alt_screen(&self) -> bool {
         self.saved_screen.is_some()
+    }
+
+    /// Encode `text` as the bytes to write to the PTY for a paste. With
+    /// bracketed-paste mode active (`?2004h`) the text is wrapped in the
+    /// `ESC [ 200 ~` / `ESC [ 201 ~` markers so the program can tell
+    /// pasted input from typed input; `ESC` bytes are stripped from the
+    /// payload first so its contents cannot smuggle the end marker and
+    /// break out of the bracket. With the mode off the text is returned
+    /// unchanged.
+    pub fn wrap_paste(&self, text: &str) -> Vec<u8> {
+        if self.bracketed_paste {
+            format!("\x1b[200~{}\x1b[201~", text.replace('\x1b', "")).into_bytes()
+        } else {
+            text.as_bytes().to_vec()
+        }
     }
 
     /// The cursor shape selected via DECSCUSR.
@@ -1158,5 +1179,36 @@ impl BlockStatus {
             BlockStatus::Failed(Some(code)) => format!("[exit {code}]"),
             BlockStatus::Failed(None) => "[exit ?]".to_string(),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn wrap_paste_returns_raw_text_when_mode_off() {
+        let grid = VtermGrid::new(80);
+        assert_eq!(grid.wrap_paste("hello"), b"hello".to_vec());
+    }
+
+    #[test]
+    fn private_mode_2004_toggles_bracketed_wrapping() {
+        let mut grid = VtermGrid::new(80);
+        grid.feed(b"\x1b[?2004h");
+        assert_eq!(grid.wrap_paste("hi"), b"\x1b[200~hi\x1b[201~".to_vec());
+        grid.feed(b"\x1b[?2004l");
+        assert_eq!(grid.wrap_paste("hi"), b"hi".to_vec());
+    }
+
+    #[test]
+    fn wrap_paste_strips_esc_from_bracketed_payload() {
+        let mut grid = VtermGrid::new(80);
+        grid.feed(b"\x1b[?2004h");
+        assert_eq!(
+            grid.wrap_paste("a\x1b[201~b"),
+            b"\x1b[200~a[201~b\x1b[201~".to_vec(),
+            "ESC stripped so a smuggled end marker stays literal text"
+        );
     }
 }

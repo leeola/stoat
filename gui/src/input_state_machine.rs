@@ -1137,6 +1137,15 @@ impl InputStateMachine {
         // sets `prompt` mode, and must keep receiving its own keys.
         if !self.text_input_allowed() {
             if let Some(terminal) = self.active_terminal.as_ref().and_then(WeakEntity::upgrade) {
+                // Cmd-V pastes the clipboard into the terminal -- bracketed
+                // when the program enabled `?2004h` -- instead of encoding
+                // the keystroke to the PTY.
+                if matches!(event.code, KeyCode::Char('v'))
+                    && event.modifiers.contains(KeyModifiers::SUPER)
+                {
+                    terminal.update(cx, |term, cx| term.paste(cx));
+                    return Vec::new();
+                }
                 let plain_printable =
                     matches!(event.code, KeyCode::Char(_)) && event.modifiers.is_empty();
                 if !plain_printable {
