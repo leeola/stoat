@@ -1,6 +1,6 @@
-use crate::{editor::Editor, theme::ActiveTheme, workspace::Workspace};
+use crate::{editor::Editor, elevation::StyledExt, workspace::Workspace};
 use gpui::{
-    div, px, relative, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId,
+    div, hsla, px, relative, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView,
     MouseButton, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
 };
@@ -349,11 +349,11 @@ impl Render for ModalLayer {
         let Some(top) = self.active_modals.last() else {
             return div();
         };
-        let border = cx.theme().border_focused;
         div()
             .absolute()
             .size_full()
             .inset_0()
+            .bg(hsla(0., 0., 0., 0.3))
             .flex()
             .items_center()
             .justify_center()
@@ -385,11 +385,7 @@ impl Render for ModalLayer {
                     .h(relative(0.9))
                     .max_h(px(1000.))
                     .overflow_hidden()
-                    .bg(cx.theme().background)
-                    .border_1()
-                    .border_color(border)
-                    .rounded_md()
-                    .shadow_lg()
+                    .elevation_3(cx)
                     // Clicks inside the modal must not reach the overlay's
                     // dismiss handler above; only clicks on the surrounding
                     // backdrop close the modal.
