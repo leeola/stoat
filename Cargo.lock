@@ -6291,6 +6291,7 @@ dependencies = [
  "gpui",
  "ignore",
  "insta",
+ "libc",
  "lsp-types",
  "nucleo",
  "portable-pty",

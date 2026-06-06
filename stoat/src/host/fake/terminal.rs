@@ -22,6 +22,7 @@ struct FakeTerminalState {
     killed: bool,
     exit_code: Option<i32>,
     size: Option<(u16, u16)>,
+    foreground_name: Option<String>,
 }
 
 impl FakeTerminalSession {
@@ -33,6 +34,7 @@ impl FakeTerminalSession {
                 killed: false,
                 exit_code: None,
                 size: None,
+                foreground_name: None,
             }),
             read_tx: Mutex::new(Some(tx)),
             read_rx: tokio::sync::Mutex::new(rx),
@@ -43,6 +45,11 @@ impl FakeTerminalSession {
         if let Some(tx) = self.read_tx.lock().unwrap().as_ref() {
             let _ = tx.try_send(data.to_vec());
         }
+    }
+
+    /// Set the name returned by [`TerminalSession::foreground_process_name`].
+    pub fn set_foreground_name(&self, name: impl Into<String>) {
+        self.state.lock().unwrap().foreground_name = Some(name.into());
     }
 
     /// Signal that the command finished with `exit_code`: closes the
@@ -130,6 +137,10 @@ impl TerminalSession for FakeTerminalSession {
         self.state.lock().unwrap().size = Some((rows, cols));
         Ok(())
     }
+
+    fn foreground_process_name(&self) -> Option<String> {
+        self.state.lock().unwrap().foreground_name.clone()
+    }
 }
 
 /// Factory fake that hands out boxes wrapping the shared
@@ -178,6 +189,10 @@ impl TerminalSession for ArcTerminalSession {
 
     fn resize(&self, rows: u16, cols: u16) -> io::Result<()> {
         self.0.resize(rows, cols)
+    }
+
+    fn foreground_process_name(&self) -> Option<String> {
+        self.0.foreground_process_name()
     }
 }
 
