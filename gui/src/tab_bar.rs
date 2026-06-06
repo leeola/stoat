@@ -27,10 +27,18 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
     let item_count = pane.items().len();
 
     let label_color = cx.theme().tab_label;
+    let active_label = cx.theme().selection;
     let active_bg = cx.theme().tab_active;
     let inactive_bg = cx.theme().tab_inactive;
+    let hover_bg = cx.theme().elevated_surface;
+    let divider = cx.theme().border_variant;
 
-    let mut row = div().flex().flex_row().w_full();
+    let mut row = div()
+        .flex()
+        .flex_row()
+        .w_full()
+        .border_b_1()
+        .border_color(divider);
     for ix in 0..item_count {
         let item = &pane.items()[ix];
         let item_id = item.item_id();
@@ -38,14 +46,15 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
         let dirty_marker = if item.is_dirty(cx) { " [+]" } else { "" };
         let display = SharedString::from(format!(" {label}{dirty_marker} "));
         let is_active = ix == active_index;
+        let is_last = ix + 1 == item_count;
         let drag_label = display.clone();
 
         let element_id: ElementId = ("stoat_tab", item_id).into();
-        let tab = div()
+        let mut tab = div()
             .id(element_id)
             .px_2()
             .py_1()
-            .text_color(label_color)
+            .text_color(if is_active { active_label } else { label_color })
             .bg(if is_active { active_bg } else { inactive_bg })
             .child(display)
             .on_click(cx.listener(move |this, _event, _window, cx| {
@@ -73,6 +82,13 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
                     this.reorder(dragged.from_index, ix, cx);
                 }
             }));
+
+        if !is_last {
+            tab = tab.border_r_1().border_color(divider);
+        }
+        if !is_active {
+            tab = tab.hover(move |s| s.bg(hover_bg));
+        }
 
         row = row.child(tab);
     }
