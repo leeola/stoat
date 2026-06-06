@@ -1,5 +1,5 @@
-use crate::theme::ThemeColors;
-use gpui::{div, point, Bounds, Div, Pixels, Point, Size, Styled};
+use crate::{elevation::StyledExt, theme::ActiveTheme};
+use gpui::{div, point, App, Bounds, Div, Pixels, Point, Size, Styled};
 
 /// Pixel origin one row below the cell at grid `(row, col)`, anchored to
 /// the editor's `text_region_bounds`. Shared by the hover and
@@ -15,19 +15,19 @@ pub fn popup_origin_below(
     point(x, y)
 }
 
-/// Absolutely-positioned popup chrome (padding, background, border) used
-/// by the floating LSP popups. Callers add their own content via
+/// Absolutely-positioned popup chrome: content padding plus the
+/// `elevation_2` elevated-surface treatment (elevated background,
+/// rounded corners, border, drop shadow). Shared by the floating LSP
+/// popups. Callers add their own content via
 /// [`gpui::ParentElement::child`] and wrap the result in
 /// [`gpui::deferred`].
-pub fn popup_container(origin: Point<Pixels>, theme: &ThemeColors) -> Div {
+pub fn popup_container(origin: Point<Pixels>, cx: &App) -> Div {
     div()
         .absolute()
         .left(origin.x)
         .top(origin.y)
         .px_2()
         .py_1()
-        .bg(theme.popup_background)
-        .text_color(theme.popup_text)
-        .border_1()
-        .border_color(theme.popup_border)
+        .text_color(cx.theme().popup_text)
+        .elevation_2(cx)
 }

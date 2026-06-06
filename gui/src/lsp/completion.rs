@@ -1,5 +1,6 @@
 use crate::{
     editor::{Editor, EditorEvent},
+    elevation::StyledExt,
     globals::{LanguageRegistry, LspHostGlobal, UserSnippetsGlobal},
     theme::ActiveTheme,
 };
@@ -260,9 +261,10 @@ impl Render for CompletionPopup {
             .take(10)
             .enumerate()
             .map(|(idx, entry)| {
-                let mut row = div().child(entry.label.clone());
+                let mut row = div().px_2().py_0p5().child(entry.label.clone());
                 if idx == selected {
                     row = row
+                        .rounded_sm()
                         .bg(theme.popup_selection_background)
                         .text_color(theme.popup_selection_text);
                 } else {
@@ -277,10 +279,8 @@ impl Render for CompletionPopup {
                 .absolute()
                 .left(origin.x)
                 .top(origin.y)
-                .bg(theme.popup_background)
-                .border_1()
-                .border_color(theme.popup_border)
-                .child(div().flex().flex_col().children(rows)),
+                .elevation_2(cx)
+                .child(div().flex().flex_col().p_1().children(rows)),
         )
         .with_priority(2)
         .into_any_element()

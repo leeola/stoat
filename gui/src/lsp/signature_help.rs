@@ -243,7 +243,7 @@ impl Render for SignatureHelpManager {
                     .child(SharedString::from(doc)),
             );
         }
-        deferred(popup_container(origin, &theme).child(content))
+        deferred(popup_container(origin, cx).child(content))
             .with_priority(2)
             .into_any_element()
     }

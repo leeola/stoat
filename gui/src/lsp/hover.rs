@@ -2,7 +2,6 @@ use crate::{
     editor::{Editor, EditorEvent},
     globals::{LanguageRegistry, LspHostGlobal},
     lsp::popup::{popup_container, popup_origin_below},
-    theme::ActiveTheme,
 };
 use gpui::{
     deferred, div, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -157,9 +156,8 @@ impl Render for HoverPopup {
         };
         let origin = popup_origin_below(bounds, cell, row, col);
         let lines = self.lines.clone();
-        let theme = cx.theme();
         deferred(
-            popup_container(origin, &theme).child(
+            popup_container(origin, cx).child(
                 div().flex().flex_col().children(
                     lines
                         .into_iter()
