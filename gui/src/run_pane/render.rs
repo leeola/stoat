@@ -200,6 +200,7 @@ pub(crate) fn render_block(
     block: &OutputBlock,
     cursor: Option<CursorRender>,
     theme: &ThemeColors,
+    grid_bounds_capture: AnyElement,
 ) -> AnyElement {
     let status = block.status();
     let (gutter, marker_color) = match status {
@@ -218,16 +219,18 @@ pub(crate) fn render_block(
                 .text_color(theme.muted_text)
                 .child(SharedString::from(block.header_meta())),
         );
-    let mut col = div().flex().flex_col().w_full().child(header);
+    let mut rows = div().relative().flex().flex_col().w_full();
     for row_idx in 0..block.grid.line_count() {
         let row_cursor = cursor.as_ref().filter(|c| c.row == row_idx);
-        col = col.child(div().px_2().child(render_grid_row(
+        rows = rows.child(div().px_2().child(render_grid_row(
             &block.grid,
             row_idx,
             block.selection.as_ref(),
             row_cursor,
         )));
     }
+    rows = rows.child(grid_bounds_capture);
+    let mut col = div().flex().flex_col().w_full().child(header).child(rows);
     if let Some(err) = &block.error {
         col = col.child(div().px_2().child(SharedString::from(err.clone())));
     }

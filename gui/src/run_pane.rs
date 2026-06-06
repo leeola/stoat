@@ -40,7 +40,7 @@ use gpui::{
 use std::{path::PathBuf, sync::Arc};
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{CommandMark, GridSelection, MouseProtocol, OutputBlock},
+    run::{CommandMark, GridSelection, LinkTarget, MouseProtocol, OutputBlock},
 };
 
 const SHELL_WIDTH: u16 = 80;
@@ -81,6 +81,13 @@ pub struct Run {
     /// forwarding the wheel to a full-screen program (see
     /// [`Self::should_forward_scroll`]).
     scroll_handle: ScrollHandle,
+    /// On-screen bounds of each block's grid-rows area, captured from
+    /// layout each paint and indexed parallel to [`Self::blocks`]. Mouse
+    /// handlers hit-test clicks against these to resolve which block and
+    /// cell a position falls in, which is robust to per-block headers,
+    /// inter-block gaps, and scroll offset that [`Self::position_to_grid`]
+    /// alone ignores.
+    block_grid_bounds: Vec<Bounds<Pixels>>,
     _spawn_task: Option<Task<()>>,
 }
 
@@ -130,6 +137,7 @@ impl Run {
             cell_size: None,
             last_terminal_size: None,
             scroll_handle: ScrollHandle::new(),
+            block_grid_bounds: Vec::new(),
             _spawn_task: Some(spawn_task),
         }
     }
@@ -150,6 +158,16 @@ impl Run {
         self.cell_size = Some(size);
         self.sync_terminal_size();
         cx.notify();
+    }
+
+    /// Record block `idx`'s grid-rows bounds, captured by its render canvas.
+    /// Stored without notifying: the value is read on click, not rendered,
+    /// so writing it must not trigger another paint.
+    pub(crate) fn set_block_grid_bounds(&mut self, idx: usize, bounds: Bounds<Pixels>) {
+        if self.block_grid_bounds.len() <= idx {
+            self.block_grid_bounds.resize(idx + 1, bounds);
+        }
+        self.block_grid_bounds[idx] = bounds;
     }
 
     /// Resize the PTY to match the current output bounds and cell size,
@@ -218,6 +236,52 @@ impl Run {
         let cell = self.cell_size?;
         let elem = point(position.x - bounds.origin.x, position.y - bounds.origin.y);
         Some(mouse::point_to_grid(elem, cell))
+    }
+
+    /// Open the file-path link under `position`, if any, returning whether
+    /// one was opened. Resolves the position against each block's captured
+    /// grid bounds (so the correct block and cell are found regardless of
+    /// scroll or header offset), hit-tests that block's [`VtermGrid::links`],
+    /// and opens a covering [`LinkTarget::Path`] via [`Workspace::open_paths`].
+    /// URL links are handled separately and ignored here.
+    fn open_link_at(&self, position: Point<Pixels>, cx: &mut Context<'_, Self>) -> bool {
+        let Some(cell) = self.cell_size else {
+            return false;
+        };
+        // Grid rows carry `px_2` horizontal padding in `render::render_block`;
+        // subtract it so column 0 lands on the first character.
+        let row_pad = px(8.);
+        for (idx, block) in self.blocks.iter().enumerate() {
+            let Some(bounds) = self.block_grid_bounds.get(idx) else {
+                continue;
+            };
+            if !bounds.contains(&position) {
+                continue;
+            }
+            let elem = point(
+                position.x - bounds.origin.x - row_pad,
+                position.y - bounds.origin.y,
+            );
+            let (row, col) = mouse::point_to_grid(elem, cell);
+            let (row, col) = (row as u16, col as u16);
+            let path = block
+                .grid
+                .links()
+                .into_iter()
+                .find_map(|link| match link.target {
+                    LinkTarget::Path { path, .. } if link.selection.contains(col, row) => {
+                        Some(path)
+                    },
+                    _ => None,
+                });
+            if let Some(path) = path {
+                if let Some(workspace) = self.workspace.upgrade() {
+                    workspace.update(cx, |w, cx| w.open_paths(&[PathBuf::from(path)], cx));
+                }
+                return true;
+            }
+        }
+        false
     }
 
     /// Whether this run pane is the workspace's focused pane item, so the
@@ -650,7 +714,25 @@ impl Render for Run {
                         focused,
                     }
                 });
-            body = body.child(render::render_block(block, cursor, &theme));
+            let grid_bounds_capture = {
+                let handle = cx.weak_entity();
+                canvas(
+                    move |bounds, _window, cx| {
+                        let _ =
+                            handle.update(cx, |run, _cx| run.set_block_grid_bounds(idx, bounds));
+                    },
+                    |_, _, _, _| {},
+                )
+                .absolute()
+                .size_full()
+                .into_any_element()
+            };
+            body = body.child(render::render_block(
+                block,
+                cursor,
+                &theme,
+                grid_bounds_capture,
+            ));
         }
         let body = if self.should_forward_scroll() {
             body.into_any_element()
@@ -696,6 +778,11 @@ impl Render for Run {
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if (event.modifiers.control || event.modifiers.platform)
+                        && this.open_link_at(event.position, cx)
+                    {
+                        return;
+                    }
                     if !this.report_mouse(0, false, true, event.position, event.modifiers, cx) {
                         this.dispatch_grid_click(event.position, window, cx);
                     }
@@ -1021,6 +1108,59 @@ mod tests {
             let len = b.text().len();
             b.edit(0..len, text, cx);
         });
+    }
+
+    /// Open a run pane, run a command whose output contains a path link
+    /// (`src/main.rs:5`), and pin a 10x20 cell grid with the first block's
+    /// bounds at the origin so click positions map to known cells.
+    fn run_with_path_link(h: &mut Harness<'_>) -> Entity<Run> {
+        let run = open_run(h);
+        h.vcx.run_until_parked();
+        type_into_input(&run, h, "ls");
+        run.update(h.vcx, |r, cx| r.submit(cx));
+        h.terminal.push_output(b"src/main.rs:5\n");
+        h.vcx.run_until_parked();
+        run.update(h.vcx, |r, _| {
+            r.cell_size = Some(size(px(10.), px(20.)));
+            r.block_grid_bounds = vec![Bounds {
+                origin: point(px(0.), px(0.)),
+                size: size(px(800.), px(400.)),
+            }];
+        });
+        run
+    }
+
+    #[test]
+    fn ctrl_click_on_path_link_opens_the_file() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = run_with_path_link(&mut h);
+
+        // (x 30, y 10) maps to column 2, row 0 -- inside "src/main.rs:5"
+        // after the 8px grid-row pad and 10x20 cells.
+        let opened = run.update(h.vcx, |r, cx| r.open_link_at(point(px(30.), px(10.)), cx));
+
+        assert!(opened, "a path link under the click is opened");
+        assert!(
+            focused_run(&mut h).is_none(),
+            "opening the file activates an editor in place of the run pane",
+        );
+    }
+
+    #[test]
+    fn ctrl_click_off_a_link_does_not_open() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let run = run_with_path_link(&mut h);
+
+        // Column ~49 on row 0 is past the end of the link span.
+        let opened = run.update(h.vcx, |r, cx| r.open_link_at(point(px(500.), px(10.)), cx));
+
+        assert!(!opened, "a click off every link opens nothing");
+        assert!(
+            focused_run(&mut h).is_some(),
+            "the run pane stays active when no link is hit",
+        );
     }
 
     #[test]
