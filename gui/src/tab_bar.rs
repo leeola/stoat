@@ -33,12 +33,7 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
     let hover_bg = cx.theme().elevated_surface;
     let divider = cx.theme().border_variant;
 
-    let mut row = div()
-        .flex()
-        .flex_row()
-        .w_full()
-        .border_b_1()
-        .border_color(divider);
+    let mut row = div().flex().flex_row().w_full();
     for ix in 0..item_count {
         let item = &pane.items()[ix];
         let item_id = item.item_id();
@@ -87,6 +82,9 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
             tab = tab.border_r_1().border_color(divider);
         }
         if !is_active {
+            // Inactive tabs carry the strip's bottom hairline; the active
+            // tab omits it so its surface merges into the editor below.
+            tab = tab.border_b_1().border_color(divider);
             tab = tab.hover(move |s| s.bg(hover_bg));
         }
 
