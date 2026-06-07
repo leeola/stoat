@@ -1,6 +1,4 @@
 pub(crate) mod badges;
-pub(crate) mod claude_checkpoint_picker;
-pub(crate) mod claude_pane;
 pub(crate) mod code_action;
 pub(crate) mod command_palette;
 pub(crate) mod commits;
@@ -33,9 +31,7 @@ pub(crate) mod workspace_symbol_picker;
 use crate::{
     app::Stoat,
     buffer_registry::BufferRegistry,
-    claude_chat::ClaudeChatState,
     editor_state::{EditorId, EditorState},
-    host::ClaudeSessionId,
     keymap_state::{action_display_desc, StoatKeymapState},
     pane::{DockVisibility, FocusTarget},
     rebase::RebasePause,
@@ -43,13 +39,12 @@ use crate::{
 };
 use ratatui::{buffer::Buffer, layout::Rect};
 use slotmap::SlotMap;
-use std::{collections::HashMap, path::Path};
+use std::path::Path;
 
 pub(crate) struct PaneCtx<'a> {
     pub(crate) editors: &'a mut SlotMap<EditorId, EditorState>,
     pub(crate) buffers: &'a BufferRegistry,
     pub(crate) runs: &'a SlotMap<RunId, RunState>,
-    pub(crate) chats: &'a HashMap<ClaudeSessionId, ClaudeChatState>,
 }
 
 /// Ambient workspace and frame state shared across render functions. Bundled
@@ -61,7 +56,6 @@ pub(crate) struct FrameCtx<'a> {
     pub(crate) workspace_root: &'a Path,
     pub(crate) mode: &'a str,
     pub(crate) theme: &'a crate::theme::Theme,
-    pub(crate) render_tick: u64,
     /// Mid-typing count prefix waiting on a motion (e.g. `4` between
     /// keypresses on the way to `4j`). The status bar shows it so the
     /// user knows a partial count is in flight; cleared after every
@@ -149,7 +143,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         workspace_root: &ws.git_root,
         mode: &stoat.mode,
         theme: &stoat.theme,
-        render_tick: stoat.render_tick,
         pending_count: stoat.pending_count,
         lsp_progress: stoat.lsp_progress.current(),
         goto_word_labels: stoat.pending_goto_word.as_ref(),
@@ -171,7 +164,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                 editors: &mut ws.editors,
                 buffers: &ws.buffers,
                 runs: &ws.runs,
-                chats: &ws.chats,
             },
             frame,
             buf,
@@ -231,7 +223,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                     editors: &mut ws.editors,
                     buffers: &ws.buffers,
                     runs: &ws.runs,
-                    chats: &ws.chats,
                 },
                 frame,
                 buf,
@@ -263,7 +254,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             size,
             buf,
         );
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false, false);
+        let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false);
         let raw = stoat.keymap.scoped_bindings(&state, "help_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -290,7 +281,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             size,
             buf,
         );
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true, false);
+        let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true);
         let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -309,7 +300,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         );
     } else if let Some(palette) = &mut stoat.command_palette {
         command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);
-        let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false, false);
+        let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false);
         let raw = stoat.keymap.scoped_bindings(&state, "palette_open");
         let bindings: Vec<_> = raw
             .iter()
@@ -391,17 +382,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "diagnostics",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(picker) = &stoat.pending_checkpoint_picker {
-        claude_checkpoint_picker::render_claude_checkpoint_picker(picker, &stoat.theme, size, buf);
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
-            "claude-restore",
             &bindings,
             None,
             &stoat.theme,

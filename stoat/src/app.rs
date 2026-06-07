@@ -1,6 +1,6 @@
 use crate::{
     action_handlers,
-    badge::{Anchor, Badge, BadgeSource, BadgeState, BadgeTray},
+    badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
     command_palette::CommandPalette,
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
@@ -8,7 +8,6 @@ use crate::{
     file_finder::FileFinder,
     help::Help,
     host::{
-        AgentMessage, ClaudeCodeHost, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
         EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspServer,
         NoopFsWatcher, NoopLspServer,
     },
@@ -99,11 +98,6 @@ pub struct Stoat {
     /// Only set when an opening dispatch returned `Redraw`;
     /// no-op opens do not overwrite the prior recall target.
     pub(crate) last_picker_action: Option<&'static str>,
-    /// Modal listing the active claude chat's per-message checkpoints;
-    /// opened by [`stoat_action::OpenCheckpointPicker`]. Selecting an
-    /// entry routes its sha to [`crate::host::GitRepo::restore_tree`]
-    /// to roll the working tree back to the captured state.
-    pub(crate) pending_checkpoint_picker: Option<crate::claude_checkpoint_picker::CheckpointPicker>,
     /// Active input modal for typing a global-search regex pattern.
     /// `Some` while the user is composing the query; cleared on
     /// submit (the picker takes over) or cancel.
@@ -153,10 +147,6 @@ pub struct Stoat {
     /// workspace's own [`Workspace::badges`]. The tray the badge lives in
     /// is the source of truth for its scope.
     pub(crate) badges: BadgeTray,
-    pub(crate) claude_host: Option<Arc<dyn ClaudeCodeHost>>,
-    claude_sessions: ClaudeCodeSessions,
-    pub(crate) claude_tx: Sender<ClaudeNotification>,
-    claude_rx: Receiver<ClaudeNotification>,
     pub(crate) pty_tx: Sender<PtyNotification>,
     pty_rx: Receiver<PtyNotification>,
     /// Wake-up signal for [`Self::run`]'s `tokio::select!`. Background
@@ -590,7 +580,6 @@ impl Stoat {
         workspaces[active_workspace].id = active_workspace;
 
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
-        let (claude_tx, claude_rx) = tokio::sync::mpsc::channel(256);
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
         let (permission_prompt_tx, permission_prompt_rx) = tokio::sync::mpsc::channel(64);
 
@@ -613,7 +602,6 @@ impl Stoat {
             jumplist_picker: None,
             diagnostics_picker: None,
             last_picker_action: None,
-            pending_checkpoint_picker: None,
             global_search_input: None,
             global_search: None,
             split_selection_input: None,
@@ -629,10 +617,6 @@ impl Stoat {
             workspaces,
             active_workspace,
             badges: BadgeTray::new(),
-            claude_host: None,
-            claude_sessions: ClaudeCodeSessions::default(),
-            claude_tx,
-            claude_rx,
             pty_tx,
             pty_rx,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),
@@ -806,82 +790,6 @@ impl Stoat {
         self.size
     }
 
-    /// Find the workspace that owns a Claude session, by searching for the
-    /// session id in each workspace's [`Workspace::chats`] map. A session
-    /// always belongs to the workspace where it was created; this lookup
-    /// keeps chat-state updates routed correctly when messages arrive while
-    /// a different workspace is active.
-    pub(crate) fn workspace_owning_session(&self, id: ClaudeSessionId) -> Option<WorkspaceId> {
-        self.workspaces
-            .iter()
-            .find(|(_, ws)| ws.chats.contains_key(&id))
-            .map(|(wid, _)| wid)
-    }
-
-    /// Whether a Claude session is currently visible in its owning
-    /// workspace's panes. A session with no owning workspace is never
-    /// visible; a session owned by a non-active workspace is never visible
-    /// from the user's perspective (they're looking at a different workspace).
-    pub(crate) fn is_claude_visible(&self, id: ClaudeSessionId) -> bool {
-        let Some(wid) = self.workspace_owning_session(id) else {
-            return false;
-        };
-        if wid != self.active_workspace {
-            return false;
-        }
-        self.workspaces[wid].is_claude_visible(id)
-    }
-
-    /// Badge label for a Claude session. Derived from the basename of the
-    /// owning workspace's git root so multiple concurrent sessions remain
-    /// distinguishable in the stacked tray. Falls back to `"claude"` when
-    /// the git root has no basename (notably for test workspaces built
-    /// from [`std::path::PathBuf::new`]).
-    pub(crate) fn claude_badge_label(&self, id: ClaudeSessionId) -> String {
-        self.workspace_owning_session(id)
-            .and_then(|wid| self.workspaces[wid].git_root.file_name())
-            .and_then(|name| name.to_str())
-            .map(|s| s.to_string())
-            .unwrap_or_else(|| "claude".to_string())
-    }
-
-    /// Drop Claude badges whose sessions are currently visible. Runs after
-    /// every action dispatch so opening a session (via pane placement, dock
-    /// unhide, or any future show path) immediately dismisses a lingering
-    /// badge. The passive visibility check in [`Self::handle_claude_message`]
-    /// only fires on protocol events, so a `Complete` badge can otherwise
-    /// outlive its session view indefinitely.
-    pub(crate) fn sync_claude_badges(&mut self) {
-        let ids: Vec<ClaudeSessionId> = self
-            .workspaces
-            .iter()
-            .flat_map(|(_, ws)| ws.chats.keys().copied())
-            .collect();
-        for id in ids {
-            if self.is_claude_visible(id) {
-                self.badges.remove_by_source(BadgeSource::Claude(id));
-            }
-        }
-    }
-
-    pub fn set_claude_code_host(&mut self, host: Arc<dyn ClaudeCodeHost>) {
-        self.claude_host = Some(host);
-    }
-
-    fn any_claude_active(&self) -> bool {
-        self.workspaces
-            .values()
-            .any(|ws| ws.chats.values().any(|c| c.active_since.is_some()))
-    }
-
-    pub fn claude_sessions(&self) -> &ClaudeCodeSessions {
-        &self.claude_sessions
-    }
-
-    pub fn claude_sessions_mut(&mut self) -> &mut ClaudeCodeSessions {
-        &mut self.claude_sessions
-    }
-
     /// Convenience wrapper that dispatches the [`OpenFile`] action with `path`.
     ///
     /// The action handler reads the file, creates a buffer, and shows it in
@@ -904,7 +812,6 @@ impl Stoat {
         render: Sender<Buffer>,
     ) -> io::Result<()> {
         loop {
-            let active = self.any_claude_active();
             let effect = tokio::select! {
                 biased;
                 event = events.recv() => {
@@ -915,22 +822,11 @@ impl Stoat {
                     let Some(notif) = notif else { continue };
                     self.handle_pty_notification(notif)
                 }
-                notif = self.claude_rx.recv() => {
-                    let Some(notif) = notif else { continue };
-                    self.handle_claude_notification(notif)
-                }
                 prompt = self.permission_prompt_rx.recv() => {
                     let Some(prompt) = prompt else { continue };
                     self.enqueue_permission_prompt(prompt)
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
-                _ = async {
-                    if active {
-                        tokio::time::sleep(std::time::Duration::from_millis(100)).await
-                    } else {
-                        std::future::pending::<()>().await
-                    }
-                } => UpdateEffect::Redraw,
             };
             match effect {
                 UpdateEffect::Redraw => {
@@ -1183,9 +1079,6 @@ impl Stoat {
         if self.handle_editor_pane_mouse(mouse.kind, col, row) {
             return UpdateEffect::Redraw;
         }
-        if self.handle_claude_pane_mouse(mouse.kind, col, row) {
-            return UpdateEffect::Redraw;
-        }
         tracing::trace!(
             target: "stoat::app",
             kind = ?mouse.kind,
@@ -1194,93 +1087,6 @@ impl Stoat {
             "mouse event routed to focused element"
         );
         UpdateEffect::None
-    }
-
-    /// Handle mouse events on a focused claude pane. On
-    /// `MouseEventKind::Up(Left)` over a row that belongs to a user
-    /// message with a captured checkpoint, restore the working tree
-    /// to that checkpoint via [`crate::host::GitRepo::restore_tree`].
-    /// Returns `true` only when a restore actually fired (a redraw is
-    /// useful afterwards even though the chat content is unchanged,
-    /// to refresh badges and badge counts).
-    fn handle_claude_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
-        let _ = col;
-        if !matches!(kind, MouseEventKind::Up(MouseButton::Left)) {
-            return false;
-        }
-        let pane_area = {
-            let ws = self.active_workspace();
-            match ws.focus {
-                FocusTarget::SplitPane(pane_id) => {
-                    let pane = ws.panes.pane(pane_id);
-                    if !matches!(pane.view, View::Claude(_)) {
-                        return false;
-                    }
-                    pane.area
-                },
-                FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
-                    Some(dock) if matches!(dock.view, View::Claude(_)) => dock.area,
-                    _ => return false,
-                },
-            }
-        };
-        let session_id = match self.active_workspace().claude_chat {
-            Some(id) => id,
-            None => return false,
-        };
-        let chat = match self.active_workspace().chats.get(&session_id) {
-            Some(c) => c,
-            None => return false,
-        };
-        let input_lines = self
-            .active_workspace()
-            .buffers
-            .get(chat.input.buffer_id)
-            .map(|b| {
-                let guard = b.read().expect("poisoned");
-                guard.snapshot.visible_text.max_point().row as u16 + 1
-            })
-            .unwrap_or(1);
-        let body_area = match crate::render::claude_pane::chat_body_area(pane_area, input_lines) {
-            Some(a) => a,
-            None => return false,
-        };
-        let body_width = body_area.width as usize;
-        let theme = &self.theme;
-        let render_tick = self.render_tick;
-        let msg_idx = match crate::render::claude_pane::message_at_screen_row(
-            chat,
-            body_area,
-            body_width,
-            theme,
-            render_tick,
-            row,
-        ) {
-            Some(idx) => idx,
-            None => return false,
-        };
-        let sha = match chat
-            .messages
-            .get(msg_idx)
-            .and_then(|m| m.checkpoint_sha.clone())
-        {
-            Some(s) => s,
-            None => return false,
-        };
-        let git_root = self.active_workspace().git_root.clone();
-        let Some(repo) = self.git_host.discover(&git_root) else {
-            return false;
-        };
-        if let Err(err) = repo.restore_tree(&sha) {
-            tracing::warn!(
-                target: "stoat::claude",
-                ?err,
-                sha,
-                "checkpoint restore via marker click failed"
-            );
-            return false;
-        }
-        true
     }
 
     /// Routes left-button Down/Drag/Up events on a focused run pane into
@@ -1584,9 +1390,6 @@ impl Stoat {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
             }
-            if self.pending_checkpoint_picker.take().is_some() {
-                return UpdateEffect::Redraw;
-            }
             if let Some(picker) = self.global_search.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1636,10 +1439,6 @@ impl Stoat {
 
         if self.diagnostics_picker.is_some() {
             return self.dispatch_diagnostics_picker_key(key);
-        }
-
-        if self.pending_checkpoint_picker.is_some() {
-            return self.dispatch_checkpoint_picker_key(key);
         }
 
         if self.global_search.is_some() {
@@ -2115,31 +1914,12 @@ impl Stoat {
                 let editor = ws.editors.get(id)?;
                 Some((id, editor.buffer_id))
             },
-            View::Claude(session_id) => {
-                let chat = ws.chats.get(&session_id)?;
-                Some((chat.input.editor_id, chat.input.buffer_id))
-            },
             View::Run(id) => {
                 let run_state = ws.runs.get(id)?;
                 Some((run_state.input.editor_id, run_state.input.buffer_id))
             },
             _ => None,
         }
-    }
-
-    pub(crate) fn focused_is_claude(&self) -> bool {
-        let ws = self.active_workspace();
-        let view = match ws.focus {
-            FocusTarget::SplitPane(_) => {
-                let focused = ws.panes.focus();
-                &ws.panes.pane(focused).view
-            },
-            FocusTarget::Dock(dock_id) => match ws.docks.get(dock_id) {
-                Some(dock) => &dock.view,
-                None => return false,
-            },
-        };
-        matches!(view, View::Claude(_))
     }
 
     fn handle_insert_key(&mut self, key: KeyEvent) -> Option<UpdateEffect> {
@@ -2202,7 +1982,7 @@ impl Stoat {
                 Some(UpdateEffect::Redraw)
             },
             KeyCode::Enter if key.modifiers.is_empty() => {
-                if self.focused_is_claude() || self.mode == "prompt" || self.mode == "run" {
+                if self.mode == "prompt" || self.mode == "run" {
                     None
                 } else {
                     self.editor_insert(editor_id, buffer_id, "\n");
@@ -2474,364 +2254,6 @@ impl Stoat {
         }
     }
 
-    fn handle_claude_notification(&mut self, notif: ClaudeNotification) -> UpdateEffect {
-        match notif {
-            ClaudeNotification::CreateRequested { session_id } => {
-                if let Some(host) = self.claude_host.clone() {
-                    let tx = self.claude_tx.clone();
-                    self.executor
-                        .spawn(async move {
-                            match host.new_session().await {
-                                Ok(session) => {
-                                    let _ = tx
-                                        .send(ClaudeNotification::SessionReady {
-                                            session_id,
-                                            session,
-                                        })
-                                        .await;
-                                },
-                                Err(e) => {
-                                    let _ = tx
-                                        .send(ClaudeNotification::SessionError {
-                                            session_id,
-                                            error: e.to_string(),
-                                        })
-                                        .await;
-                                },
-                            }
-                        })
-                        .detach();
-                }
-                UpdateEffect::None
-            },
-            ClaudeNotification::SessionReady {
-                session_id,
-                session,
-            } => {
-                let session: Arc<dyn crate::host::ClaudeCodeSession> = Arc::from(session);
-                let claude_tx = self.claude_tx.clone();
-                self.claude_sessions.fill_slot(session_id, session.clone());
-                self.executor
-                    .spawn(claude_polling_task(session_id, session.clone(), claude_tx))
-                    .detach();
-
-                let pending = {
-                    let ws = self.active_workspace_mut();
-                    ws.chats
-                        .get_mut(&session_id)
-                        .map(|chat| std::mem::take(&mut chat.pending_sends))
-                        .unwrap_or_default()
-                };
-                if !pending.is_empty() {
-                    self.executor
-                        .spawn(async move {
-                            for text in pending {
-                                if let Err(e) = session.send(&text).await {
-                                    tracing::error!("claude pending send error: {e}");
-                                    break;
-                                }
-                            }
-                        })
-                        .detach();
-                }
-
-                UpdateEffect::Redraw
-            },
-            ClaudeNotification::SessionError { session_id, error } => {
-                use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
-                tracing::error!("claude session {session_id:?} failed: {error}");
-                self.claude_sessions.remove(session_id);
-                let ws = self.active_workspace_mut();
-                if let Some(chat) = ws.chats.get_mut(&session_id) {
-                    chat.messages.push(ChatMessage {
-                        role: ChatRole::Assistant,
-                        content: ChatMessageContent::Error(format!(
-                            "Failed to start session: {error}"
-                        )),
-                        checkpoint_sha: None,
-                    });
-                }
-                UpdateEffect::Redraw
-            },
-            ClaudeNotification::Message {
-                session_id,
-                message,
-            } => self.handle_claude_message(session_id, &message),
-        }
-    }
-
-    /// Drain every queued [`ClaudeNotification`] and route it through
-    /// [`Self::handle_claude_notification`]. Used by the test harness in its
-    /// settle loop to advance the real transport pipeline without the
-    /// production `tokio::select!` in [`Self::run`]. Returns `true` if at
-    /// least one notification was processed, so callers can loop until the
-    /// pipeline reaches a fixed point.
-    #[cfg(test)]
-    pub(crate) fn drain_claude_notifications(&mut self) -> bool {
-        let mut progressed = false;
-        while let Ok(notif) = self.claude_rx.try_recv() {
-            self.handle_claude_notification(notif);
-            progressed = true;
-        }
-        progressed
-    }
-
-    pub(crate) fn handle_claude_message(
-        &mut self,
-        session_id: ClaudeSessionId,
-        message: &AgentMessage,
-    ) -> UpdateEffect {
-        use crate::claude_chat::{ChatMessage, ChatMessageContent, ChatRole};
-
-        let visible = self.is_claude_visible(session_id);
-        let owning = self.workspace_owning_session(session_id);
-        let mut follow_action: Option<(
-            WorkspaceId,
-            crate::host::ToolKind,
-            Vec<crate::host::ToolCallLocation>,
-        )> = None;
-
-        if let Some(wid) = owning {
-            let chat_ws = &mut self.workspaces[wid];
-            if let Some(chat) = chat_ws.chats.get_mut(&session_id) {
-                match message {
-                    AgentMessage::Text { text } => {
-                        chat.streaming_text = None;
-                        let trimmed = text.trim();
-                        if !trimmed.is_empty() {
-                            chat.messages.push(ChatMessage {
-                                role: ChatRole::Assistant,
-                                content: ChatMessageContent::Text(trimmed.to_string()),
-                                checkpoint_sha: None,
-                            });
-                        }
-                    },
-                    AgentMessage::PartialText { text } => {
-                        chat.streaming_text = Some(text.clone());
-                    },
-                    AgentMessage::Thinking { text, .. } => {
-                        chat.streaming_text = None;
-                        chat.messages.push(ChatMessage {
-                            role: ChatRole::Assistant,
-                            content: ChatMessageContent::Thinking { text: text.clone() },
-                            checkpoint_sha: None,
-                        });
-                    },
-                    AgentMessage::ToolUse {
-                        id,
-                        name,
-                        input,
-                        kind,
-                        locations,
-                        ..
-                    } => {
-                        chat.messages.push(ChatMessage {
-                            role: ChatRole::Assistant,
-                            content: ChatMessageContent::ToolUse {
-                                id: id.clone(),
-                                name: name.clone(),
-                                input: input.clone(),
-                            },
-                            checkpoint_sha: None,
-                        });
-                        if chat.follow {
-                            follow_action = Some((wid, *kind, locations.clone()));
-                        }
-                    },
-                    AgentMessage::ToolResult {
-                        id,
-                        content,
-                        status,
-                        ..
-                    } => {
-                        chat.messages.push(ChatMessage {
-                            role: ChatRole::Assistant,
-                            content: ChatMessageContent::ToolResult {
-                                id: id.clone(),
-                                content: content.clone(),
-                                status: *status,
-                            },
-                            checkpoint_sha: None,
-                        });
-                    },
-                    AgentMessage::Result {
-                        cost_usd,
-                        duration_ms,
-                        num_turns,
-                    } => {
-                        chat.active_since = None;
-                        chat.messages.push(ChatMessage {
-                            role: ChatRole::Assistant,
-                            content: ChatMessageContent::TurnComplete {
-                                cost_usd: *cost_usd,
-                                duration_ms: *duration_ms,
-                                num_turns: *num_turns,
-                            },
-                            checkpoint_sha: None,
-                        });
-                    },
-                    AgentMessage::Error { message: msg } => {
-                        chat.active_since = None;
-                        chat.messages.push(ChatMessage {
-                            role: ChatRole::Assistant,
-                            content: ChatMessageContent::Error(msg.clone()),
-                            checkpoint_sha: None,
-                        });
-                    },
-                    AgentMessage::Init {
-                        session_id: proto_id,
-                        ..
-                    } => {
-                        chat.protocol_session_id = Some(proto_id.clone());
-                    },
-                    AgentMessage::Usage { accumulated, .. } => {
-                        chat.usage = accumulated.clone();
-                    },
-                    AgentMessage::Unknown { .. }
-                    | AgentMessage::ServerToolUse { .. }
-                    | AgentMessage::ServerToolResult { .. }
-                    | AgentMessage::ToolUpdate { .. }
-                    | AgentMessage::PartialToolInput { .. }
-                    | AgentMessage::Plan { .. }
-                    | AgentMessage::ModeChanged { .. }
-                    | AgentMessage::ModelChanged { .. }
-                    | AgentMessage::FilesPersisted { .. }
-                    | AgentMessage::ElicitationComplete { .. }
-                    | AgentMessage::AuthRequired { .. }
-                    | AgentMessage::SessionState(_)
-                    | AgentMessage::TaskEvent(_)
-                    | AgentMessage::Hook(_) => {},
-                }
-            }
-        }
-
-        if let Some((wid, kind, locations)) = follow_action {
-            action_handlers::handle_follow_tool_use(self, wid, kind, &locations);
-        }
-
-        let source = BadgeSource::Claude(session_id);
-        let label = self.claude_badge_label(session_id);
-        let tray = &mut self.badges;
-
-        match message {
-            AgentMessage::Thinking { .. }
-            | AgentMessage::ToolUse { .. }
-            | AgentMessage::ToolResult { .. }
-            | AgentMessage::Text { .. }
-            | AgentMessage::PartialText { .. }
-            | AgentMessage::ServerToolUse { .. }
-            | AgentMessage::ServerToolResult { .. } => {
-                if visible {
-                    tray.remove_by_source(source);
-                } else {
-                    match tray.find_by_source(source) {
-                        Some(id) => {
-                            if let Some(badge) = tray.get_mut(id) {
-                                badge.state = BadgeState::Active;
-                                badge.detail = detail_for_message(message);
-                            }
-                        },
-                        None => {
-                            tray.insert(Badge {
-                                source,
-                                anchor: Anchor::TopCenter,
-                                state: BadgeState::Active,
-                                label: label.clone(),
-                                detail: detail_for_message(message),
-                            });
-                        },
-                    }
-                }
-                UpdateEffect::Redraw
-            },
-            AgentMessage::Result { .. } => {
-                if visible {
-                    tray.remove_by_source(source);
-                } else {
-                    match tray.find_by_source(source) {
-                        Some(id) => {
-                            if let Some(badge) = tray.get_mut(id) {
-                                badge.state = BadgeState::Complete;
-                                badge.detail = None;
-                            }
-                        },
-                        None => {
-                            tray.insert(Badge {
-                                source,
-                                anchor: Anchor::TopCenter,
-                                state: BadgeState::Complete,
-                                label: label.clone(),
-                                detail: None,
-                            });
-                        },
-                    }
-                }
-                UpdateEffect::Redraw
-            },
-            AgentMessage::Error { message: msg } => {
-                if visible {
-                    tray.remove_by_source(source);
-                } else {
-                    match tray.find_by_source(source) {
-                        Some(id) => {
-                            if let Some(badge) = tray.get_mut(id) {
-                                badge.state = BadgeState::Error;
-                                badge.detail = Some(msg.clone());
-                            }
-                        },
-                        None => {
-                            tray.insert(Badge {
-                                source,
-                                anchor: Anchor::TopCenter,
-                                state: BadgeState::Error,
-                                label: label.clone(),
-                                detail: Some(msg.clone()),
-                            });
-                        },
-                    }
-                }
-                UpdateEffect::Redraw
-            },
-            AgentMessage::AuthRequired { reason } => {
-                if visible {
-                    tray.remove_by_source(source);
-                } else {
-                    match tray.find_by_source(source) {
-                        Some(id) => {
-                            if let Some(badge) = tray.get_mut(id) {
-                                badge.state = BadgeState::Error;
-                                badge.detail = Some(reason.clone());
-                            }
-                        },
-                        None => {
-                            tray.insert(Badge {
-                                source,
-                                anchor: Anchor::TopCenter,
-                                state: BadgeState::Error,
-                                label: label.clone(),
-                                detail: Some(reason.clone()),
-                            });
-                        },
-                    }
-                }
-                UpdateEffect::Redraw
-            },
-            AgentMessage::Init { .. }
-            | AgentMessage::Unknown { .. }
-            | AgentMessage::ToolUpdate { .. }
-            | AgentMessage::PartialToolInput { .. }
-            | AgentMessage::Plan { .. }
-            | AgentMessage::Usage { .. }
-            | AgentMessage::ModeChanged { .. }
-            | AgentMessage::ModelChanged { .. }
-            | AgentMessage::FilesPersisted { .. }
-            | AgentMessage::ElicitationComplete { .. }
-            | AgentMessage::SessionState(_)
-            | AgentMessage::TaskEvent(_)
-            | AgentMessage::Hook(_) => UpdateEffect::None,
-        }
-    }
-
     /// Drive background parse jobs: poll any in-flight tasks for completion,
     /// install their results, then spawn new jobs for visible buffers whose
     /// stored syntax version is stale.
@@ -3060,42 +2482,6 @@ impl Stoat {
         });
     }
 
-    fn dispatch_checkpoint_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        use crate::claude_checkpoint_picker::PickerOutcome;
-        let outcome = match self.pending_checkpoint_picker.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                self.pending_checkpoint_picker = None;
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(idx) => {
-                let Some(picker) = self.pending_checkpoint_picker.take() else {
-                    return UpdateEffect::None;
-                };
-                let sha = match picker.entries().get(idx) {
-                    Some(entry) => entry.sha.clone(),
-                    None => return UpdateEffect::Redraw,
-                };
-                let git_root = self.active_workspace().git_root.clone();
-                if let Some(repo) = self.git_host.discover(&git_root) {
-                    if let Err(err) = repo.restore_tree(&sha) {
-                        tracing::warn!(
-                            target: "stoat::claude",
-                            ?err,
-                            sha,
-                            "checkpoint restore failed"
-                        );
-                    }
-                }
-                UpdateEffect::Redraw
-            },
-        }
-    }
-
     fn dispatch_global_search_key(&mut self, key: KeyEvent) -> UpdateEffect {
         use crate::global_search::PickerOutcome;
         let outcome = match self.global_search.as_mut() {
@@ -3307,33 +2693,6 @@ pub(crate) async fn parse_buffer_async(
         &styles,
         None,
     )
-}
-
-pub(crate) async fn claude_polling_task(
-    session_id: ClaudeSessionId,
-    host: Arc<dyn crate::host::ClaudeCodeSession>,
-    tx: Sender<ClaudeNotification>,
-) {
-    while let Some(message) = host.recv().await {
-        if tx
-            .send(ClaudeNotification::Message {
-                session_id,
-                message,
-            })
-            .await
-            .is_err()
-        {
-            break;
-        }
-    }
-}
-
-fn detail_for_message(message: &AgentMessage) -> Option<String> {
-    match message {
-        AgentMessage::ToolUse { name, .. } => Some(name.clone()),
-        AgentMessage::Thinking { .. } => Some("thinking".into()),
-        _ => None,
-    }
 }
 
 #[cfg(test)]

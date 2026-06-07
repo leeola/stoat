@@ -10,24 +10,18 @@
 //! so unused fresh workspaces never write a file at all.
 //!
 //! Coverage is best-effort: the workspace-persistence work
-//! (per-chunk review status, commit-list selection by SHA, Claude
-//! chat scrollback, and live `MultiBuffer` excerpts) is tracked as
-//! its own group of follow-ups and is not yet complete here.
-//! Buffer history (dirty content, undo stack, anchor-carrying
-//! selections) rehydrates via the op log replay in
-//! [`crate::buffer::TextBuffer::from_history`]. Anything referencing a live OS
-//! resource (PTY-backed `Run`) is out of scope by design. For Claude, the
-//! primary session's protocol UUID round-trips (stored for future
-//! resume-on-load wiring); live session rehydration itself is still out of
-//! scope pending a separate design pass.
+//! (per-chunk review status, commit-list selection by SHA, and live
+//! `MultiBuffer` excerpts) is tracked as its own group of follow-ups
+//! and is not yet complete here. Buffer history (dirty content, undo
+//! stack, anchor-carrying selections) rehydrates via the op log replay
+//! in [`crate::buffer::TextBuffer::from_history`]. Anything referencing
+//! a live OS resource (PTY-backed `Run`) is out of scope by design.
 
 use crate::{
     buffer_registry::BufferRegistrySnapshot,
-    claude_chat::{ChatMessage, ClaudeChatState},
     dump::snapshot::ActiveRebaseSnap,
     editor_state::{EditorId, EditorState, EditorStateSnapshot},
-    host::{ClaudeSessionId, FsHost, TokenUsage},
-    input_view::{InputView, SubmitTarget},
+    host::FsHost,
     pane::{DockId, DockPanel, FocusTarget, PaneTree, View},
     rebase::RebaseState,
     workspace::{Workspace, WorkspaceUid},
@@ -35,7 +29,7 @@ use crate::{
 use serde::{Deserialize, Serialize};
 use slotmap::SlotMap;
 use std::{
-    collections::{HashMap, HashSet},
+    collections::HashMap,
     io,
     path::{Path, PathBuf},
     time::UNIX_EPOCH,
@@ -63,38 +57,10 @@ pub(crate) struct WorkspaceStateV1 {
     pub buffers: BufferRegistrySnapshot,
     pub rebase: Option<RebaseState>,
     pub rebase_active: Option<ActiveRebaseSnap>,
-    /// Protocol-level UUID of the workspace's primary Claude session, if one
-    /// existed and had received `AgentMessage::Init` at save time. `None`
-    /// when no Claude session was active. `#[serde(default)]` keeps
-    /// pre-field on-disk files readable. Superseded by
-    /// [`Self::claude_chat`] when both are present; retained so on-disk
-    /// files written before `claude_chat` shipped still surface their
-    /// protocol id on restore.
-    #[serde(default)]
-    pub claude_session_id: Option<String>,
-    /// Full scrollback snapshot of the workspace's primary Claude chat
-    /// (session id + protocol id + messages). `None` when no Claude
-    /// session was active at save time. `#[serde(default)]` keeps
-    /// pre-field on-disk files readable.
-    #[serde(default)]
-    pub claude_chat: Option<ClaudeChatSnapshotV1>,
     /// User-facing display name. Empty string on legacy files that predate
     /// the field; restore regenerates a default from `uid` in that case.
     #[serde(default)]
     pub name: String,
-}
-
-/// Persisted shape of a single Claude chat's scrollback. The `session_id`
-/// is a slotmap key whose value bytes round-trip, but the deserialized
-/// key will not match any live entry in [`crate::host::ClaudeCodeHost`]
-/// (slotmaps are process-local), so the restored chat surfaces as
-/// scrollback-only until a future caller spawns a fresh session against
-/// it.
-#[derive(Debug, Default, Serialize, Deserialize)]
-pub(crate) struct ClaudeChatSnapshotV1 {
-    pub session_id: ClaudeSessionId,
-    pub protocol_session_id: Option<String>,
-    pub messages: Vec<ChatMessage>,
 }
 
 /// Resolve the per-git-root directory that holds every workspace persisted
@@ -228,17 +194,6 @@ impl Workspace {
             .as_ref()
             .map(|active| ActiveRebaseSnap::from_active(active).snap);
 
-        let claude_chat = self.claude_chat.and_then(|id| {
-            self.chats.get(&id).map(|chat| ClaudeChatSnapshotV1 {
-                session_id: id,
-                protocol_session_id: chat.protocol_session_id.clone(),
-                messages: chat.messages.clone(),
-            })
-        });
-        let claude_session_id = claude_chat
-            .as_ref()
-            .and_then(|snap| snap.protocol_session_id.clone());
-
         WorkspaceStateV1 {
             uid: self.uid,
             git_root: self.git_root.clone(),
@@ -249,8 +204,6 @@ impl Workspace {
             buffers: self.buffers.snapshot(),
             rebase: self.rebase.clone(),
             rebase_active,
-            claude_session_id,
-            claude_chat,
             name: self.name.clone(),
         }
     }
@@ -312,48 +265,13 @@ impl Workspace {
         }
         self.editors = editors;
 
-        self.chats.clear();
-        self.claude_chat = None;
-        self.restored_claude_session_id = state.claude_session_id;
-        if let Some(snap) = state.claude_chat {
-            self.restored_claude_session_id = snap
-                .protocol_session_id
-                .clone()
-                .or(self.restored_claude_session_id.take());
-            let input = InputView::create(
-                self,
-                executor.clone(),
-                SubmitTarget::ClaudeChat,
-                "",
-                "prompt",
-                u16::MAX,
-            );
-            let chat = ClaudeChatState {
-                session_id: snap.session_id,
-                input,
-                messages: snap.messages,
-                streaming_text: None,
-                scroll_offset: 0,
-                pending_sends: Vec::new(),
-                active_since: None,
-                protocol_session_id: snap.protocol_session_id,
-                follow: false,
-                usage: TokenUsage::default(),
-                cancelled_tool_uses: HashSet::new(),
-                focused_tool_id: None,
-                expanded_tool_ids: HashSet::new(),
-            };
-            self.chats.insert(snap.session_id, chat);
-            self.claude_chat = Some(snap.session_id);
-        }
-
         let mut panes = state.panes;
         remap_editor_views_in_panes(&mut panes, &editor_id_map);
-        sweep_stale_views_in_panes(&mut panes, &self.chats);
+        sweep_stale_views_in_panes(&mut panes);
 
         let mut docks = state.docks;
         remap_editor_views_in_docks(&mut docks, &editor_id_map);
-        sweep_stale_views_in_docks(&mut docks, &self.chats);
+        sweep_stale_views_in_docks(&mut docks);
 
         let focus = match state.focus {
             FocusTarget::Dock(id) if !docks.contains_key(id) => {
@@ -400,39 +318,27 @@ fn remap_editor_views_in_docks(
     }
 }
 
-fn sweep_stale_views_in_panes(
-    panes: &mut PaneTree,
-    chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
-) {
+fn sweep_stale_views_in_panes(panes: &mut PaneTree) {
     for id in panes.split_pane_ids() {
-        let replacement = stale_replacement(&panes.pane(id).view, chats);
+        let replacement = stale_replacement(&panes.pane(id).view);
         if let Some(view) = replacement {
             panes.pane_mut(id).view = view;
         }
     }
 }
 
-fn sweep_stale_views_in_docks(
-    docks: &mut SlotMap<DockId, DockPanel>,
-    chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
-) {
+fn sweep_stale_views_in_docks(docks: &mut SlotMap<DockId, DockPanel>) {
     for dock in docks.values_mut() {
-        if let Some(view) = stale_replacement(&dock.view, chats) {
+        if let Some(view) = stale_replacement(&dock.view) {
             dock.view = view;
         }
     }
 }
 
-fn stale_replacement(
-    view: &View,
-    chats: &HashMap<ClaudeSessionId, ClaudeChatState>,
-) -> Option<View> {
+fn stale_replacement(view: &View) -> Option<View> {
     match view {
         View::Run(_) => Some(View::Label("Terminal (closed)".into())),
-        View::Claude(id) if !chats.contains_key(id) => {
-            Some(View::Label("Claude session (closed)".into()))
-        },
-        View::Claude(_) | View::Label(_) | View::Editor(_) => None,
+        View::Label(_) | View::Editor(_) => None,
     }
 }
 
@@ -532,20 +438,17 @@ mod tests {
     }
 
     #[test]
-    fn stale_run_and_claude_views_collapse_to_labels() {
-        use crate::{host::ClaudeSessionId, run::RunId};
+    fn stale_run_views_collapse_to_labels() {
+        use crate::run::RunId;
         let fake = FakeFs::new();
         let ws_dir = PathBuf::from("/test");
         let exec = executor();
 
         let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
         let stale_run = RunId::default();
-        let stale_chat = ClaudeSessionId::default();
 
         let root = ws.panes.focus();
         ws.panes.pane_mut(root).view = View::Run(stale_run);
-        let second = ws.panes.split(Axis::Vertical);
-        ws.panes.pane_mut(second).view = View::Claude(stale_chat);
 
         let dock_id = ws.docks.insert(DockPanel {
             view: View::Run(stale_run),
@@ -599,292 +502,6 @@ mod tests {
         for id in fresh.panes.split_pane_ids() {
             assert_eq!(fresh.panes.pane(id).placement, Placement::Split);
         }
-    }
-
-    #[test]
-    fn round_trip_preserves_claude_session_id() {
-        use crate::{claude_chat::ClaudeChatState, editor_state::EditorId, host::ClaudeSessionId};
-        use stoat_text::BufferId;
-
-        let fake = FakeFs::new();
-        let ws_dir = PathBuf::from("/test");
-        let exec = executor();
-
-        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let chat_id = ClaudeSessionId::default();
-        ws.claude_chat = Some(chat_id);
-        ws.chats.insert(
-            chat_id,
-            ClaudeChatState {
-                session_id: chat_id,
-                input: InputView {
-                    editor_id: EditorId::default(),
-                    buffer_id: BufferId::new(0),
-                    target: SubmitTarget::ClaudeChat,
-                    max_height: u16::MAX,
-                    start_mode: "prompt",
-                },
-                messages: Vec::new(),
-                streaming_text: None,
-                scroll_offset: 0,
-                pending_sends: Vec::new(),
-                active_since: None,
-                protocol_session_id: Some("00000000-0000-4000-8000-000000000abc".into()),
-                follow: false,
-                focused_tool_id: None,
-                expanded_tool_ids: HashSet::new(),
-                usage: TokenUsage::default(),
-                cancelled_tool_uses: HashSet::new(),
-            },
-        );
-
-        let state_path = ws_dir.join("state.ron");
-        ws.save_state(&state_path, &fake).unwrap();
-
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
-        fresh.restore_state(&state_path, &fake, &exec).unwrap();
-
-        assert_eq!(
-            fresh.restored_claude_session_id,
-            Some("00000000-0000-4000-8000-000000000abc".into()),
-        );
-    }
-
-    #[test]
-    fn round_trip_claude_session_id_absent_when_no_chat() {
-        let fake = FakeFs::new();
-        let ws_dir = PathBuf::from("/test");
-        let exec = executor();
-
-        let ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let state_path = ws_dir.join("state.ron");
-        ws.save_state(&state_path, &fake).unwrap();
-
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
-        fresh.restore_state(&state_path, &fake, &exec).unwrap();
-
-        assert_eq!(fresh.restored_claude_session_id, None);
-    }
-
-    fn seed_claude_chat(
-        ws: &mut Workspace,
-        exec: &Executor,
-        messages: Vec<ChatMessage>,
-        protocol: Option<&str>,
-    ) -> ClaudeSessionId {
-        let chat_id = ClaudeSessionId::default();
-        let input = InputView::create(
-            ws,
-            exec.clone(),
-            SubmitTarget::ClaudeChat,
-            "",
-            "prompt",
-            u16::MAX,
-        );
-        ws.claude_chat = Some(chat_id);
-        ws.chats.insert(
-            chat_id,
-            ClaudeChatState {
-                session_id: chat_id,
-                input,
-                messages,
-                streaming_text: None,
-                scroll_offset: 0,
-                pending_sends: Vec::new(),
-                active_since: None,
-                protocol_session_id: protocol.map(String::from),
-                follow: false,
-                focused_tool_id: None,
-                expanded_tool_ids: HashSet::new(),
-                usage: TokenUsage::default(),
-                cancelled_tool_uses: HashSet::new(),
-            },
-        );
-        chat_id
-    }
-
-    #[test]
-    fn round_trip_preserves_claude_scrollback_messages() {
-        use crate::{
-            claude_chat::{ChatMessageContent, ChatRole},
-            host::ToolCallStatus,
-        };
-
-        let fake = FakeFs::new();
-        let ws_dir = PathBuf::from("/test");
-        let exec = executor();
-
-        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let messages = vec![
-            ChatMessage {
-                role: ChatRole::User,
-                content: ChatMessageContent::Text("hello".into()),
-                checkpoint_sha: Some("abc123".into()),
-            },
-            ChatMessage {
-                role: ChatRole::Assistant,
-                content: ChatMessageContent::ToolUse {
-                    id: "tool-1".into(),
-                    name: "Bash".into(),
-                    input: "ls".into(),
-                },
-                checkpoint_sha: None,
-            },
-            ChatMessage {
-                role: ChatRole::Assistant,
-                content: ChatMessageContent::ToolResult {
-                    id: "tool-1".into(),
-                    content: "out.txt\n".into(),
-                    status: ToolCallStatus::Completed,
-                },
-                checkpoint_sha: None,
-            },
-            ChatMessage {
-                role: ChatRole::Assistant,
-                content: ChatMessageContent::Error("boom".into()),
-                checkpoint_sha: None,
-            },
-        ];
-        let chat_id = seed_claude_chat(&mut ws, &exec, messages.clone(), Some("uuid-1"));
-
-        let state_path = ws_dir.join("state.ron");
-        ws.save_state(&state_path, &fake).unwrap();
-
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
-        fresh.restore_state(&state_path, &fake, &exec).unwrap();
-
-        assert_eq!(fresh.claude_chat, Some(chat_id));
-        assert_eq!(fresh.restored_claude_session_id.as_deref(), Some("uuid-1"));
-        let restored = fresh.chats.get(&chat_id).expect("chat rebuilt");
-        assert_eq!(restored.messages.len(), messages.len());
-        assert_eq!(restored.protocol_session_id.as_deref(), Some("uuid-1"));
-        for (got, want) in restored.messages.iter().zip(messages.iter()) {
-            assert_eq!(got.role, want.role);
-            assert_eq!(got.checkpoint_sha, want.checkpoint_sha);
-            match (&got.content, &want.content) {
-                (ChatMessageContent::Text(a), ChatMessageContent::Text(b)) => assert_eq!(a, b),
-                (
-                    ChatMessageContent::ToolUse {
-                        id: ai,
-                        name: an,
-                        input: ax,
-                    },
-                    ChatMessageContent::ToolUse {
-                        id: bi,
-                        name: bn,
-                        input: bx,
-                    },
-                ) => {
-                    assert_eq!((ai, an, ax), (bi, bn, bx));
-                },
-                (
-                    ChatMessageContent::ToolResult {
-                        id: ai,
-                        content: ac,
-                        status: as_,
-                    },
-                    ChatMessageContent::ToolResult {
-                        id: bi,
-                        content: bc,
-                        status: bs,
-                    },
-                ) => {
-                    assert_eq!((ai, ac, as_), (bi, bc, bs));
-                },
-                (ChatMessageContent::Error(a), ChatMessageContent::Error(b)) => assert_eq!(a, b),
-                (a, b) => panic!("variant mismatch: got {a:?} want {b:?}"),
-            }
-        }
-    }
-
-    #[test]
-    fn restored_chat_preserves_view_claude_pane() {
-        use crate::pane::Axis;
-        let fake = FakeFs::new();
-        let ws_dir = PathBuf::from("/test");
-        let exec = executor();
-
-        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let chat_id = seed_claude_chat(&mut ws, &exec, Vec::new(), None);
-        let right = ws.panes.split(Axis::Vertical);
-        ws.panes.pane_mut(right).view = View::Claude(chat_id);
-
-        let state_path = ws_dir.join("state.ron");
-        ws.save_state(&state_path, &fake).unwrap();
-
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
-        fresh.restore_state(&state_path, &fake, &exec).unwrap();
-
-        let claude_pane = fresh
-            .panes
-            .split_pane_ids()
-            .into_iter()
-            .find(|&id| matches!(fresh.panes.pane(id).view, View::Claude(_)))
-            .expect("Claude pane should survive the sweep");
-        let View::Claude(id) = fresh.panes.pane(claude_pane).view else {
-            unreachable!()
-        };
-        assert!(
-            fresh.chats.contains_key(&id),
-            "chat entry must accompany the preserved pane"
-        );
-    }
-
-    #[test]
-    fn restored_chat_with_no_pane_still_populates_chats_map() {
-        use crate::claude_chat::{ChatMessageContent, ChatRole};
-
-        let fake = FakeFs::new();
-        let ws_dir = PathBuf::from("/test");
-        let exec = executor();
-
-        let mut ws = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let chat_id = seed_claude_chat(
-            &mut ws,
-            &exec,
-            vec![ChatMessage {
-                role: ChatRole::User,
-                content: ChatMessageContent::Text("hi".into()),
-                checkpoint_sha: None,
-            }],
-            None,
-        );
-
-        let state_path = ws_dir.join("state.ron");
-        ws.save_state(&state_path, &fake).unwrap();
-
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
-        fresh.restore_state(&state_path, &fake, &exec).unwrap();
-
-        assert_eq!(fresh.claude_chat, Some(chat_id));
-        let restored = fresh.chats.get(&chat_id).expect("chat rebuilt");
-        assert_eq!(restored.messages.len(), 1);
-    }
-
-    #[test]
-    fn legacy_claude_session_id_without_chat_field_populates_restore_field() {
-        let fake = FakeFs::new();
-        let ws_dir = PathBuf::from("/test");
-        let exec = executor();
-
-        let ws_empty = new_laid_out_workspace(ws_dir.clone(), &exec);
-        let mut legacy_state = ws_empty.to_state();
-        legacy_state.claude_chat = None;
-        legacy_state.claude_session_id = Some("legacy-uuid".into());
-        let body =
-            ron::ser::to_string_pretty(&legacy_state, ron::ser::PrettyConfig::default()).unwrap();
-        let state_path = ws_dir.join("legacy.ron");
-        fake.insert_file(&state_path, body.as_bytes());
-
-        let mut fresh = Workspace::new(ws_dir.clone(), &exec);
-        fresh.restore_state(&state_path, &fake, &exec).unwrap();
-
-        assert_eq!(
-            fresh.restored_claude_session_id.as_deref(),
-            Some("legacy-uuid")
-        );
-        assert!(fresh.chats.is_empty());
-        assert_eq!(fresh.claude_chat, None);
     }
 
     #[test]

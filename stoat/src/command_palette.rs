@@ -51,8 +51,6 @@ pub struct Availability {
     pub review_open: bool,
     /// `workspace.commits.is_some()`.
     pub commits_open: bool,
-    /// Focused pane or dock currently hosts a [`View::Claude`].
-    pub claude_focused: bool,
     /// Focused pane hosts a [`View::Run`], or a modal run is active.
     pub run_focused: bool,
 }
@@ -78,7 +76,6 @@ impl Availability {
             FocusTarget::SplitPane(_) => Some(ws.panes.pane(ws.panes.focus()).view.clone()),
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|d| d.view.clone()),
         };
-        let claude_focused = matches!(focused_view, Some(View::Claude(_)));
         let run_focused = matches!(focused_view, Some(View::Run(_)));
 
         Self {
@@ -88,7 +85,6 @@ impl Availability {
             in_conflict,
             review_open: ws.review.is_some(),
             commits_open: ws.commits.is_some(),
-            claude_focused,
             run_focused,
         }
     }
@@ -131,8 +127,6 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
-
-        ClaudeSubmit | ClaudeToPane | ClaudeToDockLeft | ClaudeToDockRight => ctx.claude_focused,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
 
@@ -613,7 +607,6 @@ mod tests {
             "ReviewApplyStaged",
             "CommitsNext",
             "CommitsOpenReview",
-            "ClaudeSubmit",
             "RunSubmit",
             "EnterRebase",
         ] {
@@ -706,18 +699,6 @@ mod tests {
     }
 
     #[test]
-    fn active_scope_claude_focused_surfaces_claude_actions() {
-        let ctx = Availability {
-            claude_focused: true,
-            ..Availability::default()
-        };
-        let listed = names_for_scope("", PaletteScope::Active, &ctx);
-        for name in ["ClaudeSubmit", "ClaudeToPane"] {
-            assert!(listed.contains(&name), "{name} missing when claude_focused");
-        }
-    }
-
-    #[test]
     fn active_scope_run_focused_surfaces_run_actions() {
         let ctx = Availability {
             run_focused: true,
@@ -754,7 +735,6 @@ mod tests {
             in_conflict: true,
             review_open: true,
             commits_open: true,
-            claude_focused: true,
             run_focused: true,
         };
         for entry in registry::all() {

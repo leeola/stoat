@@ -52,7 +52,6 @@ pub(crate) enum SubmitTarget {
     HelpSearch,
     Run,
     Reword,
-    ClaudeChat,
     FileFinder,
     RenameSymbol,
     WorkspaceSymbolPicker,

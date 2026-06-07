@@ -3,8 +3,6 @@ pub mod app;
 pub mod badge;
 pub mod buffer;
 pub mod buffer_registry;
-pub mod claude_chat;
-pub(crate) mod claude_checkpoint_picker;
 pub mod command_palette;
 pub mod commit_list;
 pub mod completion;
