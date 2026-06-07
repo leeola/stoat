@@ -95,6 +95,11 @@ impl BasePalette {
 /// signal than highlighting text under the cursor.
 pub struct ThemeColors {
     pub background: Hsla,
+    /// Fill for the main editor pane (`EditorMode::Full`). One Dark
+    /// layers this as the darkest surface, below [`Self::background`]
+    /// (the window frame), so the editor reads as the focal surface
+    /// rather than blending into the frame.
+    pub editor_background: Hsla,
     /// Elevated-surface fill for floating surfaces (popovers, modals,
     /// docks) that sit above the app background. Not yet read by any
     /// renderer; the surface-elevation styling helpers consume it.
@@ -193,6 +198,11 @@ impl ThemeColors {
         let palette = BasePalette::default_dark();
         Self {
             background: theme_fg_or(cx, stoat::theme::scope::UI_BACKGROUND, palette.background),
+            editor_background: theme_bg_or(
+                cx,
+                stoat::theme::scope::UI_EDITOR_BACKGROUND,
+                rgb(0x282c33).into(),
+            ),
             elevated_surface: theme_bg_or(
                 cx,
                 stoat::theme::scope::UI_SURFACE_ELEVATED,

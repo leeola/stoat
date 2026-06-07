@@ -478,6 +478,7 @@ pub enum ThemeError {
 /// capture names with fallback.
 pub mod scope {
     pub const UI_BACKGROUND: &str = "ui.background";
+    pub const UI_EDITOR_BACKGROUND: &str = "ui.editor.background";
     pub const UI_SURFACE_ELEVATED: &str = "ui.surface.elevated";
     pub const UI_TEXT: &str = "ui.text";
     pub const UI_TEXT_MUTED: &str = "ui.text.muted";

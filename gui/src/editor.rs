@@ -4087,6 +4087,9 @@ impl Render for Editor {
             },
             EditorMode::Full {} | EditorMode::Minimap { .. } => root.h_full(),
         };
+        if self.mode.is_full() {
+            root = root.bg(cx.theme().editor_background);
+        }
         root = root.child(list).child(bounds_capture);
         if is_minimap {
             root = root.line_height(line_height);
