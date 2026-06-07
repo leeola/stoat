@@ -1,14 +1,14 @@
 theme default_dark {
-    let accent  = "#4fc1ff";
-    let primary = "#569cd6";
-    let success = "#4ec9b0";
-    let warning = "#dcdcaa";
-    let danger  = "#f44747";
-    let info    = "#569cd6";
-    let special = "#c586c0";
-    let muted   = "#808080";
-    let dim     = "#a0a0a0";
-    let text    = "#cccccc";
+    let accent  = "#74ade8";
+    let primary = "#74ade8";
+    let success = "#a1c181";
+    let warning = "#dec184";
+    let danger  = "#d07277";
+    let info    = "#74ade8";
+    let special = "#b477cf";
+    let muted   = "#a9afbc";
+    let dim     = "#878a98";
+    let text    = "#dce0e5";
     let red     = "#f92672";
     let green   = "#a6e22e";
     let cyan    = "#66d9ef";

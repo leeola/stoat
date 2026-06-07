@@ -7,15 +7,15 @@ focused: #1 of 1
 mode: reword
 size: 90x12
 ---
-[0m[1m[38;2;197;134;192mreword commit- [reword][0m
-[0m[38;2;128;128;128mi insert   h/j/k/l move   Ctrl-s save   Escape abort[0m
-[0m[38;2;128;128;128moriginal: c2: middle[0m
+[0m[1m[38;2;180;119;207mreword commit- [reword][0m
+[0m[38;2;169;175;188mi insert   h/j/k/l move   Ctrl-s save   Escape abort[0m
+[0m[38;2;169;175;188moriginal: c2: middle[0m
 
-[0m[38;2;204;204;204mc2: middle[0m[7m [0m
-
-
+[0m[38;2;220;224;229mc2: middle[0m[7m [0m
 
 
 
 
-[0m[1m[30m[48;2;244;71;71m RWD [0m[1m[38;2;204;204;204m[48;2;59;65;77m repo [0m[38;2;204;204;204m[48;2;59;65;77mreword                                                                         [0m
+
+
+[0m[1m[30m[48;2;208;114;119m RWD [0m[1m[38;2;220;224;229m[48;2;59;65;77m repo [0m[38;2;220;224;229m[48;2;59;65;77mreword                                                                         [0m
