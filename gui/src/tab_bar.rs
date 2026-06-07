@@ -1,7 +1,7 @@
 use crate::{pane::Pane, theme::ActiveTheme};
 use gpui::{
-    div, AppContext, Context, ElementId, EntityId, InteractiveElement, IntoElement, MouseButton,
-    ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
+    div, px, AppContext, Context, ElementId, EntityId, InteractiveElement, IntoElement,
+    MouseButton, ParentElement, Render, SharedString, StatefulInteractiveElement, Styled, Window,
 };
 
 /// Drag payload emitted when a tab is dragged out of its pane.
@@ -33,7 +33,7 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
     let hover_bg = cx.theme().elevated_surface;
     let divider = cx.theme().border_variant;
 
-    let mut row = div().flex().flex_row().w_full();
+    let mut row = div().flex().flex_row().w_full().h(px(32.0));
     for ix in 0..item_count {
         let item = &pane.items()[ix];
         let item_id = item.item_id();
@@ -47,8 +47,10 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
         let element_id: ElementId = ("stoat_tab", item_id).into();
         let mut tab = div()
             .id(element_id)
-            .px_2()
-            .py_1()
+            .flex()
+            .items_center()
+            .h(px(32.0))
+            .px_1()
             .text_color(if is_active { active_label } else { label_color })
             .bg(if is_active { active_bg } else { inactive_bg })
             .child(display)
