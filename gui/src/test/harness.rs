@@ -1,8 +1,7 @@
 use crate::{
     globals::{
-        AgentConnectionGlobal, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal,
-        ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, LspHostGlobal,
-        ShellHostGlobal, TerminalHostGlobal,
+        AgentConnectionGlobal, ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal, FsHostGlobal,
+        FsWatchHostGlobal, GitHostGlobal, LspHostGlobal, ShellHostGlobal, TerminalHostGlobal,
     },
     workspace::Workspace,
 };
@@ -13,11 +12,11 @@ use gpui::{
 use std::{sync::Arc, time::Duration};
 use stoat::host::{
     fake::{
-        terminal::FakeTerminalSession, FakeAgentConnection, FakeClaudeCodeHost, FakeClipboard,
-        FakeGit, FakeLsp, FakeLspHost, FakeTerminalHost,
+        terminal::FakeTerminalSession, FakeAgentConnection, FakeClipboard, FakeGit, FakeLsp,
+        FakeLspHost, FakeTerminalHost,
     },
-    AgentConnection, ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost,
-    ShellHost, TerminalHost,
+    AgentConnection, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost, ShellHost,
+    TerminalHost,
 };
 use stoat_host::{FakeEnv, FakeFs, FakeFsWatcher, FakeShell};
 use stoat_scheduler::TestScheduler;
@@ -32,7 +31,6 @@ pub struct TestHarness {
     shell: Arc<FakeShell>,
     lsp: Arc<FakeLsp>,
     git: Arc<FakeGit>,
-    claude: Arc<FakeClaudeCodeHost>,
     agent: Arc<FakeAgentConnection>,
     clipboard: Arc<FakeClipboard>,
     terminal: Arc<FakeTerminalSession>,
@@ -60,7 +58,6 @@ impl TestHarness {
         let shell = Arc::new(FakeShell::new());
         let lsp = Arc::new(FakeLsp::new());
         let git = Arc::new(FakeGit::new());
-        let claude = Arc::new(FakeClaudeCodeHost::new());
         let agent = Arc::new(FakeAgentConnection::new());
         let clipboard = Arc::new(FakeClipboard::new());
         let terminal = Arc::new(FakeTerminalSession::new());
@@ -76,7 +73,6 @@ impl TestHarness {
             shell,
             lsp,
             git,
-            claude,
             agent,
             clipboard,
             terminal,
@@ -93,7 +89,6 @@ impl TestHarness {
         let shell = self.shell.clone();
         let lsp = self.lsp.clone();
         let git = self.git.clone();
-        let claude = self.claude.clone();
         let agent = self.agent.clone();
         let clipboard = self.clipboard.clone();
         let terminal = self.terminal.clone();
@@ -107,7 +102,6 @@ impl TestHarness {
                 Arc::new(FakeLspHost::new(lsp)) as Arc<dyn LspHost>
             ));
             cx.set_global(GitHostGlobal(git as Arc<dyn GitHost>));
-            cx.set_global(ClaudeCodeHostGlobal(claude as Arc<dyn ClaudeCodeHost>));
             cx.set_global(AgentConnectionGlobal(agent as Arc<dyn AgentConnection>));
             cx.set_global(ClipboardHostGlobal(clipboard as Arc<dyn ClipboardHost>));
             cx.set_global(TerminalHostGlobal(
@@ -232,13 +226,6 @@ impl TestHarness {
         self.cx.update(|cx| cx.set_global(GitHostGlobal(arc)));
     }
 
-    pub fn set_claude_code_host(&mut self, fake: Arc<FakeClaudeCodeHost>) {
-        self.claude = fake.clone();
-        let arc = fake as Arc<dyn ClaudeCodeHost>;
-        self.cx
-            .update(|cx| cx.set_global(ClaudeCodeHostGlobal(arc)));
-    }
-
     pub fn set_agent_connection(&mut self, fake: Arc<FakeAgentConnection>) {
         self.agent = fake.clone();
         let arc = fake as Arc<dyn AgentConnection>;
@@ -284,10 +271,6 @@ impl TestHarness {
 
     pub fn git(&self) -> &Arc<FakeGit> {
         &self.git
-    }
-
-    pub fn claude(&self) -> &Arc<FakeClaudeCodeHost> {
-        &self.claude
     }
 
     pub fn agent(&self) -> &Arc<FakeAgentConnection> {
@@ -407,10 +390,6 @@ mod tests {
             );
             assert!(cx.has_global::<LspHostGlobal>(), "LspHostGlobal missing");
             assert!(cx.has_global::<GitHostGlobal>(), "GitHostGlobal missing");
-            assert!(
-                cx.has_global::<ClaudeCodeHostGlobal>(),
-                "ClaudeCodeHostGlobal missing"
-            );
             assert!(
                 cx.has_global::<AgentConnectionGlobal>(),
                 "AgentConnectionGlobal missing"

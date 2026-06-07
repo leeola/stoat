@@ -6,10 +6,9 @@
 //! past every callback yields `Allow`, matching the trait's
 //! "unconfigured == permit" default.
 //!
-//! Used by the launcher to install
-//! [`super::denial::BashDenialPolicy`] ahead of
-//! [`super::rule_policy::RuleBasedPolicy`] so the hardcoded baseline
-//! cannot be undermined by a user `always_allow` rule.
+//! Composes a hardcoded baseline like [`super::denial::BashDenialPolicy`]
+//! ahead of any configured policy so the baseline cannot be undermined
+//! by a user `always_allow` rule.
 
 use super::permission::{PermissionCallback, PermissionResult, ToolPermissionContext};
 use async_trait::async_trait;

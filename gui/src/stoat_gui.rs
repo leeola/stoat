@@ -113,10 +113,9 @@ pub use editor_input::EditorInput;
 pub use executor::spawn_with_entity;
 pub use fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent};
 pub use globals::{
-    install_production_globals, ClaudeCodeHostGlobal, ClipboardHostGlobal, EnvHostGlobal,
-    ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry,
-    LspHostGlobal, MpscPermissionPromptHost, PermissionPromptHost, PermissionPromptHostGlobal,
-    ShellHostGlobal, TerminalHostGlobal, UserSnippetsGlobal,
+    install_production_globals, ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal, FsHostGlobal,
+    FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry, LspHostGlobal, ShellHostGlobal,
+    TerminalHostGlobal, UserSnippetsGlobal,
 };
 
 /// Selects whether [`run`] starts in a fresh workspace or rehydrates

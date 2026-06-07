@@ -531,8 +531,8 @@ pub trait LspServer: Send + Sync {
 /// [`crate::host::local::LocalLspHost`]; tests wire a factory that
 /// hands out a pre-configured [`crate::host::FakeLsp`].
 ///
-/// Mirrors the factory shape of [`crate::host::ClaudeCodeHost`] and
-/// [`crate::host::TerminalHost`] so all hosts register uniformly.
+/// Mirrors the factory shape of [`crate::host::TerminalHost`] so all
+/// hosts register uniformly.
 #[async_trait]
 pub trait LspHost: Send + Sync {
     /// Launch a server session for `language` rooted at `root`. The

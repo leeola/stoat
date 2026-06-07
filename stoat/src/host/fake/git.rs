@@ -19,8 +19,8 @@ use std::{
 /// In-memory [`GitHost`] for tests.
 ///
 /// Populate with repos via [`FakeGit::add_repo`]; each call returns a
-/// [`FakeRepoBuilder`] that mirrors the ergonomics of [`crate::host::FakeClaudeCode`]'s
-/// `push_*` helpers. When a [`FakeFs`] reference is supplied to the
+/// [`FakeRepoBuilder`] with chainable `push_*` helpers. When a [`FakeFs`]
+/// reference is supplied to the
 /// builder, the builder also writes working-tree content into it so the
 /// application code (which reads via `FsHost`) sees consistent state.
 pub struct FakeGit {
@@ -423,9 +423,8 @@ fn parse_range(range: &str) -> Option<(usize, usize)> {
     }
 }
 
-/// Builder returned by [`FakeGit::add_repo`]. Method chaining style
-/// mirrors [`crate::host::FakeClaudeCode`]'s `push_*` API: each call
-/// returns `&mut Self` so a test can line up fixtures in a single
+/// Builder returned by [`FakeGit::add_repo`]. Method chaining style:
+/// each call returns `&mut Self` so a test can line up fixtures in a single
 /// statement.
 pub struct FakeRepoBuilder<'a> {
     host: &'a FakeGit,

@@ -16,22 +16,16 @@ use crate::{
     theme::{self, Theme},
 };
 use gpui::{App, Global};
-use std::{
-    collections::HashMap,
-    sync::{Arc, Mutex},
-};
+use std::{collections::HashMap, sync::Arc};
 #[cfg(any(test, feature = "test-support"))]
 use stoat::host::AgentConnection;
 use stoat::{
     host::{
-        ClaudeCodeHost, ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost,
-        PermissionPrompt, ShellHost, TerminalHost,
+        ClipboardHost, EnvHost, FsHost, FsWatchHost, GitHost, LspHost, ShellHost, TerminalHost,
     },
     snippet::UserSnippet,
 };
 use stoat_scheduler::Executor;
-use tokio::sync::mpsc;
-
 /// App-global wrapper around [`stoat_language::LanguageRegistry`].
 pub struct LanguageRegistry(pub stoat_language::LanguageRegistry);
 
@@ -80,11 +74,6 @@ pub struct GitHostGlobal(pub Arc<dyn GitHost>);
 
 impl Global for GitHostGlobal {}
 
-/// App-global wrapper for [`Arc<dyn ClaudeCodeHost>`].
-pub struct ClaudeCodeHostGlobal(pub Arc<dyn ClaudeCodeHost>);
-
-impl Global for ClaudeCodeHostGlobal {}
-
 /// App-global wrapper for [`Arc<dyn AgentConnection>`], the ACP agent
 /// host. Test-support only for now: the harness installs it so UI/app
 /// tests can resolve an agent host from globals against a fake. A
@@ -112,48 +101,6 @@ impl Global for OpenHostGlobal {}
 pub struct TerminalHostGlobal(pub Arc<dyn TerminalHost>);
 
 impl Global for TerminalHostGlobal {}
-
-/// Drain interface for queued Claude permission prompts. Production
-/// wraps the receiver end of the mpsc channel paired with a
-/// [`stoat::host::RuleBasedPolicy::with_prompt_channel`] callback;
-/// the workspace's poll task drains it on each tick and routes each
-/// prompt to its modal queue.
-pub trait PermissionPromptHost: Send + Sync {
-    /// Pop one queued prompt, or `None` if the queue is empty. Does
-    /// not block; the workspace polls on a foreground tick.
-    fn try_recv(&self) -> Option<PermissionPrompt>;
-}
-
-/// App-global wrapper for [`Arc<dyn PermissionPromptHost>`]. Absent
-/// in tests and headless runs that do not install a permission
-/// callback; the workspace's poll task becomes a no-op in that case.
-pub struct PermissionPromptHostGlobal(pub Arc<dyn PermissionPromptHost>);
-
-impl Global for PermissionPromptHostGlobal {}
-
-/// Production [`PermissionPromptHost`] backed by a tokio mpsc
-/// receiver. The sender side feeds
-/// [`stoat::host::RuleBasedPolicy::with_prompt_channel`]; the
-/// receiver lives here, drained by the GUI workspace's poll task.
-pub struct MpscPermissionPromptHost {
-    rx: Mutex<mpsc::Receiver<PermissionPrompt>>,
-}
-
-impl MpscPermissionPromptHost {
-    pub fn new(rx: mpsc::Receiver<PermissionPrompt>) -> Self {
-        Self { rx: Mutex::new(rx) }
-    }
-}
-
-impl PermissionPromptHost for MpscPermissionPromptHost {
-    fn try_recv(&self) -> Option<PermissionPrompt> {
-        self.rx
-            .lock()
-            .expect("permission prompt rx mutex poisoned")
-            .try_recv()
-            .ok()
-    }
-}
 
 /// App-global wrapper for the canonical [`Executor`]. Tokio-bound
 /// hosts (LSP, Claude Code, fs watcher) and any entity-bound async
@@ -184,8 +131,6 @@ pub struct Globals {
     pub shell_host: ShellHostGlobal,
     pub lsp_host: LspHostGlobal,
     pub git_host: GitHostGlobal,
-    pub claude_code_host: ClaudeCodeHostGlobal,
-    pub permission_prompt_host: PermissionPromptHostGlobal,
     pub clipboard_host: ClipboardHostGlobal,
     pub terminal_host: TerminalHostGlobal,
     pub executor: ExecutorGlobal,
@@ -204,8 +149,6 @@ pub fn install_production_globals(cx: &mut App, globals: Globals) {
     cx.set_global(globals.shell_host);
     cx.set_global(globals.lsp_host);
     cx.set_global(globals.git_host);
-    cx.set_global(globals.claude_code_host);
-    cx.set_global(globals.permission_prompt_host);
     cx.set_global(globals.clipboard_host);
     cx.set_global(OpenHostGlobal(Arc::new(GpuiOpenHost)));
     cx.set_global(globals.terminal_host);

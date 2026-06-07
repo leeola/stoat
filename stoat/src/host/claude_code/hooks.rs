@@ -1,6 +1,6 @@
 //! Hook-callback interface and data types.
 //!
-//! When a [`super::ClaudeCodeSession`] is built with `include_hook_events`,
+//! When a session is built with `include_hook_events`,
 //! or a user registers a [`HookCallback`] via the builder, the CLI's
 //! `hook_callback` control requests are routed to the registered
 //! callback and its [`HookResponse`] is serialized back to the CLI.

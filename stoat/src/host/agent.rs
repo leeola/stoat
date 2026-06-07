@@ -2,12 +2,8 @@
 //! ([`AgentConnection`]) that spawns per-conversation I/O handles
 //! ([`AgentSession`]).
 //!
-//! Mirrors [`crate::host::claude_code::ClaudeCodeHost`] /
-//! [`crate::host::claude_code::ClaudeCodeSession`], which these supersede
-//! for the ACP transport. The Claude traits stay until the stream-json
-//! stack is retired; the heavy ACP implementation lives in a separate
-//! crate and routes its agent output back through the shared
-//! [`AgentMessage`] event.
+//! The heavy ACP implementation lives in a separate crate and routes
+//! its agent output back through the shared [`AgentMessage`] event.
 
 use crate::host::claude_code::AgentMessage;
 use async_trait::async_trait;
@@ -25,8 +21,7 @@ pub struct AgentSessionCapabilities {
     pub select_model: bool,
 }
 
-/// Per-session I/O handle for an active agent conversation. Supersedes
-/// [`crate::host::claude_code::ClaudeCodeSession`].
+/// Per-session I/O handle for an active agent conversation.
 #[async_trait]
 pub trait AgentSession: Send + Sync {
     /// Send a user prompt, starting or continuing a turn. The turn's
@@ -70,10 +65,9 @@ pub trait AgentSession: Send + Sync {
     }
 }
 
-/// Session manager that spawns [`AgentSession`] handles. Supersedes
-/// [`crate::host::claude_code::ClaudeCodeHost`]. Production resolves and
-/// launches an ACP agent over stdio JSON-RPC; tests use an in-memory
-/// fake.
+/// Session manager that spawns [`AgentSession`] handles. Production
+/// resolves and launches an ACP agent over stdio JSON-RPC; tests use an
+/// in-memory fake.
 #[async_trait]
 pub trait AgentConnection: Send + Sync {
     /// Start a new conversation, returning its session handle.

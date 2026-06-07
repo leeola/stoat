@@ -1,6 +1,6 @@
 //! Permission-callback interface and outcome types.
 //!
-//! When a [`super::ClaudeCodeSession`] is built with a registered
+//! When a session is built with a registered
 //! [`PermissionCallback`], the underlying wrapper asks the `claude` CLI
 //! to route permission prompts over the control protocol
 //! (`--permission-prompt-tool-name stdio`). Each incoming `can_use_tool`

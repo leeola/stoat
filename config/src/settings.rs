@@ -53,19 +53,6 @@ pub enum ShowWhitespace {
     All,
 }
 
-/// Per-tool Claude permission rule lists. Each `Vec<String>` carries
-/// raw regex source as parsed from stcfg; compilation happens at the
-/// host's policy construction so a bad pattern can be reported with
-/// context rather than failing config load. Set via stcfg paths
-/// `claude.permissions.<tool>.always_allow|always_confirm|always_deny =
-/// [pattern, ...]`.
-#[derive(Debug, Default, Clone, PartialEq, Eq)]
-pub struct ToolPermissions {
-    pub always_allow: Vec<String>,
-    pub always_confirm: Vec<String>,
-    pub always_deny: Vec<String>,
-}
-
 /// Spawn arguments for a per-language LSP server. The LSP launcher
 /// reads the matching entry from
 /// [`Settings::language_servers`] (keyed by language name) and uses
@@ -102,11 +89,6 @@ pub struct Settings {
     /// table; user-defined modes can supply their own entry here so
     /// the status line shows something more meaningful than `---`.
     pub mode_badges: BTreeMap<String, String>,
-    /// Per-tool Claude permission rules, keyed by tool name (e.g.
-    /// `Bash`, `Read`, `WebFetch`). Empty when no rules are
-    /// configured. Right-hand wins on merge: a CLI override fully
-    /// replaces the file's rules for any tool it specifies.
-    pub claude_permissions: BTreeMap<String, ToolPermissions>,
     /// Monospace font family for the editor pane. Set via
     /// `editor.font.family = "Menlo";`.
     pub editor_font_family: Option<String>,
@@ -188,8 +170,6 @@ impl Settings {
     pub fn merge(self, other: Settings) -> Settings {
         let mut mode_badges = self.mode_badges;
         mode_badges.extend(other.mode_badges);
-        let mut claude_permissions = self.claude_permissions;
-        claude_permissions.extend(other.claude_permissions);
         let mut language_servers = self.language_servers;
         language_servers.extend(other.language_servers);
         let mut item_modes = self.item_modes;
@@ -202,7 +182,6 @@ impl Settings {
             theme: other.theme.or(self.theme),
             mouse_capture: other.mouse_capture.or(self.mouse_capture),
             mode_badges,
-            claude_permissions,
             editor_font_family: other.editor_font_family.or(self.editor_font_family),
             editor_font_size: other.editor_font_size.or(self.editor_font_size),
             ui_font_family: other.ui_font_family.or(self.ui_font_family),
@@ -351,28 +330,6 @@ impl Settings {
                 };
                 if let Some(mode) = mode {
                     self.ui_editor_show_whitespace = Some(mode);
-                }
-            },
-            ["claude", "permissions", tool, behavior] => {
-                let Value::Array(items) = &setting.value.node else {
-                    return;
-                };
-                let patterns: Vec<String> = items
-                    .iter()
-                    .filter_map(|item| match &item.node {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                let entry = self
-                    .claude_permissions
-                    .entry((*tool).to_string())
-                    .or_default();
-                match *behavior {
-                    "always_allow" => entry.always_allow = patterns,
-                    "always_confirm" => entry.always_confirm = patterns,
-                    "always_deny" => entry.always_deny = patterns,
-                    _ => {},
                 }
             },
             ["lsp", lang, "command"] => {
@@ -782,7 +739,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -812,7 +768,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -842,7 +797,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -881,7 +835,6 @@ mod tests {
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -903,7 +856,6 @@ mod tests {
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -927,7 +879,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -954,7 +905,6 @@ mod tests {
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -979,7 +929,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1017,7 +966,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1047,7 +995,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1077,7 +1024,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1116,7 +1062,6 @@ mod tests {
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -1141,7 +1086,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1171,7 +1115,6 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1201,7 +1144,6 @@ mod tests {
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1228,7 +1170,6 @@ mod tests {
             theme: Some("a".into()),
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -1250,7 +1191,6 @@ mod tests {
             theme: Some("b".into()),
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -1277,7 +1217,6 @@ mod tests {
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -1299,7 +1238,6 @@ mod tests {
             theme: None,
             mouse_capture: None,
             mode_badges: BTreeMap::new(),
-            claude_permissions: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
             ui_font_family: None,
@@ -1323,7 +1261,6 @@ mod tests {
                 theme: None,
                 mouse_capture: None,
                 mode_badges: BTreeMap::new(),
-                claude_permissions: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
                 ui_font_family: None,
@@ -1504,118 +1441,6 @@ mod tests {
                 ("conflict".to_string(), "conflict".to_string()),
             ])
         );
-    }
-
-    #[test]
-    fn from_config_extracts_claude_permissions() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.always_allow = ["^cargo (build|test)"];
-                claude.permissions.Bash.always_deny = ["^sudo "];
-                claude.permissions.Read.always_confirm = ["secrets/.*"];
-            }"#,
-        );
-        let settings = Settings::from_config(&config);
-        let bash = settings.claude_permissions.get("Bash").expect("Bash entry");
-        assert_eq!(bash.always_allow, vec!["^cargo (build|test)".to_string()]);
-        assert_eq!(bash.always_deny, vec!["^sudo ".to_string()]);
-        assert!(bash.always_confirm.is_empty());
-        let read = settings.claude_permissions.get("Read").expect("Read entry");
-        assert_eq!(read.always_confirm, vec!["secrets/.*".to_string()]);
-    }
-
-    #[test]
-    fn from_config_ignores_non_string_permission_items() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.always_allow = ["^cargo", 42, true];
-            }"#,
-        );
-        let settings = Settings::from_config(&config);
-        let bash = settings.claude_permissions.get("Bash").expect("Bash entry");
-        assert_eq!(bash.always_allow, vec!["^cargo".to_string()]);
-    }
-
-    #[test]
-    fn from_config_ignores_non_array_permission_value() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.always_allow = "not-an-array";
-            }"#,
-        );
-        assert!(Settings::from_config(&config).claude_permissions.is_empty());
-    }
-
-    #[test]
-    fn from_config_ignores_unknown_permission_behavior() {
-        let config = parse_ok(
-            r#"on init {
-                claude.permissions.Bash.never_allow = ["^cargo"];
-            }"#,
-        );
-        let settings = Settings::from_config(&config);
-        let bash = settings.claude_permissions.get("Bash").expect("Bash entry");
-        assert!(bash.always_allow.is_empty());
-        assert!(bash.always_confirm.is_empty());
-        assert!(bash.always_deny.is_empty());
-    }
-
-    #[test]
-    fn merge_claude_permissions_right_wins_per_tool() {
-        let left = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Bash".to_string(),
-                ToolPermissions {
-                    always_allow: vec!["^left".to_string()],
-                    always_confirm: vec![],
-                    always_deny: vec![],
-                },
-            )]),
-            ..Settings::default()
-        };
-        let right = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Bash".to_string(),
-                ToolPermissions {
-                    always_allow: vec!["^right".to_string()],
-                    always_confirm: vec![],
-                    always_deny: vec![],
-                },
-            )]),
-            ..Settings::default()
-        };
-        let merged = left.merge(right);
-        assert_eq!(
-            merged.claude_permissions.get("Bash").unwrap().always_allow,
-            vec!["^right".to_string()]
-        );
-    }
-
-    #[test]
-    fn merge_claude_permissions_layers_disjoint_tools() {
-        let left = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Bash".to_string(),
-                ToolPermissions {
-                    always_allow: vec!["^cargo".to_string()],
-                    ..Default::default()
-                },
-            )]),
-            ..Settings::default()
-        };
-        let right = Settings {
-            claude_permissions: BTreeMap::from([(
-                "Read".to_string(),
-                ToolPermissions {
-                    always_deny: vec!["secrets/".to_string()],
-                    ..Default::default()
-                },
-            )]),
-            ..Settings::default()
-        };
-        let merged = left.merge(right);
-        assert!(merged.claude_permissions.contains_key("Bash"));
-        assert!(merged.claude_permissions.contains_key("Read"));
     }
 
     #[test]

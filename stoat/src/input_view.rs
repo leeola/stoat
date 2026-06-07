@@ -40,8 +40,8 @@ pub(crate) struct InputView {
 
 /// Identifies which consumer owns an [`InputView`], used by
 /// `SubmitPromptInput` to route submission to the correct handler. The
-/// concrete [`crate::run::RunId`] / [`crate::host::ClaudeSessionId`] for
-/// targets that need them is resolved from pane focus at dispatch time, not
+/// concrete [`crate::run::RunId`] for targets that need it is resolved from
+/// pane focus at dispatch time, not
 /// stored here, so the [`InputView`] stays constructible before the owning
 /// consumer has its slotmap key.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

@@ -1,8 +1,7 @@
 #![allow(clippy::unwrap_used)]
 
 //! In-memory fakes for the ACP host traits, so UI/app tests drive an
-//! agent conversation without spawning a real process. Mirrors
-//! [`super::claude_code`]'s `FakeClaudeCode`/`FakeClaudeCodeHost`.
+//! agent conversation without spawning a real process.
 
 use crate::host::{
     agent::{AgentConnection, AgentSession},

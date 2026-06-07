@@ -24,14 +24,12 @@ pub mod terminal;
 
 pub use agent::{AgentConnection, AgentSession, AgentSessionCapabilities};
 pub use claude_code::{
-    AgentMessage, ApprovalDecision, BashDenialPolicy, ChainedPermissionPolicy, ClaudeCodeHost,
-    ClaudeCodeSession, ClaudeCodeSessions, ClaudeNotification, ClaudeSessionId,
-    ClaudeSessionSummary, HookCallback, HookDecision, HookEvent, HookKind, HookLifecycleEvent,
-    HookResponse, ModeInfo, ModelInfo, PermissionBehavior, PermissionCallback,
-    PermissionDestination, PermissionPrompt, PermissionResult, PermissionRule, PermissionScope,
-    PermissionSuggestion, PlanEntry, PlanEntryStatus, RuleBasedPolicy, SessionStateEvent,
-    TaskEvent, TerminalMeta, TokenUsage, ToolCallContent, ToolCallLocation, ToolCallStatus,
-    ToolKind, ToolPermissionContext,
+    AgentMessage, ApprovalDecision, BashDenialPolicy, ChainedPermissionPolicy, HookCallback,
+    HookDecision, HookEvent, HookKind, HookLifecycleEvent, HookResponse, ModeInfo, ModelInfo,
+    PermissionBehavior, PermissionCallback, PermissionDestination, PermissionPrompt,
+    PermissionResult, PermissionRule, PermissionScope, PermissionSuggestion, PlanEntry,
+    PlanEntryStatus, SessionStateEvent, TaskEvent, TerminalMeta, TokenUsage, ToolCallContent,
+    ToolCallLocation, ToolCallStatus, ToolKind, ToolPermissionContext,
 };
 pub use clipboard::{osc52_should_emit, ClipboardHost, NoopClipboard};
 #[cfg(any(test, feature = "test-support"))]
@@ -39,9 +37,8 @@ pub use fake::{
     change_params, completion_params, definition_params, document_highlight_params, hover_params,
     inlay_hint_params, open_params, reference_params,
     terminal::{inject_done, inject_output, FakeTerminalHost, FakeTerminalSession},
-    workspace_symbol_params, FakeAgentConnection, FakeAgentSession, FakeClaudeCode,
-    FakeClaudeCodeHost, FakeClipboard, FakeEnv, FakeFs, FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp,
-    FakeLspHost, FakeRepoBuilder,
+    workspace_symbol_params, FakeAgentConnection, FakeAgentSession, FakeClipboard, FakeEnv, FakeFs,
+    FakeFsOp, FakeFsWatcher, FakeGit, FakeLsp, FakeLspHost, FakeRepoBuilder,
 };
 pub use git::{
     resolve_review_base, BlameLine, ChangedFile, CherryPickOutcome, CommitFileChange,

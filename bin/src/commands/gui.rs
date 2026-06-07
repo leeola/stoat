@@ -3,25 +3,14 @@ use snafu::{whatever, ResultExt, Whatever};
 use std::{fs, io::ErrorKind, path::PathBuf, sync::Arc};
 use stoat::host::{
     LocalClipboard, LocalEnv, LocalFs, LocalFsWatcher, LocalGit, LocalLspHost, LocalShell,
-    LocalTerminalHost, PermissionCallback, RuleBasedPolicy,
+    LocalTerminalHost,
 };
-use stoat_agent_claude_code::ClaudeCodeLauncher;
 use stoat_gui::{
-    install_panic_hook, parse_input_sequence, ClaudeCodeHostGlobal, ClipboardHostGlobal,
-    EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals,
-    LanguageRegistry, LspHostGlobal, MpscPermissionPromptHost, PermissionPromptHost,
-    PermissionPromptHostGlobal, RestoreMode, Settings, ShellHostGlobal, TerminalHostGlobal, Theme,
-    UserSnippetsGlobal,
+    install_panic_hook, parse_input_sequence, ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal,
+    FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, Globals, LanguageRegistry, LspHostGlobal,
+    RestoreMode, Settings, ShellHostGlobal, TerminalHostGlobal, Theme, UserSnippetsGlobal,
 };
 use stoat_scheduler::TokioScheduler;
-use tokio::sync::mpsc;
-
-/// Bounded queue between the Claude permission policy callback (on
-/// the Tokio runtime) and the GUI workspace's modal poll (on the
-/// main thread). 8 matches the rule-policy tests; queued prompts
-/// remain decision-bound, so even a sustained burst clears once the
-/// user works through the modal.
-const PERMISSION_PROMPT_CAPACITY: usize = 8;
 
 const DEFAULT_CONFIG: &str = include_str!("../../../config.stcfg");
 
@@ -54,14 +43,6 @@ pub fn run(
     let (settings, theme) = load_default_settings_and_theme();
     let language_servers = settings.resolved.language_servers.clone();
 
-    let (prompt_tx, prompt_rx) = mpsc::channel(PERMISSION_PROMPT_CAPACITY);
-    let permission_policy =
-        RuleBasedPolicy::with_prompt_channel(&settings.resolved.claude_permissions, prompt_tx);
-    let claude_launcher = ClaudeCodeLauncher::new(fs_host.clone(), executor.clone())
-        .with_permission_callback(Arc::new(permission_policy) as Arc<dyn PermissionCallback>);
-    let permission_prompt_host: Arc<dyn PermissionPromptHost> =
-        Arc::new(MpscPermissionPromptHost::new(prompt_rx));
-
     let globals = Globals {
         settings,
         theme,
@@ -75,8 +56,6 @@ pub fn run(
             executor.clone(),
         ))),
         git_host: GitHostGlobal(Arc::new(LocalGit::new())),
-        claude_code_host: ClaudeCodeHostGlobal(Arc::new(claude_launcher)),
-        permission_prompt_host: PermissionPromptHostGlobal(permission_prompt_host),
         clipboard_host: ClipboardHostGlobal(Arc::new(LocalClipboard)),
         terminal_host: TerminalHostGlobal(Arc::new(LocalTerminalHost)),
         executor: ExecutorGlobal(executor),

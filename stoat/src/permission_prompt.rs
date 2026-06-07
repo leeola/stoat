@@ -1,7 +1,7 @@
 //! Modal that asks the user to approve, defer, or deny a Claude
 //! tool call when an `always_confirm` rule matches.
 //!
-//! The host's [`crate::host::RuleBasedPolicy`] sends a
+//! A permission policy sends a
 //! [`crate::host::PermissionPrompt`] over an mpsc channel. The
 //! [`crate::Stoat`] event loop receives the prompt, builds an
 //! [`ApprovalModal`] holding the prompt's `oneshot::Sender`, and

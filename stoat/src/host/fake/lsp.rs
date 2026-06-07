@@ -2090,8 +2090,7 @@ impl LspServer for FakeLsp {
 
 // --- FakeLspHost / ArcLspSession ---
 //
-// Mirrors the `FakeClaudeCodeHost` + `ArcSession` pattern: the
-// factory hands out a `Box<dyn LspServer>` while the test harness
+// The factory hands out a `Box<dyn LspServer>` while the test harness
 // retains its own `Arc<FakeLsp>` reference. The bridge type
 // `ArcLspSession` owns an `Arc<FakeLsp>` clone and forwards every
 // `LspServer` method to it so both paths target the same shared
