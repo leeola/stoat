@@ -9,11 +9,7 @@ theme default_dark {
     let muted   = "#a9afbc";
     let dim     = "#878a98";
     let text    = "#dce0e5";
-    let red     = "#b477cf";
-    let green   = "#73ade9";
     let cyan    = "#6eb4bf";
-    let yellow  = "#a1c181";
-    let purple  = "#dfc184";
     let orange  = "#bf956a";
     let olive   = "#5d636f";
     let chrome  = "#3e3e42";
@@ -124,15 +120,15 @@ theme default_dark {
     vcs.rebase.edit.fg   = special;
     vcs.rebase.drop.fg   = danger;
 
-    syntax.keyword                = { fg: red, modifiers: [bold] };
-    syntax.string.fg              = yellow;
+    syntax.keyword                = { fg: "#b477cf", modifiers: [bold] };
+    syntax.string.fg              = "#a1c181";
     syntax.string.escape          = { fg: light_green, modifiers: [bold] };
     syntax.comment                = { fg: olive, modifiers: [italic] };
     syntax.comment.documentation  = { fg: "#878e98", modifiers: [italic] };
-    syntax.function.fg            = green;
+    syntax.function.fg            = "#73ade9";
     syntax.function.special       = { fg: light_yellow, modifiers: [bold] };
     syntax.type.fg                = cyan;
-    syntax.constant.fg            = purple;
+    syntax.constant.fg            = "#dfc184";
     syntax.operator.fg            = "#6eb4bf";
     syntax.punctuation.fg         = "#acb2be";
     syntax.property.fg            = "#d07277";
