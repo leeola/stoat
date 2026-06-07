@@ -572,6 +572,10 @@ pub mod scope {
     pub const UI_DIAGNOSTIC_INFO: &str = "ui.diagnostic.info";
     pub const UI_DIAGNOSTIC_HINT: &str = "ui.diagnostic.hint";
 
+    pub const VCS_GUTTER_ADDED: &str = "vcs.gutter.added";
+    pub const VCS_GUTTER_MODIFIED: &str = "vcs.gutter.modified";
+    pub const VCS_GUTTER_DELETED: &str = "vcs.gutter.deleted";
+
     pub const VCS_CONFLICT_HEADER: &str = "vcs.conflict.header";
     pub const VCS_CONFLICT_OURS: &str = "vcs.conflict.ours";
     pub const VCS_CONFLICT_THEIRS: &str = "vcs.conflict.theirs";

@@ -403,9 +403,9 @@ impl Render for ProjectTree {
                         row.name.clone()
                     };
                     let (name_color, struck) = match row.decoration {
-                        Some(GitDecoration::Added) => (theme.git_added, false),
-                        Some(GitDecoration::Modified) => (theme.git_modified, false),
-                        Some(GitDecoration::Deleted) => (theme.git_deleted, true),
+                        Some(GitDecoration::Added) => (theme.vcs_gutter_added, false),
+                        Some(GitDecoration::Modified) => (theme.vcs_gutter_modified, false),
+                        Some(GitDecoration::Deleted) => (theme.vcs_gutter_deleted, true),
                         Some(GitDecoration::Ignored) => (theme.muted_text, true),
                         None => (color, false),
                     };

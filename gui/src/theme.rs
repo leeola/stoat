@@ -147,9 +147,11 @@ pub struct ThemeColors {
     pub diagnostic_warning: Hsla,
     pub diagnostic_info: Hsla,
     pub diagnostic_hint: Hsla,
-    pub git_added: Hsla,
-    pub git_modified: Hsla,
-    pub git_deleted: Hsla,
+    /// File-tree VCS status markers: a saturated triad kept distinct from
+    /// the softer `diff.*` text colors so file-tree decorations stand out.
+    pub vcs_gutter_added: Hsla,
+    pub vcs_gutter_modified: Hsla,
+    pub vcs_gutter_deleted: Hsla,
     pub goto_word_label: Hsla,
     pub goto_word_prefix: Hsla,
     pub selection: Hsla,
@@ -278,9 +280,21 @@ impl ThemeColors {
                 stoat::theme::scope::UI_DIAGNOSTIC_HINT,
                 palette.text_muted,
             ),
-            git_added: theme_fg_or(cx, stoat::theme::scope::DIFF_ADDED, palette.success),
-            git_modified: theme_fg_or(cx, stoat::theme::scope::DIFF_MODIFIED, palette.warning),
-            git_deleted: theme_fg_or(cx, stoat::theme::scope::DIFF_DELETED, palette.danger),
+            vcs_gutter_added: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_GUTTER_ADDED,
+                rgb(0x27a657).into(),
+            ),
+            vcs_gutter_modified: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_GUTTER_MODIFIED,
+                rgb(0xd3b020).into(),
+            ),
+            vcs_gutter_deleted: theme_fg_or(
+                cx,
+                stoat::theme::scope::VCS_GUTTER_DELETED,
+                rgb(0xe06c76).into(),
+            ),
             goto_word_label: theme_fg_or(
                 cx,
                 stoat::theme::scope::UI_GOTO_WORD_LABEL,
