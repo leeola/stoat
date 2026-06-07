@@ -26,8 +26,8 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
     let pane_id = cx.entity_id();
     let item_count = pane.items().len();
 
-    let label_color = cx.theme().tab_label;
-    let active_label = cx.theme().selection;
+    let label_color = cx.theme().muted_text;
+    let active_label = cx.theme().tab_label;
     let active_bg = cx.theme().tab_active;
     let inactive_bg = cx.theme().tab_inactive;
     let hover_bg = cx.theme().elevated_surface;
