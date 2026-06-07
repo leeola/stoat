@@ -67,7 +67,7 @@ theme default_dark {
 
     ui.tab.inactive    = { bg: "#2f343e" };
     ui.tab.active      = { bg: "#282c33" };
-    ui.tab.label.fg    = "#cccccc";
+    ui.tab.label.fg    = text;
 
     ui.statusbar.focused   = { fg: text, bg: background };
     ui.statusbar.unfocused = { fg: muted, bg: background };
