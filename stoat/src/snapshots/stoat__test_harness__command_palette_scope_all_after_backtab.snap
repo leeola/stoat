@@ -12,16 +12,16 @@ size: 80x24
   [0m[38;2;204;204;204m┌ command palette (all) ───────────────────────────────────────────────────┐[0m
   [0m[38;2;204;204;204m│[0m[38;2;220;220;170m:[0m [0m[7m [0m                                                                       [0m[38;2;204;204;204m│[0m
   [0m[38;2;204;204;204m│[0m[38;2;128;128;128m──────────────────────────────────────────────────────────────────────────[0m[38;2;204;204;204m│[0m
-  [0m[38;2;204;204;204m│[0m[30m[48;2;79;193;255m AcceptCompletion            accept the highlighted completion popup item [0m[38;2;204;204;204m│[0m
-  [0m[38;2;204;204;204m│ Append                      [0m[38;2;128;128;128menter insert mode at selection end[0m[38;2;204;204;204m           │[0m
-  [0m[38;2;204;204;204m│ ClaudeFocusNextToolCard     [0m[38;2;128;128;128mfocus next tool card[0m[38;2;204;204;204m                         │[0m
-  [0m[38;2;204;204;204m│ ClaudeFocusPrevToolCard     [0m[38;2;128;128;128mfocus previous tool card[0m[38;2;204;204;204m                     │[0m
-  [0m[38;2;204;204;204m│ ClaudeJumpToFocusedCard     [0m[38;2;128;128;128mjump to focused tool card[0m[38;2;204;204;204m                    │[0m
-  [0m[38;2;204;204;204m│ ClaudeToggleToolCardExpand  [0m[38;2;128;128;128mtoggle tool card[0m[38;2;204;204;204m                             │[0m
-  [0m[38;2;204;204;204m│ CloseBuffer                 [0m[38;2;128;128;128mclose the focused buffer[0m[38;2;204;204;204m                     │[0m
-  [0m[38;2;204;204;204m│ CodeAction                  [0m[38;2;128;128;128mshow code actions for selection[0m[38;2;204;204;204m              │[0m
-  [0m[38;2;204;204;204m│ DecreaseFontSize            [0m[38;2;128;128;128mdecrease the editor font size[0m[38;2;204;204;204m                │[0m
-  [0m[38;2;204;204;204m│ DeleteBackward              [0m[38;2;128;128;128mdelete char before each cursor[0m[38;2;204;204;204m               │[0m
+  [0m[38;2;204;204;204m│[0m[30m[48;2;79;193;255m AcceptCompletion    accept the highlighted completion popup item         [0m[38;2;204;204;204m│[0m
+  [0m[38;2;204;204;204m│ Append              [0m[38;2;128;128;128menter insert mode at selection end[0m[38;2;204;204;204m                   │[0m
+  [0m[38;2;204;204;204m│ CloseBuffer         [0m[38;2;128;128;128mclose the focused buffer[0m[38;2;204;204;204m                             │[0m
+  [0m[38;2;204;204;204m│ CodeAction          [0m[38;2;128;128;128mshow code actions for selection[0m[38;2;204;204;204m                      │[0m
+  [0m[38;2;204;204;204m│ DecreaseFontSize    [0m[38;2;128;128;128mdecrease the editor font size[0m[38;2;204;204;204m                        │[0m
+  [0m[38;2;204;204;204m│ DeleteBackward      [0m[38;2;128;128;128mdelete char before each cursor[0m[38;2;204;204;204m                       │[0m
+  [0m[38;2;204;204;204m│ DeleteForward       [0m[38;2;128;128;128mdelete char at or after each cursor[0m[38;2;204;204;204m                  │[0m
+  [0m[38;2;204;204;204m│ DeleteWordBackward  [0m[38;2;128;128;128mdelete word before each cursor[0m[38;2;204;204;204m                       │[0m
+  [0m[38;2;204;204;204m│ DeleteWordForward   [0m[38;2;128;128;128mdelete word at or after each cursor[0m[38;2;204;204;204m                  │[0m
+  [0m[38;2;204;204;204m│ DismissModal        [0m[38;2;128;128;128mdismiss the active modal[0m[38;2;204;204;204m                             │[0m
   [0m[38;2;204;204;204m│[0m[38;2;128;128;128m──────────────────────────────────────────────────────────────────────────[0m[38;2;204;204;204m│[0m
   [0m[38;2;204;204;204m│[0m[38;2;160;160;160mReplace the highlighted item's replace_range in the focused buffer with[0m   [0m[38;2;204;204;204m│[0m
   [0m[38;2;204;204;204m│[0m[38;2;160;160;160mits insert_text and place the primary cursor at the inserted end. Clears[0m  [0m[38;2;204;204;204m│[0m

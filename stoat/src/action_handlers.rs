@@ -712,21 +712,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::DecreaseFontSize
         // The Way-2 terminal is a GUI-only item view; the ratatui TUI has
         // no surface to host it.
-        | ActionKind::OpenClaudeTerminal
-        // The stream-json Claude chat has been removed; these actions no
-        // longer have a surface in the ratatui TUI.
-        | ActionKind::OpenClaude
-        | ActionKind::ClaudeSubmit
-        | ActionKind::ClaudeToPane
-        | ActionKind::ClaudeToDockLeft
-        | ActionKind::ClaudeToDockRight
-        | ActionKind::ClaudeToggleFollow
-        | ActionKind::ClaudeInterrupt
-        | ActionKind::ClaudeFocusNextToolCard
-        | ActionKind::ClaudeFocusPrevToolCard
-        | ActionKind::ClaudeToggleToolCardExpand
-        | ActionKind::ClaudeJumpToFocusedCard
-        | ActionKind::OpenCheckpointPicker => UpdateEffect::None,
+        | ActionKind::OpenClaudeTerminal => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

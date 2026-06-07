@@ -7,12 +7,7 @@ pub mod registry;
 pub use action::{Action, ActionDef, ActionPriority};
 pub use defs::{
     app::{DismissModal, Quit, QuitAll},
-    claude::{
-        ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeInterrupt, ClaudeJumpToFocusedCard,
-        ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
-        ClaudeToggleToolCardExpand, OpenCheckpointPicker, OpenClaude, ToggleDockLeft,
-        ToggleDockRight,
-    },
+    claude::{ToggleDockLeft, ToggleDockRight},
     commits::{
         CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenBranchReview,
         CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh,

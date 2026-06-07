@@ -958,7 +958,6 @@ mod tests {
                 "ConflictApply",
                 "ReviewStageChunk",
                 "CommitsNext",
-                "ClaudeSubmit",
                 "RunSubmit",
             ] {
                 assert!(names.contains(&name), "{name} missing in All scope");

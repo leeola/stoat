@@ -95,10 +95,9 @@ mod tests {
         assert_eq!(bindings[0].0, "x");
     }
 
-    fn insert_state(claude_focused: bool) -> TestState {
+    fn insert_state() -> TestState {
         let mut values = HashMap::new();
         values.insert("mode".into(), StateValue::String("insert".into()));
-        values.insert("claude_focused".into(), StateValue::Bool(claude_focused));
         TestState { values }
     }
 
@@ -113,20 +112,10 @@ mod tests {
     fn default_keymap_enter_in_editor_insert_accepts_completion() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(&insert_state(false), &enter_event())
-            .expect("Enter has a binding when claude is not focused");
+            .lookup(&insert_state(), &enter_event())
+            .expect("Enter has a binding in insert mode");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "AcceptCompletion");
-    }
-
-    #[test]
-    fn default_keymap_enter_in_chat_insert_submits_to_claude() {
-        let keymap = compile_default_keymap();
-        let actions = keymap
-            .lookup(&insert_state(true), &enter_event())
-            .expect("Enter has a binding when claude is focused");
-        assert_eq!(actions.len(), 1);
-        assert_eq!(actions[0].name, "ClaudeSubmit");
     }
 
     fn ctrl_event(c: char) -> crossterm::event::KeyEvent {
@@ -140,7 +129,7 @@ mod tests {
     fn default_keymap_ctrl_a_in_insert_goes_to_line_start() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(&insert_state(false), &ctrl_event('a'))
+            .lookup(&insert_state(), &ctrl_event('a'))
             .expect("Ctrl-a has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "GotoLineStart");
@@ -150,7 +139,7 @@ mod tests {
     fn default_keymap_ctrl_e_in_insert_goes_to_line_end() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(&insert_state(false), &ctrl_event('e'))
+            .lookup(&insert_state(), &ctrl_event('e'))
             .expect("Ctrl-e has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "GotoLineEnd");
@@ -197,10 +186,7 @@ mod tests {
     fn default_keymap_alt_left_in_insert_moves_to_prev_word() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(
-                &insert_state(false),
-                &alt_event(crossterm::event::KeyCode::Left),
-            )
+            .lookup(&insert_state(), &alt_event(crossterm::event::KeyCode::Left))
             .expect("Alt-Left has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "MovePrevWordStart");
@@ -211,7 +197,7 @@ mod tests {
         let keymap = compile_default_keymap();
         let actions = keymap
             .lookup(
-                &insert_state(false),
+                &insert_state(),
                 &alt_event(crossterm::event::KeyCode::Right),
             )
             .expect("Alt-Right has an insert-mode binding");
@@ -224,7 +210,7 @@ mod tests {
         let keymap = compile_default_keymap();
         let actions = keymap
             .lookup(
-                &insert_state(false),
+                &insert_state(),
                 &alt_event(crossterm::event::KeyCode::Backspace),
             )
             .expect("Alt-Backspace has an insert-mode binding");
@@ -237,7 +223,7 @@ mod tests {
         let keymap = compile_default_keymap();
         let actions = keymap
             .lookup(
-                &insert_state(false),
+                &insert_state(),
                 &alt_event(crossterm::event::KeyCode::Delete),
             )
             .expect("Alt-Delete has an insert-mode binding");
@@ -249,7 +235,7 @@ mod tests {
     fn default_keymap_ctrl_z_in_insert_undoes() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(&insert_state(false), &ctrl_event('z'))
+            .lookup(&insert_state(), &ctrl_event('z'))
             .expect("Ctrl-z has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "Undo");
@@ -266,7 +252,7 @@ mod tests {
             crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
         ));
         let actions = keymap
-            .lookup(&insert_state(false), &event)
+            .lookup(&insert_state(), &event)
             .expect("Ctrl-Shift-z has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "Redo");
@@ -275,7 +261,6 @@ mod tests {
     fn text_entry_state(mode: &str) -> TestState {
         let mut values = HashMap::new();
         values.insert("mode".into(), StateValue::String(mode.into()));
-        values.insert("claude_focused".into(), StateValue::Bool(false));
         values.insert("palette_open".into(), StateValue::Bool(false));
         values.insert("finder_open".into(), StateValue::Bool(false));
         values.insert("help_open".into(), StateValue::Bool(false));

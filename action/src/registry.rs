@@ -1,11 +1,7 @@
 use crate::{
     defs::{
         app::{DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll},
-        claude::{
-            ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard, ClaudeJumpToFocusedCard,
-            ClaudeSubmit, ClaudeToDockLeft, ClaudeToDockRight, ClaudeToPane, ClaudeToggleFollow,
-            ClaudeToggleToolCardExpand, OpenClaude, ToggleDockLeft, ToggleDockRight,
-        },
+        claude::{ToggleDockLeft, ToggleDockRight},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenBranchReview,
             CommitsOpenReview, CommitsPageDown, CommitsPageUp, CommitsPrev, CommitsRefresh,
@@ -687,26 +683,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(HelpJumpFirst::DEF, |_| Ok(Box::new(HelpJumpFirst)));
     add(HelpJumpLast::DEF, |_| Ok(Box::new(HelpJumpLast)));
     add(CloseHelp::DEF, |_| Ok(Box::new(CloseHelp)));
-    add(OpenClaude::DEF, |_| Ok(Box::new(OpenClaude)));
-    add(ClaudeSubmit::DEF, |_| Ok(Box::new(ClaudeSubmit)));
-    add(ClaudeToPane::DEF, |_| Ok(Box::new(ClaudeToPane)));
-    add(ClaudeToDockLeft::DEF, |_| Ok(Box::new(ClaudeToDockLeft)));
-    add(ClaudeToDockRight::DEF, |_| Ok(Box::new(ClaudeToDockRight)));
-    add(ClaudeToggleFollow::DEF, |_| {
-        Ok(Box::new(ClaudeToggleFollow))
-    });
-    add(ClaudeFocusNextToolCard::DEF, |_| {
-        Ok(Box::new(ClaudeFocusNextToolCard))
-    });
-    add(ClaudeFocusPrevToolCard::DEF, |_| {
-        Ok(Box::new(ClaudeFocusPrevToolCard))
-    });
-    add(ClaudeToggleToolCardExpand::DEF, |_| {
-        Ok(Box::new(ClaudeToggleToolCardExpand))
-    });
-    add(ClaudeJumpToFocusedCard::DEF, |_| {
-        Ok(Box::new(ClaudeJumpToFocusedCard))
-    });
     add(ToggleDockRight::DEF, |_| Ok(Box::new(ToggleDockRight)));
     add(ToggleDockLeft::DEF, |_| Ok(Box::new(ToggleDockLeft)));
     add(OpenCommits::DEF, |_| Ok(Box::new(OpenCommits)));
@@ -1036,16 +1012,6 @@ mod tests {
         "RunInterrupt",
         "RunHistoryPrev",
         "RunHistoryNext",
-        "OpenClaude",
-        "ClaudeSubmit",
-        "ClaudeToPane",
-        "ClaudeToDockLeft",
-        "ClaudeToDockRight",
-        "ClaudeToggleFollow",
-        "ClaudeFocusNextToolCard",
-        "ClaudeFocusPrevToolCard",
-        "ClaudeToggleToolCardExpand",
-        "ClaudeJumpToFocusedCard",
         "ToggleDockRight",
         "ToggleDockLeft",
         "NewWorkspace",
@@ -1172,7 +1138,7 @@ mod tests {
 
     #[test]
     fn all_returns_complete_list() {
-        // 70 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
+        // 65 previous + 13 Phase-5 rebase primitives + 1 Dump + 1 OpenHelp
         // + 4 workspace actions + 5 prompt-input plumbing actions
         // + 1 PaletteScopeToggle + 2 run-history actions
         // + 7 help plumbing actions + 1 CloseHelp + 1 QuitAll
@@ -1184,7 +1150,6 @@ mod tests {
         // Insert and Backspace in reword mode are handled by the editor
         // directly, not via the action registry.
         // + 4 file-finder actions (open, select prev/next, scope toggle).
-        // + 1 ClaudeToggleFollow.
         // + 4 viewport motions (PageUp, PageDown, HalfPageUp, HalfPageDown).
         // + 3 selection ops (RotateSelectionsForward/Backward, TrimSelections).
         // + 3 window-relative gotos (GotoWindowTop/Center/Bottom).
@@ -1263,9 +1228,6 @@ mod tests {
         // + 1 SelectRegister.
         // + 1 InsertRegister.
         // + 1 CommitUndoCheckpoint.
-        // + 3 Claude tool-card focus/expand (ClaudeFocusNextToolCard, ClaudeFocusPrevToolCard,
-        //   ClaudeToggleToolCardExpand).
-        // + 1 ClaudeJumpToFocusedCard.
         // + 1 DismissModal.
         // + 5 Picker actions (SelectPrev/SelectNext/Confirm/ConfirmSplitRight/ ConfirmSplitDown)
         //   that the GUI's `Picker<D>` primitive routes via `Workspace::dispatch_action` -> active
@@ -1314,7 +1276,7 @@ mod tests {
         // + 1 CommitsOpenBranchReview (branch review from the commits view).
         // + 1 OpenClaudeTerminal (terminal pane running the claude CLI).
         // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
-        assert_eq!(all().count(), 355);
+        assert_eq!(all().count(), 345);
     }
 
     #[test]
