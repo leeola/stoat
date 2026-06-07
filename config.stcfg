@@ -22,7 +22,7 @@ theme default_dark {
     ui.cursor = { modifiers: [reversed] };
     ui.cursor.input = { fg: black, bg: text };
     ui.selection = { fg: black, bg: accent };
-    ui.selection.editor = { bg: muted };
+    ui.selection.editor = { bg: "#74ade83d" };
     ui.selection.reversed = { fg: black, bg: text, modifiers: [reversed] };
     ui.line_highlight = { bg: "#2f343ebf" };
     ui.search.match = { fg: black, bg: warning };
@@ -41,13 +41,13 @@ theme default_dark {
     ui.modal.hints.fg = warning;
     ui.modal.palette.fg = text;
     ui.modal.picker.fg = text;
-    ui.modal.selection = { bg: "#3b4261" };
+    ui.modal.selection = { bg: "#454a56" };
     ui.modal.run.fg = warning;
 
-    ui.popup.background = { bg: "#202028" };
-    ui.popup.text.fg    = "#d0d0e0";
-    ui.popup.border.fg  = "#404050";
-    ui.popup.selection.background = { bg: "#3a3a4a" };
+    ui.popup.background = { bg: "#2f343e" };
+    ui.popup.text.fg    = "#dce0e5";
+    ui.popup.border.fg  = "#363c46";
+    ui.popup.selection.background = { bg: "#454a56" };
     ui.popup.selection.text.fg    = "#f0f0f0";
 
     ui.dock.minimized.background = { bg: "#1e1e1e" };
@@ -65,8 +65,8 @@ theme default_dark {
     ui.badge.complete.fg = success;
     ui.badge.error.fg = danger;
 
-    ui.tab.inactive    = { bg: "#1e1e1e" };
-    ui.tab.active      = { bg: "#2d2d2d" };
+    ui.tab.inactive    = { bg: "#2f343e" };
+    ui.tab.active      = { bg: "#282c33" };
     ui.tab.label.fg    = "#cccccc";
 
     ui.statusbar.focused   = { fg: text, bg: background };
