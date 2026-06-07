@@ -33,9 +33,9 @@ theme default_dark {
     ui.background.fg = "#3b414d";
     ui.surface.elevated = { bg: "#2f343e" };
 
-    ui.border.focused.fg = chrome;
-    ui.border.inactive.fg = "#2a2a2a";
-    ui.border.variant.fg = "#353539";
+    ui.border.focused.fg = "#47679e";
+    ui.border.inactive.fg = "#464b57";
+    ui.border.variant.fg = "#363c46";
 
     ui.modal.help.fg = accent;
     ui.modal.hints.fg = warning;
