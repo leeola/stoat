@@ -86,7 +86,7 @@ theme default_dark {
 
     diff.added.fg        = success;
     diff.deleted.fg      = danger;
-    diff.modified.fg     = primary;
+    diff.modified.fg     = warning;
     diff.moved.fg        = info;
     diff.context.fg      = muted;
     diff.current_hunk    = { fg: info, modifiers: [bold] };
