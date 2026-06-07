@@ -165,28 +165,6 @@ pub struct ThemeColors {
     /// [`Self::success`]/[`Self::error`] (the finished-block markers) so
     /// the three command states read as distinct colors.
     pub badge_active: Hsla,
-    pub chat_user: Hsla,
-    pub chat_text: Hsla,
-    pub chat_meta: Hsla,
-    pub chat_time: Hsla,
-    pub chat_thinking: Hsla,
-    pub chat_tool_header: Hsla,
-    pub chat_tool_body: Hsla,
-    pub chat_tool_focused: Hsla,
-    pub chat_tool_status_running: Hsla,
-    pub chat_tool_status_done: Hsla,
-    pub chat_tool_status_failed: Hsla,
-    pub chat_tool_status_cancelled: Hsla,
-    pub chat_error: Hsla,
-    /// No rendering site yet (chat view doesn't draw visible
-    /// separator lines today). Kept on the struct so the chat
-    /// palette stays comprehensive.
-    #[allow(dead_code)]
-    pub chat_separator: Hsla,
-    /// Same as `chat_separator` -- the throbber animation isn't
-    /// drawn yet but the scope is part of the chat palette spec.
-    #[allow(dead_code)]
-    pub chat_throbber: Hsla,
     pub vcs_rebase_pick: Hsla,
     pub vcs_rebase_squash: Hsla,
     pub vcs_rebase_fixup: Hsla,
@@ -350,53 +328,6 @@ impl ThemeColors {
             error: theme_fg_or(cx, stoat::theme::scope::UI_ERROR, palette.danger),
             success: palette.success,
             badge_active: theme_fg_or(cx, stoat::theme::scope::UI_BADGE_ACTIVE, palette.warning),
-            chat_user: theme_fg_or(cx, stoat::theme::scope::CHAT_USER, palette.success),
-            chat_text: theme_fg_or(cx, stoat::theme::scope::CHAT_TEXT, palette.text),
-            chat_meta: theme_fg_or(cx, stoat::theme::scope::CHAT_META, palette.text_muted),
-            chat_time: theme_fg_or(cx, stoat::theme::scope::CHAT_TIME, palette.text_muted),
-            chat_thinking: theme_fg_or(cx, stoat::theme::scope::CHAT_THINKING, palette.text_muted),
-            chat_tool_header: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_TOOL_HEADER,
-                palette.accent,
-            ),
-            chat_tool_body: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_TOOL_BODY,
-                palette.text_muted,
-            ),
-            chat_tool_focused: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_TOOL_FOCUSED,
-                palette.accent,
-            ),
-            chat_tool_status_running: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_TOOL_STATUS_RUNNING,
-                palette.accent,
-            ),
-            chat_tool_status_done: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_TOOL_STATUS_DONE,
-                palette.success,
-            ),
-            chat_tool_status_failed: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_TOOL_STATUS_FAILED,
-                palette.danger,
-            ),
-            chat_tool_status_cancelled: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_TOOL_STATUS_CANCELLED,
-                palette.text_muted,
-            ),
-            chat_error: theme_fg_or(cx, stoat::theme::scope::CHAT_ERROR, palette.danger),
-            chat_separator: theme_fg_or(
-                cx,
-                stoat::theme::scope::CHAT_SEPARATOR,
-                palette.text_muted,
-            ),
-            chat_throbber: theme_fg_or(cx, stoat::theme::scope::CHAT_THROBBER, palette.accent),
             vcs_rebase_pick: theme_fg_or(cx, stoat::theme::scope::VCS_REBASE_PICK, palette.success),
             vcs_rebase_squash: theme_fg_or(
                 cx,
@@ -606,9 +537,6 @@ mod tests {
         assert_eq!(theme.modal_palette, palette.accent);
         assert_eq!(theme.modal_picker, palette.accent);
         assert_eq!(theme.error, palette.danger);
-        assert_eq!(theme.chat_user, palette.success);
-        assert_eq!(theme.chat_tool_status_failed, palette.danger);
-        assert_eq!(theme.chat_separator, palette.text_muted);
         assert_eq!(theme.vcs_rebase_pick, palette.success);
         assert_eq!(theme.vcs_rebase_drop, palette.danger);
         assert_eq!(theme.vcs_commit_sha, palette.warning);

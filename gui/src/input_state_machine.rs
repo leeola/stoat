@@ -191,7 +191,6 @@ pub struct InputStateMachine {
     theme_picker_open: StateValue,
     global_search_open: StateValue,
     buffer_picker_open: StateValue,
-    claude_focused: StateValue,
     input_active: StateValue,
     pending_count: Option<u32>,
     /// Count carried over for dispatch after [`feed`] consumes a
@@ -376,7 +375,6 @@ impl InputStateMachine {
             theme_picker_open: StateValue::Bool(false),
             global_search_open: StateValue::Bool(false),
             buffer_picker_open: StateValue::Bool(false),
-            claude_focused: StateValue::Bool(false),
             input_active: StateValue::Bool(false),
             pending_count: None,
             consumed_count: None,
@@ -440,10 +438,6 @@ impl InputStateMachine {
 
     pub fn buffer_picker_open(&self) -> bool {
         matches!(self.buffer_picker_open, StateValue::Bool(true))
-    }
-
-    pub fn claude_focused(&self) -> bool {
-        matches!(self.claude_focused, StateValue::Bool(true))
     }
 
     pub fn pending_count(&self) -> Option<u32> {
@@ -1422,7 +1416,6 @@ impl KeymapState for InputStateMachine {
             "theme_picker_open" => Some(&self.theme_picker_open),
             "global_search_open" => Some(&self.global_search_open),
             "buffer_picker_open" => Some(&self.buffer_picker_open),
-            "claude_focused" => Some(&self.claude_focused),
             "input_active" => Some(&self.input_active),
             _ => None,
         }
@@ -1761,7 +1754,6 @@ mod tests {
             assert!(!sm.theme_picker_open());
             assert!(!sm.global_search_open());
             assert!(!sm.buffer_picker_open());
-            assert!(!sm.claude_focused());
             assert_eq!(sm.pending_count(), None);
             assert!(sm.pending_chord().is_empty());
             assert!(sm.pending_operator().is_none());
@@ -1795,7 +1787,6 @@ mod tests {
             assert_eq!(sm.get("help_open"), Some(&StateValue::Bool(false)));
             assert_eq!(sm.get("theme_picker_open"), Some(&StateValue::Bool(false)));
             assert_eq!(sm.get("global_search_open"), Some(&StateValue::Bool(false)));
-            assert_eq!(sm.get("claude_focused"), Some(&StateValue::Bool(false)));
             assert_eq!(sm.get("unknown"), None);
         });
     }

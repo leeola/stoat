@@ -1,7 +1,6 @@
 use crate::{
     buffer::Buffer,
     buffer_registry::{BufferRegistry, BufferRegistryEvent},
-    claude_permission_modal::PermissionModal,
     conflict_item::{ConflictItem, ConflictSide},
     diagnostics::DiagnosticSet,
     diff_coordinator::DiffCoordinator,
@@ -13,9 +12,7 @@ use crate::{
     fold_actions,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
     git::coordinator::BlameCoordinator,
-    globals::{
-        EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, PermissionPromptHostGlobal,
-    },
+    globals::{EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
     key_hint_banner::KeyHintBanner,
@@ -41,10 +38,10 @@ use crate::{
     toast::{Toast, ToastId, ToastView},
 };
 use gpui::{
-    deferred, div, px, relative, size, App, AppContext, BorrowAppContext, Bounds, Context,
-    DismissEvent, Entity, EventEmitter, FocusHandle, InteractiveElement, IntoElement,
-    ParentElement, Render, SharedString, Styled, Subscription, Task, TitlebarOptions, WeakEntity,
-    Window, WindowBounds, WindowOptions,
+    deferred, div, px, relative, size, App, AppContext, BorrowAppContext, Bounds, Context, Entity,
+    EventEmitter, FocusHandle, InteractiveElement, IntoElement, ParentElement, Render,
+    SharedString, Styled, Subscription, Task, TitlebarOptions, WeakEntity, Window, WindowBounds,
+    WindowOptions,
 };
 use regex::Regex;
 use std::{
@@ -52,7 +49,6 @@ use std::{
     collections::{HashMap, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
-    slice,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -144,16 +140,6 @@ pub struct Workspace {
     registers: stoat::register::RegisterStore,
     selected_register: Option<stoat::register::Register>,
     rebase_active: Option<ActiveRebase>,
-    /// Pending Claude permission prompts waiting for the active
-    /// permission modal to close. FIFO so prompts surface in the
-    /// order the policy emits them, matching the TUI's
-    /// `permission_prompt_queue`.
-    permission_prompt_queue: VecDeque<stoat::host::PermissionPrompt>,
-    /// Background task that drains
-    /// [`PermissionPromptHostGlobal`] on a foreground tick. Dropped
-    /// when the workspace drops; absent when no global is
-    /// registered (most tests, headless runs).
-    _permission_prompt_poll: Option<Task<()>>,
     /// Background task that periodically writes the workspace state
     /// to its default path. Lazy-started on first [`Render`] so the
     /// workspace is fully constructed before saves begin; dropped
@@ -211,11 +197,6 @@ enum LastMotion {
         extend: bool,
     },
 }
-
-/// Period of the permission-prompt poll task. Matches
-/// [`FsWatcherDriver`]'s tick so the two background drainers share
-/// a uniform cadence.
-const PERMISSION_PROMPT_TICK: Duration = Duration::from_millis(50);
 
 /// Interval between periodic workspace state saves. Trades off
 /// snapshot freshness against IO churn; 30 s keeps an unclean
@@ -436,8 +417,6 @@ impl Workspace {
             registers: stoat::register::RegisterStore::new(),
             selected_register: None,
             rebase_active: None,
-            permission_prompt_queue: VecDeque::new(),
-            _permission_prompt_poll: None,
             _periodic_save: None,
             focus_handle: cx.focus_handle(),
             last_window_title: None,
@@ -457,63 +436,6 @@ impl Workspace {
                 modal_layer_subscription,
             ],
         }
-    }
-
-    /// Push a Claude permission prompt onto the workspace's modal
-    /// pipeline. When no [`PermissionModal`] is currently active the
-    /// prompt opens one immediately; otherwise it queues FIFO and
-    /// surfaces when the active modal closes. Mirrors
-    /// [`stoat::Stoat::enqueue_permission_prompt`].
-    pub fn enqueue_permission_prompt(
-        &mut self,
-        prompt: stoat::host::PermissionPrompt,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        if self.permission_modal_active(cx) {
-            self.permission_prompt_queue.push_back(prompt);
-        } else {
-            self.show_permission_modal(prompt, window, cx);
-        }
-    }
-
-    fn permission_modal_active(&self, cx: &App) -> bool {
-        self.modal_layer
-            .read(cx)
-            .active_modal::<PermissionModal>()
-            .is_some()
-    }
-
-    fn show_permission_modal(
-        &mut self,
-        prompt: stoat::host::PermissionPrompt,
-        window: &mut Window,
-        cx: &mut Context<'_, Self>,
-    ) {
-        let weak_workspace = cx.weak_entity();
-        let modal = cx.new(|cx| PermissionModal::new(prompt, weak_workspace, cx));
-        let dismiss_subscription = cx.subscribe_in(
-            &modal,
-            window,
-            |workspace, _, _: &DismissEvent, window, cx| {
-                workspace.on_permission_modal_dismissed(window, cx);
-            },
-        );
-        self.modal_layer.update(cx, |layer, cx| {
-            layer.show_modal(modal, window, cx);
-        });
-        self._subscriptions.push(dismiss_subscription);
-    }
-
-    fn on_permission_modal_dismissed(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        if let Some(next) = self.permission_prompt_queue.pop_front() {
-            self.show_permission_modal(next, window, cx);
-        }
-    }
-
-    #[cfg(test)]
-    pub(crate) fn permission_prompt_queue_len(&self) -> usize {
-        self.permission_prompt_queue.len()
     }
 
     /// Open the [`crate::shell_input_modal::ShellInputModal`] for
@@ -607,56 +529,6 @@ impl Workspace {
 
     pub fn rebase_active(&self) -> Option<&ActiveRebase> {
         self.rebase_active.as_ref()
-    }
-
-    /// Open the file referenced by the focused tool card on the
-    /// active [`crate::claude_chat::ClaudeChat`] and move the cursor
-    /// to the referenced line. Mirrors the TUI's
-    /// `claude_jump_to_focused_card` body in
-    /// `stoat/src/action_handlers/claude.rs:409`; silent no-op when
-    /// the active pane is not a chat, no card is focused, the
-    /// focused card has no `file_path`, or the resolved absolute
-    /// path falls outside the workspace's git root.
-    pub fn jump_to_focused_claude_card(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
-        let Some(chat) = crate::claude_chat::focused_chat(self, cx) else {
-            return;
-        };
-        let Some((path, line)) = chat.read(cx).focused_tool_card_location() else {
-            return;
-        };
-        let absolute = if path.is_absolute() {
-            path
-        } else {
-            self.git_root.join(path)
-        };
-        if !absolute.starts_with(&self.git_root) {
-            return;
-        }
-        let _ = window;
-        self.open_paths(slice::from_ref(&absolute), cx);
-        let pane_id = self.pane_tree.read(cx).focus();
-        let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() else {
-            return;
-        };
-        let target_editor: Option<(usize, Entity<Editor>)> = pane
-            .read(cx)
-            .items()
-            .iter()
-            .enumerate()
-            .find_map(|(idx, item)| {
-                let editor = item.to_any_view().downcast::<Editor>().ok()?;
-                let path = editor.read(cx).file_path()?.to_path_buf();
-                (path == absolute).then_some((idx, editor))
-            });
-        let Some((index, editor)) = target_editor else {
-            return;
-        };
-        pane.update(cx, |p, cx| {
-            p.activate(index, cx);
-        });
-        if let Some(line) = line {
-            editor.update(cx, |ed, cx| ed.handle_goto_line_number(Some(line), cx));
-        }
     }
 
     /// Restore the workspace's git working tree to the state
@@ -2792,25 +2664,10 @@ impl Workspace {
             ActionKind::SwitchWorkspace => {
                 crate::workspace_picker::open_workspace_picker(self, window, cx)
             },
-            ActionKind::OpenCheckpointPicker => {
-                crate::claude_checkpoint_picker::open_claude_checkpoint_picker(self, window, cx)
-            },
             ActionKind::OpenGlobalSearch => {
                 crate::global_search::open_global_search(self, window, cx)
             },
             ActionKind::OpenLastPicker => self.dispatch_open_last_picker(window, cx),
-            ActionKind::OpenClaude => crate::claude_chat::dispatch_open_claude(self, window, cx),
-            ActionKind::ClaudeSubmit => crate::claude_chat::dispatch_claude_submit(self, cx),
-            ActionKind::ClaudeToPane => crate::claude_chat::dispatch_claude_to_pane(self, cx),
-            ActionKind::ClaudeToDockLeft => {
-                crate::claude_chat::dispatch_claude_to_dock(self, DockSide::Left, cx)
-            },
-            ActionKind::ClaudeToDockRight => {
-                crate::claude_chat::dispatch_claude_to_dock(self, DockSide::Right, cx)
-            },
-            ActionKind::ClaudeToggleFollow => {
-                crate::claude_chat::dispatch_claude_toggle_follow(self, cx)
-            },
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
             ActionKind::OpenClaudeTerminal => {
                 crate::terminal_view::dispatch_open_claude_terminal(self, cx)
@@ -2841,19 +2698,6 @@ impl Workspace {
                     let (row, col) = (drag.row, drag.col);
                     crate::run_pane::mouse::handle_run_drag_select_to(self, row, col, cx);
                 }
-            },
-            ActionKind::ClaudeFocusNextToolCard => {
-                crate::claude_chat::dispatch_claude_focus_next_tool_card(self, cx)
-            },
-            ActionKind::ClaudeFocusPrevToolCard => {
-                crate::claude_chat::dispatch_claude_focus_prev_tool_card(self, cx)
-            },
-            ActionKind::ClaudeToggleToolCardExpand => {
-                crate::claude_chat::dispatch_claude_toggle_tool_card_expand(self, cx)
-            },
-            ActionKind::ClaudeInterrupt => crate::claude_chat::dispatch_claude_interrupt(self, cx),
-            ActionKind::ClaudeJumpToFocusedCard => {
-                crate::claude_chat::dispatch_claude_jump_to_focused_card(self, window, cx)
             },
             ActionKind::OpenReview => self.dispatch_open_review(cx),
             ActionKind::OpenReviewCommit => {
@@ -6700,12 +6544,6 @@ impl Workspace {
     }
 }
 
-/// Spawn the background poll that drains
-/// [`PermissionPromptHostGlobal`] into the workspace's modal queue.
-/// Returns `None` when the global is not registered (most tests,
-/// headless runs) so the workspace does not park a no-op task. The
-/// task uses [`gpui::Context::spawn_in`] so its update hops land in
-/// window context for [`crate::modal_layer::ModalLayer::show_modal`].
 /// Spawn the periodic save loop that flushes the workspace's
 /// state every [`PERIODIC_SAVE_INTERVAL`]. The loop exits when the
 /// workspace's weak handle no longer upgrades (i.e. the workspace
@@ -6723,28 +6561,6 @@ fn spawn_periodic_save(cx: &mut Context<'_, Workspace>) -> Option<Task<()>> {
             workspace.save_state_to_default_path(app);
         });
         if live.is_err() {
-            break;
-        }
-    });
-    Some(task)
-}
-
-fn spawn_permission_prompt_poll(
-    window: &mut Window,
-    cx: &mut Context<'_, Workspace>,
-) -> Option<Task<()>> {
-    let host = cx
-        .try_global::<PermissionPromptHostGlobal>()
-        .map(|g| g.0.clone())?;
-    let executor = cx.try_global::<ExecutorGlobal>().map(|g| g.0.clone())?;
-    let task = cx.spawn_in(window, async move |weak_workspace, cx| loop {
-        executor.timer(PERMISSION_PROMPT_TICK).await;
-        let pumped = weak_workspace.update_in(cx, |workspace, window, cx| {
-            while let Some(prompt) = host.try_recv() {
-                workspace.enqueue_permission_prompt(prompt, window, cx);
-            }
-        });
-        if pumped.is_err() {
             break;
         }
     });
@@ -7233,9 +7049,6 @@ enum GotoKind {
 
 impl Render for Workspace {
     fn render(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        if self._permission_prompt_poll.is_none() {
-            self._permission_prompt_poll = spawn_permission_prompt_poll(window, cx);
-        }
         if self._periodic_save.is_none() {
             self._periodic_save = spawn_periodic_save(cx);
         }
@@ -7373,7 +7186,6 @@ fn item_kind_config_name(kind: crate::item::ItemKind) -> &'static str {
         ItemKind::Editor => "editor",
         ItemKind::Run => "run",
         ItemKind::Terminal => "terminal",
-        ItemKind::Claude => "claude",
         ItemKind::Conflict => "conflict",
         ItemKind::Rebase => "rebase",
         ItemKind::Review => "review",
@@ -7599,7 +7411,6 @@ mod tests {
             assert!(!sm.palette_open());
             assert!(!sm.finder_open());
             assert!(!sm.help_open());
-            assert!(!sm.claude_focused());
             assert_eq!(sm.pending_count(), None);
         });
     }
@@ -17067,132 +16878,6 @@ mod tests {
             assert!(ed.blame_visible());
             assert!(ed.blame_state().is_none());
         });
-    }
-
-    fn make_permission_prompt(
-        tool: &str,
-    ) -> (
-        stoat::host::PermissionPrompt,
-        tokio::sync::oneshot::Receiver<stoat::host::ApprovalDecision>,
-    ) {
-        let (tx, rx) = tokio::sync::oneshot::channel();
-        let prompt = stoat::host::PermissionPrompt {
-            tool: tool.to_string(),
-            input: "{}".to_string(),
-            response_tx: tx,
-        };
-        (prompt, rx)
-    }
-
-    fn active_permission_modal(
-        ws: &Entity<Workspace>,
-        vcx: &mut VisualTestContext,
-    ) -> Option<Entity<PermissionModal>> {
-        ws.read_with(vcx, |w, cx| {
-            w.modal_layer.read(cx).active_modal::<PermissionModal>()
-        })
-    }
-
-    #[test]
-    fn enqueue_permission_prompt_opens_modal_when_idle() {
-        let mut cx = TestAppContext::single();
-        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
-        let (prompt, _rx) = make_permission_prompt("Bash");
-
-        ws.update_in(vcx, |w, window, cx| {
-            w.enqueue_permission_prompt(prompt, window, cx);
-        });
-        vcx.run_until_parked();
-
-        assert!(
-            active_permission_modal(&ws, vcx).is_some(),
-            "first enqueue opens modal immediately"
-        );
-        let len = ws.read_with(vcx, |w, _| w.permission_prompt_queue_len());
-        assert_eq!(len, 0, "no queue entries when modal opens directly");
-    }
-
-    #[test]
-    fn enqueue_permission_prompt_queues_when_modal_open() {
-        let mut cx = TestAppContext::single();
-        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
-        let (first, _rx1) = make_permission_prompt("Bash");
-        let (second, _rx2) = make_permission_prompt("Read");
-
-        ws.update_in(vcx, |w, window, cx| {
-            w.enqueue_permission_prompt(first, window, cx);
-            w.enqueue_permission_prompt(second, window, cx);
-        });
-        vcx.run_until_parked();
-
-        let modal_active = active_permission_modal(&ws, vcx).is_some();
-        let queue_len = ws.read_with(vcx, |w, _| w.permission_prompt_queue_len());
-        assert!(modal_active, "first prompt opens the modal");
-        assert_eq!(queue_len, 1, "second prompt waits behind the active modal");
-    }
-
-    #[test]
-    fn dismissing_active_modal_opens_next_from_queue() {
-        let mut cx = TestAppContext::single();
-        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
-        let (first, _rx1) = make_permission_prompt("Bash");
-        let (second, _rx2) = make_permission_prompt("Read");
-
-        ws.update_in(vcx, |w, window, cx| {
-            w.enqueue_permission_prompt(first, window, cx);
-            w.enqueue_permission_prompt(second, window, cx);
-        });
-        vcx.run_until_parked();
-
-        let active = active_permission_modal(&ws, vcx).expect("first modal active");
-        active.update(vcx, |_, cx| cx.emit(DismissEvent));
-        vcx.run_until_parked();
-
-        assert!(
-            active_permission_modal(&ws, vcx).is_some(),
-            "next queued prompt opens after dismiss"
-        );
-        let queue_len = ws.read_with(vcx, |w, _| w.permission_prompt_queue_len());
-        assert_eq!(queue_len, 0, "queue drained after dismiss promotes next");
-    }
-
-    #[test]
-    fn queue_drains_in_fifo_order() {
-        let mut cx = TestAppContext::single();
-        let (ws, vcx) = new_workspace_in_window(&mut cx, "perm-test", "/tmp/perm");
-        let (first, _rx1) = make_permission_prompt("First");
-        let (second, _rx2) = make_permission_prompt("Second");
-        let (third, _rx3) = make_permission_prompt("Third");
-
-        ws.update_in(vcx, |w, window, cx| {
-            w.enqueue_permission_prompt(first, window, cx);
-            w.enqueue_permission_prompt(second, window, cx);
-            w.enqueue_permission_prompt(third, window, cx);
-        });
-        vcx.run_until_parked();
-
-        let initial_tool = active_permission_modal(&ws, vcx)
-            .expect("first modal")
-            .read_with(vcx, |m, _| m.tool().to_string());
-        assert_eq!(initial_tool, "First");
-
-        active_permission_modal(&ws, vcx)
-            .expect("first modal")
-            .update(vcx, |_, cx| cx.emit(DismissEvent));
-        vcx.run_until_parked();
-        let second_tool = active_permission_modal(&ws, vcx)
-            .expect("second modal")
-            .read_with(vcx, |m, _| m.tool().to_string());
-        assert_eq!(second_tool, "Second");
-
-        active_permission_modal(&ws, vcx)
-            .expect("second modal")
-            .update(vcx, |_, cx| cx.emit(DismissEvent));
-        vcx.run_until_parked();
-        let third_tool = active_permission_modal(&ws, vcx)
-            .expect("third modal")
-            .read_with(vcx, |m, _| m.tool().to_string());
-        assert_eq!(third_tool, "Third");
     }
 
     #[test]

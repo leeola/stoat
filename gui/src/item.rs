@@ -13,7 +13,6 @@ pub enum ItemKind {
     Editor,
     Run,
     Terminal,
-    Claude,
     Conflict,
     Rebase,
     Review,
@@ -26,7 +25,7 @@ pub enum ItemKind {
 }
 
 /// Contract every pane-hosted item satisfies. Concrete impls
-/// (`Editor`, `Run`, `ClaudeChat`, `CommitList`, `Rebase`, `Review`)
+/// (`Editor`, `Run`, `CommitList`, `Rebase`, `Review`)
 /// expose enough state for a `Pane` to paint its tab strip, route
 /// save / persistence calls, and round-trip the item across a
 /// workspace reload.

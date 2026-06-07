@@ -102,8 +102,8 @@ pub enum PaletteScope {
 /// so the scope filter is a cheap lookup on every keystroke.
 ///
 /// Mirrors the TUI `stoat::command_palette::Availability` shape.
-/// `claude_focused` / `run_focused` always read `false` until the
-/// corresponding `ClaudeChat` / `Run` items land in the GUI.
+/// `run_focused` always reads `false` until the corresponding `Run`
+/// item lands in the GUI.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Availability {
     /// A `RebaseItem` is open in some pane (editable rebase plan).
@@ -118,9 +118,6 @@ pub struct Availability {
     pub review_open: bool,
     /// A `CommitListItem` is open in some pane.
     pub commits_open: bool,
-    /// Focused pane hosts a Claude chat. Always `false` until the
-    /// Claude chat item lands.
-    pub claude_focused: bool,
     /// Focused pane hosts a Run terminal. Always `false` until the
     /// Run pane item lands.
     pub run_focused: bool,
@@ -169,7 +166,6 @@ impl Availability {
             in_conflict,
             review_open,
             commits_open,
-            claude_focused: false,
             run_focused: false,
         }
     }
@@ -214,8 +210,6 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
         | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
-
-        ClaudeSubmit | ClaudeToPane | ClaudeToDockLeft | ClaudeToDockRight => ctx.claude_focused,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
 
@@ -938,7 +932,6 @@ mod tests {
                 "ReviewApplyStaged",
                 "CommitsNext",
                 "CommitsOpenReview",
-                "ClaudeSubmit",
                 "RunSubmit",
                 "EnterRebase",
             ] {
@@ -1064,7 +1057,6 @@ mod tests {
                 in_conflict: true,
                 review_open: true,
                 commits_open: true,
-                claude_focused: true,
                 run_focused: true,
             };
             for entry in registry::all() {
