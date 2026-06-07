@@ -63,16 +63,16 @@ pub(crate) struct BasePalette {
 impl BasePalette {
     pub(crate) fn default_dark() -> Self {
         Self {
-            background: rgb(0x1e1e1e).into(),
-            surface: rgb(0x2d2d2d).into(),
-            border: rgb(0x404040).into(),
-            text: rgb(0xcccccc).into(),
-            text_muted: rgb(0x808080).into(),
-            accent: rgb(0x4fc1ff).into(),
-            success: rgb(0x4ec9b0).into(),
-            warning: rgb(0xdcdcaa).into(),
-            danger: rgb(0xf44747).into(),
-            info: rgb(0x569cd6).into(),
+            background: rgb(0x3b414d).into(),
+            surface: rgb(0x2f343e).into(),
+            border: rgb(0x464b57).into(),
+            text: rgb(0xdce0e5).into(),
+            text_muted: rgb(0xa9afbc).into(),
+            accent: rgb(0x74ade8).into(),
+            success: rgb(0xa1c181).into(),
+            warning: rgb(0xdec184).into(),
+            danger: rgb(0xd07277).into(),
+            info: rgb(0x74ade8).into(),
         }
     }
 }
