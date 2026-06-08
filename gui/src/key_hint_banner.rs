@@ -148,7 +148,8 @@ fn is_transient_mode(mode: &str) -> bool {
 /// Build the structured hint pairs for `entries` -- `(key_label,
 /// first_action_name)` from the live bindings -- as `(key_label,
 /// short_desc)`. Names absent from the action registry (e.g. the
-/// `SetMode` boilerplate every mode carries on `Escape`) are dropped.
+/// `SetMode` boilerplate every mode carries on `Escape`) are dropped, as
+/// are actions opting out of the banner via `hint_visible() == false`.
 /// Returns `None` for non-transient modes or when no entry resolves.
 fn hint_entries(mode: &str, entries: &[(String, String)]) -> Option<HintContent> {
     if !is_transient_mode(mode) {
@@ -158,6 +159,9 @@ fn hint_entries(mode: &str, entries: &[(String, String)]) -> Option<HintContent>
         .iter()
         .filter_map(|(label, name)| {
             let def = registry::lookup(name)?.def;
+            if !def.hint_visible() {
+                return None;
+            }
             Some((label.clone(), def.short_desc().to_string()))
         })
         .collect();
@@ -223,6 +227,23 @@ mod tests {
             Some(HintContent {
                 mode: "goto".to_string(),
                 bindings: vec![("i".to_string(), i_desc), ("j".to_string(), j_desc)],
+            })
+        );
+    }
+
+    #[test]
+    fn hint_entries_drops_hint_hidden_actions() {
+        let pairs = entries(&[("i", "GotoFirstNonwhitespace"), ("t", "OpenThemePicker")]);
+        let i_desc = registry::lookup("GotoFirstNonwhitespace")
+            .expect("registered")
+            .def
+            .short_desc()
+            .to_string();
+        assert_eq!(
+            hint_entries("space", &pairs),
+            Some(HintContent {
+                mode: "space".to_string(),
+                bindings: vec![("i".to_string(), i_desc)],
             })
         );
     }
