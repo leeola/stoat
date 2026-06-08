@@ -22,11 +22,19 @@ const MAX_EVENTS_PER_TICK: usize = 256;
 /// (and future review pipeline) can refresh without re-reading the
 /// host themselves.
 ///
+/// Beyond tracked buffers, workspaces register *live roots* via
+/// [`Self::add_live_root`]: directories whose untracked descendants
+/// should still emit [`FsWatcherDriverEvent::ExternalEdit`], with no
+/// buffer reload since nothing is open for them. This backs review
+/// live mode, where edits to unopened files under the reviewed
+/// workdir must surface.
+///
 /// The tick re-arms itself after every fire so it persists for the
 /// driver's lifetime; when the entity drops, the next
 /// `WeakEntity::update` short-circuits and the chain terminates.
 pub struct FsWatcherDriver {
     tracked: HashMap<PathBuf, WeakEntity<Buffer>>,
+    live_roots: Vec<PathBuf>,
     _tick_task: Option<Task<()>>,
 }
 
@@ -41,6 +49,7 @@ impl FsWatcherDriver {
     pub fn new(cx: &mut Context<'_, Self>) -> Self {
         let mut driver = Self {
             tracked: HashMap::new(),
+            live_roots: Vec::new(),
             _tick_task: None,
         };
         driver.schedule_tick(cx);
@@ -57,6 +66,22 @@ impl FsWatcherDriver {
 
     pub fn tracked_count(&self) -> usize {
         self.tracked.len()
+    }
+
+    /// Register `root` as a live directory: untracked event paths
+    /// beneath it emit [`FsWatcherDriverEvent::ExternalEdit`]. Idempotent.
+    pub fn add_live_root(&mut self, root: PathBuf) {
+        if !self.live_roots.contains(&root) {
+            self.live_roots.push(root);
+        }
+    }
+
+    pub fn remove_live_root(&mut self, root: &Path) {
+        self.live_roots.retain(|r| r != root);
+    }
+
+    pub fn live_root_count(&self) -> usize {
+        self.live_roots.len()
     }
 
     /// Look up the live [`Entity<Buffer>`] previously registered for
@@ -95,6 +120,11 @@ impl FsWatcherDriver {
                 break;
             };
             let Some(weak) = self.tracked.get(&event.path).cloned() else {
+                if self.under_live_root(&event.path) {
+                    cx.emit(FsWatcherDriverEvent::ExternalEdit {
+                        path: event.path.clone(),
+                    });
+                }
                 continue;
             };
             if let Some(buffer) = weak.upgrade() {
@@ -106,6 +136,10 @@ impl FsWatcherDriver {
                 self.tracked.remove(&event.path);
             }
         }
+    }
+
+    fn under_live_root(&self, path: &Path) -> bool {
+        self.live_roots.iter().any(|root| path.starts_with(root))
     }
 }
 
@@ -296,5 +330,92 @@ mod tests {
         advance(&scheduler, &mut cx);
 
         driver.read_with(&cx, |d, _| assert_eq!(d.tracked_count(), 0));
+    }
+
+    #[test]
+    fn add_live_root_dedups_and_remove_clears() {
+        let mut cx = TestAppContext::single();
+        let _ = install_globals(&mut cx);
+        let driver = new_driver(&mut cx);
+        let root = PathBuf::from("/repo");
+
+        driver.update(&mut cx, |d, _| {
+            d.add_live_root(root.clone());
+            d.add_live_root(root.clone());
+        });
+        driver.read_with(&cx, |d, _| assert_eq!(d.live_root_count(), 1));
+
+        driver.update(&mut cx, |d, _| d.remove_live_root(&root));
+        driver.read_with(&cx, |d, _| assert_eq!(d.live_root_count(), 0));
+    }
+
+    #[test]
+    fn untracked_path_under_live_root_emits_without_reload() {
+        let mut cx = TestAppContext::single();
+        let (fs_watcher, scheduler) = install_globals(&mut cx);
+        let driver = new_driver(&mut cx);
+        driver.update(&mut cx, |d, _| d.add_live_root(PathBuf::from("/repo")));
+        let (_recorder, events) = DriverEventRecorder::install(&mut cx, &driver);
+
+        let path = PathBuf::from("/repo/sub/new.rs");
+        fs_watcher.inject(&path, FsEventKind::Modified);
+        advance(&scheduler, &mut cx);
+
+        let observed = events.lock().expect("recorder mutex").clone();
+        assert_eq!(observed, vec![FsWatcherDriverEvent::ExternalEdit { path }]);
+    }
+
+    #[test]
+    fn untracked_path_outside_live_root_does_not_emit() {
+        let mut cx = TestAppContext::single();
+        let (fs_watcher, scheduler) = install_globals(&mut cx);
+        let driver = new_driver(&mut cx);
+        driver.update(&mut cx, |d, _| d.add_live_root(PathBuf::from("/repo")));
+        let (_recorder, events) = DriverEventRecorder::install(&mut cx, &driver);
+
+        fs_watcher.inject("/other/x.rs", FsEventKind::Modified);
+        advance(&scheduler, &mut cx);
+
+        assert!(events.lock().expect("recorder mutex").is_empty());
+    }
+
+    #[test]
+    fn removed_live_root_stops_emitting() {
+        let mut cx = TestAppContext::single();
+        let (fs_watcher, scheduler) = install_globals(&mut cx);
+        let driver = new_driver(&mut cx);
+        let root = PathBuf::from("/repo");
+        driver.update(&mut cx, |d, _| {
+            d.add_live_root(root.clone());
+            d.remove_live_root(&root);
+        });
+        let (_recorder, events) = DriverEventRecorder::install(&mut cx, &driver);
+
+        fs_watcher.inject("/repo/sub/new.rs", FsEventKind::Modified);
+        advance(&scheduler, &mut cx);
+
+        assert!(events.lock().expect("recorder mutex").is_empty());
+    }
+
+    #[test]
+    fn tracked_buffer_under_live_root_emits_once() {
+        let mut cx = TestAppContext::single();
+        let (fs_watcher, scheduler) = install_globals(&mut cx);
+        let driver = new_driver(&mut cx);
+        let buffer = new_buffer(&mut cx);
+        let path = PathBuf::from("/repo/a.rs");
+
+        driver.update(&mut cx, |d, _| {
+            d.track(path.clone(), buffer.clone());
+            d.add_live_root(PathBuf::from("/repo"));
+        });
+        let (_recorder, events) = DriverEventRecorder::install(&mut cx, &driver);
+
+        fs_watcher.inject(&path, FsEventKind::Modified);
+        advance(&scheduler, &mut cx);
+
+        let observed = events.lock().expect("recorder mutex").clone();
+        assert_eq!(observed, vec![FsWatcherDriverEvent::ExternalEdit { path }]);
+        drop(buffer);
     }
 }

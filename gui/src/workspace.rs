@@ -46,7 +46,7 @@ use gpui::{
 use regex::Regex;
 use std::{
     cell::RefCell,
-    collections::{HashMap, VecDeque},
+    collections::{HashMap, HashSet, VecDeque},
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
@@ -136,6 +136,13 @@ pub struct Workspace {
     search_indicator: Entity<SearchQueryIndicator>,
     fs_watcher_driver: Entity<FsWatcherDriver>,
     fs_watch_tokens: HashMap<PathBuf, WatchToken>,
+    /// Recursive `watch_dir` tokens keyed by the reviewed workdir,
+    /// one per working-tree review with live mode on. Distinct from
+    /// [`Self::fs_watch_tokens`] (per-open-buffer file watches): these
+    /// track directories so edits to unopened files surface, and their
+    /// lifetime is the `live` toggle plus the review item, not buffer
+    /// open/close. Managed by [`Self::reconcile_live_watches`].
+    live_watch_tokens: HashMap<PathBuf, WatchToken>,
     buffer_paths: HashMap<BufferId, PathBuf>,
     registers: stoat::register::RegisterStore,
     selected_register: Option<stoat::register::Register>,
@@ -415,6 +422,7 @@ impl Workspace {
             search_indicator,
             fs_watcher_driver,
             fs_watch_tokens: HashMap::new(),
+            live_watch_tokens: HashMap::new(),
             buffer_paths: HashMap::new(),
             registers: stoat::register::RegisterStore::new(),
             selected_register: None,
@@ -1616,6 +1624,9 @@ impl Workspace {
         self.broadcast_active_pane_item(cx);
         self.broadcast_active_editor(cx);
         self.drop_orphaned_buffer(event, cx);
+        if matches!(event, PaneEvent::ItemRemoved { .. }) {
+            self.reconcile_live_watches(cx);
+        }
     }
 
     /// On a [`PaneEvent::ItemRemoved`] for a path-bound editor, drop
@@ -5658,7 +5669,8 @@ impl Workspace {
         session.update(cx, |session, cx| session.toggle_follow(cx));
     }
 
-    /// Flip live mode on the active review session. No-op when no
+    /// Flip live mode on the active review session, then reconcile the
+    /// live directory watches so the toggle takes effect. No-op when no
     /// review item is focused.
     fn dispatch_review_toggle_live(&mut self, cx: &mut Context<'_, Self>) {
         let Some(review_item) = self.active_review_item(cx) else {
@@ -5666,6 +5678,87 @@ impl Workspace {
         };
         let session = review_item.read(cx).session().clone();
         session.update(cx, |session, cx| session.toggle_live(cx));
+        self.reconcile_live_watches(cx);
+    }
+
+    /// Reconcile recursive workdir watches against the open review
+    /// items. Every working-tree review with `live` on wants a
+    /// `watch_dir` on its workdir plus a matching [`FsWatcherDriver`]
+    /// live root, so on-disk edits to unopened files surface; any watch
+    /// no longer backed by such a review -- `live` toggled off or the
+    /// review item closed -- is dropped. Idempotent.
+    fn reconcile_live_watches(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(host) = cx.try_global::<FsWatchHostGlobal>().map(|g| g.0.clone()) else {
+            return;
+        };
+        let desired = self.live_watch_roots(cx);
+
+        let stale: Vec<PathBuf> = self
+            .live_watch_tokens
+            .keys()
+            .filter(|workdir| !desired.contains(*workdir))
+            .cloned()
+            .collect();
+        for workdir in stale {
+            if let Some(token) = self.live_watch_tokens.remove(&workdir) {
+                host.unwatch(token);
+            }
+            self.fs_watcher_driver.update(cx, |driver, _| {
+                driver.remove_live_root(&workdir);
+            });
+        }
+
+        for workdir in desired {
+            if self.live_watch_tokens.contains_key(&workdir) {
+                continue;
+            }
+            match host.watch_dir(&workdir) {
+                Ok(token) => {
+                    self.live_watch_tokens.insert(workdir.clone(), token);
+                    self.fs_watcher_driver.update(cx, |driver, _| {
+                        driver.add_live_root(workdir);
+                    });
+                },
+                Err(err) => {
+                    tracing::warn!(
+                        ?workdir,
+                        %err,
+                        "workspace: live watch_dir registration failed",
+                    );
+                },
+            }
+        }
+    }
+
+    /// Workdirs of every open review item whose session has `live` on
+    /// and a working-tree source: the directories that should be
+    /// live-watched right now.
+    fn live_watch_roots(&self, cx: &App) -> HashSet<PathBuf> {
+        let tree = self.pane_tree.read(cx);
+        let mut roots = HashSet::new();
+        for pane_id in tree.split_pane_ids() {
+            let Some(pane) = tree.pane(pane_id) else {
+                continue;
+            };
+            for item in pane.read(cx).items() {
+                let Ok(review_item) = item
+                    .to_any_view()
+                    .downcast::<crate::review_item::ReviewItem>()
+                else {
+                    continue;
+                };
+                let session = review_item.read(cx).session().clone();
+                let session = session.read(cx);
+                let inner = session.inner();
+                if !inner.live {
+                    continue;
+                }
+                if let Some(workdir) = live_watch_workdir(&inner.source) {
+                    roots.insert(workdir.clone());
+                }
+            }
+        }
+        roots
     }
 
     /// Move the review cursor to the first chunk of the reviewed file
@@ -6833,6 +6926,19 @@ fn navigate_to_move_provenance(
             cx,
         );
     });
+}
+
+/// The reviewed working-tree directory for the live-watch family of
+/// sources -- the three working-tree comparison modes, which all diff
+/// a live workdir. `None` for historical sources (commit/range/branch)
+/// and the sourceless variants, where live mode does not apply.
+fn live_watch_workdir(source: &ReviewSource) -> Option<&PathBuf> {
+    match source {
+        ReviewSource::WorkingTree { workdir }
+        | ReviewSource::WorkingTreeUnstaged { workdir }
+        | ReviewSource::WorkingTreeStaged { workdir } => Some(workdir),
+        _ => None,
+    }
 }
 
 /// Build a fresh [`ReviewFileInput`] list from `source` using the
@@ -13961,6 +14067,20 @@ mod tests {
         })
     }
 
+    fn working_tree_session(
+        vcx: &mut VisualTestContext,
+        workdir: PathBuf,
+    ) -> Entity<crate::review_session::ReviewSession> {
+        vcx.update(|_, cx| {
+            cx.new(|_| {
+                let inner = stoat::review_session::ReviewSession::new(ReviewSource::WorkingTree {
+                    workdir,
+                });
+                crate::review_session::ReviewSession::new(inner)
+            })
+        })
+    }
+
     #[test]
     fn review_follow_jumps_cursor_to_edited_file_only_when_enabled() {
         let mut cx = TestAppContext::single();
@@ -14022,6 +14142,64 @@ mod tests {
             Some(0),
             "follow off must not move the cursor on an external edit",
         );
+    }
+
+    #[test]
+    fn toggle_live_registers_workdir_watch_for_working_tree_review() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = working_tree_session(vcx, PathBuf::from("/tmp/repo"));
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session);
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleLive);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.live_watch_tokens.len(), 1);
+            assert_eq!(w.fs_watcher_driver.read(cx).live_root_count(), 1);
+        });
+    }
+
+    #[test]
+    fn toggle_live_off_tears_down_workdir_watch() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = working_tree_session(vcx, PathBuf::from("/tmp/repo"));
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session);
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleLive);
+        vcx.run_until_parked();
+        dispatch(&ws, vcx, stoat_action::ReviewToggleLive);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.live_watch_tokens.len(), 0);
+            assert_eq!(w.fs_watcher_driver.read(cx).live_root_count(), 0);
+        });
+    }
+
+    #[test]
+    fn closing_live_review_item_tears_down_workdir_watch() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = working_tree_session(vcx, PathBuf::from("/tmp/repo"));
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session);
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleLive);
+        vcx.run_until_parked();
+        ws.read_with(vcx, |w, _| assert_eq!(w.live_watch_tokens.len(), 1));
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(
+                w.live_watch_tokens.len(),
+                0,
+                "closing the review item must drop the live watch",
+            );
+            assert_eq!(w.fs_watcher_driver.read(cx).live_root_count(), 0);
+        });
     }
 
     #[test]
