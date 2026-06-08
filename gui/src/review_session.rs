@@ -191,6 +191,23 @@ impl ReviewSession {
         cx.notify();
     }
 
+    /// Add, replace, or drop the entry for `input.path` from a fresh
+    /// single-file diff (see [`InnerSession::upsert_file`]): adds the
+    /// file when new, replaces its chunks when known, drops it when the
+    /// diff goes empty. Returns the file's new chunk ids. Emits
+    /// [`ReviewSessionEvent::Changed`] + [`ReviewSessionEvent::Refreshed`].
+    pub fn upsert_file(
+        &mut self,
+        input: ReviewFileInput,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<ReviewChunkId> {
+        let ids = self.inner.upsert_file(input);
+        cx.emit(ReviewSessionEvent::Changed);
+        cx.emit(ReviewSessionEvent::Refreshed);
+        cx.notify();
+        ids
+    }
+
     pub fn progress(&self) -> ReviewProgress {
         self.inner.progress()
     }
@@ -535,6 +552,41 @@ mod tests {
         );
         session.read_with(&cx, |s, _| {
             assert_eq!(s.inner().files[0].buffer_text.as_str(), "a\nNEWER\nc\n");
+        });
+    }
+
+    #[test]
+    fn upsert_file_adds_new_file_and_emits_changed_and_refreshed() {
+        use std::path::PathBuf;
+        let mut cx = TestAppContext::single();
+        let session = new_session(&mut cx);
+        let (_recorder, events) = Recorder::install(&mut cx, &session);
+
+        let ids = session.update(&mut cx, |s, cx| {
+            s.upsert_file(
+                ReviewFileInput {
+                    path: PathBuf::from("new.txt"),
+                    rel_path: "new.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                    buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        assert!(
+            !ids.is_empty(),
+            "upserting a changed file returns its chunk ids"
+        );
+        assert_eq!(
+            drain(&events),
+            vec![ReviewSessionEvent::Changed, ReviewSessionEvent::Refreshed],
+        );
+        session.read_with(&cx, |s, _| {
+            assert_eq!(s.inner().files.len(), 1);
+            assert_eq!(s.inner().files[0].path, PathBuf::from("new.txt"));
         });
     }
 

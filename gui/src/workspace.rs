@@ -5808,6 +5808,23 @@ impl Workspace {
             return;
         };
         let session = review_item.read(cx).session().clone();
+
+        let live_workdir = {
+            let inner = session.read(cx).inner();
+            if inner.live {
+                live_watch_workdir(&inner.source).cloned()
+            } else {
+                None
+            }
+        };
+        if let Some(workdir) = live_workdir {
+            self.review_live_upsert_edit(&session, &path, &workdir, cx);
+            if session.read(cx).inner().follow {
+                self.review_jump_to_file(&path, cx);
+            }
+            return;
+        }
+
         let Some((rel_path, language, base_text)) = ({
             let inner = session.read(cx).inner();
             inner
@@ -5820,30 +5837,8 @@ impl Workspace {
         };
 
         let fs = cx.global::<FsHostGlobal>().0.clone();
-        let buffer_text = {
-            let mut buf = Vec::new();
-            match fs.read(&path, &mut buf) {
-                Ok(()) => match String::from_utf8(buf) {
-                    Ok(text) => text,
-                    Err(err) => {
-                        tracing::warn!(
-                            ?path,
-                            %err,
-                            "ReviewExternalEdit: file is not valid UTF-8, skipping refresh",
-                        );
-                        return;
-                    },
-                },
-                Err(err) if err.kind() == std::io::ErrorKind::NotFound => String::new(),
-                Err(err) => {
-                    tracing::warn!(
-                        ?path,
-                        %err,
-                        "ReviewExternalEdit: fs read failed, skipping refresh",
-                    );
-                    return;
-                },
-            }
+        let Some(buffer_text) = read_external_edit_text(fs.as_ref(), &path) else {
+            return;
         };
 
         let new_input = ReviewFileInput {
@@ -5861,6 +5856,60 @@ impl Workspace {
         if follow {
             self.review_jump_to_file(&path, cx);
         }
+    }
+
+    /// Absorb an on-disk change at `path` into a live working-tree
+    /// review: skip paths outside `workdir` or git-ignored, re-read the
+    /// file (a deleted file reads as empty, which drops its entry),
+    /// derive the base from git HEAD, and upsert -- adding the file when
+    /// new, replacing its chunks when known. Mirrors core
+    /// `review_watch_edit`.
+    fn review_live_upsert_edit(
+        &mut self,
+        session: &Entity<crate::review_session::ReviewSession>,
+        path: &Path,
+        workdir: &Path,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use crate::globals::{GitHostGlobal, LanguageRegistry};
+
+        if !path.starts_with(workdir) {
+            return;
+        }
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        if fs.is_ignored(workdir, path) {
+            return;
+        }
+        let Some(buffer_text) = read_external_edit_text(fs.as_ref(), path) else {
+            return;
+        };
+
+        let git = cx.global::<GitHostGlobal>().0.clone();
+        let Some(repo) = git.discover(workdir) else {
+            tracing::warn!(
+                workdir = %workdir.display(),
+                "ReviewExternalEdit: no git repo at workdir, skipping live upsert",
+            );
+            return;
+        };
+        let base_text = repo.head_content(path).unwrap_or_default();
+        let language = cx.global::<LanguageRegistry>().0.for_path(path);
+        let rel_path = path
+            .strip_prefix(workdir)
+            .unwrap_or(path)
+            .display()
+            .to_string();
+
+        let input = ReviewFileInput {
+            path: path.to_path_buf(),
+            rel_path,
+            language,
+            base_text: Arc::new(base_text),
+            buffer_text: Arc::new(buffer_text),
+        };
+        session.update(cx, |session, cx| {
+            session.upsert_file(input, cx);
+        });
     }
 
     fn dispatch_jump_to_move_source(&mut self, nav: JumpMoveNav, cx: &mut Context<'_, Self>) {
@@ -6938,6 +6987,32 @@ fn live_watch_workdir(source: &ReviewSource) -> Option<&PathBuf> {
         | ReviewSource::WorkingTreeUnstaged { workdir }
         | ReviewSource::WorkingTreeStaged { workdir } => Some(workdir),
         _ => None,
+    }
+}
+
+/// Read `path` as UTF-8 for a review external-edit refresh. A missing
+/// file yields `Some("")` -- the empty buffer that makes an upsert
+/// drop a deleted entry. Invalid UTF-8 or any other read error yields
+/// `None`, signalling the caller to skip the refresh.
+fn read_external_edit_text(fs: &dyn stoat::host::FsHost, path: &Path) -> Option<String> {
+    let mut buf = Vec::new();
+    match fs.read(path, &mut buf) {
+        Ok(()) => match String::from_utf8(buf) {
+            Ok(text) => Some(text),
+            Err(err) => {
+                tracing::warn!(
+                    ?path,
+                    %err,
+                    "ReviewExternalEdit: file is not valid UTF-8, skipping",
+                );
+                None
+            },
+        },
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => Some(String::new()),
+        Err(err) => {
+            tracing::warn!(?path, %err, "ReviewExternalEdit: fs read failed, skipping");
+            None
+        },
     }
 }
 
@@ -14199,6 +14274,124 @@ mod tests {
                 "closing the review item must drop the live watch",
             );
             assert_eq!(w.fs_watcher_driver.read(cx).live_root_count(), 0);
+        });
+    }
+
+    #[test]
+    fn live_external_edit_upserts_unopened_changed_file() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let fs = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/new.rs", b"a\nNEW\nc\n");
+        install_fs_host_global(vcx, fs.clone());
+
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo").head_file("new.rs", "a\nOLD\nc\n");
+        install_git_host_global(vcx, git);
+        install_language_registry_global(vcx);
+
+        let session = working_tree_session(vcx, PathBuf::from("/tmp/repo"));
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleLive);
+        vcx.run_until_parked();
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit {
+                path: PathBuf::from("/tmp/repo/new.rs"),
+            },
+        );
+        vcx.run_until_parked();
+
+        session.read_with(vcx, |s, _| {
+            let inner = s.inner();
+            assert_eq!(
+                inner.files.len(),
+                1,
+                "an unopened changed file must be upserted into the live review",
+            );
+            assert_eq!(inner.files[0].path, PathBuf::from("/tmp/repo/new.rs"));
+            assert!(!inner.files[0].chunks.is_empty());
+        });
+    }
+
+    #[test]
+    fn live_external_edit_drops_file_deleted_on_disk() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let fs = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/added.rs", b"new\nfile\n");
+        install_fs_host_global(vcx, fs.clone());
+
+        // added.rs is absent from HEAD, so its base is empty: an
+        // addition while present, an empty diff once removed.
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo");
+        install_git_host_global(vcx, git);
+        install_language_registry_global(vcx);
+
+        let session = working_tree_session(vcx, PathBuf::from("/tmp/repo"));
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(&ws, vcx, stoat_action::ReviewToggleLive);
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/repo/added.rs");
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit { path: path.clone() },
+        );
+        vcx.run_until_parked();
+        session.read_with(vcx, |s, _| {
+            assert_eq!(s.inner().files.len(), 1, "added file must appear")
+        });
+
+        fs.fail_next_read(&path, std::io::ErrorKind::NotFound);
+        dispatch(&ws, vcx, stoat_action::ReviewExternalEdit { path });
+        vcx.run_until_parked();
+        session.read_with(vcx, |s, _| {
+            assert_eq!(
+                s.inner().files.len(),
+                0,
+                "deleting the file on disk must drop its review entry",
+            )
+        });
+    }
+
+    #[test]
+    fn non_live_review_ignores_unopened_file_edit() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let fs = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/new.rs", b"a\nNEW\nc\n");
+        install_fs_host_global(vcx, fs.clone());
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo").head_file("new.rs", "a\nOLD\nc\n");
+        install_git_host_global(vcx, git);
+        install_language_registry_global(vcx);
+
+        let session = working_tree_session(vcx, PathBuf::from("/tmp/repo"));
+        let _item = open_review_item_in_focused_pane(vcx, &ws, session.clone());
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::ReviewExternalEdit {
+                path: PathBuf::from("/tmp/repo/new.rs"),
+            },
+        );
+        vcx.run_until_parked();
+
+        session.read_with(vcx, |s, _| {
+            assert_eq!(
+                s.inner().files.len(),
+                0,
+                "a non-live review must not upsert unopened files",
+            )
         });
     }
 
