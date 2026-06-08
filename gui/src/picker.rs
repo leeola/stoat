@@ -393,6 +393,14 @@ impl<D: PickerDelegate> Render for Picker<D> {
         let preview = self.delegate.render_preview(cx);
         let header = self.delegate.render_header(cx);
         let footer = self.delegate.render_footer(cx);
+        let query_row = div()
+            .flex()
+            .items_center()
+            .h(px(36.0))
+            .px(px(10.0))
+            .border_b_1()
+            .border_color(cx.theme().border_inactive)
+            .child(self.query_editor.clone());
         match preview {
             None => {
                 let mut column = div()
@@ -400,7 +408,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                     .flex_col()
                     .size_full()
                     .track_focus(&self.focus_handle)
-                    .child(self.query_editor.clone());
+                    .child(query_row);
                 if let Some(header) = header {
                     column = column.child(header);
                 }
@@ -411,12 +419,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                 column.into_any_element()
             },
             Some(preview) => {
-                let mut left = div()
-                    .flex()
-                    .flex_col()
-                    .w_2_5()
-                    .min_w_0()
-                    .child(self.query_editor.clone());
+                let mut left = div().flex().flex_col().w_2_5().min_w_0().child(query_row);
                 if let Some(header) = header {
                     left = left.child(header);
                 }
@@ -700,7 +703,7 @@ mod tests {
         // index follows the padded row height).
         vcx.simulate_click(point(px(100.0), px(500.0)), Modifiers::default());
         vcx.run_until_parked();
-        assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 15);
+        assert_eq!(picker.read_with(vcx, |p, _| p.selected_index()), 14);
 
         // The click selects only -- confirm/open stays on Enter, so the modal
         // stays open and typable.
