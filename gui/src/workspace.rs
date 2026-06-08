@@ -8798,6 +8798,68 @@ mod tests {
     }
 
     #[test]
+    fn shift_tab_through_keymap_toggles_command_palette_scope() {
+        use crate::{
+            command_palette::CommandPaletteDelegate,
+            picker::{Picker, PickerDelegate},
+        };
+        use gpui::{Keystroke, Modifiers};
+
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+
+        let match_count = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.modal_layer()
+                    .read(cx)
+                    .active_modal::<Picker<CommandPaletteDelegate>>()
+                    .map(|p| p.read(cx).delegate().match_count())
+            })
+        };
+
+        // GPUI's encoding of Shift-Tab, fed through the production
+        // `feed` -> `dispatch_action` path so the keymap resolves it.
+        let shift_tab = Keystroke {
+            modifiers: Modifiers {
+                shift: true,
+                ..Modifiers::default()
+            },
+            key: "tab".into(),
+            key_char: None,
+        };
+        let feed_shift_tab = |vcx: &mut VisualTestContext| {
+            ws.update_in(vcx, |w, window, cx| {
+                let sm = w.input_state_machine().clone();
+                let actions = sm.update(cx, |sm, cx| sm.feed(&shift_tab, window, cx));
+                for action in actions {
+                    w.dispatch_action(action, window, cx);
+                }
+            });
+            vcx.run_until_parked();
+        };
+
+        let active_count = match_count(vcx).expect("command palette open in Active scope");
+
+        feed_shift_tab(vcx);
+        let all_count = match_count(vcx).expect("command palette still open after toggle");
+        assert!(
+            all_count > active_count,
+            "shift+Tab should widen the palette to All scope, listing the \
+             contextual actions Active hides: active={active_count} all={all_count}",
+        );
+
+        feed_shift_tab(vcx);
+        assert_eq!(
+            match_count(vcx),
+            Some(active_count),
+            "shift+Tab again should return the palette to Active scope",
+        );
+    }
+
+    #[test]
     fn dispatch_toggle_project_tree_opens_and_closes_left_dock() {
         use crate::{globals::FsHostGlobal, item::ItemKind};
         use stoat::host::{FakeFs, FsHost};

@@ -1437,6 +1437,15 @@ fn keystroke_to_key_event(keystroke: &Keystroke) -> Option<KeyEvent> {
         modifiers |= KeyModifiers::SUPER;
     }
 
+    // GPUI reports Shift-Tab as `(tab, SHIFT)`, but the chord compiles to
+    // `BackTab` with no modifier (as `normalize_shift_event` and crossterm's
+    // CSI-Z decoding both treat it). Fold it here so the chord reaches its
+    // bindings.
+    if keystroke.modifiers.shift && keystroke.key == "tab" {
+        modifiers.remove(KeyModifiers::SHIFT);
+        return Some(KeyEvent::new(KeyCode::BackTab, modifiers));
+    }
+
     if keystroke.modifiers.shift {
         if let Some(typed) = keystroke
             .key_char
