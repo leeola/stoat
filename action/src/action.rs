@@ -35,6 +35,14 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
         true
     }
 
+    /// Whether this action appears in the floating key-hint banner. Defaults
+    /// to true; override to false for launcher and utility actions that
+    /// clutter the transient-mode hint. The full help modal lists every
+    /// action regardless of this flag.
+    fn hint_visible(&self) -> bool {
+        true
+    }
+
     fn priority(&self) -> ActionPriority {
         ActionPriority::Normal
     }
@@ -61,6 +69,9 @@ macro_rules! define_action {
         );
     };
     ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr) => {
+        $crate::action::define_action!($def, $action, $name, $kind, $short, $long, $priority, true);
+    };
+    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr, $hint_visible:expr) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -87,6 +98,10 @@ macro_rules! define_action {
 
             fn priority(&self) -> $crate::ActionPriority {
                 $priority
+            }
+
+            fn hint_visible(&self) -> bool {
+                $hint_visible
             }
         }
 
