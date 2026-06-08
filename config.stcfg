@@ -173,8 +173,8 @@ on init {
 on key {
     input_active == false {
         ? -> OpenHelp();
-        Cmd-= -> IncreaseFontSize();
-        Cmd-Minus -> DecreaseFontSize();
+        Ctrl-= -> IncreaseFontSize();
+        Ctrl-Minus -> DecreaseFontSize();
     }
     mode == normal && help_open {
         Escape -> CloseHelp();

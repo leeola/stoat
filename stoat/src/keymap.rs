@@ -929,7 +929,7 @@ mod tests {
     }
 
     #[test]
-    fn cmd_equals_and_cmd_minus_adjust_font_size_outside_input_modes() {
+    fn ctrl_equals_and_ctrl_minus_adjust_font_size_outside_input_modes() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
         let state = TestState::new()
@@ -937,13 +937,19 @@ mod tests {
             .set("input_active", StateValue::Bool(false));
 
         let increase = keymap
-            .lookup(&state, &key_event(KeyCode::Char('='), KeyModifiers::SUPER))
-            .expect("Cmd-= should resolve");
+            .lookup(
+                &state,
+                &key_event(KeyCode::Char('='), KeyModifiers::CONTROL),
+            )
+            .expect("Ctrl-= should resolve");
         assert_eq!(increase[0].name, "IncreaseFontSize");
 
         let decrease = keymap
-            .lookup(&state, &key_event(KeyCode::Char('-'), KeyModifiers::SUPER))
-            .expect("Cmd-Minus should resolve");
+            .lookup(
+                &state,
+                &key_event(KeyCode::Char('-'), KeyModifiers::CONTROL),
+            )
+            .expect("Ctrl-Minus should resolve");
         assert_eq!(decrease[0].name, "DecreaseFontSize");
     }
 
