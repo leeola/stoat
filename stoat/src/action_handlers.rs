@@ -496,6 +496,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::ReviewRevertHunk => review::review_revert_hunk(stoat),
         ActionKind::ReviewCycleComparisonMode => review::review_cycle_comparison_mode(stoat),
         ActionKind::ReviewToggleFollow => review::review_toggle_follow(stoat),
+        ActionKind::ReviewToggleLive => review::review_toggle_live(stoat),
         ActionKind::ReviewRefresh => review::review_refresh(stoat),
         ActionKind::ReviewExternalEdit => {
             let a = action

@@ -101,7 +101,8 @@ pub use defs::{
         ReviewLineSelectUnstage, ReviewNextChunk, ReviewNextCommit, ReviewNextUnreviewedHunk,
         ReviewPrevChunk, ReviewPrevCommit, ReviewRefresh, ReviewRemoveSelected,
         ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
-        ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
+        ReviewToggleApproval, ReviewToggleFollow, ReviewToggleLive, ReviewToggleStage,
+        ReviewUnstageChunk,
     },
     run::{
         OpenClaudeTerminal, OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev,

@@ -145,6 +145,7 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | ReviewRevertHunk
         | ReviewCycleComparisonMode
         | ReviewToggleFollow
+        | ReviewToggleLive
         | JumpToMoveSource
         | JumpToMoveTarget
         | JumpToNextMoveSource

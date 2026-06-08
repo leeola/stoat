@@ -283,6 +283,18 @@ define_action!(
 );
 
 define_action!(
+    ReviewToggleLiveDef,
+    ReviewToggleLive,
+    "ReviewToggleLive",
+    ActionKind::ReviewToggleLive,
+    "toggle review live mode",
+    "Toggle live mode: while on, a working-tree review absorbs \
+     external on-disk changes as they land, upserting each changed \
+     file. Defaults off.",
+    ActionPriority::Rare
+);
+
+define_action!(
     ReviewRefreshDef,
     ReviewRefresh,
     "ReviewRefresh",

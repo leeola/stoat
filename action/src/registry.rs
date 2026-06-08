@@ -100,7 +100,8 @@ use crate::{
             ReviewLineSelectUnstage, ReviewNextChunk, ReviewNextCommit, ReviewNextUnreviewedHunk,
             ReviewPrevChunk, ReviewPrevCommit, ReviewRefresh, ReviewRemoveSelected,
             ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
-            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleStage, ReviewUnstageChunk,
+            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleLive, ReviewToggleStage,
+            ReviewUnstageChunk,
         },
         run::{
             OpenClaudeTerminal, OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev,
@@ -274,6 +275,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(ReviewToggleFollow::DEF, |_| {
         Ok(Box::new(ReviewToggleFollow))
     });
+    add(ReviewToggleLive::DEF, |_| Ok(Box::new(ReviewToggleLive)));
     add(ReviewRefresh::DEF, |_| Ok(Box::new(ReviewRefresh)));
     add(ReviewApplyStaged::DEF, |_| Ok(Box::new(ReviewApplyStaged)));
     add(CloseReview::DEF, |_| Ok(Box::new(CloseReview)));
@@ -967,6 +969,7 @@ mod tests {
         "ReviewRevertHunk",
         "ReviewCycleComparisonMode",
         "ReviewToggleFollow",
+        "ReviewToggleLive",
         "ReviewRefresh",
         "ReviewApplyStaged",
         "CloseReview",
@@ -1258,6 +1261,7 @@ mod tests {
         // + 1 ReviewRevertHunk.
         // + 1 ReviewCycleComparisonMode.
         // + 1 ReviewToggleFollow.
+        // + 1 ReviewToggleLive.
         // + 1 SetCwd.
         // + 2 Pwd / Env (command-line :pwd / :env palette actions).
         // + 1 OpenConflictPicker (lists conflicted files in the worktree).
@@ -1276,7 +1280,7 @@ mod tests {
         // + 1 CommitsOpenBranchReview (branch review from the commits view).
         // + 1 OpenClaudeTerminal (terminal pane running the claude CLI).
         // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
-        assert_eq!(all().count(), 345);
+        assert_eq!(all().count(), 346);
     }
 
     #[test]

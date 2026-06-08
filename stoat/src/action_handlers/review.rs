@@ -352,6 +352,19 @@ pub(super) fn review_toggle_follow(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
+/// Flip the active session's live flag. Live-driven streaming of
+/// on-disk changes into the review is wired in the GUI workspace;
+/// the TUI handler only toggles the flag. No-op without an active
+/// review.
+pub(super) fn review_toggle_live(stoat: &mut Stoat) -> UpdateEffect {
+    let ws = stoat.active_workspace_mut();
+    let Some(session) = ws.review.as_mut() else {
+        return UpdateEffect::None;
+    };
+    session.live = !session.live;
+    UpdateEffect::Redraw
+}
+
 pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
     use crate::review_session::ChunkStatus;
 

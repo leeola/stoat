@@ -256,6 +256,7 @@ pub enum ActionKind {
     ReviewRevertHunk,
     ReviewCycleComparisonMode,
     ReviewToggleFollow,
+    ReviewToggleLive,
     ReviewRefresh,
     ReviewExternalEdit,
     ReviewApplyStaged,

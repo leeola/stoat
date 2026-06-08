@@ -2586,6 +2586,7 @@ impl Workspace {
             ActionKind::ReviewRevertHunk => self.dispatch_review_revert_hunk(cx),
             ActionKind::ReviewCycleComparisonMode => self.dispatch_review_cycle_comparison_mode(cx),
             ActionKind::ReviewToggleFollow => self.dispatch_review_toggle_follow(cx),
+            ActionKind::ReviewToggleLive => self.dispatch_review_toggle_live(cx),
             ActionKind::ReviewRemoveSelected => self.dispatch_review_remove_selected(cx),
             ActionKind::ReviewApplyStaged => self.dispatch_review_apply_staged(cx),
             ActionKind::ReviewRefresh => self.dispatch_review_refresh(cx),
@@ -5655,6 +5656,16 @@ impl Workspace {
         };
         let session = review_item.read(cx).session().clone();
         session.update(cx, |session, cx| session.toggle_follow(cx));
+    }
+
+    /// Flip live mode on the active review session. No-op when no
+    /// review item is focused.
+    fn dispatch_review_toggle_live(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(review_item) = self.active_review_item(cx) else {
+            return;
+        };
+        let session = review_item.read(cx).session().clone();
+        session.update(cx, |session, cx| session.toggle_live(cx));
     }
 
     /// Move the review cursor to the first chunk of the reviewed file

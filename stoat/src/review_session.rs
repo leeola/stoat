@@ -438,6 +438,12 @@ pub struct ReviewSession {
     /// cursor to that file's first chunk (follow mode). Toggled by
     /// [`stoat_action::ReviewToggleFollow`]; defaults off.
     pub follow: bool,
+    /// When true, a working-tree review absorbs external on-disk
+    /// changes as they land (live mode), upserting each changed file.
+    /// Honored by the GUI; the TUI uses its dedicated `WorkspaceWatch`
+    /// source for the same effect. Toggled by
+    /// [`stoat_action::ReviewToggleLive`]; defaults off.
+    pub live: bool,
     /// Active per-line selection while the user is in `line_select`
     /// mode; `None` otherwise. Set by [`Self::enter_line_select`] and
     /// cleared by [`Self::cancel_line_select`].
@@ -501,6 +507,7 @@ impl ReviewSession {
             origin: ReviewOrigin::Standalone,
             watch_tokens: Vec::new(),
             follow: false,
+            live: false,
             line_selection: None,
             commit_summaries: HashMap::new(),
             next_id: 0,

@@ -259,6 +259,13 @@ impl ReviewSession {
         self.emit_changed(cx);
     }
 
+    /// Flip live mode on the inner session. Emits
+    /// [`ReviewSessionEvent::Changed`].
+    pub fn toggle_live(&mut self, cx: &mut Context<'_, Self>) {
+        self.inner.live = !self.inner.live;
+        self.emit_changed(cx);
+    }
+
     /// Advance the cursor to the next chunk in order. Returns the
     /// new cursor id when the cursor actually moved (in which case
     /// [`ReviewSessionEvent::Changed`] and
