@@ -15,6 +15,7 @@ use crate::{
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     rebase_item::RebaseItem,
     review_item::ReviewItem,
+    run_pane,
     theme::ActiveTheme,
     workspace::Workspace,
 };
@@ -103,8 +104,6 @@ pub enum PaletteScope {
 /// so the scope filter is a cheap lookup on every keystroke.
 ///
 /// Mirrors the TUI `stoat::command_palette::Availability` shape.
-/// `run_focused` always reads `false` until the corresponding `Run`
-/// item lands in the GUI.
 #[derive(Debug, Clone, Copy, Default)]
 pub struct Availability {
     /// A `RebaseItem` is open in some pane (editable rebase plan).
@@ -119,8 +118,7 @@ pub struct Availability {
     pub review_open: bool,
     /// A `CommitListItem` is open in some pane.
     pub commits_open: bool,
-    /// Focused pane hosts a Run terminal. Always `false` until the
-    /// Run pane item lands.
+    /// The focused pane's active item is a `Run` pane.
     pub run_focused: bool,
     /// The focused pane item is an [`ItemKind::Editor`]. Gates the
     /// buffer-editing action family so it hides when a non-editor pane
@@ -171,7 +169,7 @@ impl Availability {
             in_conflict,
             review_open,
             commits_open,
-            run_focused: false,
+            run_focused: run_pane::focused_run_pane(workspace, cx).is_some(),
             editor_focused: workspace
                 .active_pane_item(cx)
                 .map(|item| item.item_kind(cx))

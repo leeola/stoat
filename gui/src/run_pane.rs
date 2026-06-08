@@ -1024,7 +1024,7 @@ fn with_focused_run(
 
 /// The focused pane's active item as a [`Run`], or `None` when the pane
 /// is empty or its active item is not a run pane.
-fn focused_run_pane(workspace: &Workspace, cx: &App) -> Option<Entity<Run>> {
+pub(crate) fn focused_run_pane(workspace: &Workspace, cx: &App) -> Option<Entity<Run>> {
     let pane_id = workspace.pane_tree().read(cx).focus();
     let pane = workspace.pane_tree().read(cx).pane(pane_id).cloned()?;
     let view = pane.read(cx).active_item().map(ItemHandle::to_any_view)?;
