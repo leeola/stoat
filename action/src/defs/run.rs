@@ -11,7 +11,8 @@ define_action!(
     ActionKind::OpenRun,
     "open terminal",
     "Open a terminal pane for running commands.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    false
 );
 
 define_action!(
@@ -21,7 +22,8 @@ define_action!(
     ActionKind::OpenTerminalDock,
     "open terminal dock",
     "Open the run pane in a bottom dock, or toggle its visibility when it is already open.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    false
 );
 
 define_action!(
@@ -31,7 +33,8 @@ define_action!(
     ActionKind::OpenClaudeTerminal,
     "open claude terminal",
     "Open a terminal pane running the claude CLI in the project root.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    false
 );
 
 define_action!(
@@ -126,5 +129,31 @@ impl Action for Run {
 
     fn as_any(&self) -> &dyn Any {
         self
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn open_run() {
+        assert_eq!(OpenRun.kind(), ActionKind::OpenRun);
+        assert_eq!(OpenRun.def().name(), "OpenRun");
+        assert!(!OpenRun.def().hint_visible());
+    }
+
+    #[test]
+    fn open_terminal_dock() {
+        assert_eq!(OpenTerminalDock.kind(), ActionKind::OpenTerminalDock);
+        assert_eq!(OpenTerminalDock.def().name(), "OpenTerminalDock");
+        assert!(!OpenTerminalDock.def().hint_visible());
+    }
+
+    #[test]
+    fn open_claude_terminal() {
+        assert_eq!(OpenClaudeTerminal.kind(), ActionKind::OpenClaudeTerminal);
+        assert_eq!(OpenClaudeTerminal.def().name(), "OpenClaudeTerminal");
+        assert!(!OpenClaudeTerminal.def().hint_visible());
     }
 }

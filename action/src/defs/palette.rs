@@ -29,6 +29,10 @@ impl ActionDef for OpenCommandPaletteDef {
     fn palette_visible(&self) -> bool {
         false
     }
+
+    fn hint_visible(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Debug)]
@@ -58,5 +62,6 @@ mod tests {
         assert_eq!(OpenCommandPalette.def().name(), "OpenCommandPalette");
         assert!(OpenCommandPalette.def().params().is_empty());
         assert!(!OpenCommandPalette.def().palette_visible());
+        assert!(!OpenCommandPalette.def().hint_visible());
     }
 }
