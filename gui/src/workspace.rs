@@ -26,7 +26,7 @@ use crate::{
     rebase_item::{RebaseItem, RebaseMoveDir},
     render_stats::{render_stats_enabled, FrameTimer, RenderStatsOverlay},
     review_session::ReviewApplyResult,
-    settings::Settings,
+    settings::{FontSizeOffset, Settings},
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
         diagnostics_badge::DiagnosticsBadge, encoding::EncodingItem, line_ending::LineEndingItem,
@@ -268,6 +268,8 @@ impl Workspace {
                 .update(cx, |sm, _| sm.set_keymap(keymap));
         });
         cx.observe_global::<crate::theme::Theme>(|_, cx| cx.notify())
+            .detach();
+        cx.observe_global::<FontSizeOffset>(|_, cx| cx.notify())
             .detach();
         let pane_tree_subscription =
             cx.subscribe(&pane_tree, |workspace, _, _: &PaneTreeEvent, cx| {
@@ -7132,19 +7134,33 @@ impl Render for Workspace {
     }
 }
 
+/// Minimum and maximum chrome (UI) font size in points. The configured
+/// base plus the runtime [`FontSizeOffset`] is clamped to this range,
+/// matching the editor's buffer-font bounds.
+const MIN_UI_FONT_SIZE: f32 = 6.0;
+const MAX_UI_FONT_SIZE: f32 = 100.0;
+
+/// Effective chrome font size: the configured `ui.font.size` (or
+/// [`DEFAULT_UI_FONT_SIZE`]) plus the session [`FontSizeOffset`], clamped
+/// to [`MIN_UI_FONT_SIZE`]..=[`MAX_UI_FONT_SIZE`].
+fn ui_font_size(cx: &App) -> f32 {
+    let configured = cx
+        .try_global::<Settings>()
+        .and_then(|settings| settings.resolved.ui_font_size)
+        .unwrap_or(DEFAULT_UI_FONT_SIZE);
+    let offset = cx.try_global::<FontSizeOffset>().map_or(0.0, |o| o.0);
+    (configured + offset).clamp(MIN_UI_FONT_SIZE, MAX_UI_FONT_SIZE)
+}
+
 fn ui_font(cx: &App) -> (SharedString, f32) {
-    let (family, size) = match cx.try_global::<Settings>() {
-        Some(settings) => (
-            settings.resolved.ui_font_family.clone(),
-            settings.resolved.ui_font_size,
-        ),
-        None => (None, None),
-    };
+    let family = cx
+        .try_global::<Settings>()
+        .and_then(|settings| settings.resolved.ui_font_family.clone());
     (
         family
             .map(SharedString::from)
             .unwrap_or_else(|| SharedString::from(DEFAULT_UI_FONT_FAMILY)),
-        size.unwrap_or(DEFAULT_UI_FONT_SIZE),
+        ui_font_size(cx),
     )
 }
 
