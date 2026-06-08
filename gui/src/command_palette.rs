@@ -11,6 +11,7 @@
 use crate::{
     commit_list::CommitListItem,
     editor::Editor,
+    globals::GitHostGlobal,
     item::ItemKind,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     rebase_item::RebaseItem,
@@ -124,6 +125,9 @@ pub struct Availability {
     /// buffer-editing action family so it hides when a non-editor pane
     /// (terminal, review, rebase, commits, run) is focused.
     pub editor_focused: bool,
+    /// A git repository exists at the workspace root. Gates the VCS
+    /// hunk/stage/blame action family.
+    pub in_git_repo: bool,
 }
 
 impl Availability {
@@ -174,6 +178,10 @@ impl Availability {
                 .active_pane_item(cx)
                 .map(|item| item.item_kind(cx))
                 == Some(ItemKind::Editor),
+            in_git_repo: cx
+                .try_global::<GitHostGlobal>()
+                .map(|g| g.0.discover(workspace.git_root()).is_some())
+                .unwrap_or(false),
         }
     }
 }
@@ -242,6 +250,9 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | CommitsOpenBranchReview => ctx.commits_open,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
+
+        GotoNextHunk | GotoPrevHunk | ToggleDiffHunkPanel | ToggleBlame | ToggleInlineBlame
+        | GitToggleStageHunk | GitUnstageHunk | GitToggleStageLine => ctx.in_git_repo,
 
         AcceptCompletion
         | AddSelectionAbove
@@ -1127,6 +1138,8 @@ mod tests {
                 "MoveDown",
                 "SelectAll",
                 "Undo",
+                "ToggleBlame",
+                "GitToggleStageHunk",
             ] {
                 assert!(
                     !names.contains(&name),
@@ -1158,6 +1171,20 @@ mod tests {
             let names = matched_names(&delegate);
             for name in ["MoveDown", "SelectAll", "Undo", "SaveBuffer"] {
                 assert!(names.contains(&name), "{name} missing when editor_focused");
+            }
+            assert!(!names.contains(&"RunSubmit"));
+        }
+
+        #[test]
+        fn active_scope_in_git_repo_surfaces_vcs_actions() {
+            let availability = Availability {
+                in_git_repo: true,
+                ..Availability::default()
+            };
+            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
+            let names = matched_names(&delegate);
+            for name in ["ToggleBlame", "GotoNextHunk", "GitToggleStageHunk"] {
+                assert!(names.contains(&name), "{name} missing when in_git_repo");
             }
             assert!(!names.contains(&"RunSubmit"));
         }
@@ -1272,6 +1299,7 @@ mod tests {
                 commits_open: true,
                 run_focused: true,
                 editor_focused: true,
+                in_git_repo: true,
             };
             for entry in registry::all() {
                 assert!(

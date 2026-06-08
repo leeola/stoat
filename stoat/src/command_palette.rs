@@ -57,6 +57,9 @@ pub struct Availability {
     /// action family so it hides when a non-editor pane (terminal, review,
     /// rebase, commits, run) is focused.
     pub editor_focused: bool,
+    /// A git repository exists at the workspace root. Gates the VCS
+    /// hunk/stage/blame action family.
+    pub in_git_repo: bool,
 }
 
 impl Availability {
@@ -82,6 +85,7 @@ impl Availability {
         };
         let run_focused = matches!(focused_view, Some(View::Run(_)));
         let editor_focused = matches!(focused_view, Some(View::Editor(_)));
+        let in_git_repo = stoat.git_host.discover(&ws.git_root).is_some();
 
         Self {
             in_rebase_plan: ws.rebase.is_some(),
@@ -92,6 +96,7 @@ impl Availability {
             commits_open: ws.commits.is_some(),
             run_focused,
             editor_focused,
+            in_git_repo,
         }
     }
 }
@@ -158,6 +163,9 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | CommitsOpenBranchReview => ctx.commits_open,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
+
+        GotoNextHunk | GotoPrevHunk | ToggleDiffHunkPanel | ToggleBlame | ToggleInlineBlame
+        | GitToggleStageHunk | GitUnstageHunk | GitToggleStageLine => ctx.in_git_repo,
 
         AcceptCompletion
         | AddSelectionAbove
@@ -801,6 +809,8 @@ mod tests {
             "MoveDown",
             "SelectAll",
             "Undo",
+            "ToggleBlame",
+            "GitToggleStageHunk",
         ] {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
         }
@@ -828,6 +838,19 @@ mod tests {
         let listed = names_for_scope("", PaletteScope::Active, &ctx);
         for name in ["MoveDown", "SelectAll", "Undo", "SaveBuffer"] {
             assert!(listed.contains(&name), "{name} missing when editor_focused");
+        }
+        assert!(!listed.contains(&"RunSubmit"));
+    }
+
+    #[test]
+    fn active_scope_in_git_repo_surfaces_vcs_actions() {
+        let ctx = Availability {
+            in_git_repo: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in ["ToggleBlame", "GotoNextHunk", "GitToggleStageHunk"] {
+            assert!(listed.contains(&name), "{name} missing when in_git_repo");
         }
         assert!(!listed.contains(&"RunSubmit"));
     }
@@ -948,6 +971,7 @@ mod tests {
             commits_open: true,
             run_focused: true,
             editor_focused: true,
+            in_git_repo: true,
         };
         for entry in registry::all() {
             assert!(
