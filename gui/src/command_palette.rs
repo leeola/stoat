@@ -202,14 +202,37 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | ReviewApplyStaged
         | CloseReview
         | ReviewRemoveSelected
+        | ReviewNextCommit
+        | ReviewPrevCommit
+        | ReviewApproveHunk
+        | ReviewToggleApproval
+        | ReviewNextUnreviewedHunk
+        | ReviewResetProgress
+        | ReviewEnterLineSelect
+        | ReviewLineSelectCancel
+        | ReviewLineSelectToggle
+        | ReviewLineSelectAll
+        | ReviewLineSelectStage
+        | ReviewLineSelectUnstage
+        | ReviewRevertHunk
+        | ReviewCycleComparisonMode
+        | ReviewToggleFollow
         | JumpToMoveSource
         | JumpToMoveTarget
         | JumpToNextMoveSource
         | JumpToPrevMoveSource
         | QueryMoveRelationships => ctx.review_open,
 
-        CloseCommits | CommitsNext | CommitsPrev | CommitsPageDown | CommitsPageUp
-        | CommitsFirst | CommitsLast | CommitsRefresh | CommitsOpenReview => ctx.commits_open,
+        CloseCommits
+        | CommitsNext
+        | CommitsPrev
+        | CommitsPageDown
+        | CommitsPageUp
+        | CommitsFirst
+        | CommitsLast
+        | CommitsRefresh
+        | CommitsOpenReview
+        | CommitsOpenBranchReview => ctx.commits_open,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
 
