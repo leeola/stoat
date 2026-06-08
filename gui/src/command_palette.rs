@@ -11,12 +11,13 @@
 use crate::{
     commit_list::CommitListItem,
     editor::Editor,
-    globals::GitHostGlobal,
+    globals::{GitHostGlobal, LanguageRegistry},
     item::ItemKind,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     rebase_item::RebaseItem,
     review_item::ReviewItem,
     run_pane,
+    settings::Settings,
     theme::ActiveTheme,
     workspace::Workspace,
 };
@@ -128,6 +129,9 @@ pub struct Availability {
     /// A git repository exists at the workspace root. Gates the VCS
     /// hunk/stage/blame action family.
     pub in_git_repo: bool,
+    /// A language server is configured for the focused editor's language.
+    /// Gates the LSP action family.
+    pub lsp_configured: bool,
 }
 
 impl Availability {
@@ -182,8 +186,45 @@ impl Availability {
                 .try_global::<GitHostGlobal>()
                 .map(|g| g.0.discover(workspace.git_root()).is_some())
                 .unwrap_or(false),
+            lsp_configured: focused_editor_lsp_configured(workspace, cx),
         }
     }
+}
+
+/// Whether a language server is configured for the focused editor's
+/// language. Resolves the focused pane's active [`Editor`] to a language
+/// via [`LanguageRegistry::for_path`], then checks
+/// [`Settings`]`::language_servers`. Returns `false` when the focused item
+/// is not an editor, the buffer has no path or recognized language, or no
+/// server is configured. Mirrors the per-action launch path in
+/// [`Workspace`]'s LSP handlers, which surface unconfigured languages as
+/// `NotFound` at launch time.
+fn focused_editor_lsp_configured(workspace: &Workspace, cx: &App) -> bool {
+    let language = {
+        let Some(item) = workspace.active_pane_item(cx) else {
+            return false;
+        };
+        let Ok(editor) = item.to_any_view().downcast::<Editor>() else {
+            return false;
+        };
+        let read = editor.read(cx);
+        let Some(path) = read.file_path() else {
+            return false;
+        };
+        let Some(language) = cx
+            .try_global::<LanguageRegistry>()
+            .and_then(|registry| registry.0.for_path(path))
+        else {
+            return false;
+        };
+        language
+    };
+    cx.try_global::<Settings>().is_some_and(|settings| {
+        settings
+            .resolved
+            .language_servers
+            .contains_key(language.name)
+    })
 }
 
 /// Whether `kind` should appear in the palette's Active scope given
@@ -253,6 +294,21 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
 
         GotoNextHunk | GotoPrevHunk | ToggleDiffHunkPanel | ToggleBlame | ToggleInlineBlame
         | GitToggleStageHunk | GitUnstageHunk | GitToggleStageLine => ctx.in_git_repo,
+
+        CodeAction
+        | FormatSelections
+        | GotoDefinition
+        | GotoImplementation
+        | GotoReferences
+        | GotoTypeDefinition
+        | GotoNextDiagnostic
+        | GotoPrevDiagnostic
+        | Hover
+        | RenameSymbol
+        | OpenSymbolPicker
+        | OpenWorkspaceSymbolPicker
+        | OpenDiagnosticsPicker
+        | OpenWorkspaceDiagnosticsPicker => ctx.lsp_configured,
 
         AcceptCompletion
         | AddSelectionAbove
@@ -1140,6 +1196,8 @@ mod tests {
                 "Undo",
                 "ToggleBlame",
                 "GitToggleStageHunk",
+                "GotoDefinition",
+                "Hover",
             ] {
                 assert!(
                     !names.contains(&name),
@@ -1185,6 +1243,20 @@ mod tests {
             let names = matched_names(&delegate);
             for name in ["ToggleBlame", "GotoNextHunk", "GitToggleStageHunk"] {
                 assert!(names.contains(&name), "{name} missing when in_git_repo");
+            }
+            assert!(!names.contains(&"RunSubmit"));
+        }
+
+        #[test]
+        fn active_scope_lsp_configured_surfaces_lsp_actions() {
+            let availability = Availability {
+                lsp_configured: true,
+                ..Availability::default()
+            };
+            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
+            let names = matched_names(&delegate);
+            for name in ["GotoDefinition", "Hover", "RenameSymbol", "CodeAction"] {
+                assert!(names.contains(&name), "{name} missing when lsp_configured");
             }
             assert!(!names.contains(&"RunSubmit"));
         }
@@ -1300,6 +1372,7 @@ mod tests {
                 run_focused: true,
                 editor_focused: true,
                 in_git_repo: true,
+                lsp_configured: true,
             };
             for entry in registry::all() {
                 assert!(

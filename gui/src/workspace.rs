@@ -8893,6 +8893,51 @@ mod tests {
     }
 
     #[test]
+    fn from_workspace_reports_lsp_configured_for_focused_editor_language() {
+        use crate::{
+            command_palette::Availability,
+            globals::{FsHostGlobal, LanguageRegistry},
+            settings::Settings,
+        };
+        use std::collections::BTreeMap;
+        use stoat::host::{FakeFs, FsHost};
+        use stoat_config::LanguageServerCommand;
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", "fn main() {}\n");
+        let settings = {
+            let mut s = Settings::default();
+            s.resolved.language_servers.insert(
+                "rust".into(),
+                LanguageServerCommand {
+                    command: "rust-analyzer".into(),
+                    args: vec![],
+                    env: BTreeMap::new(),
+                },
+            );
+            s
+        };
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>));
+            cx.set_global(LanguageRegistry::standard());
+            cx.set_global(settings);
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/a.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        assert!(
+            ws.read_with(vcx, |w, cx| {
+                Availability::from_workspace(w, cx).lsp_configured
+            }),
+            "a configured rust server makes lsp_configured true for the focused .rs editor",
+        );
+    }
+
+    #[test]
     fn dispatch_toggle_project_tree_opens_and_closes_left_dock() {
         use crate::{globals::FsHostGlobal, item::ItemKind};
         use stoat::host::{FakeFs, FsHost};
