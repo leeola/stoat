@@ -1,6 +1,6 @@
-use crate::{editor::Editor, elevation::StyledExt, workspace::Workspace};
+use crate::{editor::Editor, elevation::StyledExt, theme::ActiveTheme, workspace::Workspace};
 use gpui::{
-    div, hsla, px, relative, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId,
+    div, px, relative, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId,
     EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView,
     MouseButton, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
 };
@@ -353,7 +353,7 @@ impl Render for ModalLayer {
             .absolute()
             .size_full()
             .inset_0()
-            .bg(hsla(0., 0., 0., 0.3))
+            .bg(cx.theme().elevated_surface.opacity(0.2))
             .flex()
             .items_center()
             .justify_center()
