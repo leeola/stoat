@@ -53,6 +53,10 @@ pub struct Availability {
     pub commits_open: bool,
     /// Focused pane hosts a [`View::Run`], or a modal run is active.
     pub run_focused: bool,
+    /// The focused pane hosts a [`View::Editor`]. Gates the buffer-editing
+    /// action family so it hides when a non-editor pane (terminal, review,
+    /// rebase, commits, run) is focused.
+    pub editor_focused: bool,
 }
 
 impl Availability {
@@ -77,6 +81,7 @@ impl Availability {
             FocusTarget::Dock(dock_id) => ws.docks.get(dock_id).map(|d| d.view.clone()),
         };
         let run_focused = matches!(focused_view, Some(View::Run(_)));
+        let editor_focused = matches!(focused_view, Some(View::Editor(_)));
 
         Self {
             in_rebase_plan: ws.rebase.is_some(),
@@ -86,6 +91,7 @@ impl Availability {
             review_open: ws.review.is_some(),
             commits_open: ws.commits.is_some(),
             run_focused,
+            editor_focused,
         }
     }
 }
@@ -152,6 +158,166 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
         | CommitsOpenBranchReview => ctx.commits_open,
 
         RunSubmit | RunInterrupt | RunHistoryPrev | RunHistoryNext => ctx.run_focused,
+
+        AcceptCompletion
+        | AddSelectionAbove
+        | AddSelectionBelow
+        | AlignSelections
+        | AlignViewBottom
+        | AlignViewCenter
+        | AlignViewTop
+        | Append
+        | CloseBuffer
+        | CollapseSelection
+        | CommitUndoCheckpoint
+        | Decrement
+        | DeleteBackward
+        | DeleteForward
+        | DeleteSelection
+        | DeleteWordBackward
+        | DeleteWordForward
+        | ExpandSelection
+        | ExtendDown
+        | ExtendFindNextChar
+        | ExtendFindPrevChar
+        | ExtendGotoColumn
+        | ExtendGotoFileStart
+        | ExtendGotoFirstNonwhitespace
+        | ExtendGotoLastLine
+        | ExtendGotoWindowBottom
+        | ExtendGotoWindowCenter
+        | ExtendGotoWindowTop
+        | ExtendLeft
+        | ExtendMoveParentNodeEnd
+        | ExtendMoveParentNodeStart
+        | ExtendNextWordEnd
+        | ExtendNextWordStart
+        | ExtendPrevWordEnd
+        | ExtendPrevWordStart
+        | ExtendRight
+        | ExtendSelectNextSibling
+        | ExtendSelectPrevSibling
+        | ExtendTillNextChar
+        | ExtendTillPrevChar
+        | ExtendToFileStart
+        | ExtendToLastLine
+        | ExtendToLineEnd
+        | ExtendToLineStart
+        | ExtendUp
+        | FindNextChar
+        | FindPrevChar
+        | FlipSelections
+        | FoldAll
+        | FoldAtCursor
+        | GotoColumn
+        | GotoFileStart
+        | GotoFirstNonwhitespace
+        | GotoLastLine
+        | GotoLineEnd
+        | GotoLineNumber
+        | GotoLineStart
+        | GotoMark
+        | GotoMarkExact
+        | GotoNextClass
+        | GotoNextFunction
+        | GotoNextParagraph
+        | GotoPrevClass
+        | GotoPrevFunction
+        | GotoPrevParagraph
+        | GotoWindowBottom
+        | GotoWindowCenter
+        | GotoWindowTop
+        | GotoWord
+        | HalfPageDown
+        | HalfPageUp
+        | Increment
+        | IndentSelection
+        | Insert
+        | InsertNewline
+        | InsertRegister
+        | JumpBackward
+        | JumpForward
+        | KeepPrimarySelection
+        | KeepSelections
+        | MatchBrackets
+        | MoveDown
+        | MoveLeft
+        | MoveNextLongWordEnd
+        | MoveNextLongWordStart
+        | MoveNextWordEnd
+        | MoveNextWordStart
+        | MoveParentNodeEnd
+        | MoveParentNodeStart
+        | MovePrevLongWordEnd
+        | MovePrevLongWordStart
+        | MovePrevWordEnd
+        | MovePrevWordStart
+        | MoveRight
+        | MoveUp
+        | OpenAbove
+        | OpenBelow
+        | OpenJumplistPicker
+        | OpenReverseSearchInput
+        | OpenSearchInput
+        | PageDown
+        | PageUp
+        | PasteAfter
+        | PasteBefore
+        | PasteClipboardAfter
+        | PasteClipboardBefore
+        | RecordMacro
+        | Redo
+        | RemovePrimarySelection
+        | RemoveSelections
+        | RepeatLastMotion
+        | ReplaceChar
+        | ReplayMacro
+        | RotateSelectionsBackward
+        | RotateSelectionsForward
+        | SaveBuffer
+        | SaveSelection
+        | ScrollDown
+        | ScrollUp
+        | SearchNext
+        | SearchPrev
+        | SelectAll
+        | SelectAllChildren
+        | SelectAllSiblings
+        | SelectLineBelow
+        | SelectNextSibling
+        | SelectPrevSibling
+        | SelectRegister
+        | SelectTextobjectAround
+        | SelectTextobjectInner
+        | SetMark
+        | ShellAppendOutput
+        | ShellInsertOutput
+        | ShellKeepPipe
+        | ShellPipe
+        | ShellPipeTo
+        | ShrinkSelection
+        | SmartTab
+        | SplitSelection
+        | SplitSelectionOnNewline
+        | SurroundAdd
+        | SurroundDelete
+        | SurroundReplace
+        | SwitchCase
+        | SwitchToLowercase
+        | SwitchToUppercase
+        | TillNextChar
+        | TillPrevChar
+        | ToggleComments
+        | ToggleMinimap
+        | TriggerCompletion
+        | TrimSelections
+        | Undo
+        | UnfoldAll
+        | UnfoldAtCursor
+        | UnindentSelection
+        | Yank
+        | YankMainToClipboard
+        | YankToClipboard => ctx.editor_focused,
 
         _ => true,
     }
@@ -632,15 +798,38 @@ mod tests {
             "CommitsOpenReview",
             "RunSubmit",
             "EnterRebase",
+            "MoveDown",
+            "SelectAll",
+            "Undo",
         ] {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
         }
-        for name in ["Quit", "OpenFile", "OpenReview", "OpenCommits", "FocusLeft"] {
+        for name in [
+            "Quit",
+            "OpenFile",
+            "OpenReview",
+            "OpenCommits",
+            "FocusLeft",
+            "OpenGlobalSearch",
+        ] {
             assert!(
                 listed.contains(&name),
                 "{name} missing from applicable list"
             );
         }
+    }
+
+    #[test]
+    fn active_scope_editor_focused_surfaces_editor_actions() {
+        let ctx = Availability {
+            editor_focused: true,
+            ..Availability::default()
+        };
+        let listed = names_for_scope("", PaletteScope::Active, &ctx);
+        for name in ["MoveDown", "SelectAll", "Undo", "SaveBuffer"] {
+            assert!(listed.contains(&name), "{name} missing when editor_focused");
+        }
+        assert!(!listed.contains(&"RunSubmit"));
     }
 
     #[test]
@@ -758,6 +947,7 @@ mod tests {
             review_open: true,
             commits_open: true,
             run_focused: true,
+            editor_focused: true,
         };
         for entry in registry::all() {
             assert!(

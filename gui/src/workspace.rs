@@ -1486,7 +1486,7 @@ impl Workspace {
         });
     }
 
-    fn active_pane_item(&self, cx: &App) -> Option<Box<dyn ItemHandle>> {
+    pub(crate) fn active_pane_item(&self, cx: &App) -> Option<Box<dyn ItemHandle>> {
         let tree = self.pane_tree.read(cx);
         let focus = tree.focus();
         tree.pane(focus)
@@ -8856,6 +8856,39 @@ mod tests {
             match_count(vcx),
             Some(active_count),
             "shift+Tab again should return the palette to Active scope",
+        );
+    }
+
+    #[test]
+    fn from_workspace_reports_editor_focused_before_and_during_palette() {
+        use crate::{command_palette::Availability, globals::FsHostGlobal};
+        use stoat::host::{FakeFs, FsHost};
+
+        let mut cx = TestAppContext::single();
+        let fs = Arc::new(FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", "fn main() {}\n");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/a.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let editor_focused = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                Availability::from_workspace(w, cx).editor_focused
+            })
+        };
+
+        assert!(editor_focused(vcx), "opening a file focuses an editor pane");
+
+        dispatch(&ws, vcx, stoat_action::OpenCommandPalette);
+        vcx.run_until_parked();
+
+        assert!(
+            editor_focused(vcx),
+            "the open-palette snapshot still reports the editor focused while the modal is up",
         );
     }
 
