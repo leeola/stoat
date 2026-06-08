@@ -131,6 +131,9 @@ pub struct ThemeColors {
     /// notably every glyph of a file with no registered language --
     /// render in this color; syntax and selection runs layer over it.
     pub editor_text: Hsla,
+    /// Foreground for the cursor row's gutter line number, brighter than
+    /// [`Self::muted_text`] (other rows) so the active line stands out.
+    pub active_line_number: Hsla,
     /// Optional color override for end-of-line inline git blame. `None`
     /// falls back to [`Self::muted_text`].
     pub blame_inline: Option<Hsla>,
@@ -250,6 +253,11 @@ impl ThemeColors {
             search_match: theme_bg_or(cx, stoat::theme::scope::UI_SEARCH_MATCH, palette.warning),
             muted_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_MUTED, palette.text_muted),
             editor_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT, palette.text),
+            active_line_number: theme_fg_or(
+                cx,
+                stoat::theme::scope::UI_EDITOR_ACTIVE_LINE_NUMBER,
+                rgb(0xd0d4da).into(),
+            ),
             blame_inline: None,
             indent_guide: theme_fg_or(cx, stoat::theme::scope::UI_BORDER_INACTIVE, palette.border),
             indent_guide_active: theme_fg_or(

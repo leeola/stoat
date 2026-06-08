@@ -3968,6 +3968,7 @@ impl Editor {
             metrics,
             fold_chevron_rows: &fold_chevron_rows,
             line_number_color: cx.theme().muted_text,
+            active_line_number: cx.theme().active_line_number,
             line_number_mode,
             cursor_buffer_row,
             line_number_cache: Some(&self.gutter_line_number_cache),

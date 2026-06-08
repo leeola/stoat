@@ -1533,6 +1533,9 @@ pub(crate) struct GutterPaint<'a> {
     /// code (see [`GutterMetrics::chevron_col`]).
     pub fold_chevron_rows: &'a [u32],
     pub line_number_color: Hsla,
+    /// Foreground for the cursor row's line number, distinct from
+    /// [`Self::line_number_color`] so the active line stands out.
+    pub active_line_number: Hsla,
     pub line_number_mode: LineNumberMode,
     /// Buffer row of the primary cursor, for relative / hybrid line
     /// numbers.
@@ -2080,8 +2083,13 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
         let start = text.len();
         text.push_str(line_str.as_ref());
         let end = text.len();
+        let number_color = if row == paint.cursor_buffer_row {
+            paint.active_line_number
+        } else {
+            paint.line_number_color
+        };
         let style = gpui::HighlightStyle {
-            color: Some(paint.line_number_color),
+            color: Some(number_color),
             ..Default::default()
         };
         runs.push((start..end, style));
@@ -2730,6 +2738,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -2780,6 +2789,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: Some(&cache),
@@ -2807,6 +2817,41 @@ mod tests {
         );
     }
 
+    #[test]
+    fn build_gutter_prefix_brightens_cursor_row_number() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = stoat::DiffMap::default();
+        let metrics = gutter_metrics(&snapshot, false);
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            blame: None,
+            inline_blame: None,
+            indent_guides: None,
+            whitespace: None,
+            metrics,
+            fold_chevron_rows: &[],
+            line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0xd0d4da).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 1,
+            line_number_cache: None,
+            blame_cache: None,
+        };
+
+        // The cursor row's line number takes the active color; other rows
+        // keep the base line-number color.
+        let cursor = build_gutter_prefix(1, &paint);
+        let other = build_gutter_prefix(0, &paint);
+
+        assert_eq!(cursor.runs[0].1.color, Some(rgb(0xd0d4da).into()));
+        assert_eq!(other.runs[0].1.color, Some(rgb(0x808080).into()));
+    }
+
     fn chevron_prefix(snapshot: &DisplaySnapshot, chevron_rows: &[u32]) -> String {
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(snapshot, false);
@@ -2823,6 +2868,7 @@ mod tests {
             metrics,
             fold_chevron_rows: chevron_rows,
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -2877,6 +2923,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -2910,6 +2957,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -2938,6 +2986,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -2976,6 +3025,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3028,6 +3078,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3058,6 +3109,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3137,6 +3189,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3172,6 +3225,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3208,6 +3262,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3245,6 +3300,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3287,6 +3343,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3326,6 +3383,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3383,6 +3441,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3413,6 +3472,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
@@ -3445,6 +3505,7 @@ mod tests {
             metrics,
             fold_chevron_rows: &[],
             line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
             line_number_mode: LineNumberMode::Absolute,
             cursor_buffer_row: 0,
             line_number_cache: None,
