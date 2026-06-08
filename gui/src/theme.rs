@@ -134,6 +134,9 @@ pub struct ThemeColors {
     /// Foreground for the cursor row's gutter line number, brighter than
     /// [`Self::muted_text`] (other rows) so the active line stands out.
     pub active_line_number: Hsla,
+    /// Foreground for matched characters in fuzzy-match pickers, layered
+    /// over each row's base text color to make the matched span stand out.
+    pub text_accent: Hsla,
     /// Optional color override for end-of-line inline git blame. `None`
     /// falls back to [`Self::muted_text`].
     pub blame_inline: Option<Hsla>,
@@ -253,6 +256,7 @@ impl ThemeColors {
             search_match: theme_bg_or(cx, stoat::theme::scope::UI_SEARCH_MATCH, palette.warning),
             muted_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_MUTED, palette.text_muted),
             editor_text: theme_fg_or(cx, stoat::theme::scope::UI_TEXT, palette.text),
+            text_accent: theme_fg_or(cx, stoat::theme::scope::UI_TEXT_ACCENT, palette.accent),
             active_line_number: theme_fg_or(
                 cx,
                 stoat::theme::scope::UI_EDITOR_ACTIVE_LINE_NUMBER,

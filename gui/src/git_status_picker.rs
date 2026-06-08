@@ -175,7 +175,7 @@ impl PickerDelegate for GitStatusDelegate {
             &label_text,
             &shifted,
             HighlightStyle {
-                color: Some(gpui::white()),
+                color: Some(theme.text_accent),
                 ..Default::default()
             },
         );

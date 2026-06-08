@@ -485,6 +485,7 @@ pub mod scope {
     pub const UI_TEXT_MUTED: &str = "ui.text.muted";
     pub const UI_TEXT_DIM: &str = "ui.text.dim";
     pub const UI_TEXT_DISABLED: &str = "ui.text.disabled";
+    pub const UI_TEXT_ACCENT: &str = "ui.text.accent";
 
     pub const UI_CURSOR: &str = "ui.cursor";
     pub const UI_CURSOR_INPUT: &str = "ui.cursor.input";

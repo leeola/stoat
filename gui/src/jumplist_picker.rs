@@ -169,7 +169,7 @@ impl PickerDelegate for JumplistPickerDelegate {
             &display,
             matched,
             HighlightStyle {
-                color: Some(gpui::white()),
+                color: Some(theme.text_accent),
                 ..Default::default()
             },
         );

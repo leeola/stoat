@@ -136,7 +136,7 @@ impl PickerDelegate for ConflictDelegate {
             &label_text,
             matched,
             HighlightStyle {
-                color: Some(gpui::white()),
+                color: Some(cx.theme().text_accent),
                 ..Default::default()
             },
         );

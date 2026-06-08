@@ -153,7 +153,7 @@ impl PickerDelegate for ThemePickerDelegate {
             name,
             matched,
             HighlightStyle {
-                color: Some(gpui::white()),
+                color: Some(cx.theme().text_accent),
                 ..Default::default()
             },
         );
