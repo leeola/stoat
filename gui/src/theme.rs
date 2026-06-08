@@ -12,7 +12,7 @@ pub const DEFAULT_EDITOR_FONT_FAMILY: &str = "Menlo";
 /// Default editor pane font size in logical pixels. Mirrors the
 /// size most editors ship with so a fresh install reads correctly
 /// at 1x scaling.
-pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 14.0;
+pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 15.0;
 
 /// Default proportional font family for chrome (status bar, tab
 /// bar, modals, dock panels). `.SystemUIFont` is the platform's
@@ -20,7 +20,7 @@ pub const DEFAULT_EDITOR_FONT_SIZE: f32 = 14.0;
 pub const DEFAULT_UI_FONT_FAMILY: &str = ".SystemUIFont";
 
 /// Default chrome font size in logical pixels.
-pub const DEFAULT_UI_FONT_SIZE: f32 = 14.0;
+pub const DEFAULT_UI_FONT_SIZE: f32 = 16.0;
 
 /// Fallback for the editor selection band when no theme overrides
 /// `ui.selection.editor`. Returns a semi-transparent blue so a
