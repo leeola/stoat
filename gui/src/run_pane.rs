@@ -27,7 +27,7 @@ use crate::{
     globals::{ExecutorGlobal, OpenHostGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
     settings::Settings,
-    theme::{ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
+    theme::{ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY},
     workspace::Workspace,
 };
 use gpui::{
@@ -900,18 +900,14 @@ impl Render for Run {
 pub(crate) const GPUI_DEFAULT_LINE_HEIGHT_RATIO: f32 = 1.618_034;
 
 pub(crate) fn editor_font(cx: &App) -> (SharedString, f32) {
-    let (family, size) = match cx.try_global::<Settings>() {
-        Some(settings) => (
-            settings.resolved.editor_font_family.clone(),
-            settings.resolved.editor_font_size,
-        ),
-        None => (None, None),
-    };
+    let family = cx
+        .try_global::<Settings>()
+        .and_then(|settings| settings.resolved.editor_font_family.clone());
     (
         family
             .map(SharedString::from)
             .unwrap_or_else(|| SharedString::from(DEFAULT_EDITOR_FONT_FAMILY)),
-        size.unwrap_or(DEFAULT_EDITOR_FONT_SIZE),
+        crate::editor::editor_font_size(cx),
     )
 }
 

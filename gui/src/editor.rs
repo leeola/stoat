@@ -16,7 +16,7 @@ use crate::{
     globals::ExecutorGlobal,
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
-    settings::{EditorFontSize, Settings},
+    settings::{FontSizeOffset, Settings},
     sticky_scroll,
     theme::{self, ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY, DEFAULT_EDITOR_FONT_SIZE},
     toast::Toast,
@@ -447,7 +447,7 @@ impl Editor {
             cx.notify();
         });
         let theme_sub = cx.observe_global::<theme::Theme>(|_, cx| cx.notify());
-        let font_size_sub = cx.observe_global::<EditorFontSize>(|_, cx| cx.notify());
+        let font_size_sub = cx.observe_global::<FontSizeOffset>(|_, cx| cx.notify());
         let inline_blame_visible = cx
             .try_global::<Settings>()
             .and_then(|s| s.resolved.ui_editor_show_inline_blame)
@@ -4421,34 +4421,30 @@ fn now_unix_seconds() -> i64 {
         .unwrap_or(0)
 }
 
-/// Minimum and maximum editor buffer font size in points. Both the
-/// runtime [`EditorFontSize`] override and the configured size are
-/// clamped to this range, mirroring Zed's 6px-100px buffer-font bounds.
+/// Minimum and maximum editor buffer font size in points. The
+/// configured base plus the runtime [`FontSizeOffset`] is clamped to
+/// this range, mirroring Zed's 6px-100px buffer-font bounds.
 pub(crate) const MIN_EDITOR_FONT_SIZE: f32 = 6.0;
 pub(crate) const MAX_EDITOR_FONT_SIZE: f32 = 100.0;
 
-/// Effective editor buffer font size: the session [`EditorFontSize`]
-/// override when set, otherwise the configured `editor.font.size` (or
-/// [`DEFAULT_EDITOR_FONT_SIZE`]), clamped to
-/// [`MIN_EDITOR_FONT_SIZE`]..=[`MAX_EDITOR_FONT_SIZE`].
+/// Effective editor buffer font size: the configured `editor.font.size`
+/// (or [`DEFAULT_EDITOR_FONT_SIZE`]) plus the session [`FontSizeOffset`],
+/// clamped to [`MIN_EDITOR_FONT_SIZE`]..=[`MAX_EDITOR_FONT_SIZE`].
 pub(crate) fn editor_font_size(cx: &App) -> f32 {
     let configured = cx
         .try_global::<Settings>()
         .and_then(|settings| settings.resolved.editor_font_size)
         .unwrap_or(DEFAULT_EDITOR_FONT_SIZE);
-    let size = cx
-        .try_global::<EditorFontSize>()
-        .map_or(configured, |size| size.0);
-    size.clamp(MIN_EDITOR_FONT_SIZE, MAX_EDITOR_FONT_SIZE)
+    let offset = cx.try_global::<FontSizeOffset>().map_or(0.0, |o| o.0);
+    (configured + offset).clamp(MIN_EDITOR_FONT_SIZE, MAX_EDITOR_FONT_SIZE)
 }
 
-/// Step the session editor font-size override by `delta` points
-/// (clamped to the supported range) and install it as the
-/// [`EditorFontSize`] global, so every editor observing the global
-/// re-lays-out at the new size.
-pub(crate) fn adjust_editor_font_size(delta: f32, cx: &mut App) {
-    let next = (editor_font_size(cx) + delta).clamp(MIN_EDITOR_FONT_SIZE, MAX_EDITOR_FONT_SIZE);
-    cx.set_global(EditorFontSize(next));
+/// Step the session [`FontSizeOffset`] by `delta` points, so every
+/// editor observing the global re-lays-out with the configured base
+/// shifted by the new offset.
+pub(crate) fn adjust_font_size(delta: f32, cx: &mut App) {
+    let offset = cx.try_global::<FontSizeOffset>().map_or(0.0, |o| o.0);
+    cx.set_global(FontSizeOffset(offset + delta));
 }
 
 fn editor_font(cx: &App) -> (SharedString, f32) {
@@ -5748,27 +5744,31 @@ mod tests {
     }
 
     #[test]
-    fn adjust_editor_font_size_steps_and_clamps() {
+    fn adjust_font_size_steps_offset_and_clamps() {
         let cx = TestAppContext::single();
         cx.update(|cx| {
             assert_eq!(editor_font_size(cx), DEFAULT_EDITOR_FONT_SIZE);
 
-            adjust_editor_font_size(1.0, cx);
+            adjust_font_size(1.0, cx);
             assert_eq!(editor_font_size(cx), DEFAULT_EDITOR_FONT_SIZE + 1.0);
 
-            cx.set_global(EditorFontSize(40.0));
-            assert_eq!(editor_font_size(cx), 40.0, "override wins over the base");
+            cx.set_global(FontSizeOffset(5.0));
+            assert_eq!(
+                editor_font_size(cx),
+                DEFAULT_EDITOR_FONT_SIZE + 5.0,
+                "offset rides on top of the base"
+            );
 
-            cx.set_global(EditorFontSize(MAX_EDITOR_FONT_SIZE));
-            adjust_editor_font_size(5.0, cx);
+            cx.set_global(FontSizeOffset(MAX_EDITOR_FONT_SIZE));
+            adjust_font_size(5.0, cx);
             assert_eq!(
                 editor_font_size(cx),
                 MAX_EDITOR_FONT_SIZE,
                 "clamps at the top"
             );
 
-            cx.set_global(EditorFontSize(MIN_EDITOR_FONT_SIZE));
-            adjust_editor_font_size(-5.0, cx);
+            cx.set_global(FontSizeOffset(-MAX_EDITOR_FONT_SIZE));
+            adjust_font_size(-5.0, cx);
             assert_eq!(
                 editor_font_size(cx),
                 MIN_EDITOR_FONT_SIZE,

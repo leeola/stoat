@@ -16,15 +16,15 @@ pub struct Settings {
 
 impl Global for Settings {}
 
-/// Session-only override for the editor buffer font size, layered over
-/// the configured `editor.font.size`. Absent until the user adjusts the
-/// font (IncreaseFontSize / DecreaseFontSize); when present, editors
-/// use this value instead of the configured base. Not persisted to
-/// stcfg. Observed via [`gpui::App::observe_global::<EditorFontSize>`]
-/// so a change relays out every editor.
-pub struct EditorFontSize(pub f32);
+/// Session-only font-size offset in points, layered on top of the
+/// configured base size rather than replacing it. Zero until the user
+/// adjusts the font (IncreaseFontSize / DecreaseFontSize), which step
+/// this offset. Not persisted to stcfg. Observed via
+/// [`gpui::App::observe_global::<FontSizeOffset>`] so a change relays
+/// out every editor.
+pub struct FontSizeOffset(pub f32);
 
-impl Global for EditorFontSize {}
+impl Global for FontSizeOffset {}
 
 impl Settings {
     /// Build [`Settings`] from an already-parsed
