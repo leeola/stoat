@@ -194,7 +194,7 @@ impl Render for Dock {
             DockVisibility::Open { width } => {
                 let panel = along_main(div(), f32::from(width))
                     .bg(theme.elevated_surface)
-                    .border_color(theme.border_variant);
+                    .border_color(theme.border_inactive);
                 let panel = match self.side {
                     DockSide::Left => panel.border_r_1(),
                     DockSide::Right => panel.border_l_1(),

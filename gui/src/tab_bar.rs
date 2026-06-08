@@ -31,7 +31,7 @@ pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoEleme
     let active_bg = cx.theme().tab_active;
     let inactive_bg = cx.theme().tab_inactive;
     let hover_bg = cx.theme().elevated_surface;
-    let divider = cx.theme().border_variant;
+    let divider = cx.theme().border_inactive;
 
     let mut row = div().flex().flex_row().w_full().h(px(32.0));
     for ix in 0..item_count {
