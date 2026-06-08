@@ -165,6 +165,9 @@ theme default_dark {
 on init {
     theme = default_dark;
 
+    editor.font.size = 15;
+    ui.font.size = 16;
+
     ui.item_mode.review = "review";
     ui.item_mode.rebase = "rebase";
     ui.item_mode.conflict = "conflict";

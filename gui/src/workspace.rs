@@ -7143,7 +7143,7 @@ const MAX_UI_FONT_SIZE: f32 = 100.0;
 /// Effective chrome font size: the configured `ui.font.size` (or
 /// [`DEFAULT_UI_FONT_SIZE`]) plus the session [`FontSizeOffset`], clamped
 /// to [`MIN_UI_FONT_SIZE`]..=[`MAX_UI_FONT_SIZE`].
-fn ui_font_size(cx: &App) -> f32 {
+pub(crate) fn ui_font_size(cx: &App) -> f32 {
     let configured = cx
         .try_global::<Settings>()
         .and_then(|settings| settings.resolved.ui_font_size)

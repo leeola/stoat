@@ -5778,6 +5778,24 @@ mod tests {
     }
 
     #[test]
+    fn configured_base_plus_offset_resolves_for_editor_and_ui() {
+        let cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.set_global(Settings::load_from_source(
+                "on init { editor.font.size = 20; ui.font.size = 24; }",
+            ));
+            cx.set_global(FontSizeOffset(3.0));
+
+            assert_eq!(editor_font_size(cx), 23.0, "editor base 20 + offset 3");
+            assert_eq!(
+                crate::workspace::ui_font_size(cx),
+                27.0,
+                "ui base 24 + offset 3"
+            );
+        });
+    }
+
+    #[test]
     fn set_cursor_at_grid_places_cursor_at_position() {
         let mut cx = TestAppContext::single();
         let (_buffer, editor) = new_editor(&mut cx, "hello world");
