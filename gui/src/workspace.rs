@@ -2677,6 +2677,11 @@ impl Workspace {
             },
             ActionKind::OpenHelp => crate::help::open_help(self, window, cx),
             ActionKind::OpenAbout => crate::about_modal::open_about(self, window, cx),
+            ActionKind::OpenFile => {
+                if let Some(open) = action.as_any().downcast_ref::<stoat_action::OpenFile>() {
+                    self.open_paths(std::slice::from_ref(&open.path), cx);
+                }
+            },
             ActionKind::OpenFileFinder => crate::file_finder::open_file_finder(self, window, cx),
             ActionKind::OpenFileFinderHSplit => {
                 crate::file_finder::open_file_finder_split(self, Axis::Horizontal, window, cx)
@@ -12564,6 +12569,37 @@ mod tests {
         ws.read_with(vcx, |w, cx| {
             assert_eq!(w.buffer_registry().read(cx).len(), 1);
             assert_eq!(w.pane_tree().read(cx).pane_count(), 1);
+            let focus = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(focus)
+                .expect("focused pane present")
+                .read(cx);
+            assert_eq!(pane.len(), 1);
+            assert!(pane.active_item().is_some());
+        });
+    }
+
+    #[test]
+    fn dispatch_open_file_opens_path_into_focused_pane() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello stoat\n");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        dispatch(
+            &ws,
+            vcx,
+            stoat_action::OpenFile {
+                path: PathBuf::from("/tmp/repo/foo.rs"),
+            },
+        );
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(w.buffer_registry().read(cx).len(), 1);
             let focus = w.pane_tree().read(cx).focus();
             let pane = w
                 .pane_tree()
