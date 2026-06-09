@@ -293,7 +293,7 @@ pub fn find_surround_pair(
 
 fn in_skip_zone(tree: Option<&stoat_language::Tree>, offset: usize) -> bool {
     match tree {
-        Some(t) => super::movement::is_in_string_or_comment(t, offset),
+        Some(t) => stoat_language::bracket::is_in_string_or_comment(t, offset),
         None => false,
     }
 }

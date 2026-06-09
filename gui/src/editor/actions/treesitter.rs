@@ -377,7 +377,7 @@ impl Editor {
             let tree = buffer
                 .syntax_map()
                 .and_then(|map| deepest_containing_layer(map, head, head).map(|layer| &layer.tree));
-            stoat::action_handlers::movement::match_bracket_target(&rope, head, tree)
+            stoat_language::bracket::match_bracket_target(&rope, head, tree)
         };
         let Some(target) = target else {
             return;

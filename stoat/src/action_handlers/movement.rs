@@ -6,7 +6,7 @@ use crate::{
     multi_buffer::MultiBufferSnapshot,
     pane::View,
 };
-use stoat_language::structural_diff::BufferRef;
+use stoat_language::{bracket, structural_diff::BufferRef};
 use stoat_text::{
     compute_number_delta, find_number_seeking, word_selection_offsets, Anchor, Bias, Point,
     Selection, SelectionGoal, WordTarget as TextWordTarget,
@@ -2308,7 +2308,7 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         (buffer_id, head_offset, ch)
     };
 
-    let Some((open, close, forward)) = bracket_pair(ch) else {
+    let Some((open, close, forward)) = bracket::bracket_pair(ch) else {
         return UpdateEffect::None;
     };
 
@@ -2318,7 +2318,7 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         .and_then(|sm| sm.snapshot().iter_layers().next().map(|l| l.tree.clone()));
 
     if let Some(ref tree) = tree_opt {
-        if is_in_string_or_comment(tree, head_offset) {
+        if bracket::is_in_string_or_comment(tree, head_offset) {
             return UpdateEffect::None;
         }
     }
@@ -2328,7 +2328,7 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
     let buffer_snapshot = display_snapshot.buffer_snapshot();
     let rope = buffer_snapshot.rope();
 
-    let Some(target) = scan_bracket_match(
+    let Some(target) = bracket::scan_bracket_match(
         rope,
         head_offset,
         ch,
@@ -2342,105 +2342,6 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
 
     apply_primary_range(editor, target..target);
     UpdateEffect::Redraw
-}
-
-/// Find the matching bracket for the character at `head_offset`
-/// in `rope`. Returns the byte offset of the matched bracket, or
-/// `None` when the char at `head_offset` is not a bracket, the
-/// cursor sits inside a string/comment node (when `tree` is
-/// provided), or no matching bracket exists in the requested
-/// direction. Bracket characters inside string/comment nodes are
-/// skipped during the scan when `tree` is provided.
-pub fn match_bracket_target(
-    rope: &stoat_text::Rope,
-    head_offset: usize,
-    tree: Option<&stoat_language::Tree>,
-) -> Option<usize> {
-    let ch = rope.chars_at(head_offset).next()?;
-    let (open, close, forward) = bracket_pair(ch)?;
-    if let Some(t) = tree {
-        if is_in_string_or_comment(t, head_offset) {
-            return None;
-        }
-    }
-    scan_bracket_match(rope, head_offset, ch, open, close, forward, tree)
-}
-
-fn bracket_pair(ch: char) -> Option<(char, char, bool)> {
-    match ch {
-        '(' => Some(('(', ')', true)),
-        ')' => Some(('(', ')', false)),
-        '[' => Some(('[', ']', true)),
-        ']' => Some(('[', ']', false)),
-        '{' => Some(('{', '}', true)),
-        '}' => Some(('{', '}', false)),
-        _ => None,
-    }
-}
-
-pub(crate) fn is_in_string_or_comment(tree: &stoat_language::Tree, offset: usize) -> bool {
-    let Some(mut node) = tree.root_node().descendant_for_byte_range(offset, offset) else {
-        return false;
-    };
-    loop {
-        let kind = node.kind();
-        if kind.contains("string") || kind.contains("comment") {
-            return true;
-        }
-        match node.parent() {
-            Some(p) => node = p,
-            None => return false,
-        }
-    }
-}
-
-fn scan_bracket_match(
-    rope: &stoat_text::Rope,
-    start: usize,
-    start_ch: char,
-    open: char,
-    close: char,
-    forward: bool,
-    tree: Option<&stoat_language::Tree>,
-) -> Option<usize> {
-    let mut depth: u32 = 1;
-    let in_skip_zone = |offset: usize| match tree {
-        Some(t) => is_in_string_or_comment(t, offset),
-        None => false,
-    };
-    if forward {
-        let mut cur = start + start_ch.len_utf8();
-        for c in rope.chars_at(cur) {
-            if (c == open || c == close) && !in_skip_zone(cur) {
-                if c == open {
-                    depth += 1;
-                } else {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(cur);
-                    }
-                }
-            }
-            cur += c.len_utf8();
-        }
-        None
-    } else {
-        let mut cur = start;
-        for c in rope.reversed_chars_at(start) {
-            cur -= c.len_utf8();
-            if (c == open || c == close) && !in_skip_zone(cur) {
-                if c == close {
-                    depth += 1;
-                } else {
-                    depth -= 1;
-                    if depth == 0 {
-                        return Some(cur);
-                    }
-                }
-            }
-        }
-        None
-    }
 }
 
 pub(super) fn goto_line_number(stoat: &mut Stoat) -> UpdateEffect {

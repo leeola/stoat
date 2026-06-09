@@ -1,3 +1,4 @@
+pub mod bracket;
 pub mod grammar;
 pub mod highlight;
 pub mod highlight_map;
