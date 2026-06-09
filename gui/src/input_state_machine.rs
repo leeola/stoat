@@ -1947,7 +1947,7 @@ mod tests {
     #[test]
     fn feed_lowers_sequence_binding_in_order() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { s -> [SplitRight(), quit()]; }");
+        let keymap = compile_keymap("on key { s -> [vsplit(), quit()]; }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let stroke = key("s");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {

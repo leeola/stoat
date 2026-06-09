@@ -330,7 +330,7 @@ mod tests {
     #[test]
     fn keystrokes_splits_per_char() {
         let mut harness = TestHarness::new();
-        let workspace = workspace_with_keymap_source(&mut harness, "on key { s -> SplitRight(); }");
+        let workspace = workspace_with_keymap_source(&mut harness, "on key { s -> vsplit(); }");
         let pane_tree = workspace.read_with(&harness.cx, |w, _| w.pane_tree().clone());
         harness.set_active_workspace(workspace);
 

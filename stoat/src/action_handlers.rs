@@ -1863,9 +1863,9 @@ mod tests {
         let c = h.write_file("c.txt", "CCC");
 
         h.open_file(&a);
-        h.type_action("SplitRight()");
+        h.type_action("vsplit()");
         h.open_file(&b);
-        h.type_action("SplitRight()");
+        h.type_action("vsplit()");
         h.open_file(&c);
         let frame = h.snapshot();
         assert_eq!(frame.pane_count, 3);
@@ -1936,7 +1936,7 @@ mod tests {
     #[test]
     fn copy_workspace_duplicates_pane_layout() {
         let mut h = Stoat::test();
-        h.type_action("SplitRight()");
+        h.type_action("vsplit()");
         let before_pane_count = h.stoat.active_workspace().panes.pane_count();
         assert_eq!(before_pane_count, 2);
 
@@ -2077,7 +2077,7 @@ mod tests {
     #[test]
     fn splitting_pane_breaks_freshness() {
         let mut h = Stoat::test();
-        h.type_action("SplitRight()");
+        h.type_action("vsplit()");
         assert!(!h.stoat.active_workspace().is_fresh());
     }
 

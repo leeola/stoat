@@ -3,20 +3,24 @@ use crate::{action::define_action, ActionKind, ActionPriority};
 define_action!(
     SplitRightDef,
     SplitRight,
-    "SplitRight",
+    "vsplit",
     ActionKind::SplitRight,
     "split pane right",
     "Split the focused pane vertically, creating a new pane to the right.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    &["vs"]
 );
 define_action!(
     SplitDownDef,
     SplitDown,
-    "SplitDown",
+    "hsplit",
     ActionKind::SplitDown,
     "split pane down",
     "Split the focused pane horizontally, creating a new pane below.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    &["hs"]
 );
 define_action!(
     SplitNewRightDef,
@@ -93,20 +97,24 @@ define_action!(
 define_action!(
     ClosePaneDef,
     ClosePane,
-    "ClosePane",
+    "close",
     ActionKind::ClosePane,
     "close pane",
     "Close the focused pane. Refuses if it is the last remaining pane.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    &["wclose"]
 );
 define_action!(
     CloseOtherPanesDef,
     CloseOtherPanes,
-    "CloseOtherPanes",
+    "only",
     ActionKind::CloseOtherPanes,
     "close other panes",
     "Close every split pane except the focused one. No-op when the focused pane is the only one.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    &["wonly"]
 );
 
 #[cfg(test)]
@@ -132,9 +140,9 @@ mod tests {
 
     #[test]
     fn action_names() {
-        assert_eq!(SplitRight.def().name(), "SplitRight");
-        assert_eq!(ClosePane.def().name(), "ClosePane");
-        assert_eq!(CloseOtherPanes.def().name(), "CloseOtherPanes");
+        assert_eq!(SplitRight.def().name(), "vsplit");
+        assert_eq!(ClosePane.def().name(), "close");
+        assert_eq!(CloseOtherPanes.def().name(), "only");
     }
 
     #[test]

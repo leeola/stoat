@@ -747,8 +747,8 @@ mod tests {
     #[test]
     fn alphabetical_within_same_priority() {
         let listed = names_for("");
-        assert!(pos_in(&listed, "CloseCommits") < pos_in(&listed, "ClosePane"));
-        assert!(pos_in(&listed, "ClosePane") < pos_in(&listed, "CloseWorkspace"));
+        assert!(pos_in(&listed, "FocusDown") < pos_in(&listed, "FocusLeft"));
+        assert!(pos_in(&listed, "FocusLeft") < pos_in(&listed, "FocusNext"));
     }
 
     #[test]
@@ -766,9 +766,9 @@ mod tests {
 
     #[test]
     fn substring_filter_after_prefix() {
-        let listed = names_for("Pane");
-        // ClosePane has "Pane" as a substring but not as a prefix.
-        assert!(listed.contains(&"ClosePane"));
+        let listed = names_for("Word");
+        // MoveNextWordStart has "Word" as a substring but not as a prefix.
+        assert!(listed.contains(&"MoveNextWordStart"));
     }
 
     #[test]

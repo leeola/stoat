@@ -8108,7 +8108,7 @@ mod tests {
         });
         buffer.update(vcx, |b, cx| {
             let len = b.text().len();
-            b.edit(0..len, "SplitRight", cx);
+            b.edit(0..len, "vsplit", cx);
         });
         vcx.run_until_parked();
 
@@ -12279,7 +12279,7 @@ mod tests {
     fn keystroke_routes_split_right_through_state_machine() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
-        let (config, errors) = stoat_config::parse("on key { s -> SplitRight(); }");
+        let (config, errors) = stoat_config::parse("on key { s -> vsplit(); }");
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         let keymap = Keymap::compile(&config.expect("config"));
         let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
@@ -12297,7 +12297,7 @@ mod tests {
     fn keystroke_sequence_dispatches_each_action_in_order() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
-        let (config, errors) = stoat_config::parse("on key { s -> [SplitRight(), SplitRight()]; }");
+        let (config, errors) = stoat_config::parse("on key { s -> [vsplit(), vsplit()]; }");
         assert!(errors.is_empty(), "parse errors: {errors:?}");
         let keymap = Keymap::compile(&config.expect("config"));
         let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
