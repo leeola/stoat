@@ -1,7 +1,7 @@
 use crate::{
     editor::{Editor, EditorEvent},
     elevation::StyledExt,
-    globals::{LanguageRegistry, LspHostGlobal, UserSnippetsGlobal},
+    globals::{FsHostGlobal, LanguageRegistry, LspHostGlobal, UserSnippetsGlobal},
     theme::ActiveTheme,
 };
 use gpui::{
@@ -15,7 +15,8 @@ use lsp_types::{
 };
 use std::{ops::Range, path::Path, str::FromStr, sync::Arc};
 use stoat::{
-    host::{LanguageServerFeature, LspHost},
+    completion::{self, CompletionContext, CompletionItem},
+    host::{FsHost, LanguageServerFeature, LspHost},
     lsp::util::{byte_offset_to_lsp_pos, lsp_range_to_byte_range},
     snippet::UserSnippet,
 };
@@ -310,6 +311,10 @@ fn is_in_insert_mode(editor: &Entity<Editor>, cx: &Context<'_, CompletionPopup>)
 
 struct CompletionRequest {
     host: Arc<dyn LspHost>,
+    /// Filesystem host for the path source, captured at construction
+    /// because the async [`Self::run`] has no `cx`. `None` disables
+    /// path completion when no host is installed.
+    fs_host: Option<Arc<dyn FsHost>>,
     language: Arc<stoat_language::Language>,
     workspace_root: std::path::PathBuf,
     uri: Uri,
@@ -326,6 +331,7 @@ struct CompletionRequest {
 impl CompletionRequest {
     fn build(editor: &Entity<Editor>, cx: &mut Context<'_, CompletionPopup>) -> Option<Self> {
         let host = cx.global::<LspHostGlobal>().0.clone();
+        let fs_host = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone());
         let path = editor.read(cx).file_path()?.to_path_buf();
         let language = cx.global::<LanguageRegistry>().0.for_path(&path)?;
         let uri = path_to_uri(&path)?;
@@ -349,6 +355,7 @@ impl CompletionRequest {
             .unwrap_or_else(|| path.clone());
         Some(Self {
             host,
+            fs_host,
             language,
             workspace_root,
             uri,
@@ -362,9 +369,50 @@ impl CompletionRequest {
 
     async fn run(mut self) -> Vec<CompletionEntry> {
         let snippet_entries = std::mem::take(&mut self.snippet_entries);
-        let mut entries = self.lsp_entries().await;
+        let (path_entries, word_entries) = self.local_source_entries();
+        let mut entries = path_entries;
+        entries.extend(self.lsp_entries().await);
         entries.extend(snippet_entries);
+        entries.extend(word_entries);
         entries
+    }
+
+    /// Filesystem-path and buffer-word completion rows, matching the
+    /// TUI's path and word sources. Returned as a pair so [`Self::run`]
+    /// can keep the source priority order (path first, word last as a
+    /// fallback) around the LSP and snippet rows. Path rows are empty
+    /// when no filesystem host is installed or the prefix is not
+    /// path-shaped; word rows are empty when the prefix is empty.
+    fn local_source_entries(&self) -> (Vec<CompletionEntry>, Vec<CompletionEntry>) {
+        let text_before_cursor = {
+            let row = self.rope.offset_to_point(self.cursor_offset).row;
+            let line_start = self.rope.point_to_offset(stoat_text::Point::new(row, 0));
+            self.rope.slice(line_start..self.cursor_offset).to_string()
+        };
+        let ctx = CompletionContext {
+            cursor_offset: self.cursor_offset,
+            prefix: &self.signature.1,
+            prefix_range: self.prefix_range.clone(),
+            text_before_cursor: &text_before_cursor,
+        };
+
+        let path_rows = self
+            .fs_host
+            .as_ref()
+            .map(|fs| completion::path::fetch(&ctx, fs.as_ref(), &self.workspace_root, None))
+            .unwrap_or_default();
+        let word_rows = completion::word::fetch(&ctx, &self.rope);
+
+        (
+            path_rows
+                .into_iter()
+                .map(completion_entry_from_item)
+                .collect(),
+            word_rows
+                .into_iter()
+                .map(completion_entry_from_item)
+                .collect(),
+        )
     }
 
     async fn lsp_entries(self) -> Vec<CompletionEntry> {
@@ -437,6 +485,18 @@ fn translate_item(
         label: lsp_item.label.into(),
         insert_text,
         replace_range,
+    }
+}
+
+/// Convert a stoat completion source's [`CompletionItem`] into the
+/// popup's [`CompletionEntry`]. The source already scopes
+/// `replace_range` to the segment acceptance should replace, so it
+/// carries straight over.
+fn completion_entry_from_item(item: CompletionItem) -> CompletionEntry {
+    CompletionEntry {
+        label: item.label.into(),
+        insert_text: item.insert_text,
+        replace_range: Some(item.replace_range),
     }
 }
 
@@ -626,6 +686,75 @@ mod tests {
         });
         assert_eq!(labels, vec!["foo".to_string(), "format".to_string()]);
         assert_eq!(popup.read_with(&cx, |p, _| p.selected_idx()), 0);
+    }
+
+    fn seed_cursor(cx: &mut TestAppContext, editor: &Entity<Editor>, offset: usize) {
+        editor.update(cx, |ed, cx| {
+            let snap = ed.multi_buffer().read(cx).snapshot();
+            let anchor = snap.anchor_at(offset, stoat_text::Bias::Left);
+            let selection = stoat_text::Selection {
+                id: 1,
+                start: anchor,
+                end: anchor,
+                reversed: false,
+                goal: stoat_text::SelectionGoal::None,
+            };
+            ed.selections_mut().replace_with(vec![selection], &snap);
+        });
+    }
+
+    fn trigger_completion(cx: &mut TestAppContext, editor: &Entity<Editor>, offset: usize) {
+        editor.update(cx, |ed, cx| {
+            let buffer = ed.multi_buffer().read(cx).as_singleton().cloned().unwrap();
+            buffer.update(cx, |b, cx| b.edit(offset..offset, "", cx));
+        });
+        cx.run_until_parked();
+    }
+
+    #[test]
+    fn popup_includes_buffer_word_completions() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        let (workspace, editor) = build_workspace_editor(&mut cx, &path, "foobar\nfo");
+        set_mode(&mut cx, &workspace, "insert");
+        seed_cursor(&mut cx, &editor, 9);
+
+        let popup = cx.update(|cx| {
+            let e = editor.clone();
+            cx.new(|cx| CompletionPopup::new(e, cx))
+        });
+        trigger_completion(&mut cx, &editor, 9);
+
+        let labels: Vec<String> = popup.read_with(&cx, |p, _| {
+            p.items().iter().map(|i| i.label.to_string()).collect()
+        });
+        assert_eq!(labels, vec!["foobar".to_string()]);
+    }
+
+    #[test]
+    fn popup_includes_filesystem_path_completions() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let fs = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/alpha.rs", b"");
+        fs.insert_file("/tmp/beta.rs", b"");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let path = PathBuf::from("/tmp/main.rs");
+        let (workspace, editor) = build_workspace_editor(&mut cx, &path, "./a");
+        set_mode(&mut cx, &workspace, "insert");
+        seed_cursor(&mut cx, &editor, 3);
+
+        let popup = cx.update(|cx| {
+            let e = editor.clone();
+            cx.new(|cx| CompletionPopup::new(e, cx))
+        });
+        trigger_completion(&mut cx, &editor, 3);
+
+        let labels: Vec<String> = popup.read_with(&cx, |p, _| {
+            p.items().iter().map(|i| i.label.to_string()).collect()
+        });
+        assert_eq!(labels, vec!["alpha.rs".to_string()]);
     }
 
     #[test]
