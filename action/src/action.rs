@@ -46,6 +46,15 @@ pub trait ActionDef: Debug + Send + Sync + 'static {
     fn priority(&self) -> ActionPriority {
         ActionPriority::Normal
     }
+
+    /// Short alternate names that resolve to this action alongside
+    /// [`Self::name`], e.g. `w` for `write`. Empty by default; both the
+    /// canonical name and every alias key the same action in the
+    /// registry, so a collision with any other name or alias is a
+    /// registration-time panic.
+    fn aliases(&self) -> &'static [&'static str] {
+        &[]
+    }
 }
 
 pub trait Action: Debug + Send + 'static {
@@ -72,6 +81,19 @@ macro_rules! define_action {
         $crate::action::define_action!($def, $action, $name, $kind, $short, $long, $priority, true);
     };
     ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr, $hint_visible:expr) => {
+        $crate::action::define_action!(
+            $def,
+            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            $hint_visible,
+            &[]
+        );
+    };
+    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr, $hint_visible:expr, $aliases:expr) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -102,6 +124,10 @@ macro_rules! define_action {
 
             fn hint_visible(&self) -> bool {
                 $hint_visible
+            }
+
+            fn aliases(&self) -> &'static [&'static str] {
+                $aliases
             }
         }
 

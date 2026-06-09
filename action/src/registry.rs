@@ -133,7 +133,7 @@ static REGISTRY: OnceLock<HashMap<&'static str, RegistryEntry>> = OnceLock::new(
 fn init() -> HashMap<&'static str, RegistryEntry> {
     let mut map = HashMap::with_capacity(16);
     let mut add = |def: &'static dyn ActionDef, create: CreateFn| {
-        map.insert(def.name(), RegistryEntry { def, create });
+        register_entry(&mut map, def, create);
     };
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
@@ -838,17 +838,96 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     map
 }
 
+/// Key `def`'s canonical name and every [`ActionDef::aliases`] entry to
+/// the same registry entry. Panics if any key is already registered, so
+/// a name/alias collision fails loudly at startup rather than silently
+/// shadowing an action.
+fn register_entry(
+    map: &mut HashMap<&'static str, RegistryEntry>,
+    def: &'static dyn ActionDef,
+    create: CreateFn,
+) {
+    for key in std::iter::once(def.name()).chain(def.aliases().iter().copied()) {
+        if map.insert(key, RegistryEntry { def, create }).is_some() {
+            panic!("action registry: '{key}' registered twice (name or alias collision)");
+        }
+    }
+}
+
+/// The registry entries under their canonical-name key only, skipping
+/// alias keys so an aliased action is listed once. Backs [`all`].
+fn canonical<'a>(
+    map: &'a HashMap<&'static str, RegistryEntry>,
+) -> impl Iterator<Item = &'a RegistryEntry> {
+    map.iter()
+        .filter(|(key, entry)| **key == entry.def.name())
+        .map(|(_, entry)| entry)
+}
+
 pub fn lookup(name: &str) -> Option<&'static RegistryEntry> {
     REGISTRY.get_or_init(init).get(name)
 }
 
 pub fn all() -> impl Iterator<Item = &'static RegistryEntry> {
-    REGISTRY.get_or_init(init).values()
+    canonical(REGISTRY.get_or_init(init))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::action::define_action;
+
+    define_action!(
+        AliasTestDef,
+        AliasTest,
+        "alias-test",
+        crate::ActionKind::Quit,
+        "",
+        "",
+        crate::ActionPriority::Normal,
+        true,
+        &["at", "atest"]
+    );
+    define_action!(
+        AliasClashDef,
+        AliasClash,
+        "alias-clash",
+        crate::ActionKind::Quit,
+        "",
+        "",
+        crate::ActionPriority::Normal,
+        true,
+        &["at"]
+    );
+
+    #[test]
+    fn macro_threads_alias_list() {
+        assert_eq!(AliasTest::DEF.aliases(), &["at", "atest"]);
+        assert!(Quit::DEF.aliases().is_empty(), "default is no aliases");
+    }
+
+    #[test]
+    fn register_entry_keys_name_and_each_alias() {
+        let mut map: HashMap<&'static str, RegistryEntry> = HashMap::new();
+        register_entry(&mut map, AliasTest::DEF, |_| Ok(Box::new(AliasTest)));
+        assert_eq!(map.len(), 3, "name plus two aliases are all lookup keys");
+        assert!(map.contains_key("alias-test"));
+        assert!(map.contains_key("at"));
+        assert!(map.contains_key("atest"));
+        assert_eq!(
+            canonical(&map).count(),
+            1,
+            "an aliased action is listed once"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "name or alias collision")]
+    fn register_entry_panics_on_alias_collision() {
+        let mut map: HashMap<&'static str, RegistryEntry> = HashMap::new();
+        register_entry(&mut map, AliasTest::DEF, |_| Ok(Box::new(AliasTest)));
+        register_entry(&mut map, AliasClash::DEF, |_| Ok(Box::new(AliasClash)));
+    }
 
     const ZERO_ARG_NAMES: &[&str] = &[
         "Quit",
