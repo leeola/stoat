@@ -559,6 +559,19 @@ mod tests {
     }
 
     #[test]
+    fn action_with_hyphenated_name() {
+        let config = parse_ok("on key { q -> review-close(); }");
+        let binding = assert_binding(&config.blocks[0].node.statements[0]);
+        match &binding.action.node {
+            ActionExpr::Single(action) => {
+                assert_eq!(action.name, "review-close");
+                assert!(action.args.is_empty());
+            },
+            _ => panic!("expected single action"),
+        }
+    }
+
+    #[test]
     fn let_bindings() {
         let config = parse_ok("on init { let leader = space; }");
         let let_binding = assert_let(&config.blocks[0].node.statements[0]);

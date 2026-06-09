@@ -63,6 +63,27 @@ fn spanned_ident<'src>() -> impl Parser<'src, &'src str, Spanned<String>, Extra<
     ident().map_with(|node, e| Spanned::new(node, span_to_range(e.span())))
 }
 
+/// Like [`ident`] but also accepts `-` after the first character, so
+/// kebab-case action names (`review-close`, `quit-all`) parse. Scoped
+/// to the action-call name; binding keys, `let`/`fn`/theme names keep
+/// the stricter [`ident`].
+fn action_ident<'src>() -> impl Parser<'src, &'src str, String, Extra<'src>> + Clone {
+    any()
+        .filter(|c: &char| c.is_ascii_alphabetic() || *c == '_')
+        .then(
+            any()
+                .filter(|c: &char| c.is_ascii_alphanumeric() || *c == '_' || *c == '-')
+                .repeated()
+                .collect::<String>(),
+        )
+        .map(|(first, rest): (char, String)| {
+            let mut s = String::with_capacity(rest.len() + 1);
+            s.push(first);
+            s.push_str(&rest);
+            s
+        })
+}
+
 fn string_literal<'src>() -> impl Parser<'src, &'src str, String, Extra<'src>> + Clone {
     just('"')
         .ignore_then(
@@ -303,7 +324,7 @@ fn arg<'src>() -> impl Parser<'src, &'src str, Spanned<Arg>, Extra<'src>> + Clon
 }
 
 fn action<'src>() -> impl Parser<'src, &'src str, Action, Extra<'src>> + Clone {
-    ident()
+    action_ident()
         .then_ignore(ws())
         .then_ignore(just('('))
         .then_ignore(ws())
