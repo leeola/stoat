@@ -676,6 +676,22 @@ fn apply_pane_decorations(
 
 impl Render for ReviewItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        if self.files.is_empty() {
+            let mode = comparison_mode_label(&self.session.read(cx).inner().source);
+            return div()
+                .flex()
+                .flex_col()
+                .size_full()
+                .items_center()
+                .justify_center()
+                .gap_1()
+                .child(SharedString::from("No changes to review"))
+                .children(mode.map(|m| {
+                    div().opacity(0.6).child(SharedString::from(format!(
+                        "{m} \u{2014} press c to cycle comparison mode"
+                    )))
+                }));
+        }
         let active = self.active_file_index(cx);
         let position = commit_position_label(self.session.read(cx).inner());
         let children: Vec<_> = self
@@ -901,6 +917,23 @@ fn short_sha(sha: &str) -> String {
     sha.chars().take(7).collect()
 }
 
+/// Comparison-mode name for the working-tree sources the `c` cycle
+/// steps through: `WorkingTree` ("All") -> `WorkingTreeUnstaged`
+/// ("Unstaged") -> `WorkingTreeStaged` ("Staged"). `None` for every
+/// other source, which carries no staged/unstaged/all distinction.
+///
+/// Doubles as the predicate for whether an empty scan is a legitimate
+/// "no changes to review" state worth opening: only these sources
+/// open an empty review, the rest stay silent when unresolvable.
+pub(crate) fn comparison_mode_label(source: &ReviewSource) -> Option<&'static str> {
+    match source {
+        ReviewSource::WorkingTree { .. } => Some("All"),
+        ReviewSource::WorkingTreeUnstaged { .. } => Some("Unstaged"),
+        ReviewSource::WorkingTreeStaged { .. } => Some("Staged"),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -991,6 +1024,34 @@ mod tests {
         });
         single.add_commit_files("c1".into(), vec![input("a.txt")]);
         assert_eq!(commit_position_label(&single), None);
+    }
+
+    #[test]
+    fn comparison_mode_label_only_for_working_tree_sources() {
+        let dir = || PathBuf::from("/repo");
+        assert_eq!(
+            comparison_mode_label(&ReviewSource::WorkingTree { workdir: dir() }),
+            Some("All")
+        );
+        assert_eq!(
+            comparison_mode_label(&ReviewSource::WorkingTreeUnstaged { workdir: dir() }),
+            Some("Unstaged")
+        );
+        assert_eq!(
+            comparison_mode_label(&ReviewSource::WorkingTreeStaged { workdir: dir() }),
+            Some("Staged")
+        );
+        assert_eq!(
+            comparison_mode_label(&ReviewSource::WorkspaceWatch { workdir: dir() }),
+            None
+        );
+        assert_eq!(
+            comparison_mode_label(&ReviewSource::Commit {
+                workdir: dir(),
+                sha: "abc".into()
+            }),
+            None
+        );
     }
 
     #[test]

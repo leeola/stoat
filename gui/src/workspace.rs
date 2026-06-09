@@ -6653,10 +6653,12 @@ impl Workspace {
 
     /// Build a review item for `source`, re-applying the persisted
     /// per-chunk `statuses` and `approvals` (keyed by [`ChunkFingerprint`])
-    /// onto the freshly-scanned chunks. Returns `None` when the source
-    /// yields no inputs or no diff hunks. Shared by the `OpenReview*` open
-    /// path (which passes empty decision maps) and workspace restore (which
-    /// passes the decisions parsed from the persisted blob).
+    /// onto the freshly-scanned chunks. A working-tree comparison with no
+    /// hunks still builds an empty item (so a clean repo opens a "No changes
+    /// to review" pane); any other source with no hunks returns `None`.
+    /// Shared by the `OpenReview*` open path (which passes empty decision
+    /// maps) and workspace restore (which passes the decisions parsed from
+    /// the persisted blob).
     fn build_review_item(
         &mut self,
         source: ReviewSource,
@@ -6668,15 +6670,18 @@ impl Workspace {
         if let ReviewSource::Branch { workdir, base } = &source {
             populate_branch_session(&mut inner_session, workdir, base.as_deref(), cx);
         } else {
-            let inputs = review_inputs_for_source(&source, cx);
-            if inputs.is_empty() {
-                return None;
-            }
-            inner_session.add_files(inputs);
+            inner_session.add_files(review_inputs_for_source(&source, cx));
         }
-        if inner_session.order.is_empty() {
+
+        // An empty working-tree comparison is a valid "no changes to
+        // review" state worth opening; an empty result from any other
+        // source means it could not be resolved, so abort as before.
+        if inner_session.order.is_empty()
+            && crate::review_item::comparison_mode_label(&source).is_none()
+        {
             return None;
         }
+
         inner_session.apply_statuses(statuses);
         inner_session.apply_approvals(approvals);
 
@@ -15008,7 +15013,7 @@ mod tests {
     }
 
     #[test]
-    fn dispatch_open_review_with_no_changed_files_is_silent() {
+    fn dispatch_open_review_with_no_changed_files_opens_empty_review() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
@@ -15019,11 +15024,21 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::OpenReview);
         vcx.run_until_parked();
 
-        assert!(active_pane_review_item(vcx, &ws).is_none());
+        let item = active_pane_review_item(vcx, &ws).expect("clean repo opens an empty review");
+        item.read_with(vcx, |item, _| {
+            assert!(item.files().is_empty(), "an empty review has no file views");
+        });
+        assert!(
+            ws.read_with(vcx, |w, cx| w
+                .input_state_machine()
+                .read(cx)
+                .review_active()),
+            "review_active set once the empty review opens",
+        );
     }
 
     #[test]
-    fn dispatch_open_review_without_git_repo_is_silent() {
+    fn dispatch_open_review_without_git_repo_opens_empty_review() {
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
@@ -15033,7 +15048,10 @@ mod tests {
         dispatch(&ws, vcx, stoat_action::OpenReview);
         vcx.run_until_parked();
 
-        assert!(active_pane_review_item(vcx, &ws).is_none());
+        let item = active_pane_review_item(vcx, &ws).expect("no repo still opens an empty review");
+        item.read_with(vcx, |item, _| {
+            assert!(item.files().is_empty(), "an empty review has no file views");
+        });
     }
 
     #[test]
