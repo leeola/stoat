@@ -1519,9 +1519,12 @@ impl Workspace {
             self.set_input_mode(&mode, cx);
         }
 
-        let review_active = self.any_pane_hosts_review_item(cx);
-        self.input_state_machine
-            .update(cx, |sm, cx_sm| sm.set_review_active(review_active, cx_sm));
+        let review_session = self.current_review_session(cx);
+        self.input_state_machine.update(cx, |sm, cx_sm| {
+            sm.set_review_active(review_session.is_some(), cx_sm)
+        });
+        self.review_progress
+            .update(cx, |rp, cx| rp.set_review_session(review_session, cx));
 
         self.refresh_active_editor_subscription(cx);
         cx.notify();
@@ -1674,20 +1677,29 @@ impl Workspace {
             })
     }
 
-    /// Whether any pane currently hosts a review item. Drives the
-    /// workspace-wide `review_active` keymap-state flag, which stays
-    /// set while review is open anywhere -- unlike
-    /// [`Self::active_review_item`], it ignores focus.
-    fn any_pane_hosts_review_item(&self, cx: &App) -> bool {
+    /// The review session the workspace-wide status segment should
+    /// display, or `None` when no pane hosts a review. Prefers the
+    /// focused review (so staging in it drives the segment); otherwise
+    /// the first open review found in an all-pane scan, so the segment
+    /// persists regardless of which pane is focused. `is_some()` is
+    /// exactly the `review_active` condition.
+    fn current_review_session(
+        &self,
+        cx: &App,
+    ) -> Option<Entity<crate::review_session::ReviewSession>> {
+        if let Some(item) = self.active_review_item(cx) {
+            return Some(item.read(cx).session().clone());
+        }
         let tree = self.pane_tree.read(cx);
         tree.split_pane_ids()
             .into_iter()
             .filter_map(|id| tree.pane(id))
-            .any(|pane| {
-                pane.read(cx).items().iter().any(|item| {
+            .find_map(|pane| {
+                pane.read(cx).items().iter().find_map(|item| {
                     item.to_any_view()
                         .downcast::<crate::review_item::ReviewItem>()
-                        .is_ok()
+                        .ok()
+                        .map(|review| review.read(cx).session().clone())
                 })
             })
     }
@@ -14947,6 +14959,86 @@ mod tests {
         assert!(
             !review_active(vcx),
             "cleared once the last review item closes"
+        );
+    }
+
+    #[test]
+    fn review_status_segment_shows_and_persists_off_review_focus() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEW\nc\n");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .with_fs(&fs)
+            .modified("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        install_full_globals(vcx, fs, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenReview);
+        vcx.run_until_parked();
+
+        let (comparison, total) = ws.read_with(vcx, |w, cx| {
+            let rp = w.review_progress().read(cx);
+            (rp.comparison(), rp.progress().map(|p| p.total))
+        });
+        assert_eq!(
+            comparison,
+            Some("All"),
+            "comparison mode shown while review active"
+        );
+        assert!(
+            total.is_some_and(|t| t > 0),
+            "staged/total shown for a changed file"
+        );
+
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        let pane = pane_tree
+            .read_with(vcx, |t, _| t.pane(t.focus()).cloned())
+            .expect("focused pane");
+        let scratch = workspace_item(vcx, "scratch");
+        pane.update(vcx, |p, cx| {
+            p.add_item(scratch, cx);
+        });
+        vcx.run_until_parked();
+
+        ws.read_with(vcx, |w, cx| {
+            assert_eq!(
+                w.review_progress().read(cx).comparison(),
+                Some("All"),
+                "segment persists when focus leaves the review pane",
+            );
+        });
+    }
+
+    #[test]
+    fn review_status_segment_clears_when_last_review_closes() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEW\nc\n");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .with_fs(&fs)
+            .modified("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        install_full_globals(vcx, fs, git);
+
+        dispatch(&ws, vcx, stoat_action::OpenReview);
+        vcx.run_until_parked();
+        assert!(ws.read_with(vcx, |w, cx| w
+            .review_progress()
+            .read(cx)
+            .progress()
+            .is_some()));
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+        assert!(
+            ws.read_with(vcx, |w, cx| w
+                .review_progress()
+                .read(cx)
+                .progress()
+                .is_none()),
+            "segment clears once the last review closes",
         );
     }
 

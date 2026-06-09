@@ -1,37 +1,40 @@
 use crate::{
-    editor::{Editor, EditorEvent},
     item::ItemHandle,
-    review_session::ReviewApplyResult,
+    review_item,
+    review_session::{ReviewApplyResult, ReviewSession, ReviewSessionEvent},
     status_bar::StatusItemView,
     theme::ActiveTheme,
 };
 use gpui::{
-    div, App, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
-    Subscription, WeakEntity, Window,
+    div, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled, Subscription,
+    WeakEntity, Window,
 };
 use stoat::review_session::ReviewProgress as InnerProgress;
 
-/// Status-bar item that surfaces the active editor's review session
-/// state. When the session has recorded a
-/// [`stoat_action::ReviewApplyStaged`] outcome via
-/// [`crate::review_session::ReviewSession::set_apply_result`] the
-/// badge renders that result (` applied N ` or
-/// ` applied N/M `); otherwise it falls back to the live
-/// `{staged}/{total}` progress, plus a ` skip:{skipped} ` segment
-/// when any chunks have been skipped. Hides entirely when the
-/// active item is not an editor, has no review session attached,
-/// or has a review session with zero chunks and no apply result.
+/// Status-bar segment that surfaces the workspace's active review
+/// session, independent of which pane is focused. The workspace pushes
+/// the session to display via [`Self::set_review_session`] whenever the
+/// open-review set changes -- the focused review when one is focused,
+/// otherwise the first open review -- so the segment persists while a
+/// review is open in any pane and clears once the last one closes.
 ///
-/// Rebinds whenever the active pane item changes; subscribes to the
-/// editor's [`EditorEvent::Changed`] so review-session mutations --
-/// which the editor re-emits via its
-/// [`crate::review_session::ReviewSessionEvent`] subscription --
-/// refresh the badge without polling.
+/// Renders an optional `[mode]` comparison-mode prefix (Unstaged /
+/// Staged / All, absent for non-working-tree reviews) followed by the
+/// `{staged}/{total}` progress, or a recorded
+/// [`stoat_action::ReviewApplyStaged`] outcome (` applied N ` /
+/// ` applied N/M `). Stays visible even at zero chunks; hides only when
+/// no session is bound.
+///
+/// Subscribes to the bound session's [`ReviewSessionEvent`]s so
+/// chunk-staging and refreshes update the counters without polling. The
+/// `REV` mode badge stays tied to the focused pane's mode and is a
+/// separate item.
 pub struct ReviewProgress {
     progress: Option<InnerProgress>,
     apply_result: Option<ReviewApplyResult>,
-    editor: Option<WeakEntity<Editor>>,
-    _editor_subscription: Option<Subscription>,
+    comparison: Option<&'static str>,
+    session: Option<WeakEntity<ReviewSession>>,
+    _session_subscription: Option<Subscription>,
 }
 
 impl Default for ReviewProgress {
@@ -45,8 +48,9 @@ impl ReviewProgress {
         Self {
             progress: None,
             apply_result: None,
-            editor: None,
-            _editor_subscription: None,
+            comparison: None,
+            session: None,
+            _session_subscription: None,
         }
     }
 
@@ -58,23 +62,57 @@ impl ReviewProgress {
         self.apply_result.as_ref()
     }
 
-    fn bind_to_editor(&mut self, editor: &Entity<Editor>, cx: &mut Context<'_, Self>) {
-        self.editor = Some(editor.downgrade());
-        self._editor_subscription = Some(cx.subscribe(
-            editor,
-            |this, editor, _event: &EditorEvent, cx| {
-                this.refresh_from_editor(&editor, cx);
-            },
-        ));
-        self.refresh_from_editor(editor, cx);
+    pub fn comparison(&self) -> Option<&'static str> {
+        self.comparison
     }
 
-    fn refresh_from_editor(&mut self, editor: &Entity<Editor>, cx: &mut Context<'_, Self>) {
-        let next_progress = compute_progress(editor.read(cx), cx);
-        let next_apply = compute_apply_result(editor.read(cx), cx);
-        if self.progress != next_progress || self.apply_result != next_apply {
+    /// Bind the segment to `session` (or clear it with `None`). The
+    /// workspace calls this on every pane change with the review to
+    /// display. Skips re-binding when the same session is pushed again
+    /// so the live subscription is not churned.
+    pub fn set_review_session(
+        &mut self,
+        session: Option<Entity<ReviewSession>>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let current = self.session.as_ref().map(|s| s.entity_id());
+        let next = session.as_ref().map(|s| s.entity_id());
+        if current == next {
+            return;
+        }
+        match session {
+            Some(session) => self.bind_to_session(&session, cx),
+            None => self.clear(cx),
+        }
+    }
+
+    fn bind_to_session(&mut self, session: &Entity<ReviewSession>, cx: &mut Context<'_, Self>) {
+        self.session = Some(session.downgrade());
+        self._session_subscription = Some(cx.subscribe(
+            session,
+            |this, session, _event: &ReviewSessionEvent, cx| {
+                this.refresh_from_session(&session, cx);
+            },
+        ));
+        self.refresh_from_session(session, cx);
+    }
+
+    fn refresh_from_session(
+        &mut self,
+        session: &Entity<ReviewSession>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let session = session.read(cx);
+        let next_progress = Some(session.progress());
+        let next_apply = session.last_apply_result().cloned();
+        let next_comparison = review_item::comparison_mode_label(&session.inner().source);
+        if self.progress != next_progress
+            || self.apply_result != next_apply
+            || self.comparison != next_comparison
+        {
             self.progress = next_progress;
             self.apply_result = next_apply;
+            self.comparison = next_comparison;
             cx.notify();
         }
     }
@@ -82,22 +120,28 @@ impl ReviewProgress {
     fn clear(&mut self, cx: &mut Context<'_, Self>) {
         if self.progress.is_none()
             && self.apply_result.is_none()
-            && self.editor.is_none()
-            && self._editor_subscription.is_none()
+            && self.comparison.is_none()
+            && self.session.is_none()
         {
             return;
         }
         self.progress = None;
         self.apply_result = None;
-        self.editor = None;
-        self._editor_subscription = None;
+        self.comparison = None;
+        self.session = None;
+        self._session_subscription = None;
         cx.notify();
     }
 }
 
 impl Render for ReviewProgress {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let label = format_badge(self.apply_result.as_ref(), self.progress.as_ref()).map(|text| {
+        let label = format_segment(
+            self.comparison,
+            self.apply_result.as_ref(),
+            self.progress.as_ref(),
+        )
+        .map(|text| {
             div()
                 .px_2()
                 .text_color(cx.theme().statusbar_text)
@@ -108,44 +152,36 @@ impl Render for ReviewProgress {
 }
 
 impl StatusItemView for ReviewProgress {
+    /// The segment is driven workspace-wide via
+    /// [`Self::set_review_session`], not by the focused pane item, so
+    /// this fan-out callback is intentionally inert (mirroring
+    /// [`crate::status_bar::mode_badge::ModeBadge`]).
     fn set_active_pane_item(
         &mut self,
-        active_pane_item: Option<&dyn ItemHandle>,
-        cx: &mut Context<'_, Self>,
+        _active_pane_item: Option<&dyn ItemHandle>,
+        _cx: &mut Context<'_, Self>,
     ) {
-        let editor = active_pane_item.and_then(|item| item.to_any_view().downcast::<Editor>().ok());
-        match editor {
-            Some(editor) => self.bind_to_editor(&editor, cx),
-            None => self.clear(cx),
-        }
     }
 }
 
-fn compute_progress(editor: &Editor, cx: &App) -> Option<InnerProgress> {
-    let session = editor.review_session()?;
-    let progress = session.read(cx).progress();
-    if progress.total == 0 {
-        return None;
-    }
-    Some(progress)
-}
-
-fn compute_apply_result(editor: &Editor, cx: &App) -> Option<ReviewApplyResult> {
-    let session = editor.review_session()?;
-    session.read(cx).last_apply_result().cloned()
-}
-
-/// Render the badge label, preferring an apply result over the live
-/// progress counters when both are present. Returns `None` when
-/// neither piece of state should produce a visible badge.
-fn format_badge(
+/// Build the segment label: an optional `[mode]` comparison-mode prefix
+/// followed by the apply-result or live-progress body. Returns `None`
+/// only when no session is bound (`progress` is `None`), which hides the
+/// segment; a bound session with zero chunks still renders.
+fn format_segment(
+    comparison: Option<&str>,
     apply: Option<&ReviewApplyResult>,
     progress: Option<&InnerProgress>,
 ) -> Option<String> {
-    if let Some(apply) = apply {
-        return Some(format_apply_result(apply));
-    }
-    progress.map(format_progress)
+    let progress = progress?;
+    let body = match apply {
+        Some(apply) => format_apply_result(apply),
+        None => format_progress(progress),
+    };
+    Some(match comparison {
+        Some(mode) => format!(" [{mode}]{body}"),
+        None => body,
+    })
 }
 
 fn format_progress(progress: &InnerProgress) -> String {
@@ -171,138 +207,182 @@ fn format_apply_result(result: &ReviewApplyResult) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        buffer::Buffer,
-        diff_map::DiffMap,
-        display_map::DisplayMap,
-        editor::{Editor, EditorMode},
-        globals::ExecutorGlobal,
-        multi_buffer::MultiBuffer,
-        review_session::ReviewSession,
-    };
+    use crate::review_session::ReviewSession;
     use gpui::{AppContext, TestAppContext};
-    use std::sync::Arc;
-    use stoat::{
-        buffer::BufferId,
-        review_session::{ReviewSession as InnerSession, ReviewSource},
-    };
-    use stoat_scheduler::{Executor, TestScheduler};
-
-    fn install_executor_global(cx: &mut TestAppContext) {
-        let executor = Executor::new(Arc::new(TestScheduler::new()));
-        cx.update(|cx| cx.set_global(ExecutorGlobal(executor)));
-    }
-
-    fn new_editor(cx: &mut TestAppContext) -> Entity<Editor> {
-        cx.update(|cx| {
-            let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), ""));
-            let multi_buffer = {
-                let buffer = buffer.clone();
-                cx.new(|cx| MultiBuffer::singleton(buffer, cx))
-            };
-            let executor = cx.global::<ExecutorGlobal>().0.clone();
-            let display_map = {
-                let buffer = buffer.clone();
-                cx.new(|cx| DisplayMap::new(buffer, executor, cx))
-            };
-            let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
-            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx))
-        })
-    }
-
-    fn new_review_session(cx: &mut TestAppContext) -> Entity<ReviewSession> {
-        cx.update(|cx| {
-            cx.new(|_| {
-                ReviewSession::new(InnerSession::new(ReviewSource::InMemory {
-                    files: Arc::new(Vec::new()),
-                }))
-            })
-        })
-    }
+    use std::{path::PathBuf, sync::Arc};
+    use stoat::review_session::{ReviewSession as InnerSession, ReviewSource};
 
     fn new_badge(cx: &mut TestAppContext) -> Entity<ReviewProgress> {
         cx.update(|cx| cx.new(|_| ReviewProgress::new()))
     }
 
+    fn new_session(cx: &mut TestAppContext, source: ReviewSource) -> Entity<ReviewSession> {
+        cx.update(|cx| cx.new(|_| ReviewSession::new(InnerSession::new(source))))
+    }
+
+    fn working_tree(cx: &mut TestAppContext) -> Entity<ReviewSession> {
+        new_session(
+            cx,
+            ReviewSource::WorkingTree {
+                workdir: PathBuf::from("/repo"),
+            },
+        )
+    }
+
     #[test]
     fn new_starts_empty() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
         let badge = new_badge(&mut cx);
-        badge.read_with(&cx, |b, _| assert!(b.progress().is_none()));
+        badge.read_with(&cx, |b, _| {
+            assert!(b.progress().is_none());
+            assert_eq!(b.comparison(), None);
+        });
     }
 
     #[test]
-    fn editor_without_review_session_yields_no_progress() {
+    fn binds_session_shows_comparison_and_is_visible_at_zero_chunks() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
-        let editor = new_editor(&mut cx);
         let badge = new_badge(&mut cx);
-        let handle: Box<dyn ItemHandle> = Box::new(editor);
-        badge.update(&mut cx, |b, cx| b.set_active_pane_item(Some(&*handle), cx));
-        badge.read_with(&cx, |b, _| assert!(b.progress().is_none()));
+        let session = working_tree(&mut cx);
+        badge.update(&mut cx, |b, cx| b.set_review_session(Some(session), cx));
+        badge.read_with(&cx, |b, _| {
+            assert_eq!(b.comparison(), Some("All"));
+            assert_eq!(b.progress().map(|p| p.total), Some(0));
+        });
     }
 
     #[test]
-    fn editor_with_empty_review_session_yields_no_progress() {
+    fn non_working_tree_review_has_no_comparison_mode() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
-        let editor = new_editor(&mut cx);
-        let session = new_review_session(&mut cx);
-        editor.update(&mut cx, |ed, cx| ed.set_review_session(Some(session), cx));
         let badge = new_badge(&mut cx);
-        let handle: Box<dyn ItemHandle> = Box::new(editor);
-        badge.update(&mut cx, |b, cx| b.set_active_pane_item(Some(&*handle), cx));
-        badge.read_with(&cx, |b, _| assert!(b.progress().is_none()));
+        let session = new_session(
+            &mut cx,
+            ReviewSource::InMemory {
+                files: Arc::new(Vec::new()),
+            },
+        );
+        badge.update(&mut cx, |b, cx| b.set_review_session(Some(session), cx));
+        badge.read_with(&cx, |b, _| {
+            assert_eq!(b.comparison(), None);
+            assert!(b.progress().is_some());
+        });
     }
 
     #[test]
-    fn clear_drops_progress_when_active_item_is_none() {
+    fn set_review_session_none_clears() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
-        let editor = new_editor(&mut cx);
         let badge = new_badge(&mut cx);
-        let handle: Box<dyn ItemHandle> = Box::new(editor);
-        badge.update(&mut cx, |b, cx| b.set_active_pane_item(Some(&*handle), cx));
+        let session = working_tree(&mut cx);
+        badge.update(&mut cx, |b, cx| b.set_review_session(Some(session), cx));
+        badge.update(&mut cx, |b, cx| b.set_review_session(None, cx));
+        badge.read_with(&cx, |b, _| {
+            assert!(b.progress().is_none());
+            assert_eq!(b.comparison(), None);
+        });
+    }
+
+    #[test]
+    fn set_active_pane_item_is_noop() {
+        let mut cx = TestAppContext::single();
+        let badge = new_badge(&mut cx);
+        let session = working_tree(&mut cx);
+        badge.update(&mut cx, |b, cx| b.set_review_session(Some(session), cx));
         badge.update(&mut cx, |b, cx| b.set_active_pane_item(None, cx));
-        badge.read_with(&cx, |b, _| assert!(b.progress().is_none()));
+        badge.read_with(&cx, |b, _| {
+            assert_eq!(b.comparison(), Some("All"), "fan-out must not unbind");
+        });
     }
 
     #[test]
-    fn rebinding_swaps_editor() {
+    fn session_event_refreshes_segment() {
         let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
-        let editor_a = new_editor(&mut cx);
-        let editor_b = new_editor(&mut cx);
         let badge = new_badge(&mut cx);
-        let handle_a: Box<dyn ItemHandle> = Box::new(editor_a);
-        let handle_b: Box<dyn ItemHandle> = Box::new(editor_b);
+        let session = working_tree(&mut cx);
         badge.update(&mut cx, |b, cx| {
-            b.set_active_pane_item(Some(&*handle_a), cx)
+            b.set_review_session(Some(session.clone()), cx)
         });
-        badge.update(&mut cx, |b, cx| {
-            b.set_active_pane_item(Some(&*handle_b), cx)
-        });
-        badge.read_with(&cx, |b, _| assert!(b.progress().is_none()));
-    }
+        badge.read_with(&cx, |b, _| assert!(b.apply_result().is_none()));
 
-    #[test]
-    fn review_session_change_propagates_through_editor_event() {
-        let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
-        let editor = new_editor(&mut cx);
-        let session = new_review_session(&mut cx);
-        editor.update(&mut cx, |ed, cx| {
-            ed.set_review_session(Some(session.clone()), cx)
+        session.update(&mut cx, |s, cx| {
+            s.set_apply_result(
+                ReviewApplyResult {
+                    applied: 2,
+                    total: 2,
+                    first_failure: None,
+                },
+                cx,
+            )
         });
-        let badge = new_badge(&mut cx);
-        let handle: Box<dyn ItemHandle> = Box::new(editor);
-        badge.update(&mut cx, |b, cx| b.set_active_pane_item(Some(&*handle), cx));
-        badge.read_with(&cx, |b, _| assert!(b.progress().is_none()));
-
-        session.update(&mut cx, |s, cx| s.notify_changed(cx));
         cx.run_until_parked();
-        badge.read_with(&cx, |b, _| assert!(b.progress().is_none()));
+        badge.read_with(&cx, |b, _| {
+            assert_eq!(
+                b.apply_result().map(|r| r.applied),
+                Some(2),
+                "session event refreshes the bound segment",
+            );
+        });
+    }
+
+    #[test]
+    fn format_segment_prefixes_comparison_mode() {
+        let progress = InnerProgress {
+            staged: 2,
+            total: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_segment(Some("All"), None, Some(&progress)),
+            Some(" [All] 2/5 ".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_segment_without_comparison_is_progress_only() {
+        let progress = InnerProgress {
+            staged: 2,
+            total: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_segment(None, None, Some(&progress)),
+            Some(" 2/5 ".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_segment_visible_at_zero_total() {
+        let progress = InnerProgress {
+            staged: 0,
+            total: 0,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_segment(Some("Unstaged"), None, Some(&progress)),
+            Some(" [Unstaged] 0/0 ".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_segment_prefers_apply_result() {
+        let result = ReviewApplyResult {
+            applied: 3,
+            total: 3,
+            first_failure: None,
+        };
+        let progress = InnerProgress {
+            staged: 0,
+            total: 5,
+            ..Default::default()
+        };
+        assert_eq!(
+            format_segment(Some("All"), Some(&result), Some(&progress)),
+            Some(" [All] applied 3 ".to_string()),
+        );
+    }
+
+    #[test]
+    fn format_segment_hidden_without_progress() {
+        assert_eq!(format_segment(Some("All"), None, None), None);
     }
 
     #[test]
@@ -390,41 +470,5 @@ mod tests {
             first_failure: Some("disk full".to_string()),
         };
         assert_eq!(format_apply_result(&result), " applied 1/3 ");
-    }
-
-    #[test]
-    fn format_badge_prefers_apply_result_over_progress() {
-        let result = ReviewApplyResult {
-            applied: 2,
-            total: 2,
-            first_failure: None,
-        };
-        let progress = InnerProgress {
-            staged: 0,
-            total: 5,
-            ..Default::default()
-        };
-        assert_eq!(
-            format_badge(Some(&result), Some(&progress)),
-            Some(" applied 2 ".to_string()),
-        );
-    }
-
-    #[test]
-    fn format_badge_falls_back_to_progress_when_no_apply_result() {
-        let progress = InnerProgress {
-            staged: 2,
-            total: 5,
-            ..Default::default()
-        };
-        assert_eq!(
-            format_badge(None, Some(&progress)),
-            Some(" 2/5 ".to_string()),
-        );
-    }
-
-    #[test]
-    fn format_badge_is_none_when_neither_set() {
-        assert_eq!(format_badge(None, None), None);
     }
 }
