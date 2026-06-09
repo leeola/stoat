@@ -6158,7 +6158,7 @@ impl Workspace {
     fn dispatch_open_review(&mut self, cx: &mut Context<'_, Self>) {
         let workdir = self.git_root.clone();
         let source = ReviewSource::WorkingTree { workdir };
-        self.open_review_source(source, "OpenReview", cx);
+        self.open_review_source(source, "review", cx);
     }
 
     /// Issue an LSP `textDocument/prepareRename` for the symbol under
@@ -6468,7 +6468,7 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         let source = ReviewSource::Commit { workdir, sha };
-        self.open_review_source(source, "OpenReviewCommit", cx);
+        self.open_review_source(source, "review-commit", cx);
     }
 
     fn dispatch_open_review_commit_range(
@@ -6479,7 +6479,7 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         let source = ReviewSource::CommitRange { workdir, from, to };
-        self.open_review_source(source, "OpenReviewCommitRange", cx);
+        self.open_review_source(source, "review-range", cx);
     }
 
     fn dispatch_open_review_branch(
@@ -6489,7 +6489,7 @@ impl Workspace {
         cx: &mut Context<'_, Self>,
     ) {
         let source = ReviewSource::Branch { workdir, base };
-        self.open_review_source(source, "OpenReviewBranch", cx);
+        self.open_review_source(source, "review-branch", cx);
     }
 
     fn dispatch_open_review_agent_edits(
