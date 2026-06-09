@@ -2438,6 +2438,9 @@ impl Workspace {
                 true,
                 cx,
             ),
+            ActionKind::ExtendToLineStart => {
+                self.dispatch_simple_goto(GotoKind::LineStart, true, cx)
+            },
             ActionKind::ExtendToLineEnd => self.dispatch_simple_goto(GotoKind::LineEnd, true, cx),
             ActionKind::ExtendToFileStart => {
                 self.dispatch_simple_goto(GotoKind::FileStart, true, cx)
@@ -11619,6 +11622,24 @@ mod tests {
 
         let sel = selection_offsets(vcx, &editor);
         assert_eq!(sel, vec![(2, 11)]);
+    }
+
+    #[test]
+    fn dispatch_extend_to_line_start_preserves_anchor() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let editor = new_singleton_editor(vcx, "hello world\nnext");
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+        seed_primary_offset(vcx, &editor, 6);
+
+        dispatch(&ws, vcx, stoat_action::ExtendToLineStart);
+        vcx.run_until_parked();
+
+        let sel = selection_offsets(vcx, &editor);
+        assert_eq!(sel, vec![(0, 6)]);
+        let reversed = editor.read_with(vcx, |ed, _| ed.selections().all_anchors()[0].reversed);
+        assert!(reversed);
     }
 
     #[test]
