@@ -62,7 +62,9 @@ use stoat::{
     rebase::{ActiveRebase, RebaseEntry, RebasePause},
     review::{ReviewFileInput, ReviewRow},
     review_apply::remove_chunks_from_buffer,
-    review_session::{build_chunk_patch, ChunkFingerprint, ChunkStatus, ReviewSource},
+    review_session::{
+        build_chunk_patch, ChunkFingerprint, ChunkStatus, ReviewChunkId, ReviewSource,
+    },
 };
 use stoat_action::ActionKind;
 use stoat_config::LineNumberMode;
@@ -5761,11 +5763,10 @@ impl Workspace {
         roots
     }
 
-    /// Move the review cursor to the first chunk of the reviewed file
-    /// at `path` and scroll its editor row into view. No-op when no
-    /// review is active, `path` is not one of the reviewed files, or
-    /// the file has no chunks.
-    fn review_jump_to_file(&mut self, path: &Path, cx: &mut Context<'_, Self>) {
+    /// Move the review cursor to `chunk_id` and scroll its editor row
+    /// into view (centered). No-op when no review is active or the
+    /// chunk is not in the session.
+    fn review_jump_to_chunk(&mut self, chunk_id: ReviewChunkId, cx: &mut Context<'_, Self>) {
         let Some(review_item) = self.active_review_item(cx) else {
             return;
         };
@@ -5774,18 +5775,11 @@ impl Workspace {
             let target = {
                 let inner = session.read(cx).inner();
                 inner
-                    .files
-                    .iter()
-                    .find(|f| f.path == path)
-                    .and_then(|f| f.chunks.first().copied())
-                    .and_then(|id| {
-                        inner
-                            .chunks
-                            .get(&id)
-                            .map(|c| (id, c.file_index, c.buffer_line_range.start))
-                    })
+                    .chunks
+                    .get(&chunk_id)
+                    .map(|c| (c.file_index, c.buffer_line_range.start))
             };
-            let Some((chunk_id, file_index, buffer_row)) = target else {
+            let Some((file_index, buffer_row)) = target else {
                 return;
             };
             session.update(cx, |s, cx| s.set_cursor_chunk(chunk_id, cx));
@@ -5817,44 +5811,40 @@ impl Workspace {
                 None
             }
         };
-        if let Some(workdir) = live_workdir {
-            self.review_live_upsert_edit(&session, &path, &workdir, cx);
-            if session.read(cx).inner().follow {
-                self.review_jump_to_file(&path, cx);
+
+        let new_ids = if let Some(workdir) = live_workdir {
+            self.review_live_upsert_edit(&session, &path, &workdir, cx)
+        } else {
+            let Some((rel_path, language, base_text)) = ({
+                let inner = session.read(cx).inner();
+                inner
+                    .files
+                    .iter()
+                    .find(|f| f.path == path)
+                    .map(|f| (f.rel_path.clone(), f.language.clone(), f.base_text.clone()))
+            }) else {
+                return;
+            };
+
+            let fs = cx.global::<FsHostGlobal>().0.clone();
+            let Some(buffer_text) = read_external_edit_text(fs.as_ref(), &path) else {
+                return;
+            };
+
+            let new_input = ReviewFileInput {
+                path: path.clone(),
+                rel_path,
+                language,
+                base_text,
+                buffer_text: Arc::new(buffer_text),
+            };
+            session.update(cx, |session, cx| session.refresh_file(&path, new_input, cx))
+        };
+
+        if session.read(cx).inner().follow {
+            if let Some(chunk_id) = freshest_chunk_id(&session, &new_ids, cx) {
+                self.review_jump_to_chunk(chunk_id, cx);
             }
-            return;
-        }
-
-        let Some((rel_path, language, base_text)) = ({
-            let inner = session.read(cx).inner();
-            inner
-                .files
-                .iter()
-                .find(|f| f.path == path)
-                .map(|f| (f.rel_path.clone(), f.language.clone(), f.base_text.clone()))
-        }) else {
-            return;
-        };
-
-        let fs = cx.global::<FsHostGlobal>().0.clone();
-        let Some(buffer_text) = read_external_edit_text(fs.as_ref(), &path) else {
-            return;
-        };
-
-        let new_input = ReviewFileInput {
-            path: path.clone(),
-            rel_path,
-            language,
-            base_text,
-            buffer_text: Arc::new(buffer_text),
-        };
-        session.update(cx, |session, cx| {
-            session.refresh_file(&path, new_input, cx);
-        });
-
-        let follow = session.read(cx).inner().follow;
-        if follow {
-            self.review_jump_to_file(&path, cx);
         }
     }
 
@@ -5862,26 +5852,27 @@ impl Workspace {
     /// review: skip paths outside `workdir` or git-ignored, re-read the
     /// file (a deleted file reads as empty, which drops its entry),
     /// derive the base from git HEAD, and upsert -- adding the file when
-    /// new, replacing its chunks when known. Mirrors core
-    /// `review_watch_edit`.
+    /// new, replacing its chunks when known. Returns the upserted
+    /// file's new chunk ids, empty when the path is skipped. Mirrors
+    /// core `review_watch_edit`.
     fn review_live_upsert_edit(
         &mut self,
         session: &Entity<crate::review_session::ReviewSession>,
         path: &Path,
         workdir: &Path,
         cx: &mut Context<'_, Self>,
-    ) {
+    ) -> Vec<ReviewChunkId> {
         use crate::globals::{GitHostGlobal, LanguageRegistry};
 
         if !path.starts_with(workdir) {
-            return;
+            return Vec::new();
         }
         let fs = cx.global::<FsHostGlobal>().0.clone();
         if fs.is_ignored(workdir, path) {
-            return;
+            return Vec::new();
         }
         let Some(buffer_text) = read_external_edit_text(fs.as_ref(), path) else {
-            return;
+            return Vec::new();
         };
 
         let git = cx.global::<GitHostGlobal>().0.clone();
@@ -5890,7 +5881,7 @@ impl Workspace {
                 workdir = %workdir.display(),
                 "ReviewExternalEdit: no git repo at workdir, skipping live upsert",
             );
-            return;
+            return Vec::new();
         };
         let base_text = repo.head_content(path).unwrap_or_default();
         let language = cx.global::<LanguageRegistry>().0.for_path(path);
@@ -5907,9 +5898,7 @@ impl Workspace {
             base_text: Arc::new(base_text),
             buffer_text: Arc::new(buffer_text),
         };
-        session.update(cx, |session, cx| {
-            session.upsert_file(input, cx);
-        });
+        session.update(cx, |session, cx| session.upsert_file(input, cx))
     }
 
     fn dispatch_jump_to_move_source(&mut self, nav: JumpMoveNav, cx: &mut Context<'_, Self>) {
@@ -7014,6 +7003,29 @@ fn read_external_edit_text(fs: &dyn stoat::host::FsHost, path: &Path) -> Option<
             None
         },
     }
+}
+
+/// The chunk with the smallest buffer-byte start among `new_ids` --
+/// the freshest changed hunk the follow cursor lands on, matching core
+/// `review_watch_edit`. `None` when `new_ids` is empty or none resolve
+/// to a live chunk.
+fn freshest_chunk_id(
+    session: &Entity<crate::review_session::ReviewSession>,
+    new_ids: &[ReviewChunkId],
+    cx: &App,
+) -> Option<ReviewChunkId> {
+    let session = session.read(cx);
+    let inner = session.inner();
+    new_ids
+        .iter()
+        .filter_map(|id| {
+            inner
+                .chunks
+                .get(id)
+                .map(|c| (c.buffer_byte_range.start, *id))
+        })
+        .min_by_key(|(start, _)| *start)
+        .map(|(_, id)| id)
 }
 
 /// Build a fresh [`ReviewFileInput`] list from `source` using the
@@ -14393,6 +14405,31 @@ mod tests {
                 "a non-live review must not upsert unopened files",
             )
         });
+    }
+
+    #[test]
+    fn freshest_chunk_id_picks_smallest_buffer_byte_start() {
+        let mut cx = TestAppContext::single();
+        let (_ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let session = in_memory_session_with_files(
+            vcx,
+            vec![stoat::review_session::InMemoryFile {
+                path: PathBuf::from("a.txt"),
+                base_text: Arc::new("1\n2\n3\n4\n5\n6\n7\n8\n9\n10\n".to_string()),
+                buffer_text: Arc::new("1\nX\n3\n4\n5\n6\n7\n8\n9\nY\n".to_string()),
+            }],
+        );
+        let ordered = session.read_with(vcx, |s, _| s.inner().files[0].chunks.clone());
+        assert_eq!(ordered.len(), 2, "the edit should yield two separate hunks");
+
+        // Reversed so a smallest-byte pick cannot coincide with first-in-slice.
+        let reversed: Vec<_> = ordered.iter().rev().copied().collect();
+        let freshest = vcx.update(|_, cx| freshest_chunk_id(&session, &reversed, cx));
+        assert_eq!(
+            freshest,
+            Some(ordered[0]),
+            "freshest is the smallest-byte chunk regardless of slice order",
+        );
     }
 
     #[test]

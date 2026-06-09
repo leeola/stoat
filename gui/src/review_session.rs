@@ -175,20 +175,21 @@ impl ReviewSession {
     }
 
     /// Replace the entry for `path` with `new_input` and
-    /// re-extract its hunks in isolation. No-op when `path` is
-    /// not in the session's files. Emits
-    /// [`ReviewSessionEvent::Changed`] +
+    /// re-extract its hunks in isolation. Returns the file's new
+    /// chunk ids in buffer order, empty when `path` is not in the
+    /// session's files. Emits [`ReviewSessionEvent::Changed`] +
     /// [`ReviewSessionEvent::Refreshed`].
     pub fn refresh_file(
         &mut self,
         path: &std::path::Path,
         new_input: ReviewFileInput,
         cx: &mut Context<'_, Self>,
-    ) {
-        self.inner.refresh_file(path, new_input);
+    ) -> Vec<ReviewChunkId> {
+        let ids = self.inner.refresh_file(path, new_input);
         cx.emit(ReviewSessionEvent::Changed);
         cx.emit(ReviewSessionEvent::Refreshed);
         cx.notify();
+        ids
     }
 
     /// Add, replace, or drop the entry for `input.path` from a fresh
@@ -588,6 +589,49 @@ mod tests {
             assert_eq!(s.inner().files.len(), 1);
             assert_eq!(s.inner().files[0].path, PathBuf::from("new.txt"));
         });
+    }
+
+    #[test]
+    fn refresh_file_returns_new_chunk_ids() {
+        use std::path::PathBuf;
+        let mut cx = TestAppContext::single();
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = InnerSession::new(ReviewSource::InMemory {
+                    files: Arc::new(Vec::new()),
+                });
+                inner.add_files(vec![ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                    buffer_text: Arc::new("a\nNEW\nc\n".to_string()),
+                }]);
+                ReviewSession::new(inner)
+            })
+        });
+
+        let ids = session.update(&mut cx, |s, cx| {
+            s.refresh_file(
+                &PathBuf::from("a.txt"),
+                ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("a\nOLD\nc\n".to_string()),
+                    buffer_text: Arc::new("a\nNEWER\nc\n".to_string()),
+                },
+                cx,
+            )
+        });
+        cx.run_until_parked();
+
+        let file_chunks = session.read_with(&cx, |s, _| s.inner().files[0].chunks.clone());
+        assert_eq!(
+            ids, file_chunks,
+            "refresh_file returns the file's new chunk ids"
+        );
+        assert!(!ids.is_empty());
     }
 
     #[test]

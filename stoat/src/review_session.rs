@@ -1205,7 +1205,8 @@ impl ReviewSession {
     /// the refreshed file may go stale until a whole-session
     /// refresh fires.
     ///
-    /// No-op when `path` is not currently in [`Self::files`].
+    /// Returns the file's new chunk ids in buffer order; empty when
+    /// `path` is not currently in [`Self::files`] (a no-op).
     /// Decided statuses on the file's prior chunks carry across
     /// when the new chunks' [`Self::identity_key`] matches.
     /// Cursor behavior: if the cursor was on a chunk in this file,
@@ -1213,7 +1214,11 @@ impl ReviewSession {
     /// first chunk in the refreshed file); if the session had no
     /// cursor, it adopts the first new chunk; cursors on other
     /// files are left alone.
-    pub fn refresh_file(&mut self, path: &std::path::Path, new_input: ReviewFileInput) {
+    pub fn refresh_file(
+        &mut self,
+        path: &std::path::Path,
+        new_input: ReviewFileInput,
+    ) -> Vec<ReviewChunkId> {
         // Combined-diff files only; per-commit branch files share paths and
         // are refreshed by whole-session rebuild, not single-file refresh.
         let Some(file_index) = self
@@ -1221,7 +1226,7 @@ impl ReviewSession {
             .iter()
             .position(|f| f.path == path && f.commit.is_none())
         else {
-            return;
+            return Vec::new();
         };
 
         let old_chunk_ids: Vec<ReviewChunkId> = self.files[file_index].chunks.clone();
@@ -1325,6 +1330,7 @@ impl ReviewSession {
         }
 
         self.version += 1;
+        new_chunk_ids
     }
 
     /// Replace the session's files with `new_files`, re-extracting
