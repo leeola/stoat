@@ -1130,8 +1130,8 @@ mod tests {
             "OpenFile expected in {names:?}"
         );
         assert!(
-            names.contains(&"OpenReview"),
-            "OpenReview expected in {names:?}",
+            names.contains(&"OpenGlobalSearch"),
+            "OpenGlobalSearch expected in {names:?}",
         );
     }
 
@@ -1213,7 +1213,7 @@ mod tests {
             for name in [
                 "Quit",
                 "OpenFile",
-                "OpenReview",
+                "review",
                 "OpenCommits",
                 "FocusLeft",
                 "OpenGlobalSearch",
@@ -1346,7 +1346,7 @@ mod tests {
             };
             let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
             let names = matched_names(&delegate);
-            for name in ["ReviewStageChunk", "ReviewApplyStaged", "CloseReview"] {
+            for name in ["ReviewStageChunk", "ReviewApplyStaged", "review-close"] {
                 assert!(names.contains(&name), "{name} missing when review_open");
             }
             assert!(!names.contains(&"CommitsNext"));

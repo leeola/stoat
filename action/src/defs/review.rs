@@ -3,11 +3,13 @@ use crate::{action::define_action, ActionKind, ActionPriority};
 define_action!(
     OpenReviewDef,
     OpenReview,
-    "OpenReview",
+    "review",
     ActionKind::OpenReview,
     "review changed files",
     "Open the first modified or staged file with a structural diff against HEAD.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    &["r"]
 );
 
 define_action!(
@@ -319,7 +321,7 @@ define_action!(
 define_action!(
     CloseReviewDef,
     CloseReview,
-    "CloseReview",
+    "review-close",
     ActionKind::CloseReview,
     "close the active review",
     "Drop the active review session and return the focused pane to a \
@@ -366,7 +368,7 @@ pub struct OpenReviewCommitDef;
 
 impl ActionDef for OpenReviewCommitDef {
     fn name(&self) -> &'static str {
-        "OpenReviewCommit"
+        "review-commit"
     }
 
     fn kind(&self) -> ActionKind {
@@ -419,7 +421,7 @@ pub struct OpenReviewWatchDef;
 
 impl ActionDef for OpenReviewWatchDef {
     fn name(&self) -> &'static str {
-        "OpenReviewWatch"
+        "review-watch"
     }
 
     fn kind(&self) -> ActionKind {
@@ -487,7 +489,7 @@ pub struct OpenReviewCommitRangeDef;
 
 impl ActionDef for OpenReviewCommitRangeDef {
     fn name(&self) -> &'static str {
-        "OpenReviewCommitRange"
+        "review-range"
     }
 
     fn kind(&self) -> ActionKind {
@@ -550,7 +552,7 @@ pub struct OpenReviewBranchDef;
 
 impl ActionDef for OpenReviewBranchDef {
     fn name(&self) -> &'static str {
-        "OpenReviewBranch"
+        "review-branch"
     }
 
     fn kind(&self) -> ActionKind {
@@ -772,7 +774,7 @@ mod tests {
     #[test]
     fn kind_and_name() {
         assert_eq!(OpenReview.kind(), ActionKind::OpenReview);
-        assert_eq!(OpenReview.def().name(), "OpenReview");
+        assert_eq!(OpenReview.def().name(), "review");
         assert!(OpenReview.def().params().is_empty());
         assert!(OpenReview.def().palette_visible());
     }

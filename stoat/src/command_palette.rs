@@ -711,11 +711,11 @@ mod tests {
     fn tiers_order_prefix_then_substring_then_fuzzy() {
         // For query `re`:
         // - `ReviewRefresh` starts with "re" (prefix).
-        // - `OpenReview` contains "re" as a non-prefix substring.
+        // - `InsertRegister` contains "re" as a non-prefix substring.
         // - `RunInterrupt` has r(0),e(6) as a subsequence, no "re" substring.
         let listed = names_for("re");
         let prefix = pos_in(&listed, "ReviewRefresh");
-        let substring = pos_in(&listed, "OpenReview");
+        let substring = pos_in(&listed, "InsertRegister");
         let fuzzy = pos_in(&listed, "RunInterrupt");
         assert!(prefix < substring, "prefix ranks above substring");
         assert!(substring < fuzzy, "substring ranks above fuzzy");
@@ -744,8 +744,8 @@ mod tests {
     #[test]
     fn alphabetical_within_same_priority() {
         let listed = names_for("");
-        assert!(pos_in(&listed, "CloseCommits") < pos_in(&listed, "CloseReview"));
-        assert!(pos_in(&listed, "CloseReview") < pos_in(&listed, "CloseWorkspace"));
+        assert!(pos_in(&listed, "CloseCommits") < pos_in(&listed, "ClosePane"));
+        assert!(pos_in(&listed, "ClosePane") < pos_in(&listed, "CloseWorkspace"));
     }
 
     #[test]
@@ -818,7 +818,7 @@ mod tests {
         for name in [
             "Quit",
             "OpenFile",
-            "OpenReview",
+            "review",
             "OpenCommits",
             "FocusLeft",
             "OpenGlobalSearch",
@@ -915,7 +915,7 @@ mod tests {
             ..Availability::default()
         };
         let listed = names_for_scope("", PaletteScope::Active, &ctx);
-        for name in ["ReviewStageChunk", "ReviewApplyStaged", "CloseReview"] {
+        for name in ["ReviewStageChunk", "ReviewApplyStaged", "review-close"] {
             assert!(listed.contains(&name), "{name} missing when review_open");
         }
         assert!(!listed.contains(&"CommitsNext"));

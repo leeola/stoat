@@ -960,7 +960,7 @@ mod tests {
         "FileFinderScopeToggle",
         "OpenHelp",
         "OpenAbout",
-        "OpenReview",
+        "review",
         "JumpToMoveSource",
         "JumpToMoveTarget",
         "JumpToNextMoveSource",
@@ -1051,7 +1051,7 @@ mod tests {
         "ReviewToggleLive",
         "ReviewRefresh",
         "ReviewApplyStaged",
-        "CloseReview",
+        "review-close",
         "ReviewRemoveSelected",
         "OpenCommits",
         "CloseCommits",
@@ -1195,7 +1195,7 @@ mod tests {
 
     #[test]
     fn open_review_branch_factory_parses_workdir_and_optional_base() {
-        let entry = lookup("OpenReviewBranch").expect("OpenReviewBranch");
+        let entry = lookup("review-branch").expect("review-branch");
 
         let with_base = (entry.create)(&[
             ParamValue::String("/repo".into()),

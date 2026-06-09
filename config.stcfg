@@ -287,7 +287,7 @@ on key {
         ] -> SetMode(bracket_next);
         [ -> SetMode(bracket_prev);
         m -> SetMode(match);
-        R -> OpenReview();
+        R -> review();
         / -> OpenSearchInput();
         n -> SearchNext();
         N -> SearchPrev();
@@ -487,8 +487,8 @@ on key {
         : -> OpenCommandPalette();
     }
     mode == review {
-        Escape -> CloseReview();
-        q -> CloseReview();
+        Escape -> review-close();
+        q -> review-close();
         n -> ReviewNextUnreviewedHunk();
         p -> ReviewPrevChunk();
         j -> ReviewNextChunk();
@@ -667,7 +667,7 @@ on key {
         b -> [ToggleBlame(), SetMode(normal)];
         s -> [OpenGitStatus(), SetMode(normal)];
         x -> [OpenConflictPicker(), SetMode(normal)];
-        r -> [OpenReview(), SetMode(normal)];
+        r -> [review(), SetMode(normal)];
         d -> [ToggleDiffHunkPanel(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
