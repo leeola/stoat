@@ -13,7 +13,9 @@ use crate::{
     editor::Editor,
     globals::{GitHostGlobal, LanguageRegistry},
     item::ItemKind,
-    picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
+    picker::{
+        match_and_rank_aliased, match_highlight_runs, Picker, PickerDelegate, PickerSecondary,
+    },
     rebase_item::RebaseItem,
     review_item::ReviewItem,
     run_pane,
@@ -618,8 +620,11 @@ impl CommandPaletteDelegate {
             .iter()
             .enumerate()
             .filter(|(_, entry)| self.is_entry_visible(entry))
-            .map(|(i, entry)| (i, entry.def.name().to_string()));
-        let ranked = match rank_matches(trimmed, items) {
+            .map(|(i, entry)| {
+                let aliases = entry.def.aliases().iter().map(|a| a.to_string()).collect();
+                (i, entry.def.name().to_string(), aliases)
+            });
+        let ranked = match match_and_rank_aliased(trimmed, items) {
             Some(r) => r,
             None => {
                 self.set_matches_for_empty_query();

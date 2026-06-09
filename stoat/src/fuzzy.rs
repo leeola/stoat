@@ -86,6 +86,61 @@ pub fn match_and_rank<T>(
     Some(out)
 }
 
+/// Like [`match_and_rank`], but each item carries a primary haystack
+/// plus zero or more alternate haystacks (e.g. command aliases). The
+/// item is scored against all of them and keeps its best score, so it
+/// surfaces when the query matches any alternate even if the primary
+/// does not.
+///
+/// [`RankedMatch::haystack`] is always the primary, and
+/// [`RankedMatch::matched_indices`] index into it. When an alternate
+/// outscores the primary (or the primary did not match), the indices
+/// are empty -- the alternate's matched cells do not exist in the
+/// primary text, so a renderer highlighting the primary must paint
+/// nothing rather than a misaligned run.
+///
+/// With no alternates this reduces exactly to [`match_and_rank`].
+pub fn match_and_rank_aliased<T>(
+    query: &str,
+    items: impl IntoIterator<Item = (T, String, Vec<String>)>,
+) -> Option<Vec<RankedMatch<T>>> {
+    let pattern = parse_query(query)?;
+    let mut guard = matcher().lock().expect("fuzzy matcher poisoned");
+    let mut hay_buf: Vec<char> = Vec::new();
+    let mut out: Vec<RankedMatch<T>> = Vec::new();
+
+    for (item, primary, aliases) in items {
+        let primary_match = {
+            let hay = Utf32Str::new(&primary, &mut hay_buf);
+            score_with_bonuses(&pattern, &primary, hay, &mut guard)
+        };
+
+        let mut best_alias: Option<u32> = None;
+        for alias in &aliases {
+            let hay = Utf32Str::new(alias, &mut hay_buf);
+            if let Some(scored) = score_with_bonuses(&pattern, alias, hay, &mut guard) {
+                best_alias = Some(best_alias.map_or(scored.score, |b| b.max(scored.score)));
+            }
+        }
+
+        let (score, matched_indices) = match (primary_match, best_alias) {
+            (Some(p), Some(a)) if a > p.score => (a, Vec::new()),
+            (Some(p), _) => (p.score, p.indices),
+            (None, Some(a)) => (a, Vec::new()),
+            (None, None) => continue,
+        };
+
+        out.push(RankedMatch {
+            item,
+            haystack: primary,
+            score,
+            matched_indices,
+        });
+    }
+
+    Some(out)
+}
+
 struct Scored {
     score: u32,
     indices: Vec<u32>,
@@ -324,5 +379,54 @@ mod tests {
         let results = match_and_rank("quit", items).expect("query has atoms");
         assert_eq!(results.len(), 1);
         assert!(results[0].score > 0);
+    }
+
+    #[test]
+    fn aliased_with_no_aliases_equals_plain() {
+        let plain = match_and_rank("quit", vec![(0usize, "QuitAll".to_string())]).expect("atoms");
+        let aliased = match_and_rank_aliased("quit", vec![(0usize, "QuitAll".to_string(), vec![])])
+            .expect("atoms");
+        assert_eq!(aliased.len(), 1);
+        assert_eq!(aliased[0].score, plain[0].score);
+        assert_eq!(aliased[0].matched_indices, plain[0].matched_indices);
+    }
+
+    #[test]
+    fn aliased_alias_only_match_surfaces_without_indices() {
+        let items = vec![(0usize, "SplitRight".to_string(), vec!["vs".to_string()])];
+        let results = match_and_rank_aliased("vs", items).expect("atoms");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].item, 0);
+        assert!(
+            results[0].matched_indices.is_empty(),
+            "alias-derived indices must not paint the primary name"
+        );
+        let direct = match_and_rank("vs", vec![(0usize, "vs".to_string())]).expect("atoms");
+        assert_eq!(results[0].score, direct[0].score);
+    }
+
+    #[test]
+    fn aliased_primary_match_keeps_indices() {
+        let items = vec![(0usize, "SplitRight".to_string(), vec!["vs".to_string()])];
+        let results = match_and_rank_aliased("split", items).expect("atoms");
+        assert_eq!(results.len(), 1);
+        assert!(!results[0].matched_indices.is_empty());
+    }
+
+    #[test]
+    fn aliased_no_match_is_filtered() {
+        let items = vec![(0usize, "SplitRight".to_string(), vec!["vs".to_string()])];
+        let results = match_and_rank_aliased("zzz", items).expect("atoms");
+        assert!(results.is_empty());
+    }
+
+    #[test]
+    fn aliased_primary_outscores_alias_keeps_primary_indices() {
+        // Query matches both, but the contiguous primary outscores the
+        // gapped alias, so the primary's matched cells win.
+        let items = vec![(0usize, "ab".to_string(), vec!["axb".to_string()])];
+        let results = match_and_rank_aliased("ab", items).expect("atoms");
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].matched_indices, vec![0, 1]);
     }
 }

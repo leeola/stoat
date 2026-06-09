@@ -13,7 +13,7 @@ use gpui::{
     Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use std::ops::Range;
-pub use stoat::fuzzy::{match_and_rank, RankedMatch};
+pub use stoat::fuzzy::{match_and_rank, match_and_rank_aliased, RankedMatch};
 use stoat_action::ActionKind;
 
 /// Action kinds whose handlers open a top-level picker modal in

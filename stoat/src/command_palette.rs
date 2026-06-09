@@ -579,11 +579,11 @@ pub(crate) fn refilter(
     filtered.clear();
     match_indices.clear();
 
-    let items = visible
-        .iter()
-        .copied()
-        .map(|entry| (entry, entry.def.name().to_string()));
-    let Some(mut matches) = fuzzy::match_and_rank(input, items) else {
+    let items = visible.iter().copied().map(|entry| {
+        let aliases = entry.def.aliases().iter().map(|a| a.to_string()).collect();
+        (entry, entry.def.name().to_string(), aliases)
+    });
+    let Some(mut matches) = fuzzy::match_and_rank_aliased(input, items) else {
         let mut all = visible;
         all.sort_by_key(|e| (e.def.priority().ord(), e.def.name()));
         for entry in all {
