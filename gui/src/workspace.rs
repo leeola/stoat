@@ -1519,6 +1519,10 @@ impl Workspace {
             self.set_input_mode(&mode, cx);
         }
 
+        let review_active = self.any_pane_hosts_review_item(cx);
+        self.input_state_machine
+            .update(cx, |sm, cx_sm| sm.set_review_active(review_active, cx_sm));
+
         self.refresh_active_editor_subscription(cx);
         cx.notify();
     }
@@ -1666,6 +1670,24 @@ impl Workspace {
                     item.to_any_view()
                         .downcast::<Editor>()
                         .is_ok_and(|editor| editor.read(cx).file_path() == Some(path))
+                })
+            })
+    }
+
+    /// Whether any pane currently hosts a review item. Drives the
+    /// workspace-wide `review_active` keymap-state flag, which stays
+    /// set while review is open anywhere -- unlike
+    /// [`Self::active_review_item`], it ignores focus.
+    fn any_pane_hosts_review_item(&self, cx: &App) -> bool {
+        let tree = self.pane_tree.read(cx);
+        tree.split_pane_ids()
+            .into_iter()
+            .filter_map(|id| tree.pane(id))
+            .any(|pane| {
+                pane.read(cx).items().iter().any(|item| {
+                    item.to_any_view()
+                        .downcast::<crate::review_item::ReviewItem>()
+                        .is_ok()
                 })
             })
     }
@@ -14890,6 +14912,37 @@ mod tests {
             assert_eq!(item.files()[0].rel_path, "a.txt");
             assert!(!item.session().read(cx).inner().order.is_empty());
         });
+    }
+
+    #[test]
+    fn review_active_tracks_review_item_presence() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.txt", b"a\nNEW\nc\n");
+        let git = Arc::new(stoat::host::fake::FakeGit::new());
+        git.add_repo("/tmp/repo")
+            .with_fs(&fs)
+            .modified("a.txt", "a\nOLD\nc\n", "a\nNEW\nc\n");
+        install_full_globals(vcx, fs, git);
+
+        let review_active = |vcx: &mut VisualTestContext| {
+            ws.read_with(vcx, |w, cx| {
+                w.input_state_machine().read(cx).review_active()
+            })
+        };
+        assert!(!review_active(vcx), "no review item open at startup");
+
+        dispatch(&ws, vcx, stoat_action::OpenReview);
+        vcx.run_until_parked();
+        assert!(review_active(vcx), "set while a pane hosts a review item");
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+        assert!(
+            !review_active(vcx),
+            "cleared once the last review item closes"
+        );
     }
 
     #[test]

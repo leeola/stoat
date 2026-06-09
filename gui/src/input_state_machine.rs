@@ -191,6 +191,7 @@ pub struct InputStateMachine {
     theme_picker_open: StateValue,
     global_search_open: StateValue,
     buffer_picker_open: StateValue,
+    review_active: StateValue,
     input_active: StateValue,
     pending_count: Option<u32>,
     /// Count carried over for dispatch after [`feed`] consumes a
@@ -375,6 +376,7 @@ impl InputStateMachine {
             theme_picker_open: StateValue::Bool(false),
             global_search_open: StateValue::Bool(false),
             buffer_picker_open: StateValue::Bool(false),
+            review_active: StateValue::Bool(false),
             input_active: StateValue::Bool(false),
             pending_count: None,
             consumed_count: None,
@@ -438,6 +440,10 @@ impl InputStateMachine {
 
     pub fn buffer_picker_open(&self) -> bool {
         matches!(self.buffer_picker_open, StateValue::Bool(true))
+    }
+
+    pub fn review_active(&self) -> bool {
+        matches!(self.review_active, StateValue::Bool(true))
     }
 
     pub fn pending_count(&self) -> Option<u32> {
@@ -652,6 +658,18 @@ impl InputStateMachine {
         let new = StateValue::Bool(open);
         if self.buffer_picker_open != new {
             self.buffer_picker_open = new;
+            cx.notify();
+        }
+    }
+
+    /// Set the `review_active` keymap-state flag. The workspace keeps
+    /// this true while any pane hosts a review item, independent of
+    /// focus. No-ops on unchanged value so observers don't see
+    /// redundant notifications.
+    pub fn set_review_active(&mut self, active: bool, cx: &mut Context<'_, Self>) {
+        let new = StateValue::Bool(active);
+        if self.review_active != new {
+            self.review_active = new;
             cx.notify();
         }
     }
@@ -1416,6 +1434,7 @@ impl KeymapState for InputStateMachine {
             "theme_picker_open" => Some(&self.theme_picker_open),
             "global_search_open" => Some(&self.global_search_open),
             "buffer_picker_open" => Some(&self.buffer_picker_open),
+            "review_active" => Some(&self.review_active),
             "input_active" => Some(&self.input_active),
             _ => None,
         }
@@ -1763,6 +1782,7 @@ mod tests {
             assert!(!sm.theme_picker_open());
             assert!(!sm.global_search_open());
             assert!(!sm.buffer_picker_open());
+            assert!(!sm.review_active());
             assert_eq!(sm.pending_count(), None);
             assert!(sm.pending_chord().is_empty());
             assert!(sm.pending_operator().is_none());
