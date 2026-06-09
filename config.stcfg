@@ -500,6 +500,7 @@ on key {
         Enter -> ReviewApproveHunk();
         t -> ReviewToggleApproval();
         f -> ReviewToggleFollow();
+        l -> ReviewToggleLive();
         S -> ReviewSkipChunk();
         A -> ReviewApplyStaged();
         D -> ReviewRemoveSelected();
