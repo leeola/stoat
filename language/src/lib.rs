@@ -4,6 +4,7 @@ pub mod highlight;
 pub mod highlight_map;
 pub mod language;
 pub mod structural_diff;
+pub mod surround;
 pub mod syntax_map;
 pub mod textobject;
 

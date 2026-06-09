@@ -1929,11 +1929,11 @@ impl Editor {
     }
 
     /// Wrap every non-empty selection with the pair returned by
-    /// [`stoat::action_handlers::surround::surround_pair_for`].
+    /// [`stoat_language::surround::surround_pair_for`].
     /// Selections collapse direction is preserved. Empty
     /// (cursor-only) selections are skipped.
     pub fn handle_surround_add(&mut self, ch: char, cx: &mut Context<'_, Self>) {
-        let (open, close) = stoat::action_handlers::surround::surround_pair_for(ch);
+        let (open, close) = stoat_language::surround::surround_pair_for(ch);
         let buffer = match self.multi_buffer.read(cx).as_singleton() {
             Some(b) => b.clone(),
             None => {
@@ -2000,11 +2000,11 @@ impl Editor {
 
     /// Find the enclosing pair for `ch` around every selection
     /// head via
-    /// [`stoat::action_handlers::surround::find_surround_pair`],
+    /// [`stoat_language::surround::find_surround_pair`],
     /// dedupe, and remove the pair. Tree-sitter-aware when the
     /// active buffer carries a [`stoat_language::SyntaxMap`].
     pub fn handle_surround_delete(&mut self, ch: char, cx: &mut Context<'_, Self>) {
-        let (open, close) = stoat::action_handlers::surround::surround_pair_for(ch);
+        let (open, close) = stoat_language::surround::surround_pair_for(ch);
         let pairs = match self.collect_surround_pairs(open, close, cx) {
             Some(p) if !p.is_empty() => p,
             _ => return,
@@ -2032,8 +2032,8 @@ impl Editor {
     /// Tree-sitter-aware when the active buffer carries a
     /// [`stoat_language::SyntaxMap`].
     pub fn handle_surround_replace(&mut self, from: char, to: char, cx: &mut Context<'_, Self>) {
-        let (old_open, old_close) = stoat::action_handlers::surround::surround_pair_for(from);
-        let (new_open, new_close) = stoat::action_handlers::surround::surround_pair_for(to);
+        let (old_open, old_close) = stoat_language::surround::surround_pair_for(from);
+        let (new_open, new_close) = stoat_language::surround::surround_pair_for(to);
         let pairs = match self.collect_surround_pairs(old_open, old_close, cx) {
             Some(p) if !p.is_empty() => p,
             _ => return,
@@ -2100,7 +2100,7 @@ impl Editor {
                         })
                         .map(|layer| &layer.tree)
                 });
-                stoat::action_handlers::surround::find_surround_pair(&rope, head, open, close, tree)
+                stoat_language::surround::find_surround_pair(&rope, head, open, close, tree)
             })
             .collect();
         pairs.sort_unstable();

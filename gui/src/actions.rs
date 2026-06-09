@@ -600,7 +600,7 @@ impl Action for ApplyReplayMacroChar {
 /// [`stoat_action::SurroundAdd`] action arms the chord. Carries the
 /// chord-completing character; workspace dispatch resolves the
 /// canonical [`open`, `close`] pair via
-/// [`stoat::action_handlers::surround::surround_pair_for`] and
+/// [`stoat_language::surround::surround_pair_for`] and
 /// wraps every non-empty selection.
 #[derive(Debug)]
 pub struct ApplySurroundAddChar {
