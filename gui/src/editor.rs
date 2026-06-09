@@ -3368,6 +3368,11 @@ impl Editor {
             _ => false,
         };
         let metrics = render::gutter_metrics(&display_snapshot, blame_visible);
+        let metrics = if self.review_active(cx) {
+            metrics.widened_for_review()
+        } else {
+            metrics
+        };
         if col as usize != metrics.chevron_col() {
             return false;
         }
@@ -3850,7 +3855,13 @@ impl Editor {
             _ => None,
         };
         let blame_visible_with_data = blame_lines.as_ref().is_some_and(|v| !v.is_empty());
+        let review_active = self.review_active(cx);
         let metrics = render::gutter_metrics(&display_snapshot, blame_visible_with_data);
+        let metrics = if review_active {
+            metrics.widened_for_review()
+        } else {
+            metrics
+        };
         let diff_map_inner = self.diff_map.read(cx).diff().clone();
         let diff_move_provenances = if self.review_session.is_none() {
             collect_move_provenances_from_diff(&diff_map_inner)
@@ -3963,7 +3974,6 @@ impl Editor {
             .into_keys()
             .collect()
         };
-        let review_active = self.review_active(cx);
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,

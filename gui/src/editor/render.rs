@@ -1341,10 +1341,18 @@ const BLAME_SHA_HEX: u32 = 0xc9b458;
 const BLAME_NAME_HEX: u32 = 0x73c991;
 const BLAME_AGE_HEX: u32 = 0x6796e6;
 
+/// Diff-strip width in cells while review mode is active. One cell wider
+/// than the compact gutter so the +/-/~ symbol reads more clearly.
+const REVIEW_DIFF_STRIP_WIDTH: usize = 2;
+
 #[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub(crate) struct GutterMetrics {
     pub line_number_width: usize,
     pub blame_width: usize,
+    /// Width in cells of the diff-strip column: 1 in the compact gutter,
+    /// [`REVIEW_DIFF_STRIP_WIDTH`] while review mode is active (see
+    /// [`Self::widened_for_review`]).
+    pub diff_strip_width: usize,
     pub total_width: usize,
 }
 
@@ -1354,7 +1362,16 @@ impl GutterMetrics {
     /// (blame, line number, diff, diagnostic, chunk) and before the
     /// trailing space. Used to hit-test a chevron click.
     pub fn chevron_col(&self) -> usize {
-        self.blame_width + self.line_number_width + 3
+        self.blame_width + self.line_number_width + self.diff_strip_width + 2
+    }
+
+    /// Widen the diff strip to its review-mode size, growing the gutter
+    /// by the extra cell. Applied while `review_active`; the compact
+    /// gutter is the unmodified value.
+    pub fn widened_for_review(mut self) -> Self {
+        self.total_width += REVIEW_DIFF_STRIP_WIDTH - self.diff_strip_width;
+        self.diff_strip_width = REVIEW_DIFF_STRIP_WIDTH;
+        self
     }
 }
 
@@ -1362,10 +1379,12 @@ pub(crate) fn gutter_metrics(snapshot: &DisplaySnapshot, blame_visible: bool) ->
     let buffer_line_count = snapshot.buffer_line_count().max(1);
     let line_number_width = digit_count(buffer_line_count);
     let blame_width = if blame_visible { BLAME_STRIP_WIDTH } else { 0 };
+    let diff_strip_width = 1;
     GutterMetrics {
         line_number_width,
         blame_width,
-        total_width: blame_width + line_number_width + 1 + 1 + 1 + 1 + 1,
+        diff_strip_width,
+        total_width: blame_width + line_number_width + diff_strip_width + 1 + 1 + 1 + 1,
     }
 }
 
@@ -2160,6 +2179,9 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
         };
         runs.push((start..end, style));
     } else {
+        text.push(' ');
+    }
+    for _ in 1..paint.metrics.diff_strip_width {
         text.push(' ');
     }
 
@@ -3251,6 +3273,56 @@ mod tests {
         assert!(
             review_diff_row_bg(1, &paint).is_none(),
             "unchanged line is not tinted"
+        );
+    }
+
+    #[test]
+    fn widened_for_review_grows_diff_strip_and_chevron() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "x");
+        let compact = gutter_metrics(&snapshot, false);
+        let review = compact.widened_for_review();
+        assert_eq!(compact.diff_strip_width, 1);
+        assert_eq!(review.diff_strip_width, 2);
+        assert_eq!(review.total_width, compact.total_width + 1);
+        assert_eq!(review.chevron_col(), compact.chevron_col() + 1);
+    }
+
+    #[test]
+    fn build_gutter_prefix_widens_diff_strip_in_review_mode() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = added_diff_map(0..1);
+        let metrics = gutter_metrics(&snapshot, false).widened_for_review();
+        let paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            review_active: true,
+            blame: None,
+            inline_blame: None,
+            indent_guides: None,
+            whitespace: None,
+            metrics,
+            fold_chevron_rows: &[],
+            line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
+            line_number_cache: None,
+            blame_cache: None,
+        };
+        let chars: Vec<char> = build_gutter_prefix(0, &paint).text.chars().collect();
+        assert_eq!(
+            chars[metrics.line_number_width], '+',
+            "symbol in the wider strip"
+        );
+        assert_eq!(
+            chars[metrics.line_number_width + 1],
+            ' ',
+            "strip padded to two cells"
         );
     }
 
