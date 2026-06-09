@@ -525,6 +525,14 @@ fn snippet_label(snippet: &UserSnippet) -> SharedString {
     }
 }
 
+/// Byte range of the completion prefix ending at the cursor.
+///
+/// Walks back through path characters; when that run bears a separator
+/// (`/` or `~`) the whole segment is the prefix, so a bare `./`, `../`,
+/// `~/`, or `/foo/` still anchors a popup the path source can fill.
+/// Without a separator the prefix is only the trailing word run, so a
+/// dotted identifier (`foo.bar`) keeps completing `bar` rather than
+/// `foo.bar` and LSP member access does not regress.
 fn word_prefix_range(rope: &stoat_text::Rope, cursor_offset: usize) -> Range<usize> {
     if cursor_offset == 0 || cursor_offset > rope.len() {
         return cursor_offset..cursor_offset;
@@ -532,15 +540,35 @@ fn word_prefix_range(rope: &stoat_text::Rope, cursor_offset: usize) -> Range<usi
     let row = rope.offset_to_point(cursor_offset).row;
     let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
     let slice = rope.slice(line_start..cursor_offset).to_string();
+
+    let path_start = walk_back(&slice, is_path_char);
+    let path_run = &slice[path_start..];
+    if path_run.contains('/') || path_run.contains('~') {
+        return (line_start + path_start)..cursor_offset;
+    }
+
+    let word_start = walk_back(&slice, |ch| ch.is_alphanumeric() || ch == '_');
+    (line_start + word_start)..cursor_offset
+}
+
+/// Byte index of the first char in the trailing run of `slice` for
+/// which `accept` holds, or `slice.len()` when the last char is
+/// rejected. Walks back over `char_indices` so the index lands on a
+/// UTF-8 boundary.
+fn walk_back(slice: &str, accept: impl Fn(char) -> bool) -> usize {
     let mut start = slice.len();
     for (idx, ch) in slice.char_indices().rev() {
-        if ch.is_alphanumeric() || ch == '_' {
+        if accept(ch) {
             start = idx;
         } else {
             break;
         }
     }
-    (line_start + start)..cursor_offset
+    start
+}
+
+fn is_path_char(ch: char) -> bool {
+    ch.is_alphanumeric() || matches!(ch, '/' | '.' | '_' | '-' | '~')
 }
 
 fn path_to_uri(path: &Path) -> Option<Uri> {
@@ -755,6 +783,62 @@ mod tests {
             p.items().iter().map(|i| i.label.to_string()).collect()
         });
         assert_eq!(labels, vec!["alpha.rs".to_string()]);
+    }
+
+    #[test]
+    fn popup_triggers_on_bare_path_prefix() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let fs = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/alpha.rs", b"");
+        fs.insert_file("/tmp/beta.rs", b"");
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs as Arc<dyn FsHost>)));
+        let path = PathBuf::from("/tmp/main.rs");
+        let (workspace, editor) = build_workspace_editor(&mut cx, &path, "./");
+        set_mode(&mut cx, &workspace, "insert");
+        seed_cursor(&mut cx, &editor, 2);
+
+        let popup = cx.update(|cx| {
+            let e = editor.clone();
+            cx.new(|cx| CompletionPopup::new(e, cx))
+        });
+        trigger_completion(&mut cx, &editor, 2);
+
+        let mut labels: Vec<String> = popup.read_with(&cx, |p, _| {
+            p.items().iter().map(|i| i.label.to_string()).collect()
+        });
+        labels.sort();
+        assert_eq!(
+            labels,
+            vec!["alpha.rs".to_string(), "beta.rs".to_string()],
+            "a bare ./ lists the directory",
+        );
+    }
+
+    #[test]
+    fn word_prefix_range_takes_path_segment_only_with_separator() {
+        fn prefix(text: &str) -> String {
+            let rope = stoat_text::Rope::from(text);
+            let range = word_prefix_range(&rope, text.len());
+            rope.slice(range).to_string()
+        }
+
+        assert_eq!(prefix("fo"), "fo");
+        assert_eq!(
+            prefix("foo.bar"),
+            "bar",
+            "dotted identifier keeps the word tail"
+        );
+        assert_eq!(prefix("./"), "./");
+        assert_eq!(prefix("./fo"), "./fo");
+        assert_eq!(prefix("/etc/ho"), "/etc/ho");
+        assert_eq!(prefix("~/d"), "~/d");
+        assert_eq!(
+            prefix("read ./"),
+            "./",
+            "separator run starts after the space"
+        );
+        assert_eq!(prefix(""), "");
     }
 
     #[test]
