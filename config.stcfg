@@ -175,10 +175,10 @@ on init {
 }
 
 on key {
+    Ctrl-= -> IncreaseFontSize();
+    Ctrl-Minus -> DecreaseFontSize();
     input_active == false {
         ? -> OpenHelp();
-        Ctrl-= -> IncreaseFontSize();
-        Ctrl-Minus -> DecreaseFontSize();
     }
     mode == normal && help_open {
         Escape -> CloseHelp();

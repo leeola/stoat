@@ -929,28 +929,40 @@ mod tests {
     }
 
     #[test]
-    fn ctrl_equals_and_ctrl_minus_adjust_font_size_outside_input_modes() {
+    fn ctrl_equals_and_ctrl_minus_adjust_font_size_in_every_mode() {
         let config = parse_config(crate::app::DEFAULT_KEYMAP);
         let keymap = Keymap::compile(&config);
-        let state = TestState::new()
-            .set("mode", StateValue::String("normal".into()))
-            .set("input_active", StateValue::Bool(false));
 
-        let increase = keymap
-            .lookup(
-                &state,
-                &key_event(KeyCode::Char('='), KeyModifiers::CONTROL),
-            )
-            .expect("Ctrl-= should resolve");
-        assert_eq!(increase[0].name, "IncreaseFontSize");
+        let states = [
+            TestState::new()
+                .set("mode", StateValue::String("normal".into()))
+                .set("input_active", StateValue::Bool(false)),
+            TestState::new()
+                .set("mode", StateValue::String("insert".into()))
+                .set("input_active", StateValue::Bool(true)),
+            TestState::new()
+                .set("mode", StateValue::String("prompt".into()))
+                .set("input_active", StateValue::Bool(true))
+                .set("finder_open", StateValue::Bool(true)),
+        ];
 
-        let decrease = keymap
-            .lookup(
-                &state,
-                &key_event(KeyCode::Char('-'), KeyModifiers::CONTROL),
-            )
-            .expect("Ctrl-Minus should resolve");
-        assert_eq!(decrease[0].name, "DecreaseFontSize");
+        for state in states {
+            let increase = keymap
+                .lookup(
+                    &state,
+                    &key_event(KeyCode::Char('='), KeyModifiers::CONTROL),
+                )
+                .expect("Ctrl-= should resolve in every mode");
+            assert_eq!(increase[0].name, "IncreaseFontSize");
+
+            let decrease = keymap
+                .lookup(
+                    &state,
+                    &key_event(KeyCode::Char('-'), KeyModifiers::CONTROL),
+                )
+                .expect("Ctrl-Minus should resolve in every mode");
+            assert_eq!(decrease[0].name, "DecreaseFontSize");
+        }
     }
 
     #[test]
