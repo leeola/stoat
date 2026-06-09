@@ -277,7 +277,7 @@ on key {
         u -> Undo();
         U -> Redo();
         Ctrl-s -> CommitUndoCheckpoint();
-        G -> GotoLineNumber();
+        G -> goto();
         Ctrl-g -> OpenGotoLineModal();
         > -> IndentSelection();
         < -> UnindentSelection();

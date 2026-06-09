@@ -1273,7 +1273,7 @@ mod tests {
         // + 1 CloseBuffer.
         // + 1 AcceptCompletion.
         // + 2 SmartTab/TriggerCompletion.
-        // + 1 GotoLineNumber.
+        // + 1 goto.
         // + 4 FindNextChar/FindPrevChar/TillNextChar/TillPrevChar.
         // + 1 RepeatLastMotion.
         // + 1 GotoColumn.

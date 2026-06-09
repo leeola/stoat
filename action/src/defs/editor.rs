@@ -1277,11 +1277,13 @@ define_action!(
 define_action!(
     GotoLineNumberDef,
     GotoLineNumber,
-    "GotoLineNumber",
+    "goto",
     ActionKind::GotoLineNumber,
     "goto line number from count",
     "Jump to the start of the line numbered by the pending count prefix (1-indexed); falls back to the last line when no count is pending. Counts beyond the buffer length clamp to the last visible row.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    &["g"]
 );
 
 define_action!(
