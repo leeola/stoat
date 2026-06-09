@@ -2891,6 +2891,18 @@ impl Editor {
             == Some(cx.entity_id())
     }
 
+    /// Whether the workspace is in review mode (`review_active` on the
+    /// shared [`InputStateMachine`]). Drives the editor's richer review
+    /// gutter chrome. `false` for an editor with no workspace wired
+    /// (unit-test editors, the minimap).
+    fn review_active(&self, cx: &Context<'_, Self>) -> bool {
+        self.workspace
+            .as_ref()
+            .and_then(WeakEntity::upgrade)
+            .map(|ws| ws.read(cx).input_state_machine().read(cx).review_active())
+            .unwrap_or(false)
+    }
+
     pub fn text_region_bounds(&self) -> Option<Bounds<Pixels>> {
         self.text_region_bounds
     }
@@ -3951,6 +3963,7 @@ impl Editor {
             .into_keys()
             .collect()
         };
+        let review_active = self.review_active(cx);
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
             diff_map: &diff_map_inner,
@@ -3961,6 +3974,7 @@ impl Editor {
             } else {
                 &diff_move_provenances
             },
+            review_active,
             blame: blame_paint,
             inline_blame: inline_blame_paint,
             indent_guides: indent_guide_paint,

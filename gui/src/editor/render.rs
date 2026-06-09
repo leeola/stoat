@@ -1492,19 +1492,48 @@ fn hunk_status_color(status: stoat::DiffHunkStatus) -> Hsla {
     rgb(hex).into()
 }
 
-fn diff_strip_for_status(status: stoat::DiffStatus) -> Option<(char, u32)> {
-    match status {
-        stoat::DiffStatus::Unchanged => None,
-        stoat::DiffStatus::Added => Some(('|', DIFF_ADDED_HEX)),
-        stoat::DiffStatus::Modified => Some(('|', DIFF_MODIFIED_HEX)),
-        stoat::DiffStatus::Moved => Some(('|', DIFF_MOVED_HEX)),
-        stoat::DiffStatus::StagedAdded => Some(('|', DIFF_STAGED_ADDED_HEX)),
-        stoat::DiffStatus::StagedModified => Some(('|', DIFF_STAGED_MODIFIED_HEX)),
-        stoat::DiffStatus::StagedDeleted => Some(('|', DIFF_STAGED_DELETED_HEX)),
-        stoat::DiffStatus::CommittedAdded => Some(('|', DIFF_COMMITTED_ADDED_HEX)),
-        stoat::DiffStatus::CommittedModified => Some(('|', DIFF_COMMITTED_MODIFIED_HEX)),
-        stoat::DiffStatus::CommittedDeleted => Some(('|', DIFF_COMMITTED_DELETED_HEX)),
+/// Gutter diff-strip cell for `status`. In review mode the per-family
+/// `+`/`-`/`~` symbol stands in for the compact `|` bar so changed
+/// lines read at a glance; outside review mode every changed status
+/// keeps the `|` bar (only the color distinguishes them). `None` for an
+/// unchanged line.
+fn diff_strip_for_status(status: stoat::DiffStatus, review_active: bool) -> Option<(char, u32)> {
+    let (symbol, hex) = match status {
+        stoat::DiffStatus::Unchanged => return None,
+        stoat::DiffStatus::Added => ('+', DIFF_ADDED_HEX),
+        stoat::DiffStatus::Modified => ('~', DIFF_MODIFIED_HEX),
+        stoat::DiffStatus::Moved => ('~', DIFF_MOVED_HEX),
+        stoat::DiffStatus::StagedAdded => ('+', DIFF_STAGED_ADDED_HEX),
+        stoat::DiffStatus::StagedModified => ('~', DIFF_STAGED_MODIFIED_HEX),
+        stoat::DiffStatus::StagedDeleted => ('-', DIFF_STAGED_DELETED_HEX),
+        stoat::DiffStatus::CommittedAdded => ('+', DIFF_COMMITTED_ADDED_HEX),
+        stoat::DiffStatus::CommittedModified => ('~', DIFF_COMMITTED_MODIFIED_HEX),
+        stoat::DiffStatus::CommittedDeleted => ('-', DIFF_COMMITTED_DELETED_HEX),
+    };
+    Some((if review_active { symbol } else { '|' }, hex))
+}
+
+/// Subtle full-width background tint for a changed line in review mode:
+/// the line's diff color at low alpha so syntax stays readable. `None`
+/// for an unchanged line.
+fn subtle_diff_bg(status: stoat::DiffStatus) -> Option<Hsla> {
+    let hex = diff_strip_for_status(status, false)?.1;
+    let mut color: Hsla = rgb(hex).into();
+    color.a = 0.12;
+    Some(color)
+}
+
+/// Background tint for `display_row`'s full-width diff bar: `Some` only
+/// when the workspace is in review mode and the row is a changed line.
+fn review_diff_row_bg(display_row: u32, paint: &GutterPaint<'_>) -> Option<Hsla> {
+    if !paint.review_active {
+        return None;
     }
+    let buffer_row = paint
+        .display_snapshot
+        .display_to_buffer(DisplayPoint::new(display_row, 0))
+        .map(|p| p.row)?;
+    subtle_diff_bg(paint.diff_map.status_for_line(buffer_row))
 }
 
 fn diagnostic_glyph_for(severity: DiagnosticSeverity) -> (char, u32) {
@@ -1523,6 +1552,10 @@ pub(crate) struct GutterPaint<'a> {
     pub diagnostics: Option<&'a DiagnosticRowMap>,
     pub review_chunk_markers: &'a [(u32, ChunkStatus)],
     pub review_move_provenances: &'a [(u32, MoveProvenance)],
+    /// Workspace-wide review mode (`review_active`). When set, the diff
+    /// strip uses `+`/`-`/`~` symbols and changed lines get a subtle
+    /// full-width background; otherwise the compact `|` strip renders.
+    pub review_active: bool,
     pub blame: Option<BlamePaint<'a>>,
     pub inline_blame: Option<InlineBlamePaint<'a>>,
     pub indent_guides: Option<IndentGuidePaint>,
@@ -1709,6 +1742,9 @@ pub(crate) fn render_row_with_gutter(
     let body_runs = coalesce_runs(body.text.len(), &body.runs);
     let suffix_runs = coalesce_runs(suffix.text.len(), &suffix.runs);
     let mut row_el = div().relative().flex().flex_row();
+    if let Some(bg) = review_diff_row_bg(display_row, paint) {
+        row_el = row_el.w_full().bg(bg);
+    }
     for guide in indent_guide_lines(display_row, paint) {
         row_el = row_el.child(guide);
     }
@@ -2107,7 +2143,7 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
         .map(|prev| paint.diff_map.has_deletion_after(prev))
         .unwrap_or(false);
     let start = text.len();
-    if let Some((ch, hex)) = diff_strip_for_status(diff_status) {
+    if let Some((ch, hex)) = diff_strip_for_status(diff_status, paint.review_active) {
         text.push(ch);
         let end = text.len();
         let style = gpui::HighlightStyle {
@@ -2731,6 +2767,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -2782,6 +2819,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -2829,6 +2867,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -2861,6 +2900,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -2916,6 +2956,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -2950,6 +2991,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -2979,6 +3021,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3018,6 +3061,7 @@ mod tests {
             diagnostics: Some(&diagnostics),
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3071,6 +3115,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &markers,
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3102,6 +3147,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &markers,
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3120,6 +3166,92 @@ mod tests {
         assert_eq!(chunk_glyph_char(&prefix, metrics.line_number_width), ' ');
         let prefix = build_gutter_prefix(2, &paint);
         assert_eq!(chunk_glyph_char(&prefix, metrics.line_number_width), ' ');
+    }
+
+    fn added_diff_map(lines: Range<u32>) -> stoat::DiffMap {
+        stoat::DiffMap::from_hunks(
+            [stoat::DiffHunk {
+                status: stoat::DiffHunkStatus::Added,
+                staged: false,
+                buffer_start_line: lines.start,
+                buffer_line_range: lines,
+                base_byte_range: 0..0,
+                anchor_range: None,
+                token_detail: None,
+            }],
+            None,
+        )
+    }
+
+    #[test]
+    fn diff_strip_for_status_swaps_to_symbols_in_review_mode() {
+        use stoat::DiffStatus;
+        assert_eq!(diff_strip_for_status(DiffStatus::Unchanged, true), None);
+        assert_eq!(
+            diff_strip_for_status(DiffStatus::Added, true),
+            Some(('+', DIFF_ADDED_HEX))
+        );
+        assert_eq!(
+            diff_strip_for_status(DiffStatus::Modified, true),
+            Some(('~', DIFF_MODIFIED_HEX))
+        );
+        assert_eq!(
+            diff_strip_for_status(DiffStatus::StagedDeleted, true),
+            Some(('-', DIFF_STAGED_DELETED_HEX))
+        );
+        assert_eq!(
+            diff_strip_for_status(DiffStatus::Added, false),
+            Some(('|', DIFF_ADDED_HEX)),
+            "compact mode keeps the bar"
+        );
+    }
+
+    #[test]
+    fn subtle_diff_bg_tints_changed_lines_only() {
+        assert_eq!(subtle_diff_bg(stoat::DiffStatus::Unchanged), None);
+        let bg = subtle_diff_bg(stoat::DiffStatus::Added).expect("changed line tinted");
+        assert!(bg.a > 0.0 && bg.a < 0.2, "background tint stays subtle");
+    }
+
+    #[test]
+    fn review_mode_enriches_diff_gutter() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\nb\nc");
+        let diff_map = added_diff_map(0..1);
+        let metrics = gutter_metrics(&snapshot, false);
+        let mut paint = GutterPaint {
+            display_snapshot: &snapshot,
+            diff_map: &diff_map,
+            diagnostics: None,
+            review_chunk_markers: &[],
+            review_move_provenances: &[],
+            review_active: false,
+            blame: None,
+            inline_blame: None,
+            indent_guides: None,
+            whitespace: None,
+            metrics,
+            fold_chevron_rows: &[],
+            line_number_color: rgb(0x808080).into(),
+            active_line_number: rgb(0x808080).into(),
+            line_number_mode: LineNumberMode::Absolute,
+            cursor_buffer_row: 0,
+            line_number_cache: None,
+            blame_cache: None,
+        };
+
+        let compact = build_gutter_prefix(0, &paint);
+        assert_eq!(diff_strip_char(&compact, metrics.line_number_width), '|');
+        assert!(review_diff_row_bg(0, &paint).is_none());
+
+        paint.review_active = true;
+        let review = build_gutter_prefix(0, &paint);
+        assert_eq!(diff_strip_char(&review, metrics.line_number_width), '+');
+        assert!(review_diff_row_bg(0, &paint).is_some());
+        assert!(
+            review_diff_row_bg(1, &paint).is_none(),
+            "unchanged line is not tinted"
+        );
     }
 
     #[test]
@@ -3182,6 +3314,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: Some(blame),
             inline_blame: None,
             indent_guides: None,
@@ -3218,6 +3351,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: Some(blame),
             inline_blame: None,
             indent_guides: None,
@@ -3255,6 +3389,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: Some(blame),
             inline_blame: None,
             indent_guides: None,
@@ -3293,6 +3428,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3336,6 +3472,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3376,6 +3513,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &provenances,
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3434,6 +3572,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3465,6 +3604,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
@@ -3498,6 +3638,7 @@ mod tests {
             diagnostics: None,
             review_chunk_markers: &[],
             review_move_provenances: &[],
+            review_active: false,
             blame: None,
             inline_blame: None,
             indent_guides: None,
