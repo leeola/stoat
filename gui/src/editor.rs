@@ -30,7 +30,7 @@ use gpui::{
 };
 use lru::LruCache;
 use serde_json::Value;
-use std::{cell::RefCell, num::NonZeroUsize, ops::Range};
+use std::{cell::RefCell, collections::VecDeque, num::NonZeroUsize, ops::Range};
 use stoat::{
     buffer::BufferId,
     display_map::{Block, BlockRowKind},
@@ -141,6 +141,17 @@ struct MinimapDrag {
 /// a subscription that re-emits child changes as
 /// [`EditorEvent::Changed`], and the minimum mutation surface needed to
 /// validate the event pipeline.
+/// In-flight snippet expansion installed by completion acceptance. The
+/// editor sits on the rendered snippet text with the cursor on the
+/// first tabstop group; Tab advances through [`Self::groups`] in order
+/// before collapsing the cursor at [`Self::exit`]. Anchors track edits,
+/// so typing inside one tabstop keeps later tabstops positioned.
+#[derive(Debug, Clone)]
+pub struct ActiveSnippet {
+    groups: VecDeque<Vec<Range<Anchor>>>,
+    exit: Anchor,
+}
+
 pub struct Editor {
     multi_buffer: Entity<MultiBuffer>,
     display_map: Entity<DisplayMap>,
@@ -200,6 +211,7 @@ pub struct Editor {
     hover_debounce_seq: u64,
     hover_popup: Option<Entity<crate::lsp::HoverPopup>>,
     completion_popup: Option<Entity<crate::lsp::CompletionPopup>>,
+    active_snippet: Option<ActiveSnippet>,
     inlay_hints_manager: Option<Entity<crate::lsp::InlayHintsManager>>,
     code_lens_manager: Option<Entity<crate::lsp::CodeLensManager>>,
     semantic_tokens_manager: Option<Entity<crate::lsp::SemanticTokensManager>>,
@@ -484,6 +496,7 @@ impl Editor {
             hover_debounce_seq: 0,
             hover_popup: None,
             completion_popup: None,
+            active_snippet: None,
             inlay_hints_manager: None,
             code_lens_manager: None,
             semantic_tokens_manager: None,
@@ -606,6 +619,118 @@ impl Editor {
 
     pub fn selections_mut(&mut self) -> &mut SelectionsCollection {
         &mut self.selections
+    }
+
+    /// Install a rendered snippet's tabstops: anchor each group at
+    /// `inserted_at` (the byte offset the snippet text was inserted at),
+    /// select the first group so typing replaces the first placeholder,
+    /// and arm [`ActiveSnippet`] with the remaining groups for Tab to
+    /// advance. A snippet with only the exit collapses the cursor there
+    /// and arms nothing.
+    pub fn install_snippet(
+        &mut self,
+        rendered: &stoat::completion::snippet::Rendered,
+        inserted_at: usize,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+
+        let mut anchored: Vec<Vec<Range<Anchor>>> = rendered
+            .groups
+            .iter()
+            .map(|group| {
+                group
+                    .ranges
+                    .iter()
+                    .map(|r| {
+                        let start = snapshot.anchor_at(inserted_at + r.start, Bias::Right);
+                        let end = snapshot.anchor_at(inserted_at + r.end, Bias::Right);
+                        start..end
+                    })
+                    .collect()
+            })
+            .collect();
+
+        let exit = anchored
+            .last()
+            .and_then(|group| group.first())
+            .map(|range| range.start)
+            .unwrap_or_else(|| snapshot.anchor_at(inserted_at, Bias::Right));
+
+        let real_groups = anchored.len().saturating_sub(1);
+        anchored.pop();
+
+        if real_groups == 0 {
+            let collapsed = Selection {
+                id: 0,
+                start: exit,
+                end: exit,
+                reversed: false,
+                goal: SelectionGoal::None,
+            };
+            self.selections.replace_with(vec![collapsed], &snapshot);
+            self.active_snippet = None;
+            return;
+        }
+
+        let initial: Vec<Selection<Anchor>> = anchored
+            .remove(0)
+            .into_iter()
+            .enumerate()
+            .map(|(id, range)| Selection {
+                id,
+                start: range.start,
+                end: range.end,
+                reversed: false,
+                goal: SelectionGoal::None,
+            })
+            .collect();
+        self.selections.replace_with(initial, &snapshot);
+        self.active_snippet = Some(ActiveSnippet {
+            groups: anchored.into(),
+            exit,
+        });
+    }
+
+    /// Advance an installed snippet to its next tabstop group, selecting
+    /// it. With no groups left, collapse the cursor at the exit and drop
+    /// the active snippet. Returns `true` when a snippet was installed
+    /// (so the caller treats Tab as consumed), `false` otherwise.
+    pub fn advance_snippet(&mut self, cx: &mut Context<'_, Self>) -> bool {
+        let Some(mut active) = self.active_snippet.take() else {
+            return false;
+        };
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+
+        match active.groups.pop_front() {
+            Some(group) if !group.is_empty() => {
+                let selections: Vec<Selection<Anchor>> = group
+                    .into_iter()
+                    .enumerate()
+                    .map(|(id, range)| Selection {
+                        id,
+                        start: range.start,
+                        end: range.end,
+                        reversed: false,
+                        goal: SelectionGoal::None,
+                    })
+                    .collect();
+                self.selections.replace_with(selections, &snapshot);
+                self.active_snippet = Some(active);
+            },
+            _ => {
+                let exit = active.exit;
+                let collapsed = Selection {
+                    id: 0,
+                    start: exit,
+                    end: exit,
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                };
+                self.selections.replace_with(vec![collapsed], &snapshot);
+            },
+        }
+        true
     }
 
     pub fn scroll_row(&self) -> u32 {

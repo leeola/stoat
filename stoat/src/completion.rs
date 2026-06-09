@@ -14,7 +14,7 @@ mod e2e;
 pub mod lsp;
 pub mod path;
 pub(crate) mod request;
-pub(crate) mod snippet;
+pub mod snippet;
 pub mod word;
 
 use std::ops::Range;

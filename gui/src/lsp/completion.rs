@@ -62,6 +62,9 @@ pub struct CompletionEntry {
     pub label: SharedString,
     pub insert_text: String,
     pub replace_range: Option<Range<usize>>,
+    /// Raw LSP snippet body (with `$N` tabstops) when this row expands
+    /// interactively; `None` for plain rows inserted verbatim.
+    pub snippet_body: Option<String>,
 }
 
 impl CompletionPopup {
@@ -157,7 +160,15 @@ impl CompletionPopup {
         let Some(buffer) = multi.read(cx).as_singleton().cloned() else {
             return false;
         };
-        buffer.update(cx, |b, cx| b.edit(range, &entry.insert_text, cx));
+
+        if let Some(body) = &entry.snippet_body {
+            let rendered = completion::snippet::parse(body).render();
+            buffer.update(cx, |b, cx| b.edit(range.clone(), &rendered.text, cx));
+            editor.update(cx, |ed, cx| ed.install_snippet(&rendered, range.start, cx));
+        } else {
+            buffer.update(cx, |b, cx| b.edit(range, &entry.insert_text, cx));
+        }
+
         self.clear(cx);
         true
     }
@@ -485,6 +496,7 @@ fn translate_item(
         label: lsp_item.label.into(),
         insert_text,
         replace_range,
+        snippet_body: None,
     }
 }
 
@@ -497,6 +509,7 @@ fn completion_entry_from_item(item: CompletionItem) -> CompletionEntry {
         label: item.label.into(),
         insert_text: item.insert_text,
         replace_range: Some(item.replace_range),
+        snippet_body: None,
     }
 }
 
@@ -512,6 +525,7 @@ fn snippet_completion_entries(snippets: &[UserSnippet], prefix: &str) -> Vec<Com
             label: snippet_label(snippet),
             insert_text: snippet.expanded_body(),
             replace_range: None,
+            snippet_body: Some(snippet.body.clone()),
         })
         .collect()
 }
@@ -910,6 +924,68 @@ mod tests {
         });
         assert_eq!(text, "foo_bar");
         assert!(popup.read_with(&cx, |p, _| p.items().is_empty()));
+    }
+
+    fn primary_offsets(cx: &TestAppContext, editor: &Entity<Editor>) -> (usize, usize) {
+        editor.read_with(cx, |ed, cx| {
+            let snap = ed.multi_buffer().read(cx).snapshot();
+            let sel = ed.selections().all_anchors()[0].clone();
+            (
+                snap.resolve_anchor(&sel.start),
+                snap.resolve_anchor(&sel.end),
+            )
+        })
+    }
+
+    fn expand_snippet(cx: &mut TestAppContext, editor: &Entity<Editor>, body: &str) -> String {
+        let rendered = completion::snippet::parse(body).render();
+        editor.update(cx, |ed, cx| {
+            let buffer = ed.multi_buffer().read(cx).as_singleton().cloned().unwrap();
+            buffer.update(cx, |b, cx| b.edit(0..0, &rendered.text, cx));
+            ed.install_snippet(&rendered, 0, cx);
+        });
+        rendered.text
+    }
+
+    #[test]
+    fn install_snippet_selects_first_tabstop_then_exits() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        let (_workspace, editor) = build_workspace_editor(&mut cx, &path, "");
+
+        let text = expand_snippet(&mut cx, &editor, "println!(${1:msg})$0");
+        assert_eq!(text, "println!(msg)");
+        assert_eq!(
+            primary_offsets(&cx, &editor),
+            (9, 12),
+            "cursor selects the $1 placeholder",
+        );
+
+        let advanced = editor.update(&mut cx, |ed, cx| ed.advance_snippet(cx));
+        assert!(advanced);
+        assert_eq!(primary_offsets(&cx, &editor), (13, 13), "Tab lands on $0");
+
+        let inert = editor.update(&mut cx, |ed, cx| ed.advance_snippet(cx));
+        assert!(!inert, "no snippet remains after exiting");
+    }
+
+    #[test]
+    fn advance_snippet_walks_tabstops_in_order() {
+        let mut cx = TestAppContext::single();
+        let _lsp = install_globals(&mut cx);
+        let path = PathBuf::from("/tmp/main.rs");
+        let (_workspace, editor) = build_workspace_editor(&mut cx, &path, "");
+
+        let text = expand_snippet(&mut cx, &editor, "${1:fn}(${2:arg})");
+        assert_eq!(text, "fn(arg)");
+        assert_eq!(primary_offsets(&cx, &editor), (0, 2), "$1 = fn");
+
+        editor.update(&mut cx, |ed, cx| ed.advance_snippet(cx));
+        assert_eq!(primary_offsets(&cx, &editor), (3, 6), "$2 = arg");
+
+        editor.update(&mut cx, |ed, cx| ed.advance_snippet(cx));
+        assert_eq!(primary_offsets(&cx, &editor), (7, 7), "exit at body end");
     }
 
     #[test]

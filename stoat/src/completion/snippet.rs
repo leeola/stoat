@@ -43,14 +43,14 @@ pub(crate) enum Element {
 
 /// Parsed snippet body.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Snippet {
-    pub elements: Vec<Element>,
+pub struct Snippet {
+    pub(crate) elements: Vec<Element>,
 }
 
 /// Output of [`Snippet::render`]: rendered text plus tabstop visit
 /// groups and the final cursor position.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct Rendered {
+pub struct Rendered {
     pub text: String,
     /// Tabstop groups in visit order. The last entry is the exit
     /// position represented as a zero-length range at the exit
@@ -65,14 +65,14 @@ pub(crate) struct Rendered {
 /// group with multiple ranges so the editor can place a multi-cursor
 /// selection across them.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct TabstopGroup {
+pub struct TabstopGroup {
     pub idx: u32,
     pub ranges: Vec<Range<usize>>,
 }
 
 /// Parse a snippet body. Always succeeds; unrecognized syntax falls
 /// through to literal text.
-pub(crate) fn parse(input: &str) -> Snippet {
+pub fn parse(input: &str) -> Snippet {
     let mut elements = Vec::new();
     let mut text = String::new();
     let bytes = input.as_bytes();
@@ -218,7 +218,7 @@ fn unescape_default(s: &str) -> String {
 }
 
 impl Snippet {
-    pub(crate) fn render(&self) -> Rendered {
+    pub fn render(&self) -> Rendered {
         let mut text = String::new();
         let mut groups_by_idx: std::collections::BTreeMap<u32, Vec<Range<usize>>> =
             std::collections::BTreeMap::new();

@@ -1,25 +1,22 @@
 //! `SmartTab` and `TriggerCompletion` action handlers.
 //!
-//! `SmartTab` arbitrates the Tab key across three branches in
+//! `SmartTab` arbitrates the Tab key across four branches in
 //! priority order:
 //!
-//! 1. **Popup acceptance** -- when the active editor's [`crate::lsp::completion::CompletionPopup`]
+//! 1. **Snippet advance** -- when a snippet expansion is installed on the active editor (see
+//!    [`crate::editor::Editor::advance_snippet`]), `Tab` moves to the next tabstop group.
+//! 2. **Popup acceptance** -- when the active editor's [`crate::lsp::completion::CompletionPopup`]
 //!    is visible, `Tab` accepts the highlighted entry.
-//! 2. **Indent insertion** -- otherwise, if the primary cursor sits at the start of its line or
+//! 3. **Indent insertion** -- otherwise, if the primary cursor sits at the start of its line or
 //!    after only whitespace (see [`crate::editor::Editor::cursor_after_only_whitespace`]), `Tab`
 //!    inserts a single literal `"\t"` at every cursor.
-//! 3. **No-op** -- otherwise the action falls through. The Tab key will then run whatever the
+//! 4. **No-op** -- otherwise the action falls through. The Tab key will then run whatever the
 //!    keymap binds it to in this mode (typically nothing for normal mode).
 //!
 //! `TriggerCompletion` invalidates the popup's signature
 //! cache and re-runs its reconcile step so a fresh LSP
 //! `textDocument/completion` request fires even when the
 //! cursor / prefix have not changed.
-//!
-//! FIXME: SmartTab's snippet-advance branch (the TUI's first
-//! priority -- advance to the next tabstop while an active
-//! snippet is installed) is not implemented because the gui
-//! does not host a snippet subsystem yet.
 
 use crate::{editor::Editor, workspace::Workspace};
 use gpui::{Context, Entity};
@@ -39,6 +36,10 @@ pub fn handle_smart_tab(workspace: &mut Workspace, cx: &mut Context<'_, Workspac
     let Some(editor) = active_editor(workspace, cx) else {
         return;
     };
+
+    if editor.update(cx, |ed, cx| ed.advance_snippet(cx)) {
+        return;
+    }
 
     let popup = editor.read(cx).completion_popup().cloned();
     if let Some(popup) = popup {
