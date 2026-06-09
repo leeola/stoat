@@ -2300,8 +2300,7 @@ impl Editor {
 
     /// Find the number near each selection head via
     /// [`stoat_text::find_number_seeking`], compute the new
-    /// value via
-    /// [`stoat::action_handlers::movement::compute_number_delta`],
+    /// value via [`stoat_text::compute_number_delta`],
     /// and apply the edits. Cursors that land on the same
     /// number range share one edit. Re-anchors affected
     /// selections to span the new text. No-op when no cursor
@@ -2334,11 +2333,7 @@ impl Editor {
                     let text = rope
                         .slice(num_match.range.start..num_match.range.end)
                         .to_string();
-                    let new_text = stoat::action_handlers::movement::compute_number_delta(
-                        &text,
-                        num_match.kind,
-                        delta,
-                    )?;
+                    let new_text = stoat_text::compute_number_delta(&text, num_match.kind, delta)?;
                     if new_text == text {
                         return None;
                     }

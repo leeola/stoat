@@ -8,8 +8,8 @@ use crate::{
 };
 use stoat_language::structural_diff::BufferRef;
 use stoat_text::{
-    find_number_seeking, word_selection_offsets, Anchor, Bias, NumberKind, Point, Selection,
-    SelectionGoal, WordTarget as TextWordTarget,
+    compute_number_delta, find_number_seeking, word_selection_offsets, Anchor, Bias, Point,
+    Selection, SelectionGoal, WordTarget as TextWordTarget,
 };
 
 #[derive(Copy, Clone, Debug)]
@@ -911,86 +911,6 @@ fn apply_number_delta(stoat: &mut Stoat, delta: i64) -> UpdateEffect {
         new
     });
     UpdateEffect::Redraw
-}
-
-pub fn compute_number_delta(text: &str, kind: NumberKind, delta: i64) -> Option<String> {
-    match kind {
-        NumberKind::Decimal => {
-            let parsed = text.parse::<i64>().ok()?;
-            Some(parsed.saturating_add(delta).to_string())
-        },
-        _ => {
-            let mut chars = text.chars();
-            chars.next()?;
-            let marker = chars.next()?;
-            let body = &text[2..];
-
-            let digits_only: String = body.chars().filter(|c| *c != '_').collect();
-            if digits_only.is_empty() {
-                return None;
-            }
-
-            let parsed = u64::from_str_radix(&digits_only, kind.radix()).ok()?;
-            let new_value = if delta < 0 {
-                parsed.saturating_sub(delta.unsigned_abs())
-            } else {
-                parsed.saturating_add(delta as u64)
-            };
-
-            let body_uppercase = matches!(kind, NumberKind::Hex)
-                && (marker.is_ascii_uppercase()
-                    || body
-                        .chars()
-                        .any(|c| c.is_ascii_uppercase() && c.is_ascii_alphabetic()));
-            let new_body = match (kind, body_uppercase) {
-                (NumberKind::Hex, true) => format!("{new_value:X}"),
-                (NumberKind::Hex, false) => format!("{new_value:x}"),
-                (NumberKind::Binary, _) => format!("{new_value:b}"),
-                (NumberKind::Octal, _) => format!("{new_value:o}"),
-                _ => unreachable!(),
-            };
-
-            let padded = if new_body.len() < digits_only.len() {
-                format!("{new_body:0>width$}", width = digits_only.len())
-            } else {
-                new_body
-            };
-
-            let formatted = match group_size_for_body(body) {
-                Some(g) => regroup_right(&padded, g),
-                None => padded,
-            };
-
-            Some(format!("0{marker}{formatted}"))
-        },
-    }
-}
-
-fn group_size_for_body(body: &str) -> Option<usize> {
-    let trimmed = body.trim_matches('_');
-    let last = trimmed.rfind('_')?;
-    Some(trimmed.len() - last - 1)
-}
-
-fn regroup_right(digits: &str, group_size: usize) -> String {
-    let n = digits.len();
-    if n == 0 || group_size == 0 || n <= group_size {
-        return digits.to_string();
-    }
-    let first_size = if n.is_multiple_of(group_size) {
-        group_size
-    } else {
-        n % group_size
-    };
-    let mut out = String::with_capacity(n + (n - 1) / group_size);
-    out.push_str(&digits[..first_size]);
-    let mut idx = first_size;
-    while idx < n {
-        out.push('_');
-        out.push_str(&digits[idx..idx + group_size]);
-        idx += group_size;
-    }
-    out
 }
 
 pub(super) fn delete_selection(stoat: &mut Stoat) -> UpdateEffect {
