@@ -1907,7 +1907,7 @@ mod tests {
     fn type_action_quit_from_space() {
         let mut h = Stoat::test();
         h.type_keys("space");
-        h.type_action("Quit");
+        h.type_action("quit");
     }
 
     #[test]

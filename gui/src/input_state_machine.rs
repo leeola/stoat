@@ -1889,7 +1889,7 @@ mod tests {
     #[test]
     fn feed_matched_action_clears_pending_count() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { q -> Quit(); }");
+        let keymap = compile_keymap("on key { q -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         sm.update(vcx, |sm, _| sm.pending_count = Some(3));
         let stroke = key("q");
@@ -1902,7 +1902,7 @@ mod tests {
     #[test]
     fn feed_matched_action_moves_pending_count_into_consumed() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { q -> Quit(); }");
+        let keymap = compile_keymap("on key { q -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         sm.update(vcx, |sm, _| sm.pending_count = Some(5));
         let stroke = key("q");
@@ -1928,7 +1928,7 @@ mod tests {
     #[test]
     fn feed_uppercase_letter_normalizes_shift() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { G -> Quit(); }");
+        let keymap = compile_keymap("on key { G -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         sm.update(vcx, |sm, _| sm.pending_count = Some(3));
         let stroke = key_with(
@@ -1947,7 +1947,7 @@ mod tests {
     #[test]
     fn feed_lowers_sequence_binding_in_order() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { s -> [SplitRight(), Quit()]; }");
+        let keymap = compile_keymap("on key { s -> [SplitRight(), quit()]; }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let stroke = key("s");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
@@ -1990,7 +1990,7 @@ mod tests {
     #[test]
     fn text_input_in_normal_mode_routes_through_feed() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             quit_kinds(sm.text_input("a", None, window, cx))
@@ -2098,7 +2098,7 @@ mod tests {
     #[test]
     fn text_input_then_feed_drops_raw_duplicate_in_insert() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
@@ -2112,7 +2112,7 @@ mod tests {
     #[test]
     fn feed_after_text_input_only_drops_one_event() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
@@ -2129,7 +2129,7 @@ mod tests {
     #[test]
     fn text_input_in_normal_mode_does_not_set_marker() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let stroke = key("a");
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
@@ -2142,7 +2142,7 @@ mod tests {
     #[test]
     fn mode_change_after_text_input_clears_drop() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         sm.update_in(vcx, |sm, window, cx| sm.text_input("a", None, window, cx));
@@ -2157,7 +2157,7 @@ mod tests {
     #[test]
     fn text_input_with_multi_char_does_not_set_marker() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
@@ -2171,7 +2171,7 @@ mod tests {
     #[test]
     fn non_matching_feed_preserves_marker_for_real_duplicate() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); b -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); b -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         let a = key("a");
@@ -2196,7 +2196,7 @@ mod tests {
     #[test]
     fn composition_update_preserves_pending_duplicate() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
@@ -2214,7 +2214,7 @@ mod tests {
     #[test]
     fn consumed_marker_survives_composition_update_between_arm_and_redelivery() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { mode == normal { : -> Quit(); } }");
+        let keymap = compile_keymap("on key { mode == normal { : -> quit(); } }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let editor = new_singleton_editor(vcx, "");
         sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
@@ -2234,7 +2234,7 @@ mod tests {
     #[test]
     fn consumed_marker_clears_when_mode_returns_to_armed() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { mode == normal { : -> Quit(); } }");
+        let keymap = compile_keymap("on key { mode == normal { : -> quit(); } }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let kinds = feed_in_app(vcx, &sm, |sm, window, cx| {
             sm.text_input(":", None, window, cx);
@@ -2253,7 +2253,7 @@ mod tests {
     fn setmode_into_submode_drops_paired_text_input_twin() {
         let mut cx = TestAppContext::single();
         let keymap = compile_keymap(
-            "on key { mode == space { b -> SetMode(space_buffer); } mode == space_buffer { b -> Quit(); } }",
+            "on key { mode == space { b -> SetMode(space_buffer); } mode == space_buffer { b -> quit(); } }",
         );
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "space");
@@ -2282,7 +2282,7 @@ mod tests {
     #[test]
     fn composition_commit_preserves_pending_duplicate() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         let stroke = key("a");
@@ -2300,7 +2300,7 @@ mod tests {
     #[test]
     fn feed_with_modifier_is_not_a_duplicate() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { C-a -> Quit(); }");
+        let keymap = compile_keymap("on key { C-a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         let stroke = key_with(
@@ -2742,7 +2742,7 @@ mod tests {
     #[test]
     fn feed_shifted_symbol_dispatches_bound_action() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { : -> Quit(); }");
+        let keymap = compile_keymap("on key { : -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         let stroke = key_with_char(
             ";",
@@ -2844,7 +2844,7 @@ mod tests {
     #[test]
     fn non_char_keystroke_clears_chord_and_falls_through() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { Escape -> Quit(); }");
+        let keymap = compile_keymap("on key { Escape -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "normal");
         sm.update(vcx, |sm, cx| {
@@ -2898,7 +2898,7 @@ mod tests {
     #[test]
     fn non_char_keystroke_clears_mark_chord_and_falls_through() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { Escape -> Quit(); }");
+        let keymap = compile_keymap("on key { Escape -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "normal");
         sm.update(vcx, |sm, cx| sm.set_pending_mark(MarkRequest::Set, cx));
@@ -2915,7 +2915,7 @@ mod tests {
     #[test]
     fn pending_find_outside_normal_or_select_is_inert() {
         let mut cx = TestAppContext::single();
-        let keymap = compile_keymap("on key { a -> Quit(); }");
+        let keymap = compile_keymap("on key { a -> quit(); }");
         let (sm, vcx) = new_state_machine_with_keymap(&mut cx, keymap);
         set_mode(vcx, &sm, "insert");
         sm.update(vcx, |sm, cx| {

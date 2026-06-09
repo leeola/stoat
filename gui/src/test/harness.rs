@@ -343,7 +343,7 @@ mod tests {
     #[test]
     fn keystroke_with_modifier_dispatches() {
         let mut harness = TestHarness::new();
-        let workspace = workspace_with_keymap_source(&mut harness, "on key { C-q -> Quit(); }");
+        let workspace = workspace_with_keymap_source(&mut harness, "on key { C-q -> quit(); }");
         let pane_tree = workspace.read_with(&harness.cx, |w, _| w.pane_tree().clone());
         // Split first so Quit closes one pane rather than the app.
         pane_tree.update(&mut harness.cx, |t, cx| {

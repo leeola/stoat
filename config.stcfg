@@ -612,7 +612,7 @@ on key {
     }
     mode == space {
         Escape -> SetMode(normal);
-        q -> Quit();
+        q -> quit();
         a -> SetMode(space_pane_nav);
         t -> [OpenRun(), SetMode(run)];
         w -> SetMode(space_workspace);
@@ -642,7 +642,7 @@ on key {
     mode == space_buffer {
         Escape -> SetMode(normal);
         b -> OpenBufferPicker();
-        d -> [CloseBuffer(), SetMode(normal)];
+        d -> [buffer-close(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_lsp {

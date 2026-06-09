@@ -14,7 +14,6 @@ size: 80x24
   [0m[38;2;220;224;229m│[0m[38;2;169;175;188m──────────────────────────────────────────────────────────────────────────[0m[38;2;220;224;229m│[0m
   [0m[38;2;220;224;229m│[0m[30m[48;2;116;173;232m AcceptCompletion    accept the highlighted completion popup item         [0m[38;2;220;224;229m│[0m
   [0m[38;2;220;224;229m│ Append              [0m[38;2;169;175;188menter insert mode at selection end[0m[38;2;220;224;229m                   │[0m
-  [0m[38;2;220;224;229m│ CloseBuffer         [0m[38;2;169;175;188mclose the focused buffer[0m[38;2;220;224;229m                             │[0m
   [0m[38;2;220;224;229m│ CodeAction          [0m[38;2;169;175;188mshow code actions for selection[0m[38;2;220;224;229m                      │[0m
   [0m[38;2;220;224;229m│ DecreaseFontSize    [0m[38;2;169;175;188mdecrease the editor font size[0m[38;2;220;224;229m                        │[0m
   [0m[38;2;220;224;229m│ DeleteBackward      [0m[38;2;169;175;188mdelete char before each cursor[0m[38;2;220;224;229m                       │[0m
@@ -22,6 +21,7 @@ size: 80x24
   [0m[38;2;220;224;229m│ DeleteWordBackward  [0m[38;2;169;175;188mdelete word before each cursor[0m[38;2;220;224;229m                       │[0m
   [0m[38;2;220;224;229m│ DeleteWordForward   [0m[38;2;169;175;188mdelete word at or after each cursor[0m[38;2;220;224;229m                  │[0m
   [0m[38;2;220;224;229m│ DismissModal        [0m[38;2;169;175;188mdismiss the active modal[0m[38;2;220;224;229m                             │[0m
+  [0m[38;2;220;224;229m│ Env                 [0m[38;2;169;175;188mreport STOAT_ environment variables[0m[38;2;220;224;229m                  │[0m
   [0m[38;2;220;224;229m│[0m[38;2;169;175;188m──────────────────────────────────────────────────────────────────────────[0m[38;2;220;224;229m│[0m
   [0m[38;2;220;224;229m│[0m[38;2;135;138;152mReplace the highlighted item's replace_range in the focused buffer with[0m   [0m[38;2;220;224;229m│[0m
   [0m[38;2;220;224;229m│[0m[38;2;135;138;152mits insert_text and place the primary cursor at the inserted end. Clears[0m  [0m[38;2;220;224;229m│[0m

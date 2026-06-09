@@ -7811,7 +7811,7 @@ mod tests {
 
         let mut cx = TestAppContext::single();
         cx.update(|cx| {
-            cx.set_global(Settings::load_from_source("on key { x -> Quit(); }"));
+            cx.set_global(Settings::load_from_source("on key { x -> quit(); }"));
         });
         let ws = new_workspace(&mut cx, "main", "/tmp/repo");
         let sm = ws.read_with(&cx, |w, _| w.input_state_machine().clone());
@@ -7826,7 +7826,7 @@ mod tests {
         assert_eq!(before, vec!["x".to_string()]);
 
         cx.update(|cx| {
-            cx.set_global(Settings::load_from_source("on key { y -> Quit(); }"));
+            cx.set_global(Settings::load_from_source("on key { y -> quit(); }"));
         });
         cx.run_until_parked();
 

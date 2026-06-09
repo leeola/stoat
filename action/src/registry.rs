@@ -903,7 +903,10 @@ mod tests {
     #[test]
     fn macro_threads_alias_list() {
         assert_eq!(AliasTest::DEF.aliases(), &["at", "atest"]);
-        assert!(Quit::DEF.aliases().is_empty(), "default is no aliases");
+        assert!(
+            DismissModal::DEF.aliases().is_empty(),
+            "default is no aliases"
+        );
     }
 
     #[test]
@@ -930,8 +933,8 @@ mod tests {
     }
 
     const ZERO_ARG_NAMES: &[&str] = &[
-        "Quit",
-        "QuitAll",
+        "quit",
+        "quit-all",
         "SplitRight",
         "SplitDown",
         "SplitNewRight",
@@ -1140,7 +1143,7 @@ mod tests {
         for name in ZERO_ARG_NAMES {
             assert!(lookup(name).is_some(), "missing: {name}");
         }
-        assert!(lookup("OpenFile").is_some());
+        assert!(lookup("open").is_some());
     }
 
     #[test]
@@ -1160,7 +1163,7 @@ mod tests {
 
     #[test]
     fn open_file_factory_consumes_path() {
-        let entry = lookup("OpenFile").expect("OpenFile");
+        let entry = lookup("open").expect("open");
         let params = vec![ParamValue::String("/tmp/x.rs".into())];
         let action = (entry.create)(&params).expect("create");
         let open = action
@@ -1172,7 +1175,7 @@ mod tests {
 
     #[test]
     fn open_file_factory_missing_param_errors() {
-        let entry = lookup("OpenFile").expect("OpenFile");
+        let entry = lookup("open").expect("open");
         assert!(matches!(
             (entry.create)(&[]).err(),
             Some(ParamError::Missing { name: "path", .. })
@@ -1181,7 +1184,7 @@ mod tests {
 
     #[test]
     fn open_file_factory_wrong_kind_errors() {
-        let entry = lookup("OpenFile").expect("OpenFile");
+        let entry = lookup("open").expect("open");
         let err = (entry.create)(&[ParamValue::Number(1.0)]).err();
         assert!(matches!(
             err,

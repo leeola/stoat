@@ -3,21 +3,25 @@ use crate::{action::define_action, ActionKind, ActionPriority};
 define_action!(
     QuitDef,
     Quit,
-    "Quit",
+    "quit",
     ActionKind::Quit,
     "close pane or exit",
     "Close the focused pane. Exit the application when closing the last remaining pane.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    &["q"]
 );
 
 define_action!(
     QuitAllDef,
     QuitAll,
-    "QuitAll",
+    "quit-all",
     ActionKind::QuitAll,
     "exit stoat, closing all panes",
-    "Exit the application immediately, closing every pane and viewport. See also Quit, which closes the current pane and only exits when it is the last.",
-    ActionPriority::Common
+    "Exit the application immediately, closing every pane and viewport. See also quit, which closes the current pane and only exits when it is the last.",
+    ActionPriority::Common,
+    true,
+    &["qa"]
 );
 
 define_action!(
@@ -60,7 +64,7 @@ mod tests {
     #[test]
     fn quit() {
         assert_eq!(Quit.kind(), ActionKind::Quit);
-        assert_eq!(Quit.def().name(), "Quit");
+        assert_eq!(Quit.def().name(), "quit");
         assert!(Quit.def().params().is_empty());
         assert_eq!(Quit.def().short_desc(), "close pane or exit");
     }
@@ -68,7 +72,7 @@ mod tests {
     #[test]
     fn quit_all() {
         assert_eq!(QuitAll.kind(), ActionKind::QuitAll);
-        assert_eq!(QuitAll.def().name(), "QuitAll");
+        assert_eq!(QuitAll.def().name(), "quit-all");
         assert!(QuitAll.def().params().is_empty());
         assert_eq!(QuitAll.def().short_desc(), "exit stoat, closing all panes");
     }

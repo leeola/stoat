@@ -1092,8 +1092,8 @@ mod tests {
         let delegate = new_delegate();
         let names = matched_names(&delegate);
         assert!(!names.is_empty());
-        assert!(names.contains(&"Quit"));
-        assert!(names.contains(&"OpenFile"));
+        assert!(names.contains(&"quit"));
+        assert!(names.contains(&"open"));
         assert!(
             !names.contains(&"OpenCommandPalette"),
             "OpenCommandPalette is palette_visible=false",
@@ -1126,8 +1126,8 @@ mod tests {
 
         let names = matched_names(&delegate);
         assert!(
-            names.contains(&"OpenFile"),
-            "OpenFile expected in {names:?}"
+            names.contains(&"OpenCommits"),
+            "OpenCommits expected in {names:?}"
         );
         assert!(
             names.contains(&"OpenGlobalSearch"),
@@ -1141,15 +1141,15 @@ mod tests {
         delegate.refilter("   ");
 
         let names = matched_names(&delegate);
-        assert!(names.contains(&"Quit"));
-        assert!(names.contains(&"OpenFile"));
+        assert!(names.contains(&"quit"));
+        assert!(names.contains(&"open"));
     }
 
     #[test]
     fn refilter_clamps_selected_when_results_shrink() {
         let mut delegate = new_delegate();
         delegate.selected = delegate.matches.len() - 1;
-        delegate.refilter("Quit");
+        delegate.refilter("quit");
 
         assert!(!delegate.matches.is_empty());
         assert!(delegate.selected < delegate.matches.len());
@@ -1158,7 +1158,7 @@ mod tests {
     #[test]
     fn refilter_quit_all_selects_quit_all() {
         let mut delegate = new_delegate();
-        delegate.refilter("QuitAll");
+        delegate.refilter("quit-all");
 
         let entry = delegate.selected_entry().expect("selected entry");
         assert_eq!(entry.def.kind(), ActionKind::QuitAll);
@@ -1211,8 +1211,8 @@ mod tests {
                 );
             }
             for name in [
-                "Quit",
-                "OpenFile",
+                "quit",
+                "open",
                 "review",
                 "OpenCommits",
                 "FocusLeft",
@@ -1233,7 +1233,7 @@ mod tests {
             };
             let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
             let names = matched_names(&delegate);
-            for name in ["MoveDown", "SelectAll", "Undo", "SaveBuffer"] {
+            for name in ["MoveDown", "SelectAll", "Undo", "write"] {
                 assert!(names.contains(&name), "{name} missing when editor_focused");
             }
             assert!(!names.contains(&"RunSubmit"));
@@ -1580,10 +1580,10 @@ mod tests {
         fn confirm_filter_zero_arg_stays_in_filter() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            let entry = select_entry_by_name(&mut h, "Quit");
+            let entry = select_entry_by_name(&mut h, "quit");
             assert!(
                 entry.def.params().is_empty(),
-                "Quit is expected to be zero-arg",
+                "quit is expected to be zero-arg",
             );
             confirm(&mut h);
             let in_filter = h.picker.read_with(h.vcx, |p, _cx| {
@@ -1599,7 +1599,7 @@ mod tests {
         fn confirm_filter_param_action_enters_collect_args() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             let snapshot = h
                 .picker
@@ -1623,7 +1623,7 @@ mod tests {
         fn match_count_in_collect_args_returns_one() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             let count = h
                 .picker
@@ -1635,7 +1635,7 @@ mod tests {
         fn selected_index_in_collect_args_pinned_to_zero() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             h.picker.update(h.vcx, |p, cx| {
                 p.delegate_mut().set_selected_index(5, cx);
@@ -1650,7 +1650,7 @@ mod tests {
         fn update_matches_in_collect_args_does_not_refilter() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             type_query(&mut h, "anything goes");
             let in_collect = h.picker.read_with(h.vcx, |p, _cx| {
@@ -1668,7 +1668,7 @@ mod tests {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
             type_query(&mut h, "OpenF");
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             let text = h.picker.read_with(h.vcx, |p, cx| {
                 p.query_editor()
@@ -1687,7 +1687,7 @@ mod tests {
         fn collect_args_with_valid_input_resets_to_filter_phase() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             type_query(&mut h, "/tmp/example.rs");
             confirm(&mut h);
@@ -1704,7 +1704,7 @@ mod tests {
         fn collect_args_clears_query_between_steps_when_advancing() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             type_query(&mut h, "/tmp/a.rs");
             confirm(&mut h);
@@ -1725,7 +1725,7 @@ mod tests {
         fn render_collect_args_renders_param_prompt_at_ix_zero() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "OpenFile");
+            select_entry_by_name(&mut h, "open");
             confirm(&mut h);
             let entry = h
                 .picker

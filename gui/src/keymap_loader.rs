@@ -88,7 +88,7 @@ mod tests {
 
     #[test]
     fn compile_from_settings_uses_cached_config() {
-        let settings = Settings::load_from_source("on key { x -> Quit(); }");
+        let settings = Settings::load_from_source("on key { x -> quit(); }");
         let keymap = compile_from_settings(&settings);
         let bindings = keymap.active_bindings(&normal_state());
         assert_eq!(bindings.len(), 1);

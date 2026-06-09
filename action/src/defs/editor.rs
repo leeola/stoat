@@ -783,21 +783,25 @@ define_action!(
 define_action!(
     SaveBufferDef,
     SaveBuffer,
-    "SaveBuffer",
+    "write",
     ActionKind::SaveBuffer,
     "save the focused buffer to disk",
     "Write the focused buffer's rope text to its backing file via FsHost, clear the buffer's dirty flag, and notify the LSP server via did_save. No-op for scratch buffers (no path).",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    &["w"]
 );
 
 define_action!(
     CloseBufferDef,
     CloseBuffer,
-    "CloseBuffer",
+    "buffer-close",
     ActionKind::CloseBuffer,
     "close the focused buffer",
     "Drop the focused buffer from the workspace's BufferRegistry and notify the LSP server via did_close. Editor panes that displayed the closed buffer are rebound to fresh scratch buffers so the pane layout stays coherent. Refuses to close when the buffer is dirty; save first.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    &["bc"]
 );
 
 define_action!(

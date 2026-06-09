@@ -14,7 +14,11 @@ pub struct OpenFileDef;
 
 impl ActionDef for OpenFileDef {
     fn name(&self) -> &'static str {
-        "OpenFile"
+        "open"
+    }
+
+    fn aliases(&self) -> &'static [&'static str] {
+        &["o", "edit", "e"]
     }
 
     fn kind(&self) -> ActionKind {
@@ -67,7 +71,7 @@ mod tests {
             path: PathBuf::from("/tmp/x.rs"),
         };
         assert_eq!(action.kind(), ActionKind::OpenFile);
-        assert_eq!(action.def().name(), "OpenFile");
+        assert_eq!(action.def().name(), "open");
         assert_eq!(action.def().params().len(), 1);
         assert_eq!(action.def().params()[0].name, "path");
     }

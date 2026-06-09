@@ -603,7 +603,7 @@ mod tests {
 
     fn sample_active() -> Vec<(String, Vec<ResolvedAction>)> {
         vec![
-            binding("q", "Quit"),
+            binding("q", "quit"),
             binding("h", "MoveLeft"),
             binding("k", "MoveUp"),
         ]
@@ -642,7 +642,7 @@ mod tests {
         let names: Vec<String> = modal.read_with(vcx, |m, _| {
             m.entries.iter().map(|e| e.def.name().to_string()).collect()
         });
-        assert_eq!(names, vec!["MoveLeft", "MoveUp", "Quit"]);
+        assert_eq!(names, vec!["MoveLeft", "MoveUp", "quit"]);
     }
 
     #[test]
@@ -725,7 +725,7 @@ mod tests {
         vcx.run_until_parked();
 
         let input = modal.read_with(vcx, |m, _| m.input.clone());
-        type_into(&input, vcx, "Quit");
+        type_into(&input, vcx, "quit");
         vcx.run_until_parked();
 
         modal.read_with(vcx, |m, _| {
@@ -734,7 +734,7 @@ mod tests {
                 .iter()
                 .map(|&i| m.entries[i].def.name())
                 .collect();
-            assert_eq!(names, vec!["Quit"]);
+            assert_eq!(names, vec!["quit"]);
         });
     }
 

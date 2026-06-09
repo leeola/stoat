@@ -434,7 +434,7 @@ mod tests {
 
     fn sample_active() -> Vec<(String, Vec<ResolvedAction>)> {
         vec![
-            active_binding("q", "Quit"),
+            active_binding("q", "quit"),
             active_binding("h", "MoveLeft"),
             active_binding("j", "MoveDown"),
             active_binding("k", "MoveUp"),
@@ -500,7 +500,7 @@ mod tests {
         }
         assert_eq!(help_input_mode(&h.stoat.mode), HelpInput::Insert);
         let names = filtered_names(&h);
-        assert!(names.contains(&"Quit"));
+        assert!(names.contains(&"quit"));
         assert!(names.contains(&"MoveDown"));
         assert_eq!(names.len(), 5);
     }
@@ -512,8 +512,8 @@ mod tests {
         send_key(&mut h, keys::key(KeyCode::BackTab));
         assert_eq!(help_ref(&h).scope(), HelpScope::All);
         let names = filtered_names(&h);
-        assert!(names.contains(&"Quit"));
-        assert!(names.contains(&"OpenFile"));
+        assert!(names.contains(&"quit"));
+        assert!(names.contains(&"open"));
         assert!(!names.contains(&"OpenCommandPalette"));
         assert!(!names.contains(&"OpenHelp"));
     }
@@ -539,7 +539,7 @@ mod tests {
         open_help_with(&mut h, sample_active());
         send_key(&mut h, keys::key(KeyCode::BackTab));
         type_str(&mut h, "exit stoat");
-        assert_eq!(filtered_names(&h), vec!["QuitAll"]);
+        assert_eq!(filtered_names(&h), vec!["quit-all"]);
     }
 
     #[test]
@@ -653,8 +653,8 @@ mod tests {
     fn enter_zero_arg_closes_help_on_dispatch() {
         let mut h = TestHarness::default();
         open_help_with(&mut h, sample_active());
-        type_str(&mut h, "Quit");
-        assert_eq!(selected_name(&h), Some("Quit"));
+        type_str(&mut h, "quit");
+        assert_eq!(selected_name(&h), Some("quit"));
         send_key(&mut h, keys::key(KeyCode::Enter));
         assert!(h.stoat.help.is_none(), "Dispatch should close help");
     }
@@ -663,7 +663,7 @@ mod tests {
     fn enter_bound_entry_with_args_dispatches() {
         let active = vec![active_binding_with_arg(
             "C-o",
-            "OpenFile",
+            "open",
             Value::String("/tmp/x.rs".to_owned()),
         )];
         let mut h = TestHarness::default();
@@ -677,8 +677,8 @@ mod tests {
         let mut h = TestHarness::default();
         open_help_with(&mut h, Vec::new());
         send_key(&mut h, keys::key(KeyCode::BackTab));
-        type_str(&mut h, "OpenFile");
-        assert_eq!(selected_name(&h), Some("OpenFile"));
+        type_str(&mut h, "review-commit");
+        assert_eq!(selected_name(&h), Some("review-commit"));
         send_key(&mut h, keys::key(KeyCode::Enter));
         assert!(
             h.stoat.help.is_some(),
@@ -692,7 +692,7 @@ mod tests {
         open_help_with(&mut h, sample_active());
         send_key(&mut h, keys::key(KeyCode::Down));
         send_key(&mut h, keys::key(KeyCode::Down));
-        type_str(&mut h, "Quit");
+        type_str(&mut h, "quit");
         assert_eq!(help_ref(&h).selected(), 0);
     }
 

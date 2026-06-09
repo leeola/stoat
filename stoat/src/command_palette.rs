@@ -662,8 +662,8 @@ mod tests {
     #[test]
     fn empty_filter_groups_by_priority_then_alphabetical() {
         let listed = names_for("");
-        assert!(listed.contains(&"Quit"));
-        assert!(listed.contains(&"OpenFile"));
+        assert!(listed.contains(&"quit"));
+        assert!(listed.contains(&"open"));
         assert!(!listed.contains(&"OpenCommandPalette"));
 
         let listed_with_prio: Vec<(u8, &&'static str)> =
@@ -698,12 +698,15 @@ mod tests {
 
     #[test]
     fn fuzzy_matches_noncontiguous_subsequence() {
-        // `:qa` matches `QuitAll` via subsequence Q(0),A(4); `Quit` has no `a`.
+        // `qa` matches `quit-all` via subsequence q(0),a(5); `quit` has no `a`.
         let listed = names_for("qa");
-        assert!(listed.contains(&"QuitAll"), "QuitAll must match via fuzzy");
         assert!(
-            !listed.contains(&"Quit"),
-            "Quit lacks 'a' and must not match"
+            listed.contains(&"quit-all"),
+            "quit-all must match via fuzzy"
+        );
+        assert!(
+            !listed.contains(&"quit"),
+            "quit lacks 'a' and must not match"
         );
     }
 
@@ -723,13 +726,13 @@ mod tests {
 
     #[test]
     fn multi_token_query_matches_in_either_order() {
-        // `OpenFile` contains both `open` and `file` tokens. Pattern
+        // `OpenFileFinder` contains both `open` and `file` tokens. Pattern
         // splits on whitespace, so the order of tokens does not change
         // the hit set.
         let forward = names_for("open file");
         let reverse = names_for("file open");
-        assert!(forward.contains(&"OpenFile"));
-        assert!(reverse.contains(&"OpenFile"));
+        assert!(forward.contains(&"OpenFileFinder"));
+        assert!(reverse.contains(&"OpenFileFinder"));
     }
 
     #[test]
@@ -770,7 +773,7 @@ mod tests {
 
     #[test]
     fn case_insensitive_filter() {
-        assert_eq!(names_for("quit"), vec!["Quit", "QuitAll"]);
+        assert_eq!(names_for("quit"), vec!["quit", "quit-all"]);
     }
 
     #[test]
@@ -816,8 +819,8 @@ mod tests {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
         }
         for name in [
-            "Quit",
-            "OpenFile",
+            "quit",
+            "open",
             "review",
             "OpenCommits",
             "FocusLeft",
@@ -837,7 +840,7 @@ mod tests {
             ..Availability::default()
         };
         let listed = names_for_scope("", PaletteScope::Active, &ctx);
-        for name in ["MoveDown", "SelectAll", "Undo", "SaveBuffer"] {
+        for name in ["MoveDown", "SelectAll", "Undo", "write"] {
             assert!(listed.contains(&name), "{name} missing when editor_focused");
         }
         assert!(!listed.contains(&"RunSubmit"));
@@ -989,7 +992,7 @@ mod tests {
         let path = h.write_file("palette_target.txt", "loaded via palette");
         let path_str = path.to_str().expect("utf8 path");
 
-        h.type_text(":OpenFile");
+        h.type_text(":edit");
         h.type_keys("enter");
         h.type_text(path_str);
         h.type_keys("enter");
@@ -1103,7 +1106,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_collect_args_empty() {
         let mut h = Stoat::test();
-        h.type_text(":OpenFile");
+        h.type_text(":edit");
         h.type_keys("enter");
         h.assert_snapshot("command_palette_collect_args_empty");
     }
@@ -1111,7 +1114,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_collect_args_typing() {
         let mut h = Stoat::test();
-        h.type_text(":OpenFile");
+        h.type_text(":edit");
         h.type_keys("enter");
         h.type_text("/tmp/example.rs");
         h.assert_snapshot("command_palette_collect_args_typing");
