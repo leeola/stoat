@@ -314,7 +314,13 @@ impl Help {
         }
 
         let sort = |v: &mut Vec<usize>, entries: &[HelpEntry]| {
-            v.sort_by(|&a, &b| entries[a].def.name().cmp(entries[b].def.name()));
+            v.sort_by(|&a, &b| {
+                let an = entries[a].def.name().to_lowercase();
+                let bn = entries[b].def.name().to_lowercase();
+                (an != needle)
+                    .cmp(&(bn != needle))
+                    .then_with(|| an.cmp(&bn))
+            });
         };
         sort(&mut prefix_name, &self.entries);
         sort(&mut substring_name, &self.entries);
@@ -677,8 +683,8 @@ mod tests {
         let mut h = TestHarness::default();
         open_help_with(&mut h, Vec::new());
         send_key(&mut h, keys::key(KeyCode::BackTab));
-        type_str(&mut h, "review-commit");
-        assert_eq!(selected_name(&h), Some("review-commit"));
+        type_str(&mut h, "open");
+        assert_eq!(selected_name(&h), Some("open"));
         send_key(&mut h, keys::key(KeyCode::Enter));
         assert!(
             h.stoat.help.is_some(),

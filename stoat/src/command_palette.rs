@@ -992,7 +992,7 @@ mod tests {
         let path = h.write_file("palette_target.txt", "loaded via palette");
         let path_str = path.to_str().expect("utf8 path");
 
-        h.type_text(":edit");
+        h.type_text(":open");
         h.type_keys("enter");
         h.type_text(path_str);
         h.type_keys("enter");
@@ -1106,7 +1106,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_collect_args_empty() {
         let mut h = Stoat::test();
-        h.type_text(":edit");
+        h.type_text(":open");
         h.type_keys("enter");
         h.assert_snapshot("command_palette_collect_args_empty");
     }
@@ -1114,7 +1114,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_collect_args_typing() {
         let mut h = Stoat::test();
-        h.type_text(":edit");
+        h.type_text(":open");
         h.type_keys("enter");
         h.type_text("/tmp/example.rs");
         h.assert_snapshot("command_palette_collect_args_typing");

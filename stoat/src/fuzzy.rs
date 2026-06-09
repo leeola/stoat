@@ -123,12 +123,22 @@ pub fn match_and_rank_aliased<T>(
             }
         }
 
-        let (score, matched_indices) = match (primary_match, best_alias) {
+        let (mut score, matched_indices) = match (primary_match, best_alias) {
             (Some(p), Some(a)) if a > p.score => (a, Vec::new()),
             (Some(p), _) => (p.score, p.indices),
             (None, Some(a)) => (a, Vec::new()),
             (None, None) => continue,
         };
+
+        // A bare command name should select its own command even when a
+        // longer sibling shares the prefix and scores the same. Boost an
+        // exact full-name or full-alias match above any fuzzy score so it
+        // ranks first.
+        if query.eq_ignore_ascii_case(&primary)
+            || aliases.iter().any(|a| query.eq_ignore_ascii_case(a))
+        {
+            score = score.saturating_add(EXACT_NAME_BONUS);
+        }
 
         out.push(RankedMatch {
             item,
@@ -195,6 +205,12 @@ fn score_with_bonuses(
 /// per-character bonuses (8-18 each, totals around 100-300 for
 /// short queries) without dominating the raw score.
 const BASENAME_BONUS: u32 = 50;
+
+/// Added to an exact full-name or full-alias match in
+/// [`match_and_rank_aliased`] so a bare command name always ranks above
+/// fuzzy and prefix matches. Far larger than any realistic nucleo score
+/// plus bonuses, so the exact match wins regardless of name tiebreaks.
+const EXACT_NAME_BONUS: u32 = 1_000_000;
 
 fn all_in_basename(indices: &[u32], haystack: &str) -> bool {
     let Some(last_slash) = last_slash_char_pos(haystack) else {
@@ -401,8 +417,10 @@ mod tests {
             results[0].matched_indices.is_empty(),
             "alias-derived indices must not paint the primary name"
         );
+        // The query exactly matches the alias, so the aliased score is the
+        // direct match score plus the exact-match boost.
         let direct = match_and_rank("vs", vec![(0usize, "vs".to_string())]).expect("atoms");
-        assert_eq!(results[0].score, direct[0].score);
+        assert_eq!(results[0].score, direct[0].score + EXACT_NAME_BONUS);
     }
 
     #[test]
@@ -428,5 +446,49 @@ mod tests {
         let results = match_and_rank_aliased("ab", items).expect("atoms");
         assert_eq!(results.len(), 1);
         assert_eq!(results[0].matched_indices, vec![0, 1]);
+    }
+
+    #[test]
+    fn aliased_exact_name_outranks_prefix_sibling() {
+        // "open" exactly matches the open command; "OpenAbout" only
+        // prefix-matches, so the exact match must score higher.
+        let items = vec![
+            (0usize, "OpenAbout".to_string(), vec![]),
+            (1usize, "open".to_string(), vec![]),
+        ];
+        let results = match_and_rank_aliased("open", items).expect("atoms");
+        let exact = results.iter().find(|m| m.item == 1).expect("open matched");
+        let prefix = results
+            .iter()
+            .find(|m| m.item == 0)
+            .expect("OpenAbout matched");
+        assert!(
+            exact.score > prefix.score,
+            "exact 'open' ({}) must outrank prefix 'OpenAbout' ({})",
+            exact.score,
+            prefix.score,
+        );
+    }
+
+    #[test]
+    fn aliased_exact_alias_outranks_prefix_sibling() {
+        // Typing an exact alias ("vs") boosts its command above a sibling
+        // that only prefix-matches by name.
+        let items = vec![
+            (0usize, "vsync".to_string(), vec![]),
+            (1usize, "vsplit".to_string(), vec!["vs".to_string()]),
+        ];
+        let results = match_and_rank_aliased("vs", items).expect("atoms");
+        let aliased = results
+            .iter()
+            .find(|m| m.item == 1)
+            .expect("vsplit matched");
+        let prefix = results.iter().find(|m| m.item == 0).expect("vsync matched");
+        assert!(
+            aliased.score > prefix.score,
+            "exact alias 'vs' ({}) must outrank prefix 'vsync' ({})",
+            aliased.score,
+            prefix.score,
+        );
     }
 }
