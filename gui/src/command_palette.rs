@@ -1200,7 +1200,7 @@ mod tests {
                 "MoveDown",
                 "SelectAll",
                 "Undo",
-                "ToggleBlame",
+                "blame",
                 "GitToggleStageHunk",
                 "GotoDefinition",
                 "Hover",
@@ -1247,7 +1247,7 @@ mod tests {
             };
             let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
             let names = matched_names(&delegate);
-            for name in ["ToggleBlame", "GotoNextHunk", "GitToggleStageHunk"] {
+            for name in ["blame", "GotoNextHunk", "GitToggleStageHunk"] {
                 assert!(names.contains(&name), "{name} missing when in_git_repo");
             }
             assert!(!names.contains(&"RunSubmit"));
@@ -1856,8 +1856,8 @@ mod tests {
                 let idx = delegate
                     .entries
                     .iter()
-                    .position(|e| e.def.name() == "ToggleMinimap")
-                    .expect("ToggleMinimap registered");
+                    .position(|e| e.def.name() == "minimap")
+                    .expect("minimap registered");
                 delegate.matches = vec![(idx, Vec::new())];
                 delegate.selected = 0;
             });
@@ -1875,7 +1875,7 @@ mod tests {
             );
             assert!(
                 ws.read_with(vcx, |w, _| w.minimap_visible()),
-                "ToggleMinimap must reach the workspace, not the palette query editor",
+                "minimap must reach the workspace, not the palette query editor",
             );
             let minimap_target = ws.read_with(vcx, |w, cx| {
                 w.minimap()
@@ -2077,7 +2077,7 @@ mod tests {
             vcx.run_until_parked();
 
             let picker = open_palette(&ws, vcx);
-            type_query(&picker, vcx, "ToggleMinimap");
+            type_query(&picker, vcx, "minimap");
             picker.update_in(vcx, |p, window, cx| {
                 p.handle_action(&stoat_action::PickerConfirm, window, cx);
             });
@@ -2085,7 +2085,7 @@ mod tests {
 
             assert_eq!(
                 ws.read_with(vcx, |w, _| w.command_palette_history().clone()),
-                VecDeque::from(vec!["ToggleMinimap".to_string()]),
+                VecDeque::from(vec!["minimap".to_string()]),
                 "confirming records the typed search query",
             );
         }

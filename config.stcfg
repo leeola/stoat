@@ -622,7 +622,7 @@ on key {
         " -> SetMode(space_clipboard);
         p -> OpenFileFinder();
         g -> OpenChangedFilePicker();
-        e -> ToggleProjectTree();
+        e -> project-tree();
         T -> OpenThemePicker();
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
@@ -664,11 +664,11 @@ on key {
     }
     mode == space_git {
         Escape -> SetMode(normal);
-        b -> [ToggleBlame(), SetMode(normal)];
+        b -> [blame(), SetMode(normal)];
         s -> [OpenGitStatus(), SetMode(normal)];
         x -> [OpenConflictPicker(), SetMode(normal)];
         r -> [review(), SetMode(normal)];
-        d -> [ToggleDiffHunkPanel(), SetMode(normal)];
+        d -> [diff-hunk-panel(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_workspace {
@@ -678,11 +678,11 @@ on key {
         s -> [workspace-switch(), SetMode(normal)];
         x -> [workspace-close(), SetMode(normal)];
         r -> [workspace-rename(), SetMode(normal)];
-        Shift-L -> [ToggleDockLeft(), SetMode(normal)];
-        Shift-R -> [ToggleDockRight(), SetMode(normal)];
-        m -> [ToggleMinimap(), SetMode(normal)];
-        o -> [ToggleOutlinePanel(), SetMode(normal)];
-        d -> [ToggleDiagnosticsPanel(), SetMode(normal)];
+        Shift-L -> [dock-left(), SetMode(normal)];
+        Shift-R -> [dock-right(), SetMode(normal)];
+        m -> [minimap(), SetMode(normal)];
+        o -> [outline-panel(), SetMode(normal)];
+        d -> [diagnostics-panel(), SetMode(normal)];
         M -> [OpenMarkdownPreview(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
@@ -730,8 +730,8 @@ on key {
         : -> OpenCommandPalette();
     }
     mode == project_tree {
-        Escape -> ToggleProjectTree();
-        q -> ToggleProjectTree();
+        Escape -> project-tree();
+        q -> project-tree();
         j -> ProjectTreeSelectNext();
         k -> ProjectTreeSelectPrev();
         h -> ProjectTreeCollapse();

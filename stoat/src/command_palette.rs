@@ -813,7 +813,7 @@ mod tests {
             "MoveDown",
             "SelectAll",
             "Undo",
-            "ToggleBlame",
+            "blame",
             "GitToggleStageHunk",
         ] {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
@@ -853,7 +853,7 @@ mod tests {
             ..Availability::default()
         };
         let listed = names_for_scope("", PaletteScope::Active, &ctx);
-        for name in ["ToggleBlame", "GotoNextHunk", "GitToggleStageHunk"] {
+        for name in ["blame", "GotoNextHunk", "GitToggleStageHunk"] {
             assert!(listed.contains(&name), "{name} missing when in_git_repo");
         }
         assert!(!listed.contains(&"RunSubmit"));

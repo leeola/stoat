@@ -193,7 +193,7 @@ define_action!(
 define_action!(
     ToggleCommentsDef,
     ToggleComments,
-    "ToggleComments",
+    "comments",
     ActionKind::ToggleComments,
     "toggle line comments",
     "Toggle the line-comment prefix on every line touched by any selection. The prefix is the language's `line_comment` (e.g. `//` for rust, `#` for toml); buffers whose language has none are a no-op. Each line decides independently: if its first non-whitespace run is the prefix (followed by a space or end-of-content), the prefix and one trailing space are removed; otherwise the prefix and a single space are inserted at the first non-whitespace position. Empty / whitespace-only lines are skipped.",
@@ -203,7 +203,7 @@ define_action!(
 define_action!(
     ToggleBlameDef,
     ToggleBlame,
-    "ToggleBlame",
+    "blame",
     ActionKind::ToggleBlame,
     "toggle blame strip",
     "Toggle the blame strip on the active editor's gutter. When visible, the strip shows the short sha, first-name of the author, and short relative age for the commit that last touched each source line. Toggling on triggers a refresh against the workspace's git host; toggling off hides the strip but keeps the cached entries until the next edit invalidates them. Buffers without an on-disk path (scratch, modal inputs) are a no-op.",
@@ -213,7 +213,7 @@ define_action!(
 define_action!(
     ToggleInlineBlameDef,
     ToggleInlineBlame,
-    "ToggleInlineBlame",
+    "inline-blame",
     ActionKind::ToggleInlineBlame,
     "toggle inline blame",
     "Toggle inline git blame at the end of each editable line in the active editor, showing the commit author and a relative age (e.g. `Lee Olayvar, 3 days ago`) in muted text. Defaults off and is an alternative to the gutter blame strip. Toggling on triggers a refresh against the workspace's git host; buffers without an on-disk path (scratch, modal inputs) are a no-op.",
@@ -223,7 +223,7 @@ define_action!(
 define_action!(
     ToggleDiffHunkPanelDef,
     ToggleDiffHunkPanel,
-    "ToggleDiffHunkPanel",
+    "diff-hunk-panel",
     ActionKind::ToggleDiffHunkPanel,
     "toggle diff hunk panel",
     "Toggle the right-side diff hunk panel for the active editor's buffer. When visible, the panel lists every diff hunk in the buffer with its line range and status; selecting an entry jumps the cursor to that hunk's first changed line. Buffers without an on-disk path or with no diff state are a no-op.",
@@ -233,7 +233,7 @@ define_action!(
 define_action!(
     ToggleMinimapDef,
     ToggleMinimap,
-    "ToggleMinimap",
+    "minimap",
     ActionKind::ToggleMinimap,
     "toggle minimap",
     "Toggle the minimap on the active editor. The minimap is a reduced-scale mirror of the buffer painted as a narrow right-aligned column for at-a-glance navigation and scrolling. Toggling off hides the column; the active editor's own view is unaffected.",
@@ -243,7 +243,7 @@ define_action!(
 define_action!(
     ToggleRelativeLineNumbersDef,
     ToggleRelativeLineNumbers,
-    "ToggleRelativeLineNumbers",
+    "relative-numbers",
     ActionKind::ToggleRelativeLineNumbers,
     "cycle line-number mode",
     "Cycle the gutter line-number mode across all editors: absolute -> relative -> hybrid -> absolute. Relative shows each row's distance from the cursor row; hybrid shows the absolute number on the cursor row and the distance elsewhere. Changes the global ui.editor.line_numbers setting.",
@@ -253,7 +253,7 @@ define_action!(
 define_action!(
     ToggleTabBarDef,
     ToggleTabBar,
-    "ToggleTabBar",
+    "tab-bar",
     ActionKind::ToggleTabBar,
     "toggle pane tab bar",
     "Toggle the per-pane tab bar that lists every pane item along the top of the pane. Toggling off hides the bar for every pane; the active item still renders below. Persists via the `ui.pane.show_tab_bar` setting on the runtime `Settings` global -- session only, restart reverts to the stcfg value.",

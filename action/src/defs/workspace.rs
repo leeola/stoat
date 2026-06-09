@@ -57,7 +57,7 @@ define_action!(
 define_action!(
     ToggleProjectTreeDef,
     ToggleProjectTree,
-    "ToggleProjectTree",
+    "project-tree",
     ActionKind::ToggleProjectTree,
     "toggle the project file tree",
     "Open the project file tree in a left dock listing the workspace directory contents, or close it if already open.",
@@ -67,7 +67,7 @@ define_action!(
 define_action!(
     ToggleOutlinePanelDef,
     ToggleOutlinePanel,
-    "ToggleOutlinePanel",
+    "outline-panel",
     ActionKind::ToggleOutlinePanel,
     "toggle the symbol outline panel",
     "Open a right dock showing the active editor's symbol tree, tracking the cursor and refreshing as the buffer changes, or close it if already open.",
@@ -77,7 +77,7 @@ define_action!(
 define_action!(
     ToggleDiagnosticsPanelDef,
     ToggleDiagnosticsPanel,
-    "ToggleDiagnosticsPanel",
+    "diagnostics-panel",
     ActionKind::ToggleDiagnosticsPanel,
     "toggle the diagnostics panel",
     "Open a right dock listing every diagnostic across open buffers grouped by file, or close it if already open.",
@@ -241,7 +241,7 @@ mod tests {
         assert_eq!(OpenWorkspacePicker.kind(), ActionKind::OpenWorkspacePicker);
         assert_eq!(OpenWorkspacePicker.def().name(), "OpenWorkspacePicker");
         assert_eq!(ToggleProjectTree.kind(), ActionKind::ToggleProjectTree);
-        assert_eq!(ToggleProjectTree.def().name(), "ToggleProjectTree");
+        assert_eq!(ToggleProjectTree.def().name(), "project-tree");
         assert_eq!(Pwd.kind(), ActionKind::Pwd);
         assert_eq!(Pwd.def().name(), "pwd");
         assert_eq!(Env.kind(), ActionKind::Env);
