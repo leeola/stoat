@@ -7,7 +7,7 @@ use std::any::Any;
 define_action!(
     NewWorkspaceDef,
     NewWorkspace,
-    "NewWorkspace",
+    "workspace-new",
     ActionKind::NewWorkspace,
     "create a new workspace",
     "Create a fresh workspace at the current workspace's git root. The new workspace has default panes and no inherited buffers, Claude session, or rebase state. The current workspace is saved and kept in the background; the new workspace becomes active.",
@@ -17,7 +17,7 @@ define_action!(
 define_action!(
     CopyWorkspaceDef,
     CopyWorkspace,
-    "CopyWorkspace",
+    "workspace-copy",
     ActionKind::CopyWorkspace,
     "duplicate this workspace",
     "Create a new workspace that clones the current workspace's panes, editors, buffers, and layout. The copy sits at the same git root as the source but does not inherit live Claude session or in-flight rebase state. The current workspace is saved; the copy becomes active.",
@@ -27,7 +27,7 @@ define_action!(
 define_action!(
     SwitchWorkspaceDef,
     SwitchWorkspace,
-    "SwitchWorkspace",
+    "workspace-switch",
     ActionKind::SwitchWorkspace,
     "switch workspaces",
     "Open the workspace picker to choose another open workspace to switch to. The current workspace is saved before the switch; its panes, buffers, and selections are preserved for the return trip.",
@@ -37,7 +37,7 @@ define_action!(
 define_action!(
     CloseWorkspaceDef,
     CloseWorkspace,
-    "CloseWorkspace",
+    "workspace-close",
     ActionKind::CloseWorkspace,
     "close this workspace",
     "Close the active workspace, delete its persisted state, and switch to a sibling workspace. Refuses when only one workspace is open.",
@@ -106,7 +106,7 @@ pub struct RenameWorkspaceDef;
 
 impl ActionDef for RenameWorkspaceDef {
     fn name(&self) -> &'static str {
-        "RenameWorkspace"
+        "workspace-rename"
     }
 
     fn kind(&self) -> ActionKind {
@@ -161,7 +161,7 @@ pub struct SetCwdDef;
 
 impl ActionDef for SetCwdDef {
     fn name(&self) -> &'static str {
-        "SetCwd"
+        "cd"
     }
 
     fn kind(&self) -> ActionKind {
@@ -207,7 +207,7 @@ impl Action for SetCwd {
 define_action!(
     PwdDef,
     Pwd,
-    "Pwd",
+    "pwd",
     ActionKind::Pwd,
     "report the working directory",
     "Write the active workspace's working directory to the log at info level. The working directory is the workspace git root that the file finder, review, and git operations resolve against.",
@@ -217,7 +217,7 @@ define_action!(
 define_action!(
     EnvDef,
     Env,
-    "Env",
+    "env",
     ActionKind::Env,
     "report STOAT_ environment variables",
     "Write every environment variable whose name begins with STOAT_ to the log at info level as name/value pairs, reporting which Stoat-specific overrides are active in the current process.",
@@ -231,26 +231,26 @@ mod tests {
     #[test]
     fn kinds_and_names() {
         assert_eq!(NewWorkspace.kind(), ActionKind::NewWorkspace);
-        assert_eq!(NewWorkspace.def().name(), "NewWorkspace");
+        assert_eq!(NewWorkspace.def().name(), "workspace-new");
         assert_eq!(CopyWorkspace.kind(), ActionKind::CopyWorkspace);
-        assert_eq!(CopyWorkspace.def().name(), "CopyWorkspace");
+        assert_eq!(CopyWorkspace.def().name(), "workspace-copy");
         assert_eq!(SwitchWorkspace.kind(), ActionKind::SwitchWorkspace);
-        assert_eq!(SwitchWorkspace.def().name(), "SwitchWorkspace");
+        assert_eq!(SwitchWorkspace.def().name(), "workspace-switch");
         assert_eq!(CloseWorkspace.kind(), ActionKind::CloseWorkspace);
-        assert_eq!(CloseWorkspace.def().name(), "CloseWorkspace");
+        assert_eq!(CloseWorkspace.def().name(), "workspace-close");
         assert_eq!(OpenWorkspacePicker.kind(), ActionKind::OpenWorkspacePicker);
         assert_eq!(OpenWorkspacePicker.def().name(), "OpenWorkspacePicker");
         assert_eq!(ToggleProjectTree.kind(), ActionKind::ToggleProjectTree);
         assert_eq!(ToggleProjectTree.def().name(), "ToggleProjectTree");
         assert_eq!(Pwd.kind(), ActionKind::Pwd);
-        assert_eq!(Pwd.def().name(), "Pwd");
+        assert_eq!(Pwd.def().name(), "pwd");
         assert_eq!(Env.kind(), ActionKind::Env);
-        assert_eq!(Env.def().name(), "Env");
+        assert_eq!(Env.def().name(), "env");
         let rename = RenameWorkspace {
             name: "x".to_string(),
         };
         assert_eq!(rename.kind(), ActionKind::RenameWorkspace);
-        assert_eq!(rename.def().name(), "RenameWorkspace");
+        assert_eq!(rename.def().name(), "workspace-rename");
     }
 
     #[test]
@@ -279,7 +279,7 @@ mod tests {
             path: "/tmp".to_string(),
         };
         assert_eq!(set.kind(), ActionKind::SetCwd);
-        assert_eq!(set.def().name(), "SetCwd");
+        assert_eq!(set.def().name(), "cd");
         let params = SetCwdDef.params();
         assert_eq!(params.len(), 1);
         assert_eq!(params[0].name, "path");

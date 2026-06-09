@@ -673,11 +673,11 @@ on key {
     }
     mode == space_workspace {
         Escape -> SetMode(normal);
-        n -> [NewWorkspace(), SetMode(normal)];
-        c -> [CopyWorkspace(), SetMode(normal)];
-        s -> [SwitchWorkspace(), SetMode(normal)];
-        x -> [CloseWorkspace(), SetMode(normal)];
-        r -> [RenameWorkspace(), SetMode(normal)];
+        n -> [workspace-new(), SetMode(normal)];
+        c -> [workspace-copy(), SetMode(normal)];
+        s -> [workspace-switch(), SetMode(normal)];
+        x -> [workspace-close(), SetMode(normal)];
+        r -> [workspace-rename(), SetMode(normal)];
         Shift-L -> [ToggleDockLeft(), SetMode(normal)];
         Shift-R -> [ToggleDockRight(), SetMode(normal)];
         m -> [ToggleMinimap(), SetMode(normal)];

@@ -1099,10 +1099,10 @@ mod tests {
         "RunHistoryNext",
         "ToggleDockRight",
         "ToggleDockLeft",
-        "NewWorkspace",
-        "CopyWorkspace",
-        "SwitchWorkspace",
-        "CloseWorkspace",
+        "workspace-new",
+        "workspace-copy",
+        "workspace-switch",
+        "workspace-close",
         "OpenWorkspacePicker",
         "ToggleProjectTree",
         "ToggleOutlinePanel",
@@ -1344,8 +1344,8 @@ mod tests {
         // + 1 ReviewCycleComparisonMode.
         // + 1 ReviewToggleFollow.
         // + 1 ReviewToggleLive.
-        // + 1 SetCwd.
-        // + 2 Pwd / Env (command-line :pwd / :env palette actions).
+        // + 1 cd.
+        // + 2 pwd / env (command-line :pwd / :env palette actions).
         // + 1 OpenConflictPicker (lists conflicted files in the worktree).
         // + 2 ReviewEnterLineSelect / ReviewLineSelectCancel (line-select mode).
         // + 2 ReviewLineSelectToggle / ReviewLineSelectAll (line-select mutation).

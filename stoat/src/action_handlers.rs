@@ -1923,7 +1923,7 @@ mod tests {
         let original = h.stoat.active_workspace;
         assert_eq!(h.stoat.workspaces.len(), 1);
 
-        h.type_action("NewWorkspace()");
+        h.type_action("workspace-new()");
 
         assert_eq!(h.stoat.workspaces.len(), 2);
         assert_ne!(h.stoat.active_workspace, original);
@@ -1940,7 +1940,7 @@ mod tests {
         let before_pane_count = h.stoat.active_workspace().panes.pane_count();
         assert_eq!(before_pane_count, 2);
 
-        h.type_action("CopyWorkspace()");
+        h.type_action("workspace-copy()");
 
         assert_eq!(h.stoat.workspaces.len(), 2);
         let new_ws = h.stoat.active_workspace();
@@ -1953,7 +1953,7 @@ mod tests {
         h.fake_fs.insert_file("/work/note.txt", b"original text");
         h.stoat.open_file(Path::new("/work/note.txt"));
 
-        h.type_action("CopyWorkspace()");
+        h.type_action("workspace-copy()");
 
         let ws = h.stoat.active_workspace();
         let focused = ws.panes.focus();
@@ -1973,7 +1973,7 @@ mod tests {
         let source_uid = h.stoat.active_workspace().uid;
 
         h.advance_clock(Duration::from_nanos(1));
-        h.type_action("CopyWorkspace()");
+        h.type_action("workspace-copy()");
 
         let copy_uid = h.stoat.active_workspace().uid;
         assert_ne!(
@@ -1985,10 +1985,10 @@ mod tests {
     #[test]
     fn switch_workspace_opens_picker() {
         let mut h = Stoat::test();
-        h.type_action("NewWorkspace()");
+        h.type_action("workspace-new()");
         assert!(h.stoat.workspace_picker.is_none());
 
-        h.type_action("SwitchWorkspace()");
+        h.type_action("workspace-switch()");
 
         assert!(h.stoat.workspace_picker.is_some());
         let picker = h.stoat.workspace_picker.as_ref().unwrap();
@@ -1998,13 +1998,13 @@ mod tests {
     #[test]
     fn picker_enter_switches_to_selected_workspace() {
         let mut h = Stoat::test();
-        h.type_action("NewWorkspace()");
+        h.type_action("workspace-new()");
         let second = h.stoat.active_workspace;
-        h.type_action("NewWorkspace()");
+        h.type_action("workspace-new()");
         let third = h.stoat.active_workspace;
         assert_eq!(h.stoat.workspaces.len(), 3);
 
-        h.type_action("SwitchWorkspace()");
+        h.type_action("workspace-switch()");
         h.type_keys("down enter");
 
         // Picker sorts current first, then by basename. With all three sharing
@@ -2018,10 +2018,10 @@ mod tests {
     #[test]
     fn picker_escape_closes_without_switching() {
         let mut h = Stoat::test();
-        h.type_action("NewWorkspace()");
+        h.type_action("workspace-new()");
         let before = h.stoat.active_workspace;
 
-        h.type_action("SwitchWorkspace()");
+        h.type_action("workspace-switch()");
         h.type_keys("escape");
 
         assert!(h.stoat.workspace_picker.is_none());
@@ -2033,7 +2033,7 @@ mod tests {
         let mut h = Stoat::test();
         let only = h.stoat.active_workspace;
 
-        h.type_action("CloseWorkspace()");
+        h.type_action("workspace-close()");
 
         assert_eq!(h.stoat.workspaces.len(), 1);
         assert_eq!(h.stoat.active_workspace, only);
@@ -2042,14 +2042,14 @@ mod tests {
     #[test]
     fn snapshot_workspace_picker_listing() {
         let mut h = Stoat::test();
-        h.type_action("NewWorkspace()");
+        h.type_action("workspace-new()");
         // NewWorkspace builds a Workspace via the production path, which
         // generates a random uid-derived name. Clear it before opening
         // the picker so the rendered snapshot is stable across runs.
         for (_, ws) in h.stoat.workspaces.iter_mut() {
             ws.name = String::new();
         }
-        h.type_action("SwitchWorkspace()");
+        h.type_action("workspace-switch()");
         h.assert_snapshot("workspace_picker_listing");
     }
 
@@ -2085,11 +2085,11 @@ mod tests {
     fn close_workspace_switches_to_sibling() {
         let mut h = Stoat::test();
         let first = h.stoat.active_workspace;
-        h.type_action("NewWorkspace()");
+        h.type_action("workspace-new()");
         let second = h.stoat.active_workspace;
         assert_ne!(first, second);
 
-        h.type_action("CloseWorkspace()");
+        h.type_action("workspace-close()");
 
         assert_eq!(h.stoat.workspaces.len(), 1);
         assert_eq!(h.stoat.active_workspace, first);
