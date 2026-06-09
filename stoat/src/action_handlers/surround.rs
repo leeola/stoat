@@ -2,20 +2,8 @@ use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
 };
-use stoat_language::surround::{find_surround_pair, surround_pair_for};
+use stoat_language::surround::{find_surround_pair, surround_pair_for, SurroundReplaceStage};
 use stoat_text::{Bias, SelectionGoal};
-
-/// Two-step capture state for [`surround_replace`]: arms after the action
-/// fires, transitions to [`SurroundReplaceStage::AwaitTo`] once the user
-/// types the from-char, then back to [`SurroundReplaceStage::Idle`] after
-/// the to-char applies the edit.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
-pub enum SurroundReplaceStage {
-    #[default]
-    Idle,
-    AwaitFrom,
-    AwaitTo(char),
-}
 
 pub(super) fn surround_add(stoat: &mut Stoat) -> UpdateEffect {
     stoat.pending_surround_add = true;

@@ -211,7 +211,7 @@ pub struct Stoat {
     /// via [`action_handlers::surround::execute_surround_replace`]
     /// and clears the state. Non-char keypresses also clear the
     /// state.
-    pub(crate) pending_surround_replace: action_handlers::surround::SurroundReplaceStage,
+    pub(crate) pending_surround_replace: stoat_language::surround::SurroundReplaceStage,
     /// Set after a `SurroundDelete` action arms the chord. While
     /// true, the next printable char keypress in normal/select mode
     /// finds the enclosing surround pair for that char around every
@@ -630,7 +630,7 @@ impl Stoat {
             pending_goto_word_input: String::new(),
             pending_replace: false,
             pending_surround_add: false,
-            pending_surround_replace: action_handlers::surround::SurroundReplaceStage::Idle,
+            pending_surround_replace: stoat_language::surround::SurroundReplaceStage::Idle,
             pending_surround_delete: false,
             pending_textobject_select: None,
             search_input: None,
@@ -1669,26 +1669,25 @@ impl Stoat {
         }
 
         if (self.mode == "normal" || self.mode == "select")
-            && self.pending_surround_replace
-                != action_handlers::surround::SurroundReplaceStage::Idle
+            && self.pending_surround_replace != stoat_language::surround::SurroundReplaceStage::Idle
         {
             if let KeyCode::Char(ch) = key.code {
                 let stage = self.pending_surround_replace;
                 self.pending_surround_replace =
-                    action_handlers::surround::SurroundReplaceStage::Idle;
+                    stoat_language::surround::SurroundReplaceStage::Idle;
                 match stage {
-                    action_handlers::surround::SurroundReplaceStage::AwaitFrom => {
+                    stoat_language::surround::SurroundReplaceStage::AwaitFrom => {
                         self.pending_surround_replace =
-                            action_handlers::surround::SurroundReplaceStage::AwaitTo(ch);
+                            stoat_language::surround::SurroundReplaceStage::AwaitTo(ch);
                         return UpdateEffect::Redraw;
                     },
-                    action_handlers::surround::SurroundReplaceStage::AwaitTo(from) => {
+                    stoat_language::surround::SurroundReplaceStage::AwaitTo(from) => {
                         return action_handlers::surround::execute_surround_replace(self, from, ch);
                     },
-                    action_handlers::surround::SurroundReplaceStage::Idle => unreachable!(),
+                    stoat_language::surround::SurroundReplaceStage::Idle => unreachable!(),
                 }
             }
-            self.pending_surround_replace = action_handlers::surround::SurroundReplaceStage::Idle;
+            self.pending_surround_replace = stoat_language::surround::SurroundReplaceStage::Idle;
         }
 
         if (self.mode == "normal" || self.mode == "select") && self.pending_surround_delete {

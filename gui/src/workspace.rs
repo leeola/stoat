@@ -12173,7 +12173,7 @@ mod tests {
 
     #[test]
     fn surround_replace_two_stage_chord_swaps_pair() {
-        use stoat::action_handlers::surround::SurroundReplaceStage;
+        use stoat_language::surround::SurroundReplaceStage;
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let editor = new_singleton_editor(vcx, "a(hello)b");
@@ -12210,7 +12210,7 @@ mod tests {
 
     #[test]
     fn surround_replace_non_char_clears_chord() {
-        use stoat::action_handlers::surround::SurroundReplaceStage;
+        use stoat_language::surround::SurroundReplaceStage;
         let mut cx = TestAppContext::single();
         let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
         let editor = new_singleton_editor(vcx, "abc");

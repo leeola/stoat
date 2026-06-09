@@ -19,13 +19,13 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
-    action_handlers::surround::SurroundReplaceStage,
     keymap::{is_text_input_mode, Keymap, KeymapState, StateValue},
     keymap_state::{arg_as_str, normalize_shift_event, resolve_action},
     register::Register,
     run::encode_key,
 };
 use stoat_config::KeyPart;
+use stoat_language::surround::SurroundReplaceStage;
 
 /// Window during which an armed duplicate-drop marker stays
 /// eligible to fire. macOS pairs an IME commit with its raw

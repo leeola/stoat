@@ -6,6 +6,18 @@
 use crate::{bracket, Tree};
 use stoat_text::Rope;
 
+/// Two-step capture state for the surround-replace chord: arms after
+/// the action fires, transitions to [`Self::AwaitTo`] once the user
+/// types the from-char, then back to [`Self::Idle`] after the to-char
+/// applies the edit.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
+pub enum SurroundReplaceStage {
+    #[default]
+    Idle,
+    AwaitFrom,
+    AwaitTo(char),
+}
+
 /// Canonical open/close pair for a surround character. Bracket
 /// characters map to their pair; any other character (quotes, custom
 /// delimiters) pairs with itself.

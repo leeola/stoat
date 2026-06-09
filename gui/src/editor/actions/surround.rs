@@ -18,9 +18,9 @@
 //!   skipped.
 //!
 //! - `SurroundReplace` -> `Workspace::dispatch_surround_replace` arms the two-stage chord
-//!   ([`stoat::action_handlers::surround::SurroundReplaceStage`]). The first char keystroke
-//!   transitions `AwaitFrom -> AwaitTo(from)` without dispatching; the second char keystroke
-//!   produces [`crate::actions::ApplySurroundReplaceChar { from, to }`] which dispatches into
+//!   ([`stoat_language::surround::SurroundReplaceStage`]). The first char keystroke transitions
+//!   `AwaitFrom -> AwaitTo(from)` without dispatching; the second char keystroke produces
+//!   [`crate::actions::ApplySurroundReplaceChar { from, to }`] which dispatches into
 //!   [`crate::editor::Editor::handle_surround_replace`].
 //!
 //! The dispatch lives in [`crate::workspace`]; the mutation
