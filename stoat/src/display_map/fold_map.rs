@@ -409,6 +409,10 @@ impl FoldMap {
             fold_metadata_by_id,
             version: self.version,
         });
+
+        #[cfg(test)]
+        snapshot.check_invariants();
+
         self.last_inlay_version = snapshot.inlay_snapshot.inlay_version;
         self.last_self_version = self.version;
         self.cached_snapshot = Some(Arc::clone(&snapshot));
@@ -997,10 +1001,10 @@ impl FoldSnapshot {
     }
 
     /// Asserts the fold transform tree's total input length equals the
-    /// inlay snapshot's output length. Tests driving an incremental sync
-    /// call this to catch coordinate-space corruption. Not yet armed
-    /// inside `sync`: other incremental paths (line-count-changing edits)
-    /// still violate it pending separate fixes to the upstream patch.
+    /// inlay snapshot's output length. Called from `sync` under
+    /// `cfg(test)` so every incremental sync is checked, catching
+    /// coordinate-space and patch-span corruption in the transform
+    /// rebuild.
     #[cfg(test)]
     fn check_invariants(&self) {
         assert_eq!(
