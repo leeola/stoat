@@ -211,16 +211,32 @@ impl InlayMap {
         }
 
         let inlays_changed = self.version != self.last_self_version;
-        let can_incremental = !buffer_edits.is_empty()
+        let buffer_changed = !buffer_edits.is_empty();
+        let can_incremental = buffer_changed
             && !inlays_changed
             && self.cached_snapshot.is_some()
             && self.inlays_sorted
             && self.cached_offsets.len() == self.inlays.len();
+        // An inlay splice with no buffer edit drives sync_incremental with
+        // synthetic empty edits at the changed inlay offsets, so only those
+        // rows are patched instead of the whole file.
+        let can_incremental_inlay =
+            inlays_changed && !buffer_changed && self.cached_snapshot.is_some();
 
         let (resolved, inlay_offsets) = if can_incremental {
             self.resolve_incremental(&buffer_snapshot, buffer_edits)
         } else {
             self.resolve_all(&buffer_snapshot)
+        };
+
+        let splice_edits = if can_incremental_inlay {
+            let old_snapshot = self
+                .cached_snapshot
+                .as_ref()
+                .expect("guarded by can_incremental_inlay");
+            Some(inlay_splice_edits(old_snapshot, &resolved, &inlay_offsets))
+        } else {
+            None
         };
 
         // Skip inlays whose anchor was invalidated (its hinted text deleted):
@@ -254,6 +270,18 @@ impl InlayMap {
                 old_snapshot,
                 &buffer_snapshot,
                 buffer_edits,
+                &resolved,
+                &transform_offsets,
+            )
+        } else if let Some(splice_edits) = &splice_edits {
+            let old_snapshot = self
+                .cached_snapshot
+                .as_ref()
+                .expect("guarded by can_incremental_inlay");
+            sync_incremental(
+                old_snapshot,
+                &buffer_snapshot,
+                splice_edits,
                 &resolved,
                 &transform_offsets,
             )
@@ -652,6 +680,53 @@ fn sync_incremental(
     (new_transforms, row_edits)
 }
 
+/// Synthetic empty edits at the buffer offsets where the inlay set changed.
+///
+/// Diffs the cached snapshot's inlays against the freshly resolved set by id;
+/// the buffer is unchanged, so a surviving inlay keeps its offset. A removed
+/// inlay contributes its old offset, an inserted one its new offset, a moved
+/// one both. Routing these `offset..offset` edits through [`sync_incremental`]
+/// reconstructs only the affected rows rather than the whole file.
+fn inlay_splice_edits(
+    old_snapshot: &InlaySnapshot,
+    new_inlays: &[Inlay],
+    new_offsets: &[usize],
+) -> Patch<usize> {
+    let old_rope = old_snapshot.buffer.rope();
+    let mut old: HashMap<usize, usize> = HashMap::new();
+    for transform in old_snapshot.transforms.iter() {
+        if let Transform::Inlay(inlay) = transform {
+            old.insert(inlay.id.0, old_rope.point_to_offset(inlay.position));
+        }
+    }
+
+    let mut offsets: Vec<usize> = Vec::new();
+    let mut new: HashMap<usize, usize> = HashMap::with_capacity(new_inlays.len());
+    for (inlay, &offset) in new_inlays.iter().zip(new_offsets) {
+        new.insert(inlay.id.0, offset);
+        if old.get(&inlay.id.0) != Some(&offset) {
+            offsets.push(offset);
+        }
+    }
+    for (id, &offset) in &old {
+        if !new.contains_key(id) {
+            offsets.push(offset);
+        }
+    }
+
+    offsets.sort_unstable();
+    offsets.dedup();
+    Patch::new(
+        offsets
+            .into_iter()
+            .map(|offset| stoat_text::patch::Edit {
+                old: offset..offset,
+                new: offset..offset,
+            })
+            .collect(),
+    )
+}
+
 fn point_overshoot(base: Point, target: Point) -> Point {
     if target.row == base.row {
         Point::new(0, target.column - base.column)
@@ -1012,13 +1087,13 @@ impl InlayPointCursor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{InlayMap, InlayOffset, InlayPoint};
+    use super::{InlayKind, InlayMap, InlayOffset, InlayPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::{patch::Patch, Point, TextSummary};
+    use stoat_text::{patch::Patch, Bias, Point, TextSummary};
 
     fn make_snapshot(content: &str) -> Arc<super::InlaySnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -1043,9 +1118,9 @@ mod tests {
             .map(|(pos, text)| {
                 let off = buffer_snapshot.rope().point_to_offset(pos);
                 (
-                    buffer_snapshot.anchor_at(off, stoat_text::Bias::Right),
+                    buffer_snapshot.anchor_at(off, Bias::Right),
                     text,
-                    super::InlayKind::Hint,
+                    InlayKind::Hint,
                 )
             })
             .collect();
@@ -1094,6 +1169,58 @@ mod tests {
             assert_eq!(got.len, expected.len, "len mismatch for {range:?}");
             assert_eq!(got.lines, expected.lines, "lines mismatch for {range:?}");
         }
+    }
+
+    #[test]
+    fn splice_incremental_matches_full_rebuild() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "alpha\nbeta\ngamma\ndelta");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let anchor_at = |row: u32, col: u32| {
+            let off = buffer_snapshot.rope().point_to_offset(Point::new(row, col));
+            buffer_snapshot.anchor_at(off, Bias::Right)
+        };
+
+        // First hint, full-rebuilt on the initial sync.
+        let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
+        let a_ids = map.splice(
+            Vec::new(),
+            vec![(anchor_at(0, 5), ": A".to_string(), InlayKind::Hint)],
+        );
+        let _ = map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        // Remove A, add B two rows down: drives the incremental splice path.
+        map.splice(
+            a_ids,
+            vec![(anchor_at(2, 5), ": B".to_string(), InlayKind::Hint)],
+        );
+        let (inc_snap, edits) = map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        // Oracle: a fresh map holding only the final inlay (full rebuild).
+        let (mut full_map, _) = InlayMap::new(buffer_snapshot.clone());
+        full_map.splice(
+            Vec::new(),
+            vec![(anchor_at(2, 5), ": B".to_string(), InlayKind::Hint)],
+        );
+        let (full_snap, _) = full_map.sync(buffer_snapshot.clone(), &Patch::empty());
+
+        assert_eq!(
+            inc_snap.inlay_text(),
+            full_snap.inlay_text(),
+            "incremental splice must match a full rebuild"
+        );
+
+        let total_rows = inc_snap.total_summary().lines.row + 1;
+        assert!(!edits.is_empty(), "splice must emit a row patch");
+        assert!(
+            !edits
+                .edits()
+                .iter()
+                .any(|e| e.new.start == 0 && e.new.end >= total_rows),
+            "splice row patch must be localized, got {:?}",
+            edits.edits()
+        );
     }
 
     #[test]
@@ -1189,10 +1316,10 @@ mod tests {
         let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
 
         let off = buffer_snapshot.rope().point_to_offset(Point::new(0, 5));
-        let anchor = buffer_snapshot.anchor_at(off, stoat_text::Bias::Right);
+        let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
         let ids = map.splice(
             Vec::new(),
-            vec![(anchor, ": str".to_string(), super::InlayKind::Hint)],
+            vec![(anchor, ": str".to_string(), InlayKind::Hint)],
         );
         let (snap, _) = map.sync(buffer_snapshot.clone(), &Patch::empty());
         assert_eq!(
@@ -1243,10 +1370,10 @@ mod tests {
         let (mut map, _) = InlayMap::new(snap.clone());
 
         let off = snap.rope().point_to_offset(Point::new(0, 5));
-        let anchor = snap.anchor_at(off, stoat_text::Bias::Right);
+        let anchor = snap.anchor_at(off, Bias::Right);
         map.splice(
             Vec::new(),
-            vec![(anchor, ": str".to_string(), super::InlayKind::Hint)],
+            vec![(anchor, ": str".to_string(), InlayKind::Hint)],
         );
 
         {
@@ -1295,7 +1422,7 @@ mod tests {
         let inlay_chunks: Vec<_> = chunks.iter().filter(|c| c.is_inlay).collect();
         assert_eq!(inlay_chunks.len(), 1);
         assert_eq!(inlay_chunks[0].text.as_ref(), ": str");
-        assert_eq!(inlay_chunks[0].inlay_kind, Some(super::InlayKind::Hint));
+        assert_eq!(inlay_chunks[0].inlay_kind, Some(InlayKind::Hint));
     }
 
     #[test]
@@ -1353,10 +1480,10 @@ mod tests {
         let (mut map, _) = InlayMap::new(snap1.clone());
 
         // Anchor a hint inside "def" (offset 3).
-        let anchor = snap1.anchor_at(3, stoat_text::Bias::Right);
+        let anchor = snap1.anchor_at(3, Bias::Right);
         map.splice(
             Vec::new(),
-            vec![(anchor, ": hint".to_string(), super::InlayKind::Hint)],
+            vec![(anchor, ": hint".to_string(), InlayKind::Hint)],
         );
         let (before, _) = map.sync(snap1, &Patch::empty());
         assert!(
