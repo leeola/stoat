@@ -696,6 +696,48 @@ impl WrapSnapshot {
         }
     }
 
+    /// First wrap (output) row of the input row containing `point`.
+    ///
+    /// Block-region edits snap to whole input rows so a soft-wrapped line is
+    /// rebuilt as a unit rather than split mid-wrap. With `wrap_width` unset
+    /// every input row is one wrap row, so this is just `point.row()`.
+    pub fn prev_row_boundary(&self, point: WrapPoint) -> u32 {
+        if self.wrap_width.is_none() {
+            return point.row().min(self.total_rows.saturating_sub(1));
+        }
+
+        let target = OutputRow(point.row() + 1);
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&target, Bias::Left);
+        let Dimensions(_input_start, output_start, _) = cursor.start();
+        output_start.0
+    }
+
+    /// First wrap (output) row of the input row *after* the one containing
+    /// `point`, clamped to the wrap line count. With `wrap_width` unset this is
+    /// `point.row() + 1`. The companion of [`WrapSnapshot::prev_row_boundary`]
+    /// for bounding a block region.
+    pub fn next_row_boundary(&self, point: WrapPoint) -> u32 {
+        if self.wrap_width.is_none() {
+            return (point.row() + 1).min(self.total_rows);
+        }
+
+        let target = OutputRow(point.row() + 1);
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&target, Bias::Left);
+        cursor.next();
+        if cursor.item().is_some() {
+            let Dimensions(_input_start, output_start, _) = cursor.start();
+            output_start.0
+        } else {
+            self.total_rows
+        }
+    }
+
     pub fn classify_row(&self, wrap_row: u32) -> WrapRowKind {
         if self.wrap_width.is_none() {
             return WrapRowKind::Primary;
@@ -1201,6 +1243,30 @@ mod tests {
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width, test_executor());
         wrap_snapshot
+    }
+
+    #[test]
+    fn row_boundaries_unwrapped() {
+        let snap = make_snapshot("l0\nl1\nl2", None);
+        assert_eq!(snap.prev_row_boundary(WrapPoint::new(1, 0)), 1);
+        assert_eq!(snap.next_row_boundary(WrapPoint::new(1, 0)), 2);
+        assert_eq!(snap.prev_row_boundary(WrapPoint::new(0, 0)), 0);
+        assert_eq!(snap.next_row_boundary(WrapPoint::new(2, 0)), 3);
+    }
+
+    #[test]
+    fn row_boundaries_snap_to_input_row_under_wrap() {
+        // "aaaaaaaa" wraps into output rows 0,1 at width 4; "bb" is row 2.
+        let snap = make_snapshot("aaaaaaaa\nbb", Some(4));
+        assert_eq!(
+            snap.line_count(),
+            3,
+            "the long line must wrap into two rows"
+        );
+        assert_eq!(snap.prev_row_boundary(WrapPoint::new(1, 0)), 0);
+        assert_eq!(snap.next_row_boundary(WrapPoint::new(1, 0)), 2);
+        assert_eq!(snap.prev_row_boundary(WrapPoint::new(0, 0)), 0);
+        assert_eq!(snap.next_row_boundary(WrapPoint::new(2, 0)), 3);
     }
 
     #[test]
