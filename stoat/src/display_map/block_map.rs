@@ -17,7 +17,7 @@ use std::{
     ops::Deref,
     sync::{
         atomic::{AtomicUsize, Ordering::SeqCst},
-        Arc,
+        Arc, LazyLock,
     },
 };
 use stoat_text::{
@@ -213,6 +213,13 @@ pub struct CustomBlock {
     pub diff_status: Option<DiffHunkStatus>,
     pub style: BlockStyle,
     pub priority: usize,
+    /// Line strings from rendering `render` once at construction against the
+    /// default (empty-snapshot) context. Backs `get_line` and everything that
+    /// funnels through it, so the render closure runs once per block rather
+    /// than once per line access.
+    lines: Arc<[String]>,
+    longest_row: u32,
+    longest_row_chars: u32,
 }
 
 impl std::fmt::Debug for CustomBlock {
@@ -267,43 +274,9 @@ impl Block {
         }
     }
 
-    fn default_ctx(&self) -> BlockContext<'static> {
-        // Non-Custom blocks render static content and don't access the buffer.
-        // Custom blocks receive a real BlockContext through the display pipeline.
-        static EMPTY_SNAPSHOT: std::sync::LazyLock<MultiBufferSnapshot> =
-            std::sync::LazyLock::new(MultiBufferSnapshot::empty);
-        BlockContext {
-            block_id: match self {
-                Block::Custom(b) => BlockId::Custom(b.id),
-                Block::FoldedBuffer { first_excerpt, .. } => {
-                    BlockId::FoldedBuffer(first_excerpt.id)
-                },
-                Block::ExcerptBoundary { excerpt, .. } => BlockId::ExcerptBoundary(excerpt.id),
-                Block::BufferHeader { excerpt, .. } => BlockId::BufferHeader(excerpt.id),
-                Block::Spacer { id, .. } => BlockId::Spacer(*id),
-            },
-            max_width: 256,
-            height: self.height(),
-            selected: false,
-            anchor_row: 0,
-            diff_status: match self {
-                Block::Custom(b) => b.diff_status,
-                _ => None,
-            },
-            buffer_snapshot: &EMPTY_SNAPSHOT,
-        }
-    }
-
     pub fn get_line(&self, index: u32) -> String {
         match self {
-            Block::Custom(b) => {
-                let ctx = self.default_ctx();
-                let lines = (b.render)(&ctx);
-                lines
-                    .get(index as usize)
-                    .map(|l| l.to_string())
-                    .unwrap_or_default()
-            },
+            Block::Custom(b) => b.lines.get(index as usize).cloned().unwrap_or_default(),
             _ => String::new(),
         }
     }
@@ -561,6 +534,8 @@ impl BlockMap {
         let mut ids = Vec::with_capacity(blocks.len());
         for props in blocks {
             let id = CustomBlockId(self.next_block_id.fetch_add(1, SeqCst));
+            let (lines, longest_row, longest_row_chars) =
+                render_block_cache(id, props.height, props.diff_status, &props.render);
             let block = Arc::new(CustomBlock {
                 id,
                 placement: props.placement,
@@ -569,6 +544,9 @@ impl BlockMap {
                 diff_status: props.diff_status,
                 style: props.style,
                 priority: props.priority,
+                lines,
+                longest_row,
+                longest_row_chars,
             });
             let ix = self
                 .custom_blocks
@@ -1702,7 +1680,42 @@ pub fn balancing_block(
     })
 }
 
+fn render_block_cache(
+    id: CustomBlockId,
+    height: Option<u32>,
+    diff_status: Option<DiffHunkStatus>,
+    render: &RenderBlock,
+) -> (Arc<[String]>, u32, u32) {
+    static EMPTY_SNAPSHOT: LazyLock<MultiBufferSnapshot> =
+        LazyLock::new(MultiBufferSnapshot::empty);
+    let ctx = BlockContext {
+        block_id: BlockId::Custom(id),
+        max_width: 256,
+        height: height.unwrap_or(0),
+        selected: false,
+        anchor_row: 0,
+        diff_status,
+        buffer_snapshot: &EMPTY_SNAPSHOT,
+    };
+    let lines: Arc<[String]> = render(&ctx).iter().map(|line| line.to_string()).collect();
+
+    let mut longest_row = 0;
+    let mut longest_row_chars = 0;
+    for (row, line) in lines.iter().enumerate() {
+        let chars = line.len() as u32;
+        if chars > longest_row_chars {
+            longest_row = row as u32;
+            longest_row_chars = chars;
+        }
+    }
+    (lines, longest_row, longest_row_chars)
+}
+
 fn longest_block_line(block: &Block) -> (u32, u32) {
+    if let Block::Custom(b) = block {
+        return (b.longest_row, b.longest_row_chars);
+    }
+
     let mut best_row = 0u32;
     let mut best_chars = 0u32;
     for i in 0..block.height() {
@@ -1762,13 +1775,19 @@ fn push_isomorphic(
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockMap, BlockPlacement, BlockPoint, BlockProperties, BlockRowKind, BlockStyle};
+    use super::{
+        longest_block_line, Block, BlockMap, BlockPlacement, BlockPoint, BlockProperties,
+        BlockRowKind, BlockStyle, Line,
+    };
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap, wrap_map::WrapMap},
         multi_buffer::MultiBuffer,
     };
-    use std::sync::{Arc, RwLock};
+    use std::sync::{
+        atomic::{AtomicUsize, Ordering::SeqCst},
+        Arc, RwLock,
+    };
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{patch::Patch, Bias, Point};
 
@@ -1797,6 +1816,45 @@ mod tests {
             content.lines().map(String::from).collect(),
             BlockStyle::Fixed,
         )
+    }
+
+    #[test]
+    fn custom_block_renders_once_into_cache() {
+        let render_count = Arc::new(AtomicUsize::new(0));
+        let props = BlockProperties {
+            placement: BlockPlacement::Below(0),
+            height: Some(3),
+            style: BlockStyle::Fixed,
+            render: Arc::new({
+                let render_count = Arc::clone(&render_count);
+                move |_ctx| {
+                    render_count.fetch_add(1, SeqCst);
+                    vec![Line::raw("aa"), Line::raw("bbbb"), Line::raw("c")]
+                }
+            }),
+            diff_status: None,
+            priority: 0,
+        };
+
+        let mut block_map = BlockMap::new();
+        block_map.insert(vec![props]);
+        assert_eq!(
+            render_count.load(SeqCst),
+            1,
+            "render runs once at construction"
+        );
+
+        let block = Block::Custom(Arc::clone(&block_map.custom_blocks[0]));
+        assert_eq!(block.get_line(0), "aa");
+        assert_eq!(block.get_line(1), "bbbb");
+        assert_eq!(block.line_len(1), 4);
+        assert_eq!(block.get_line(2), "c");
+        assert_eq!(longest_block_line(&block), (1, 4));
+        assert_eq!(
+            render_count.load(SeqCst),
+            1,
+            "reads hit the cache without re-rendering"
+        );
     }
 
     #[test]
@@ -2011,7 +2069,7 @@ mod tests {
         let props = text_block(BlockPlacement::Below(0), "short\nlonger line\nx");
         let mut block_map = BlockMap::new();
         block_map.insert(vec![props]);
-        let block = super::Block::Custom(block_map.custom_blocks[0].clone());
+        let block = Block::Custom(block_map.custom_blocks[0].clone());
         for i in 0..block.height() {
             assert_eq!(
                 block.line_len(i),
