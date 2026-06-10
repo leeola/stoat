@@ -1147,8 +1147,10 @@ impl BlockSnapshot {
     /// Walks forward from `rows.start` (and backward from `rows.end - 1`) to
     /// find the first display rows that map to a buffer point. Display rows
     /// inside custom blocks have no buffer mapping and are skipped. The end
-    /// is taken at the start of the buffer line *after* the last visible row
-    /// so its full content is included.
+    /// is taken at the start of the buffer line after the buffer point at the
+    /// last visible row's *end*: a display row holding a multi-line fold
+    /// renders trailing text from the fold's end buffer line, past the buffer
+    /// point at the row's start, and that tail must fall inside the range.
     ///
     /// Used by [`crate::display_map::DisplayMap::build_endpoints`] to bound
     /// highlight endpoint construction to the viewport instead of the whole
@@ -1175,11 +1177,14 @@ impl BlockSnapshot {
 
         let end_offset = (start_row..end_row)
             .rev()
-            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, 0)))
+            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, self.line_len(r))))
             .map(|p| {
-                // Take through the start of the next buffer line so the
-                // entire visible row's content (incl. any trailing newline)
-                // is covered. point_to_offset clamps past-the-end points.
+                // Map the row's end, not its start: a multi-line fold renders
+                // trailing text from the fold's end buffer line, so the byte
+                // at the row's first buffer point under-spans it. Take through
+                // the start of the next buffer line so the row's full content
+                // (incl. any trailing newline) is covered; point_to_offset
+                // clamps past-the-end points.
                 rope.point_to_offset(Point::new(p.row + 1, 0)).min(total)
             })
             .unwrap_or(start_offset);

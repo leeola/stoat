@@ -905,18 +905,22 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{BlockRowKind, DisplayMap, DisplayPoint, DisplayRow, InlayKind, InlayPoint};
+    use super::{
+        BlockRowKind, DisplayMap, DisplayPoint, DisplayRow, HighlightKey, HighlightLayer,
+        HighlightStyle, InlayKind, InlayPoint,
+    };
     use crate::{
         buffer::{BufferId, TextBuffer},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
         multi_buffer::MultiBuffer,
     };
+    use ratatui::style::Color;
     use std::{
         ops::Range,
         sync::{Arc, RwLock},
     };
     use stoat_scheduler::{Executor, TestScheduler};
-    use stoat_text::Point;
+    use stoat_text::{Bias, Point};
 
     fn test_executor() -> Executor {
         Executor::new(Arc::new(TestScheduler::new()))
@@ -1273,7 +1277,7 @@ mod tests {
         let anchor = {
             let snap = display_map.multi_buffer.snapshot();
             let off = snap.rope().point_to_offset(Point::new(0, 5));
-            snap.anchor_at(off, stoat_text::Bias::Right)
+            snap.anchor_at(off, Bias::Right)
         };
 
         let inserted = display_map.splice_inlays(
@@ -1303,7 +1307,7 @@ mod tests {
 
         let snap = display_map.multi_buffer.snapshot();
         let off = snap.rope().point_to_offset(Point::new(0, 5));
-        let anchor = snap.anchor_at(off, stoat_text::Bias::Right);
+        let anchor = snap.anchor_at(off, Bias::Right);
         display_map.inlay_map.splice(
             Vec::new(),
             vec![(anchor, ": str".to_string(), InlayKind::Hint)],
@@ -1426,6 +1430,42 @@ mod tests {
             .join("\n");
 
         assert_eq!(from_chunks, from_lines);
+    }
+
+    #[test]
+    fn fold_tail_highlight_endpoints_survive() {
+        let mut display_map = create_display_map("fn foo() {\n    body\n}  TAIL");
+        display_map.fold(vec![Point::new(0, 10)..Point::new(2, 1)]);
+
+        let range = {
+            let snap = display_map.multi_buffer.snapshot();
+            let rope = snap.rope();
+            let start = rope.point_to_offset(Point::new(2, 3));
+            let end = rope.point_to_offset(Point::new(2, 7));
+            snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left)
+        };
+        display_map.highlight_text(
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
+            vec![range],
+            HighlightStyle {
+                foreground: Some(Color::Red),
+                ..Default::default()
+            },
+        );
+
+        let snapshot = display_map.snapshot();
+        assert_eq!(
+            snapshot.line_count(),
+            1,
+            "fold collapses to one display row"
+        );
+
+        let styled: String = snapshot
+            .highlighted_chunks(0..1)
+            .filter(|c| c.highlight_style.is_some())
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(styled, "TAIL");
     }
 
     #[test]
