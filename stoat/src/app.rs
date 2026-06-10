@@ -76,10 +76,6 @@ pub struct Stoat {
     pub(crate) permission_prompt_queue: std::collections::VecDeque<crate::host::PermissionPrompt>,
     pub permission_prompt_tx: Sender<crate::host::PermissionPrompt>,
     permission_prompt_rx: Receiver<crate::host::PermissionPrompt>,
-    /// Active diagnostics picker modal (`space l d`). `Some` while
-    /// the modal is open; cleared on Esc, on selection (after
-    /// jumping the focused editor's cursor), and on Ctrl-C.
-    pub(crate) diagnostics_picker: Option<crate::diagnostics_picker::DiagnosticsPicker>,
     /// Name of the action that most recently opened a picker
     /// successfully. Used by `OpenLastPicker` (`space '`) to
     /// re-fire the same action and rebuild the picker fresh.
@@ -585,7 +581,6 @@ impl Stoat {
             permission_prompt_queue: std::collections::VecDeque::new(),
             permission_prompt_tx,
             permission_prompt_rx,
-            diagnostics_picker: None,
             last_picker_action: None,
             global_search_input: None,
             global_search: None,
@@ -1359,10 +1354,6 @@ impl Stoat {
                 self.mode = palette.previous_mode;
                 return UpdateEffect::Redraw;
             }
-            if let Some(picker) = self.diagnostics_picker.take() {
-                self.mode = picker.previous_mode;
-                return UpdateEffect::Redraw;
-            }
             if let Some(picker) = self.global_search.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1396,10 +1387,6 @@ impl Stoat {
 
         if self.permission_prompt.is_some() {
             return self.dispatch_permission_prompt_key(key);
-        }
-
-        if self.diagnostics_picker.is_some() {
-            return self.dispatch_diagnostics_picker_key(key);
         }
 
         if self.global_search.is_some() {
@@ -2283,94 +2270,6 @@ impl Stoat {
                 UpdateEffect::Redraw
             },
         }
-    }
-
-    fn dispatch_diagnostics_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        use crate::diagnostics_picker::PickerOutcome;
-        let outcome = match self.diagnostics_picker.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                if let Some(picker) = self.diagnostics_picker.take() {
-                    self.mode = picker.previous_mode;
-                }
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(idx) => {
-                let Some(picker) = self.diagnostics_picker.take() else {
-                    return UpdateEffect::None;
-                };
-                let entry = match picker.entries().get(idx) {
-                    Some(entry) => entry,
-                    None => return UpdateEffect::Redraw,
-                };
-                let path = entry.path.clone();
-                let zero_based_line = entry.line.saturating_sub(1);
-                let zero_based_column = entry.column.saturating_sub(1);
-                let local_offset = entry.offset;
-                self.mode = picker.previous_mode;
-                let offset = match path {
-                    Some(path) => {
-                        action_handlers::file::open_file(self, &path);
-                        self.offset_for_focused_point(zero_based_line, zero_based_column)
-                            .unwrap_or(0)
-                    },
-                    None => local_offset,
-                };
-                self.collapse_focused_cursor_to(offset);
-                UpdateEffect::Redraw
-            },
-        }
-    }
-
-    /// Resolve a `(line, column)` 0-based point to a byte
-    /// offset in the focused editor's rope. Returns `None`
-    /// when the focused pane is not an editor.
-    fn offset_for_focused_point(&mut self, line: u32, column: u32) -> Option<usize> {
-        let ws = self.active_workspace_mut();
-        let editor_id = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
-                View::Editor(id) => id,
-                _ => return None,
-            },
-            FocusTarget::Dock(_) => return None,
-        };
-        let editor = ws.editors.get_mut(editor_id)?;
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let rope = buf_snap.rope();
-        let point = stoat_text::Point::new(line, column);
-        Some(rope.point_to_offset(point).min(rope.len()))
-    }
-
-    /// Collapse the focused editor's primary selection at
-    /// `offset`. Used by non-jumplist navigation flows (e.g. the
-    /// diagnostics picker) that need to move the cursor without
-    /// touching jumplist state.
-    fn collapse_focused_cursor_to(&mut self, offset: usize) {
-        let ws = self.active_workspace_mut();
-        let editor_id = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
-                View::Editor(id) => id,
-                _ => return,
-            },
-            FocusTarget::Dock(_) => return,
-        };
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let anchor = buf_snap.anchor_at(offset, Bias::Right);
-        editor.selections.transform(buf_snap, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
-        });
     }
 
     fn dispatch_global_search_key(&mut self, key: KeyEvent) -> UpdateEffect {

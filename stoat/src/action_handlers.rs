@@ -284,8 +284,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::JumpBackward => movement::jump_backward(stoat),
         ActionKind::JumpForward => movement::jump_forward(stoat),
         ActionKind::OpenJumplistPicker => open_jumplist_picker(stoat),
-        ActionKind::OpenDiagnosticsPicker => open_diagnostics_picker(stoat),
-        ActionKind::OpenWorkspaceDiagnosticsPicker => open_workspace_diagnostics_picker(stoat),
+        ActionKind::OpenDiagnosticsPicker => UpdateEffect::None,
+        ActionKind::OpenWorkspaceDiagnosticsPicker => UpdateEffect::None,
         ActionKind::OpenGlobalSearch => open_global_search(stoat),
         ActionKind::FindNextChar => {
             movement::set_pending_find(stoat, movement::FindKind::NextChar, false)
@@ -860,65 +860,6 @@ pub(crate) fn global_search_cancel(stoat: &mut Stoat) -> bool {
 /// the GUI, so this is now a no-op in the TUI.
 fn open_jumplist_picker(_stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::None
-}
-
-/// Drive [`ActionKind::OpenWorkspaceDiagnosticsPicker`].
-/// Snapshots every `(path, diagnostic)` pair currently in
-/// `Stoat::diagnostics` and stores the workspace-scope picker
-/// on `Stoat::diagnostics_picker`. No-op when the workspace
-/// has no diagnostics loaded.
-fn open_workspace_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let previous_mode = stoat.mode.clone();
-    if stoat.diagnostics.iter().next().is_none() {
-        return UpdateEffect::None;
-    }
-    let picker =
-        crate::diagnostics_picker::DiagnosticsPicker::workspace(&stoat.diagnostics, previous_mode);
-    if picker.entries().is_empty() {
-        return UpdateEffect::None;
-    }
-    stoat.diagnostics_picker = Some(picker);
-    UpdateEffect::Redraw
-}
-
-/// Drive [`ActionKind::OpenDiagnosticsPicker`]. Snapshots the
-/// focused buffer's diagnostic list from `Stoat::diagnostics`
-/// and stores the picker on `Stoat::diagnostics_picker`. No-op
-/// when the focused pane is not an editor, the buffer has no
-/// path on disk, or the path has no diagnostics.
-fn open_diagnostics_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let previous_mode = stoat.mode.clone();
-    let ws = stoat.active_workspace_mut();
-    let editor_id = match ws.focus {
-        FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
-            View::Editor(id) => id,
-            _ => return UpdateEffect::None,
-        },
-        FocusTarget::Dock(_) => return UpdateEffect::None,
-    };
-    let buffer_id = match ws.editors.get(editor_id) {
-        Some(e) => e.buffer_id,
-        None => return UpdateEffect::None,
-    };
-    let path = match ws.buffers.path_for(buffer_id) {
-        Some(p) => p.to_path_buf(),
-        None => return UpdateEffect::None,
-    };
-    let diagnostics = stoat.diagnostics.get(&path).to_vec();
-    if diagnostics.is_empty() {
-        return UpdateEffect::None;
-    }
-    let ws = stoat.active_workspace_mut();
-    let buffer = match ws.buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return UpdateEffect::None,
-    };
-    let picker = {
-        let guard = buffer.read().expect("buffer poisoned");
-        crate::diagnostics_picker::DiagnosticsPicker::new(&diagnostics, &guard, previous_mode)
-    };
-    stoat.diagnostics_picker = Some(picker);
-    UpdateEffect::Redraw
 }
 
 /// Drive [`ActionKind::QuitAll`] by quitting the app.
@@ -2027,6 +1968,5 @@ mod tests {
             UpdateEffect::None
         );
         assert!(stoat.command_palette.is_none());
-        assert!(stoat.diagnostics_picker.is_none());
     }
 }
