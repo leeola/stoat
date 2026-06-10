@@ -42,7 +42,6 @@ pub mod run;
 pub mod selection;
 pub mod snippet;
 pub mod theme;
-pub mod ui;
 pub mod workspace;
 pub mod workspace_picker;
 
