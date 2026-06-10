@@ -59,8 +59,6 @@ pub struct Args {
 
 #[derive(Subcommand)]
 enum Command {
-    /// Open the first changed file with a diff against HEAD
-    Review,
     /// Manage workspace dumps (captured tarballs of the repo + stoat state).
     Dump {
         #[command(subcommand)]
@@ -111,19 +109,8 @@ pub fn run() -> Result<(), Whatever> {
         Some(Command::Gui { inputs, timeout }) => {
             crate::commands::gui::run(files, restore, inputs, timeout)
         },
-        Some(Command::Review) | None => {
-            let _ = restore;
-            print_gui_hint()
-        },
+        None => crate::commands::gui::run(files, restore, None, None),
     }
-}
-
-/// Until the GPUI entry lands, the default and `Review` invocations
-/// have no working backend; tell the user where the new entry will
-/// live and exit.
-fn print_gui_hint() -> Result<(), Whatever> {
-    eprintln!("use `stoat gui`");
-    Ok(())
 }
 
 #[cfg(test)]
