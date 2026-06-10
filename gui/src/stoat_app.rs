@@ -24,6 +24,12 @@ pub(crate) struct StoatApp {
     /// view so window close flushes a final save before the
     /// workspace entity is dropped.
     _workspace_release: Subscription,
+    /// Drops with the app; saves the workspace on `App::quit` before
+    /// `shutdown()` clears the windows. The release observer above
+    /// does not fire on quit -- this view owns both the workspace
+    /// and that subscription and drops them together -- so the quit
+    /// path needs its own save. The periodic timer remains a backstop.
+    _workspace_quit: Subscription,
 }
 
 impl StoatApp {
@@ -65,11 +71,16 @@ impl StoatApp {
 
         let _workspace_release =
             gpui::App::observe_release(cx, &workspace, |ws, cx| ws.save_state_to_default_path(cx));
+        let _workspace_quit = cx.on_app_quit(|app, cx| {
+            app.workspace.read(cx).save_state_to_default_path(cx);
+            async {}
+        });
 
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
             _workspace_release,
+            _workspace_quit,
         }
     }
 }
@@ -132,11 +143,16 @@ impl StoatApp {
 
         let _workspace_release =
             gpui::App::observe_release(cx, &workspace, |ws, cx| ws.save_state_to_default_path(cx));
+        let _workspace_quit = cx.on_app_quit(|app, cx| {
+            app.workspace.read(cx).save_state_to_default_path(cx);
+            async {}
+        });
 
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
             _workspace_release,
+            _workspace_quit,
         }
     }
 
@@ -261,6 +277,42 @@ mod tests {
         assert!(
             stoat::host::FsHost::exists(&*fs_global, &expected_path),
             "release observer should have saved state at {}",
+            expected_path.display(),
+        );
+    }
+
+    #[test]
+    fn app_quit_writes_workspace_state() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let fs_global: Arc<dyn stoat::host::FsHost> = fs.clone();
+        cx.update(|cx| cx.set_global(FsHostGlobal(fs_global.clone())));
+
+        let (app, _vcx) =
+            cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), RestoreMode::None, cx));
+
+        // The initial scratch workspace is fresh and saves nothing, so
+        // split a pane to make the quit save produce a state file.
+        let workspace = app.read_with(&cx, |app, _| app.workspace.clone());
+        workspace.update(&mut cx, |w, cx| {
+            w.pane_tree().clone().update(cx, |tree, cx| {
+                tree.split(Axis::Vertical, cx);
+            });
+        });
+
+        let cwd = std::env::current_dir().expect("current_dir");
+        let uid = workspace.read_with(&cx, |w, _| w.uid());
+        let expected_path =
+            stoat::workspace::persist::state_path_for(&cwd, uid, &*fs_global).expect("state path");
+
+        assert!(!stoat::host::FsHost::exists(&*fs_global, &expected_path));
+
+        cx.quit();
+
+        assert!(
+            stoat::host::FsHost::exists(&*fs_global, &expected_path),
+            "app quit should have saved state at {}",
             expected_path.display(),
         );
     }
