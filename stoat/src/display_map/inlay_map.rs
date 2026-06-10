@@ -212,7 +212,6 @@ impl InlayMap {
             }
         }
 
-        let inlay_count = self.inlays.len();
         let inlays_changed = self.version != self.last_self_version;
         let can_incremental = !buffer_edits.is_empty()
             && !inlays_changed
@@ -226,6 +225,28 @@ impl InlayMap {
             self.resolve_all(&buffer_snapshot)
         };
 
+        // Skip inlays whose anchor was invalidated (its hinted text deleted):
+        // the anchor still resolves to the collapse offset, so without this the
+        // hint would linger there until the next LSP refresh. Only the rendered
+        // transforms drop it; `self.inlays`/`cached_offsets` keep the full set
+        // so the hint reappears if the deletion is undone.
+        let valid: Vec<bool> = self
+            .inlays
+            .iter()
+            .map(|ai| buffer_snapshot.is_anchor_valid(&ai.position))
+            .collect();
+        let resolved: Vec<Inlay> = resolved
+            .into_iter()
+            .zip(&valid)
+            .filter_map(|(inlay, &keep)| keep.then_some(inlay))
+            .collect();
+        let transform_offsets: Vec<usize> = inlay_offsets
+            .iter()
+            .zip(&valid)
+            .filter_map(|(&off, &keep)| keep.then_some(off))
+            .collect();
+        let inlay_count = resolved.len();
+
         let (transforms, edits) = if can_incremental {
             let old_snapshot = self
                 .cached_snapshot
@@ -236,7 +257,7 @@ impl InlayMap {
                 &buffer_snapshot,
                 buffer_edits,
                 &resolved,
-                &inlay_offsets,
+                &transform_offsets,
             )
         } else {
             // Inlay-output rows, matching new_line_count's space below;
@@ -1198,5 +1219,42 @@ mod tests {
             .collect();
         assert_eq!(rows, [(0, 1, 0, 2)]);
         assert_eq!(snap.total_summary().len, 6);
+    }
+
+    #[test]
+    fn invalid_inlay_anchor_dropped_on_delete() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "abcdef");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap1 = multi_buffer.snapshot();
+        let version1 = snap1.version();
+        let (mut map, _) = InlayMap::new(snap1.clone());
+
+        // Anchor a hint inside "def" (offset 3).
+        let anchor = snap1.anchor_at(3, stoat_text::Bias::Right);
+        map.splice(
+            Vec::new(),
+            vec![(anchor, ": hint".to_string(), super::InlayKind::Hint)],
+        );
+        let (before, _) = map.sync(snap1, &Patch::empty());
+        assert!(
+            before.has_inlays(),
+            "hint present before its text is deleted"
+        );
+
+        // Delete the anchored text; its anchor is now invalid.
+        {
+            let mut buf = shared.write().unwrap();
+            buf.edit(3..6, "");
+        }
+        let snap2 = multi_buffer.snapshot();
+        let edits = snap2.edits_since(version1);
+        let (after, _) = map.sync(snap2, &edits);
+
+        assert!(
+            !after.has_inlays(),
+            "stale hint dropped once its anchor is invalidated"
+        );
     }
 }
