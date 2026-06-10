@@ -7,6 +7,7 @@ mod offset_utf16;
 pub mod patch;
 mod point;
 mod rope;
+mod search;
 mod selection;
 mod sum_tree;
 pub mod tree_map;
@@ -30,6 +31,7 @@ pub use rope::{
     BytesInRange, CharsAt, ChunksInLine, ChunksInRange, FindIter, Lines, ReversedCharsAt, Rope,
     TextSummary,
 };
+pub use search::compile_search_regex;
 pub use selection::{cursor_offset, Selection, SelectionGoal};
 pub use sum_tree::{
     Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Edit, FilterCursor, Item, Iter,

@@ -132,7 +132,7 @@ fn jump_to_match(stoat: &mut Stoat, query: &str, direction: SearchDirection) -> 
     use crate::pane::View;
     use stoat_text::{Bias, SelectionGoal};
 
-    let Ok(regex) = compile_search_regex(query) else {
+    let Ok(regex) = stoat_text::compile_search_regex(query) else {
         return false;
     };
     let ws = stoat.active_workspace_mut();
@@ -199,12 +199,6 @@ fn next_match_at_or_after(regex: &regex::Regex, text: &str, at: usize) -> Option
     } else {
         None
     }
-}
-
-/// Compile `pattern` into a [`regex::Regex`] with multiline mode on,
-/// so `^` and `$` match line boundaries inside the buffer text.
-pub fn compile_search_regex(pattern: &str) -> Result<regex::Regex, regex::Error> {
-    regex::RegexBuilder::new(pattern).multi_line(true).build()
 }
 
 #[cfg(test)]

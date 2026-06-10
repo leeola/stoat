@@ -62,7 +62,7 @@ pub(crate) fn submit(stoat: &mut Stoat) -> bool {
     if query.is_empty() {
         return true;
     }
-    let regex = match super::search::compile_search_regex(&query) {
+    let regex = match stoat_text::compile_search_regex(&query) {
         Ok(r) => r,
         Err(_) => return true,
     };

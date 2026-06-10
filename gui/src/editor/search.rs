@@ -97,7 +97,7 @@ impl Editor {
         if query.is_empty() {
             return;
         }
-        let Ok(regex) = stoat::action_handlers::search::compile_search_regex(query) else {
+        let Ok(regex) = stoat_text::compile_search_regex(query) else {
             return;
         };
         let snapshot = self.display_map().update(cx, |dm, _| dm.snapshot());
@@ -168,7 +168,7 @@ mod tests {
     use super::*;
 
     fn re(pattern: &str) -> regex::Regex {
-        stoat::action_handlers::search::compile_search_regex(pattern).expect("compile")
+        stoat_text::compile_search_regex(pattern).expect("compile")
     }
 
     #[test]

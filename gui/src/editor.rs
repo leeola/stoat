@@ -1772,7 +1772,7 @@ impl Editor {
     /// `pattern`. An invalid regex is a no-op and a warning is
     /// logged. Selections without matches are left unchanged.
     pub fn split_selection_by_pattern(&mut self, pattern: &str, cx: &mut Context<'_, Self>) {
-        let regex = match stoat::action_handlers::search::compile_search_regex(pattern) {
+        let regex = match stoat_text::compile_search_regex(pattern) {
             Ok(r) => r,
             Err(err) => {
                 tracing::warn!(
@@ -1835,7 +1835,7 @@ impl Editor {
         remove: bool,
         cx: &mut Context<'_, Self>,
     ) {
-        let regex = match stoat::action_handlers::search::compile_search_regex(pattern) {
+        let regex = match stoat_text::compile_search_regex(pattern) {
             Ok(r) => r,
             Err(err) => {
                 tracing::warn!(
@@ -2920,7 +2920,7 @@ impl Editor {
             .as_ref()
             .is_some_and(|(cached, _)| cached == query);
         if !cache_hit {
-            match stoat::action_handlers::search::compile_search_regex(query) {
+            match stoat_text::compile_search_regex(query) {
                 Ok(regex) => self.cached_search_regex = Some((query.to_string(), regex)),
                 Err(_) => {
                     self.cached_search_regex = None;
@@ -3199,7 +3199,7 @@ impl Editor {
         if state.query().is_empty() {
             return Vec::new();
         }
-        let Ok(regex) = stoat::action_handlers::search::compile_search_regex(state.query()) else {
+        let Ok(regex) = stoat_text::compile_search_regex(state.query()) else {
             return Vec::new();
         };
 

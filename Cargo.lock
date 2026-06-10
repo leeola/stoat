@@ -6472,6 +6472,7 @@ name = "stoat_text"
 version = "0.1.0"
 dependencies = [
  "arrayvec",
+ "regex",
  "serde",
  "smallvec",
 ]

@@ -112,7 +112,7 @@ pub(crate) fn render_editor_with_overlay(
     let buffer_snapshot = snapshot.buffer_snapshot();
 
     if let Some(query) = search_query.filter(|q| !q.is_empty()) {
-        if let Ok(regex) = crate::action_handlers::search::compile_search_regex(query) {
+        if let Ok(regex) = stoat_text::compile_search_regex(query) {
             let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
             let rope = buffer_snapshot.rope();
             let text = rope.to_string();

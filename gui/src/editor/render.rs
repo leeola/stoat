@@ -4846,7 +4846,7 @@ mod tests {
         if query.is_empty() {
             return;
         }
-        let Ok(regex) = stoat::action_handlers::search::compile_search_regex(query) else {
+        let Ok(regex) = stoat_text::compile_search_regex(query) else {
             return;
         };
         let maps = build_row_byte_maps(rows, snapshot, range.clone());
