@@ -14,8 +14,8 @@
 //!
 //! - `ReplayMacro` -> `Workspace::dispatch_replay_macro` arms the replay chord. The next
 //!   chord-completing char keystroke resolves to a [`stoat::register::Register`] via
-//!   [`stoat::register::register_for_char`] and the stored keystrokes are re-fed
-//!   through the input state machine.
+//!   [`stoat::register::register_for_char`] and the stored keystrokes are re-fed through the input
+//!   state machine.
 //!
 //! - `SelectRegister` -> `Workspace::dispatch_select_register` arms the register-select chord. The
 //!   next char keystroke resolves to a register and is stored in
