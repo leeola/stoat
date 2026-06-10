@@ -364,7 +364,28 @@ impl FoldMap {
             && self.cached_snapshot.is_some();
 
         resolved.sort_by_key(|f| f.range.start);
-        let resolved_tree = SumTree::from_iter(resolved, ());
+        // Folds are stored individually; coalesce overlapping (and
+        // adjacent-mergeable) folds only here, so the transforms render an
+        // outer fold as a single placeholder without discarding the inner
+        // fold from storage. The merged region keeps the first fold's id
+        // and placeholder.
+        let mut merged_resolved: Vec<Fold> = Vec::with_capacity(resolved.len());
+        for fold in resolved {
+            if let Some(last) = merged_resolved.last_mut() {
+                let overlaps = fold.range.start < last.range.end;
+                let adjacent = fold.range.start == last.range.end
+                    && last.placeholder.merge_adjacent
+                    && fold.placeholder.merge_adjacent;
+                if overlaps || adjacent {
+                    if fold.range.end > last.range.end {
+                        last.range.end = fold.range.end;
+                    }
+                    continue;
+                }
+            }
+            merged_resolved.push(fold);
+        }
+        let resolved_tree = SumTree::from_iter(merged_resolved, ());
 
         let (transforms, edits) = if can_incremental {
             let old_snapshot = self
@@ -448,7 +469,6 @@ impl FoldMap {
         let edits: Vec<Edit<AnchoredFold>> = new_folds.into_iter().map(Edit::Insert).collect();
         self.folds.edit(edits, ());
 
-        self.merge_overlapping_presorted(buffer_snapshot);
         self.version += 1;
         new_ids
     }
@@ -502,53 +522,6 @@ impl FoldMap {
 
     pub fn version_unchanged(&self) -> bool {
         self.version == self.last_self_version
-    }
-
-    fn merge_overlapping_presorted(&mut self, buffer_snapshot: &MultiBufferSnapshot) {
-        let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
-        let all: Vec<AnchoredFold> = self.folds.iter().cloned().collect();
-        if all.len() <= 1 {
-            return;
-        }
-
-        let has_overlap = all.windows(2).any(|w| {
-            let end = resolve(&w[0].range.end);
-            let start = resolve(&w[1].range.start);
-            start <= end
-        });
-
-        if !has_overlap {
-            return;
-        }
-
-        let mut merged: Vec<AnchoredFold> = Vec::with_capacity(all.len());
-        let mut last_end = 0usize;
-        for fold in all {
-            let fold_range = fold.range.to_offset_range(&resolve);
-            if !merged.is_empty() {
-                let overlaps = fold_range.start < last_end;
-                let adjacent_and_mergeable = fold_range.start == last_end
-                    && merged
-                        .last()
-                        .expect("guarded by !merged.is_empty()")
-                        .placeholder
-                        .merge_adjacent
-                    && fold.placeholder.merge_adjacent;
-                if overlaps || adjacent_and_mergeable {
-                    if fold_range.end > last_end {
-                        let last: &mut AnchoredFold =
-                            merged.last_mut().expect("guarded by !merged.is_empty()");
-                        last.range.end = fold.range.end;
-                        last.resolved_end = fold_range.end;
-                        last_end = fold_range.end;
-                    }
-                    continue;
-                }
-            }
-            last_end = fold_range.end;
-            merged.push(fold);
-        }
-        self.folds = SumTree::from_iter(merged, ());
     }
 }
 
@@ -1771,6 +1744,39 @@ mod tests {
         );
         let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         // 4 rows - 2 rows folded = 2 rows
+        assert_eq!(snap.line_count(), 2);
+    }
+
+    #[test]
+    fn overlapping_folds_stored_individually() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "line0\nline1\nline2\nline3");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let to_anchor = |row: u32, col: u32, bias: Bias| {
+            let off = buffer_snapshot
+                .rope()
+                .point_to_offset(stoat_text::Point::new(row, col));
+            buffer_snapshot.anchor_at(off, bias)
+        };
+
+        fold_map.fold(
+            vec![to_anchor(1, 0, Bias::Right)..to_anchor(2, 0, Bias::Left)],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        fold_map.fold(
+            vec![to_anchor(1, 5, Bias::Right)..to_anchor(3, 0, Bias::Left)],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+
+        // Storage keeps both folds individually; only rendering coalesces.
+        assert_eq!(fold_map.fold_anchor_ranges().len(), 2);
+        let (snap, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
         assert_eq!(snap.line_count(), 2);
     }
 
