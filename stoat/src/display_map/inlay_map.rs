@@ -239,10 +239,13 @@ impl InlayMap {
                 &inlay_offsets,
             )
         } else {
+            // Inlay-output rows, matching new_line_count's space below;
+            // line_count() would return buffer rows, which diverge from
+            // output rows once a multi-line inlay exists.
             let old_line_count = self
                 .cached_snapshot
                 .as_ref()
-                .map(|s| s.line_count())
+                .map(|s| s.total_summary().lines.row + 1)
                 .unwrap_or(0);
             let transforms =
                 build_transforms(buffer_snapshot.rope(), buffer_snapshot.text(), &resolved);
@@ -573,12 +576,12 @@ fn sync_incremental(
             );
         }
 
-        let new_out = new_transforms.summary().output.lines;
-        let new_end_row = if new_out.column > 0 {
-            new_out.row + 1
-        } else {
-            new_out.row.max(new_start_row + 1)
-        };
+        // `new_out.row` sits past the edit's new content; +1 covers the
+        // row it lands on. When the content is newline-terminated that row
+        // holds the tail shifted down by the edit, so it must be included.
+        // Over-spanning by a row is harmless; under-spanning drops the
+        // tail's row from downstream invalidation.
+        let new_end_row = new_transforms.summary().output.lines.row + 1;
 
         row_edits.push(stoat_text::patch::Edit {
             old: old_inlay_start_row..old_inlay_end_row,
@@ -1166,5 +1169,34 @@ mod tests {
             .collect();
         let text: String = chunks.iter().map(|c| c.text.as_ref()).collect();
         assert_eq!(text, "de!!fg");
+    }
+
+    #[test]
+    fn incremental_sync_row_patch_spans_inserted_line() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "ab\ncd");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap1 = multi_buffer.snapshot();
+        let version1 = snap1.version();
+        let (mut map, _) = InlayMap::new(snap1);
+
+        {
+            let mut buf = shared.write().unwrap();
+            buf.edit(0..0, "\n");
+        }
+
+        let snap2 = multi_buffer.snapshot();
+        let buffer_edits = snap2.edits_since(version1);
+        let (snap, inlay_edits) = map.sync(snap2, &buffer_edits);
+
+        // Inserting a newline at offset 0 turns old row 0 ("ab") into new
+        // rows 0 ("") and 1 ("ab"), so the row patch must span new 0..2.
+        let rows: Vec<_> = (&inlay_edits)
+            .into_iter()
+            .map(|e| (e.old.start, e.old.end, e.new.start, e.new.end))
+            .collect();
+        assert_eq!(rows, [(0, 1, 0, 2)]);
+        assert_eq!(snap.total_summary().len, 6);
     }
 }
