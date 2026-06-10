@@ -741,14 +741,21 @@ fn sync_fold_incremental(
         }
     };
 
+    // The cursor walks the old transforms, whose input space is the old
+    // inlay snapshot's output offsets, so `edit.old.*` rows must resolve
+    // against the old snapshot; `edit.new.*` use the new `row_to_offset`.
+    let old_row_to_offset =
+        |row: u32| -> usize { old_snapshot.inlay_snapshot.inlay_offset_at_row(row).0 };
+    let old_text_len = old_snapshot.transforms.summary().input.len;
+
     let mut new_transforms = SumTree::new(());
     let mut cursor = old_snapshot.transforms.cursor::<InputOffset>(());
     let mut row_edits = Patch::empty();
 
     let mut edits_iter = inlay_edits.into_iter().peekable();
     while let Some(edit) = edits_iter.next() {
-        let old_start_offset = row_to_offset(edit.old.start);
-        let old_end_offset = row_to_offset(edit.old.end).min(text.len());
+        let old_start_offset = old_row_to_offset(edit.old.start);
+        let old_end_offset = old_row_to_offset(edit.old.end).min(old_text_len);
 
         // Preserve unchanged prefix
         new_transforms.append(cursor.slice(&InputOffset(old_start_offset), Bias::Left), ());
@@ -894,7 +901,7 @@ fn sync_fold_incremental(
             let cursor_end = cursor.start().0 + item.summary.input.len;
             if edits_iter
                 .peek()
-                .is_none_or(|next| row_to_offset(next.old.start) >= cursor_end)
+                .is_none_or(|next| old_row_to_offset(next.old.start) >= cursor_end)
             {
                 let tail = cursor_end - old_end_offset;
                 let tail_end_new = new_end_offset + tail;
@@ -987,6 +994,20 @@ impl FoldSnapshot {
 
     pub fn version(&self) -> usize {
         self.version
+    }
+
+    /// Asserts the fold transform tree's total input length equals the
+    /// inlay snapshot's output length. Tests driving an incremental sync
+    /// call this to catch coordinate-space corruption. Not yet armed
+    /// inside `sync`: other incremental paths (line-count-changing edits)
+    /// still violate it pending separate fixes to the upstream patch.
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        assert_eq!(
+            self.transforms.summary().input.len,
+            self.inlay_snapshot.total_summary().len,
+            "fold transform input length must equal inlay output length",
+        );
     }
 
     pub fn len(&self) -> FoldOffset {
@@ -2082,5 +2103,47 @@ mod tests {
         let fold_chunks: Vec<_> = chunks.iter().filter(|c| c.renderer.is_some()).collect();
         assert_eq!(fold_chunks.len(), 1);
         assert_eq!(fold_chunks[0].text.as_ref(), "...");
+    }
+
+    #[test]
+    fn incremental_sync_preserves_fold_after_length_changing_edit() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "abc\ndef\nghi\njkl");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap1 = multi_buffer.snapshot();
+        let version1 = snap1.version();
+        let (mut inlay_map, inlay1) = InlayMap::new(snap1.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay1.clone());
+
+        let fold_start = snap1.rope().point_to_offset(stoat_text::Point::new(2, 0));
+        let fold_end = snap1.rope().point_to_offset(stoat_text::Point::new(2, 3));
+        fold_map.fold(
+            vec![snap1.anchor_at(fold_start, Bias::Right)..snap1.anchor_at(fold_end, Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap1,
+        );
+
+        // Settle the fold so the next sync takes the incremental path:
+        // version == last_self_version and a cached snapshot is present.
+        fold_map.sync(inlay1, &Patch::empty());
+
+        {
+            let mut buf = shared.write().unwrap();
+            buf.edit(0..0, "XX");
+        }
+
+        let snap2 = multi_buffer.snapshot();
+        let buffer_edits = snap2.edits_since(version1);
+        let (inlay2, inlay_edits) = inlay_map.sync(snap2, &buffer_edits);
+        assert!(
+            !inlay_edits.is_empty(),
+            "edit must drive the incremental path"
+        );
+
+        let (fold_snap, _) = fold_map.sync(inlay2, &inlay_edits);
+        fold_snap.check_invariants();
+        let text: String = fold_snap.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "XXabc\ndef\n...\njkl");
     }
 }
