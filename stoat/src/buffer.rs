@@ -793,14 +793,14 @@ impl TextBufferSnapshot {
                     old: old_offset..old_offset,
                     new: new_offset..(new_offset + len),
                 };
-                result = result.compose([edit]);
+                result.push(edit);
                 new_offset += len;
             } else if !fragment.visible && was_visible {
                 let edit = Edit {
                     old: old_offset..(old_offset + len),
                     new: new_offset..new_offset,
                 };
-                result = result.compose([edit]);
+                result.push(edit);
                 old_offset += len;
             } else if fragment.visible {
                 old_offset += len;
@@ -1068,6 +1068,39 @@ mod tests {
         assert_eq!(edits.len(), 1);
         assert_eq!(edits[0].old, 5..11);
         assert_eq!(edits[0].new, 5..5);
+    }
+
+    #[test]
+    fn edits_since_three_interspersed_inserts() {
+        let mut b = buf("ab\ncd\nef\n");
+        let v0 = b.version();
+        b.edit(9..9, "ab");
+        b.edit(6..6, "ab");
+        b.edit(2..2, "ab");
+        let new = b.snapshot.visible_text.to_string();
+
+        let patch = b.snapshot.edits_since(v0);
+        let edits = patch.edits();
+        assert_eq!(
+            edits
+                .iter()
+                .map(|e| (e.old.clone(), e.new.clone()))
+                .collect::<Vec<_>>(),
+            [(2..2, 2..4), (6..6, 8..10), (9..9, 13..15)],
+        );
+
+        // The patch must reconstruct the new text from the old text;
+        // accumulating the edits incorrectly merges interspersed inserts.
+        let old = "ab\ncd\nef\n";
+        let mut rebuilt = String::new();
+        let mut pos = 0;
+        for e in edits {
+            rebuilt.push_str(&old[pos..e.old.start]);
+            rebuilt.push_str(&new[e.new.start..e.new.end]);
+            pos = e.old.end;
+        }
+        rebuilt.push_str(&old[pos..]);
+        assert_eq!(rebuilt, new);
     }
 
     #[test]
