@@ -359,18 +359,19 @@ impl<'a> Iterator for TabChunks<'a> {
                 let spaces = self.tab_width();
                 self.display_column += spaces;
                 let rest = text[1..].to_string();
-                let metadata = clone_chunk_metadata(&pending);
                 if !rest.is_empty() {
                     self.pending = Some(Chunk {
                         text: Cow::Owned(rest),
-                        ..metadata
+                        ..clone_chunk_metadata(&pending)
                     });
                 }
+                // Inherit the surrounding chunk's style/diagnostic/inlay
+                // metadata so a styled range spanning the tab keeps its
+                // appearance over the expanded cells.
                 Some(Chunk {
                     text: Cow::Borrowed(tab_spaces_slice(spaces)),
                     is_tab: true,
-                    highlight_style: None,
-                    ..Default::default()
+                    ..clone_chunk_metadata(&pending)
                 })
             },
             Some(idx) => {
@@ -782,5 +783,53 @@ mod tests {
         let tab_chunks: Vec<_> = chunks.iter().filter(|c| c.is_tab).collect();
         assert_eq!(tab_chunks.len(), 1);
         assert_eq!(tab_chunks[0].text.as_ref(), "  ");
+    }
+
+    #[test]
+    fn tab_chunk_inherits_surrounding_style() {
+        use crate::display_map::{
+            fold_map::FoldOffset,
+            highlights::{
+                create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
+            },
+        };
+        use ratatui::style::Color;
+        use std::collections::HashMap;
+        use stoat_text::Anchor;
+
+        let snap = make_snapshot("\thello");
+        let end = snap.fold_snapshot().len();
+
+        // Style the whole "\thello" range red so it spans the tab.
+        let red = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let mut highlights_map = HashMap::new();
+        let key = HighlightKey::new(HighlightLayer::SyntaxToken, 0);
+        let mk_anchor = |offset: usize| Anchor {
+            timestamp: 0,
+            offset: offset as u32,
+            bias: Bias::Left,
+            buffer_id: None,
+        };
+        highlights_map.insert(key, Arc::new((red, vec![mk_anchor(0)..mk_anchor(6)])));
+        let highlights = Arc::new(highlights_map);
+        let resolve = |a: &Anchor| a.offset as usize;
+        let endpoints: Arc<[_]> = Arc::from(create_highlight_endpoints(
+            &(0..6),
+            &highlights,
+            None,
+            None,
+            &resolve,
+        ));
+
+        let chunks: Vec<_> = snap.chunks(FoldOffset(0)..end, 0, endpoints).collect();
+        let tab = chunks.iter().find(|c| c.is_tab).expect("tab chunk present");
+        assert_eq!(
+            tab.highlight_style.as_ref().and_then(|s| s.foreground),
+            Some(Color::Red),
+            "tab-expansion chunk inherits the surrounding highlight"
+        );
     }
 }
