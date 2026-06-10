@@ -1334,6 +1334,8 @@ fn sync_incremental(
     let mut edits = wrap_edits.edits().iter().peekable();
 
     while let Some(edit) = edits.next() {
+        let mut new_start = edit.new.start;
+
         new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
 
         // Preserve transforms ending exactly at edit start (matching Zed lines 902-920)
@@ -1357,17 +1359,24 @@ fn sync_incremental(
             }
         }
 
-        // Handle isomorphic prefix if edit starts within a transform
+        // Ensure the edit starts at a transform boundary. If it starts within an
+        // isomorphic transform, preserve the prefix; if it lands inside a block
+        // that replaces input rows, pull the new edit start back to the block's
+        // start so the whole replacement is reconstructed (matching Zed 922-943).
+        // Only `new_start` is carried back: the rebuild keys off the new-side
+        // start, while the old side is re-seeked from `edit.old.end` below.
         if let Some(item) = cursor.item() {
-            if item.block.is_none() {
-                let transform_rows_before_edit = edit.old.start - cursor.start().0;
-                if transform_rows_before_edit > 0 {
+            let transform_rows_before_edit = edit.old.start - cursor.start().0;
+            if transform_rows_before_edit > 0 {
+                if item.block.is_none() {
                     push_isomorphic(
                         &mut new_transforms,
                         transform_rows_before_edit,
                         cursor.start().0,
                         wrap_snapshot,
                     );
+                } else {
+                    new_start -= transform_rows_before_edit;
                 }
             }
         }
@@ -1416,14 +1425,14 @@ fn sync_incremental(
         }
 
         let current_rows: InputRow = new_transforms.extent(());
-        if edit.new.start > current_rows.0 {
-            let gap = edit.new.start - current_rows.0;
+        if new_start > current_rows.0 {
+            let gap = new_start - current_rows.0;
             push_isomorphic(&mut new_transforms, gap, current_rows.0, wrap_snapshot);
         }
 
         let edit_end = new_end.min(wrap_line_count);
 
-        let edit_start_buf = wrap_row_to_buffer_row(edit.new.start, wrap_snapshot);
+        let edit_start_buf = wrap_row_to_buffer_row(new_start, wrap_snapshot);
         let edit_end_buf = if edit_end >= wrap_line_count {
             u32::MAX
         } else {
@@ -1466,7 +1475,7 @@ fn sync_incremental(
                     } else {
                         block_start < edit_end
                     };
-                    if within_end && block_end >= edit.new.start {
+                    if within_end && block_end >= new_start {
                         Some((placement, b))
                     } else {
                         None
@@ -2253,6 +2262,23 @@ mod tests {
             Patch::new(vec![Edit {
                 old: 1..3,
                 new: 1..3,
+            }]),
+        );
+    }
+
+    #[test]
+    fn incremental_keeps_replace_block_when_edit_starts_inside() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3\nl4");
+        let blocks = blocks_for(vec![text_block(
+            BlockPlacement::Replace { start: 1, end: 3 },
+            "REPL",
+        )]);
+        assert_incremental_matches_full(
+            &wrap,
+            &blocks,
+            Patch::new(vec![Edit {
+                old: 2..3,
+                new: 2..3,
             }]),
         );
     }
