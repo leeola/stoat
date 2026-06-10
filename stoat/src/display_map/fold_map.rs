@@ -549,38 +549,22 @@ fn build_fold_transforms(
         return transforms;
     }
 
-    let text: &str = if inlay_snapshot.has_inlays() {
-        inlay_snapshot.inlay_text()
-    } else {
-        inlay_snapshot.buffer_snapshot().text()
-    };
-
-    let rope = inlay_snapshot.rope();
-    let has_inlays = inlay_snapshot.has_inlays();
-
-    let mut scanner = PointScanner::new(text.as_bytes());
+    let total_len = inlay_snapshot.total_summary().len;
     let mut cursor = 0usize;
 
     for fold in folds.iter() {
-        let fold_start = if has_inlays {
-            scanner.advance_to(&fold.range.start)
-        } else {
-            let buf_point = inlay_snapshot.to_buffer_point(fold.range.start);
-            rope.point_to_offset(buf_point).min(text.len())
-        };
-        let fold_end = if has_inlays {
-            scanner.advance_to(&fold.range.end)
-        } else {
-            let buf_point = inlay_snapshot.to_buffer_point(fold.range.end);
-            rope.point_to_offset(buf_point).min(text.len())
-        };
+        let fold_start = inlay_snapshot
+            .inlay_point_to_offset(fold.range.start)
+            .0
+            .min(total_len);
+        let fold_end = inlay_snapshot
+            .inlay_point_to_offset(fold.range.end)
+            .0
+            .min(total_len);
 
         if fold_start > cursor {
-            let summary = if has_inlays {
-                TextSummary::from_str(&text[cursor..fold_start])
-            } else {
-                rope.text_summary_for_range(cursor..fold_start)
-            };
+            let summary =
+                inlay_snapshot.text_summary_for_range(InlayOffset(cursor)..InlayOffset(fold_start));
             transforms.push(
                 Transform {
                     summary: TransformSummary {
@@ -594,11 +578,8 @@ fn build_fold_transforms(
             );
         }
 
-        let input_summary = if has_inlays {
-            TextSummary::from_str(&text[fold_start..fold_end])
-        } else {
-            rope.text_summary_for_range(fold_start..fold_end)
-        };
+        let input_summary =
+            inlay_snapshot.text_summary_for_range(InlayOffset(fold_start)..InlayOffset(fold_end));
         let output_summary = TextSummary::from_str(&fold.placeholder.text);
         transforms.push(
             Transform {
@@ -615,12 +596,9 @@ fn build_fold_transforms(
         cursor = fold_end;
     }
 
-    if cursor < text.len() {
-        let summary = if has_inlays {
-            TextSummary::from_str(&text[cursor..])
-        } else {
-            rope.text_summary_for_range(cursor..text.len())
-        };
+    if cursor < total_len {
+        let summary =
+            inlay_snapshot.text_summary_for_range(InlayOffset(cursor)..InlayOffset(total_len));
         transforms.push(
             Transform {
                 summary: TransformSummary {
@@ -694,28 +672,12 @@ fn sync_fold_incremental(
     inlay_edits: &Patch<u32>,
     resolved_folds: &SumTree<Fold>,
 ) -> (SumTree<Transform>, Patch<u32>) {
-    let has_inlays = inlay_snapshot.has_inlays();
-    let rope = inlay_snapshot.rope();
-    let text = if has_inlays {
-        inlay_snapshot.inlay_text()
-    } else {
-        inlay_snapshot.buffer_snapshot().text()
-    };
+    let total_len = inlay_snapshot.total_summary().len;
 
-    let row_to_offset = |row: u32| -> usize {
-        if has_inlays {
-            inlay_snapshot.inlay_offset_at_row(row).0
-        } else {
-            rope.point_to_offset(Point::new(row, 0))
-        }
-    };
+    let row_to_offset = |row: u32| -> usize { inlay_snapshot.inlay_offset_at_row(row).0 };
 
     let text_summary = |a: usize, b: usize| -> TextSummary {
-        if has_inlays {
-            TextSummary::from_str(&text[a..b])
-        } else {
-            rope.text_summary_for_range(a..b)
-        }
+        inlay_snapshot.text_summary_for_range(InlayOffset(a)..InlayOffset(b))
     };
 
     // The cursor walks the old transforms, whose input space is the old
@@ -779,7 +741,7 @@ fn sync_fold_incremental(
         let new_fold_start = new_transforms.summary().output.lines.row;
 
         // Rebuild transforms for the edit region [new_start, new_end)
-        let new_end_offset = row_to_offset(edit.new.end).min(text.len());
+        let new_end_offset = row_to_offset(edit.new.end).min(total_len);
         let folds_in_range: Vec<&Fold> = {
             let new_start_inlay = InlayPoint::new(edit.new.start, 0);
             let new_end_inlay = InlayPoint::new(edit.new.end, 0);
@@ -816,11 +778,11 @@ fn sync_fold_incremental(
                 let fold_start_offset = inlay_snapshot
                     .inlay_point_to_offset(fold.range.start)
                     .0
-                    .min(text.len());
+                    .min(total_len);
                 let fold_end_offset = inlay_snapshot
                     .inlay_point_to_offset(fold.range.end)
                     .0
-                    .min(text.len());
+                    .min(total_len);
 
                 if fold_start_offset > region_cursor {
                     let summary = text_summary(region_cursor, fold_start_offset);
@@ -900,12 +862,8 @@ fn sync_fold_incremental(
 
     new_transforms.append(cursor.suffix(), ());
 
-    if new_transforms.is_empty() && !text.is_empty() {
-        let summary = if has_inlays {
-            TextSummary::from_str(text)
-        } else {
-            rope.summary().clone()
-        };
+    if new_transforms.is_empty() && total_len > 0 {
+        let summary = inlay_snapshot.total_summary();
         new_transforms.push(
             Transform {
                 summary: TransformSummary {
@@ -921,32 +879,6 @@ fn sync_fold_incremental(
 
     row_edits.consolidate();
     (new_transforms, row_edits)
-}
-
-struct PointScanner<'a> {
-    bytes: &'a [u8],
-    pos: usize,
-    row: u32,
-}
-
-impl<'a> PointScanner<'a> {
-    fn new(bytes: &'a [u8]) -> Self {
-        Self {
-            bytes,
-            pos: 0,
-            row: 0,
-        }
-    }
-
-    fn advance_to(&mut self, point: &InlayPoint) -> usize {
-        while self.row < point.row() && self.pos < self.bytes.len() {
-            if self.bytes[self.pos] == b'\n' {
-                self.row += 1;
-            }
-            self.pos += 1;
-        }
-        (self.pos + point.column() as usize).min(self.bytes.len())
-    }
 }
 
 fn point_overshoot(base: Point, target: Point) -> Point {

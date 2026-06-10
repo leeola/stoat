@@ -7,7 +7,7 @@ use std::{
     cmp::Ordering,
     collections::{HashMap, HashSet},
     ops::{Add, AddAssign, Deref, Range, Sub},
-    sync::{Arc, OnceLock},
+    sync::Arc,
 };
 use stoat_text::{
     patch::Patch, Anchor, Bias, ContextLessSummary, Cursor, Dimension, Dimensions, Item, Point,
@@ -164,7 +164,6 @@ pub struct InlaySnapshot {
     buffer: MultiBufferSnapshot,
     transforms: SumTree<Transform>,
     inlay_count: usize,
-    inlay_text_cache: OnceLock<String>,
     pub inlay_version: usize,
 }
 
@@ -182,7 +181,6 @@ impl InlayMap {
             buffer: buffer_snapshot,
             transforms,
             inlay_count: 0,
-            inlay_text_cache: OnceLock::new(),
             inlay_version: 0,
         });
         let map = InlayMap {
@@ -288,7 +286,6 @@ impl InlayMap {
             buffer: buffer_snapshot,
             transforms,
             inlay_count,
-            inlay_text_cache: OnceLock::new(),
             inlay_version: self.snapshot_version,
         });
         self.last_buffer_version = snapshot.buffer.version();
@@ -828,26 +825,28 @@ impl InlaySnapshot {
         self.inlay_point_to_offset(InlayPoint::new(row, 0))
     }
 
-    pub fn inlay_text(&self) -> &str {
-        self.inlay_text_cache.get_or_init(|| {
-            let buffer_text = self.buffer.text();
-            let mut result = String::new();
-            let mut buffer_offset = 0usize;
+    /// The whole inlay-mapped text as a String. Test-only oracle for
+    /// [`InlaySnapshot::text_summary_for_range`]; production reads summaries,
+    /// not the materialized text.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn inlay_text(&self) -> String {
+        let buffer_text = self.buffer.text();
+        let mut result = String::new();
+        let mut buffer_offset = 0usize;
 
-            for transform in self.transforms.iter() {
-                match transform {
-                    Transform::Isomorphic(s) => {
-                        let end = buffer_offset + s.len;
-                        result.push_str(&buffer_text[buffer_offset..end]);
-                        buffer_offset = end;
-                    },
-                    Transform::Inlay(inlay) => {
-                        result.push_str(&inlay.text);
-                    },
-                }
+        for transform in self.transforms.iter() {
+            match transform {
+                Transform::Isomorphic(s) => {
+                    let end = buffer_offset + s.len;
+                    result.push_str(&buffer_text[buffer_offset..end]);
+                    buffer_offset = end;
+                },
+                Transform::Inlay(inlay) => {
+                    result.push_str(&inlay.text);
+                },
             }
-            result
-        })
+        }
+        result
     }
 
     pub fn inlay_point_cursor(&self) -> InlayPointCursor<'_> {
