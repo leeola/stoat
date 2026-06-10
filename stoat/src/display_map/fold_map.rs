@@ -1116,6 +1116,20 @@ impl FoldSnapshot {
         }
     }
 
+    /// Fold-offset of the end of `fold_row`'s rendered content, excluding
+    /// the trailing newline. Unlike [`FoldSnapshot::line_len`], which sums
+    /// only buffer chars and fold placeholders, this derives from the
+    /// transform tree (via [`FoldSnapshot::row_start_offset`]) and so counts
+    /// inlay bytes -- the inclusive end that pairs with the inclusive start
+    /// when slicing a row's chunk range.
+    pub fn row_content_end_offset(&self, fold_row: u32) -> FoldOffset {
+        if fold_row + 1 >= self.line_count() {
+            self.len()
+        } else {
+            FoldOffset(self.row_start_offset(fold_row + 1).0 - 1)
+        }
+    }
+
     /// Stream [`Chunk`]s covering `range` in fold-offset space.
     ///
     /// Walks the fold transform tree and interleaves chunks from the inlay

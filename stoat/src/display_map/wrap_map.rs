@@ -834,14 +834,7 @@ impl WrapSnapshot {
                 (FoldOffset(0), FoldOffset(0))
             } else {
                 let start = fold.row_start_offset(rows.start);
-                let last_row = rows.end - 1;
-                let line_count = fold.line_count();
-                let end = if last_row >= line_count {
-                    fold.len()
-                } else {
-                    let last_start = fold.row_start_offset(last_row);
-                    FoldOffset(last_start.0 + fold.line_len(last_row) as usize)
-                };
+                let end = fold.row_content_end_offset(rows.end - 1);
                 (start, end)
             };
             return WrapChunks::Passthrough {
@@ -1068,7 +1061,7 @@ impl<'a> WrappedChunksInner<'a> {
             return None;
         }
         let row_start = fold.row_start_offset(tab_row);
-        let row_end = FoldOffset(row_start.0 + fold.line_len(tab_row) as usize);
+        let row_end = fold.row_content_end_offset(tab_row);
 
         let tab_chunks =
             self.snapshot
@@ -1184,14 +1177,14 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         display_map::{
             fold_map::FoldMap,
-            inlay_map::InlayMap,
+            inlay_map::{InlayKind, InlayMap},
             tab_map::{TabMap, TabPoint},
         },
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
     use stoat_scheduler::{Executor, TestScheduler};
-    use stoat_text::patch::Patch;
+    use stoat_text::{patch::Patch, Bias, Point};
 
     fn test_executor() -> Executor {
         Executor::new(Arc::new(TestScheduler::new()))
@@ -1208,6 +1201,38 @@ mod tests {
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, wrap_width, test_executor());
         wrap_snapshot
+    }
+
+    #[test]
+    fn hinted_row_chunk_text_is_not_truncated() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+
+        let (mut inlay_map, _) = InlayMap::new(buffer_snapshot.clone());
+        let off = buffer_snapshot.rope().point_to_offset(Point::new(0, 5));
+        let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
+        inlay_map.splice(
+            Vec::new(),
+            vec![(anchor, ": str".to_string(), InlayKind::Hint)],
+        );
+        let (inlay_snapshot, _) = inlay_map.sync(buffer_snapshot, &Patch::empty());
+
+        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
+
+        // The hint sits after "hello"; the row must render its full content
+        // including the trailing " world", not drop bytes equal to the hint
+        // length.
+        let endpoints: Arc<[super::HighlightEndpoint]> = Arc::from(Vec::new());
+        let text: String = wrap_snapshot
+            .chunks(0..1, endpoints)
+            .map(|c| c.text.to_string())
+            .collect();
+        assert_eq!(text, "hello: str world");
     }
 
     #[test]
@@ -1613,7 +1638,7 @@ mod tests {
         let mk_anchor = |offset: usize| Anchor {
             timestamp: 0,
             offset: offset as u32,
-            bias: stoat_text::Bias::Left,
+            bias: Bias::Left,
             buffer_id: None,
         };
         highlights_map.insert(
