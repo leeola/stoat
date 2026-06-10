@@ -18,7 +18,6 @@ use crate::{
     register,
     run::{CommandMark, GridSelection, PtyNotification},
     workspace::{Workspace, WorkspaceId},
-    workspace_picker::{PickerOutcome, WorkspacePicker},
 };
 use crossterm::event::{
     Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
@@ -65,7 +64,6 @@ pub struct Stoat {
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
-    pub(crate) workspace_picker: Option<WorkspacePicker>,
     /// Active Claude Code permission-approval modal. `Some` while a
     /// tool call is awaiting user input; cleared when the user picks
     /// a button. Subsequent prompts queue in
@@ -583,7 +581,6 @@ impl Stoat {
             command_palette: None,
             help: None,
             file_finder: None,
-            workspace_picker: None,
             permission_prompt: None,
             permission_prompt_queue: std::collections::VecDeque::new(),
             permission_prompt_tx,
@@ -1362,10 +1359,6 @@ impl Stoat {
                 self.mode = palette.previous_mode;
                 return UpdateEffect::Redraw;
             }
-            if self.workspace_picker.is_some() {
-                self.workspace_picker = None;
-                return UpdateEffect::Redraw;
-            }
             if let Some(picker) = self.diagnostics_picker.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1399,10 +1392,6 @@ impl Stoat {
         };
         if !is_record_macro_toggle {
             action_handlers::macro_recording::capture(self, &key);
-        }
-
-        if self.workspace_picker.is_some() {
-            return self.dispatch_workspace_picker_key(key);
         }
 
         if self.permission_prompt.is_some() {
@@ -2263,31 +2252,6 @@ impl Stoat {
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf
-    }
-
-    fn dispatch_workspace_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        let outcome = match self.workspace_picker.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                self.workspace_picker = None;
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(id) => {
-                self.workspace_picker = None;
-                if id == self.active_workspace {
-                    return UpdateEffect::Redraw;
-                }
-                self.save_workspace(self.active_workspace());
-                self.active_workspace = id;
-                let size = self.size;
-                self.active_workspace_mut().layout(size);
-                UpdateEffect::Redraw
-            },
-        }
     }
 
     pub(crate) fn enqueue_permission_prompt(

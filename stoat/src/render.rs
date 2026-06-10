@@ -23,7 +23,6 @@ pub(crate) mod run_pane;
 pub(crate) mod sanitize;
 pub(crate) mod symbol_picker;
 pub(crate) mod text;
-pub(crate) mod workspace_picker;
 pub(crate) mod workspace_symbol_picker;
 
 use crate::{
@@ -309,17 +308,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             .collect();
         hints::render_hints(
             "palette",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(picker) = &stoat.workspace_picker {
-        workspace_picker::render_workspace_picker(picker, &stoat.theme, size, buf);
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
-            "picker",
             &bindings,
             None,
             &stoat.theme,

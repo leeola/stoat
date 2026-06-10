@@ -32,7 +32,6 @@ use crate::{
     help::Help,
     host::FsHost,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
-    workspace_picker::WorkspacePicker,
 };
 pub(crate) use commits::pump_commits;
 pub(crate) use file_finder::close_file_finder;
@@ -592,13 +591,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::NewWorkspace => workspace::new_workspace(stoat),
         ActionKind::CopyWorkspace => workspace::copy_workspace(stoat),
-        ActionKind::SwitchWorkspace => {
-            stoat.workspace_picker = Some(WorkspacePicker::new(
-                &stoat.workspaces,
-                stoat.active_workspace,
-            ));
-            UpdateEffect::Redraw
-        },
+        ActionKind::SwitchWorkspace => UpdateEffect::None,
         ActionKind::CloseWorkspace => workspace::close_workspace(stoat),
         ActionKind::RenameWorkspace => {
             let action = action
@@ -1806,52 +1799,6 @@ mod tests {
     }
 
     #[test]
-    fn switch_workspace_opens_picker() {
-        let mut h = Stoat::test();
-        h.type_action("workspace-new()");
-        assert!(h.stoat.workspace_picker.is_none());
-
-        h.type_action("workspace-switch()");
-
-        assert!(h.stoat.workspace_picker.is_some());
-        let picker = h.stoat.workspace_picker.as_ref().unwrap();
-        assert_eq!(picker.entries().len(), 2);
-    }
-
-    #[test]
-    fn picker_enter_switches_to_selected_workspace() {
-        let mut h = Stoat::test();
-        h.type_action("workspace-new()");
-        let second = h.stoat.active_workspace;
-        h.type_action("workspace-new()");
-        let third = h.stoat.active_workspace;
-        assert_eq!(h.stoat.workspaces.len(), 3);
-
-        h.type_action("workspace-switch()");
-        h.type_keys("down enter");
-
-        // Picker sorts current first, then by basename. With all three sharing
-        // the empty basename, uid is the tiebreaker (smallest first after the
-        // current one), so "Down Enter" lands on whichever sibling sorts first.
-        assert!(h.stoat.workspace_picker.is_none());
-        assert_ne!(h.stoat.active_workspace, third);
-        assert!(h.stoat.active_workspace == second || h.stoat.active_workspace != third);
-    }
-
-    #[test]
-    fn picker_escape_closes_without_switching() {
-        let mut h = Stoat::test();
-        h.type_action("workspace-new()");
-        let before = h.stoat.active_workspace;
-
-        h.type_action("workspace-switch()");
-        h.type_keys("escape");
-
-        assert!(h.stoat.workspace_picker.is_none());
-        assert_eq!(h.stoat.active_workspace, before);
-    }
-
-    #[test]
     fn close_workspace_refuses_when_only_one_remains() {
         let mut h = Stoat::test();
         let only = h.stoat.active_workspace;
@@ -1860,20 +1807,6 @@ mod tests {
 
         assert_eq!(h.stoat.workspaces.len(), 1);
         assert_eq!(h.stoat.active_workspace, only);
-    }
-
-    #[test]
-    fn snapshot_workspace_picker_listing() {
-        let mut h = Stoat::test();
-        h.type_action("workspace-new()");
-        // NewWorkspace builds a Workspace via the production path, which
-        // generates a random uid-derived name. Clear it before opening
-        // the picker so the rendered snapshot is stable across runs.
-        for (_, ws) in h.stoat.workspaces.iter_mut() {
-            ws.name = String::new();
-        }
-        h.type_action("workspace-switch()");
-        h.assert_snapshot("workspace_picker_listing");
     }
 
     #[test]

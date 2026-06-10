@@ -41,7 +41,6 @@ pub mod selection;
 pub mod snippet;
 pub mod theme;
 pub mod workspace;
-pub mod workspace_picker;
 
 pub use app::{Stoat, UpdateEffect};
 #[cfg(test)]
