@@ -1456,7 +1456,17 @@ fn sync_incremental(
                         ResolvedPlacement::Replace { end, .. } => end,
                         _ => block_start,
                     };
-                    if block_start < edit_end && block_end >= edit.new.start {
+                    // Below/spacer blocks resolving to edit_end were discarded
+                    // above for reconstruction, so the end bound must include
+                    // them; Above/Replace blocks at edit_end are preserved by
+                    // the cursor, and excluding them avoids a duplicate.
+                    let discarded_at_end = b.place_below() || matches!(b, Block::Spacer { .. });
+                    let within_end = if discarded_at_end {
+                        block_start <= edit_end
+                    } else {
+                        block_start < edit_end
+                    };
+                    if within_end && block_end >= edit.new.start {
                         Some((placement, b))
                     } else {
                         None
@@ -2223,6 +2233,20 @@ mod tests {
     fn incremental_keeps_above_block_at_edit_end() {
         let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3\nl4");
         let blocks = blocks_for(vec![text_block(BlockPlacement::Above(3), "ABOVE")]);
+        assert_incremental_matches_full(
+            &wrap,
+            &blocks,
+            Patch::new(vec![Edit {
+                old: 1..3,
+                new: 1..3,
+            }]),
+        );
+    }
+
+    #[test]
+    fn incremental_keeps_below_block_at_edit_end() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3\nl4");
+        let blocks = blocks_for(vec![text_block(BlockPlacement::Below(3), "BELOW")]);
         assert_incremental_matches_full(
             &wrap,
             &blocks,
