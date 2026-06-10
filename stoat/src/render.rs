@@ -16,7 +16,6 @@ pub(crate) mod jumplist_picker;
 pub(crate) mod layout;
 pub(crate) mod pane;
 pub(crate) mod permission_prompt;
-pub(crate) mod quit_all_confirm;
 pub(crate) mod rebase;
 pub(crate) mod rename_input;
 pub(crate) mod review;
@@ -322,22 +321,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         let bindings = picker.hint_bindings();
         hints::render_hints(
             "picker",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(modal) = &stoat.quit_all_confirm {
-        quit_all_confirm::render_quit_all_confirm(modal, &stoat.theme, size, buf);
-        let bindings: Vec<(&'static str, String)> = vec![
-            ("y", "discard & quit".to_string()),
-            ("n", "cancel".to_string()),
-            ("Enter", "discard & quit".to_string()),
-            ("Esc", "cancel".to_string()),
-        ];
-        hints::render_hints(
-            "quit",
             &bindings,
             None,
             &stoat.theme,

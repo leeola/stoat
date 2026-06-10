@@ -1,6 +1,6 @@
 //! GUI quit-all confirmation modal.
 //!
-//! Mirrors the TUI [`stoat::quit_all_confirm::QuitAllConfirm`] surface:
+//! Mirrors the former TUI quit-all-confirm surface:
 //! lists every dirty buffer, confirms on `Enter`, cancels on `Escape`.
 //! Constructed by [`open_quit_confirm`] only when at least one buffer
 //! is dirty -- the dispatch path quits immediately when none are.

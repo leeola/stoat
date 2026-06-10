@@ -31,7 +31,6 @@ pub mod multi_buffer;
 pub mod pane;
 pub mod paths;
 pub(crate) mod permission_prompt;
-pub(crate) mod quit_all_confirm;
 pub mod rebase;
 pub mod register;
 pub(crate) mod render;

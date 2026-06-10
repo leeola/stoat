@@ -14,7 +14,6 @@ use crate::{
     keymap::{is_text_input_mode, normalize_shift_event, resolve_action, Keymap, ResolvedAction},
     keymap_state::StoatKeymapState,
     pane::{FocusTarget, View},
-    quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
     register,
     run::{CommandMark, GridSelection, PtyNotification},
@@ -67,11 +66,6 @@ pub struct Stoat {
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
     pub(crate) workspace_picker: Option<WorkspacePicker>,
-    /// Confirmation modal shown when [`stoat_action::QuitAll`] fires
-    /// with at least one dirty buffer in any workspace. `Some` while
-    /// the user is being prompted to discard or cancel; cleared on
-    /// cancel and stays `Some` on confirm (the app exits anyway).
-    pub(crate) quit_all_confirm: Option<QuitAllConfirm>,
     /// Active Claude Code permission-approval modal. `Some` while a
     /// tool call is awaiting user input; cleared when the user picks
     /// a button. Subsequent prompts queue in
@@ -594,7 +588,6 @@ impl Stoat {
             help: None,
             file_finder: None,
             workspace_picker: None,
-            quit_all_confirm: None,
             permission_prompt: None,
             permission_prompt_queue: std::collections::VecDeque::new(),
             permission_prompt_tx,
@@ -1378,10 +1371,6 @@ impl Stoat {
                 self.workspace_picker = None;
                 return UpdateEffect::Redraw;
             }
-            if self.quit_all_confirm.is_some() {
-                self.quit_all_confirm = None;
-                return UpdateEffect::Redraw;
-            }
             if let Some(picker) = self.jumplist_picker.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1423,10 +1412,6 @@ impl Stoat {
 
         if self.workspace_picker.is_some() {
             return self.dispatch_workspace_picker_key(key);
-        }
-
-        if self.quit_all_confirm.is_some() {
-            return self.dispatch_quit_all_confirm_key(key);
         }
 
         if self.permission_prompt.is_some() {
@@ -2315,21 +2300,6 @@ impl Stoat {
                 self.active_workspace_mut().layout(size);
                 UpdateEffect::Redraw
             },
-        }
-    }
-
-    fn dispatch_quit_all_confirm_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        let outcome = match self.quit_all_confirm.as_mut() {
-            Some(modal) => modal.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            ConfirmOutcome::None => UpdateEffect::Redraw,
-            ConfirmOutcome::Cancel => {
-                self.quit_all_confirm = None;
-                UpdateEffect::Redraw
-            },
-            ConfirmOutcome::Confirm => UpdateEffect::Quit,
         }
     }
 
