@@ -1400,9 +1400,15 @@ fn sync_incremental(
             }
         }
 
-        // Discard zero-width block transforms at edit end (matching Zed lines 980-991)
+        // Discard only below/spacer blocks at edit end; they are reconstructed
+        // below. An Above block at the boundary belongs to the next region and
+        // must survive (matching Zed lines 980-991).
         while let Some(item) = cursor.item() {
-            if item.summary.input_rows == 0 && item.block.is_some() {
+            if item
+                .block
+                .as_ref()
+                .is_some_and(|b| b.place_below() || matches!(b, Block::Spacer { .. }))
+            {
                 cursor.next();
             } else {
                 break;
@@ -1776,8 +1782,9 @@ fn push_isomorphic(
 #[cfg(test)]
 mod tests {
     use super::{
-        longest_block_line, Block, BlockMap, BlockPlacement, BlockPoint, BlockProperties,
-        BlockRowKind, BlockStyle, Line,
+        build_transforms, longest_block_line, sync_incremental, Block, BlockMap, BlockPlacement,
+        BlockPoint, BlockProperties, BlockRowKind, BlockSnapshot, BlockStyle, Line, OutputRow,
+        Transform,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -1789,13 +1796,16 @@ mod tests {
         Arc, RwLock,
     };
     use stoat_scheduler::{Executor, TestScheduler};
-    use stoat_text::{patch::Patch, Bias, Point};
+    use stoat_text::{
+        patch::{Edit, Patch},
+        Bias, Point, SumTree,
+    };
 
     fn test_executor() -> Executor {
         Executor::new(Arc::new(TestScheduler::new()))
     }
 
-    fn create_block_snapshot(content: &str, props: &[BlockProperties]) -> super::BlockSnapshot {
+    fn create_block_snapshot(content: &str, props: &[BlockProperties]) -> BlockSnapshot {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
@@ -2150,6 +2160,77 @@ mod tests {
         let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
         let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
         wrap_snapshot
+    }
+
+    fn blocks_for(props: Vec<BlockProperties>) -> Vec<Block> {
+        let mut block_map = BlockMap::new();
+        block_map.insert(props);
+        block_map
+            .custom_blocks
+            .iter()
+            .map(|b| Block::Custom(b.clone()))
+            .collect()
+    }
+
+    fn render_transforms(
+        transforms: &SumTree<Transform>,
+        wrap: &Arc<super::WrapSnapshot>,
+    ) -> Vec<String> {
+        let total = transforms.extent::<OutputRow>(()).0;
+        let snapshot = BlockSnapshot {
+            wrap_snapshot: wrap.clone(),
+            transforms: transforms.clone(),
+            total_rows: total,
+        };
+        (0..total).map(|row| snapshot.display_line(row)).collect()
+    }
+
+    /// The incremental block sync must reproduce, for the post-edit state,
+    /// exactly what a full rebuild produces. A no-op edit over unchanged text
+    /// still drives the full boundary reconstruction, so divergence here is a
+    /// boundary bug in [`sync_incremental`].
+    fn assert_incremental_matches_full(
+        wrap: &Arc<super::WrapSnapshot>,
+        blocks: &[Block],
+        edits: Patch<u32>,
+    ) {
+        let line_count = wrap.line_count();
+        let old = build_transforms(line_count, blocks, wrap);
+        let incremental = sync_incremental(&old, line_count, blocks, wrap, &edits);
+        let full = build_transforms(line_count, blocks, wrap);
+        assert_eq!(
+            render_transforms(&incremental, wrap),
+            render_transforms(&full, wrap),
+            "incremental sync output must match a full rebuild"
+        );
+    }
+
+    #[test]
+    fn incremental_matches_full_edit_away_from_block() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3\nl4");
+        let blocks = blocks_for(vec![text_block(BlockPlacement::Above(0), "TOP")]);
+        assert_incremental_matches_full(
+            &wrap,
+            &blocks,
+            Patch::new(vec![Edit {
+                old: 3..4,
+                new: 3..4,
+            }]),
+        );
+    }
+
+    #[test]
+    fn incremental_keeps_above_block_at_edit_end() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3\nl4");
+        let blocks = blocks_for(vec![text_block(BlockPlacement::Above(3), "ABOVE")]);
+        assert_incremental_matches_full(
+            &wrap,
+            &blocks,
+            Patch::new(vec![Edit {
+                old: 1..3,
+                new: 1..3,
+            }]),
+        );
     }
 
     #[test]
