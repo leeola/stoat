@@ -52,10 +52,9 @@ pub use display_map::{
     ChunkRendererId, ChunkReplacement, Crease, CreaseId, CreaseMap, CreaseSnapshot, DisplayMap,
     DisplayMapId, DisplayPoint, DisplayRow, DisplaySnapshot, FoldMap, FoldPlaceholder, FoldPoint,
     FoldSnapshot, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
-    HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight, InlayHighlights, InlayId,
-    InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot, SemanticTokenHighlight,
-    SemanticTokensHighlights, TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap,
-    WrapPoint, WrapSnapshot,
+    HighlightStyleInterner, HighlightedChunk, Highlights, InlayId, InlayKind, InlayMap,
+    InlayOffset, InlayPoint, InlaySnapshot, SemanticTokenHighlight, SemanticTokensHighlights,
+    TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap, WrapPoint, WrapSnapshot,
 };
 pub use host::DiffStatus;
 pub use multi_buffer::{

@@ -26,12 +26,12 @@ pub use fold_map::{FoldMap, FoldMetadata, FoldOffset, FoldPlaceholder, FoldPoint
 pub use highlights::{
     CachedHighlightEndpoints, Chunk, ChunkRenderer, ChunkRendererId, ChunkReplacement,
     DecorationHighlight, DecorationHighlights, HighlightKey, HighlightLayer, HighlightStyle,
-    HighlightStyleId, HighlightStyleInterner, HighlightedChunk, Highlights, InlayHighlight,
-    InlayHighlights, SemanticTokenHighlight, SemanticTokensHighlights, TextHighlights,
+    HighlightStyleId, HighlightStyleInterner, HighlightedChunk, Highlights, SemanticTokenHighlight,
+    SemanticTokensHighlights, TextHighlights,
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
-    collections::{BTreeMap, HashMap, HashSet},
+    collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
         Arc,
@@ -205,7 +205,6 @@ pub struct DisplayMap {
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
     decoration_highlights: DecorationHighlights,
-    inlay_highlights: InlayHighlights,
     companion: Option<Companion>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
     masked: bool,
@@ -248,7 +247,6 @@ impl DisplayMap {
             text_highlights: Arc::new(HashMap::new()),
             semantic_token_highlights: Arc::new(HashMap::new()),
             decoration_highlights: Arc::new(HashMap::new()),
-            inlay_highlights: BTreeMap::new(),
             companion: None,
             lsp_folding_crease_ids: HashMap::new(),
             masked: false,
@@ -387,10 +385,9 @@ impl DisplayMap {
     }
 
     pub fn clear_highlights(&mut self, key: HighlightKey) -> bool {
-        let mut cleared = Arc::make_mut(&mut self.text_highlights)
+        let cleared = Arc::make_mut(&mut self.text_highlights)
             .remove(&key)
             .is_some();
-        cleared |= self.inlay_highlights.remove(&key).is_some();
         if cleared {
             self.highlights_dirty = true;
         }
@@ -443,18 +440,6 @@ impl DisplayMap {
         insert: Vec<(Anchor, String, InlayKind)>,
     ) -> Vec<InlayId> {
         self.inlay_map.splice(remove, insert)
-    }
-
-    pub fn highlight_inlays(
-        &mut self,
-        key: HighlightKey,
-        highlights: Vec<InlayHighlight>,
-        style: HighlightStyle,
-    ) {
-        let entry = self.inlay_highlights.entry(key).or_default();
-        for highlight in highlights {
-            entry.insert(highlight.inlay, (style.clone(), highlight));
-        }
     }
 
     pub fn insert_creases(
@@ -566,7 +551,6 @@ impl DisplayMap {
             text_highlights: self.text_highlights.clone(),
             semantic_token_highlights: self.semantic_token_highlights.clone(),
             decoration_highlights: self.decoration_highlights.clone(),
-            inlay_highlights: self.inlay_highlights.clone(),
             crease_snapshot: self.crease_map.snapshot(),
             fold_placeholder: FoldPlaceholder::default(),
             masked: self.masked,
@@ -586,7 +570,6 @@ pub struct DisplaySnapshot {
     text_highlights: TextHighlights,
     semantic_token_highlights: SemanticTokensHighlights,
     decoration_highlights: DecorationHighlights,
-    inlay_highlights: InlayHighlights,
     crease_snapshot: CreaseSnapshot,
     fold_placeholder: FoldPlaceholder,
     masked: bool,
@@ -643,10 +626,6 @@ impl DisplaySnapshot {
         &self.decoration_highlights
     }
 
-    pub fn inlay_highlights(&self) -> &InlayHighlights {
-        &self.inlay_highlights
-    }
-
     pub fn is_masked(&self) -> bool {
         self.masked
     }
@@ -681,7 +660,6 @@ impl DisplaySnapshot {
     ) -> block_map::BlockChunks<'_> {
         let highlights = Highlights {
             text_highlights: Some(&self.text_highlights),
-            inlay_highlights: Some(&self.inlay_highlights),
             semantic_token_highlights: Some(&self.semantic_token_highlights),
             decoration_highlights: Some(&self.decoration_highlights),
         };

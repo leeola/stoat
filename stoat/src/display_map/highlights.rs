@@ -175,15 +175,6 @@ pub struct DecorationHighlight {
 /// each other when set independently.
 pub type DecorationHighlights = Arc<HashMap<BufferId, Arc<[DecorationHighlight]>>>;
 
-pub type InlayHighlights =
-    BTreeMap<HighlightKey, BTreeMap<InlayId, (HighlightStyle, InlayHighlight)>>;
-
-#[derive(Debug, Clone)]
-pub struct InlayHighlight {
-    pub inlay: InlayId,
-    pub range: Range<usize>,
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum ChunkRendererId {
     Fold(usize),
@@ -236,7 +227,6 @@ impl Default for Chunk<'_> {
 #[derive(Debug, Default)]
 pub struct Highlights<'a> {
     pub text_highlights: Option<&'a TextHighlights>,
-    pub inlay_highlights: Option<&'a InlayHighlights>,
     pub semantic_token_highlights: Option<&'a SemanticTokensHighlights>,
     pub decoration_highlights: Option<&'a DecorationHighlights>,
 }
