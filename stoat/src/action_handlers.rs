@@ -42,7 +42,7 @@ pub(crate) use review::install_review_session;
 use std::path::Path;
 use stoat_action::{
     Action, ActionKind, Dump, OpenFile, OpenReviewAgentEdits, OpenReviewBranch, OpenReviewCommit,
-    OpenReviewCommitRange, OpenReviewWatch, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
+    OpenReviewCommitRange, RenameWorkspace, ReviewExternalEdit, Run, SetCwd,
 };
 
 pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
@@ -159,14 +159,6 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         },
         ActionKind::OpenReview => {
             review::open_review(stoat);
-            UpdateEffect::Redraw
-        },
-        ActionKind::OpenReviewWatch => {
-            let a = action
-                .as_any()
-                .downcast_ref::<OpenReviewWatch>()
-                .expect("OpenReviewWatch action downcast");
-            review::open_review_watch(stoat, &a.workdir);
             UpdateEffect::Redraw
         },
         ActionKind::AddSelectionBelow => movement::add_selection_below(stoat),

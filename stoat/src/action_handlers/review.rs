@@ -1184,16 +1184,6 @@ pub(super) fn open_review(stoat: &mut Stoat) {
     install_review_session(stoat, session);
 }
 
-/// Open an empty review session that surfaces live edits inside
-/// `workdir`. Files and chunks are added incrementally by the
-/// workspace-watch event loop; see `ReviewSource::WorkspaceWatch`.
-pub(super) fn open_review_watch(stoat: &mut Stoat, workdir: &Path) {
-    let session = ReviewSession::new(ReviewSource::WorkspaceWatch {
-        workdir: workdir.to_path_buf(),
-    });
-    install_review_session(stoat, session);
-}
-
 /// Build a review session by scanning the git working tree rooted at
 /// `git_root`. Returns `None` when the root is not a repository or has no
 /// diff hunks. Shared by [`open_review`] and [`review_refresh`].
@@ -1592,6 +1582,12 @@ mod tests {
         review_session::ChunkStatus, test_harness::TestHarness,
     };
     use std::path::PathBuf;
+
+    fn open_workspace_watch(h: &mut TestHarness, workdir: PathBuf) {
+        use crate::review_session::{ReviewSession, ReviewSource};
+        let session = ReviewSession::new(ReviewSource::WorkspaceWatch { workdir });
+        super::install_review_session(&mut h.stoat, session);
+    }
 
     #[test]
     fn install_review_session_populates_diff_cache() {
@@ -2063,15 +2059,11 @@ mod tests {
     }
 
     #[test]
-    fn open_review_watch_starts_empty_with_recursive_watch() {
+    fn workspace_watch_session_starts_empty_with_recursive_watch() {
         use crate::review_session::ReviewSource;
         let mut h = TestHarness::with_size(80, 14);
         let workdir = PathBuf::from("/work");
-        let action = stoat_action::OpenReviewWatch {
-            workdir: workdir.clone(),
-        };
-
-        crate::action_handlers::dispatch(&mut h.stoat, &action);
+        open_workspace_watch(&mut h, workdir.clone());
 
         let ws = h.stoat.active_workspace();
         let session = ws.review.as_ref().expect("watch session installed");
@@ -2104,12 +2096,7 @@ mod tests {
         let workdir = PathBuf::from("/work");
         h.fake_git().add_repo(workdir.clone());
 
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &stoat_action::OpenReviewWatch {
-                workdir: workdir.clone(),
-            },
-        );
+        open_workspace_watch(&mut h, workdir.clone());
         assert_eq!(h.with_review(|s| s.files.len()), 0);
 
         let new_path = workdir.join("new.rs");
@@ -2145,12 +2132,7 @@ mod tests {
         h.fake_fs()
             .insert_file(workdir.join(".stoatignore"), b"ignored.log\n");
 
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &stoat_action::OpenReviewWatch {
-                workdir: workdir.clone(),
-            },
-        );
+        open_workspace_watch(&mut h, workdir.clone());
         let version_after_open = h.with_review(|s| s.version);
 
         let ignored = workdir.join("ignored.log");

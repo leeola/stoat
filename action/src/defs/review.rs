@@ -409,60 +409,6 @@ impl Action for OpenReviewCommit {
     }
 }
 
-const OPEN_REVIEW_WATCH_PARAMS: &[ParamDef] = &[ParamDef {
-    name: "workdir",
-    kind: ParamKind::String,
-    required: true,
-    description: "Absolute path of the directory whose live edits should populate the review.",
-}];
-
-#[derive(Debug)]
-pub struct OpenReviewWatchDef;
-
-impl ActionDef for OpenReviewWatchDef {
-    fn name(&self) -> &'static str {
-        "review-watch"
-    }
-
-    fn kind(&self) -> ActionKind {
-        ActionKind::OpenReviewWatch
-    }
-
-    fn params(&self) -> &'static [ParamDef] {
-        OPEN_REVIEW_WATCH_PARAMS
-    }
-
-    fn short_desc(&self) -> &'static str {
-        "review live edits to a workspace"
-    }
-
-    fn long_desc(&self) -> &'static str {
-        "Open an empty review session that grows as files inside \
-         `workdir` change on disk. Each external write becomes a \
-         review chunk diffed against git HEAD; the cursor jumps to \
-         the most recent change."
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
-pub struct OpenReviewWatch {
-    pub workdir: PathBuf,
-}
-
-impl OpenReviewWatch {
-    pub const DEF: &OpenReviewWatchDef = &OpenReviewWatchDef;
-}
-
-impl Action for OpenReviewWatch {
-    fn def(&self) -> &'static dyn ActionDef {
-        Self::DEF
-    }
-
-    fn as_any(&self) -> &dyn Any {
-        self
-    }
-}
-
 const OPEN_REVIEW_COMMIT_RANGE_PARAMS: &[ParamDef] = &[
     ParamDef {
         name: "workdir",

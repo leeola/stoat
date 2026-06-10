@@ -93,15 +93,14 @@ use crate::{
         review::{
             CloseReview, GitToggleStageHunk, GitToggleStageLine, GitUnstageHunk, JumpToMoveSource,
             JumpToMoveTarget, JumpToNextMoveSource, JumpToPrevMoveSource, OpenReview,
-            OpenReviewBranch, OpenReviewCommit, OpenReviewCommitRange, OpenReviewWatch,
-            QueryMoveRelationships, ReviewApplyStaged, ReviewApproveHunk,
-            ReviewCycleComparisonMode, ReviewEnterLineSelect, ReviewLineSelectAll,
-            ReviewLineSelectCancel, ReviewLineSelectStage, ReviewLineSelectToggle,
-            ReviewLineSelectUnstage, ReviewNextChunk, ReviewNextCommit, ReviewNextUnreviewedHunk,
-            ReviewPrevChunk, ReviewPrevCommit, ReviewRefresh, ReviewRemoveSelected,
-            ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk, ReviewStageChunk,
-            ReviewToggleApproval, ReviewToggleFollow, ReviewToggleLive, ReviewToggleStage,
-            ReviewUnstageChunk,
+            OpenReviewBranch, OpenReviewCommit, OpenReviewCommitRange, QueryMoveRelationships,
+            ReviewApplyStaged, ReviewApproveHunk, ReviewCycleComparisonMode, ReviewEnterLineSelect,
+            ReviewLineSelectAll, ReviewLineSelectCancel, ReviewLineSelectStage,
+            ReviewLineSelectToggle, ReviewLineSelectUnstage, ReviewNextChunk, ReviewNextCommit,
+            ReviewNextUnreviewedHunk, ReviewPrevChunk, ReviewPrevCommit, ReviewRefresh,
+            ReviewRemoveSelected, ReviewResetProgress, ReviewRevertHunk, ReviewSkipChunk,
+            ReviewStageChunk, ReviewToggleApproval, ReviewToggleFollow, ReviewToggleLive,
+            ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{
             OpenClaudeTerminal, OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev,
@@ -302,19 +301,6 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         Ok(Box::new(OpenReviewCommit {
             workdir: PathBuf::from(workdir),
             sha: sha.to_owned(),
-        }))
-    });
-    add(OpenReviewWatch::DEF, |params| {
-        let workdir = params
-            .first()
-            .context(MissingSnafu { name: "workdir" })?
-            .as_string()
-            .context(WrongKindSnafu {
-                name: "workdir",
-                expected: ParamKind::String,
-            })?;
-        Ok(Box::new(OpenReviewWatch {
-            workdir: PathBuf::from(workdir),
         }))
     });
     add(OpenReviewCommitRange::DEF, |params| {
@@ -1333,7 +1319,6 @@ mod tests {
         //   routed to the focused project tree dock.
         // + 1 RenameTreeEntry (inline project-tree rename).
         // + 2 NewFileInTree / NewFolderInTree (inline project-tree create).
-        // + 1 OpenReviewWatch (workspace-watch review session).
         // + 1 OpenAbout (build info modal).
         // + 2 ReviewApproveHunk / ReviewToggleApproval.
         // + 1 ReviewNextUnreviewedHunk.
@@ -1362,7 +1347,7 @@ mod tests {
         // + 1 CommitsOpenBranchReview (branch review from the commits view).
         // + 1 OpenClaudeTerminal (terminal pane running the claude CLI).
         // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
-        assert_eq!(all().count(), 346);
+        assert_eq!(all().count(), 345);
     }
 
     #[test]
