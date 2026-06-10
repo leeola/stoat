@@ -48,7 +48,6 @@ arboard.workspace = true
 base64.workspace = true
 regex.workspace = true
 brush-parser.workspace = true
-gpui.workspace = true
 
 [dev-dependencies]
 insta = "1"

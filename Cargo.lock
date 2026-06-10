@@ -6288,7 +6288,6 @@ dependencies = [
  "etcetera",
  "futures",
  "git2",
- "gpui",
  "ignore",
  "insta",
  "libc",
