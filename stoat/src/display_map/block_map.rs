@@ -2,7 +2,7 @@ use super::{
     fold_map::FoldPointCursor,
     highlights::Chunk,
     inlay_map::InlayPointCursor,
-    wrap_map::{WrapPointCursor, WrapSnapshot},
+    wrap_map::{WrapPoint, WrapPointCursor, WrapSnapshot},
     Companion, DisplayMapId,
 };
 use crate::{
@@ -21,8 +21,9 @@ use std::{
     },
 };
 use stoat_text::{
-    patch::Patch, tree_map::TreeMap, Bias, ContextLessSummary, Dimension, Dimensions, Item, Point,
-    SeekTarget, SumTree,
+    patch::{Edit, Patch},
+    tree_map::TreeMap,
+    Bias, ContextLessSummary, Dimension, Dimensions, Item, Point, SeekTarget, SumTree,
 };
 
 #[derive(Copy, Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -488,6 +489,10 @@ pub struct BlockMap {
     total_rows: u32,
     blocks_dirty: bool,
     deferred_edits: Patch<u32>,
+    /// Wrap snapshot from the last `sync`. Block mutations resolve their
+    /// affected wrap-row region against it to emit `deferred_edits`: the
+    /// "old" space the next sync's `wrap_edits` map forward from.
+    last_wrap_snapshot: Option<Arc<WrapSnapshot>>,
     buffer_header_height: u32,
     excerpt_header_height: u32,
     folded_buffers: HashSet<BufferId>,
@@ -511,6 +516,7 @@ impl BlockMap {
             total_rows: 0,
             blocks_dirty: true,
             deferred_edits: Patch::empty(),
+            last_wrap_snapshot: None,
             buffer_header_height: 1,
             excerpt_header_height: 1,
             folded_buffers: HashSet::new(),
@@ -525,13 +531,17 @@ impl BlockMap {
     /// Whether the block layer has pending changes not yet folded into a
     /// synced snapshot. The display-map snapshot cache consults this so a
     /// block insert or remove invalidates the cache even when the buffer,
-    /// diff, fold, and inlay versions are all unchanged.
+    /// diff, fold, and inlay versions are all unchanged. Pending
+    /// `deferred_edits` count: a mutation that emits one instead of setting
+    /// `blocks_dirty` still changes the next snapshot.
     pub fn is_dirty(&self) -> bool {
-        self.blocks_dirty
+        self.blocks_dirty || !self.deferred_edits.is_empty()
     }
 
     pub fn insert(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
+        let snapshot = self.last_wrap_snapshot.clone();
         let mut ids = Vec::with_capacity(blocks.len());
+        let mut regions = Vec::new();
         for props in blocks {
             let id = CustomBlockId(self.next_block_id.fetch_add(1, SeqCst));
             let (lines, longest_row, longest_row_chars) =
@@ -548,6 +558,9 @@ impl BlockMap {
                 longest_row,
                 longest_row_chars,
             });
+            if let Some(ref snapshot) = snapshot {
+                regions.push(block_region(&block.placement, snapshot));
+            }
             let ix = self
                 .custom_blocks
                 .partition_point(|b| b.placement.start_row() <= props.placement.start_row());
@@ -555,7 +568,11 @@ impl BlockMap {
             self.custom_blocks_by_id.insert(id, block);
             ids.push(id);
         }
-        self.blocks_dirty = true;
+        if snapshot.is_some() {
+            self.merge_deferred_regions(regions);
+        } else {
+            self.blocks_dirty = true;
+        }
         ids
     }
 
@@ -563,17 +580,63 @@ impl BlockMap {
         if ids.is_empty() {
             return;
         }
+        match self.last_wrap_snapshot.clone() {
+            Some(snapshot) => {
+                let regions: Vec<(u32, u32)> = self
+                    .custom_blocks
+                    .iter()
+                    .filter(|b| ids.contains(&b.id))
+                    .map(|b| block_region(&b.placement, &snapshot))
+                    .collect();
+                self.merge_deferred_regions(regions);
+            },
+            None => self.blocks_dirty = true,
+        }
         self.custom_blocks.retain(|b| !ids.contains(&b.id));
         for id in ids {
             self.custom_blocks_by_id.remove(id);
         }
-        self.blocks_dirty = true;
+    }
+
+    /// Merge `regions` (wrap-row ranges) into [`BlockMap::deferred_edits`] as
+    /// no-op-size edits, kept sorted and coalesced. The next [`BlockMap::sync`]
+    /// composes them with the buffer's wrap edits, so the affected rows are
+    /// reconstructed incrementally rather than via a full rebuild.
+    fn merge_deferred_regions(&mut self, regions: impl IntoIterator<Item = (u32, u32)>) {
+        let mut ranges: Vec<(u32, u32)> = self
+            .deferred_edits
+            .edits()
+            .iter()
+            .map(|e| (e.old.start, e.old.end))
+            .chain(regions)
+            .filter(|&(start, end)| end > start)
+            .collect();
+        ranges.sort_unstable();
+
+        let mut merged: Vec<Edit<u32>> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if start <= last.old.end {
+                    last.old.end = last.old.end.max(end);
+                    last.new.end = last.old.end;
+                    continue;
+                }
+            }
+            merged.push(Edit {
+                old: start..end,
+                new: start..end,
+            });
+        }
+        self.deferred_edits = Patch::new(merged);
     }
 
     pub fn folded_buffers(&self) -> &HashSet<BufferId> {
         &self.folded_buffers
     }
 
+    // Folding/unfolding a buffer rewrites every row of that buffer's excerpt
+    // (the whole file for a singleton), so a full rebuild is already optimal;
+    // there is no localized region to defer, hence `blocks_dirty`.
     pub fn fold_buffer(&mut self, buffer_id: BufferId) {
         self.folded_buffers.insert(buffer_id);
         self.blocks_dirty = true;
@@ -632,7 +695,7 @@ impl BlockMap {
                         buffer_row_to_wrap_row(our_range.start.row, &wrap_snapshot);
                     let our_wrap_end = buffer_row_to_wrap_row(our_range.end.row, &wrap_snapshot)
                         .max(our_wrap_start + 1);
-                    merged.push(stoat_text::patch::Edit {
+                    merged.push(Edit {
                         old: our_wrap_start..our_wrap_end,
                         new: our_wrap_start..our_wrap_end,
                     });
@@ -699,6 +762,7 @@ impl BlockMap {
         self.transforms = Some(transforms.clone());
         self.total_rows = total_rows.0;
         self.blocks_dirty = false;
+        self.last_wrap_snapshot = Some(wrap_snapshot.clone());
 
         BlockSnapshot {
             wrap_snapshot,
@@ -911,7 +975,7 @@ impl BlockSnapshot {
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
-        let wrap_point = super::wrap_map::WrapPoint::new(wrap_row, point.column);
+        let wrap_point = WrapPoint::new(wrap_row, point.column);
         let tab_point = self.wrap_snapshot.to_tab_point(wrap_point);
         let fold_point = self
             .wrap_snapshot
@@ -951,9 +1015,7 @@ impl BlockSnapshot {
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
-        let tab_point = self
-            .wrap_snapshot
-            .to_tab_point(super::wrap_map::WrapPoint::new(wrap_row, 0));
+        let tab_point = self.wrap_snapshot.to_tab_point(WrapPoint::new(wrap_row, 0));
         let inlay_point = self
             .wrap_snapshot
             .fold_snapshot()
@@ -1306,6 +1368,29 @@ fn resolve_block_placement(
     }
 }
 
+/// Wrap-row range a block mutation affects, snapped to whole input rows.
+///
+/// Maps the placement's *buffer-anchor* rows (not the resolved Below/Near `+1`
+/// position) to wrap rows, then widens to the surrounding row boundaries so
+/// [`sync_incremental`] reconstructs the block's rows as a unit. Anchoring at
+/// the buffer row puts a removed below block in the reconstruction zone, so it
+/// is dropped rather than preserved at the edit start. Used to turn a mutation
+/// into a `deferred_edits` entry.
+fn block_region(placement: &BlockPlacement, snapshot: &WrapSnapshot) -> (u32, u32) {
+    let (start_buf, end_buf) = match *placement {
+        BlockPlacement::Above(row) | BlockPlacement::Below(row) | BlockPlacement::Near(row) => {
+            (row, row)
+        },
+        BlockPlacement::Replace { start, end } => (start, end),
+    };
+
+    let start_wrap = buffer_row_to_wrap_row(start_buf, snapshot);
+    let end_wrap = buffer_row_to_wrap_row(end_buf, snapshot);
+    let start = snapshot.prev_row_boundary(WrapPoint::new(start_wrap, 0));
+    let end = snapshot.next_row_boundary(WrapPoint::new(end_wrap, 0));
+    (start, end)
+}
+
 fn sync_incremental(
     old_transforms: &SumTree<Transform>,
     wrap_line_count: u32,
@@ -1645,7 +1730,7 @@ fn block_buffer_row(block: &Block) -> u32 {
 }
 
 fn wrap_row_to_buffer_row(wrap_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 {
-    let tab_point = wrap_snapshot.to_tab_point(super::wrap_map::WrapPoint::new(wrap_row, 0));
+    let tab_point = wrap_snapshot.to_tab_point(WrapPoint::new(wrap_row, 0));
     let inlay_point = wrap_snapshot
         .fold_snapshot()
         .to_inlay_point(super::fold_map::FoldPoint::new(tab_point.row(), 0));
@@ -2298,6 +2383,80 @@ mod tests {
                 new: 2..3,
             }]),
         );
+    }
+
+    fn display_lines(snap: &BlockSnapshot) -> Vec<String> {
+        (0..snap.total_lines())
+            .map(|row| snap.display_line(row))
+            .collect()
+    }
+
+    #[test]
+    fn deferred_block_insert_matches_full_rebuild() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3");
+        let props = || {
+            vec![
+                text_block(BlockPlacement::Above(1), "ABOVE"),
+                text_block(BlockPlacement::Below(2), "BELOW"),
+            ]
+        };
+
+        // Full rebuild: insert before any sync, so blocks_dirty forces it.
+        let mut full = BlockMap::new();
+        full.insert(props());
+        let full_snap = full.sync(Arc::clone(&wrap), &Patch::empty(), None);
+
+        // Incremental: sync first (stores the snapshot), then insert emits
+        // deferred edits that drive sync_incremental.
+        let mut incremental = BlockMap::new();
+        incremental.sync(Arc::clone(&wrap), &Patch::empty(), None);
+        incremental.insert(props());
+        let inc_snap = incremental.sync(Arc::clone(&wrap), &Patch::empty(), None);
+
+        assert_eq!(display_lines(&inc_snap), display_lines(&full_snap));
+    }
+
+    #[test]
+    fn deferred_block_removal_matches_full_rebuild() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3");
+
+        let mut incremental = BlockMap::new();
+        let ids = incremental.insert(vec![
+            text_block(BlockPlacement::Above(1), "ABOVE"),
+            text_block(BlockPlacement::Below(2), "BELOW"),
+        ]);
+        incremental.sync(Arc::clone(&wrap), &Patch::empty(), None);
+        incremental.remove(&[ids[0]].into_iter().collect());
+        let inc_snap = incremental.sync(Arc::clone(&wrap), &Patch::empty(), None);
+
+        // Full rebuild keeping only the surviving block.
+        let mut full = BlockMap::new();
+        full.insert(vec![text_block(BlockPlacement::Below(2), "BELOW")]);
+        let full_snap = full.sync(Arc::clone(&wrap), &Patch::empty(), None);
+
+        assert_eq!(display_lines(&inc_snap), display_lines(&full_snap));
+    }
+
+    #[test]
+    fn deferred_insert_composes_with_buffer_edit() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3");
+
+        let mut incremental = BlockMap::new();
+        incremental.sync(Arc::clone(&wrap), &Patch::empty(), None);
+        incremental.insert(vec![text_block(BlockPlacement::Above(2), "ABOVE")]);
+        // A concurrent (no-op-size) wrap edit must compose with the block's
+        // deferred edit rather than drop it.
+        let wrap_edits = Patch::new(vec![Edit {
+            old: 0..1,
+            new: 0..1,
+        }]);
+        let inc_snap = incremental.sync(Arc::clone(&wrap), &wrap_edits, None);
+
+        let mut full = BlockMap::new();
+        full.insert(vec![text_block(BlockPlacement::Above(2), "ABOVE")]);
+        let full_snap = full.sync(Arc::clone(&wrap), &Patch::empty(), None);
+
+        assert_eq!(display_lines(&inc_snap), display_lines(&full_snap));
     }
 
     #[test]
