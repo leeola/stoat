@@ -73,7 +73,6 @@ impl From<Point> for InlayPoint {
 #[derive(Clone, Debug)]
 pub struct Inlay {
     pub id: InlayId,
-    pub position: Point,
     pub text: Arc<str>,
     pub kind: InlayKind,
 }
@@ -176,7 +175,7 @@ impl Deref for InlaySnapshot {
 
 impl InlayMap {
     pub fn new(buffer_snapshot: MultiBufferSnapshot) -> (Self, Arc<InlaySnapshot>) {
-        let transforms = build_transforms(buffer_snapshot.rope(), buffer_snapshot.text(), &[]);
+        let transforms = build_transforms(buffer_snapshot.rope(), buffer_snapshot.text(), &[], &[]);
         let snapshot = Arc::new(InlaySnapshot {
             buffer: buffer_snapshot,
             transforms,
@@ -294,8 +293,12 @@ impl InlayMap {
                 .as_ref()
                 .map(|s| s.total_summary().lines.row + 1)
                 .unwrap_or(0);
-            let transforms =
-                build_transforms(buffer_snapshot.rope(), buffer_snapshot.text(), &resolved);
+            let transforms = build_transforms(
+                buffer_snapshot.rope(),
+                buffer_snapshot.text(),
+                &resolved,
+                &transform_offsets,
+            );
             let new_line_count = if transforms.is_empty() {
                 buffer_snapshot.line_count()
             } else {
@@ -324,36 +327,27 @@ impl InlayMap {
 
     fn resolve_all(&mut self, buffer_snapshot: &MultiBufferSnapshot) -> (Vec<Inlay>, Vec<usize>) {
         let anchors: Vec<Anchor> = self.inlays.iter().map(|ai| ai.position).collect();
-        let offsets = buffer_snapshot.resolve_anchors_batch(&anchors);
-        let mut resolved: Vec<Inlay> = self
-            .inlays
-            .iter()
-            .zip(offsets.iter())
-            .map(|(ai, &offset)| Inlay {
-                id: ai.id,
-                position: buffer_snapshot.rope().offset_to_point(offset),
-                text: Arc::clone(&ai.text),
-                kind: ai.kind,
-            })
-            .collect();
+        let mut offsets = buffer_snapshot.resolve_anchors_batch(&anchors);
+
         if !self.inlays_sorted {
-            resolved.sort_by_key(|i| (i.position.row, i.position.column));
-            let id_to_pos: HashMap<usize, usize> = resolved
-                .iter()
-                .enumerate()
-                .map(|(i, r)| (r.id.0, i))
-                .collect();
-            self.inlays
-                .sort_by_key(|ai| id_to_pos.get(&ai.id.0).copied().unwrap_or(usize::MAX));
+            // Resolved offset order matches point order, so sort the inlays and
+            // their offsets together by offset.
+            let mut order: Vec<usize> = (0..self.inlays.len()).collect();
+            order.sort_by_key(|&i| offsets[i]);
+            self.inlays = order.iter().map(|&i| self.inlays[i].clone()).collect();
+            offsets = order.iter().map(|&i| offsets[i]).collect();
             self.inlays_sorted = true;
         }
-        let inlay_offsets: Vec<usize> = resolved
+
+        let text_len = buffer_snapshot.text().len();
+        let inlay_offsets: Vec<usize> = offsets.iter().map(|&o| o.min(text_len)).collect();
+        let resolved: Vec<Inlay> = self
+            .inlays
             .iter()
-            .map(|i| {
-                buffer_snapshot
-                    .rope()
-                    .point_to_offset(i.position)
-                    .min(buffer_snapshot.text().len())
+            .map(|ai| Inlay {
+                id: ai.id,
+                text: Arc::clone(&ai.text),
+                kind: ai.kind,
             })
             .collect();
         (resolved, inlay_offsets)
@@ -400,22 +394,16 @@ impl InlayMap {
             }
         }
 
+        let inlay_offsets: Vec<usize> = offsets.iter().map(|&o| o.min(text_len)).collect();
         let resolved: Vec<Inlay> = self
             .inlays
             .iter()
-            .zip(offsets.iter())
-            .map(|(ai, &offset)| {
-                let clamped = offset.min(text_len);
-                Inlay {
-                    id: ai.id,
-                    position: buffer_snapshot.rope().offset_to_point(clamped),
-                    text: Arc::clone(&ai.text),
-                    kind: ai.kind,
-                }
+            .map(|ai| Inlay {
+                id: ai.id,
+                text: Arc::clone(&ai.text),
+                kind: ai.kind,
             })
             .collect();
-
-        let inlay_offsets: Vec<usize> = offsets.iter().map(|&o| o.min(text_len)).collect();
         (resolved, inlay_offsets)
     }
 
@@ -452,7 +440,12 @@ impl InlayMap {
     }
 }
 
-fn build_transforms(rope: &Rope, text: &str, inlays: &[Inlay]) -> SumTree<Transform> {
+fn build_transforms(
+    rope: &Rope,
+    text: &str,
+    inlays: &[Inlay],
+    inlay_offsets: &[usize],
+) -> SumTree<Transform> {
     let mut transforms = SumTree::new(());
 
     if inlays.is_empty() {
@@ -464,8 +457,8 @@ fn build_transforms(rope: &Rope, text: &str, inlays: &[Inlay]) -> SumTree<Transf
 
     let mut cursor = 0usize;
 
-    for inlay in inlays {
-        let offset = rope.point_to_offset(inlay.position).min(text.len());
+    for (inlay, &offset) in inlays.iter().zip(inlay_offsets) {
+        let offset = offset.min(text.len());
 
         if offset > cursor {
             transforms.push(
@@ -692,11 +685,16 @@ fn inlay_splice_edits(
     new_inlays: &[Inlay],
     new_offsets: &[usize],
 ) -> Patch<usize> {
-    let old_rope = old_snapshot.buffer.rope();
+    // Each inlay's buffer offset is the running sum of isomorphic input
+    // lengths up to its transform (inlays contribute no input).
     let mut old: HashMap<usize, usize> = HashMap::new();
+    let mut offset = 0usize;
     for transform in old_snapshot.transforms.iter() {
-        if let Transform::Inlay(inlay) = transform {
-            old.insert(inlay.id.0, old_rope.point_to_offset(inlay.position));
+        match transform {
+            Transform::Isomorphic(summary) => offset += summary.len,
+            Transform::Inlay(inlay) => {
+                old.insert(inlay.id.0, offset);
+            },
         }
     }
 
@@ -864,7 +862,7 @@ impl InlaySnapshot {
                 break;
             }
             if let Transform::Inlay(ref inlay) = transform {
-                if inlay.position.row == row {
+                if pos.row == row {
                     extra += inlay.text.len() as u32;
                 }
             }
@@ -1305,6 +1303,20 @@ mod tests {
             snap.to_buffer_point(InlayPoint::new(0, 11)),
             Point::new(0, 8)
         );
+    }
+
+    #[test]
+    fn out_of_order_inlays_render_sorted() {
+        // Inserted with the later position first; resolve_all must sort them by
+        // resolved offset before building transforms.
+        let snap = make_snapshot_with_inlays(
+            "ab cd ef",
+            vec![
+                (Point::new(0, 5), "YY".to_string()),
+                (Point::new(0, 2), "X".to_string()),
+            ],
+        );
+        assert_eq!(snap.inlay_text(), "abX cdYY ef");
     }
 
     #[test]
