@@ -40,7 +40,7 @@ pub(super) fn arm_replay(stoat: &mut Stoat) -> UpdateEffect {
 /// re-feeding each captured [`KeyEvent`] through [`Stoat::update`].
 /// No-op when the register is empty or unnamed.
 pub(crate) fn execute_replay(stoat: &mut Stoat, ch: char) -> UpdateEffect {
-    let Some(register) = super::yank::register_for_char(ch) else {
+    let Some(register) = crate::register::register_for_char(ch) else {
         return UpdateEffect::None;
     };
     let Some(keys) = stoat.macros.get(&register).cloned() else {

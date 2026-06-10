@@ -31,6 +31,23 @@ pub enum Register {
     LastInsert,
 }
 
+/// Resolve a [`Register`] from a consumed-char keypress in a register
+/// chord. `"` -> `Unnamed`; an ASCII letter -> `Named`; the helix
+/// special chars (`*`/`+`, `/`, `_`, `#`, `.`) route to the matching
+/// special variant; any other char returns `None`.
+pub fn register_for_char(ch: char) -> Option<Register> {
+    match ch {
+        '"' => Some(Register::Unnamed),
+        '*' | '+' => Some(Register::Clipboard),
+        '/' => Some(Register::Search),
+        '_' => Some(Register::Blackhole),
+        '#' => Some(Register::SelectionIndex),
+        '.' => Some(Register::LastInsert),
+        _ if ch.is_ascii_alphabetic() => Some(Register::Named(ch)),
+        _ => None,
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct RegisterStore {
     unnamed: Option<String>,

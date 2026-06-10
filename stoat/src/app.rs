@@ -1927,7 +1927,7 @@ impl Stoat {
         if self.pending_insert_register {
             self.pending_insert_register = false;
             if let KeyCode::Char(ch) = key.code {
-                if let Some(register) = action_handlers::yank::register_for_char(ch) {
+                if let Some(register) = register::register_for_char(ch) {
                     if let Some(content) =
                         action_handlers::yank::read_register_content(self, register)
                     {

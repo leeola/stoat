@@ -3433,7 +3433,7 @@ impl Workspace {
     }
 
     fn apply_register_select_char(&mut self, ch: char) {
-        if let Some(register) = stoat::action_handlers::yank::register_for_char(ch) {
+        if let Some(register) = stoat::register::register_for_char(ch) {
             self.set_selected_register(register);
         }
     }
@@ -3456,7 +3456,7 @@ impl Workspace {
     /// Re-feed each captured keystroke through the input state
     /// machine and dispatch the resulting actions. Resolves the
     /// chord-completing char to a [`stoat::register::Register`]
-    /// via [`stoat::action_handlers::yank::register_for_char`];
+    /// via [`stoat::register::register_for_char`];
     /// no-op when the char does not name a register or the
     /// register has no stored macro.
     ///
@@ -3468,7 +3468,7 @@ impl Workspace {
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) {
-        let Some(register) = stoat::action_handlers::yank::register_for_char(ch) else {
+        let Some(register) = stoat::register::register_for_char(ch) else {
             return;
         };
         let Some(keys) = self

@@ -362,7 +362,7 @@ impl Action for ApplyMarkChar {
 /// [`crate::input_state_machine::InputStateMachine::feed`] after a
 /// [`stoat_action::SelectRegister`] action arms the chord. Carries
 /// the chord-completing character; the workspace dispatch resolves
-/// it through [`stoat::action_handlers::yank::register_for_char`]
+/// it through [`stoat::register::register_for_char`]
 /// and stores the matching [`stoat::register::Register`] in
 /// `Workspace::selected_register` for the next yank/paste.
 #[derive(Debug)]
@@ -482,7 +482,7 @@ impl Action for ApplyReplaceChar {
 /// insert mode. Carries the chord-completing character; the
 /// workspace dispatch resolves the matching
 /// [`stoat::register::Register`] via
-/// [`stoat::action_handlers::yank::register_for_char`] and
+/// [`stoat::register::register_for_char`] and
 /// inserts the register's content at every cursor on the active
 /// editor.
 #[derive(Debug)]

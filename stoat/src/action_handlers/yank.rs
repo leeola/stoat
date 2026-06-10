@@ -1,7 +1,7 @@
 use crate::{
     app::{Stoat, UpdateEffect},
     pane::View,
-    register::Register,
+    register::{register_for_char, Register},
 };
 use stoat_text::{Bias, SelectionGoal};
 
@@ -68,24 +68,6 @@ pub(super) fn insert_register(stoat: &mut Stoat) -> UpdateEffect {
 /// pending state without selecting a register.
 pub(crate) fn execute_select_register(stoat: &mut Stoat, ch: char) {
     stoat.selected_register = register_for_char(ch);
-}
-
-/// Resolve [`Register`] from the consumed-char keypress for the
-/// pending [`crate::app::Stoat::pending_insert_register`] chord
-/// and the `SelectRegister` chord. `"` -> `Unnamed`; ASCII
-/// letter -> `Named`; helix special chars route to the matching
-/// special variant; any other char returns `None`.
-pub fn register_for_char(ch: char) -> Option<Register> {
-    match ch {
-        '"' => Some(Register::Unnamed),
-        '*' | '+' => Some(Register::Clipboard),
-        '/' => Some(Register::Search),
-        '_' => Some(Register::Blackhole),
-        '#' => Some(Register::SelectionIndex),
-        '.' => Some(Register::LastInsert),
-        _ if ch.is_ascii_alphabetic() => Some(Register::Named(ch)),
-        _ => None,
-    }
 }
 
 pub(super) fn paste_after(stoat: &mut Stoat) -> UpdateEffect {
