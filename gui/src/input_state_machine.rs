@@ -19,8 +19,10 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
-    keymap::{is_text_input_mode, Keymap, KeymapState, StateValue},
-    keymap_state::{arg_as_str, normalize_shift_event, resolve_action},
+    keymap::{
+        arg_as_str, is_text_input_mode, normalize_shift_event, resolve_action, Keymap, KeymapState,
+        StateValue,
+    },
     register::Register,
     run::encode_key,
 };

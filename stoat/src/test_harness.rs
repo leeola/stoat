@@ -6,8 +6,7 @@ pub(crate) mod keys;
 
 use crate::{
     app::{Stoat, UpdateEffect},
-    keymap::resolve_config_action,
-    keymap_state::arg_as_str,
+    keymap::{arg_as_str, resolve_config_action},
 };
 use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
 use ratatui::{

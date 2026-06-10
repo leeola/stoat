@@ -45,10 +45,7 @@ pub fn compile_from_settings(settings: &Settings) -> Keymap {
 mod tests {
     use super::*;
     use std::collections::HashMap;
-    use stoat::{
-        keymap::{KeymapState, StateValue},
-        keymap_state,
-    };
+    use stoat::keymap::{normalize_shift_event, KeymapState, StateValue};
 
     struct TestState {
         values: HashMap<String, StateValue>,
@@ -247,7 +244,7 @@ mod tests {
         // Ctrl+Shift+z reaches lookup as {Char('Z'), CONTROL}: the input
         // pipeline uppercases shifted letters and drops SHIFT, so the redo
         // binding is Ctrl-Z, mirroring normal mode's `U -> Redo()`.
-        let event = keymap_state::normalize_shift_event(crossterm::event::KeyEvent::new(
+        let event = normalize_shift_event(crossterm::event::KeyEvent::new(
             crossterm::event::KeyCode::Char('z'),
             crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
         ));

@@ -11,8 +11,8 @@ use crate::{
         EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspServer,
         NoopFsWatcher, NoopLspServer,
     },
-    keymap::{is_text_input_mode, Keymap, ResolvedAction},
-    keymap_state::{normalize_shift_event, resolve_action, StoatKeymapState},
+    keymap::{is_text_input_mode, normalize_shift_event, resolve_action, Keymap, ResolvedAction},
+    keymap_state::StoatKeymapState,
     pane::{FocusTarget, View},
     quit_all_confirm::{ConfirmOutcome, QuitAllConfirm},
     rebase::RebasePause,
@@ -1773,7 +1773,7 @@ impl Stoat {
         let mut dispatched_workspace_symbol_picker = false;
         for ra in &actions {
             if ra.name == "SetMode" {
-                if let Some(mode_name) = ra.args.first().and_then(crate::keymap_state::arg_as_str) {
+                if let Some(mode_name) = ra.args.first().and_then(crate::keymap::arg_as_str) {
                     self.transition_mode(mode_name);
                     effect = UpdateEffect::Redraw;
                 }

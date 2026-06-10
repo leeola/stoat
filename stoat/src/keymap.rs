@@ -1,6 +1,7 @@
 use compact_str::CompactString;
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
+use stoat_action::{registry, Action, ParamValue};
 use stoat_config::{
     ActionExpr, Binding, Config, EventType, Key, KeyPart, Predicate, Statement, Value,
 };
@@ -287,6 +288,74 @@ pub struct ResolvedAction {
 pub struct ResolvedArg {
     pub name: Option<String>,
     pub value: Value,
+}
+
+/// Strip the `SHIFT` modifier from events where it duplicates information
+/// already carried by the keycode, so bindings written without an explicit
+/// `S-` prefix still match what the terminal emits.
+///
+/// Default crossterm without the kitty keyboard protocol reports Shift+a as
+/// `(Char('A'), SHIFT)` and Shift-Tab (CSI Z) as `(BackTab, SHIFT)`, but
+/// bindings written as `A` or `BackTab` compile to `(_, NONE)` and modifier
+/// comparison in [`CompiledKey::matches`] is strict. For `Char(letter)` the
+/// uppercase code already encodes Shift; for `BackTab` the keycode itself is
+/// the Shift-Tab variant. In both cases the SHIFT modifier is redundant, so
+/// dropping it up-front keeps bindings terminal-agnostic.
+pub fn normalize_shift_event(key: KeyEvent) -> KeyEvent {
+    if !key.modifiers.contains(KeyModifiers::SHIFT) {
+        return key;
+    }
+    let new_code = match key.code {
+        KeyCode::Char(ch) if ch.is_ascii_alphabetic() => KeyCode::Char(ch.to_ascii_uppercase()),
+        KeyCode::BackTab => KeyCode::BackTab,
+        _ => return key,
+    };
+    let mut modifiers = key.modifiers;
+    modifiers.remove(KeyModifiers::SHIFT);
+    KeyEvent {
+        code: new_code,
+        modifiers,
+        ..key
+    }
+}
+
+pub fn arg_as_str(arg: &ResolvedArg) -> Option<String> {
+    match &arg.value {
+        Value::String(s) => Some(s.clone()),
+        Value::Ident(s) => Some(s.clone()),
+        _ => None,
+    }
+}
+
+fn arg_to_param_value(arg: &ResolvedArg) -> Option<ParamValue> {
+    match &arg.value {
+        Value::String(s) => Some(ParamValue::String(s.clone())),
+        Value::Ident(s) => Some(ParamValue::String(s.clone())),
+        Value::Number(n) => Some(ParamValue::Number(*n)),
+        Value::Bool(b) => Some(ParamValue::Bool(*b)),
+        _ => None,
+    }
+}
+
+pub fn resolve_action(name: &str, args: &[ResolvedArg]) -> Option<Box<dyn Action>> {
+    let entry = registry::lookup(name)?;
+    let mut params = Vec::with_capacity(args.len());
+    for arg in args {
+        match arg_to_param_value(arg) {
+            Some(value) => params.push(value),
+            None => {
+                tracing::warn!("action `{name}`: cannot convert arg {:?}", arg.value);
+                return None;
+            },
+        }
+    }
+    match (entry.create)(&params) {
+        Ok(action) => Some(action),
+        Err(e) => {
+            tracing::warn!("action `{name}`: {e}");
+            None
+        },
+    }
 }
 
 #[derive(Debug, Clone)]
