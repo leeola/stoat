@@ -10,7 +10,7 @@ mod wrap_map;
 
 use crate::{
     buffer::BufferId,
-    diff_map::{DiffMap, TokenDetail},
+    diff_map::{DiffBlockKey, DiffMap, TokenDetail},
     host::DiffStatus,
     multi_buffer::{ExcerptId, MultiBuffer, MultiBufferSnapshot},
 };
@@ -211,7 +211,7 @@ pub struct DisplayMap {
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
     last_buffer_version: u64,
-    inserted_diff_block_ids: Vec<CustomBlockId>,
+    inserted_diff_blocks: HashMap<DiffBlockKey, CustomBlockId>,
     last_diff_version: usize,
     cached_snapshot: Option<DisplaySnapshot>,
     /// Set when any highlight collection is mutated. Checked inside
@@ -253,7 +253,7 @@ impl DisplayMap {
             clip_at_line_ends: false,
             diagnostics_max_severity: None,
             last_buffer_version: version,
-            inserted_diff_block_ids: Vec::new(),
+            inserted_diff_blocks: HashMap::new(),
             last_diff_version: 0,
             cached_snapshot: None,
             highlights_dirty: false,
@@ -517,13 +517,31 @@ impl DisplayMap {
         let diff_map = self.multi_buffer.snapshot().diff_map.clone();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
         if diff_version != self.last_diff_version {
-            self.block_map
-                .remove(&self.inserted_diff_block_ids.drain(..).collect());
-            let props = diff_map
+            let existing: HashSet<DiffBlockKey> =
+                self.inserted_diff_blocks.keys().cloned().collect();
+            let (current_keys, new_blocks) = diff_map
                 .as_ref()
-                .map(|dm| dm.deleted_blocks())
+                .map(|dm| dm.deleted_block_specs(&existing))
                 .unwrap_or_default();
-            self.inserted_diff_block_ids = self.block_map.insert(props);
+
+            let stale: HashSet<CustomBlockId> = self
+                .inserted_diff_blocks
+                .iter()
+                .filter(|(key, _)| !current_keys.contains(key))
+                .map(|(_, id)| *id)
+                .collect();
+            if !stale.is_empty() {
+                self.block_map.remove(&stale);
+                self.inserted_diff_blocks
+                    .retain(|key, _| current_keys.contains(key));
+            }
+
+            if !new_blocks.is_empty() {
+                let (keys, props): (Vec<_>, Vec<_>) = new_blocks.into_iter().unzip();
+                let ids = self.block_map.insert(props);
+                self.inserted_diff_blocks.extend(keys.into_iter().zip(ids));
+            }
+
             self.last_diff_version = diff_version;
         }
         let companion_view =
@@ -959,6 +977,33 @@ mod tests {
             token_detail: None,
         });
         dm
+    }
+
+    #[test]
+    fn diff_block_reused_across_identical_versions_and_swapped_on_change() {
+        let base = "deleted base\n";
+        let mut buffer = TextBuffer::with_text(BufferId::new(0), "alpha\nbeta\ngamma\ndelta");
+        buffer.diff_map = Some(make_diff_with_deletion(0, base, 0..12, 1));
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let mut dm = DisplayMap::new(multi_buffer, test_executor());
+
+        let _ = dm.snapshot();
+        assert_eq!(dm.inserted_diff_blocks.len(), 1);
+        let id1 = *dm.inserted_diff_blocks.values().next().unwrap();
+
+        // A fresh diff version carrying the same hunk keeps the existing block.
+        shared.write().unwrap().diff_map = Some(make_diff_with_deletion(0, base, 0..12, 1));
+        let _ = dm.snapshot();
+        let id2 = *dm.inserted_diff_blocks.values().next().unwrap();
+        assert_eq!(id1, id2, "identical hunk must keep its block id");
+
+        // A hunk at a different line is a different key, so the block is swapped.
+        shared.write().unwrap().diff_map = Some(make_diff_with_deletion(2, base, 0..12, 1));
+        let _ = dm.snapshot();
+        assert_eq!(dm.inserted_diff_blocks.len(), 1);
+        let id3 = *dm.inserted_diff_blocks.values().next().unwrap();
+        assert_ne!(id1, id3, "a hunk at a new line must get a new block id");
     }
 
     #[test]

@@ -4,6 +4,7 @@ use crate::{
 };
 use std::{
     cmp::Ordering,
+    collections::HashSet,
     ops::Range,
     sync::{
         atomic::{AtomicUsize, Ordering as AtomicOrdering},
@@ -131,6 +132,17 @@ impl KeyedItem for DiffHunk {
 
 // --- DiffMap ---
 
+/// Stable identity of a deleted-line diff block across diff versions.
+///
+/// A hunk produces the same block as long as its buffer placement and the
+/// base bytes it renders are unchanged, so a caller can keep an existing block
+/// instead of re-rendering and re-inserting it when only the version bumped.
+#[derive(Clone, Debug, PartialEq, Eq, Hash)]
+pub struct DiffBlockKey {
+    pub buffer_start_line: u32,
+    pub base_byte_range: Range<usize>,
+}
+
 #[derive(Clone, Debug, Default)]
 pub struct DiffMap {
     hunks: SumTree<DiffHunk>,
@@ -245,18 +257,43 @@ impl DiffMap {
     }
 
     pub fn deleted_blocks(&self) -> Vec<BlockProperties> {
+        self.deleted_block_specs(&HashSet::new())
+            .1
+            .into_iter()
+            .map(|(_, props)| props)
+            .collect()
+    }
+
+    /// Diff this map's deleted-line blocks against the keys a caller already
+    /// holds.
+    ///
+    /// Returns every key that should currently have a block, plus freshly
+    /// materialized [`BlockProperties`] for only the keys absent from
+    /// `existing`. The caller removes blocks whose key is no longer in the
+    /// returned set and inserts the new ones, so an unchanged hunk keeps its
+    /// block without re-rendering or re-inserting it across diff versions.
+    pub fn deleted_block_specs(
+        &self,
+        existing: &HashSet<DiffBlockKey>,
+    ) -> (HashSet<DiffBlockKey>, Vec<(DiffBlockKey, BlockProperties)>) {
         let base_text = match &self.base_text {
             Some(t) => t,
-            None => return Vec::new(),
+            None => return (HashSet::new(), Vec::new()),
         };
 
-        self.hunks
-            .iter()
-            .filter(|h| {
-                matches!(h.status, DiffHunkStatus::Deleted | DiffHunkStatus::Modified)
-                    && !h.base_byte_range.is_empty()
-            })
-            .map(|hunk| {
+        let mut current = HashSet::new();
+        let mut new_blocks = Vec::new();
+        for hunk in self.hunks.iter().filter(|h| {
+            matches!(h.status, DiffHunkStatus::Deleted | DiffHunkStatus::Modified)
+                && !h.base_byte_range.is_empty()
+        }) {
+            let key = DiffBlockKey {
+                buffer_start_line: hunk.buffer_start_line,
+                base_byte_range: hunk.base_byte_range.clone(),
+            };
+            current.insert(key.clone());
+
+            if !existing.contains(&key) {
                 let content = &base_text[hunk.base_byte_range.clone()];
                 let lines: Vec<String> = content.lines().map(String::from).collect();
                 let placement_line = hunk.buffer_start_line.saturating_sub(1);
@@ -266,9 +303,10 @@ impl DiffMap {
                     BlockStyle::Fixed,
                 );
                 props.diff_status = Some(hunk.status);
-                props
-            })
-            .collect()
+                new_blocks.push((key, props));
+            }
+        }
+        (current, new_blocks)
     }
 
     pub fn hunks_in_range(&self, line_range: Range<u32>) -> Vec<&DiffHunk> {
@@ -624,9 +662,11 @@ fn byte_range_to_line_range(text: &str, byte_range: &Range<usize>) -> Range<u32>
 
 #[cfg(test)]
 mod tests {
-    use super::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
+    use super::{
+        ChangeKind, ChangeSpan, DiffBlockKey, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail,
+    };
     use crate::host::DiffStatus;
-    use std::sync::Arc;
+    use std::{collections::HashSet, sync::Arc};
 
     fn added_hunk(line_range: std::ops::Range<u32>) -> DiffHunk {
         DiffHunk {
@@ -1043,6 +1083,35 @@ mod tests {
 
         let blocks = dm.deleted_blocks();
         assert_eq!(blocks.len(), 1);
+    }
+
+    #[test]
+    fn deleted_block_specs_skips_unchanged_hunks() {
+        let base = "del1\ndel2\n";
+        let dm = DiffMap::from_hunks(
+            [deleted_hunk(2, 0..5), deleted_hunk(4, 5..10)],
+            Some(Arc::new(base.to_string())),
+        );
+
+        let (keys, new_blocks) = dm.deleted_block_specs(&HashSet::new());
+        assert_eq!(keys.len(), 2);
+        assert_eq!(
+            new_blocks.len(),
+            2,
+            "every hunk materializes when none are held"
+        );
+
+        let (keys_again, none_new) = dm.deleted_block_specs(&keys);
+        assert_eq!(keys_again, keys);
+        assert!(none_new.is_empty(), "held hunks must not re-materialize");
+
+        let one: HashSet<DiffBlockKey> = new_blocks
+            .iter()
+            .map(|(key, _)| key.clone())
+            .take(1)
+            .collect();
+        let (_, one_new) = dm.deleted_block_specs(&one);
+        assert_eq!(one_new.len(), 1, "only the unheld hunk re-materializes");
     }
 
     #[test]
