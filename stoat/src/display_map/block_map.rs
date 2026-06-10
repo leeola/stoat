@@ -1439,9 +1439,12 @@ fn sync_incremental(
             wrap_row_to_buffer_row(edit_end, wrap_snapshot)
         };
 
-        let search_start_buf = edit_start_buf.saturating_sub(1);
+        // Search from the edit start with no slack: a below block at the edit
+        // start is already preserved by the preserve loop above, so a `- 1`
+        // here would re-include and duplicate it. Replace blocks the edit
+        // begins inside are reached via the new_start backward extension.
         let start_block_idx = last_block_idx
-            + blocks[last_block_idx..].partition_point(|b| block_buffer_row(b) < search_start_buf);
+            + blocks[last_block_idx..].partition_point(|b| block_buffer_row(b) < edit_start_buf);
         let end_block_idx = if edit_end_buf == u32::MAX {
             blocks.len()
         } else {
@@ -2273,6 +2276,20 @@ mod tests {
             BlockPlacement::Replace { start: 1, end: 3 },
             "REPL",
         )]);
+        assert_incremental_matches_full(
+            &wrap,
+            &blocks,
+            Patch::new(vec![Edit {
+                old: 2..3,
+                new: 2..3,
+            }]),
+        );
+    }
+
+    #[test]
+    fn incremental_does_not_duplicate_below_block_at_edit_start() {
+        let wrap = create_wrap_snapshot("l0\nl1\nl2\nl3\nl4");
+        let blocks = blocks_for(vec![text_block(BlockPlacement::Below(1), "BELOW")]);
         assert_incremental_matches_full(
             &wrap,
             &blocks,
