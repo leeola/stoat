@@ -485,6 +485,22 @@ impl<'a> Dimension<'a, TransformSummary> for InlayOffset {
     }
 }
 
+/// Accumulates the inlay-space (`output`) text summary across transforms, so a
+/// cursor can sum the interior of a range in O(log n) for
+/// [`InlaySnapshot::text_summary_for_range`].
+#[derive(Clone, Default)]
+struct OutputTextSummary(TextSummary);
+
+impl<'a> Dimension<'a, TransformSummary> for OutputTextSummary {
+    fn zero(_cx: ()) -> Self {
+        Self(TextSummary::default())
+    }
+
+    fn add_summary(&mut self, s: &'a TransformSummary, _cx: ()) {
+        ContextLessSummary::add_summary(&mut self.0, &s.output);
+    }
+}
+
 pub(super) type OutputOffset = InlayOffset;
 
 impl<'a> SeekTarget<'a, TransformSummary, Dimensions<OutputOffset, Point, InlayPoint>>
@@ -695,6 +711,70 @@ impl InlaySnapshot {
 
     pub fn total_summary(&self) -> TextSummary {
         self.transforms.summary().output.clone()
+    }
+
+    /// Text summary of an inlay-offset range without materializing the text.
+    ///
+    /// Walks the transform tree summing the `output` (inlay-space) summary:
+    /// a partial summary at each boundary transform (a rope summary for an
+    /// isomorphic span, an inlay-text slice for an inlay) and an O(log n)
+    /// interior via `cursor.summary`. Replaces slicing a whole-file
+    /// [`InlaySnapshot::inlay_text`] String. Range bounds must fall on
+    /// character boundaries (inlay/fold offsets do).
+    pub fn text_summary_for_range(&self, range: Range<InlayOffset>) -> TextSummary {
+        let mut summary = TextSummary::default();
+
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InlayOffset, InputOffset>>(());
+        cursor.seek(&range.start, Bias::Right);
+
+        let overshoot = range.start.0 - cursor.start().0 .0;
+        match cursor.item() {
+            Some(Transform::Isomorphic(_)) => {
+                let buffer_start = cursor.start().1 .0;
+                let suffix_start = buffer_start + overshoot;
+                let suffix_end =
+                    buffer_start + (cursor.end().0 .0.min(range.end.0) - cursor.start().0 .0);
+                summary = self
+                    .buffer
+                    .rope()
+                    .text_summary_for_range(suffix_start..suffix_end);
+                cursor.next();
+            },
+            Some(Transform::Inlay(inlay)) => {
+                let suffix_start = overshoot;
+                let suffix_end = cursor.end().0 .0.min(range.end.0) - cursor.start().0 .0;
+                summary = TextSummary::from_str(&inlay.text[suffix_start..suffix_end]);
+                cursor.next();
+            },
+            None => {},
+        }
+
+        if range.end.0 > cursor.start().0 .0 {
+            let interior: OutputTextSummary =
+                cursor.summary(&InlayOffset(range.end.0), Bias::Right);
+            ContextLessSummary::add_summary(&mut summary, &interior.0);
+
+            let overshoot = range.end.0 - cursor.start().0 .0;
+            match cursor.item() {
+                Some(Transform::Isomorphic(_)) => {
+                    let buffer_start = cursor.start().1 .0;
+                    let prefix = self
+                        .buffer
+                        .rope()
+                        .text_summary_for_range(buffer_start..buffer_start + overshoot);
+                    ContextLessSummary::add_summary(&mut summary, &prefix);
+                },
+                Some(Transform::Inlay(inlay)) => {
+                    let prefix = TextSummary::from_str(&inlay.text[0..overshoot]);
+                    ContextLessSummary::add_summary(&mut summary, &prefix);
+                },
+                None => {},
+            }
+        }
+
+        summary
     }
 
     pub fn line_len(&self, row: u32) -> u32 {
@@ -933,13 +1013,13 @@ impl InlayPointCursor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{InlayMap, InlayPoint};
+    use super::{InlayMap, InlayOffset, InlayPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
         multi_buffer::MultiBuffer,
     };
     use std::sync::{Arc, RwLock};
-    use stoat_text::{patch::Patch, Point};
+    use stoat_text::{patch::Patch, Point, TextSummary};
 
     fn make_snapshot(content: &str) -> Arc<super::InlaySnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
@@ -973,6 +1053,48 @@ mod tests {
         map.splice(Vec::new(), anchored_inlays);
         let (snapshot, _) = map.sync(buffer_snapshot, &Patch::empty());
         snapshot
+    }
+
+    #[test]
+    fn text_summary_for_range_matches_inlay_text_slicing() {
+        let snap = make_snapshot_with_inlays(
+            "hello world\nsecond line",
+            vec![
+                (Point::new(0, 5), ": str".to_string()),
+                (Point::new(1, 6), " hint".to_string()),
+            ],
+        );
+        let text = snap.inlay_text().to_string();
+        let total = snap.total_summary().len;
+        assert_eq!(
+            total,
+            text.len(),
+            "total summary length is the inlay text len"
+        );
+
+        // Ranges include ones starting/ending inside an inlay span and a
+        // full-document range, to exercise both boundary partials and the
+        // interior sum.
+        let ranges = [0..total, 0..4, 6..10, 5..14, 14..total, total..total];
+        for range in ranges {
+            let expected = TextSummary::from_str(&text[range.clone()]);
+            let got = snap.text_summary_for_range(InlayOffset(range.start)..InlayOffset(range.end));
+            assert_eq!(got.len, expected.len, "len mismatch for {range:?}");
+            assert_eq!(got.lines, expected.lines, "lines mismatch for {range:?}");
+        }
+    }
+
+    #[test]
+    fn text_summary_for_range_no_inlays() {
+        let snap = make_snapshot("hello\nworld\nfoo");
+        let text = snap.buffer_snapshot().text();
+        let total = snap.total_summary().len;
+        for range in [0..total, 0..6, 6..12, 3..total, total..total] {
+            let expected = TextSummary::from_str(&text[range.clone()]);
+            let got = snap.text_summary_for_range(InlayOffset(range.start)..InlayOffset(range.end));
+            assert_eq!(got.len, expected.len, "len mismatch for {range:?}");
+            assert_eq!(got.lines, expected.lines, "lines mismatch for {range:?}");
+        }
     }
 
     #[test]
