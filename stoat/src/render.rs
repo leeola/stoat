@@ -13,7 +13,6 @@ pub(crate) mod hints;
 pub(crate) mod hover;
 pub(crate) mod layout;
 pub(crate) mod pane;
-pub(crate) mod permission_prompt;
 pub(crate) mod rebase;
 pub(crate) mod rename_input;
 pub(crate) mod review;
@@ -307,22 +306,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             .collect();
         hints::render_hints(
             "palette",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(modal) = &stoat.permission_prompt {
-        permission_prompt::render_permission_prompt(modal, &stoat.theme, size, buf);
-        let bindings: Vec<(&'static str, String)> = vec![
-            ("Tab", "next button".to_string()),
-            ("Shift-Tab", "prev button".to_string()),
-            ("Enter", "select".to_string()),
-            ("Esc", "deny".to_string()),
-        ];
-        hints::render_hints(
-            "permission",
             &bindings,
             None,
             &stoat.theme,

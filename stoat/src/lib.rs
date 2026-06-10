@@ -28,7 +28,6 @@ pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;
 pub mod paths;
-pub(crate) mod permission_prompt;
 pub mod rebase;
 pub mod register;
 pub(crate) mod render;

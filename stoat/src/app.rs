@@ -64,18 +64,6 @@ pub struct Stoat {
     pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
-    /// Active Claude Code permission-approval modal. `Some` while a
-    /// tool call is awaiting user input; cleared when the user picks
-    /// a button. Subsequent prompts queue in
-    /// [`Self::permission_prompt_queue`] until the active modal
-    /// completes.
-    pub(crate) permission_prompt: Option<crate::permission_prompt::ApprovalModal>,
-    /// Pending permission prompts waiting for the active modal to
-    /// close. FIFO so prompts surface in the order the policy sent
-    /// them.
-    pub(crate) permission_prompt_queue: std::collections::VecDeque<crate::host::PermissionPrompt>,
-    pub permission_prompt_tx: Sender<crate::host::PermissionPrompt>,
-    permission_prompt_rx: Receiver<crate::host::PermissionPrompt>,
     /// Name of the action that most recently opened a picker
     /// successfully. Used by `OpenLastPicker` (`space '`) to
     /// re-fire the same action and rebuild the picker fresh.
@@ -565,7 +553,6 @@ impl Stoat {
 
         let (pty_tx, pty_rx) = tokio::sync::mpsc::channel(256);
         let (review_external_edit_tx, review_external_edit_rx) = tokio::sync::mpsc::channel(256);
-        let (permission_prompt_tx, permission_prompt_rx) = tokio::sync::mpsc::channel(64);
 
         Self {
             size: Rect::default(),
@@ -577,10 +564,6 @@ impl Stoat {
             command_palette: None,
             help: None,
             file_finder: None,
-            permission_prompt: None,
-            permission_prompt_queue: std::collections::VecDeque::new(),
-            permission_prompt_tx,
-            permission_prompt_rx,
             last_picker_action: None,
             global_search_input: None,
             global_search: None,
@@ -801,10 +784,6 @@ impl Stoat {
                 notif = self.pty_rx.recv() => {
                     let Some(notif) = notif else { continue };
                     self.handle_pty_notification(notif)
-                }
-                prompt = self.permission_prompt_rx.recv() => {
-                    let Some(prompt) = prompt else { continue };
-                    self.enqueue_permission_prompt(prompt)
                 }
                 _ = self.redraw_notify.notified() => UpdateEffect::Redraw,
             };
@@ -1383,10 +1362,6 @@ impl Stoat {
         };
         if !is_record_macro_toggle {
             action_handlers::macro_recording::capture(self, &key);
-        }
-
-        if self.permission_prompt.is_some() {
-            return self.dispatch_permission_prompt_key(key);
         }
 
         if self.global_search.is_some() {
@@ -2239,37 +2214,6 @@ impl Stoat {
         let mut buf = Buffer::empty(self.size);
         crate::render::frame(self, &mut buf);
         buf
-    }
-
-    pub(crate) fn enqueue_permission_prompt(
-        &mut self,
-        prompt: crate::host::PermissionPrompt,
-    ) -> UpdateEffect {
-        if self.permission_prompt.is_none() {
-            self.permission_prompt = Some(crate::permission_prompt::ApprovalModal::new(prompt));
-        } else {
-            self.permission_prompt_queue.push_back(prompt);
-        }
-        UpdateEffect::Redraw
-    }
-
-    fn dispatch_permission_prompt_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        use crate::permission_prompt::ModalOutcome;
-        let outcome = match self.permission_prompt.as_mut() {
-            Some(modal) => modal.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            ModalOutcome::None => UpdateEffect::Redraw,
-            ModalOutcome::Decided(_) => {
-                self.permission_prompt = None;
-                if let Some(next) = self.permission_prompt_queue.pop_front() {
-                    self.permission_prompt =
-                        Some(crate::permission_prompt::ApprovalModal::new(next));
-                }
-                UpdateEffect::Redraw
-            },
-        }
     }
 
     fn dispatch_global_search_key(&mut self, key: KeyEvent) -> UpdateEffect {
