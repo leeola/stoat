@@ -78,10 +78,6 @@ pub struct Stoat {
     pub(crate) permission_prompt_queue: std::collections::VecDeque<crate::host::PermissionPrompt>,
     pub permission_prompt_tx: Sender<crate::host::PermissionPrompt>,
     permission_prompt_rx: Receiver<crate::host::PermissionPrompt>,
-    /// Modal listing the focused editor's jumplist entries; opened by
-    /// [`stoat_action::OpenJumplistPicker`] and dismissed on jump or
-    /// cancel.
-    pub(crate) jumplist_picker: Option<crate::jumplist_picker::JumplistPicker>,
     /// Active diagnostics picker modal (`space l d`). `Some` while
     /// the modal is open; cleared on Esc, on selection (after
     /// jumping the focused editor's cursor), and on Ctrl-C.
@@ -592,7 +588,6 @@ impl Stoat {
             permission_prompt_queue: std::collections::VecDeque::new(),
             permission_prompt_tx,
             permission_prompt_rx,
-            jumplist_picker: None,
             diagnostics_picker: None,
             last_picker_action: None,
             global_search_input: None,
@@ -1371,10 +1366,6 @@ impl Stoat {
                 self.workspace_picker = None;
                 return UpdateEffect::Redraw;
             }
-            if let Some(picker) = self.jumplist_picker.take() {
-                self.mode = picker.previous_mode;
-                return UpdateEffect::Redraw;
-            }
             if let Some(picker) = self.diagnostics_picker.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1416,10 +1407,6 @@ impl Stoat {
 
         if self.permission_prompt.is_some() {
             return self.dispatch_permission_prompt_key(key);
-        }
-
-        if self.jumplist_picker.is_some() {
-            return self.dispatch_jumplist_picker_key(key);
         }
 
         if self.diagnostics_picker.is_some() {
@@ -2334,35 +2321,6 @@ impl Stoat {
         }
     }
 
-    fn dispatch_jumplist_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
-        use crate::jumplist_picker::PickerOutcome;
-        let outcome = match self.jumplist_picker.as_mut() {
-            Some(picker) => picker.handle_key(key),
-            None => return UpdateEffect::None,
-        };
-        match outcome {
-            PickerOutcome::None => UpdateEffect::Redraw,
-            PickerOutcome::Close => {
-                if let Some(picker) = self.jumplist_picker.take() {
-                    self.mode = picker.previous_mode;
-                }
-                UpdateEffect::Redraw
-            },
-            PickerOutcome::Select(idx) => {
-                let Some(picker) = self.jumplist_picker.take() else {
-                    return UpdateEffect::None;
-                };
-                let target_offset = match picker.entries().get(idx) {
-                    Some(entry) => entry.offset,
-                    None => return UpdateEffect::Redraw,
-                };
-                self.mode = picker.previous_mode;
-                self.jump_focused_to_offset(target_offset, idx);
-                UpdateEffect::Redraw
-            },
-        }
-    }
-
     fn dispatch_diagnostics_picker_key(&mut self, key: KeyEvent) -> UpdateEffect {
         use crate::diagnostics_picker::PickerOutcome;
         let outcome = match self.diagnostics_picker.as_mut() {
@@ -2502,30 +2460,6 @@ impl Stoat {
             new.collapse_to(anchor, stoat_text::SelectionGoal::None);
             new
         });
-    }
-
-    fn jump_focused_to_offset(&mut self, offset: usize, jumplist_idx: usize) {
-        let ws = self.active_workspace_mut();
-        let editor_id = match ws.focus {
-            FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
-                View::Editor(id) => id,
-                _ => return,
-            },
-            FocusTarget::Dock(_) => return,
-        };
-        let editor = match ws.editors.get_mut(editor_id) {
-            Some(e) => e,
-            None => return,
-        };
-        let snapshot = editor.display_map.snapshot();
-        let buf_snap = snapshot.buffer_snapshot();
-        let anchor = buf_snap.anchor_at(offset, Bias::Right);
-        editor.selections.transform(buf_snap, |s| {
-            let mut new = s.clone();
-            new.collapse_to(anchor, stoat_text::SelectionGoal::None);
-            new
-        });
-        editor.jumplist.set_cursor(jumplist_idx);
     }
 }
 

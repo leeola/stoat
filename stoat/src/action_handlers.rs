@@ -863,38 +863,10 @@ pub(crate) fn global_search_cancel(stoat: &mut Stoat) -> bool {
     true
 }
 
-/// Drive [`ActionKind::OpenJumplistPicker`]. Builds a snapshot of the
-/// focused editor's jumplist and stores it in
-/// [`Stoat::jumplist_picker`]. No-op when the jumplist is empty.
-fn open_jumplist_picker(stoat: &mut Stoat) -> UpdateEffect {
-    let previous_mode = stoat.mode.clone();
-    let ws = stoat.active_workspace_mut();
-    let editor_id = match ws.focus {
-        FocusTarget::SplitPane(pane_id) => match ws.panes.pane(pane_id).view {
-            View::Editor(id) => id,
-            _ => return UpdateEffect::None,
-        },
-        FocusTarget::Dock(_) => return UpdateEffect::None,
-    };
-    let editor = match ws.editors.get(editor_id) {
-        Some(e) => e,
-        None => return UpdateEffect::None,
-    };
-    if editor.jumplist.entries().is_empty() {
-        return UpdateEffect::None;
-    }
-    let buffer_id = editor.buffer_id;
-    let jumplist = editor.jumplist.clone();
-    let buffer = match ws.buffers.get(buffer_id) {
-        Some(b) => b,
-        None => return UpdateEffect::None,
-    };
-    let picker = {
-        let guard = buffer.read().expect("buffer poisoned");
-        crate::jumplist_picker::JumplistPicker::new(&jumplist, &guard, previous_mode)
-    };
-    stoat.jumplist_picker = Some(picker);
-    UpdateEffect::Redraw
+/// Drive [`ActionKind::OpenJumplistPicker`]. The picker modal moved to
+/// the GUI, so this is now a no-op in the TUI.
+fn open_jumplist_picker(_stoat: &mut Stoat) -> UpdateEffect {
+    UpdateEffect::None
 }
 
 /// Drive [`ActionKind::OpenWorkspaceDiagnosticsPicker`].
@@ -985,7 +957,7 @@ pub(crate) fn read_string_via_host(fs: &dyn FsHost, path: &Path) -> std::io::Res
 mod tests {
     use super::*;
     use crate::test_harness::{editor, keys};
-    use crossterm::event::{Event, KeyCode, KeyEvent, KeyModifiers};
+    use crossterm::event::{Event, KeyCode};
     use std::{sync::Arc, time::Duration};
     use stoat_action::{
         AddSelectionBelow, CollapseSelection, ExtendDown, ExtendLeft, ExtendNextWordEnd,
@@ -993,7 +965,7 @@ mod tests {
         ExtendToFileStart, ExtendToLastLine, ExtendToLineEnd, ExtendToLineStart, ExtendUp,
         FlipSelections, HalfPageDown, MoveDown, MoveLeft, MoveNextWordEnd, MoveNextWordStart,
         MovePrevWordEnd, MovePrevWordStart, MoveRight, MoveUp, PageDown, PageUp, Quit, QuitAll,
-        RenameWorkspace, SaveSelection, SelectAll, SetCwd, SplitNewRight, SplitRight,
+        RenameWorkspace, SelectAll, SetCwd, SplitNewRight, SplitRight,
     };
     use stoat_scheduler::TestScheduler;
     use stoat_text::{Bias, SelectionGoal};
@@ -1030,77 +1002,6 @@ mod tests {
         dispatch(&mut stoat, &SplitRight);
         assert_eq!(stoat.active_workspace().panes.pane_count(), 3);
         assert_eq!(dispatch(&mut stoat, &QuitAll), UpdateEffect::Quit);
-    }
-
-    #[test]
-    fn open_jumplist_picker_with_empty_jumplist_is_noop() {
-        let mut stoat = stoat();
-        editor::seed_focused_buffer(&mut stoat, "alpha\nbeta\n");
-        assert_eq!(
-            dispatch(&mut stoat, &stoat_action::OpenJumplistPicker),
-            UpdateEffect::None
-        );
-        assert!(stoat.jumplist_picker.is_none());
-    }
-
-    #[test]
-    fn open_jumplist_picker_opens_modal_when_jumplist_has_entries() {
-        let mut stoat = stoat();
-        editor::seed_focused_buffer(&mut stoat, "alpha\nbeta\ngamma\n");
-        dispatch(&mut stoat, &SaveSelection);
-        dispatch(&mut stoat, &MoveDown);
-        dispatch(&mut stoat, &SaveSelection);
-        assert_eq!(
-            dispatch(&mut stoat, &stoat_action::OpenJumplistPicker),
-            UpdateEffect::Redraw
-        );
-        let picker = stoat.jumplist_picker.as_ref().expect("modal open");
-        assert_eq!(picker.entries().len(), 2);
-    }
-
-    #[test]
-    fn jumplist_picker_enter_jumps_focused_cursor() {
-        let mut h = Stoat::test();
-        h.seed_focused_buffer("alpha\nbeta\ngamma\n");
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &MoveDown);
-        dispatch(&mut h.stoat, &MoveDown);
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
-        h.stoat.update(Event::Key(keys::key(KeyCode::Up)));
-        assert_eq!(
-            h.stoat.update(Event::Key(keys::key(KeyCode::Enter))),
-            UpdateEffect::Redraw
-        );
-        assert!(h.stoat.jumplist_picker.is_none());
-        assert_eq!(editor::head_offsets(&mut h.stoat), vec![0]);
-    }
-
-    #[test]
-    fn jumplist_picker_esc_closes_without_jumping() {
-        let mut h = Stoat::test();
-        h.seed_focused_buffer("alpha\nbeta\n");
-        dispatch(&mut h.stoat, &MoveDown);
-        let before = editor::head_offsets(&mut h.stoat);
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
-        assert_eq!(
-            h.stoat.update(Event::Key(keys::key(KeyCode::Esc))),
-            UpdateEffect::Redraw
-        );
-        assert!(h.stoat.jumplist_picker.is_none());
-        assert_eq!(editor::head_offsets(&mut h.stoat), before);
-    }
-
-    #[test]
-    fn jumplist_picker_ctrl_c_closes_without_jumping() {
-        let mut h = Stoat::test();
-        h.seed_focused_buffer("alpha\nbeta\n");
-        dispatch(&mut h.stoat, &SaveSelection);
-        dispatch(&mut h.stoat, &stoat_action::OpenJumplistPicker);
-        let event = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
-        assert_eq!(h.stoat.update(Event::Key(event)), UpdateEffect::Redraw);
-        assert!(h.stoat.jumplist_picker.is_none());
     }
 
     #[test]
@@ -2193,35 +2094,6 @@ mod tests {
             UpdateEffect::None
         );
         assert!(stoat.command_palette.is_none());
-        assert!(stoat.jumplist_picker.is_none());
         assert!(stoat.diagnostics_picker.is_none());
-    }
-
-    #[test]
-    fn last_picker_recall_reopens_jumplist_after_close() {
-        let mut stoat = stoat();
-        editor::seed_focused_buffer(&mut stoat, "alpha\nbeta\ngamma\n");
-        dispatch(&mut stoat, &SaveSelection);
-        dispatch(&mut stoat, &MoveDown);
-        dispatch(&mut stoat, &SaveSelection);
-        dispatch(&mut stoat, &stoat_action::OpenJumplistPicker);
-        assert_eq!(
-            stoat.last_picker_action,
-            Some("OpenJumplistPicker"),
-            "open should record the recall target"
-        );
-        let previous_mode = stoat
-            .jumplist_picker
-            .as_ref()
-            .expect("modal open")
-            .previous_mode
-            .clone();
-        stoat.jumplist_picker = None;
-        stoat.mode = previous_mode;
-        assert_eq!(
-            dispatch(&mut stoat, &stoat_action::OpenLastPicker),
-            UpdateEffect::Redraw
-        );
-        assert!(stoat.jumplist_picker.is_some(), "recall should reopen");
     }
 }

@@ -23,7 +23,6 @@ pub mod help;
 pub mod host;
 mod input_view;
 pub mod jumplist;
-pub(crate) mod jumplist_picker;
 pub mod keymap;
 pub mod keymap_state;
 pub mod lsp;

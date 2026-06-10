@@ -12,7 +12,6 @@ pub(crate) mod global_search;
 pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
-pub(crate) mod jumplist_picker;
 pub(crate) mod layout;
 pub(crate) mod pane;
 pub(crate) mod permission_prompt;
@@ -337,17 +336,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         ];
         hints::render_hints(
             "permission",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(picker) = &stoat.jumplist_picker {
-        jumplist_picker::render_jumplist_picker(picker, &stoat.theme, size, buf);
-        let bindings = picker.hint_bindings();
-        hints::render_hints(
-            "jumplist",
             &bindings,
             None,
             &stoat.theme,
