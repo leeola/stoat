@@ -1150,7 +1150,11 @@ impl FoldSnapshot {
             if fold.range.start.row() > inlay_row {
                 return false;
             }
-            if fold.range.end.row() >= inlay_row
+            // A fold ending at column 0 of a row collapses only up to that
+            // row's start, leaving the row itself rendered, so the bound is
+            // strict: `> row_start` excludes a column-0 end row that an
+            // end-row `>=` check would wrongly mark folded.
+            if fold.range.end > row_start
                 && (fold.range.start.row() != fold.range.end.row()
                     || fold.range.start.column() != fold.range.end.column())
             {
@@ -1799,6 +1803,21 @@ mod tests {
             vec![(InlayPoint::new(0, 3), InlayPoint::new(0, 3))],
         );
         assert!(!snap.is_line_folded(0));
+    }
+
+    #[test]
+    fn is_line_folded_excludes_end_row_at_column_zero() {
+        let snap = make_snapshot_with_folds(
+            "line0\nline1\nline2\nline3",
+            vec![(InlayPoint::new(0, 5), InlayPoint::new(2, 0))],
+        );
+        assert!(snap.is_line_folded(0), "start row is folded");
+        assert!(snap.is_line_folded(1), "interior row is folded");
+        assert!(
+            !snap.is_line_folded(2),
+            "fold ending at column 0 does not fold the end row"
+        );
+        assert!(!snap.is_line_folded(3));
     }
 
     #[test]
