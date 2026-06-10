@@ -112,6 +112,11 @@ pub(crate) struct RenderedRow {
     pub runs: Vec<(Range<usize>, gpui::HighlightStyle)>,
 }
 
+/// Opacity reduction applied to inlay-hint runs so LSP hints read as
+/// secondary to code. Fades the resolved text color toward the background,
+/// adapting to any theme without a dedicated hint color.
+const INLAY_HINT_FADE: f32 = 0.4;
+
 pub(crate) fn build_rendered_rows(
     snapshot: &DisplaySnapshot,
     range: Range<u32>,
@@ -122,7 +127,12 @@ pub(crate) fn build_rendered_rows(
 
     let mut current = 0usize;
     for chunk in snapshot.highlighted_chunks(range.clone()) {
-        let style = chunk.highlight_style.as_ref().map(convert_highlight_style);
+        let mut style = chunk.highlight_style.as_ref().map(convert_highlight_style);
+        if chunk.is_inlay {
+            let mut hint = style.unwrap_or_default();
+            hint.fade_out = Some(INLAY_HINT_FADE);
+            style = Some(hint);
+        }
         let mut remaining: &str = chunk.text.as_ref();
         while !remaining.is_empty() && current < count {
             match remaining.find('\n') {
@@ -4361,6 +4371,36 @@ mod tests {
             BlockStyle::Fixed,
         )]);
         inner.snapshot()
+    }
+
+    #[test]
+    fn inlay_hint_run_is_faded() {
+        let mut cx = TestAppContext::single();
+        let cx = &mut cx;
+        let buffer = cx.update(|cx| cx.new(|_| Buffer::with_text(BufferId::new(0), "hello")));
+        let buffer_id = buffer.read_with(cx, |b, _| b.read(|tb| tb.buffer_id()));
+        let shared = buffer.read_with(cx, |b, _| b.shared().clone());
+        let multi_buffer = stoat::MultiBuffer::singleton(buffer_id, shared);
+        let anchor = multi_buffer.snapshot().anchor_at(5, Bias::Right);
+
+        let executor = Executor::new(Arc::new(TestScheduler::new()));
+        let mut inner = stoat::DisplayMap::new(multi_buffer, executor);
+        inner.splice_inlays(
+            Vec::new(),
+            vec![(anchor, ": Type".to_string(), stoat::InlayKind::Hint)],
+        );
+        let snapshot = inner.snapshot();
+
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        assert_eq!(rows[0].text.as_ref(), "hello: Type");
+        // The inlay hint renders as exactly one faded run over its own text.
+        let faded: Vec<_> = rows[0]
+            .runs
+            .iter()
+            .filter(|(_, s)| s.fade_out.is_some())
+            .collect();
+        assert_eq!(faded.len(), 1, "exactly the inlay hint run is faded");
+        assert_eq!(&rows[0].text[faded[0].0.clone()], ": Type");
     }
 
     #[test]
