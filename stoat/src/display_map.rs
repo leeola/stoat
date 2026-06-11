@@ -736,13 +736,13 @@ impl DisplaySnapshot {
     }
 
     pub fn buffer_to_display(&self, point: Point) -> DisplayPoint {
-        let block = self.block_snapshot.buffer_to_block(point);
+        let block = self.block_snapshot.buffer_to_block(point, Bias::Left);
         DisplayPoint::new(block.row, block.column)
     }
 
     pub fn display_to_buffer(&self, point: DisplayPoint) -> Option<Point> {
         self.block_snapshot
-            .block_to_buffer(BlockPoint::new(point.row, point.column))
+            .block_to_buffer(BlockPoint::new(point.row, point.column), Bias::Left)
     }
 
     pub fn classify_row(&self, display_row: u32) -> BlockRowKind<'_> {

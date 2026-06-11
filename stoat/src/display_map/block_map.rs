@@ -323,6 +323,13 @@ impl Block {
             _ => false,
         }
     }
+
+    fn is_replace(&self) -> bool {
+        matches!(
+            self,
+            Block::Custom(b) if matches!(b.placement, BlockPlacement::Replace { .. })
+        )
+    }
 }
 
 #[derive(Clone, Default, Debug)]
@@ -953,7 +960,7 @@ impl Deref for BlockSnapshot {
 }
 
 impl BlockSnapshot {
-    pub fn buffer_to_block(&self, point: Point) -> BlockPoint {
+    pub fn buffer_to_block(&self, point: Point, bias: Bias) -> BlockPoint {
         let inlay_point = self
             .wrap_snapshot
             .tab_snapshot()
@@ -964,7 +971,7 @@ impl BlockSnapshot {
             .wrap_snapshot
             .tab_snapshot()
             .fold_snapshot()
-            .to_fold_point(inlay_point, Bias::Right);
+            .to_fold_point(inlay_point, bias);
         let tab_point = self.wrap_snapshot.tab_snapshot().to_tab_point(fold_point);
         let wrap_point = self.wrap_snapshot.to_wrap_point(tab_point);
         let wrap_row = wrap_point.row();
@@ -985,7 +992,7 @@ impl BlockSnapshot {
         }
     }
 
-    pub fn block_to_buffer(&self, point: BlockPoint) -> Option<Point> {
+    pub fn block_to_buffer(&self, point: BlockPoint, bias: Bias) -> Option<Point> {
         let target = OutputRow(point.row + 1);
         let mut cursor = self
             .transforms
@@ -995,19 +1002,18 @@ impl BlockSnapshot {
         let Dimensions(input_start, output_start, _) = cursor.start();
         let rows_into_transform = point.row.saturating_sub(output_start.0);
 
-        if let Some(transform) = cursor.item() {
-            if transform.block.is_some() {
-                return None;
-            }
-        }
+        let wrap_point = match cursor.item() {
+            Some(transform) if transform.block.is_some() => {
+                self.resolve_block_row(transform, input_start.0, bias)
+            },
+            _ => WrapPoint::new(input_start.0 + rows_into_transform, point.column),
+        };
 
-        let wrap_row = input_start.0 + rows_into_transform;
-        let wrap_point = WrapPoint::new(wrap_row, point.column);
         let tab_point = self.wrap_snapshot.to_tab_point(wrap_point);
         let fold_point = self
             .wrap_snapshot
             .tab_snapshot()
-            .to_fold_point(tab_point, Bias::Left);
+            .to_fold_point(tab_point, bias);
         let inlay_point = self
             .wrap_snapshot
             .tab_snapshot()
@@ -1020,6 +1026,24 @@ impl BlockSnapshot {
             .inlay_snapshot()
             .to_buffer_point(inlay_point);
         Some(buf)
+    }
+
+    /// Resolve a synthetic block row to the wrap point of the adjacent text it
+    /// renders against, chosen by `bias`. A below block maps to the end of the
+    /// row it sits under; an above block, or a left-biased replacement, to the
+    /// start of the row it sits over; a right-biased replacement to the end of
+    /// the span it covers.
+    fn resolve_block_row(&self, transform: &Transform, input_start: u32, bias: Bias) -> WrapPoint {
+        let block = transform.block.as_ref().expect("block transform");
+        if block.place_below() {
+            let wrap_row = input_start.saturating_sub(1);
+            WrapPoint::new(wrap_row, self.wrap_snapshot.line_len(wrap_row))
+        } else if block.is_replace() && bias == Bias::Right {
+            let wrap_row = (input_start + transform.summary.input_rows).saturating_sub(1);
+            WrapPoint::new(wrap_row, self.wrap_snapshot.line_len(wrap_row))
+        } else {
+            WrapPoint::new(input_start, 0)
+        }
     }
 
     pub fn classify_row(&self, block_row: u32) -> BlockRowKind<'_> {
@@ -1239,13 +1263,13 @@ impl BlockSnapshot {
         let end_row = rows.end.min(max_row);
 
         let start_offset = (start_row..end_row)
-            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, 0)))
+            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, 0), Bias::Left))
             .map(|p| rope.point_to_offset(p))
             .unwrap_or(total);
 
         let end_offset = (start_row..end_row)
             .rev()
-            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, self.line_len(r))))
+            .find_map(|r| self.block_to_buffer(BlockPoint::new(r, self.line_len(r)), Bias::Left))
             .map(|p| {
                 // Map the row's end, not its start: a multi-line fold renders
                 // trailing text from the fold's end buffer line, so the byte
@@ -2084,10 +2108,10 @@ mod tests {
 
         assert_eq!(snapshot.total_lines(), 3);
 
-        let block = snapshot.buffer_to_block(Point::new(1, 2));
+        let block = snapshot.buffer_to_block(Point::new(1, 2), Bias::Left);
         assert_eq!(block, BlockPoint::new(1, 2));
 
-        let buffer = snapshot.block_to_buffer(BlockPoint::new(1, 2));
+        let buffer = snapshot.block_to_buffer(BlockPoint::new(1, 2), Bias::Left);
         assert_eq!(buffer, Some(Point::new(1, 2)));
     }
 
@@ -2132,21 +2156,25 @@ mod tests {
         let blocks = vec![text_block(BlockPlacement::Below(0), "deleted")];
         let snapshot = create_block_snapshot("line1\nline2", &blocks);
 
-        let block = snapshot.buffer_to_block(Point::new(0, 0));
+        let block = snapshot.buffer_to_block(Point::new(0, 0), Bias::Left);
         assert_eq!(block, BlockPoint::new(0, 0));
 
-        let block = snapshot.buffer_to_block(Point::new(1, 0));
+        let block = snapshot.buffer_to_block(Point::new(1, 0), Bias::Left);
         assert_eq!(block, BlockPoint::new(2, 0));
     }
 
     #[test]
-    fn block_to_buffer_returns_none_for_block() {
+    fn block_to_buffer_resolves_block_row_to_adjacent_text() {
         let blocks = vec![text_block(BlockPlacement::Below(0), "deleted")];
         let snapshot = create_block_snapshot("line1\nline2", &blocks);
 
-        assert!(snapshot.block_to_buffer(BlockPoint::new(1, 0)).is_none());
+        // The below block at row 1 resolves to the end of the line it sits under.
         assert_eq!(
-            snapshot.block_to_buffer(BlockPoint::new(2, 0)),
+            snapshot.block_to_buffer(BlockPoint::new(1, 0), Bias::Left),
+            Some(Point::new(0, 5))
+        );
+        assert_eq!(
+            snapshot.block_to_buffer(BlockPoint::new(2, 0), Bias::Left),
             Some(Point::new(1, 0))
         );
     }
@@ -2281,7 +2309,9 @@ mod tests {
         let mut block_map = BlockMap::new();
         let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), None);
 
-        let buf = snapshot.block_to_buffer(BlockPoint::new(0, 5)).unwrap();
+        let buf = snapshot
+            .block_to_buffer(BlockPoint::new(0, 5), Bias::Left)
+            .unwrap();
         assert_eq!(buf, Point::new(0, 2));
     }
 
@@ -2621,13 +2651,21 @@ mod tests {
             _ => panic!("expected buffer row"),
         }
 
-        assert!(snapshot.block_to_buffer(BlockPoint::new(1, 0)).is_none());
+        // The replaced row resolves to either end of the replaced span by bias.
         assert_eq!(
-            snapshot.block_to_buffer(BlockPoint::new(0, 0)),
+            snapshot.block_to_buffer(BlockPoint::new(1, 0), Bias::Left),
+            Some(Point::new(1, 0))
+        );
+        assert_eq!(
+            snapshot.block_to_buffer(BlockPoint::new(1, 0), Bias::Right),
+            Some(Point::new(1, 5))
+        );
+        assert_eq!(
+            snapshot.block_to_buffer(BlockPoint::new(0, 0), Bias::Left),
             Some(Point::new(0, 0))
         );
         assert_eq!(
-            snapshot.block_to_buffer(BlockPoint::new(2, 0)),
+            snapshot.block_to_buffer(BlockPoint::new(2, 0), Bias::Left),
             Some(Point::new(2, 0))
         );
     }
