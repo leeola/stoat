@@ -207,7 +207,6 @@ pub struct DisplayMap {
     decoration_highlights: DecorationHighlights,
     companion: Option<Companion>,
     lsp_folding_crease_ids: HashMap<BufferId, Vec<CreaseId>>,
-    masked: bool,
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
     last_buffer_version: u64,
@@ -249,7 +248,6 @@ impl DisplayMap {
             decoration_highlights: Arc::new(HashMap::new()),
             companion: None,
             lsp_folding_crease_ids: HashMap::new(),
-            masked: false,
             clip_at_line_ends: false,
             diagnostics_max_severity: None,
             last_buffer_version: version,
@@ -283,10 +281,6 @@ impl DisplayMap {
         }
         self.companion = companion;
         self.block_map.mark_dirty();
-    }
-
-    pub fn set_masked(&mut self, masked: bool) {
-        self.masked = masked;
     }
 
     pub fn set_clip_at_line_ends(&mut self, clip: bool) {
@@ -576,7 +570,6 @@ impl DisplayMap {
             decoration_highlights: self.decoration_highlights.clone(),
             crease_snapshot: self.crease_map.snapshot(),
             fold_placeholder: FoldPlaceholder::default(),
-            masked: self.masked,
             clip_at_line_ends: self.clip_at_line_ends,
             diagnostics_max_severity: self.diagnostics_max_severity,
             highlight_endpoint_cache: Arc::new(Mutex::new(None)),
@@ -596,7 +589,6 @@ pub struct DisplaySnapshot {
     decoration_highlights: DecorationHighlights,
     crease_snapshot: CreaseSnapshot,
     fold_placeholder: FoldPlaceholder,
-    masked: bool,
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
     /// Per-snapshot cache of resolved highlight endpoints, shared across this
@@ -664,10 +656,6 @@ impl DisplaySnapshot {
 
     pub fn decoration_highlights(&self) -> &DecorationHighlights {
         &self.decoration_highlights
-    }
-
-    pub fn is_masked(&self) -> bool {
-        self.masked
     }
 
     pub fn wrap_snapshot(&self) -> &WrapSnapshot {
