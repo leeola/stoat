@@ -1391,7 +1391,7 @@ impl BlockSnapshot {
 }
 
 fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
-    blocks.sort_unstable_by(|(a, _), (b, _)| {
+    blocks.sort_unstable_by(|(a, block_a), (b, block_b)| {
         a.start_wrap_row()
             .cmp(&b.start_wrap_row())
             .then_with(|| {
@@ -1416,6 +1416,8 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
                 }
                 tie(a).cmp(&tie(b))
             })
+            .then_with(|| Ord::cmp(&block_priority(block_a), &block_priority(block_b)))
+            .then_with(|| block_id(block_a).cmp(&block_id(block_b)))
     });
 
     blocks.dedup_by(|right, left| match (&mut left.0, &right.0) {
@@ -1440,6 +1442,20 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
         },
         _ => false,
     });
+}
+
+fn block_priority(block: &Block) -> usize {
+    match block {
+        Block::Custom(b) => b.priority,
+        _ => 0,
+    }
+}
+
+fn block_id(block: &Block) -> Option<CustomBlockId> {
+    match block {
+        Block::Custom(b) => Some(b.id),
+        _ => None,
+    }
 }
 
 fn resolve_block_placement(
@@ -2536,6 +2552,24 @@ mod tests {
             .collect();
         assert_eq!(header_rows.len(), 2);
         assert!(header_rows[1] > header_rows[0] + 1);
+    }
+
+    #[test]
+    fn same_position_blocks_order_by_priority() {
+        let mut high = text_block(BlockPlacement::Above(0), "HIGH");
+        high.priority = 2;
+        let mut low = text_block(BlockPlacement::Above(0), "LOW");
+        low.priority = 1;
+
+        // Inserted high-first, but the sort orders by priority ascending
+        // regardless of input order, so the lower priority lands first.
+        let snapshot = create_block_snapshot("x", &[high, low]);
+        let priority_at = |row| match snapshot.classify_row(row) {
+            BlockRowKind::Block { block, .. } => Some(super::block_priority(block)),
+            _ => None,
+        };
+        assert_eq!(priority_at(0), Some(1));
+        assert_eq!(priority_at(1), Some(2));
     }
 
     #[test]
