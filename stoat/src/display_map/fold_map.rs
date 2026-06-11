@@ -277,6 +277,14 @@ pub struct FoldMap {
     cached_snapshot: Option<Arc<FoldSnapshot>>,
     last_inlay_version: usize,
     last_self_version: usize,
+    /// Inlay-row regions a pending `fold`/`unfold` touched, resolved against
+    /// [`Self::cached_snapshot`] (the "old" space the next sync's inlay edits
+    /// map forward from). The next [`Self::sync`] composes them with the
+    /// buffer's inlay edits so a fold toggle rebuilds only its rows instead of
+    /// taking the whole-file `0..line_count` path. A mutation that fills this
+    /// always bumps `version`, so the early-return and the coordinator cache
+    /// both re-sync and drain it.
+    deferred_edits: Patch<u32>,
 }
 
 pub struct FoldSnapshot {
@@ -306,6 +314,7 @@ impl FoldMap {
             cached_snapshot: Some(Arc::clone(&snapshot)),
             last_inlay_version: inlay_version,
             last_self_version: 0,
+            deferred_edits: Patch::empty(),
         };
         (map, snapshot)
     }
@@ -359,9 +368,19 @@ impl FoldMap {
         valid_folds.sort_by_key(|f| f.resolved_start);
         self.folds = SumTree::from_iter(valid_folds, ());
 
-        let can_incremental = !inlay_edits.is_empty()
-            && self.version == self.last_self_version
-            && self.cached_snapshot.is_some();
+        // Fold mutations recorded their touched rows as identity edits in
+        // `deferred_edits`; compose them with the buffer's inlay edits so the
+        // incremental rebuild covers both the toggled folds and any concurrent
+        // edit. A pure fold toggle arrives here with empty `inlay_edits`, so the
+        // composed set is the deferred regions alone.
+        let composed_edits = if self.deferred_edits.is_empty() {
+            inlay_edits.clone()
+        } else {
+            let deferred = std::mem::replace(&mut self.deferred_edits, Patch::empty());
+            deferred.compose(inlay_edits.edits().iter().cloned())
+        };
+
+        let can_incremental = !composed_edits.is_empty() && self.cached_snapshot.is_some();
 
         resolved.sort_by_key(|f| f.range.start);
         // Folds are stored individually; coalesce overlapping (and
@@ -392,7 +411,12 @@ impl FoldMap {
                 .cached_snapshot
                 .as_ref()
                 .expect("guarded by can_incremental");
-            sync_fold_incremental(old_snapshot, &inlay_snapshot, inlay_edits, &resolved_tree)
+            sync_fold_incremental(
+                old_snapshot,
+                &inlay_snapshot,
+                &composed_edits,
+                &resolved_tree,
+            )
         } else {
             let old_line_count = self
                 .cached_snapshot
@@ -466,6 +490,14 @@ impl FoldMap {
         let new_ids: Vec<FoldId> = new_folds.iter().map(|f| f.id).collect();
         new_folds.sort_by_key(|f| f.resolved_start);
 
+        if let Some(snapshot) = self.cached_snapshot.clone() {
+            let regions: Vec<(u32, u32)> = new_folds
+                .iter()
+                .map(|fold| fold_inlay_region(&fold.range, &snapshot.inlay_snapshot))
+                .collect();
+            self.merge_deferred_regions(regions);
+        }
+
         let edits: Vec<Edit<AnchoredFold>> = new_folds.into_iter().map(Edit::Insert).collect();
         self.folds.edit(edits, ());
 
@@ -475,17 +507,67 @@ impl FoldMap {
 
     pub fn unfold(&mut self, ranges: Vec<Range<usize>>, buffer_snapshot: &MultiBufferSnapshot) {
         let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
+        let mut removed: Vec<AnchoredFold> = Vec::new();
         let mut new_folds = SumTree::default();
         for fold in self.folds.iter() {
-            if !ranges
+            if ranges
                 .iter()
                 .any(|r| fold.range.overlaps_range(r, &resolve))
             {
+                removed.push(fold.clone());
+            } else {
                 new_folds.push(fold.clone(), ());
             }
         }
+
+        if removed.is_empty() {
+            return;
+        }
+
         self.folds = new_folds;
+
+        if let Some(snapshot) = self.cached_snapshot.clone() {
+            let regions: Vec<(u32, u32)> = removed
+                .iter()
+                .map(|fold| fold_inlay_region(&fold.range, &snapshot.inlay_snapshot))
+                .collect();
+            self.merge_deferred_regions(regions);
+        }
+
         self.version += 1;
+    }
+
+    /// Coalesce inlay-row `regions` into [`Self::deferred_edits`] as identity
+    /// (`old == new`) edits, kept sorted and overlap-merged. The next
+    /// [`Self::sync`] composes them with the buffer's inlay edits, so the
+    /// affected rows are reconstructed incrementally rather than via a full
+    /// rebuild.
+    fn merge_deferred_regions(&mut self, regions: impl IntoIterator<Item = (u32, u32)>) {
+        let mut ranges: Vec<(u32, u32)> = self
+            .deferred_edits
+            .edits()
+            .iter()
+            .map(|e| (e.old.start, e.old.end))
+            .chain(regions)
+            .filter(|&(start, end)| end > start)
+            .collect();
+        ranges.sort_unstable();
+
+        let mut merged: Vec<stoat_text::patch::Edit<u32>> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            if let Some(last) = merged.last_mut() {
+                if start <= last.old.end {
+                    last.old.end = last.old.end.max(end);
+                    last.new.end = last.old.end;
+                    continue;
+                }
+            }
+            merged.push(stoat_text::patch::Edit {
+                old: start..end,
+                new: start..end,
+            });
+        }
+        self.deferred_edits = Patch::new(merged);
     }
 
     pub fn is_folded_at_offset(
@@ -523,6 +605,23 @@ impl FoldMap {
     pub fn version_unchanged(&self) -> bool {
         self.version == self.last_self_version
     }
+}
+
+/// Inlay-row span `[start_row, end_row + 1)` a fold occupies, resolving its
+/// anchors against `inlay_snapshot`'s buffer. Used to turn a `fold`/`unfold`
+/// into a `deferred_edits` region; a fold toggle leaves the inlay text
+/// unchanged, so the span is identical on the old and new sides.
+fn fold_inlay_region(range: &Range<Anchor>, inlay_snapshot: &InlaySnapshot) -> (u32, u32) {
+    let buffer = inlay_snapshot.buffer_snapshot();
+    let start_point = buffer
+        .rope()
+        .offset_to_point(buffer.resolve_anchor(&range.start));
+    let end_point = buffer
+        .rope()
+        .offset_to_point(buffer.resolve_anchor(&range.end));
+    let start_row = inlay_snapshot.to_inlay_point(start_point).row();
+    let end_row = inlay_snapshot.to_inlay_point(end_point).row();
+    (start_row, end_row + 1)
 }
 
 fn build_fold_transforms(
@@ -2120,5 +2219,82 @@ mod tests {
         fold_snap.check_invariants();
         let text: String = fold_snap.chars_at(FoldPoint::new(0, 0)).collect();
         assert_eq!(text, "XXabc\ndef\n...\njkl");
+    }
+
+    #[test]
+    fn fold_toggle_emits_localized_patch() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "aaa\nbbb\nccc\nddd\neee");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let snap = multi_buffer.snapshot();
+        let (_, inlay) = InlayMap::new(snap.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay.clone());
+
+        let fold_start = snap.rope().point_to_offset(stoat_text::Point::new(1, 1));
+        let fold_end = snap.rope().point_to_offset(stoat_text::Point::new(3, 1));
+        fold_map.fold(
+            vec![snap.anchor_at(fold_start, Bias::Right)..snap.anchor_at(fold_end, Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap,
+        );
+
+        // Pure fold toggle: no buffer edit, so the sync's only input is the
+        // fold's synthesized region. The row patch must cover just the fold's
+        // rows, not 0..line_count as a full rebuild would emit.
+        let (fold_snap, patch) = fold_map.sync(inlay, &Patch::empty());
+
+        let edits = patch.edits();
+        assert_eq!(edits.len(), 1);
+        assert_eq!(
+            edits[0].old.start, 1,
+            "patch starts at the fold row, not a full rebuild from row 0"
+        );
+        assert_eq!(
+            fold_snap.line_count(),
+            3,
+            "rows 1..3 collapse to one display row"
+        );
+    }
+
+    #[test]
+    fn noop_unfold_does_not_bump_version() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "aaa\nbbb\nccc\nddd");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let f_start = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(0, 1));
+        let f_end = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(0, 3));
+        fold_map.fold(
+            vec![
+                buffer_snapshot.anchor_at(f_start, Bias::Right)
+                    ..buffer_snapshot.anchor_at(f_end, Bias::Left),
+            ],
+            FoldPlaceholder::default(),
+            &buffer_snapshot,
+        );
+        fold_map.sync(inlay_snapshot, &Patch::empty());
+        assert!(fold_map.version_unchanged());
+
+        // Unfolding a range that overlaps no fold (the last line) must not
+        // invalidate the snapshot cache by bumping the version.
+        let u_start = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(3, 0));
+        let u_end = buffer_snapshot
+            .rope()
+            .point_to_offset(stoat_text::Point::new(3, 3));
+        #[allow(clippy::single_range_in_vec_init)]
+        fold_map.unfold(vec![u_start..u_end], &buffer_snapshot);
+        assert!(
+            fold_map.version_unchanged(),
+            "no-op unfold must not bump version"
+        );
     }
 }
