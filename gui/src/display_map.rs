@@ -166,9 +166,10 @@ impl DisplayMap {
     /// Splice the inlay set: remove the inlays identified by `remove`
     /// and insert new anchored inlays for each `(Anchor, String,
     /// InlayKind)` triple in `insert`, returning the freshly-allocated
-    /// [`InlayId`]s in the same order. Emits [`DisplayMapEvent::Changed`]
-    /// when either side of the splice is non-empty; an empty-empty
-    /// call is a no-op.
+    /// [`InlayId`]s in `insert` order. Text is sanitized to a single line
+    /// and empty texts are dropped, so the returned ids may be fewer than
+    /// `insert`. Emits [`DisplayMapEvent::Changed`] when either side of the
+    /// splice is non-empty; an empty-empty call is a no-op.
     pub fn set_inlay_hints(
         &mut self,
         remove: Vec<InlayId>,

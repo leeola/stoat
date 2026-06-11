@@ -426,6 +426,14 @@ impl InlayMap {
 
         let mut new_ids = Vec::with_capacity(insert.len());
         for (position, text, kind) in insert {
+            // Inlay text must stay single-line: line_count ignores inlay
+            // newlines while transform summaries count them, so an embedded
+            // newline desyncs row math. An empty text renders nothing, so it
+            // is dropped rather than allocated an id.
+            let text = text.replace(['\n', '\r'], " ");
+            if text.is_empty() {
+                continue;
+            }
             let id = InlayId(self.next_id);
             self.next_id += 1;
             self.inlays.push(AnchoredInlay {
@@ -1403,6 +1411,29 @@ mod tests {
             snap.to_inlay_point(Point::new(0, 5), Bias::Right),
             InlayPoint::new(0, 5)
         );
+    }
+
+    #[test]
+    fn splice_sanitizes_newlines_and_skips_empty() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "hello world");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (mut map, _) = InlayMap::new(buffer_snapshot.clone());
+
+        let off = buffer_snapshot.rope().point_to_offset(Point::new(0, 5));
+        let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
+        let ids = map.splice(
+            Vec::new(),
+            vec![
+                (anchor, "a\nb".to_string(), InlayKind::Hint),
+                (anchor, String::new(), InlayKind::Hint),
+            ],
+        );
+
+        assert_eq!(ids.len(), 1);
+        let inlay = map.inlays.iter().find(|i| i.id == ids[0]).unwrap();
+        assert_eq!(&*inlay.text, "a b");
     }
 
     #[test]

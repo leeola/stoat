@@ -431,9 +431,11 @@ impl DisplayMap {
 
     /// Remove the inlays identified by `remove` and insert new
     /// anchored inlays for each `(Anchor, String, InlayKind)` triple
-    /// in `insert`. Returns the freshly-allocated [`InlayId`]s in the
-    /// same order as `insert`, so callers can track the live set for
-    /// the next splice. Delegates to [`InlayMap::splice`].
+    /// in `insert`. Inlay text is sanitized to a single line and empty
+    /// texts are dropped, so the returned [`InlayId`]s -- one per
+    /// surviving inlay, in `insert` order -- may be fewer than `insert`;
+    /// callers track them as the live set for the next splice. Delegates
+    /// to [`InlayMap::splice`].
     pub fn splice_inlays(
         &mut self,
         remove: Vec<InlayId>,

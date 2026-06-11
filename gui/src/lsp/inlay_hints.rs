@@ -259,7 +259,7 @@ fn visible_buffer_rows(
 }
 
 fn flatten_label(label: InlayHintLabel) -> String {
-    match label {
+    let raw = match label {
         InlayHintLabel::String(s) => s,
         InlayHintLabel::LabelParts(parts) => {
             let mut out = String::new();
@@ -268,7 +268,9 @@ fn flatten_label(label: InlayHintLabel) -> String {
             }
             out
         },
-    }
+    };
+    // Inlay text must stay single-line; a server may put newlines in a label.
+    raw.replace(['\n', '\r'], " ")
 }
 
 fn path_to_uri(path: &Path) -> Option<Uri> {
