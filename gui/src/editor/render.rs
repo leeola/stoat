@@ -110,6 +110,22 @@ pub(crate) fn convert_highlight_style(src: &StoatHighlightStyle) -> gpui::Highli
 pub(crate) struct RenderedRow {
     pub text: SharedString,
     pub runs: Vec<(Range<usize>, gpui::HighlightStyle)>,
+    /// Whitespace classification recorded during [`build_rendered_rows`],
+    /// so the whitespace overlay reads it instead of re-walking the row's
+    /// display chunks.
+    pub whitespace: RowWhitespace,
+}
+
+/// Per-row whitespace cells (char-column plus [`WsKind`]) and the content
+/// extents the overlay needs: the column of the first content char and the
+/// column past the last. Tab-expansion cells are tagged [`WsKind::Tab`]
+/// even though they render as spaces, which only the display chunk walk
+/// can tell apart.
+#[derive(Clone, Default)]
+pub(crate) struct RowWhitespace {
+    pub cells: Vec<(u32, WsKind)>,
+    pub first_content: Option<u32>,
+    pub last_content_end: Option<u32>,
 }
 
 /// Opacity reduction applied to inlay-hint runs so LSP hints read as
@@ -124,8 +140,11 @@ pub(crate) fn build_rendered_rows(
     let count = range.end.saturating_sub(range.start) as usize;
     let mut texts: Vec<String> = vec![String::new(); count];
     let mut runs: Vec<Vec<(Range<usize>, gpui::HighlightStyle)>> = vec![Vec::new(); count];
+    let mut whitespace: Vec<RowWhitespace> = vec![RowWhitespace::default(); count];
 
     let mut current = 0usize;
+    let mut column = 0u32;
+    let mut row_ws = RowWhitespace::default();
     for chunk in snapshot.highlighted_chunks(range.clone()) {
         let mut style = chunk.highlight_style.as_ref().map(convert_highlight_style);
         if chunk.is_inlay {
@@ -133,25 +152,39 @@ pub(crate) fn build_rendered_rows(
             hint.fade_out = Some(INLAY_HINT_FADE);
             style = Some(hint);
         }
+        // A tab-expansion chunk renders as spaces but carries one Tab cell,
+        // and never spans a newline.
+        if chunk.is_tab {
+            if current < count {
+                let text: &str = chunk.text.as_ref();
+                append_run(&mut texts[current], &mut runs[current], text, style);
+                row_ws.cells.push((column, WsKind::Tab));
+                column += text.chars().count() as u32;
+            }
+            continue;
+        }
         let mut remaining: &str = chunk.text.as_ref();
         while !remaining.is_empty() && current < count {
             match remaining.find('\n') {
                 Some(nl) => {
-                    append_run(
-                        &mut texts[current],
-                        &mut runs[current],
-                        &remaining[..nl],
-                        style,
-                    );
+                    let seg = &remaining[..nl];
+                    append_run(&mut texts[current], &mut runs[current], seg, style);
+                    classify_ws_segment(seg, &mut row_ws, &mut column);
+                    whitespace[current] = std::mem::take(&mut row_ws);
+                    column = 0;
                     current += 1;
                     remaining = &remaining[nl + 1..];
                 },
                 None => {
                     append_run(&mut texts[current], &mut runs[current], remaining, style);
+                    classify_ws_segment(remaining, &mut row_ws, &mut column);
                     remaining = "";
                 },
             }
         }
+    }
+    if current < count {
+        whitespace[current] = row_ws;
     }
 
     let buffer_snapshot = snapshot.buffer_snapshot();
@@ -187,11 +220,30 @@ pub(crate) fn build_rendered_rows(
     texts
         .into_iter()
         .zip(runs)
-        .map(|(text, runs)| RenderedRow {
+        .zip(whitespace)
+        .map(|((text, runs), whitespace)| RenderedRow {
             text: SharedString::from(text),
             runs,
+            whitespace,
         })
         .collect()
+}
+
+/// Classify a newline-free display-text segment into `ws`, advancing
+/// `column` per char: spaces become cells, content updates the first/last
+/// content extents.
+fn classify_ws_segment(seg: &str, ws: &mut RowWhitespace, column: &mut u32) {
+    for ch in seg.chars() {
+        if ch == ' ' {
+            ws.cells.push((*column, WsKind::Space));
+        } else {
+            if ws.first_content.is_none() {
+                ws.first_content = Some(*column);
+            }
+            ws.last_content_end = Some(*column + 1);
+        }
+        *column += 1;
+    }
 }
 
 fn block_context_for<'a>(
@@ -947,7 +999,7 @@ fn append_run(
 }
 
 pub(crate) fn render_row_element(row: RenderedRow) -> Div {
-    let RenderedRow { text, runs } = row;
+    let RenderedRow { text, runs, .. } = row;
     let runs = coalesce_runs(text.len(), &runs);
     div().child(StyledText::new(text).with_highlights(runs))
 }
@@ -1078,6 +1130,7 @@ pub(crate) fn apply_selection_paint(
     let RenderedRow {
         text,
         runs: syntax_runs,
+        whitespace,
     } = row;
 
     let active_line = paint.active_line_row == Some(display_row);
@@ -1110,6 +1163,7 @@ pub(crate) fn apply_selection_paint(
         return RenderedRow {
             text,
             runs: syntax_runs,
+            whitespace,
         };
     }
 
@@ -1152,7 +1206,11 @@ pub(crate) fn apply_selection_paint(
             &cursor_ranges,
             cursor_style,
         );
-        return RenderedRow { text, runs: merged };
+        return RenderedRow {
+            text,
+            runs: merged,
+            whitespace,
+        };
     }
 
     // Padding required: materialize a fresh `String` so we can append
@@ -1190,6 +1248,7 @@ pub(crate) fn apply_selection_paint(
     RenderedRow {
         text: SharedString::from(text_owned),
         runs: merged,
+        whitespace,
     }
 }
 
@@ -1654,7 +1713,7 @@ pub(crate) struct IndentGuidePaint {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-enum WsKind {
+pub(crate) enum WsKind {
     Space,
     Tab,
 }
@@ -1878,43 +1937,6 @@ fn whitespace_glyph(kind: WsKind) -> char {
     }
 }
 
-/// Whitespace cells of `display_row` as (char-column, kind), plus the
-/// column of the first content char and the column past the last
-/// content char (both `None` for an all-whitespace row). Walks the
-/// display chunks so tab-expansion cells are tagged [`WsKind::Tab`] via
-/// `is_tab` even though they render as spaces.
-fn classify_row_whitespace(
-    snapshot: &DisplaySnapshot,
-    display_row: u32,
-) -> (Vec<(u32, WsKind)>, Option<u32>, Option<u32>) {
-    let mut cells = Vec::new();
-    let mut first_content = None;
-    let mut last_content_end = None;
-    let mut column = 0u32;
-    'outer: for chunk in snapshot.highlighted_chunks(display_row..display_row + 1) {
-        if chunk.is_tab {
-            cells.push((column, WsKind::Tab));
-            column += chunk.text.chars().count() as u32;
-            continue;
-        }
-        for ch in chunk.text.chars() {
-            if ch == '\n' {
-                break 'outer;
-            }
-            if ch == ' ' {
-                cells.push((column, WsKind::Space));
-            } else {
-                if first_content.is_none() {
-                    first_content = Some(column);
-                }
-                last_content_end = Some(column + 1);
-            }
-            column += 1;
-        }
-    }
-    (cells, first_content, last_content_end)
-}
-
 /// Choose which classified whitespace cells get a glyph (per `mode`)
 /// and which carry the always-on trailing underline. Pure: the column
 /// classification, content extents, and selection column ranges are all
@@ -1960,7 +1982,7 @@ fn byte_to_column(text: &str, byte: usize) -> u32 {
 }
 
 /// Convert a row's byte-range selection spans (from [`SelectionPaint`])
-/// to char-column ranges aligned with [`classify_row_whitespace`].
+/// to char-column ranges aligned with the row's [`RowWhitespace`] cells.
 fn selection_columns_for_row(
     row: Option<&RenderedRow>,
     spans: Option<&Vec<Range<usize>>>,
@@ -1995,20 +2017,21 @@ pub(crate) fn build_whitespace_rows(
             {
                 return Vec::new();
             }
-            let (cells, first_content, last_content_end) =
-                classify_row_whitespace(snapshot, display_row);
+            let Some(row) = rows.get(idx) else {
+                return Vec::new();
+            };
             let selection_cols = if mode == ShowWhitespace::Selection {
                 selection_columns_for_row(
-                    rows.get(idx),
+                    Some(row),
                     selection_paint.row_selection_spans.get(&display_row),
                 )
             } else {
                 Vec::new()
             };
             select_whitespace_glyphs(
-                &cells,
-                first_content,
-                last_content_end,
+                &row.whitespace.cells,
+                row.whitespace.first_content,
+                row.whitespace.last_content_end,
                 mode,
                 &selection_cols,
             )
@@ -2675,15 +2698,16 @@ mod tests {
     }
 
     #[test]
-    fn classify_row_whitespace_tags_tab_and_trailing() {
+    fn build_rendered_rows_records_whitespace_cells() {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "\tx  ");
-        let (cells, first, last) = classify_row_whitespace(&snapshot, 0);
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        let ws = &rows[0].whitespace;
         assert_eq!(
-            cells,
+            ws.cells,
             vec![(0, WsKind::Tab), (5, WsKind::Space), (6, WsKind::Space)]
         );
-        assert_eq!((first, last), (Some(4), Some(5)));
+        assert_eq!((ws.first_content, ws.last_content_end), (Some(4), Some(5)));
     }
 
     #[test]
@@ -2836,6 +2860,7 @@ mod tests {
         let row = RenderedRow {
             text: original_text,
             runs: runs.clone(),
+            whitespace: RowWhitespace::default(),
         };
 
         let (_prefix, body, _suffix) = build_gutter_row_pieces(row, 0, &paint);
@@ -3016,6 +3041,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
 
         let element = render_row_with_gutter(row, 0, &paint);
@@ -3974,6 +4000,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("abcdef"),
             runs: runs.clone(),
+            whitespace: RowWhitespace::default(),
         };
         assert_merged_paint_valid(&row);
 
@@ -3996,6 +4023,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
@@ -4034,6 +4062,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
@@ -4074,6 +4103,7 @@ mod tests {
                 RenderedRow {
                     text: SharedString::from("hello"),
                     runs: vec![(0..5, syntax_style)],
+                    whitespace: RowWhitespace::default(),
                 },
                 0,
                 &paint,
@@ -4109,6 +4139,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
@@ -4156,6 +4187,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
@@ -4193,6 +4225,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
@@ -4225,6 +4258,7 @@ mod tests {
         let row = RenderedRow {
             text: original,
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let painted = apply_selection_paint(
             row,
@@ -4256,6 +4290,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
@@ -4298,6 +4333,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from(""),
             runs: Vec::new(),
+            whitespace: RowWhitespace::default(),
         };
         let selection_color = hsla(0.6, 0.5, 0.5, 0.3);
         let cursor_color = rgb(0xc8d6ff).into();
@@ -4333,6 +4369,7 @@ mod tests {
         let row = RenderedRow {
             text: SharedString::from("hello"),
             runs: vec![(0..5, syntax_style)],
+            whitespace: RowWhitespace::default(),
         };
         let mut paint = SelectionPaint::default();
         paint.row_selection_spans.insert(0, vec![1..4]);
