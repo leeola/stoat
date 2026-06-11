@@ -983,8 +983,14 @@ impl BlockSnapshot {
         cursor.seek(&target, Bias::Left);
 
         let Dimensions(input, output, _) = cursor.start();
-        let rows_into_transform = wrap_row.saturating_sub(input.0);
-        let block_row = output.0 + rows_into_transform;
+        let block_row = if cursor.item().is_some_and(|t| t.block.is_some()) {
+            // A point whose wrap row falls inside a multi-row replacement
+            // clamps to the block's first output row rather than overshooting
+            // onto the rows rendered below it.
+            output.0
+        } else {
+            output.0 + wrap_row.saturating_sub(input.0)
+        };
 
         BlockPoint {
             row: block_row,
@@ -1098,35 +1104,58 @@ impl BlockSnapshot {
                 BlockPoint::new(row, clipped.column())
             },
             BlockRowKind::Block { .. } => {
-                let target = OutputRow(row + 1);
                 let mut cursor = self
                     .transforms
                     .cursor::<Dimensions<InputRow, OutputRow>>(());
-                cursor.seek(&target, Bias::Left);
+                cursor.seek(&OutputRow(row + 1), Bias::Left);
 
-                if bias == Bias::Left {
-                    cursor.prev();
-                    while let Some(t) = cursor.item() {
-                        if t.block.is_none() {
-                            let end = cursor.end();
-                            let last_buf_row = end.1 .0.saturating_sub(1);
-                            return BlockPoint::new(last_buf_row, self.line_len(last_buf_row));
-                        }
-                        cursor.prev();
-                    }
-                    BlockPoint::new(0, 0)
-                } else {
-                    cursor.next();
-                    while let Some(t) = cursor.item() {
-                        if t.block.is_none() {
-                            let start_row = cursor.start().1 .0;
-                            return BlockPoint::new(start_row, 0);
-                        }
-                        cursor.next();
-                    }
-                    self.max_point()
+                // A replacement (or folded buffer) at the point clips to its own
+                // first output row, itself a valid caret position.
+                if cursor
+                    .item()
+                    .is_some_and(|t| t.block.as_ref().is_some_and(|b| b.is_replacement()))
+                {
+                    return BlockPoint::new(cursor.start().1 .0, 0);
                 }
+
+                // Otherwise search for an adjacent text row in the preferred
+                // direction, reverse on exhaustion, then fall back to the end --
+                // never returning a block row, which would no-op cursor ops.
+                let prefer_forward = bias == Bias::Right;
+                self.search_clip(row, prefer_forward)
+                    .or_else(|| self.search_clip(row, !prefer_forward))
+                    .unwrap_or_else(|| self.max_point())
             },
+        }
+    }
+
+    /// Search from `row` in `forward`'s direction for a valid clip target: an
+    /// adjacent text row (its start when searching forward, its end when
+    /// searching backward) or a replacement block's first output row. `None`
+    /// once the transforms in that direction are exhausted.
+    fn search_clip(&self, row: u32, forward: bool) -> Option<BlockPoint> {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&OutputRow(row + 1), Bias::Left);
+        loop {
+            if forward {
+                cursor.next();
+            } else {
+                cursor.prev();
+            }
+            let transform = cursor.item()?;
+            match transform.block.as_ref() {
+                None if forward => return Some(BlockPoint::new(cursor.start().1 .0, 0)),
+                None => {
+                    let last = cursor.end().1 .0.saturating_sub(1);
+                    return Some(BlockPoint::new(last, self.line_len(last)));
+                },
+                Some(b) if b.is_replacement() => {
+                    return Some(BlockPoint::new(cursor.start().1 .0, 0))
+                },
+                Some(_) => continue,
+            }
         }
     }
 
@@ -2301,6 +2330,47 @@ mod tests {
 
         let clipped_right = snapshot.clip_point(BlockPoint::new(1, 0), Bias::Right);
         assert_eq!(clipped_right, BlockPoint::new(2, 0));
+    }
+
+    #[test]
+    fn clip_point_reverses_off_leading_block() {
+        let blocks = vec![text_block(BlockPlacement::Above(0), "header")];
+        let snapshot = create_block_snapshot("line0\nline1", &blocks);
+        // Block row 0 has no text row above it, so a Left clip reverses forward
+        // to the first text row instead of returning the block row (0, 0).
+        assert_eq!(
+            snapshot.clip_point(BlockPoint::new(0, 0), Bias::Left),
+            BlockPoint::new(1, 0)
+        );
+    }
+
+    #[test]
+    fn clip_point_lands_on_replacement_first_row() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace { start: 1, end: 2 },
+            "X",
+        )];
+        let snapshot = create_block_snapshot("line0\nline1\nline2\nline3", &blocks);
+        // A replacement block's first output row is a valid caret position.
+        assert_eq!(
+            snapshot.clip_point(BlockPoint::new(1, 3), Bias::Left),
+            BlockPoint::new(1, 0)
+        );
+    }
+
+    #[test]
+    fn buffer_to_block_clamps_inside_replace_span() {
+        let blocks = vec![text_block(
+            BlockPlacement::Replace { start: 1, end: 2 },
+            "X",
+        )];
+        let snapshot = create_block_snapshot("line0\nline1\nline2\nline3", &blocks);
+        // A buffer point inside the replaced span clamps to the block's first
+        // output row, not the unrelated row rendered below it.
+        assert_eq!(
+            snapshot.buffer_to_block(Point::new(2, 0), Bias::Left).row,
+            1
+        );
     }
 
     #[test]
