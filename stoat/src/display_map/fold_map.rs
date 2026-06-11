@@ -1085,10 +1085,10 @@ impl FoldSnapshot {
     pub fn to_fold_point(&self, inlay_point: InlayPoint, bias: Bias) -> FoldPoint {
         let (start, end, item) = self
             .transforms
-            .find::<Dimensions<InlayPoint, FoldPoint>, _>((), &inlay_point, bias);
+            .find::<Dimensions<InlayPoint, FoldPoint>, _>((), &inlay_point, Bias::Right);
         match item {
             Some(t) if t.placeholder.is_some() => {
-                if inlay_point.0 == start.0 .0 {
+                if inlay_point.0 == start.0 .0 || bias == Bias::Left {
                     start.1
                 } else {
                     end.1
@@ -1115,9 +1115,26 @@ impl FoldSnapshot {
     }
 
     pub fn clip_point(&self, point: FoldPoint, bias: Bias) -> FoldPoint {
-        let inlay = self.to_inlay_point(point);
-        let clipped = self.inlay_snapshot.clip_point(inlay, bias);
-        self.to_fold_point(clipped, bias)
+        let (start, end, item) = self
+            .transforms
+            .find::<Dimensions<FoldPoint, InlayPoint>, _>((), &point, Bias::Right);
+        match item {
+            Some(transform) if transform.placeholder.is_some() => {
+                if point.0 == start.0 .0 || bias == Bias::Left {
+                    start.0
+                } else {
+                    end.0
+                }
+            },
+            Some(_) => {
+                let overshoot = point_overshoot(start.0 .0, point.0);
+                let inlay_point = InlayPoint(start.1 .0 + overshoot);
+                let clipped = self.inlay_snapshot.clip_point(inlay_point, bias);
+                let back = point_overshoot(start.1 .0, clipped.0);
+                FoldPoint(start.0 .0 + back)
+            },
+            None => FoldPoint(self.transforms.summary().output.lines),
+        }
     }
 
     pub fn fold_count(&self) -> usize {
@@ -1448,14 +1465,14 @@ pub struct FoldPointCursor<'a> {
 impl FoldPointCursor<'_> {
     pub fn map(&mut self, inlay_point: InlayPoint, bias: Bias) -> FoldPoint {
         if self.cursor.did_seek() {
-            self.cursor.seek_forward(&inlay_point, bias);
+            self.cursor.seek_forward(&inlay_point, Bias::Right);
         } else {
-            self.cursor.seek(&inlay_point, bias);
+            self.cursor.seek(&inlay_point, Bias::Right);
         }
         let start = self.cursor.start();
         match self.cursor.item() {
             Some(t) if t.placeholder.is_some() => {
-                if inlay_point.0 == start.0 .0 {
+                if inlay_point.0 == start.0 .0 || bias == Bias::Left {
                     start.1
                 } else {
                     self.cursor.end().1
