@@ -33,7 +33,7 @@ use serde_json::Value;
 use std::{cell::RefCell, collections::VecDeque, num::NonZeroUsize, ops::Range};
 use stoat::{
     buffer::BufferId,
-    display_map::{Block, BlockRowKind},
+    display_map::{Block, BlockRowKind, DisplaySnapshot},
     jumplist::JumpList,
     multi_buffer::MultiBufferSnapshot,
     review_session::ChunkStatus,
@@ -395,6 +395,31 @@ struct ReviewRenderData {
     chunk_markers: Vec<(u32, ChunkStatus)>,
     provenances: Vec<(u32, stoat::review::MoveProvenance)>,
     moved_spans: Vec<(u32, Range<usize>)>,
+}
+
+/// Per-frame render inputs computed once per [`Editor::render`] and shared
+/// across the `uniform_list` item closure's repeated invocations.
+///
+/// gpui's `UniformList` runs the item closure several times per frame --
+/// twice to measure (request_layout and prepaint each render one probe
+/// row) before the real visible-range pass. Building this setup inside the
+/// closure would walk the review chunks, clone the blame list and diff,
+/// and rebuild the diagnostics map on every call; hoisting it here
+/// collapses that to once per frame. The closure borrows this and repeats
+/// only the range-dependent work (row build, overlays, gutter paint).
+struct FrameRenderData {
+    display_snapshot: DisplaySnapshot,
+    review_data: ReviewRenderData,
+    syntax: Option<(
+        stoat_language::SyntaxSnapshot,
+        stoat::display_map::syntax_theme::SyntaxStyles,
+    )>,
+    search_regex: Option<regex::Regex>,
+    blame_lines: Option<Vec<stoat::host::BlameLine>>,
+    inline_blame_lines: Option<Vec<stoat::host::BlameLine>>,
+    diff_map: stoat::DiffMap,
+    diff_move_provenances: Vec<(u32, stoat::review::MoveProvenance)>,
+    diagnostic_row_map: Option<render::DiagnosticRowMap>,
 }
 
 /// Build per-row "moved from" provenance for a plain editor from the
@@ -3849,10 +3874,94 @@ impl Editor {
         }
     }
 
-    fn render_visible_rows(&mut self, range: Range<usize>, cx: &mut Context<'_, Self>) -> Vec<Div> {
-        let _span = tracing::trace_span!("editor.render_visible_rows").entered();
-        let is_minimap = self.mode.is_minimap();
+    fn build_frame_render_data(&mut self, cx: &mut Context<'_, Self>) -> FrameRenderData {
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let review_data = self.collect_review_render_data(cx);
+
+        let syntax = if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
+            if let Some(syntax_snapshot) =
+                buffer.read(cx).syntax_map().map(|m| m.snapshot().clone())
+            {
+                let theme = cx
+                    .try_global::<theme::Theme>()
+                    .map(|t| t.0.clone())
+                    .unwrap_or_else(stoat::theme::Theme::empty);
+                let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
+                Some((syntax_snapshot, styles))
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        let search_regex = {
+            let query = self
+                .search_state
+                .as_ref()
+                .map(|s| s.query().to_string())
+                .filter(|q| !q.is_empty());
+            match query {
+                Some(query) => self.compiled_search_regex(&query).cloned(),
+                None => None,
+            }
+        };
+
+        let blame_lines = match (self.blame_visible, self.blame_state.as_ref()) {
+            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
+            _ => None,
+        };
+        let inline_blame_lines = match (self.inline_blame_visible, self.blame_state.as_ref()) {
+            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
+            _ => None,
+        };
+
+        let diff_map = self.diff_map.read(cx).diff().clone();
+        let diff_move_provenances = if self.review_session.is_none() {
+            collect_move_provenances_from_diff(&diff_map)
+        } else {
+            Vec::new()
+        };
+        let diagnostic_row_map = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
+            (Some(path), Some(set)) => {
+                Some(render::compute_row_severity_for_path(set.read(cx), path))
+            },
+            _ => None,
+        };
+
+        FrameRenderData {
+            display_snapshot,
+            review_data,
+            syntax,
+            search_regex,
+            blame_lines,
+            inline_blame_lines,
+            diff_map,
+            diff_move_provenances,
+            diagnostic_row_map,
+        }
+    }
+
+    /// Builds [`FrameRenderData`] and renders `range` in one call, mirroring
+    /// what [`Editor::render`]'s `uniform_list` closure does per frame.
+    /// Production renders through `build_frame_render_data` once and
+    /// `render_rows_in_range` per visible-range pass; this collapses both for
+    /// tests that render rows directly.
+    #[cfg(test)]
+    fn render_visible_rows(&mut self, range: Range<usize>, cx: &mut Context<'_, Self>) -> Vec<Div> {
+        let frame = self.build_frame_render_data(cx);
+        self.render_rows_in_range(range, &frame, cx)
+    }
+
+    fn render_rows_in_range(
+        &mut self,
+        range: Range<usize>,
+        frame: &FrameRenderData,
+        cx: &mut Context<'_, Self>,
+    ) -> Vec<Div> {
+        let _span = tracing::trace_span!("editor.render_rows_in_range").entered();
+        let is_minimap = self.mode.is_minimap();
+        let display_snapshot = frame.display_snapshot.clone();
         let total_rows = (display_snapshot.max_point().row + 1) as usize;
         let end = range.end.min(total_rows);
         let start = range.start.min(end);
@@ -3866,7 +3975,7 @@ impl Editor {
         // collapse below perceptibility. Syntax-color bands and the
         // active-line band still read as horizontal stripes, so those
         // remain wired below.
-        let review_data = self.collect_review_render_data(cx);
+        let review_data = &frame.review_data;
         if !is_minimap {
             render::apply_move_chip_overlay(&mut rows, &display_snapshot, start as u32..end as u32);
 
@@ -3878,43 +3987,28 @@ impl Editor {
             );
         }
 
-        if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
-            let syntax_snapshot = buffer.read(cx).syntax_map().map(|m| m.snapshot().clone());
-            if let Some(syntax_snapshot) = syntax_snapshot {
-                let theme = cx
-                    .try_global::<theme::Theme>()
-                    .map(|t| t.0.clone())
-                    .unwrap_or_else(stoat::theme::Theme::empty);
-                let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
-                render::apply_syntax_overlay(
+        if let Some((syntax_snapshot, styles)) = &frame.syntax {
+            render::apply_syntax_overlay(
+                &mut rows,
+                &byte_maps,
+                &display_snapshot,
+                start as u32..end as u32,
+                syntax_snapshot,
+                styles,
+            );
+        }
+
+        if !is_minimap {
+            if let Some(regex) = &frame.search_regex {
+                let color = cx.theme().search_match;
+                render::apply_search_overlay(
                     &mut rows,
                     &byte_maps,
                     &display_snapshot,
                     start as u32..end as u32,
-                    &syntax_snapshot,
-                    &styles,
+                    regex,
+                    color,
                 );
-            }
-        }
-
-        let search_query: Option<String> = self
-            .search_state
-            .as_ref()
-            .map(|s| s.query().to_string())
-            .filter(|q| !q.is_empty());
-        if !is_minimap {
-            if let Some(query) = search_query {
-                let color = cx.theme().search_match;
-                if let Some(regex) = self.compiled_search_regex(&query) {
-                    render::apply_search_overlay(
-                        &mut rows,
-                        &byte_maps,
-                        &display_snapshot,
-                        start as u32..end as u32,
-                        regex,
-                        color,
-                    );
-                }
             }
         }
 
@@ -3970,10 +4064,7 @@ impl Editor {
             return rows.into_iter().map(render::render_row_element).collect();
         }
 
-        let blame_lines = match (self.blame_visible, self.blame_state.as_ref()) {
-            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
-            _ => None,
-        };
+        let blame_lines = &frame.blame_lines;
         let blame_visible_with_data = blame_lines.as_ref().is_some_and(|v| !v.is_empty());
         let review_active = self.review_active(cx);
         let metrics = render::gutter_metrics(&display_snapshot, blame_visible_with_data);
@@ -3982,18 +4073,9 @@ impl Editor {
         } else {
             metrics
         };
-        let diff_map_inner = self.diff_map.read(cx).diff().clone();
-        let diff_move_provenances = if self.review_session.is_none() {
-            collect_move_provenances_from_diff(&diff_map_inner)
-        } else {
-            Vec::new()
-        };
-        let diagnostic_row_map = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
-            (Some(path), Some(set)) => {
-                Some(render::compute_row_severity_for_path(set.read(cx), path))
-            },
-            _ => None,
-        };
+        let diff_map_inner = &frame.diff_map;
+        let diff_move_provenances = &frame.diff_move_provenances;
+        let diagnostic_row_map = &frame.diagnostic_row_map;
         let blame_paint =
             blame_lines
                 .as_ref()
@@ -4002,10 +4084,7 @@ impl Editor {
                     lines,
                     now_seconds: now_unix_seconds(),
                 });
-        let inline_blame_lines = match (self.inline_blame_visible, self.blame_state.as_ref()) {
-            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
-            _ => None,
-        };
+        let inline_blame_lines = &frame.inline_blame_lines;
         let inline_blame_color = {
             let theme = cx.theme();
             theme.blame_inline.unwrap_or(theme.muted_text)
@@ -4096,13 +4175,13 @@ impl Editor {
         };
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
-            diff_map: &diff_map_inner,
+            diff_map: diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
             review_chunk_markers: &review_data.chunk_markers,
             review_move_provenances: if self.review_session.is_some() {
                 &review_data.provenances
             } else {
-                &diff_move_provenances
+                diff_move_provenances
             },
             review_active,
             blame: blame_paint,
@@ -4143,19 +4222,17 @@ impl Render for Editor {
             }
         }
         let is_minimap = self.mode.is_minimap();
-        let document_rows = self
-            .display_map
-            .update(cx, |dm, _| dm.snapshot())
-            .max_point()
-            .row as usize
-            + 1;
+        let frame = self.build_frame_render_data(cx);
+        let document_rows = (frame.display_snapshot.max_point().row + 1) as usize;
         let total_rows = document_rows;
         let handle = cx.entity().downgrade();
         let bounds_handle = handle.clone();
         let list = uniform_list("editor-rows", total_rows, move |range, _window, cx| {
             handle
                 .upgrade()
-                .map(|editor| editor.update(cx, |ed, cx| ed.render_visible_rows(range, cx)))
+                .map(|editor| {
+                    editor.update(cx, |ed, cx| ed.render_rows_in_range(range, &frame, cx))
+                })
                 .unwrap_or_default()
         })
         .track_scroll(self.scroll_handle.clone())
