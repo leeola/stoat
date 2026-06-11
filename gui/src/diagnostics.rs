@@ -10,6 +10,9 @@ use stoat::diagnostics::{DiagnosticSet as InnerSet, DiagnosticSummary};
 /// bar re-render.
 pub struct DiagnosticSet {
     inner: InnerSet,
+    /// Bumped on every mutation so readers (e.g. the scrollbar-marker
+    /// cache) can detect a change without diffing the diagnostic lists.
+    generation: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -23,7 +26,14 @@ impl DiagnosticSet {
     pub fn new() -> Self {
         Self {
             inner: InnerSet::new(),
+            generation: 0,
         }
+    }
+
+    /// Monotonic counter bumped on every mutation. A cache keyed on it
+    /// recomputes only when the diagnostics actually changed.
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn replace_for_path(
@@ -33,6 +43,7 @@ impl DiagnosticSet {
         cx: &mut Context<'_, Self>,
     ) {
         self.inner.replace_for_path(path.clone(), diagnostics);
+        self.generation += 1;
         cx.emit(DiagnosticSetEvent::Changed { path });
         cx.notify();
     }

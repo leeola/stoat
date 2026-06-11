@@ -200,6 +200,10 @@ pub struct Editor {
     /// the prior compilation instead of recompiling per frame.
     /// Populated lazily by [`Self::compiled_search_regex`].
     cached_search_regex: Option<(String, regex::Regex)>,
+    /// Memoized minimap scrollbar markers, valid while
+    /// [`ScrollbarMarkerKey`] is unchanged. Interior-mutable because the
+    /// minimap reads markers from the parent editor on the render path.
+    scrollbar_marker_cache: RefCell<Option<(ScrollbarMarkerKey, scroll::ScrollbarMarkerSet)>>,
     workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
@@ -422,6 +426,17 @@ struct FrameRenderData {
     diagnostic_row_map: Option<render::DiagnosticRowMap>,
 }
 
+/// Cache key for [`Editor::scrollbar_markers`]. The marker set is a pure
+/// function of these four inputs, so the per-frame minimap render
+/// recomputes only when one of them changes rather than every call.
+#[derive(PartialEq)]
+struct ScrollbarMarkerKey {
+    buffer_version: u64,
+    diff_version: usize,
+    diagnostics_generation: u64,
+    search_query: Option<String>,
+}
+
 /// Build per-row "moved from" provenance for a plain editor from the
 /// buffer's [`stoat::DiffMap`] Moved hunks. Emits a chip only for
 /// intra-file sources (`buffer: None`) with an empty `rel_path`;
@@ -514,6 +529,7 @@ impl Editor {
             review_file_index: None,
             search_state: None,
             cached_search_regex: None,
+            scrollbar_marker_cache: RefCell::new(None),
             workspace: None,
             text_region_bounds: None,
             hover_position: None,
@@ -3184,6 +3200,33 @@ impl Editor {
     /// re-reading after the underlying diagnostics, diff, or search
     /// state changes.
     pub fn scrollbar_markers(&self, cx: &App) -> scroll::ScrollbarMarkerSet {
+        let key = self.scrollbar_marker_key(cx);
+        {
+            let cache = self.scrollbar_marker_cache.borrow();
+            if let Some((cached_key, set)) = cache.as_ref() {
+                if *cached_key == key {
+                    return set.clone();
+                }
+            }
+        }
+        let set = self.compute_scrollbar_markers(cx);
+        *self.scrollbar_marker_cache.borrow_mut() = Some((key, set.clone()));
+        set
+    }
+
+    fn scrollbar_marker_key(&self, cx: &App) -> ScrollbarMarkerKey {
+        ScrollbarMarkerKey {
+            buffer_version: self.multi_buffer().read(cx).snapshot().version(),
+            diff_version: self.diff_map.read(cx).diff().version(),
+            diagnostics_generation: self
+                .diagnostic_set
+                .as_ref()
+                .map_or(0, |set| set.read(cx).generation()),
+            search_query: self.search_state.as_ref().map(|s| s.query().to_string()),
+        }
+    }
+
+    fn compute_scrollbar_markers(&self, cx: &App) -> scroll::ScrollbarMarkerSet {
         let diagnostics = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
             (Some(path), Some(set)) => render::compute_row_severity_for_path(set.read(cx), path)
                 .into_iter()
@@ -6861,6 +6904,57 @@ mod tests {
             vec![(0, DiffHunkStatus::Added), (1, DiffHunkStatus::Added)]
         );
         assert_eq!(markers.search_hits, vec![0, 2], "foo matches rows 0 and 2");
+    }
+
+    #[test]
+    fn scrollbar_markers_cache_invalidates_on_diagnostics_change() {
+        use crate::diagnostics::DiagnosticSet;
+        use lsp_types::{Diagnostic, DiagnosticSeverity, Position, Range};
+
+        let diag_at = |row: u32, severity: DiagnosticSeverity| Diagnostic {
+            range: Range::new(Position::new(row, 0), Position::new(row, 1)),
+            severity: Some(severity),
+            code: None,
+            code_description: None,
+            source: None,
+            message: String::new(),
+            related_information: None,
+            tags: None,
+            data: None,
+        };
+
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "a\nb\nc\n");
+        let path = PathBuf::from("/ws/a.rs");
+        let diag_set = cx.update(|cx| cx.new(|_| DiagnosticSet::new()));
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_file_path(Some(path.clone()), cx);
+            ed.set_diagnostic_set(Some(diag_set.clone()), cx);
+        });
+
+        diag_set.update(&mut cx, |s, cx| {
+            s.replace_for_path(
+                path.clone(),
+                vec![diag_at(0, DiagnosticSeverity::ERROR)],
+                cx,
+            )
+        });
+        let first = editor.read_with(&cx, |ed, cx| ed.scrollbar_markers(cx));
+        assert_eq!(first.diagnostics, vec![(0, DiagnosticSeverity::ERROR)]);
+
+        diag_set.update(&mut cx, |s, cx| {
+            s.replace_for_path(
+                path.clone(),
+                vec![diag_at(2, DiagnosticSeverity::WARNING)],
+                cx,
+            )
+        });
+        let second = editor.read_with(&cx, |ed, cx| ed.scrollbar_markers(cx));
+        assert_eq!(
+            second.diagnostics,
+            vec![(2, DiagnosticSeverity::WARNING)],
+            "cache must recompute when diagnostics change"
+        );
     }
 
     #[test]
