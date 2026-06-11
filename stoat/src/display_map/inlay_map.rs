@@ -586,11 +586,16 @@ fn sync_incremental(
         // Record old output rows
         let old_start_point = old_rope.offset_to_point(edit.old.start);
         let old_end_point = old_rope.offset_to_point(edit.old.end);
-        let old_inlay_start_row = old_snapshot.to_inlay_point(old_start_point).row();
+        let old_inlay_start_row = old_snapshot
+            .to_inlay_point(old_start_point, Bias::Right)
+            .row();
         let old_inlay_end_row = if edit.old.start == edit.old.end {
             old_inlay_start_row + 1
         } else {
-            old_snapshot.to_inlay_point(old_end_point).row() + 1
+            old_snapshot
+                .to_inlay_point(old_end_point, Bias::Right)
+                .row()
+                + 1
         };
 
         // Seek past old content
@@ -737,12 +742,10 @@ fn point_overshoot(base: Point, target: Point) -> Point {
 }
 
 impl InlaySnapshot {
-    pub fn to_inlay_point(&self, buffer_point: Point) -> InlayPoint {
-        let (start, _end, item) = self.transforms.find::<Dimensions<Point, InlayPoint>, _>(
-            (),
-            &buffer_point,
-            Bias::Right,
-        );
+    pub fn to_inlay_point(&self, buffer_point: Point, bias: Bias) -> InlayPoint {
+        let (start, _end, item) =
+            self.transforms
+                .find::<Dimensions<Point, InlayPoint>, _>((), &buffer_point, bias);
         match item {
             Some(Transform::Isomorphic(_)) | None => {
                 let overshoot = point_overshoot(start.0, buffer_point);
@@ -765,13 +768,13 @@ impl InlaySnapshot {
         }
     }
 
-    pub fn clip_point(&self, point: InlayPoint, _bias: Bias) -> InlayPoint {
+    pub fn clip_point(&self, point: InlayPoint, bias: Bias) -> InlayPoint {
         let buf = self.to_buffer_point(point);
         let max_row = self.buffer.line_count().saturating_sub(1);
         let row = buf.row.min(max_row);
         let line_len = self.buffer.rope().line_len(row);
         let col = buf.column.min(line_len);
-        self.to_inlay_point(Point::new(row, col))
+        self.to_inlay_point(Point::new(row, col), bias)
     }
 
     pub fn line_count(&self) -> u32 {
@@ -1069,11 +1072,11 @@ pub struct InlayPointCursor<'a> {
 }
 
 impl InlayPointCursor<'_> {
-    pub fn map(&mut self, buffer_point: Point) -> InlayPoint {
+    pub fn map(&mut self, buffer_point: Point, bias: Bias) -> InlayPoint {
         if self.cursor.did_seek() {
-            self.cursor.seek_forward(&buffer_point, Bias::Right);
+            self.cursor.seek_forward(&buffer_point, bias);
         } else {
-            self.cursor.seek(&buffer_point, Bias::Right);
+            self.cursor.seek(&buffer_point, bias);
         }
         let start = self.cursor.start();
         match self.cursor.item() {
@@ -1228,7 +1231,7 @@ mod tests {
     fn passthrough_no_inlays() {
         let snap = make_snapshot("hello\nworld");
         let point = Point::new(1, 3);
-        let inlay = snap.to_inlay_point(point);
+        let inlay = snap.to_inlay_point(point, Bias::Right);
         assert_eq!(inlay, InlayPoint::new(1, 3));
         let back = snap.to_buffer_point(inlay);
         assert_eq!(back, point);
@@ -1238,13 +1241,16 @@ mod tests {
     fn single_inlay() {
         let snap =
             make_snapshot_with_inlays("hello world", vec![(Point::new(0, 5), ": str".to_string())]);
-        assert_eq!(snap.to_inlay_point(Point::new(0, 0)), InlayPoint::new(0, 0));
         assert_eq!(
-            snap.to_inlay_point(Point::new(0, 5)),
+            snap.to_inlay_point(Point::new(0, 0), Bias::Right),
+            InlayPoint::new(0, 0)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 5), Bias::Right),
             InlayPoint::new(0, 10)
         );
         assert_eq!(
-            snap.to_inlay_point(Point::new(0, 6)),
+            snap.to_inlay_point(Point::new(0, 6), Bias::Right),
             InlayPoint::new(0, 11)
         );
 
@@ -1282,12 +1288,31 @@ mod tests {
             ],
         );
         // "ab" + "X" + " cd" + "YY" + " ef"
-        assert_eq!(snap.to_inlay_point(Point::new(0, 0)), InlayPoint::new(0, 0));
-        assert_eq!(snap.to_inlay_point(Point::new(0, 2)), InlayPoint::new(0, 3));
-        assert_eq!(snap.to_inlay_point(Point::new(0, 5)), InlayPoint::new(0, 8));
         assert_eq!(
-            snap.to_inlay_point(Point::new(0, 8)),
+            snap.to_inlay_point(Point::new(0, 0), Bias::Right),
+            InlayPoint::new(0, 0)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 2), Bias::Right),
+            InlayPoint::new(0, 3)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 5), Bias::Right),
+            InlayPoint::new(0, 8)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 8), Bias::Right),
             InlayPoint::new(0, 11)
+        );
+
+        // Left bias places the caret before the inlay text rather than after.
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 2), Bias::Left),
+            InlayPoint::new(0, 2)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 5), Bias::Left),
+            InlayPoint::new(0, 6)
         );
 
         assert_eq!(
@@ -1368,13 +1393,16 @@ mod tests {
         );
         let (snap, _) = map.sync(buffer_snapshot.clone(), &Patch::empty());
         assert_eq!(
-            snap.to_inlay_point(Point::new(0, 5)),
+            snap.to_inlay_point(Point::new(0, 5), Bias::Right),
             InlayPoint::new(0, 10)
         );
 
         map.splice(ids, Vec::new());
         let (snap, _) = map.sync(buffer_snapshot, &Patch::empty());
-        assert_eq!(snap.to_inlay_point(Point::new(0, 5)), InlayPoint::new(0, 5));
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 5), Bias::Right),
+            InlayPoint::new(0, 5)
+        );
     }
 
     #[test]
@@ -1400,10 +1428,22 @@ mod tests {
                 (Point::new(2, 0), "Y".to_string()),
             ],
         );
-        assert_eq!(snap.to_inlay_point(Point::new(0, 3)), InlayPoint::new(0, 4));
-        assert_eq!(snap.to_inlay_point(Point::new(1, 2)), InlayPoint::new(1, 2));
-        assert_eq!(snap.to_inlay_point(Point::new(2, 0)), InlayPoint::new(2, 1));
-        assert_eq!(snap.to_inlay_point(Point::new(2, 3)), InlayPoint::new(2, 4));
+        assert_eq!(
+            snap.to_inlay_point(Point::new(0, 3), Bias::Right),
+            InlayPoint::new(0, 4)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(1, 2), Bias::Right),
+            InlayPoint::new(1, 2)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(2, 0), Bias::Right),
+            InlayPoint::new(2, 1)
+        );
+        assert_eq!(
+            snap.to_inlay_point(Point::new(2, 3), Bias::Right),
+            InlayPoint::new(2, 4)
+        );
     }
 
     #[test]
@@ -1429,7 +1469,7 @@ mod tests {
         let snap2 = multi_buffer.snapshot();
         let (inlay_snap, _) = map.sync(snap2, &Patch::empty());
         assert_eq!(
-            inlay_snap.to_inlay_point(Point::new(0, 7)),
+            inlay_snap.to_inlay_point(Point::new(0, 7), Bias::Right),
             InlayPoint::new(0, 12)
         );
     }

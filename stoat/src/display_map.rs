@@ -731,7 +731,7 @@ impl DisplaySnapshot {
         let inlay_point = self
             .fold_snapshot()
             .inlay_snapshot()
-            .to_inlay_point(Point::new(buffer_row, 0));
+            .to_inlay_point(Point::new(buffer_row, 0), Bias::Right);
         self.fold_snapshot().is_line_folded(inlay_point.row())
     }
 
@@ -1425,7 +1425,7 @@ mod tests {
         let snapshot = display_map.snapshot();
         let inlay_snap = snapshot.inlay_snapshot();
         assert_eq!(
-            inlay_snap.to_inlay_point(Point::new(0, 15)),
+            inlay_snap.to_inlay_point(Point::new(0, 15), Bias::Right),
             InlayPoint::new(0, 20)
         );
     }

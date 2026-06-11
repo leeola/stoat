@@ -966,7 +966,7 @@ impl BlockSnapshot {
             .tab_snapshot()
             .fold_snapshot()
             .inlay_snapshot()
-            .to_inlay_point(point);
+            .to_inlay_point(point, bias);
         let fold_point = self
             .wrap_snapshot
             .tab_snapshot()
@@ -1439,7 +1439,7 @@ fn resolve_block_placement(
                    fold_cursor: &mut FoldPointCursor<'_>,
                    wrap_cursor: &mut WrapPointCursor<'_>|
      -> u32 {
-        let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0));
+        let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0), Bias::Right);
         let fold_point = fold_cursor.map(inlay_point, Bias::Right);
         let tab_point = super::tab_map::TabPoint::new(fold_point.row(), fold_point.column());
         wrap_cursor.map(tab_point).row()
@@ -1844,7 +1844,7 @@ fn buffer_row_to_wrap_row(buffer_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 
     let inlay_point = wrap_snapshot
         .fold_snapshot()
         .inlay_snapshot()
-        .to_inlay_point(Point::new(buffer_row, 0));
+        .to_inlay_point(Point::new(buffer_row, 0), Bias::Right);
     let fold_point = wrap_snapshot
         .fold_snapshot()
         .to_fold_point(inlay_point, Bias::Left);

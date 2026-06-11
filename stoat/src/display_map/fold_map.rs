@@ -395,8 +395,8 @@ impl FoldMap {
         let all_points = buffer.points_for_anchors_batch(&all_anchors);
         let mut resolved = Vec::new();
         for (i, af) in self.folds.iter().enumerate() {
-            let start_inlay = inlay_snapshot.to_inlay_point(all_points[i * 2]);
-            let end_inlay = inlay_snapshot.to_inlay_point(all_points[i * 2 + 1]);
+            let start_inlay = inlay_snapshot.to_inlay_point(all_points[i * 2], Bias::Right);
+            let end_inlay = inlay_snapshot.to_inlay_point(all_points[i * 2 + 1], Bias::Right);
             if start_inlay >= end_inlay {
                 continue;
             }
@@ -666,8 +666,10 @@ fn fold_inlay_region(range: &Range<Anchor>, inlay_snapshot: &InlaySnapshot) -> (
     let end_point = buffer
         .rope()
         .offset_to_point(buffer.resolve_anchor(&range.end));
-    let start_row = inlay_snapshot.to_inlay_point(start_point).row();
-    let end_row = inlay_snapshot.to_inlay_point(end_point).row();
+    let start_row = inlay_snapshot
+        .to_inlay_point(start_point, Bias::Right)
+        .row();
+    let end_row = inlay_snapshot.to_inlay_point(end_point, Bias::Right).row();
     (start_row, end_row + 1)
 }
 
