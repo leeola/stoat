@@ -159,13 +159,19 @@ impl TabSnapshot {
     }
 
     pub fn line_len(&self, fold_row: u32) -> u32 {
-        let fold_line_len = self.fold_snapshot.line_len(fold_row);
-        expand_column(
-            self.fold_snapshot.fold_line_chars(fold_row),
-            fold_line_len,
-            self.tab_size,
-            self.max_expansion_column,
-        )
+        let mut expanded = 0u32;
+        for ch in self.fold_snapshot.fold_line_chars(fold_row) {
+            if ch == '\t' {
+                if expanded >= self.max_expansion_column {
+                    expanded += 1;
+                } else {
+                    expanded += self.tab_size - (expanded % self.tab_size);
+                }
+            } else {
+                expanded += super::display_width(ch);
+            }
+        }
+        expanded
     }
 
     pub fn clip_point(&self, point: TabPoint, _bias: Bias) -> TabPoint {
