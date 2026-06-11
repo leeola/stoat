@@ -198,7 +198,7 @@ impl HoverRequest {
         let display_snapshot = display_map.update(cx, |dm, _| dm.snapshot());
         let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
         let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
-        let buffer_point = display_snapshot.display_to_buffer(clipped)?;
+        let buffer_point = display_snapshot.display_to_buffer(clipped, Bias::Left)?;
         let rope = mb_snapshot.rope().clone();
         let offset = rope.point_to_offset(buffer_point);
         let workspace_root = path

@@ -472,7 +472,7 @@ fn apply_token_overlay(
             },
             _ => {
                 let Some(buffer_point) =
-                    snapshot.display_to_buffer(DisplayPoint::new(display_row, 0))
+                    snapshot.display_to_buffer(DisplayPoint::new(display_row, 0), Bias::Left)
                 else {
                     continue;
                 };
@@ -628,12 +628,12 @@ pub(crate) fn build_row_byte_maps(
     for (idx, row) in rows.iter().enumerate() {
         let display_row = range.start + idx as u32;
         let buffer_start_offset = snapshot
-            .display_to_buffer(DisplayPoint::new(display_row, 0))
+            .display_to_buffer(DisplayPoint::new(display_row, 0), Bias::Left)
             .map(|p| rope.point_to_offset(p))
             .unwrap_or(rope_len)
             .min(rope_len);
         let next_row_start = snapshot
-            .display_to_buffer(DisplayPoint::new(display_row + 1, 0))
+            .display_to_buffer(DisplayPoint::new(display_row + 1, 0), Bias::Left)
             .map(|p| rope.point_to_offset(p))
             .unwrap_or(rope_len)
             .min(rope_len);
@@ -693,10 +693,10 @@ fn visible_byte_range(
     rope_len: usize,
 ) -> Range<usize> {
     let start_pt = snapshot
-        .display_to_buffer(DisplayPoint::new(range.start, 0))
+        .display_to_buffer(DisplayPoint::new(range.start, 0), Bias::Left)
         .unwrap_or(stoat_text::Point::zero());
     let end_pt = snapshot
-        .display_to_buffer(DisplayPoint::new(range.end, 0))
+        .display_to_buffer(DisplayPoint::new(range.end, 0), Bias::Left)
         .unwrap_or_else(|| snapshot.buffer_snapshot().rope().max_point());
     let rope = snapshot.buffer_snapshot().rope();
     let start = rope.point_to_offset(start_pt).min(rope_len);
@@ -860,7 +860,7 @@ pub(crate) fn apply_goto_word_overlay(
             continue;
         }
         let point = rope.offset_to_point(offset);
-        let display = snapshot.buffer_to_display(point);
+        let display = snapshot.buffer_to_display(point, Bias::Left);
         if display.row < range.start || display.row >= range.end {
             continue;
         }
@@ -1019,7 +1019,7 @@ pub(crate) fn compute_selection_paint(
             buffer.resolve_anchor(&primary.head()),
         );
         let head_point = buffer.rope().offset_to_point(head_offset);
-        let head_display = snapshot.buffer_to_display(head_point);
+        let head_display = snapshot.buffer_to_display(head_point, Bias::Left);
         if head_display.row >= start_row && head_display.row < end_row {
             paint.active_line_row = Some(head_display.row);
         }
@@ -1042,8 +1042,8 @@ pub(crate) fn compute_selection_paint(
         if lo != hi {
             let lo_point = buffer.rope().offset_to_point(lo);
             let hi_point = buffer.rope().offset_to_point(hi);
-            let lo_display = snapshot.buffer_to_display(lo_point);
-            let hi_display = snapshot.buffer_to_display(hi_point);
+            let lo_display = snapshot.buffer_to_display(lo_point, Bias::Left);
+            let hi_display = snapshot.buffer_to_display(hi_point, Bias::Left);
             // Clamp to the on-screen intersection so a selection spanning
             // many rows (e.g. select-all) does not walk every document row.
             let first = lo_display.row.max(start_row);
@@ -1076,7 +1076,7 @@ pub(crate) fn compute_selection_paint(
         }
 
         let head_point = buffer.rope().offset_to_point(head_offset);
-        let head_display = snapshot.buffer_to_display(head_point);
+        let head_display = snapshot.buffer_to_display(head_point, Bias::Left);
         if head_display.row >= start_row && head_display.row < end_row {
             let row_idx = (head_display.row - start_row) as usize;
             let row_text: &str = rendered_rows[row_idx].text.as_ref();

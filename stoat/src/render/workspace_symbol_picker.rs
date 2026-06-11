@@ -8,6 +8,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Widget},
 };
+use stoat_text::Bias;
 
 /// Paint either the workspace-symbol input modal or the result
 /// picker, whichever is active. Anchored to the focused editor's
@@ -240,7 +241,7 @@ fn cursor_screen_position(
         return None;
     }
     let point = rope.offset_to_point(anchor_offset);
-    let display = snapshot.buffer_to_display(point);
+    let display = snapshot.buffer_to_display(point, Bias::Left);
     if display.row < editor.scroll_row {
         return None;
     }

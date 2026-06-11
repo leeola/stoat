@@ -244,14 +244,14 @@ fn visible_buffer_rows(
         .min(max_display_row.saturating_add(1));
 
     let start_buffer = display_snapshot
-        .display_to_buffer(DisplayPoint::new(start_display, 0))?
+        .display_to_buffer(DisplayPoint::new(start_display, 0), Bias::Left)?
         .row;
     let end_buffer = if end_display == 0 {
         0
     } else {
         let probe = end_display.saturating_sub(1);
         let buffer = display_snapshot
-            .display_to_buffer(DisplayPoint::new(probe, 0))?
+            .display_to_buffer(DisplayPoint::new(probe, 0), Bias::Left)?
             .row;
         buffer.saturating_add(1)
     };

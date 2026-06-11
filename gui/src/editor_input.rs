@@ -183,7 +183,7 @@ impl EntityInputHandler for EditorInput {
             let display_snapshot = ed.display_map().update(cx, |dm, _| dm.snapshot());
             let snapshot = ed.multi_buffer().read(cx).snapshot();
             let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
-            let buffer_point = display_snapshot.display_to_buffer(clipped)?;
+            let buffer_point = display_snapshot.display_to_buffer(clipped, Bias::Left)?;
             let byte_offset = snapshot.rope().point_to_offset(buffer_point);
             Some(snapshot.rope().offset_to_offset_utf16(byte_offset).0)
         })

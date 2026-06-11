@@ -8,6 +8,7 @@ use ratatui::{
     layout::Rect,
     widgets::{Block, Borders, Widget},
 };
+use stoat_text::Bias;
 
 /// Visible-window size for the symbol picker. The list scrolls so
 /// `selected_idx` stays inside this window; visible rows are
@@ -185,7 +186,7 @@ fn cursor_screen_position(
         return None;
     }
     let point = rope.offset_to_point(anchor_offset);
-    let display = snapshot.buffer_to_display(point);
+    let display = snapshot.buffer_to_display(point, Bias::Left);
     if display.row < editor.scroll_row {
         return None;
     }

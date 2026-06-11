@@ -1299,7 +1299,7 @@ impl Stoat {
         let snapshot = editor.display_map.snapshot();
         let raw = crate::display_map::DisplayPoint::new(display_row, display_col);
         let clipped = snapshot.clip_point(raw, Bias::Left);
-        let buffer_pt = snapshot.display_to_buffer(clipped)?;
+        let buffer_pt = snapshot.display_to_buffer(clipped, Bias::Left)?;
         Some(snapshot.buffer_snapshot().rope().point_to_offset(buffer_pt))
     }
 

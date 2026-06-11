@@ -6,7 +6,7 @@ use ratatui::{
     style::{Modifier, Style},
 };
 use std::{collections::BTreeMap, path::Path};
-use stoat_text::cursor_offset;
+use stoat_text::{cursor_offset, Bias};
 
 pub(crate) fn render_editor(
     editor: &mut EditorState,
@@ -130,7 +130,7 @@ pub(crate) fn render_editor_with_overlay(
                     };
                     if ch != '\n' {
                         let point = rope.offset_to_point(offset);
-                        let display = snapshot.buffer_to_display(point);
+                        let display = snapshot.buffer_to_display(point, Bias::Left);
                         if display.row >= editor.scroll_row && display.row < end_row {
                             let y = inner.y + (display.row - editor.scroll_row) as u16;
                             let x = inner.x + display.column as u16;
@@ -168,7 +168,7 @@ pub(crate) fn render_editor_with_overlay(
                 };
                 if ch != '\n' && offset != cursor {
                     let point = rope.offset_to_point(offset);
-                    let display = snapshot.buffer_to_display(point);
+                    let display = snapshot.buffer_to_display(point, Bias::Left);
                     if display.row >= editor.scroll_row && display.row < end_row {
                         let y = inner.y + (display.row - editor.scroll_row) as u16;
                         let x = inner.x + display.column as u16;
@@ -183,7 +183,7 @@ pub(crate) fn render_editor_with_overlay(
         }
 
         let cursor_point = rope.offset_to_point(cursor);
-        let display = snapshot.buffer_to_display(cursor_point);
+        let display = snapshot.buffer_to_display(cursor_point, Bias::Left);
         if display.row >= editor.scroll_row && display.row < end_row {
             let y = inner.y + (display.row - editor.scroll_row) as u16;
             let x = inner.x + display.column as u16;
@@ -209,7 +209,7 @@ pub(crate) fn render_editor_with_overlay(
                 continue;
             }
             let point = rope.offset_to_point(offset);
-            let display = snapshot.buffer_to_display(point);
+            let display = snapshot.buffer_to_display(point, Bias::Left);
             if display.row < editor.scroll_row || display.row >= end_row {
                 continue;
             }

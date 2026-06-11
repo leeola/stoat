@@ -735,14 +735,14 @@ impl DisplaySnapshot {
         self.fold_snapshot().is_line_folded(inlay_point.row())
     }
 
-    pub fn buffer_to_display(&self, point: Point) -> DisplayPoint {
-        let block = self.block_snapshot.buffer_to_block(point, Bias::Left);
+    pub fn buffer_to_display(&self, point: Point, bias: Bias) -> DisplayPoint {
+        let block = self.block_snapshot.buffer_to_block(point, bias);
         DisplayPoint::new(block.row, block.column)
     }
 
-    pub fn display_to_buffer(&self, point: DisplayPoint) -> Option<Point> {
+    pub fn display_to_buffer(&self, point: DisplayPoint, bias: Bias) -> Option<Point> {
         self.block_snapshot
-            .block_to_buffer(BlockPoint::new(point.row, point.column), Bias::Left)
+            .block_to_buffer(BlockPoint::new(point.row, point.column), bias)
     }
 
     pub fn classify_row(&self, display_row: u32) -> BlockRowKind<'_> {
@@ -908,17 +908,19 @@ impl DisplaySnapshot {
     }
 
     pub fn prev_line_boundary(&self, point: Point) -> (Point, DisplayPoint) {
-        let display = self.buffer_to_display(point);
+        let display = self.buffer_to_display(point, Bias::Left);
         let start = DisplayPoint::new(display.row, 0);
-        let buf = self.display_to_buffer(start).unwrap_or(Point::zero());
+        let buf = self
+            .display_to_buffer(start, Bias::Left)
+            .unwrap_or(Point::zero());
         (buf, start)
     }
 
     pub fn next_line_boundary(&self, point: Point) -> (Point, DisplayPoint) {
-        let display = self.buffer_to_display(point);
+        let display = self.buffer_to_display(point, Bias::Left);
         let end = DisplayPoint::new(display.row, self.line_len(display.row));
         let max = self.block_snapshot.buffer_snapshot().rope().max_point();
-        let buf = self.display_to_buffer(end).unwrap_or(max);
+        let buf = self.display_to_buffer(end, Bias::Left).unwrap_or(max);
         (buf, end)
     }
 
@@ -1090,10 +1092,10 @@ mod tests {
         let snapshot = display_map.snapshot();
 
         let buffer_point = Point::new(1, 3);
-        let display_point = snapshot.buffer_to_display(buffer_point);
+        let display_point = snapshot.buffer_to_display(buffer_point, Bias::Left);
         assert_eq!(display_point, DisplayPoint::new(1, 3));
 
-        let back = snapshot.display_to_buffer(display_point);
+        let back = snapshot.display_to_buffer(display_point, Bias::Left);
         assert_eq!(back, Some(buffer_point));
     }
 
@@ -1151,14 +1153,14 @@ mod tests {
         let mut display_map = create_display_map("\thello");
         let snapshot = display_map.snapshot();
 
-        let display = snapshot.buffer_to_display(Point::new(0, 1));
+        let display = snapshot.buffer_to_display(Point::new(0, 1), Bias::Left);
         assert_eq!(display, DisplayPoint::new(0, 4));
 
-        let back = snapshot.display_to_buffer(display).unwrap();
+        let back = snapshot.display_to_buffer(display, Bias::Left).unwrap();
         assert_eq!(back, Point::new(0, 1));
 
         let display5 = DisplayPoint::new(0, 5);
-        let back5 = snapshot.display_to_buffer(display5).unwrap();
+        let back5 = snapshot.display_to_buffer(display5, Bias::Left).unwrap();
         assert_eq!(back5, Point::new(0, 2));
     }
 
@@ -1168,8 +1170,8 @@ mod tests {
         display_map.fold(vec![Point::new(0, 11)..Point::new(2, 0)]);
         let snapshot = display_map.snapshot();
 
-        let display = snapshot.buffer_to_display(Point::new(2, 1));
-        let back = snapshot.display_to_buffer(display).unwrap();
+        let display = snapshot.buffer_to_display(Point::new(2, 1), Bias::Left);
+        let back = snapshot.display_to_buffer(display, Bias::Left).unwrap();
         assert_eq!(back, Point::new(2, 1));
     }
 

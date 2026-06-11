@@ -186,7 +186,7 @@ impl Editor {
                     buffer_snapshot.resolve_anchor(&sel.head()),
                 );
                 let cursor_point = buffer_snapshot.rope().offset_to_point(cursor_off);
-                let cursor_display = display_snapshot.buffer_to_display(cursor_point);
+                let cursor_display = display_snapshot.buffer_to_display(cursor_point, Bias::Left);
                 let goal_col = match sel.goal {
                     SelectionGoal::Column(c) => c,
                     SelectionGoal::None => cursor_display.column,
@@ -199,7 +199,8 @@ impl Editor {
                 let clamped_col = goal_col.min(display_snapshot.line_len(new_row));
                 let raw = DisplayPoint::new(new_row, clamped_col);
                 let clipped = display_snapshot.clip_point(raw, Bias::Left);
-                let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+                let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped, Bias::Left)
+                else {
                     return sel.clone();
                 };
                 let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
@@ -747,7 +748,7 @@ mod tests {
             let buffer_snap = ed.multi_buffer().read(cx).snapshot();
             let head_anchor = ed.selections().all_anchors()[0].head();
             let head_point = buffer_snap.point_for_anchor(&head_anchor);
-            snapshot.buffer_to_display(head_point).row
+            snapshot.buffer_to_display(head_point, Bias::Left).row
         })
     }
 

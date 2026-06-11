@@ -1,7 +1,7 @@
 use crate::{
     app::Stoat, editor_state::EditorId, pane::PaneId, test_harness::cursor_notation, View,
 };
-use stoat_text::cursor_offset;
+use stoat_text::{cursor_offset, Bias};
 
 /// Append `text` at offset 0 in the focused editor's buffer. Panics
 /// if the focused pane is not an editor.
@@ -208,7 +208,7 @@ pub(crate) fn cursor_display_positions(stoat: &mut Stoat) -> Vec<(u32, u32)> {
             let head = buffer_snapshot.resolve_anchor(&sel.head());
             let tail = buffer_snapshot.resolve_anchor(&sel.tail());
             let point = rope.offset_to_point(cursor_offset(rope, tail, head));
-            let display = snapshot.buffer_to_display(point);
+            let display = snapshot.buffer_to_display(point, Bias::Left);
             (display.row, display.column)
         })
         .collect()

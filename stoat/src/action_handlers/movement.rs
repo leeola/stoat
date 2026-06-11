@@ -207,7 +207,7 @@ fn add_selection_in_direction_step(stoat: &mut Stoat, dir: AddDirection) -> Upda
     let source = editor.selections.newest_anchor().clone();
     let source_head = source.head();
     let source_point = buffer_snapshot.point_for_anchor(&source_head);
-    let source_display = display_snapshot.buffer_to_display(source_point);
+    let source_display = display_snapshot.buffer_to_display(source_point, Bias::Left);
 
     let goal_col = match source.goal {
         SelectionGoal::Column(c) => c,
@@ -234,7 +234,7 @@ fn add_selection_in_direction_step(stoat: &mut Stoat, dir: AddDirection) -> Upda
         let clamped_col = goal_col.min(display_snapshot.line_len(row));
         let raw = DisplayPoint::new(row, clamped_col);
         let clipped = display_snapshot.clip_point(raw, Bias::Left);
-        let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+        let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped, Bias::Left) else {
             continue;
         };
         let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
@@ -304,7 +304,7 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
     editor.selections.transform(buffer_snapshot, |sel| {
         let head_anchor = sel.head();
         let head_point = buffer_snapshot.point_for_anchor(&head_anchor);
-        let head_display = display_snapshot.buffer_to_display(head_point);
+        let head_display = display_snapshot.buffer_to_display(head_point, Bias::Left);
         let goal_col = match sel.goal {
             SelectionGoal::Column(c) => c,
             SelectionGoal::None => head_display.column,
@@ -317,7 +317,7 @@ pub(super) fn move_vertical(stoat: &mut Stoat, delta: i32, extend: bool) -> Upda
         let clamped_col = goal_col.min(display_snapshot.line_len(new_row));
         let raw = DisplayPoint::new(new_row, clamped_col);
         let clipped = display_snapshot.clip_point(raw, Bias::Left);
-        let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+        let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped, Bias::Left) else {
             return sel.clone();
         };
         let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
@@ -586,7 +586,7 @@ pub(super) fn align_selections(stoat: &mut Stoat) -> UpdateEffect {
                 return UpdateEffect::None;
             }
             let head_pt = if sel.reversed { start_pt } else { end_pt };
-            let head_display = display_snapshot.buffer_to_display(head_pt);
+            let head_display = display_snapshot.buffer_to_display(head_pt, Bias::Left);
             out.push(AlignEntry {
                 insert_offset: start_offset,
                 head_col: head_display.column,

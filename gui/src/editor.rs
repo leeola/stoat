@@ -1750,7 +1750,7 @@ impl Editor {
                 return;
             }
             let head_pt = if sel.reversed { start_pt } else { end_pt };
-            let head_display = display_snapshot.buffer_to_display(head_pt);
+            let head_display = display_snapshot.buffer_to_display(head_pt, Bias::Left);
             entries.push(AlignEntry {
                 insert_offset: start_offset,
                 head_col: head_display.column,
@@ -1945,7 +1945,7 @@ impl Editor {
         let source = self.selections.newest_anchor().clone();
         let source_head = source.head();
         let source_point = buffer_snapshot.point_for_anchor(&source_head);
-        let source_display = display_snapshot.buffer_to_display(source_point);
+        let source_display = display_snapshot.buffer_to_display(source_point, Bias::Left);
         let goal_col = match source.goal {
             SelectionGoal::Column(c) => c,
             SelectionGoal::None => source_display.column,
@@ -1971,7 +1971,7 @@ impl Editor {
             let clamped_col = goal_col.min(display_snapshot.line_len(row));
             let raw = DisplayPoint::new(row, clamped_col);
             let clipped = display_snapshot.clip_point(raw, Bias::Left);
-            let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped) else {
+            let Some(buffer_pt) = display_snapshot.display_to_buffer(clipped, Bias::Left) else {
                 continue;
             };
             let offset = buffer_snapshot.rope().point_to_offset(buffer_pt);
@@ -2492,7 +2492,7 @@ impl Editor {
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
         let snapshot = self.multi_buffer.read(cx).snapshot();
         let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
-        let Some(buffer_point) = display_snapshot.display_to_buffer(clipped) else {
+        let Some(buffer_point) = display_snapshot.display_to_buffer(clipped, Bias::Left) else {
             return;
         };
         let offset = snapshot.rope().point_to_offset(buffer_point);
@@ -3468,7 +3468,7 @@ impl Editor {
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
         let snapshot = self.multi_buffer.read(cx).snapshot();
         let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
-        let Some(buffer_point) = display_snapshot.display_to_buffer(clipped) else {
+        let Some(buffer_point) = display_snapshot.display_to_buffer(clipped, Bias::Left) else {
             return;
         };
         let offset = snapshot.rope().point_to_offset(buffer_point);
@@ -3581,7 +3581,7 @@ impl Editor {
             return false;
         }
         let Some(buffer_row) = display_snapshot
-            .display_to_buffer(DisplayPoint::new(row, 0))
+            .display_to_buffer(DisplayPoint::new(row, 0), Bias::Left)
             .map(|p| p.row)
         else {
             return false;
@@ -3812,7 +3812,7 @@ impl Editor {
             let head = selection.head();
             let head_offset = multi_buffer_snapshot.resolve_anchor(&head);
             let head_point = multi_buffer_snapshot.rope().offset_to_point(head_offset);
-            let head_display = display_snapshot.buffer_to_display(head_point);
+            let head_display = display_snapshot.buffer_to_display(head_point, Bias::Left);
             min_row = min_row.min(head_display.row);
             max_row = max_row.max(head_display.row);
         }
@@ -3826,7 +3826,7 @@ impl Editor {
             let head = newest.head();
             let head_offset = multi_buffer_snapshot.resolve_anchor(&head);
             let head_point = multi_buffer_snapshot.rope().offset_to_point(head_offset);
-            let head_display = display_snapshot.buffer_to_display(head_point);
+            let head_display = display_snapshot.buffer_to_display(head_point, Bias::Left);
             target_top = head_display.row as f64;
             target_bottom = target_top + 1.0;
         }
@@ -3882,7 +3882,7 @@ impl Editor {
             .rope()
             .offset_utf16_to_offset(OffsetUtf16(offset_utf16));
         let buffer_point = snapshot.rope().offset_to_point(byte_offset);
-        let display_point = display_snapshot.buffer_to_display(buffer_point);
+        let display_point = display_snapshot.buffer_to_display(buffer_point, Bias::Left);
         let origin = Point::new(
             element_origin.x + cell.width * display_point.column as usize,
             element_origin.y + cell.height * display_point.row as usize,
@@ -4213,10 +4213,10 @@ impl Editor {
             match (show, self.cell_size) {
                 (true, Some(cell)) => {
                     let cursor_display_row = display_snapshot
-                        .buffer_to_display(stoat_text::Point::new(
-                            self.primary_cursor_buffer_row(cx),
-                            0,
-                        ))
+                        .buffer_to_display(
+                            stoat_text::Point::new(self.primary_cursor_buffer_row(cx), 0),
+                            Bias::Left,
+                        )
                         .row;
                     let theme = cx.theme();
                     Some(render::IndentGuidePaint {
@@ -4264,11 +4264,14 @@ impl Editor {
         let cursor_buffer_row = self.primary_cursor_buffer_row(cx);
         let fold_chevron_rows: Vec<u32> = {
             let first_buffer_row = display_snapshot
-                .display_to_buffer(DisplayPoint::new(start as u32, 0))
+                .display_to_buffer(DisplayPoint::new(start as u32, 0), Bias::Left)
                 .map(|p| p.row)
                 .unwrap_or(0);
             let last_buffer_row = display_snapshot
-                .display_to_buffer(DisplayPoint::new(end.saturating_sub(1) as u32, 0))
+                .display_to_buffer(
+                    DisplayPoint::new(end.saturating_sub(1) as u32, 0),
+                    Bias::Left,
+                )
                 .map(|p| p.row)
                 .unwrap_or(first_buffer_row);
             fold_actions::foldable_container_ranges_in_range(
@@ -4444,7 +4447,7 @@ impl Render for Editor {
                 let first_display_row =
                     self.scroll_manager().anchor().offset.y.max(0.0).floor() as u32;
                 let header = snapshot
-                    .display_to_buffer(DisplayPoint::new(first_display_row, 0))
+                    .display_to_buffer(DisplayPoint::new(first_display_row, 0), Bias::Left)
                     .map(|p| p.row)
                     .and_then(|row| sticky_scroll::sticky_header(self, row, cx));
                 if let Some(header) = header {

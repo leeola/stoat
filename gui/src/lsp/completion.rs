@@ -20,6 +20,7 @@ use stoat::{
     lsp::util::{byte_offset_to_lsp_pos, lsp_range_to_byte_range},
     snippet::UserSnippet,
 };
+use stoat_text::Bias;
 
 /// Floating popup that lists completions from the language server
 /// at the active editor's cursor. Mirrors [`HoverPopup`] in shape:
@@ -262,7 +263,7 @@ impl Render for CompletionPopup {
         let display_snapshot = display_map.update(cx, |dm, _| dm.snapshot());
         let mb_snapshot = multi_buffer.read(cx).snapshot();
         let cursor_point = mb_snapshot.rope().offset_to_point(self.anchor_offset);
-        let display = display_snapshot.buffer_to_display(cursor_point);
+        let display = display_snapshot.buffer_to_display(cursor_point, Bias::Left);
         let origin = popup_origin(bounds, cell, display.row, display.column);
 
         let theme = cx.theme();
@@ -700,7 +701,7 @@ mod tests {
         // Move cursor to end of text via direct selection mutation.
         editor.update(&mut cx, |ed, cx| {
             let snap = ed.multi_buffer().read(cx).snapshot();
-            let anchor = snap.anchor_at(2, stoat_text::Bias::Left);
+            let anchor = snap.anchor_at(2, Bias::Left);
             let selection = stoat_text::Selection {
                 id: 1,
                 start: anchor,
@@ -733,7 +734,7 @@ mod tests {
     fn seed_cursor(cx: &mut TestAppContext, editor: &Entity<Editor>, offset: usize) {
         editor.update(cx, |ed, cx| {
             let snap = ed.multi_buffer().read(cx).snapshot();
-            let anchor = snap.anchor_at(offset, stoat_text::Bias::Left);
+            let anchor = snap.anchor_at(offset, Bias::Left);
             let selection = stoat_text::Selection {
                 id: 1,
                 start: anchor,
@@ -896,7 +897,7 @@ mod tests {
         set_mode(&mut cx, &workspace, "insert");
         editor.update(&mut cx, |ed, cx| {
             let snap = ed.multi_buffer().read(cx).snapshot();
-            let anchor = snap.anchor_at(2, stoat_text::Bias::Left);
+            let anchor = snap.anchor_at(2, Bias::Left);
             let selection = stoat_text::Selection {
                 id: 1,
                 start: anchor,
@@ -1003,7 +1004,7 @@ mod tests {
         set_mode(&mut cx, &workspace, "insert");
         editor.update(&mut cx, |ed, cx| {
             let snap = ed.multi_buffer().read(cx).snapshot();
-            let anchor = snap.anchor_at(2, stoat_text::Bias::Left);
+            let anchor = snap.anchor_at(2, Bias::Left);
             let selection = stoat_text::Selection {
                 id: 1,
                 start: anchor,
@@ -1092,7 +1093,7 @@ mod tests {
         set_mode(&mut cx, &workspace, "insert");
         editor.update(&mut cx, |ed, cx| {
             let snap = ed.multi_buffer().read(cx).snapshot();
-            let anchor = snap.anchor_at(2, stoat_text::Bias::Left);
+            let anchor = snap.anchor_at(2, Bias::Left);
             let selection = stoat_text::Selection {
                 id: 1,
                 start: anchor,

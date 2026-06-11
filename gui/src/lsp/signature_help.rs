@@ -203,7 +203,7 @@ impl Render for SignatureHelpManager {
         let display_snapshot = display_map.update(cx, |dm, _| dm.snapshot());
         let mb_snapshot = multi_buffer.read(cx).snapshot();
         let buffer_point = mb_snapshot.point_for_anchor(&anchor);
-        let display = display_snapshot.buffer_to_display(buffer_point);
+        let display = display_snapshot.buffer_to_display(buffer_point, Bias::Left);
 
         let sig_idx = self.active_signature.unwrap_or(0) as usize;
         let Some(signature) = self.signatures.get(sig_idx) else {

@@ -68,6 +68,7 @@ use stoat::{
 };
 use stoat_action::ActionKind;
 use stoat_config::LineNumberMode;
+use stoat_text::Bias;
 
 /// Top-level workspace entity. Composes the structural pieces of
 /// a single Stoat window: the git root, the pane tree, any docks
@@ -3362,7 +3363,7 @@ impl Workspace {
             let head_offset = mb_snapshot.resolve_anchor(&newest.head());
             let head_point = mb_snapshot.rope().offset_to_point(head_offset);
             let display_snapshot = ed.display_map().update(cx, |dm, _| dm.snapshot());
-            let head_display = display_snapshot.buffer_to_display(head_point);
+            let head_display = display_snapshot.buffer_to_display(head_point, Bias::Left);
             ed.set_hover_position(Some((head_display.row, head_display.column)), cx);
         });
     }
@@ -10922,8 +10923,8 @@ mod tests {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
             let sel = stoat_text::Selection {
                 id: 600,
-                start: snapshot.anchor_at(0, stoat_text::Bias::Left),
-                end: snapshot.anchor_at(7, stoat_text::Bias::Right),
+                start: snapshot.anchor_at(0, Bias::Left),
+                end: snapshot.anchor_at(7, Bias::Right),
                 reversed: false,
                 goal: stoat_text::SelectionGoal::None,
             };
@@ -11116,7 +11117,7 @@ mod tests {
         let editor = new_singleton_editor(vcx, "foo ( bar )");
         editor.update(vcx, |ed, cx| {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
-            let anchor = snapshot.anchor_at(4, stoat_text::Bias::Left);
+            let anchor = snapshot.anchor_at(4, Bias::Left);
             let sel = stoat_text::Selection {
                 id: 800,
                 start: anchor,
@@ -11146,8 +11147,8 @@ mod tests {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
             let sel = stoat_text::Selection {
                 id: 700,
-                start: snapshot.anchor_at(3, stoat_text::Bias::Left),
-                end: snapshot.anchor_at(3, stoat_text::Bias::Left),
+                start: snapshot.anchor_at(3, Bias::Left),
+                end: snapshot.anchor_at(3, Bias::Left),
                 reversed: false,
                 goal: stoat_text::SelectionGoal::None,
             };
@@ -11186,8 +11187,8 @@ mod tests {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
             let sel = stoat_text::Selection {
                 id: 400,
-                start: snapshot.anchor_at(0, stoat_text::Bias::Left),
-                end: snapshot.anchor_at(3, stoat_text::Bias::Right),
+                start: snapshot.anchor_at(0, Bias::Left),
+                end: snapshot.anchor_at(3, Bias::Right),
                 reversed: false,
                 goal: stoat_text::SelectionGoal::None,
             };
@@ -11345,7 +11346,7 @@ mod tests {
             let buffer_snap = ed.multi_buffer().read(cx).snapshot();
             let head_anchor = ed.selections().all_anchors()[0].head();
             let head_point = buffer_snap.point_for_anchor(&head_anchor);
-            snapshot.buffer_to_display(head_point).row
+            snapshot.buffer_to_display(head_point, Bias::Left).row
         });
         assert_eq!(row, 1);
     }
@@ -12128,8 +12129,8 @@ mod tests {
             .expect("singleton");
         editor.update(vcx, |ed, cx| {
             let snapshot = ed.multi_buffer().read(cx).snapshot();
-            let start = snapshot.anchor_at(0, stoat_text::Bias::Right);
-            let end = snapshot.anchor_at(5, stoat_text::Bias::Left);
+            let start = snapshot.anchor_at(0, Bias::Right);
+            let end = snapshot.anchor_at(5, Bias::Left);
             ed.selections_mut().replace_with(
                 vec![stoat_text::Selection {
                     id: 1,
