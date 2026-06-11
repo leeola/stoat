@@ -1,53 +1,117 @@
+//! Classification of Unicode characters that render blank or near-blank and
+//! are easily confused with ordinary spacing -- ASCII and C1 control codes,
+//! non-ASCII whitespace, and the Format / invisible Nonspacing-Mark categories
+//! (byte-order marks, bidirectional overrides, zero-width spaces, variation
+//! selectors). Marking them guards against homoglyph and bidi-override source
+//! spoofing and surfaces stray formatting characters.
+//!
+//! Unassigned codepoints are deliberately left unmarked: the font renderer
+//! already substitutes a replacement glyph for those, and there are a great
+//! many of them.
+
+/// Whether `c` should be surfaced as a stray invisible. ASCII tab, newline,
+/// and carriage return are excluded (they have structural meaning); the
+/// ideographic space is excluded because it already renders visibly wide.
 pub fn is_invisible(c: char) -> bool {
-    matches!(c,
-        '\u{0000}'..='\u{0008}'
-        | '\u{000E}'..='\u{001F}'
-        | '\u{007F}'
-        | '\u{0080}'..='\u{009F}'
-        | '\u{00AD}'
-        | '\u{034F}'
-        | '\u{061C}'
-        | '\u{115F}'..='\u{1160}'
-        | '\u{17B4}'..='\u{17B5}'
-        | '\u{180E}'
-        | '\u{200B}'..='\u{200F}'
-        | '\u{202A}'..='\u{202E}'
-        | '\u{2060}'..='\u{2064}'
-        | '\u{2066}'..='\u{206F}'
-        | '\u{FE00}'..='\u{FE0F}'
-        | '\u{FEFF}'
-        | '\u{FFF9}'..='\u{FFFB}'
-        | '\u{0600}'..='\u{0605}'
-        | '\u{E0001}'
-        | '\u{E0020}'..='\u{E007F}'
-        | '\u{E0100}'..='\u{E01EF}'
-    )
+    if c <= '\u{1f}' {
+        c != '\t' && c != '\n' && c != '\r'
+    } else if c >= '\u{7f}' {
+        c <= '\u{9f}'
+            || (c.is_whitespace() && c != IDEOGRAPHIC_SPACE)
+            || contains(c, FORMAT)
+            || contains(c, OTHER)
+    } else {
+        false
+    }
 }
 
-pub fn replacement(c: char) -> Option<&'static str> {
-    match c {
-        '\u{0000}' => Some("NUL"),
-        '\u{0001}' => Some("SOH"),
-        '\u{0002}' => Some("STX"),
-        '\u{0003}' => Some("ETX"),
-        '\u{0004}' => Some("EOT"),
-        '\u{0005}' => Some("ENQ"),
-        '\u{0006}' => Some("ACK"),
-        '\u{0007}' => Some("BEL"),
-        '\u{0008}' => Some("BS"),
-        '\u{000E}' => Some("SO"),
-        '\u{000F}' => Some("SI"),
-        '\u{007F}' => Some("DEL"),
-        '\u{00AD}' => Some("SHY"),
-        '\u{200B}' => Some("ZWSP"),
-        '\u{200C}' => Some("ZWNJ"),
-        '\u{200D}' => Some("ZWJ"),
-        '\u{200E}' => Some("LRM"),
-        '\u{200F}' => Some("RLM"),
-        '\u{FEFF}' => Some("BOM"),
-        _ if is_invisible(c) => Some("?"),
-        _ => None,
+/// The single visible cell to substitute for a marked invisible, or `None`
+/// for the [`PRESERVE`] set -- combining characters (e.g. ZWJ) that sit inside
+/// a composed glyph and must be kept verbatim so emoji and similar are not
+/// shredded.
+///
+/// Only meaningful for characters [`is_invisible`] accepts; a visible
+/// character passed here returns a fixed-width space.
+pub fn replacement(c: char) -> Option<char> {
+    if c <= '\u{1f}' {
+        // C0 control pictures occupy U+2400..=U+241F, one per control code.
+        char::from_u32(0x2400 + c as u32)
+    } else if c == '\u{7f}' {
+        Some('\u{2421}')
+    } else if contains(c, PRESERVE) {
+        None
+    } else {
+        Some('\u{2007}')
     }
+}
+
+/// Common alongside wide character sets and already rendered visibly wide, so
+/// it is not treated as a stray invisible.
+const IDEOGRAPHIC_SPACE: char = '\u{3000}';
+
+/// General-category Format characters (Unicode 16).
+const FORMAT: &[(char, char)] = &[
+    ('\u{ad}', '\u{ad}'),
+    ('\u{600}', '\u{605}'),
+    ('\u{61c}', '\u{61c}'),
+    ('\u{6dd}', '\u{6dd}'),
+    ('\u{70f}', '\u{70f}'),
+    ('\u{890}', '\u{891}'),
+    ('\u{8e2}', '\u{8e2}'),
+    ('\u{180e}', '\u{180e}'),
+    ('\u{200b}', '\u{200f}'),
+    ('\u{202a}', '\u{202e}'),
+    ('\u{2060}', '\u{2064}'),
+    ('\u{2066}', '\u{206f}'),
+    ('\u{feff}', '\u{feff}'),
+    ('\u{fff9}', '\u{fffb}'),
+    ('\u{110bd}', '\u{110bd}'),
+    ('\u{110cd}', '\u{110cd}'),
+    ('\u{13430}', '\u{1343f}'),
+    ('\u{1bca0}', '\u{1bca3}'),
+    ('\u{1d173}', '\u{1d17a}'),
+    ('\u{e0001}', '\u{e0001}'),
+    ('\u{e0020}', '\u{e007f}'),
+];
+
+/// Other blank or invisible Nonspacing Marks (excluding Format). Variation
+/// selectors stop at FE0D: VS15/VS16 (FE0E/FE0F) select text vs. emoji
+/// presentation and must not be marked.
+const OTHER: &[(char, char)] = &[
+    ('\u{034f}', '\u{034f}'),
+    ('\u{115f}', '\u{1160}'),
+    ('\u{17b4}', '\u{17b5}'),
+    ('\u{180b}', '\u{180d}'),
+    ('\u{2800}', '\u{2800}'),
+    ('\u{3164}', '\u{3164}'),
+    ('\u{fe00}', '\u{fe0d}'),
+    ('\u{ffa0}', '\u{ffa0}'),
+    ('\u{fffc}', '\u{fffc}'),
+    ('\u{e0100}', '\u{e01ef}'),
+];
+
+/// The subset of [`FORMAT`]/[`OTHER`] that appears within composed glyphs;
+/// [`replacement`] keeps these verbatim rather than substituting a cell.
+const PRESERVE: &[(char, char)] = &[
+    ('\u{034f}', '\u{034f}'),
+    ('\u{200d}', '\u{200d}'),
+    ('\u{17b4}', '\u{17b5}'),
+    ('\u{180b}', '\u{180d}'),
+    ('\u{e0061}', '\u{e007a}'),
+    ('\u{e007f}', '\u{e007f}'),
+];
+
+/// Membership test over a start-sorted list of inclusive ranges.
+fn contains(c: char, list: &[(char, char)]) -> bool {
+    for &(start, end) in list {
+        if c < start {
+            return false;
+        }
+        if c <= end {
+            return true;
+        }
+    }
+    false
 }
 
 #[cfg(test)]
@@ -55,29 +119,50 @@ mod tests {
     use super::{is_invisible, replacement};
 
     #[test]
-    fn control_chars_detected() {
+    fn controls_and_c1_are_invisible() {
         assert!(is_invisible('\u{0000}'));
-        assert!(is_invisible('\u{0001}'));
-        assert!(is_invisible('\u{007F}'));
-        assert!(is_invisible('\u{200B}'));
-        assert!(is_invisible('\u{FEFF}'));
-    }
-
-    #[test]
-    fn normal_chars_not_detected() {
-        assert!(!is_invisible('a'));
-        assert!(!is_invisible('Z'));
-        assert!(!is_invisible(' '));
+        assert!(is_invisible('\u{001f}'));
+        assert!(is_invisible('\u{007f}'));
+        assert!(is_invisible('\u{0085}'));
         assert!(!is_invisible('\t'));
         assert!(!is_invisible('\n'));
+        assert!(!is_invisible('\r'));
     }
 
     #[test]
-    fn replacements_correct() {
-        assert_eq!(replacement('\u{0000}'), Some("NUL"));
-        assert_eq!(replacement('\u{007F}'), Some("DEL"));
-        assert_eq!(replacement('\u{200B}'), Some("ZWSP"));
-        assert_eq!(replacement('\u{FEFF}'), Some("BOM"));
-        assert_eq!(replacement('a'), None);
+    fn ordinary_chars_not_invisible() {
+        assert!(!is_invisible('a'));
+        assert!(!is_invisible(' '));
+        assert!(!is_invisible('世'));
+        assert!(!is_invisible('\u{3000}'));
+    }
+
+    #[test]
+    fn spoofing_chars_marked() {
+        assert!(is_invisible('\u{202e}'));
+        assert!(is_invisible('\u{00a0}'));
+        assert!(is_invisible('\u{200b}'));
+        assert_eq!(replacement('\u{202e}'), Some('\u{2007}'));
+        assert_eq!(replacement('\u{00a0}'), Some('\u{2007}'));
+    }
+
+    #[test]
+    fn combining_chars_invisible_but_preserved() {
+        assert!(is_invisible('\u{200d}'));
+        assert_eq!(replacement('\u{200d}'), None);
+        assert_eq!(replacement('\u{034f}'), None);
+    }
+
+    #[test]
+    fn variation_selectors_15_16_not_marked() {
+        assert!(!is_invisible('\u{fe0e}'));
+        assert!(!is_invisible('\u{fe0f}'));
+    }
+
+    #[test]
+    fn control_pictures() {
+        assert_eq!(replacement('\u{0000}'), Some('\u{2400}'));
+        assert_eq!(replacement('\u{001f}'), Some('\u{241f}'));
+        assert_eq!(replacement('\u{007f}'), Some('\u{2421}'));
     }
 }
