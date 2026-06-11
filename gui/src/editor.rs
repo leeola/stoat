@@ -3257,9 +3257,12 @@ impl Editor {
         }
     }
 
-    /// Rows containing a match of the active search query, sorted and
-    /// deduplicated. Empty when no search is active, the query is empty,
-    /// or the query does not compile as a regex.
+    /// Rows containing a match of the active search query, ascending and
+    /// each row at most once. Empty when no search is active, the query is
+    /// empty, or the query does not compile as a regex.
+    ///
+    /// Each row is tested against its own line, so the buffer is never
+    /// copied whole; a pattern that spans a newline does not register.
     fn search_hit_rows(&self, cx: &App) -> Vec<u32> {
         let Some(state) = self.search_state.as_ref() else {
             return Vec::new();
@@ -3273,14 +3276,9 @@ impl Editor {
 
         let snapshot = self.multi_buffer().read(cx).snapshot();
         let rope = snapshot.rope();
-        let text = rope.to_string();
-
-        let mut rows: Vec<u32> = regex
-            .find_iter(&text)
-            .map(|m| rope.offset_to_point(m.start()).row)
-            .collect();
-        rows.dedup();
-        rows
+        (0..=rope.max_point().row)
+            .filter(|&row| regex.is_match(&rope.line_at_row(row)))
+            .collect()
     }
 
     /// Construct the [`crate::lsp::SemanticTokensManager`] entity
