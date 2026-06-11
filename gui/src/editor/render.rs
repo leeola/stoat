@@ -1006,10 +1006,11 @@ pub(crate) fn compute_selection_paint(
             let hi_point = buffer.rope().offset_to_point(hi);
             let lo_display = snapshot.buffer_to_display(lo_point);
             let hi_display = snapshot.buffer_to_display(hi_point);
-            for row in lo_display.row..=hi_display.row {
-                if row < start_row || row >= end_row {
-                    continue;
-                }
+            // Clamp to the on-screen intersection so a selection spanning
+            // many rows (e.g. select-all) does not walk every document row.
+            let first = lo_display.row.max(start_row);
+            let last = hi_display.row.saturating_add(1).min(end_row);
+            for row in first..last {
                 let row_idx = (row - start_row) as usize;
                 let row_text: &str = rendered_rows[row_idx].text.as_ref();
                 let row_char_count = row_text.chars().count() as u32;
@@ -3872,6 +3873,24 @@ mod tests {
         assert!(paint.row_selection_spans.is_empty());
         assert!(paint.row_cursors.is_empty());
         assert_eq!(paint.active_line_row, None);
+    }
+
+    #[test]
+    fn compute_selection_paint_clamps_selection_spanning_into_viewport() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "alpha\nbeta\ngamma");
+        let rows = build_rendered_rows(&snapshot, 1..3);
+        // Selection from row 0 col 1 down to row 2 col 2, viewport rows 1..3.
+        let sel = range_selection(&snapshot, 1, 13, false, 1);
+
+        let paint = compute_selection_paint(&snapshot, &[sel], &rows, 1);
+        assert_eq!(paint.row_selection_spans.get(&0), None);
+        assert_eq!(
+            paint.row_selection_spans.get(&1),
+            Some(&vec![0..4]),
+            "first visible row fills from column 0, not the selection start column"
+        );
+        assert_eq!(paint.row_selection_spans.get(&2), Some(&vec![0..2]));
     }
 
     #[test]
