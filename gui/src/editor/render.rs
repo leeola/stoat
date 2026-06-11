@@ -2236,7 +2236,7 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
         paint
             .fold_chevron_rows
             .contains(&row)
-            .then(|| paint.display_snapshot.is_line_folded(row + 1))
+            .then(|| paint.display_snapshot.is_line_folded(row))
     });
     let start = text.len();
     if let Some(folded) = chevron_folded {
