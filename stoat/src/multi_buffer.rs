@@ -345,6 +345,17 @@ impl MultiBuffer {
         buffer.diff_map.as_ref().map(|d| d.version()).unwrap_or(0)
     }
 
+    /// The first excerpt's buffer's diff map, freshly cloned. The single
+    /// source of diff state for a snapshot built from this buffer; read it
+    /// directly rather than through a copy embedded in the cached snapshot
+    /// chain, where it would lag behind diff refreshes that don't bump the
+    /// buffer's edit version.
+    pub fn diff_map(&self) -> Option<DiffMap> {
+        let excerpt = &self.live_excerpts[0];
+        let buffer = excerpt.buffer.read().expect("buffer lock poisoned");
+        buffer.diff_map.clone()
+    }
+
     pub fn snapshot(&self) -> MultiBufferSnapshot {
         if self.singleton {
             let excerpt = &self.live_excerpts[0];
@@ -353,7 +364,6 @@ impl MultiBuffer {
                 singleton: true,
                 buffer_snapshot: buffer.snapshot.clone(),
                 text_cache: OnceLock::new(),
-                diff_map: buffer.diff_map.clone(),
                 excerpt_tree: None,
                 excerpt_ids: None,
             }
@@ -397,7 +407,6 @@ impl MultiBuffer {
                 singleton: false,
                 buffer_snapshot: first_buf.snapshot.clone(),
                 text_cache: OnceLock::new(),
-                diff_map: first_buf.diff_map.clone(),
                 excerpt_tree: Some(tree),
                 excerpt_ids: Some(ids),
             }
@@ -613,7 +622,6 @@ pub struct MultiBufferSnapshot {
     singleton: bool,
     buffer_snapshot: TextBufferSnapshot,
     text_cache: OnceLock<String>,
-    pub diff_map: Option<DiffMap>,
     excerpt_tree: Option<SumTree<ExcerptEntry>>,
     #[allow(dead_code)]
     excerpt_ids: Option<SumTree<ExcerptIdMapping>>,
@@ -665,7 +673,6 @@ impl MultiBufferSnapshot {
             singleton: true,
             buffer_snapshot: TextBufferSnapshot::empty(),
             text_cache: OnceLock::new(),
-            diff_map: None,
             excerpt_tree: None,
             excerpt_ids: None,
         }

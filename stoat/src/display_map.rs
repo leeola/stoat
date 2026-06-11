@@ -517,7 +517,7 @@ impl DisplayMap {
         }
 
         let (wrap_snapshot, wrap_edits) = self.sync_through_wrap();
-        let diff_map = self.multi_buffer.snapshot().diff_map.clone();
+        let diff_map = self.multi_buffer.diff_map();
         let diff_version = diff_map.as_ref().map(|dm| dm.version()).unwrap_or(0);
         if diff_version != self.last_diff_version {
             let existing: HashSet<DiffBlockKey> =
@@ -818,10 +818,8 @@ impl DisplaySnapshot {
             .unwrap_or_default()
     }
 
-    /// Snapshot's freshly-cloned diff map. Prefer this over reaching for
-    /// `buffer_snapshot().diff_map`, which is read through the inlay/fold/
-    /// tab/wrap cache chain and can lag behind buffer mutations that don't
-    /// bump the buffer's edit version.
+    /// The snapshot's diff map, cloned from the buffer when the snapshot was
+    /// built -- the single source of diff state for the snapshot.
     pub fn diff_map(&self) -> Option<&DiffMap> {
         self.diff_map.as_ref()
     }
