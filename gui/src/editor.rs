@@ -24,13 +24,13 @@ use crate::{
 use gpui::{
     canvas, div, fill, font, outline, px, relative, size as gpui_size, uniform_list, App,
     AppContext, BorderStyle, Bounds, Context, DispatchPhase, Div, ElementInputHandler, Entity,
-    EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size,
-    Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
+    EntityId, EventEmitter, InteractiveElement, IntoElement, MouseButton, MouseDownEvent,
+    MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent,
+    SharedString, Size, Styled, Subscription, Task, UniformListScrollHandle, WeakEntity, Window,
 };
 use lru::LruCache;
 use serde_json::Value;
-use std::{cell::RefCell, collections::VecDeque, num::NonZeroUsize, ops::Range, sync::Arc};
+use std::{cell::RefCell, collections::VecDeque, num::NonZeroUsize, ops::Range, rc::Rc, sync::Arc};
 use stoat::{
     buffer::BufferId,
     display_map::{Block, BlockRowKind, DisplaySnapshot},
@@ -204,6 +204,8 @@ pub struct Editor {
     /// [`ScrollbarMarkerKey`] is unchanged. Interior-mutable because the
     /// minimap reads markers from the parent editor on the render path.
     scrollbar_marker_cache: RefCell<Option<(ScrollbarMarkerKey, scroll::ScrollbarMarkerSet)>>,
+    review_render_cache: RefCell<Option<(ReviewCacheKey, Rc<ReviewRenderData>)>>,
+    diff_provenance_cache: RefCell<Option<(usize, Rc<MoveProvenances>)>>,
     workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
@@ -394,10 +396,14 @@ fn touched_rows(snapshot: &MultiBufferSnapshot, selections: &SelectionsCollectio
     rows
 }
 
+/// Cross-file move provenances keyed by buffer row, sorted ascending for
+/// binary-search lookup during gutter paint.
+type MoveProvenances = Vec<(u32, stoat::review::MoveProvenance)>;
+
 #[derive(Default)]
 struct ReviewRenderData {
     chunk_markers: Vec<(u32, ChunkStatus)>,
-    provenances: Vec<(u32, stoat::review::MoveProvenance)>,
+    provenances: MoveProvenances,
     moved_spans: Vec<(u32, Range<usize>)>,
 }
 
@@ -413,7 +419,7 @@ struct ReviewRenderData {
 /// only the range-dependent work (row build, overlays, gutter paint).
 struct FrameRenderData {
     display_snapshot: DisplaySnapshot,
-    review_data: ReviewRenderData,
+    review_data: Rc<ReviewRenderData>,
     syntax: Option<(
         stoat_language::SyntaxSnapshot,
         stoat::display_map::syntax_theme::SyntaxStyles,
@@ -422,8 +428,19 @@ struct FrameRenderData {
     blame_lines: Option<Arc<[stoat::host::BlameLine]>>,
     inline_blame_lines: Option<Arc<[stoat::host::BlameLine]>>,
     diff_map: stoat::DiffMap,
-    diff_move_provenances: Vec<(u32, stoat::review::MoveProvenance)>,
+    diff_move_provenances: Rc<MoveProvenances>,
     diagnostic_row_map: Option<render::DiagnosticRowMap>,
+}
+
+/// Cache key for [`Editor::cached_review_render_data`]. The review render
+/// data is a pure function of which session and file are shown plus the
+/// session's mutation counter, so it is rebuilt only when one of these
+/// changes rather than every frame.
+#[derive(PartialEq)]
+struct ReviewCacheKey {
+    session: Option<EntityId>,
+    file_index: Option<usize>,
+    version: u64,
 }
 
 /// Cache key for [`Editor::scrollbar_markers`]. The marker set is a pure
@@ -443,9 +460,7 @@ struct ScrollbarMarkerKey {
 /// cross-file sources keep their filename chip via
 /// [`render::apply_move_chip_overlay`], so the two paths never paint the
 /// same row twice.
-fn collect_move_provenances_from_diff(
-    diff: &stoat::DiffMap,
-) -> Vec<(u32, stoat::review::MoveProvenance)> {
+fn collect_move_provenances_from_diff(diff: &stoat::DiffMap) -> MoveProvenances {
     let mut out = Vec::new();
     for hunk in diff.hunks_in_range(0..u32::MAX) {
         if !matches!(hunk.status, DiffHunkStatus::Moved) {
@@ -531,6 +546,8 @@ impl Editor {
             search_state: None,
             cached_search_regex: None,
             scrollbar_marker_cache: RefCell::new(None),
+            review_render_cache: RefCell::new(None),
+            diff_provenance_cache: RefCell::new(None),
             workspace: None,
             text_region_bounds: None,
             hover_position: None,
@@ -3919,9 +3936,58 @@ impl Editor {
         }
     }
 
+    fn review_cache_key(&self, cx: &App) -> ReviewCacheKey {
+        ReviewCacheKey {
+            session: self.review_session.as_ref().map(|s| s.entity_id()),
+            file_index: self.review_file_index,
+            version: self
+                .review_session
+                .as_ref()
+                .map_or(0, |s| s.read(cx).inner().version),
+        }
+    }
+
+    /// Review render data for the active session/file, rebuilt only when the
+    /// session, file index, or session version changes. Mirrors the
+    /// version-keyed [`Editor::scrollbar_markers`] cache so the per-frame
+    /// `uniform_list` render reuses the prior frame's data unchanged.
+    fn cached_review_render_data(&self, cx: &App) -> Rc<ReviewRenderData> {
+        let key = self.review_cache_key(cx);
+        {
+            let cache = self.review_render_cache.borrow();
+            if let Some((cached_key, data)) = cache.as_ref() {
+                if *cached_key == key {
+                    return data.clone();
+                }
+            }
+        }
+        let data = Rc::new(self.collect_review_render_data(cx));
+        *self.review_render_cache.borrow_mut() = Some((key, data.clone()));
+        data
+    }
+
+    /// Non-review cross-file move provenances derived from the diff, rebuilt
+    /// only when the diff version changes.
+    fn cached_diff_move_provenances(&self, cx: &App) -> Rc<MoveProvenances> {
+        let version = self.diff_map.read(cx).diff().version();
+        {
+            let cache = self.diff_provenance_cache.borrow();
+            if let Some((cached_version, data)) = cache.as_ref() {
+                if *cached_version == version {
+                    return data.clone();
+                }
+            }
+        }
+        let data = Rc::new(collect_move_provenances_from_diff(
+            self.diff_map.read(cx).diff(),
+        ));
+        *self.diff_provenance_cache.borrow_mut() = Some((version, data.clone()));
+        data
+    }
+
     fn build_frame_render_data(&mut self, cx: &mut Context<'_, Self>) -> FrameRenderData {
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
-        let review_data = self.collect_review_render_data(cx);
+        let review_data = self.cached_review_render_data(cx);
 
         let syntax = if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
             if let Some(syntax_snapshot) =
@@ -3963,9 +4029,9 @@ impl Editor {
 
         let diff_map = self.diff_map.read(cx).diff().clone();
         let diff_move_provenances = if self.review_session.is_none() {
-            collect_move_provenances_from_diff(&diff_map)
+            self.cached_diff_move_provenances(cx)
         } else {
-            Vec::new()
+            Rc::new(Vec::new())
         };
         let diagnostic_row_map = match (self.file_path.as_deref(), self.diagnostic_set.as_ref()) {
             (Some(path), Some(set)) => {
@@ -7179,6 +7245,49 @@ mod tests {
             assert!(data.provenances.is_empty());
             assert!(data.moved_spans.is_empty());
         });
+    }
+
+    #[test]
+    fn cached_review_render_data_reuses_until_review_target_changes() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "alpha modified\nbeta\n");
+
+        let session = cx.update(|cx| {
+            cx.new(|_| {
+                let mut inner = stoat::review_session::ReviewSession::new(
+                    stoat::review_session::ReviewSource::InMemory {
+                        files: Arc::new(Vec::new()),
+                    },
+                );
+                inner.add_files(vec![stoat::review::ReviewFileInput {
+                    path: PathBuf::from("a.txt"),
+                    rel_path: "a.txt".to_string(),
+                    language: None,
+                    base_text: Arc::new("alpha\nbeta\n".to_string()),
+                    buffer_text: Arc::new("alpha modified\nbeta\n".to_string()),
+                }]);
+                crate::review_session::ReviewSession::new(inner)
+            })
+        });
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_review_session(Some(session.clone()), cx);
+            ed.set_review_file_index(Some(0), cx);
+        });
+
+        let first = editor.read_with(&cx, |ed, app| ed.cached_review_render_data(app));
+        let second = editor.read_with(&cx, |ed, app| ed.cached_review_render_data(app));
+        assert!(
+            Rc::ptr_eq(&first, &second),
+            "unchanged session reuses cached data"
+        );
+
+        editor.update(&mut cx, |ed, cx| ed.set_review_file_index(None, cx));
+        let third = editor.read_with(&cx, |ed, app| ed.cached_review_render_data(app));
+        assert!(
+            !Rc::ptr_eq(&first, &third),
+            "review target change rebuilds cached data"
+        );
     }
 
     #[test]
