@@ -290,11 +290,17 @@ impl DisplayMap {
     }
 
     pub fn set_clip_at_line_ends(&mut self, clip: bool) {
-        self.clip_at_line_ends = clip;
+        if self.clip_at_line_ends != clip {
+            self.clip_at_line_ends = clip;
+            self.cached_snapshot = None;
+        }
     }
 
     pub fn set_diagnostics_max_severity(&mut self, severity: Option<DiagnosticSeverity>) {
-        self.diagnostics_max_severity = severity;
+        if self.diagnostics_max_severity != severity {
+            self.diagnostics_max_severity = severity;
+            self.cached_snapshot = None;
+        }
     }
 
     pub fn insert_blocks(&mut self, blocks: Vec<BlockProperties>) -> Vec<CustomBlockId> {
@@ -446,11 +452,13 @@ impl DisplayMap {
         &mut self,
         creases: impl IntoIterator<Item = Crease<Anchor>>,
     ) -> Vec<CreaseId> {
+        self.cached_snapshot = None;
         let buffer_snapshot = self.multi_buffer.snapshot();
         self.crease_map.insert(creases, &buffer_snapshot)
     }
 
     pub fn remove_creases(&mut self, ids: impl IntoIterator<Item = CreaseId>) {
+        self.cached_snapshot = None;
         let buffer_snapshot = self.multi_buffer.snapshot();
         self.crease_map.remove(ids, &buffer_snapshot);
     }
@@ -989,8 +997,9 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 #[cfg(test)]
 mod tests {
     use super::{
-        BlockRowKind, DisplayMap, DisplayPoint, DisplayRow, HighlightKey, HighlightLayer,
-        HighlightStyle, InlayKind, InlayPoint, LineIndent,
+        BlockRowKind, Crease, DiagnosticSeverity, DisplayMap, DisplayPoint, DisplayRow,
+        FoldPlaceholder, HighlightKey, HighlightLayer, HighlightStyle, InlayKind, InlayPoint,
+        LineIndent,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -1375,6 +1384,67 @@ mod tests {
         let snapshot = display_map.snapshot();
         let clipped = snapshot.clip_at_line_end(DisplayPoint::new(0, 100));
         assert_eq!(clipped, DisplayPoint::new(0, 5));
+    }
+
+    #[test]
+    fn set_clip_at_line_ends_invalidates_cache() {
+        let mut display_map = create_display_map("hello");
+        let _ = display_map.snapshot();
+        display_map.set_clip_at_line_ends(true);
+        let snapshot = display_map.snapshot();
+        // A stale cache would keep clip_at_line_ends false and return (0, 5).
+        assert_eq!(
+            snapshot.clip_point(DisplayPoint::new(0, 100), Bias::Left),
+            DisplayPoint::new(0, 4)
+        );
+    }
+
+    #[test]
+    fn set_diagnostics_max_severity_invalidates_cache() {
+        let mut display_map = create_display_map("hello");
+        let _ = display_map.snapshot();
+        display_map.set_diagnostics_max_severity(Some(DiagnosticSeverity::Error));
+        let snapshot = display_map.snapshot();
+        assert_eq!(
+            snapshot.diagnostics_max_severity(),
+            Some(DiagnosticSeverity::Error)
+        );
+    }
+
+    fn anchor_range(display_map: &DisplayMap) -> Range<super::Anchor> {
+        let buffer = display_map.multi_buffer().snapshot();
+        buffer.anchor_at(0, Bias::Right)..buffer.anchor_at(5, Bias::Left)
+    }
+
+    #[test]
+    fn insert_creases_invalidates_cache() {
+        let mut display_map = create_display_map("line0\nline1\nline2");
+        let _ = display_map.snapshot();
+        let range = anchor_range(&display_map);
+        display_map.insert_creases([Crease::inline(range, FoldPlaceholder::default())]);
+        let snapshot = display_map.snapshot();
+        assert_eq!(snapshot.crease_snapshot().creases().count(), 1);
+    }
+
+    #[test]
+    fn remove_creases_invalidates_cache() {
+        let mut display_map = create_display_map("line0\nline1\nline2");
+        let range = anchor_range(&display_map);
+        let ids = display_map.insert_creases([Crease::inline(range, FoldPlaceholder::default())]);
+        let _ = display_map.snapshot();
+        display_map.remove_creases(ids);
+        let snapshot = display_map.snapshot();
+        assert_eq!(snapshot.crease_snapshot().creases().count(), 0);
+    }
+
+    #[test]
+    fn set_lsp_folding_ranges_invalidates_cache() {
+        let mut display_map = create_display_map("line0\nline1\nline2");
+        let _ = display_map.snapshot();
+        let range = anchor_range(&display_map);
+        display_map.set_lsp_folding_ranges(BufferId::new(0), vec![(range, None)]);
+        let snapshot = display_map.snapshot();
+        assert_eq!(snapshot.crease_snapshot().creases().count(), 1);
     }
 
     #[test]
