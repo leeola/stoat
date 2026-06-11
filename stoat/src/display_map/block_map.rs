@@ -290,21 +290,6 @@ impl Block {
         buf.push_str(&self.get_line(index));
     }
 
-    fn placement(&self) -> BlockPlacement {
-        match self {
-            Block::Custom(b) => b.placement,
-            Block::FoldedBuffer { .. } => BlockPlacement::Replace { start: 0, end: 0 },
-            Block::ExcerptBoundary { .. } | Block::BufferHeader { .. } => BlockPlacement::Above(0),
-            Block::Spacer { is_below, .. } => {
-                if *is_below {
-                    BlockPlacement::Below(0)
-                } else {
-                    BlockPlacement::Above(0)
-                }
-            },
-        }
-    }
-
     fn is_replacement(&self) -> bool {
         match self {
             Block::Custom(b) => matches!(b.placement, BlockPlacement::Replace { .. }),
@@ -757,22 +742,14 @@ impl BlockMap {
             .fold_snapshot()
             .inlay_snapshot()
             .buffer_snapshot();
-        let mut blocks: Vec<Block> = self
+        let mut blocks: Vec<(BlockPlacement, Block)> = self
             .custom_blocks
             .iter()
-            .map(|b| Block::Custom(b.clone()))
+            .map(|b| (b.placement, Block::Custom(b.clone())))
             .collect();
-        blocks.extend(
-            self.header_and_footer_blocks(buffer_snapshot)
-                .into_iter()
-                .map(|(_placement, block)| block),
-        );
+        blocks.extend(self.header_and_footer_blocks(buffer_snapshot));
         if let Some(ref companion_view) = companion_view {
-            blocks.extend(
-                self.spacer_blocks(&wrap_snapshot, companion_view)
-                    .into_iter()
-                    .map(|(_placement, block)| block),
-            );
+            blocks.extend(self.spacer_blocks(&wrap_snapshot, companion_view));
         }
 
         let can_incremental = !self.blocks_dirty && !edits.is_empty() && self.transforms.is_some();
@@ -1466,7 +1443,7 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
 }
 
 fn resolve_block_placement(
-    block: &Block,
+    placement: BlockPlacement,
     inlay_cursor: &mut InlayPointCursor<'_>,
     fold_cursor: &mut FoldPointCursor<'_>,
     wrap_cursor: &mut WrapPointCursor<'_>,
@@ -1482,7 +1459,6 @@ fn resolve_block_placement(
         wrap_cursor.map(tab_point).row()
     };
 
-    let placement = block.placement();
     match placement {
         BlockPlacement::Above(row) => {
             ResolvedPlacement::Above(map_row(row, inlay_cursor, fold_cursor, wrap_cursor))
@@ -1530,7 +1506,7 @@ fn block_region(placement: &BlockPlacement, snapshot: &WrapSnapshot) -> (u32, u3
 fn sync_incremental(
     old_transforms: &SumTree<Transform>,
     wrap_line_count: u32,
-    blocks: &[Block],
+    blocks: &[(BlockPlacement, Block)],
     wrap_snapshot: &WrapSnapshot,
     wrap_edits: &Patch<u32>,
 ) -> SumTree<Transform> {
@@ -1674,38 +1650,36 @@ fn sync_incremental(
         };
 
         blocks_in_range.clear();
-        blocks_in_range.extend(
-            blocks[start_block_idx..end_block_idx]
-                .iter()
-                .filter_map(|b| {
-                    let placement = resolve_block_placement(
-                        b,
-                        &mut inlay_cursor,
-                        &mut fold_cursor,
-                        &mut wrap_cursor,
-                    );
-                    let block_start = placement.start_wrap_row();
-                    let block_end = match placement {
-                        ResolvedPlacement::Replace { end, .. } => end,
-                        _ => block_start,
-                    };
-                    // Below/spacer blocks resolving to edit_end were discarded
-                    // above for reconstruction, so the end bound must include
-                    // them; Above/Replace blocks at edit_end are preserved by
-                    // the cursor, and excluding them avoids a duplicate.
-                    let discarded_at_end = b.place_below() || matches!(b, Block::Spacer { .. });
-                    let within_end = if discarded_at_end {
-                        block_start <= edit_end
-                    } else {
-                        block_start < edit_end
-                    };
-                    if within_end && block_end >= new_start {
-                        Some((placement, b))
-                    } else {
-                        None
-                    }
-                }),
-        );
+        blocks_in_range.extend(blocks[start_block_idx..end_block_idx].iter().filter_map(
+            |(bp, b)| {
+                let placement = resolve_block_placement(
+                    *bp,
+                    &mut inlay_cursor,
+                    &mut fold_cursor,
+                    &mut wrap_cursor,
+                );
+                let block_start = placement.start_wrap_row();
+                let block_end = match placement {
+                    ResolvedPlacement::Replace { end, .. } => end,
+                    _ => block_start,
+                };
+                // Below/spacer blocks resolving to edit_end were discarded
+                // above for reconstruction, so the end bound must include
+                // them; Above/Replace blocks at edit_end are preserved by
+                // the cursor, and excluding them avoids a duplicate.
+                let discarded_at_end = b.place_below() || matches!(b, Block::Spacer { .. });
+                let within_end = if discarded_at_end {
+                    block_start <= edit_end
+                } else {
+                    block_start < edit_end
+                };
+                if within_end && block_end >= new_start {
+                    Some((placement, b))
+                } else {
+                    None
+                }
+            },
+        ));
         sort_and_dedup_blocks(&mut blocks_in_range);
 
         let mut row = new_transforms.extent::<InputRow>(()).0;
@@ -1769,7 +1743,7 @@ fn sync_incremental(
 
 fn build_transforms(
     wrap_line_count: u32,
-    blocks: &[Block],
+    blocks: &[(BlockPlacement, Block)],
     wrap_snapshot: &WrapSnapshot,
 ) -> SumTree<Transform> {
     debug_assert!(
@@ -1808,9 +1782,9 @@ fn build_transforms(
     let mut wrap_cursor = wrap_snapshot.wrap_point_cursor();
 
     let mut keyed_blocks: Vec<(ResolvedPlacement, &Block)> = Vec::with_capacity(blocks.len());
-    for b in blocks {
+    for (bp, b) in blocks {
         keyed_blocks.push((
-            resolve_block_placement(b, &mut inlay_cursor, &mut fold_cursor, &mut wrap_cursor),
+            resolve_block_placement(*bp, &mut inlay_cursor, &mut fold_cursor, &mut wrap_cursor),
             b,
         ));
     }
@@ -1861,8 +1835,8 @@ fn build_transforms(
     transforms
 }
 
-fn block_buffer_row(block: &Block) -> u32 {
-    block.placement().start_row()
+fn block_buffer_row(entry: &(BlockPlacement, Block)) -> u32 {
+    entry.0.start_row()
 }
 
 fn wrap_row_to_buffer_row(wrap_row: u32, wrap_snapshot: &WrapSnapshot) -> u32 {
@@ -2481,13 +2455,13 @@ mod tests {
         wrap_snapshot
     }
 
-    fn blocks_for(props: Vec<BlockProperties>) -> Vec<Block> {
+    fn blocks_for(props: Vec<BlockProperties>) -> Vec<(BlockPlacement, Block)> {
         let mut block_map = BlockMap::new();
         block_map.insert(props);
         block_map
             .custom_blocks
             .iter()
-            .map(|b| Block::Custom(b.clone()))
+            .map(|b| (b.placement, Block::Custom(b.clone())))
             .collect()
     }
 
@@ -2510,7 +2484,7 @@ mod tests {
     /// boundary bug in [`sync_incremental`].
     fn assert_incremental_matches_full(
         wrap: &Arc<super::WrapSnapshot>,
-        blocks: &[Block],
+        blocks: &[(BlockPlacement, Block)],
         edits: Patch<u32>,
     ) {
         let line_count = wrap.line_count();
@@ -2536,6 +2510,32 @@ mod tests {
                 new: 3..4,
             }]),
         );
+    }
+
+    #[test]
+    fn header_blocks_land_below_their_excerpt() {
+        let buf1 = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "a\nb")));
+        let mut multi = MultiBuffer::singleton(BufferId::new(0), buf1);
+        let buf2 = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(1), "c\nd")));
+        multi.insert_excerpts(BufferId::new(1), buf2, std::iter::once(0..2).collect());
+
+        let buffer_snapshot = multi.snapshot();
+        assert!(buffer_snapshot.show_headers());
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
+        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (_, wrap_snapshot) = WrapMap::new(tab_snapshot, None, test_executor());
+        let mut block_map = BlockMap::new();
+        let snapshot = block_map.sync(wrap_snapshot, &Patch::empty(), None);
+
+        // Each excerpt gets a header; the second must land below the first
+        // excerpt's rows, not stacked at display row 0 (the resolved-row-0 bug).
+        let header_rows: Vec<u32> = (0..snapshot.total_lines())
+            .filter(|&r| matches!(snapshot.classify_row(r), BlockRowKind::Block { .. }))
+            .collect();
+        assert_eq!(header_rows.len(), 2);
+        assert!(header_rows[1] > header_rows[0] + 1);
     }
 
     #[test]
