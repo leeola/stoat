@@ -4242,9 +4242,9 @@ impl Editor {
                 let theme = cx.theme();
                 Some(render::WhitespacePaint {
                     rows: render::build_whitespace_rows(
-                        &display_snapshot,
                         &rows,
                         start as u32..end as u32,
+                        &row_infos,
                         mode,
                         &selection_paint,
                     ),
@@ -4282,6 +4282,8 @@ impl Editor {
         };
         let paint = render::GutterPaint {
             display_snapshot: &display_snapshot,
+            row_infos: &row_infos,
+            row_range_start: start as u32,
             diff_map: diff_map_inner,
             diagnostics: diagnostic_row_map.as_ref(),
             review_chunk_markers: &review_data.chunk_markers,

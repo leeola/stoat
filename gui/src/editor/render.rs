@@ -188,7 +188,11 @@ pub(crate) fn build_rendered_rows(
     }
 
     let buffer_snapshot = snapshot.buffer_snapshot();
+    let row_infos = snapshot.row_infos(range.clone());
     for idx in 0..count {
+        if row_infos[idx].buffer_row.is_some() {
+            continue;
+        }
         let display_row = range.start + idx as u32;
         if let BlockRowKind::Block { block, line_index } = snapshot.classify_row(display_row) {
             let ctx = block_context_for(block, display_row, buffer_snapshot);
@@ -1601,9 +1605,9 @@ fn review_diff_row_bg(display_row: u32, paint: &GutterPaint<'_>) -> Option<Hsla>
         return None;
     }
     let buffer_row = paint
-        .display_snapshot
-        .display_to_buffer(DisplayPoint::new(display_row, 0))
-        .map(|p| p.row)?;
+        .row_infos
+        .get((display_row - paint.row_range_start) as usize)
+        .and_then(|ri| ri.buffer_row)?;
     subtle_diff_bg(paint.diff_map.status_for_line(buffer_row))
 }
 
@@ -1619,6 +1623,12 @@ fn diagnostic_glyph_for(severity: DiagnosticSeverity) -> (char, u32) {
 
 pub(crate) struct GutterPaint<'a> {
     pub display_snapshot: &'a DisplaySnapshot,
+    /// Per-display-row facts for the painted range, indexed by
+    /// `display_row - row_range_start`, so the gutter helpers read a row's
+    /// buffer row and wrap-continuation flag without re-seeking the block
+    /// transform tree once per row per concern.
+    pub row_infos: &'a [RowInfo],
+    pub row_range_start: u32,
     pub diff_map: &'a stoat::DiffMap,
     pub diagnostics: Option<&'a DiagnosticRowMap>,
     pub review_chunk_markers: &'a [(u32, ChunkStatus)],
@@ -1842,12 +1852,10 @@ fn indent_guide_lines(display_row: u32, paint: &GutterPaint<'_>) -> Vec<Div> {
         return Vec::new();
     };
     let snapshot = paint.display_snapshot;
-    if snapshot.is_wrap_continuation(display_row)
-        || matches!(
-            snapshot.classify_row(display_row),
-            BlockRowKind::Block { .. }
-        )
-    {
+    let row_info = paint
+        .row_infos
+        .get((display_row - paint.row_range_start) as usize);
+    if row_info.is_none_or(|ri| ri.is_wrap_continuation || ri.buffer_row.is_none()) {
         return Vec::new();
     }
     let depth = row_indent_depth(snapshot, display_row);
@@ -1981,20 +1989,18 @@ fn selection_columns_for_row(
 /// Per-row whitespace decorations for `range`, indexed from
 /// `range.start`. Wrap-continuation and block rows get no decorations.
 pub(crate) fn build_whitespace_rows(
-    snapshot: &DisplaySnapshot,
     rows: &[RenderedRow],
     range: Range<u32>,
+    row_infos: &[RowInfo],
     mode: ShowWhitespace,
     selection_paint: &SelectionPaint,
 ) -> Vec<Vec<WsGlyph>> {
     (range.start..range.end)
         .enumerate()
         .map(|(idx, display_row)| {
-            if snapshot.is_wrap_continuation(display_row)
-                || matches!(
-                    snapshot.classify_row(display_row),
-                    BlockRowKind::Block { .. }
-                )
+            if row_infos
+                .get(idx)
+                .is_none_or(|ri| ri.is_wrap_continuation || ri.buffer_row.is_none())
             {
                 return Vec::new();
             }
@@ -2083,13 +2089,13 @@ fn blame_entry(lines: &[BlameLine], buffer_row: u32) -> Option<&BlameLine> {
 /// it floats a few columns clear of the line's end.
 fn inline_blame_cell(display_row: u32, paint: &GutterPaint<'_>) -> Option<Div> {
     let inline = paint.inline_blame.as_ref()?;
-    if paint.display_snapshot.is_wrap_continuation(display_row) {
+    let row_info = paint
+        .row_infos
+        .get((display_row - paint.row_range_start) as usize);
+    if row_info.is_none_or(|ri| ri.is_wrap_continuation) {
         return None;
     }
-    let buffer_row = paint
-        .display_snapshot
-        .display_to_buffer(DisplayPoint::new(display_row, 0))
-        .map(|p| p.row)?;
+    let buffer_row = row_info.and_then(|ri| ri.buffer_row)?;
     let entry = blame_entry(inline.lines, buffer_row)?;
     let label = blame::inline_blame_text(entry, inline.now_seconds);
     Some(
@@ -2112,9 +2118,9 @@ pub(crate) fn build_gutter_row_pieces(
 ) -> (GutterPrefix, RenderedRow, RowSuffix) {
     let prefix = build_gutter_prefix(display_row, paint);
     let buffer_row = paint
-        .display_snapshot
-        .display_to_buffer(DisplayPoint::new(display_row, 0))
-        .map(|p| p.row);
+        .row_infos
+        .get((display_row - paint.row_range_start) as usize)
+        .and_then(|ri| ri.buffer_row);
     let suffix = build_row_suffix(buffer_row, paint);
     (prefix, row, suffix)
 }
@@ -2129,12 +2135,12 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     let mut runs: Vec<(Range<usize>, gpui::HighlightStyle)> = Vec::new();
     let width = paint.metrics.line_number_width;
 
-    let buffer_row = paint
-        .display_snapshot
-        .display_to_buffer(DisplayPoint::new(display_row, 0))
-        .map(|p| p.row);
+    let row_info = paint
+        .row_infos
+        .get((display_row - paint.row_range_start) as usize);
+    let buffer_row = row_info.and_then(|ri| ri.buffer_row);
     let show_line_number =
-        buffer_row.is_some() && !paint.display_snapshot.is_wrap_continuation(display_row);
+        buffer_row.is_some() && !row_info.is_some_and(|ri| ri.is_wrap_continuation);
 
     if let Some(blame) = paint.blame.as_ref() {
         append_blame_strip(
@@ -2812,8 +2818,11 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "hello\nworld");
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -2865,8 +2874,11 @@ mod tests {
         let metrics = gutter_metrics(&snapshot, false);
         let cache: RefCell<LruCache<(u32, usize), SharedString>> =
             RefCell::new(LruCache::new(std::num::NonZeroUsize::new(8).unwrap()));
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -2913,8 +2925,11 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -2946,8 +2961,11 @@ mod tests {
     fn chevron_prefix(snapshot: &DisplaySnapshot, chevron_rows: &[u32]) -> String {
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3002,8 +3020,11 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "hello\nworld");
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3038,8 +3059,11 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "a");
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3068,8 +3092,11 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "a");
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3108,8 +3135,11 @@ mod tests {
         let metrics = gutter_metrics(&snapshot, false);
         let mut diagnostics: DiagnosticRowMap = BTreeMap::new();
         diagnostics.insert(0, DiagnosticSeverity::WARNING);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: Some(&diagnostics),
             review_chunk_markers: &[],
@@ -3162,8 +3192,11 @@ mod tests {
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(&snapshot, false);
         let markers = vec![(1, ChunkStatus::Staged)];
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &markers,
@@ -3194,8 +3227,11 @@ mod tests {
         let diff_map = stoat::DiffMap::default();
         let metrics = gutter_metrics(&snapshot, false);
         let markers = vec![(1, ChunkStatus::Staged)];
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &markers,
@@ -3272,8 +3308,11 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map = added_diff_map(0..1);
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let mut paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3325,8 +3364,11 @@ mod tests {
         let snapshot = test_snapshot(&mut cx, "a\nb\nc");
         let diff_map = added_diff_map(0..1);
         let metrics = gutter_metrics(&snapshot, false).widened_for_review();
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3411,8 +3453,11 @@ mod tests {
             lines: &lines,
             now_seconds: now,
         };
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3448,8 +3493,11 @@ mod tests {
             lines: &lines,
             now_seconds: 1_000_000_000,
         };
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3486,8 +3534,11 @@ mod tests {
             lines: &lines,
             now_seconds: now,
         };
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3525,8 +3576,11 @@ mod tests {
                 line: 41,
             },
         )];
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3569,8 +3623,11 @@ mod tests {
                 line: 0,
             },
         )];
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3610,8 +3667,11 @@ mod tests {
                 line: 0,
             },
         )];
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3669,8 +3729,11 @@ mod tests {
         let diff_map =
             stoat::DiffMap::from_hunks([deleted_after(0)], Some(Arc::new("gone\n".to_string())));
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3701,8 +3764,11 @@ mod tests {
         let diff_map =
             stoat::DiffMap::from_hunks([deleted_after(0)], Some(Arc::new("gone\n".to_string())));
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
@@ -3735,8 +3801,11 @@ mod tests {
             Some(Arc::new("gone\n".to_string())),
         );
         let metrics = gutter_metrics(&snapshot, false);
+        let row_infos = snapshot.row_infos(0..snapshot.max_point().row + 1);
         let paint = GutterPaint {
             display_snapshot: &snapshot,
+            row_infos: &row_infos,
+            row_range_start: 0,
             diff_map: &diff_map,
             diagnostics: None,
             review_chunk_markers: &[],
