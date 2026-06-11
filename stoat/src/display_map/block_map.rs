@@ -407,6 +407,10 @@ pub struct BlockChunks<'a> {
     current_row: u32,
     end_row: u32,
     pending_wrap_chunks: Option<WrapChunks<'a>>,
+    /// First block row past the run `pending_wrap_chunks` is streaming, so
+    /// `current_row` can jump over the whole isomorphic run when the wrap
+    /// iterator drains rather than advancing one row at a time.
+    pending_wrap_end: u32,
     pending_newline: bool,
 }
 
@@ -428,7 +432,7 @@ impl<'a> Iterator for BlockChunks<'a> {
                     return Some(chunk);
                 }
                 self.pending_wrap_chunks = None;
-                self.current_row += 1;
+                self.current_row = self.pending_wrap_end;
                 if self.current_row < self.end_row {
                     self.pending_newline = true;
                 }
@@ -468,13 +472,24 @@ impl<'a> Iterator for BlockChunks<'a> {
                 });
             }
 
-            // Regular transform: pull chunks from the wrap layer for exactly
-            // one wrap row.
-            let wrap_row = input_start.0 + rows_into_transform;
+            // Regular transform: stream the whole isomorphic run in one pass.
+            // Isomorphic transforms map output rows to wrap rows 1:1, so the
+            // run [current_row, portion_end) maps to a contiguous wrap-row
+            // range. One `WrapChunks` over the range keeps a single
+            // `BufferChunks` open across the rows, carrying the highlight
+            // endpoint index monotonically instead of rescanning from zero per
+            // row. Inter-row newlines come from the rope inside the streamed
+            // chunks; the run's trailing newline is added via `pending_newline`
+            // when the iterator drains.
+            let Dimensions(_, output_end, _) = cursor.end();
+            let portion_end = output_end.0.min(self.end_row);
+            let wrap_start = input_start.0 + rows_into_transform;
+            let wrap_end = wrap_start + (portion_end - self.current_row);
+            self.pending_wrap_end = portion_end;
             self.pending_wrap_chunks = Some(
                 self.snapshot
                     .wrap_snapshot
-                    .chunks(wrap_row..wrap_row + 1, self.endpoints.clone()),
+                    .chunks(wrap_start..wrap_end, self.endpoints.clone()),
             );
         }
     }
@@ -1178,6 +1193,7 @@ impl BlockSnapshot {
             current_row: rows.start,
             end_row: rows.end,
             pending_wrap_chunks: None,
+            pending_wrap_end: rows.start,
             pending_newline: false,
         }
     }

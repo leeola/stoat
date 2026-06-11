@@ -1584,6 +1584,35 @@ mod tests {
     }
 
     #[test]
+    fn highlight_on_later_row_survives_multi_row_streaming() {
+        let mut display_map = create_display_map("alpha\nbeta\ngamma");
+        let range = {
+            let snap = display_map.multi_buffer.snapshot();
+            let rope = snap.rope();
+            let start = rope.point_to_offset(Point::new(2, 0));
+            let end = rope.point_to_offset(Point::new(2, 5));
+            snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left)
+        };
+        display_map.highlight_text(
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
+            vec![range],
+            HighlightStyle {
+                foreground: Some(Color::Red),
+                ..Default::default()
+            },
+        );
+
+        let snapshot = display_map.snapshot();
+        let total = snapshot.line_count();
+        let styled: String = snapshot
+            .highlighted_chunks(0..total)
+            .filter(|c| c.highlight_style.is_some())
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(styled, "gamma");
+    }
+
+    #[test]
     fn snapshot_open_rust_file_highlights() {
         let mut h = crate::test_harness::TestHarness::with_size(40, 6);
         let path = h.write_file("sample.rs", "fn main() {\n    let x = \"hi\";\n}\n");
