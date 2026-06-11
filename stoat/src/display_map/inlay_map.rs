@@ -368,7 +368,10 @@ impl InlayMap {
         for edit in buffer_edits.into_iter().rev() {
             let delta = (edit.new.end as isize) - (edit.old.end as isize);
             let start_idx = offsets.partition_point(|&o| o < edit.old.start);
-            let end_idx = offsets.partition_point(|&o| o < edit.old.end);
+            // Inclusive of edit.old.end: an anchor at the edit boundary (e.g. a
+            // Bias::Left anchor at an insertion point) must be re-resolved, not
+            // blindly delta-shifted, so it can stay put per its bias.
+            let end_idx = offsets.partition_point(|&o| o <= edit.old.end);
 
             for flag in &mut needs_resolve[start_idx..end_idx] {
                 *flag = true;
@@ -1317,6 +1320,36 @@ mod tests {
             ],
         );
         assert_eq!(snap.inlay_text(), "abX cdYY ef");
+    }
+
+    #[test]
+    fn left_biased_inlay_stays_at_insertion_point() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "helloworld");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap0 = multi_buffer.snapshot();
+        let version = snap0.version();
+
+        let (mut map, _) = InlayMap::new(snap0.clone());
+        let anchor = snap0.anchor_at(5, Bias::Left);
+        map.splice(
+            Vec::new(),
+            vec![(anchor, ": X".to_string(), InlayKind::Hint)],
+        );
+        let _ = map.sync(snap0, &Patch::empty());
+
+        // Insert exactly at the Left-biased anchor's offset, driving
+        // resolve_incremental: the anchor must stay at 5, not shift right.
+        {
+            let mut buf = shared.write().unwrap();
+            buf.edit(5..5, "ZZ");
+        }
+        let snap1 = multi_buffer.snapshot();
+        let edits = snap1.edits_since(version);
+        assert!(!edits.is_empty(), "edit must drive resolve_incremental");
+        let (inlay_snap, _) = map.sync(snap1, &edits);
+
+        assert_eq!(inlay_snap.inlay_text(), "hello: XZZworld");
     }
 
     #[test]
