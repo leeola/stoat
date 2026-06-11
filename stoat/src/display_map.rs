@@ -447,12 +447,12 @@ impl DisplayMap {
         creases: impl IntoIterator<Item = Crease<Anchor>>,
     ) -> Vec<CreaseId> {
         let buffer_snapshot = self.multi_buffer.snapshot();
-        let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
-        self.crease_map.insert(creases, &resolve)
+        self.crease_map.insert(creases, &buffer_snapshot)
     }
 
     pub fn remove_creases(&mut self, ids: impl IntoIterator<Item = CreaseId>) {
-        self.crease_map.remove(ids);
+        let buffer_snapshot = self.multi_buffer.snapshot();
+        self.crease_map.remove(ids, &buffer_snapshot);
     }
 
     pub fn set_lsp_folding_ranges(
@@ -461,7 +461,8 @@ impl DisplayMap {
         ranges: Vec<(std::ops::Range<Anchor>, Option<String>)>,
     ) {
         if let Some(old_ids) = self.lsp_folding_crease_ids.remove(&buffer_id) {
-            self.crease_map.remove(old_ids);
+            let buffer_snapshot = self.multi_buffer.snapshot();
+            self.crease_map.remove(old_ids, &buffer_snapshot);
         }
         let creases = ranges.into_iter().map(|(range, collapsed_text)| {
             Crease::inline(
@@ -557,10 +558,6 @@ impl DisplayMap {
         let block_snapshot = self
             .block_map
             .sync(wrap_snapshot, &wrap_edits, companion_view);
-
-        let buffer_snapshot_for_crease = self.multi_buffer.snapshot();
-        self.crease_map
-            .sync(&|a| buffer_snapshot_for_crease.resolve_anchor(a));
 
         let snapshot = DisplaySnapshot {
             companion_display_snapshot: None,
