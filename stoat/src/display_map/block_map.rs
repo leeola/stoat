@@ -392,6 +392,18 @@ pub enum BlockRowKind<'a> {
     Block { block: &'a Block, line_index: u32 },
 }
 
+/// Per-display-row facts the render path needs, computed in one
+/// [`BlockSnapshot::row_infos`] cursor walk instead of a fresh per-row seek
+/// for each of `classify_row` / `is_wrap_continuation` / `display_to_buffer` /
+/// `soft_wrap_indent`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct RowInfo {
+    /// Buffer row for a regular row, or `None` for a block (synthetic) row.
+    pub buffer_row: Option<u32>,
+    pub is_wrap_continuation: bool,
+    pub soft_wrap_indent: u32,
+}
+
 use super::{highlights::HighlightEndpoint, wrap_map::WrapChunks};
 
 /// Iterator over a range of block rows, emitting [`Chunk`]s that propagate
@@ -1291,6 +1303,53 @@ impl BlockSnapshot {
         let wrap_row = input_start.0 + rows_into_transform;
         self.wrap_snapshot.classify_row(wrap_row) == super::wrap_map::WrapRowKind::Continuation
     }
+
+    /// Compute [`RowInfo`] for each row in `rows` in a single forward walk of
+    /// the block transform cursor, so the render path resolves a row's buffer
+    /// row, wrap-continuation flag, and soft-wrap indent once rather than
+    /// re-seeking per concern per row.
+    pub fn row_infos(&self, rows: std::ops::Range<u32>) -> Vec<RowInfo> {
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<InputRow, OutputRow>>(());
+        cursor.seek(&OutputRow(rows.start + 1), Bias::Left);
+
+        let mut out = Vec::with_capacity(rows.end.saturating_sub(rows.start) as usize);
+        for block_row in rows {
+            cursor.seek_forward(&OutputRow(block_row + 1), Bias::Left);
+            let Dimensions(input_start, output_start, _) = cursor.start();
+            let rows_into_transform = block_row.saturating_sub(output_start.0);
+
+            if cursor.item().is_some_and(|t| t.block.is_some()) {
+                out.push(RowInfo {
+                    buffer_row: None,
+                    is_wrap_continuation: false,
+                    soft_wrap_indent: 0,
+                });
+                continue;
+            }
+
+            let wrap_row = input_start.0 + rows_into_transform;
+            let tab_point = self.wrap_snapshot.to_tab_point(WrapPoint::new(wrap_row, 0));
+            let inlay_point = self
+                .wrap_snapshot
+                .fold_snapshot()
+                .to_inlay_point(super::fold_map::FoldPoint::new(tab_point.row(), 0));
+            let buffer_point = self
+                .wrap_snapshot
+                .fold_snapshot()
+                .inlay_snapshot()
+                .to_buffer_point(inlay_point);
+
+            out.push(RowInfo {
+                buffer_row: Some(buffer_point.row),
+                is_wrap_continuation: self.wrap_snapshot.classify_row(wrap_row)
+                    == super::wrap_map::WrapRowKind::Continuation,
+                soft_wrap_indent: self.wrap_snapshot.soft_wrap_indent(wrap_row),
+            });
+        }
+        out
+    }
 }
 
 fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
@@ -1949,6 +2008,35 @@ mod tests {
             content.lines().map(String::from).collect(),
             BlockStyle::Fixed,
         )
+    }
+
+    #[test]
+    fn row_infos_matches_per_row_methods() {
+        let snap = create_block_snapshot(
+            "aaa\nbbb\nccc",
+            &[text_block(BlockPlacement::Below(1), "BLOCK1\nBLOCK2")],
+        );
+        let total = snap.total_rows;
+        let infos = snap.row_infos(0..total);
+        assert_eq!(infos.len() as u32, total);
+        for row in 0..total {
+            let info = infos[row as usize];
+            let expected_buffer_row = match snap.classify_row(row) {
+                BlockRowKind::BufferRow { buffer_row } => Some(buffer_row),
+                BlockRowKind::Block { .. } => None,
+            };
+            assert_eq!(info.buffer_row, expected_buffer_row, "row {row} buffer_row");
+            assert_eq!(
+                info.is_wrap_continuation,
+                snap.is_wrap_continuation(row),
+                "row {row} is_wrap_continuation"
+            );
+            assert_eq!(
+                info.soft_wrap_indent,
+                snap.soft_wrap_indent(row),
+                "row {row} soft_wrap_indent"
+            );
+        }
     }
 
     #[test]

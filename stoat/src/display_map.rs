@@ -17,7 +17,7 @@ use crate::{
 pub use block_map::{
     balancing_block, Block, BlockContext, BlockId, BlockMap, BlockPlacement, BlockPoint,
     BlockProperties, BlockRow, BlockRowKind, BlockSnapshot, BlockStyle, CompanionView, CustomBlock,
-    CustomBlockId, RenderBlock,
+    CustomBlockId, RenderBlock, RowInfo,
 };
 pub use crease_map::{
     Crease, CreaseId, CreaseMap, CreaseMetadata, CreaseSnapshot, RenderToggleFn, RenderTrailerFn,
@@ -747,6 +747,10 @@ impl DisplaySnapshot {
 
     pub fn classify_row(&self, display_row: u32) -> BlockRowKind<'_> {
         self.block_snapshot.classify_row(display_row)
+    }
+
+    pub fn row_infos(&self, rows: std::ops::Range<u32>) -> Vec<RowInfo> {
+        self.block_snapshot.row_infos(rows)
     }
 
     pub fn clip_point(&self, point: DisplayPoint, bias: Bias) -> DisplayPoint {
