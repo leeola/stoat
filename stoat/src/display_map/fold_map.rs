@@ -12,8 +12,8 @@ use std::{
 };
 use stoat_text::{
     patch::Patch, tree_map::TreeMap, Anchor, AnchorRangeExt, Bias, CharsAt, ContextLessSummary,
-    Cursor, Dimension, Dimensions, Edit, Item, KeyedItem, Point, ReversedCharsAt, Rope, SeekTarget,
-    SumTree, TextSummary,
+    Cursor, Dimension, Dimensions, Item, Point, ReversedCharsAt, Rope, SeekTarget, SumTree,
+    Summary, TextSummary,
 };
 
 #[derive(Copy, Clone, Debug, Default, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -220,53 +220,104 @@ struct AnchoredFold {
     id: FoldId,
     range: Range<Anchor>,
     placeholder: FoldPlaceholder,
-    resolved_start: usize,
-    resolved_end: usize,
 }
 
-#[derive(Clone, Debug, Default)]
+/// Summary of a span of [`AnchoredFold`]s, keyed by [`Anchor`] and resolved
+/// lazily against the buffer passed as context. `min_start`/`max_end` bound the
+/// span's offset extent so [`FoldMap::is_folded_at_offset`] can prune;
+/// `start`/`end` carry the last fold's range for the [`FoldRange`] dimension.
+/// Because comparison is deferred to query time, buffer edits never rebuild the
+/// tree -- only `fold`/`unfold` do.
+#[derive(Clone, Debug)]
 struct AnchoredFoldSummary {
-    key: Option<usize>,
-    max_end: usize,
+    start: Anchor,
+    end: Anchor,
+    min_start: Anchor,
+    max_end: Anchor,
+    count: usize,
 }
 
-impl ContextLessSummary for AnchoredFoldSummary {
-    fn add_summary(&mut self, other: &Self) {
-        if other.key.is_some() {
-            self.key = other.key;
+impl Default for AnchoredFoldSummary {
+    fn default() -> Self {
+        Self {
+            start: Anchor::min(),
+            end: Anchor::max(),
+            min_start: Anchor::max(),
+            max_end: Anchor::min(),
+            count: 0,
         }
-        self.max_end = self.max_end.max(other.max_end);
     }
 }
 
-#[derive(Clone, Default, Debug, PartialEq, Eq, PartialOrd, Ord)]
-struct FoldKeyRef(Option<usize>);
+impl Summary for AnchoredFoldSummary {
+    type Context<'a> = &'a MultiBufferSnapshot;
 
-impl<'a> Dimension<'a, AnchoredFoldSummary> for FoldKeyRef {
-    fn zero(_cx: ()) -> Self {
-        Self(None)
+    fn zero(_cx: Self::Context<'_>) -> Self {
+        Self::default()
     }
-    fn add_summary(&mut self, summary: &'a AnchoredFoldSummary, _cx: ()) {
-        if summary.key.is_some() {
-            self.0 = summary.key;
+
+    fn add_summary(&mut self, other: &Self, cx: Self::Context<'_>) {
+        if other.count == 0 {
+            return;
         }
+        if self.count == 0 {
+            self.min_start = other.min_start;
+            self.max_end = other.max_end;
+        } else {
+            let resolve = |a: &Anchor| cx.resolve_anchor(a);
+            if other.min_start.cmp(&self.min_start, &resolve) == Ordering::Less {
+                self.min_start = other.min_start;
+            }
+            if other.max_end.cmp(&self.max_end, &resolve) == Ordering::Greater {
+                self.max_end = other.max_end;
+            }
+        }
+        self.start = other.start;
+        self.end = other.end;
+        self.count += other.count;
     }
 }
 
 impl Item for AnchoredFold {
     type Summary = AnchoredFoldSummary;
-    fn summary(&self, _cx: ()) -> AnchoredFoldSummary {
+    fn summary(&self, _cx: &MultiBufferSnapshot) -> AnchoredFoldSummary {
         AnchoredFoldSummary {
-            key: Some(self.resolved_start),
-            max_end: self.resolved_end,
+            start: self.range.start,
+            end: self.range.end,
+            min_start: self.range.start,
+            max_end: self.range.end,
+            count: 1,
         }
     }
 }
 
-impl KeyedItem for AnchoredFold {
-    type Key = FoldKeyRef;
-    fn key(&self) -> FoldKeyRef {
-        FoldKeyRef(Some(self.resolved_start))
+/// Anchor-range dimension and seek target over [`AnchoredFoldSummary`]. Seeks
+/// resolve anchors against the buffer carried as the cursor's context, so the
+/// storage tree stays correctly ordered across edits without being rebuilt.
+#[derive(Clone, Debug)]
+struct FoldRange(Range<Anchor>);
+
+impl Default for FoldRange {
+    fn default() -> Self {
+        Self(Anchor::min()..Anchor::max())
+    }
+}
+
+impl<'a> Dimension<'a, AnchoredFoldSummary> for FoldRange {
+    fn zero(_cx: &MultiBufferSnapshot) -> Self {
+        Self::default()
+    }
+
+    fn add_summary(&mut self, summary: &'a AnchoredFoldSummary, _cx: &MultiBufferSnapshot) {
+        self.0.start = summary.start;
+        self.0.end = summary.end;
+    }
+}
+
+impl SeekTarget<'_, AnchoredFoldSummary, FoldRange> for FoldRange {
+    fn cmp(&self, other: &Self, cx: &MultiBufferSnapshot) -> Ordering {
+        let resolve = |a: &Anchor| cx.resolve_anchor(a);
+        AnchorRangeExt::cmp(&self.0, &other.0, &resolve)
     }
 }
 
@@ -308,7 +359,7 @@ impl FoldMap {
             version: 0,
         });
         let map = FoldMap {
-            folds: SumTree::default(),
+            folds: SumTree::new(snapshot.inlay_snapshot.buffer_snapshot()),
             next_id: 0,
             version: 0,
             cached_snapshot: Some(Arc::clone(&snapshot)),
@@ -332,41 +383,29 @@ impl FoldMap {
             }
         }
 
+        // Resolve the anchor storage tree to inlay points for this snapshot's
+        // transforms. The tree itself is left untouched -- buffer edits never
+        // rebuild it; only `fold`/`unfold` mutate it.
         let buffer = inlay_snapshot.buffer_snapshot();
-        let all_folds: Vec<AnchoredFold> = self.folds.iter().cloned().collect();
-        let all_anchors: Vec<Anchor> = all_folds
+        let all_anchors: Vec<Anchor> = self
+            .folds
             .iter()
             .flat_map(|af| [af.range.start, af.range.end])
             .collect();
         let all_points = buffer.points_for_anchors_batch(&all_anchors);
-        let mut valid_folds = Vec::new();
         let mut resolved = Vec::new();
-        for (i, af) in all_folds.iter().enumerate() {
-            let start_pt = all_points[i * 2];
-            let end_pt = all_points[i * 2 + 1];
-            let start_inlay = inlay_snapshot.to_inlay_point(start_pt);
-            let end_inlay = inlay_snapshot.to_inlay_point(end_pt);
+        for (i, af) in self.folds.iter().enumerate() {
+            let start_inlay = inlay_snapshot.to_inlay_point(all_points[i * 2]);
+            let end_inlay = inlay_snapshot.to_inlay_point(all_points[i * 2 + 1]);
             if start_inlay >= end_inlay {
                 continue;
             }
-            let start_offset = inlay_snapshot
-                .rope()
-                .point_to_offset(inlay_snapshot.to_buffer_point(start_inlay));
-            let end_offset = inlay_snapshot
-                .rope()
-                .point_to_offset(inlay_snapshot.to_buffer_point(end_inlay));
-            let mut valid = af.clone();
-            valid.resolved_start = start_offset;
-            valid.resolved_end = end_offset;
-            valid_folds.push(valid);
             resolved.push(Fold {
                 id: af.id,
                 range: start_inlay..end_inlay,
                 placeholder: af.placeholder.clone(),
             });
         }
-        valid_folds.sort_by_key(|f| f.resolved_start);
-        self.folds = SumTree::from_iter(valid_folds, ());
 
         // Fold mutations recorded their touched rows as identity edits in
         // `deferred_edits`; compose them with the buffer's inlay edits so the
@@ -470,25 +509,19 @@ impl FoldMap {
         placeholder: FoldPlaceholder,
         buffer_snapshot: &MultiBufferSnapshot,
     ) -> Vec<FoldId> {
-        let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
         let mut new_folds: Vec<AnchoredFold> = ranges
             .into_iter()
             .map(|range| {
-                let resolved_start = resolve(&range.start);
-                let resolved_end = resolve(&range.end);
                 let id = FoldId(self.next_id);
                 self.next_id += 1;
                 AnchoredFold {
                     id,
                     range,
                     placeholder: placeholder.clone(),
-                    resolved_start,
-                    resolved_end,
                 }
             })
             .collect();
         let new_ids: Vec<FoldId> = new_folds.iter().map(|f| f.id).collect();
-        new_folds.sort_by_key(|f| f.resolved_start);
 
         if let Some(snapshot) = self.cached_snapshot.clone() {
             let regions: Vec<(u32, u32)> = new_folds
@@ -498,8 +531,22 @@ impl FoldMap {
             self.merge_deferred_regions(regions);
         }
 
-        let edits: Vec<Edit<AnchoredFold>> = new_folds.into_iter().map(Edit::Insert).collect();
-        self.folds.edit(edits, ());
+        let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
+        new_folds.sort_unstable_by(|a, b| AnchorRangeExt::cmp(&a.range, &b.range, &resolve));
+
+        self.folds = {
+            let mut new_tree = SumTree::new(buffer_snapshot);
+            let mut cursor = self.folds.cursor::<FoldRange>(buffer_snapshot);
+            for fold in new_folds {
+                new_tree.append(
+                    cursor.slice(&FoldRange(fold.range.clone()), Bias::Right),
+                    buffer_snapshot,
+                );
+                new_tree.push(fold, buffer_snapshot);
+            }
+            new_tree.append(cursor.suffix(), buffer_snapshot);
+            new_tree
+        };
 
         self.version += 1;
         new_ids
@@ -508,7 +555,7 @@ impl FoldMap {
     pub fn unfold(&mut self, ranges: Vec<Range<usize>>, buffer_snapshot: &MultiBufferSnapshot) {
         let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
         let mut removed: Vec<AnchoredFold> = Vec::new();
-        let mut new_folds = SumTree::default();
+        let mut new_folds = SumTree::new(buffer_snapshot);
         for fold in self.folds.iter() {
             if ranges
                 .iter()
@@ -516,7 +563,7 @@ impl FoldMap {
             {
                 removed.push(fold.clone());
             } else {
-                new_folds.push(fold.clone(), ());
+                new_folds.push(fold.clone(), buffer_snapshot);
             }
         }
 
@@ -579,12 +626,12 @@ impl FoldMap {
             return false;
         }
         let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
-        let mut cursor = self
-            .folds
-            .filter::<_, FoldKeyRef>((), |summary| summary.max_end > offset);
+        let mut cursor = self.folds.filter::<_, ()>(buffer_snapshot, |summary| {
+            buffer_snapshot.resolve_anchor(&summary.max_end) > offset
+        });
         cursor.next();
         while let Some(fold) = cursor.item() {
-            if fold.resolved_start > offset {
+            if buffer_snapshot.resolve_anchor(&fold.range.start) > offset {
                 return false;
             }
             if fold.range.contains_offset(offset, &resolve) {
@@ -2295,6 +2342,44 @@ mod tests {
         assert!(
             fold_map.version_unchanged(),
             "no-op unfold must not bump version"
+        );
+    }
+
+    #[test]
+    fn fold_query_resolves_lazily_after_edit() {
+        let buffer = TextBuffer::with_text(BufferId::new(0), "aaa\nbbb\nccc");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap1 = multi_buffer.snapshot();
+        let (_, inlay1) = InlayMap::new(snap1.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay1.clone());
+
+        let fs = snap1.rope().point_to_offset(stoat_text::Point::new(1, 0));
+        let fe = snap1.rope().point_to_offset(stoat_text::Point::new(1, 3));
+        fold_map.fold(
+            vec![snap1.anchor_at(fs, Bias::Right)..snap1.anchor_at(fe, Bias::Left)],
+            FoldPlaceholder::default(),
+            &snap1,
+        );
+        fold_map.sync(inlay1, &Patch::empty());
+
+        // Insert on row 0, shifting row 1's offsets without touching the fold or
+        // re-syncing. The anchor storage tree is never rebuilt, yet the query
+        // resolves the fold's anchors against the live buffer.
+        {
+            shared.write().unwrap().edit(0..0, "ZZ");
+        }
+        let snap2 = multi_buffer.snapshot();
+
+        let bbb_mid = snap2.rope().point_to_offset(stoat_text::Point::new(1, 1));
+        assert!(
+            fold_map.is_folded_at_offset(bbb_mid, &snap2),
+            "fold tracks the edit via lazy anchor resolution"
+        );
+        assert!(
+            !fold_map.is_folded_at_offset(0, &snap2),
+            "text before the fold is not folded"
         );
     }
 }
