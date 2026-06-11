@@ -619,8 +619,8 @@ impl<'a> Iterator for BufferChunks<'a> {
 #[cfg(test)]
 mod tests {
     use super::{
-        create_highlight_endpoints, highlighted_chunks, Chunk, HighlightKey, HighlightLayer,
-        HighlightStyle, TextHighlights,
+        create_highlight_endpoints, create_highlight_endpoints_cached, highlighted_chunks, Chunk,
+        HighlightKey, HighlightLayer, HighlightStyle, TextHighlights,
     };
     use ratatui::style::Color;
     use std::{collections::HashMap, ops::Range, sync::Arc};
@@ -684,6 +684,56 @@ mod tests {
         assert_eq!(
             chunks[1].style.as_ref().unwrap().foreground,
             Some(Color::Red)
+        );
+    }
+
+    #[test]
+    fn cached_endpoints_reused_until_range_changes() {
+        let style = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        #[allow(clippy::single_range_in_vec_init)]
+        let highlights = make_highlights(vec![(
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
+            style,
+            vec![6..11],
+        )]);
+        let resolve = |a: &Anchor| a.offset as usize;
+
+        let mut cache = None;
+        let first = create_highlight_endpoints_cached(
+            &(0..11),
+            &highlights,
+            None,
+            None,
+            &resolve,
+            &mut cache,
+        );
+        let second = create_highlight_endpoints_cached(
+            &(0..11),
+            &highlights,
+            None,
+            None,
+            &resolve,
+            &mut cache,
+        );
+        assert!(
+            Arc::ptr_eq(&first, &second),
+            "same range and highlights reuse the cached endpoints"
+        );
+
+        let third = create_highlight_endpoints_cached(
+            &(0..6),
+            &highlights,
+            None,
+            None,
+            &resolve,
+            &mut cache,
+        );
+        assert!(
+            !Arc::ptr_eq(&first, &third),
+            "a range change recomputes the endpoints"
         );
     }
 

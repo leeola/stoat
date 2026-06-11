@@ -34,7 +34,7 @@ use std::{
     collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
-        Arc,
+        Arc, Mutex,
     },
 };
 use stoat_scheduler::Executor;
@@ -571,6 +571,7 @@ impl DisplayMap {
             masked: self.masked,
             clip_at_line_ends: self.clip_at_line_ends,
             diagnostics_max_severity: self.diagnostics_max_severity,
+            highlight_endpoint_cache: Arc::new(Mutex::new(None)),
         };
         self.cached_snapshot = Some(snapshot.clone());
         snapshot
@@ -590,6 +591,12 @@ pub struct DisplaySnapshot {
     masked: bool,
     clip_at_line_ends: bool,
     diagnostics_max_severity: Option<DiagnosticSeverity>,
+    /// Per-snapshot cache of resolved highlight endpoints, shared across this
+    /// snapshot's clones. Reused across the per-frame render passes (and idle
+    /// frames while the coordinator keeps reusing this snapshot) so the
+    /// visible range's anchors resolve at most once until a highlight set or
+    /// the range changes; a rebuilt snapshot starts with an empty cache.
+    highlight_endpoint_cache: Arc<Mutex<Option<CachedHighlightEndpoints>>>,
 }
 
 /// Leading-whitespace measurement of a display row. `spaces` counts the
@@ -706,14 +713,18 @@ impl DisplaySnapshot {
         let semantic_ref = highlights.semantic_token_highlights;
         let decoration_ref = highlights.decoration_highlights;
         let resolve = |a: &Anchor| buffer.resolve_anchor(a);
-        let eps = highlights::create_highlight_endpoints(
+        let mut cache = self
+            .highlight_endpoint_cache
+            .lock()
+            .expect("highlight endpoint cache mutex poisoned");
+        highlights::create_highlight_endpoints_cached(
             &range,
             text_highlights_ref,
             semantic_ref,
             decoration_ref,
             &resolve,
-        );
-        Arc::from(eps)
+            &mut cache,
+        )
     }
 
     pub fn is_line_folded(&self, buffer_row: u32) -> bool {
