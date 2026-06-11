@@ -1002,16 +1002,23 @@ pub struct WrappedChunksInner<'a> {
     pending_newline: bool,
 }
 
-/// Per-wrap-row streaming state. Holds an open [`TabChunks`] over the full
-/// underlying tab row plus the running display column. Chunks pulled from
-/// `tab_chunks` are sliced to the `[target_start, target_end)` display
-/// column window before being yielded.
+/// Streaming state for one tab row across all of its wrap sub-rows. Holds a
+/// single open [`TabChunks`] over the underlying tab row plus the running
+/// display column; chunks pulled from it are sliced to the current sub-row's
+/// `[target_start, target_end)` display-column window before being yielded.
+/// Advancing to the next sub-row only moves the window and reuses the same
+/// `tab_chunks` rather than re-streaming the row from column zero. A chunk
+/// that straddles the window end is held in `pending` for the next sub-row,
+/// which begins exactly at that column.
 struct RowChunksState<'a> {
     tab_chunks: TabChunks<'a>,
     column: u32,
     target_start: u32,
     target_end: Option<u32>,
     done: bool,
+    sub_row: usize,
+    wrap_columns: Vec<u32>,
+    pending: Option<Chunk<'a>>,
 }
 
 impl<'a> Iterator for WrapChunks<'a> {
@@ -1042,19 +1049,20 @@ impl<'a> WrappedChunksInner<'a> {
                 }
                 self.row_state = self.start_row(self.current_row);
                 if self.row_state.is_none() {
-                    self.advance_row();
+                    self.advance_wrap_row();
                     continue;
                 }
             }
 
             let state = self.row_state.as_mut().expect("checked Some above");
             if state.done {
-                self.advance_row();
+                self.advance_wrap_row();
                 continue;
             }
 
-            let Some(chunk) = state.tab_chunks.next() else {
-                self.advance_row();
+            let chunk = state.pending.take().or_else(|| state.tab_chunks.next());
+            let Some(chunk) = chunk else {
+                self.advance_wrap_row();
                 continue;
             };
 
@@ -1065,8 +1073,16 @@ impl<'a> WrappedChunksInner<'a> {
         }
     }
 
-    fn advance_row(&mut self) {
-        self.row_state = None;
+    /// Finish the current wrap row. If the open tab row has a further sub-row,
+    /// move the window onto it and keep the same `tab_chunks` (and any
+    /// straddling `pending` chunk); otherwise drop the state so the next tab
+    /// row is opened fresh. Either way advance the output row and queue the
+    /// separating newline.
+    fn advance_wrap_row(&mut self) {
+        let reused = self.row_state.as_mut().is_some_and(advance_sub_row);
+        if !reused {
+            self.row_state = None;
+        }
         self.current_row += 1;
         if self.current_row < self.rows.end {
             self.pending_newline = true;
@@ -1116,6 +1132,9 @@ impl<'a> WrappedChunksInner<'a> {
             target_start,
             target_end,
             done: false,
+            sub_row,
+            wrap_columns: transform.wrap_columns.clone(),
+            pending: None,
         })
     }
 }
@@ -1162,6 +1181,18 @@ fn slice_chunk_to_window<'a>(
     }
     state.column = col;
 
+    if state.done && byte_end < text.len() {
+        // The window ended mid-chunk; carry the overflow forward. The next
+        // sub-row begins exactly at this column, so it consumes the remainder
+        // from there rather than re-streaming the tab row.
+        let mut pending = chunk.clone();
+        pending.text = match &chunk.text {
+            Cow::Borrowed(s) => Cow::Borrowed(&s[byte_end..]),
+            Cow::Owned(s) => Cow::Owned(s[byte_end..].to_string()),
+        };
+        state.pending = Some(pending);
+    }
+
     let bs = byte_start?;
     let mut sliced = chunk;
     sliced.text = match sliced.text {
@@ -1169,6 +1200,21 @@ fn slice_chunk_to_window<'a>(
         Cow::Owned(s) => Cow::Owned(s[bs..byte_end].to_string()),
     };
     Some(sliced)
+}
+
+/// Move `state` onto its next wrap sub-row, reusing the open `tab_chunks` and
+/// any straddling `pending` chunk. Returns false when the tab row has no
+/// further sub-rows, leaving the caller to drop the state.
+fn advance_sub_row(state: &mut RowChunksState<'_>) -> bool {
+    let next = state.sub_row + 1;
+    if next >= state.wrap_columns.len() {
+        return false;
+    }
+    state.sub_row = next;
+    state.target_start = state.wrap_columns[next];
+    state.target_end = state.wrap_columns.get(next + 1).copied();
+    state.done = false;
+    true
 }
 
 pub struct WrapPointCursor<'a> {
