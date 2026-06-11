@@ -131,7 +131,30 @@ pub(crate) fn foldable_container_ranges_in_range(
     let Some(layer) = shallowest_containing_layer(syntax_map.snapshot(), 0) else {
         return out;
     };
-    collect_foldable_starts(layer.tree.root_node(), rope, start_row, end_row, &mut out);
+
+    let root = layer.tree.root_node();
+    let start_byte = rope.point_to_offset(Point::new(start_row, 0));
+    let end_byte = rope.point_to_offset(Point::new(end_row, 0));
+    let seed = root
+        .descendant_for_byte_range(start_byte, end_byte)
+        .unwrap_or(root);
+
+    // A container whose declaration sits at the viewport top spans the
+    // seed, so it is an ancestor rather than part of its subtree. Record
+    // those outermost-first to preserve the outermost-wins ordering.
+    let mut ancestors = Vec::new();
+    let mut ancestor = seed.parent();
+    while let Some(node) = ancestor {
+        ancestors.push(node);
+        ancestor = node.parent();
+    }
+    for node in ancestors.into_iter().rev() {
+        record_foldable(node, rope, start_row, end_row, &mut out);
+    }
+
+    collect_foldable_starts(
+        seed, rope, start_byte, end_byte, start_row, end_row, &mut out,
+    );
     out
 }
 
@@ -142,32 +165,49 @@ fn fold_range(rope: &Rope, start_row: u32, end_row: u32) -> Range<Point> {
     Point::new(start_row, rope.line_len(start_row))..Point::new(end_row, 0)
 }
 
-/// Recursively collect foldable multi-line containers starting in
-/// `[start_row, end_row)`, pruning subtrees that do not intersect the
-/// range. The parent of a same-row pair is visited first, so
-/// [`BTreeMap::entry`] keeps the outermost range per row.
-fn collect_foldable_starts(
+/// Record `node` as its start row's fold range when it is a multi-line
+/// foldable container declared in `[start_row, end_row)`. [`BTreeMap::
+/// entry`] keeps the outermost range when containers share a start row.
+fn record_foldable(
     node: Node<'_>,
     rope: &Rope,
     start_row: u32,
     end_row: u32,
     out: &mut BTreeMap<u32, Range<Point>>,
 ) {
-    let node_start = rope.offset_to_point(node.byte_range().start).row;
-    let node_end = rope.offset_to_point(node.byte_range().end).row;
-    if node_end < start_row || node_start >= end_row {
+    if !FOLDABLE_KINDS.contains(&node.kind()) {
         return;
     }
-    if FOLDABLE_KINDS.contains(&node.kind())
-        && node_end > node_start
-        && (start_row..end_row).contains(&node_start)
-    {
+    let node_start = rope.offset_to_point(node.byte_range().start).row;
+    let node_end = rope.offset_to_point(node.byte_range().end).row;
+    if node_end > node_start && (start_row..end_row).contains(&node_start) {
         out.entry(node_start)
             .or_insert_with(|| fold_range(rope, node_start, node_end));
     }
+}
+
+/// Recursively collect foldable multi-line containers starting in
+/// `[start_row, end_row)`, pruning subtrees outside the visible byte
+/// range `[start_byte, end_byte)` so node byte ranges are compared
+/// directly instead of converted to rows. The parent of a same-row pair
+/// is visited first, so [`BTreeMap::entry`] keeps the outermost per row.
+fn collect_foldable_starts(
+    node: Node<'_>,
+    rope: &Rope,
+    start_byte: usize,
+    end_byte: usize,
+    start_row: u32,
+    end_row: u32,
+    out: &mut BTreeMap<u32, Range<Point>>,
+) {
+    let range = node.byte_range();
+    if range.end < start_byte || range.start >= end_byte {
+        return;
+    }
+    record_foldable(node, rope, start_row, end_row, out);
     for i in 0..node.child_count() {
         if let Some(child) = node.child(i as u32) {
-            collect_foldable_starts(child, rope, start_row, end_row, out);
+            collect_foldable_starts(child, rope, start_byte, end_byte, start_row, end_row, out);
         }
     }
 }
@@ -295,6 +335,24 @@ mod tests {
         assert_eq!(
             ranges.into_iter().collect::<Vec<_>>(),
             vec![(2, Point::new(2, 18)..Point::new(4, 0))]
+        );
+    }
+
+    #[test]
+    fn foldable_ranges_in_range_finds_viewport_top_container() {
+        let mut cx = TestAppContext::single();
+        let editor = new_rust_editor(&mut cx, NESTED);
+        // Viewport rows 0..2: the `mod` and `impl` containers start in it
+        // and span past it; the deeper `fn` at row 2 is excluded.
+        let ranges = editor.read_with(&cx, |ed, cx| {
+            foldable_container_ranges_in_range(ed, 0, 2, cx)
+        });
+        assert_eq!(
+            ranges.into_iter().collect::<Vec<_>>(),
+            vec![
+                (0, Point::new(0, 9)..Point::new(6, 0)),
+                (1, Point::new(1, 14)..Point::new(5, 0)),
+            ]
         );
     }
 }
