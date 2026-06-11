@@ -4,6 +4,7 @@ use super::{
 };
 use std::{
     borrow::Cow,
+    mem,
     num::NonZeroU32,
     ops::{Deref, Range},
     sync::Arc,
@@ -310,12 +311,9 @@ impl<'a> Iterator for TabChunks<'a> {
             self.pending.as_ref()?;
         }
         // Take ownership of pending so we can mutate self freely.
-        let pending = self.pending.take().expect("refilled above");
+        let mut pending = self.pending.take().expect("refilled above");
 
-        let text: &str = pending.text.as_ref();
-        let tab_idx = text.find('\t');
-
-        match tab_idx {
+        match pending.text.find('\t') {
             None => {
                 // No tab in this chunk. Emit whole chunk, advance column.
                 advance_display_column(&pending.text, &mut self.display_column);
@@ -326,10 +324,10 @@ impl<'a> Iterator for TabChunks<'a> {
                 // the remainder back into pending.
                 let spaces = self.tab_width();
                 self.display_column += spaces;
-                let rest = text[1..].to_string();
+                let rest = slice_cow_from(mem::take(&mut pending.text), 1);
                 if !rest.is_empty() {
                     self.pending = Some(Chunk {
-                        text: Cow::Owned(rest),
+                        text: rest,
                         ..clone_chunk_metadata(&pending)
                     });
                 }
@@ -345,11 +343,10 @@ impl<'a> Iterator for TabChunks<'a> {
             Some(idx) => {
                 // Emit prefix before the tab; push the tab-plus-suffix back
                 // into pending so the next call processes them.
-                let prefix = text[..idx].to_string();
-                let rest = text[idx..].to_string();
+                let (prefix, rest) = split_cow_at(mem::take(&mut pending.text), idx);
                 let metadata = clone_chunk_metadata(&pending);
                 self.pending = Some(Chunk {
-                    text: Cow::Owned(rest),
+                    text: rest,
                     highlight_style: metadata.highlight_style.clone(),
                     is_tab: metadata.is_tab,
                     is_inlay: metadata.is_inlay,
@@ -359,7 +356,7 @@ impl<'a> Iterator for TabChunks<'a> {
                 });
                 advance_display_column(&prefix, &mut self.display_column);
                 Some(Chunk {
-                    text: Cow::Owned(prefix),
+                    text: prefix,
                     ..metadata
                 })
             },
@@ -376,6 +373,28 @@ fn clone_chunk_metadata<'a>(chunk: &Chunk<'a>) -> Chunk<'a> {
         inlay_kind: chunk.inlay_kind,
         diagnostic_severity: chunk.diagnostic_severity,
         renderer: chunk.renderer.clone(),
+    }
+}
+
+/// Slice a chunk's text from byte `start` to its end. A borrowed chunk keeps
+/// its `'a` lifetime so the suffix is a free re-slice; an owned chunk falls
+/// back to allocating the remainder.
+fn slice_cow_from(cow: Cow<'_, str>, start: usize) -> Cow<'_, str> {
+    match cow {
+        Cow::Borrowed(s) => Cow::Borrowed(&s[start..]),
+        Cow::Owned(s) => Cow::Owned(s[start..].to_string()),
+    }
+}
+
+/// Split a chunk's text at byte `idx` into prefix and suffix. A borrowed chunk
+/// re-slices both halves for free; an owned chunk allocates each half.
+fn split_cow_at(cow: Cow<'_, str>, idx: usize) -> (Cow<'_, str>, Cow<'_, str>) {
+    match cow {
+        Cow::Borrowed(s) => (Cow::Borrowed(&s[..idx]), Cow::Borrowed(&s[idx..])),
+        Cow::Owned(s) => (
+            Cow::Owned(s[..idx].to_string()),
+            Cow::Owned(s[idx..].to_string()),
+        ),
     }
 }
 
