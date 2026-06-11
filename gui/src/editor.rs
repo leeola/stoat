@@ -30,7 +30,7 @@ use gpui::{
 };
 use lru::LruCache;
 use serde_json::Value;
-use std::{cell::RefCell, collections::VecDeque, num::NonZeroUsize, ops::Range};
+use std::{cell::RefCell, collections::VecDeque, num::NonZeroUsize, ops::Range, sync::Arc};
 use stoat::{
     buffer::BufferId,
     display_map::{Block, BlockRowKind, DisplaySnapshot},
@@ -415,8 +415,8 @@ struct FrameRenderData {
         stoat::display_map::syntax_theme::SyntaxStyles,
     )>,
     search_regex: Option<regex::Regex>,
-    blame_lines: Option<Vec<stoat::host::BlameLine>>,
-    inline_blame_lines: Option<Vec<stoat::host::BlameLine>>,
+    blame_lines: Option<Arc<[stoat::host::BlameLine]>>,
+    inline_blame_lines: Option<Arc<[stoat::host::BlameLine]>>,
     diff_map: stoat::DiffMap,
     diff_move_provenances: Vec<(u32, stoat::review::MoveProvenance)>,
     diagnostic_row_map: Option<render::DiagnosticRowMap>,
@@ -3908,11 +3908,11 @@ impl Editor {
         };
 
         let blame_lines = match (self.blame_visible, self.blame_state.as_ref()) {
-            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
+            (true, Some(state)) => Some(state.read(cx).blame_arc()),
             _ => None,
         };
         let inline_blame_lines = match (self.inline_blame_visible, self.blame_state.as_ref()) {
-            (true, Some(state)) => Some(state.read(cx).blame().to_vec()),
+            (true, Some(state)) => Some(state.read(cx).blame_arc()),
             _ => None,
         };
 

@@ -2061,6 +2061,16 @@ fn whitespace_overlay_lines(display_row: u32, paint: &GutterPaint<'_>) -> Vec<Di
     out
 }
 
+/// Resolve the blame entry for `buffer_row`. The list is row-sorted
+/// ascending by line, so this binary-searches instead of scanning every
+/// entry for each rendered row.
+fn blame_entry(lines: &[BlameLine], buffer_row: u32) -> Option<&BlameLine> {
+    lines
+        .binary_search_by_key(&buffer_row, |line| line.line)
+        .ok()
+        .map(|idx| &lines[idx])
+}
+
 /// Build the trailing inline-blame element for `display_row` when
 /// inline blame is active and a blame entry covers the row's buffer
 /// line. Returns `None` for wrap continuations, unmapped rows, or rows
@@ -2075,7 +2085,7 @@ fn inline_blame_cell(display_row: u32, paint: &GutterPaint<'_>) -> Option<Div> {
         .display_snapshot
         .display_to_buffer(DisplayPoint::new(display_row, 0))
         .map(|p| p.row)?;
-    let entry = inline.lines.iter().find(|line| line.line == buffer_row)?;
+    let entry = blame_entry(inline.lines, buffer_row)?;
     let label = blame::inline_blame_text(entry, inline.now_seconds);
     Some(
         div()
@@ -2276,7 +2286,7 @@ fn append_blame_strip(
     cache: Option<&BlameStripCache>,
 ) {
     let entry = if show_for_row {
-        buffer_row.and_then(|row| paint.lines.iter().find(|line| line.line == row))
+        buffer_row.and_then(|row| blame_entry(paint.lines, row))
     } else {
         None
     };

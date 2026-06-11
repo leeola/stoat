@@ -1,5 +1,6 @@
 use crate::buffer::{Buffer, BufferEvent};
 use gpui::{Context, Entity, EventEmitter, Subscription};
+use std::sync::Arc;
 use stoat::host::BlameLine;
 
 /// Per-buffer cache of [`BlameLine`] data produced by
@@ -9,10 +10,15 @@ use stoat::host::BlameLine;
 /// attribute lines after the row offsets shift, so the strip blanks
 /// until a coordinator refills it.
 ///
+/// Entries stay ascending and contiguous by [`BlameLine::line`], the
+/// order `blame_path` emits them, so the render path resolves a row by
+/// binary search. Held as `Arc<[BlameLine]>` so per-frame readers share
+/// the list without deep-cloning every entry's strings.
+///
 /// Subscribers observe [`BlameStateEvent::Changed`] -- emitted on
 /// both fresh data and edit-driven invalidation -- to drive re-render.
 pub struct BlameState {
-    blame: Vec<BlameLine>,
+    blame: Arc<[BlameLine]>,
     _subscription: Subscription,
 }
 
@@ -30,13 +36,13 @@ impl BlameState {
                 if this.blame.is_empty() {
                     return;
                 }
-                this.blame.clear();
+                this.blame = Vec::new().into();
                 cx.emit(BlameStateEvent::Changed);
                 cx.notify();
             }
         });
         Self {
-            blame: Vec::new(),
+            blame: Vec::new().into(),
             _subscription: subscription,
         }
     }
@@ -45,15 +51,23 @@ impl BlameState {
         &self.blame
     }
 
+    /// Shared handle to the cached entries. Cloning is a refcount bump, so
+    /// per-frame render setup can hold the list without copying every
+    /// entry's strings.
+    pub fn blame_arc(&self) -> Arc<[BlameLine]> {
+        self.blame.clone()
+    }
+
     pub fn is_empty(&self) -> bool {
         self.blame.is_empty()
     }
 
     /// Replace the cached entries with `blame` and notify subscribers.
     /// A coordinator calls this after computing
-    /// [`stoat::host::GitRepo::blame_path`].
+    /// [`stoat::host::GitRepo::blame_path`]. Entries must be ascending by
+    /// [`BlameLine::line`]; the render path binary-searches them.
     pub fn set_blame(&mut self, blame: Vec<BlameLine>, cx: &mut Context<'_, Self>) {
-        self.blame = blame;
+        self.blame = blame.into();
         cx.emit(BlameStateEvent::Changed);
         cx.notify();
     }
@@ -62,7 +76,7 @@ impl BlameState {
         if self.blame.is_empty() {
             return;
         }
-        self.blame.clear();
+        self.blame = Vec::new().into();
         cx.emit(BlameStateEvent::Changed);
         cx.notify();
     }
