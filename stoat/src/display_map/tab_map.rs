@@ -56,10 +56,6 @@ impl TabMap {
         }
     }
 
-    pub fn set_tab_size(&mut self, size: NonZeroU32) {
-        self.tab_size = size;
-    }
-
     /// Advances to `fold_snapshot` and returns the tab-row patch for the
     /// wrap layer.
     ///
@@ -137,26 +133,6 @@ impl TabSnapshot {
             self.max_expansion_column,
         );
         FoldPoint::new(tab_point.row(), fold_column)
-    }
-
-    pub fn tab_point_to_fold_point_detailed(
-        &self,
-        tab_point: TabPoint,
-        bias: Bias,
-    ) -> (FoldPoint, u32, u32) {
-        let chars = self.fold_snapshot.fold_line_chars(tab_point.row());
-        let (fold_column, expanded_char_column, to_next_stop) = collapse_column_detailed(
-            chars,
-            tab_point.column(),
-            self.tab_size,
-            bias,
-            self.max_expansion_column,
-        );
-        (
-            FoldPoint::new(tab_point.row(), fold_column),
-            expanded_char_column,
-            to_next_stop,
-        )
     }
 
     pub fn line_len(&self, fold_row: u32) -> u32 {
@@ -484,47 +460,6 @@ fn collapse_column(
         fold_col = fold_col.saturating_sub(last_char_byte_len);
     }
     fold_col
-}
-
-fn collapse_column_detailed(
-    chars: impl Iterator<Item = char>,
-    tab_column: u32,
-    tab_size: u32,
-    bias: Bias,
-    max_expansion_column: u32,
-) -> (u32, u32, u32) {
-    let mut expanded = 0u32;
-    let mut fold_col = 0u32;
-    let mut last_char_byte_len = 0u32;
-    let mut last_char_width = 0u32;
-    for ch in chars {
-        if expanded >= tab_column {
-            break;
-        }
-        let char_width = if ch == '\t' {
-            if expanded >= max_expansion_column {
-                1
-            } else {
-                tab_size - (expanded % tab_size)
-            }
-        } else {
-            super::display_width(ch)
-        };
-        expanded += char_width;
-        last_char_byte_len = ch.len_utf8() as u32;
-        last_char_width = char_width;
-        fold_col += last_char_byte_len;
-    }
-    if bias == Bias::Left && expanded > tab_column {
-        fold_col = fold_col.saturating_sub(last_char_byte_len);
-        expanded -= last_char_width;
-    }
-    let to_next_stop = if expanded >= max_expansion_column {
-        1
-    } else {
-        tab_size - (expanded % tab_size)
-    };
-    (fold_col, expanded, to_next_stop)
 }
 
 #[cfg(test)]
