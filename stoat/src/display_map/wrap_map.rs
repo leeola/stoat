@@ -757,12 +757,12 @@ impl WrapSnapshot {
         }
     }
 
-    pub fn clip_point(&self, point: WrapPoint, _bias: Bias) -> WrapPoint {
+    pub fn clip_point(&self, point: WrapPoint, bias: Bias) -> WrapPoint {
         let max_row = self.total_rows.saturating_sub(1);
         let row = point.row().min(max_row);
-        let max_col = self.line_len(row);
-        let col = point.column().min(max_col);
-        WrapPoint::new(row, col)
+        let tab_point = self.to_tab_point(WrapPoint::new(row, point.column()));
+        let clipped = self.tab_snapshot().clip_point(tab_point, bias);
+        self.to_wrap_point(clipped)
     }
 
     pub fn line_len(&self, wrap_row: u32) -> u32 {

@@ -773,11 +773,21 @@ impl DisplaySnapshot {
 
     fn clip_point_at_line_end(&self, point: DisplayPoint) -> DisplayPoint {
         let line_len = self.line_len(point.row);
-        if line_len > 0 && point.column >= line_len {
-            DisplayPoint::new(point.row, line_len.saturating_sub(1))
-        } else {
-            point
+        if line_len == 0 || point.column < line_len {
+            return point;
         }
+        // Step back a char in buffer space so the caret lands at the last
+        // glyph's start, not mid-tab or on a wide char's second cell, which
+        // clamping to `line_len - 1` display columns would.
+        let Some(buf) = self.display_to_buffer(DisplayPoint::new(point.row, line_len), Bias::Left)
+        else {
+            return point;
+        };
+        let prev = self.buffer_snapshot().rope().clip_point(
+            Point::new(buf.row, buf.column.saturating_sub(1)),
+            Bias::Left,
+        );
+        self.buffer_to_display(prev, Bias::Left)
     }
 
     pub fn max_point(&self) -> DisplayPoint {

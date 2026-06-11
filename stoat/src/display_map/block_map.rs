@@ -1086,8 +1086,16 @@ impl BlockSnapshot {
         let row = point.row.min(self.total_rows.saturating_sub(1));
         match self.classify_row(row) {
             BlockRowKind::BufferRow { .. } => {
-                let col = point.column.min(self.line_len(row));
-                BlockPoint::new(row, col)
+                let mut cursor = self
+                    .transforms
+                    .cursor::<Dimensions<InputRow, OutputRow>>(());
+                cursor.seek(&OutputRow(row + 1), Bias::Left);
+                let Dimensions(input_start, output_start, _) = cursor.start();
+                let wrap_row = input_start.0 + (row - output_start.0);
+                let clipped = self
+                    .wrap_snapshot
+                    .clip_point(WrapPoint::new(wrap_row, point.column), bias);
+                BlockPoint::new(row, clipped.column())
             },
             BlockRowKind::Block { .. } => {
                 let target = OutputRow(row + 1);

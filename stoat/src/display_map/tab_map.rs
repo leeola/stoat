@@ -175,12 +175,10 @@ impl TabSnapshot {
         expanded
     }
 
-    pub fn clip_point(&self, point: TabPoint, _bias: Bias) -> TabPoint {
-        let max_row = self.line_count().saturating_sub(1);
-        let row = point.row().min(max_row);
-        let max_col = self.line_len(row);
-        let col = point.column().min(max_col);
-        TabPoint::new(row, col)
+    pub fn clip_point(&self, point: TabPoint, bias: Bias) -> TabPoint {
+        let fold_point = self.to_fold_point(point, bias);
+        let clipped = self.fold_snapshot.clip_point(fold_point, bias);
+        self.to_tab_point(clipped)
     }
 
     pub fn write_expand_line(&self, buf: &mut String, fold_row: u32) {
@@ -655,13 +653,31 @@ mod tests {
     #[test]
     fn clip_point_clamps() {
         let snap = make_snapshot("hello\nhi");
+        // A past-end row clamps to the buffer's end, not the start of the last
+        // line: the fold round-trip resolves an out-of-range point to max_point.
         assert_eq!(
             snap.clip_point(TabPoint::new(5, 0), Bias::Left),
-            TabPoint::new(1, 0)
+            TabPoint::new(1, 2)
         );
         assert_eq!(
             snap.clip_point(TabPoint::new(0, 100), Bias::Left),
             TabPoint::new(0, 5)
+        );
+    }
+
+    #[test]
+    fn clip_point_snaps_inside_tab() {
+        // "\tx": the tab expands to 4 cells (columns 0..4), x at column 4.
+        let snap = make_snapshot("\tx");
+        // A column inside the tab expansion snaps to a cell boundary -- Left to
+        // the tab's start, Right to the cell after it -- rather than surviving.
+        assert_eq!(
+            snap.clip_point(TabPoint::new(0, 2), Bias::Left),
+            TabPoint::new(0, 0)
+        );
+        assert_eq!(
+            snap.clip_point(TabPoint::new(0, 2), Bias::Right),
+            TabPoint::new(0, 4)
         );
     }
 
