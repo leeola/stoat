@@ -475,6 +475,7 @@ fn collect_move_provenances_from_diff(
             out.push((row, provenance.clone()));
         }
     }
+    out.sort_by_key(|(row, _)| *row);
     out
 }
 
@@ -3882,7 +3883,7 @@ impl Editor {
         let Some(file) = inner.files.get(file_index) else {
             return ReviewRenderData::default();
         };
-        let chunk_markers = file
+        let mut chunk_markers = file
             .chunks
             .iter()
             .filter_map(|id| inner.chunks.get(id))
@@ -3908,6 +3909,9 @@ impl Editor {
                 }
             }
         }
+        chunk_markers.sort_by_key(|(row, _)| *row);
+        provenances.sort_by_key(|(row, _)| *row);
+        moved_spans.sort_by_key(|(row, _)| *row);
         ReviewRenderData {
             chunk_markers,
             provenances,

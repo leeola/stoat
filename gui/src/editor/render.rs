@@ -767,9 +767,10 @@ pub(crate) fn apply_review_moved_overlay(
         };
         let buffer_row = buffer_point.row;
         let row_len = row.text.len();
-        for (row_idx, span) in moved_spans {
+        let start_idx = moved_spans.partition_point(|(r, _)| *r < buffer_row);
+        for (row_idx, span) in &moved_spans[start_idx..] {
             if *row_idx != buffer_row {
-                continue;
+                break;
             }
             let start = span.start.min(row_len);
             let end = span.end.min(row_len);
@@ -1795,10 +1796,13 @@ fn build_row_suffix(buffer_row: Option<u32>, paint: &GutterPaint<'_>) -> RowSuff
     let Some(buffer_row) = buffer_row else {
         return RowSuffix { text, runs };
     };
+    let prov_idx = paint
+        .review_move_provenances
+        .partition_point(|(row, _)| *row < buffer_row);
     let Some(provenance) = paint
         .review_move_provenances
-        .iter()
-        .find(|(row, _)| *row == buffer_row)
+        .get(prov_idx)
+        .filter(|(row, _)| *row == buffer_row)
         .map(|(_, prov)| prov)
     else {
         return RowSuffix { text, runs };
@@ -2242,10 +2246,13 @@ fn build_gutter_prefix(display_row: u32, paint: &GutterPaint<'_>) -> GutterPrefi
     }
 
     let chunk_status = buffer_row.and_then(|row| {
+        let idx = paint
+            .review_chunk_markers
+            .partition_point(|(start, _)| *start < row);
         paint
             .review_chunk_markers
-            .iter()
-            .find(|(start, _)| *start == row)
+            .get(idx)
+            .filter(|(start, _)| *start == row)
             .map(|(_, status)| *status)
     });
     let start = text.len();
