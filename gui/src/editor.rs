@@ -4077,6 +4077,7 @@ impl Editor {
         let end = range.end.min(total_rows);
         let start = range.start.min(end);
         let mut rows = render::build_rendered_rows(&display_snapshot, start as u32..end as u32);
+        let row_infos = display_snapshot.row_infos(start as u32..end as u32);
         let byte_maps =
             render::build_row_byte_maps(&rows, &display_snapshot, start as u32..end as u32);
 
@@ -4088,14 +4089,9 @@ impl Editor {
         // remain wired below.
         let review_data = &frame.review_data;
         if !is_minimap {
-            render::apply_move_chip_overlay(&mut rows, &display_snapshot, start as u32..end as u32);
+            render::apply_move_chip_overlay(&mut rows, &display_snapshot, &row_infos);
 
-            render::apply_review_moved_overlay(
-                &mut rows,
-                &display_snapshot,
-                start as u32..end as u32,
-                &review_data.moved_spans,
-            );
+            render::apply_review_moved_overlay(&mut rows, &row_infos, &review_data.moved_spans);
         }
 
         if let Some((syntax_snapshot, styles)) = &frame.syntax {

@@ -19,7 +19,7 @@ use stoat::{
     host::BlameLine,
     review::MoveProvenance,
     review_session::ChunkStatus,
-    BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot,
+    BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot, RowInfo,
 };
 use stoat_config::{LineNumberMode, ShowWhitespace};
 use stoat_text::{cursor_offset, Anchor, Bias, Selection};
@@ -746,26 +746,16 @@ fn push_syntax_runs(
 /// skipped.
 pub(crate) fn apply_review_moved_overlay(
     rows: &mut [RenderedRow],
-    snapshot: &DisplaySnapshot,
-    range: Range<u32>,
+    row_infos: &[RowInfo],
     moved_spans: &[(u32, Range<usize>)],
 ) {
     if moved_spans.is_empty() {
         return;
     }
     for (idx, row) in rows.iter_mut().enumerate() {
-        let display_row = range.start + idx as u32;
-        if !matches!(
-            snapshot.classify_row(display_row),
-            BlockRowKind::BufferRow { .. }
-        ) {
-            continue;
-        }
-        let Some(buffer_point) = snapshot.display_to_buffer(DisplayPoint::new(display_row, 0))
-        else {
+        let Some(buffer_row) = row_infos[idx].buffer_row else {
             continue;
         };
-        let buffer_row = buffer_point.row;
         let row_len = row.text.len();
         let start_idx = moved_spans.partition_point(|(r, _)| *r < buffer_row);
         for (row_idx, span) in &moved_spans[start_idx..] {
@@ -801,7 +791,7 @@ pub(crate) fn apply_review_moved_overlay(
 pub(crate) fn apply_move_chip_overlay(
     rows: &mut [RenderedRow],
     snapshot: &DisplaySnapshot,
-    range: Range<u32>,
+    row_infos: &[RowInfo],
 ) {
     let Some(diff_map) = snapshot.diff_map() else {
         return;
@@ -811,18 +801,9 @@ pub(crate) fn apply_move_chip_overlay(
         ..Default::default()
     };
     for (idx, row) in rows.iter_mut().enumerate() {
-        let display_row = range.start + idx as u32;
-        if !matches!(
-            snapshot.classify_row(display_row),
-            BlockRowKind::BufferRow { .. }
-        ) {
-            continue;
-        }
-        let Some(buffer_point) = snapshot.display_to_buffer(DisplayPoint::new(display_row, 0))
-        else {
+        let Some(buffer_row) = row_infos[idx].buffer_row else {
             continue;
         };
-        let buffer_row = buffer_point.row;
         let Some(detail) = diff_map.token_detail_for_line(buffer_row) else {
             continue;
         };
@@ -4748,7 +4729,8 @@ mod tests {
         let snapshot = snapshot_with_diff_map(&mut cx, "hello", diff_map);
 
         let mut rows = build_rendered_rows(&snapshot, 0..1);
-        apply_move_chip_overlay(&mut rows, &snapshot, 0..1);
+        let row_infos = snapshot.row_infos(0..1);
+        apply_move_chip_overlay(&mut rows, &snapshot, &row_infos);
 
         assert_eq!(rows[0].text.as_ref(), "hello  <- other.rs:4");
         let chip_run = rows[0]
@@ -4790,7 +4772,8 @@ mod tests {
         let snapshot = snapshot_with_diff_map(&mut cx, "hello", diff_map);
 
         let mut rows = build_rendered_rows(&snapshot, 0..1);
-        apply_move_chip_overlay(&mut rows, &snapshot, 0..1);
+        let row_infos = snapshot.row_infos(0..1);
+        apply_move_chip_overlay(&mut rows, &snapshot, &row_infos);
 
         assert_eq!(
             rows[0].text.as_ref(),
@@ -4883,9 +4866,10 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "alpha\nbeta\ngamma");
         let mut rows = build_rendered_rows(&snapshot, 0..3);
+        let row_infos = snapshot.row_infos(0..3);
         let moved = vec![(1u32, 1..3)];
 
-        apply_review_moved_overlay(&mut rows, &snapshot, 0..3, &moved);
+        apply_review_moved_overlay(&mut rows, &row_infos, &moved);
 
         assert!(
             rows[0].runs.is_empty(),
@@ -4905,8 +4889,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "hi");
         let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let row_infos = snapshot.row_infos(0..1);
 
-        apply_review_moved_overlay(&mut rows, &snapshot, 0..1, &[(0, 0..99)]);
+        apply_review_moved_overlay(&mut rows, &row_infos, &[(0, 0..99)]);
 
         let overlay = underline_run(&rows[0].runs);
         assert_eq!(overlay.0, 0..2);
@@ -4917,8 +4902,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "alpha");
         let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let row_infos = snapshot.row_infos(0..1);
 
-        apply_review_moved_overlay(&mut rows, &snapshot, 0..1, &[]);
+        apply_review_moved_overlay(&mut rows, &row_infos, &[]);
 
         assert!(rows[0].runs.is_empty());
     }
@@ -4928,8 +4914,9 @@ mod tests {
         let mut cx = TestAppContext::single();
         let snapshot = test_snapshot(&mut cx, "alpha");
         let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let row_infos = snapshot.row_infos(0..1);
 
-        apply_review_moved_overlay(&mut rows, &snapshot, 0..1, &[(5, 0..2)]);
+        apply_review_moved_overlay(&mut rows, &row_infos, &[(5, 0..2)]);
 
         assert!(rows[0].runs.is_empty());
     }

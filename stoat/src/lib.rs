@@ -53,8 +53,9 @@ pub use display_map::{
     DisplayMapId, DisplayPoint, DisplayRow, DisplaySnapshot, FoldMap, FoldPlaceholder, FoldPoint,
     FoldSnapshot, HighlightKey, HighlightLayer, HighlightStyle, HighlightStyleId,
     HighlightStyleInterner, HighlightedChunk, Highlights, InlayId, InlayKind, InlayMap,
-    InlayOffset, InlayPoint, InlaySnapshot, SemanticTokenHighlight, SemanticTokensHighlights,
-    TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap, WrapPoint, WrapSnapshot,
+    InlayOffset, InlayPoint, InlaySnapshot, RowInfo, SemanticTokenHighlight,
+    SemanticTokensHighlights, TabMap, TabPoint, TabRow, TabSnapshot, TextHighlights, WrapMap,
+    WrapPoint, WrapSnapshot,
 };
 pub use host::DiffStatus;
 pub use multi_buffer::{
