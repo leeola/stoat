@@ -1753,14 +1753,10 @@ const INDENT_GUIDE_BLANK_SCAN: u32 = 256;
 
 /// Indent levels for a line: leading-space columns divided by
 /// `tab_width` (floor). Display lines have tabs expanded to spaces, so
-/// leading whitespace is counted directly. Returns 0 for an
-/// unindented line or a zero `tab_width`.
-fn indent_levels(display_line: &str, tab_width: u32) -> u32 {
-    if tab_width == 0 {
-        return 0;
-    }
-    let leading = display_line.chars().take_while(|c| *c == ' ').count() as u32;
-    leading / tab_width
+/// leading whitespace counts directly. Returns 0 for an unindented line
+/// or a zero `tab_width`.
+fn indent_depth(spaces: u32, tab_width: u32) -> u32 {
+    spaces.checked_div(tab_width).unwrap_or(0)
 }
 
 /// Effective indent depth for a blank line: the lesser of the nearest
@@ -1781,8 +1777,8 @@ pub(crate) fn cursor_active_indent_index(
     snapshot: &DisplaySnapshot,
     cursor_display_row: u32,
 ) -> Option<u32> {
-    let depth = indent_levels(
-        &snapshot.display_line(cursor_display_row),
+    let depth = indent_depth(
+        snapshot.line_indent(cursor_display_row).spaces,
         INDENT_GUIDE_TAB_WIDTH,
     );
     depth.checked_sub(1)
@@ -1895,9 +1891,9 @@ fn indent_guide_lines(display_row: u32, paint: &GutterPaint<'_>) -> Vec<Div> {
 /// blank line the enclosing block's indent (see
 /// [`enclosing_block_indent`]).
 fn row_indent_depth(snapshot: &DisplaySnapshot, display_row: u32) -> u32 {
-    let line = snapshot.display_line(display_row);
-    if !line.trim().is_empty() {
-        return indent_levels(&line, INDENT_GUIDE_TAB_WIDTH);
+    let indent = snapshot.line_indent(display_row);
+    if !indent.blank {
+        return indent_depth(indent.spaces, INDENT_GUIDE_TAB_WIDTH);
     }
     let above = nearest_nonblank_indent(snapshot, display_row, true);
     let below = nearest_nonblank_indent(snapshot, display_row, false);
@@ -1922,9 +1918,9 @@ fn nearest_nonblank_indent(
                 return None;
             }
         }
-        let line = snapshot.display_line(row);
-        if !line.trim().is_empty() {
-            return Some(indent_levels(&line, INDENT_GUIDE_TAB_WIDTH));
+        let indent = snapshot.line_indent(row);
+        if !indent.blank {
+            return Some(indent_depth(indent.spaces, INDENT_GUIDE_TAB_WIDTH));
         }
     }
     None
@@ -2415,13 +2411,13 @@ mod tests {
     use stoat_scheduler::{Executor, TestScheduler};
 
     #[test]
-    fn indent_levels_counts_tab_stops() {
-        assert_eq!(indent_levels("code", 4), 0);
-        assert_eq!(indent_levels("    code", 4), 1);
-        assert_eq!(indent_levels("        code", 4), 2);
-        assert_eq!(indent_levels("      code", 4), 1);
-        assert_eq!(indent_levels("", 4), 0);
-        assert_eq!(indent_levels("    code", 0), 0);
+    fn indent_depth_counts_tab_stops() {
+        assert_eq!(indent_depth(0, 4), 0);
+        assert_eq!(indent_depth(4, 4), 1);
+        assert_eq!(indent_depth(8, 4), 2);
+        assert_eq!(indent_depth(6, 4), 1);
+        assert_eq!(indent_depth(0, 4), 0);
+        assert_eq!(indent_depth(4, 0), 0);
     }
 
     #[test]

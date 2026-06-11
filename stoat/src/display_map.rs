@@ -595,6 +595,16 @@ pub struct DisplaySnapshot {
     diagnostics_max_severity: Option<DiagnosticSeverity>,
 }
 
+/// Leading-whitespace measurement of a display row. `spaces` counts the
+/// leading space columns (display text has tabs expanded to spaces);
+/// `blank` is true when the row holds no non-space content. Produced by
+/// [`DisplaySnapshot::line_indent`] without materializing the line.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct LineIndent {
+    pub spaces: u32,
+    pub blank: bool,
+}
+
 impl DisplaySnapshot {
     pub fn version(&self) -> usize {
         self.fold_snapshot().version()
@@ -812,6 +822,37 @@ impl DisplaySnapshot {
         range.map(move |row| self.display_line(row))
     }
 
+    /// Leading whitespace of `display_row`, read in a single forward pass
+    /// over the row's display chunks without allocating the line. Block
+    /// rows -- whose chunk text differs from their rendered line -- fall
+    /// back to the materialized line so the result matches
+    /// [`display_line`](Self::display_line).
+    pub fn line_indent(&self, display_row: u32) -> LineIndent {
+        if matches!(self.classify_row(display_row), BlockRowKind::Block { .. }) {
+            let line = self.display_line(display_row);
+            let spaces = line.chars().take_while(|c| *c == ' ').count() as u32;
+            return LineIndent {
+                spaces,
+                blank: line.trim().is_empty(),
+            };
+        }
+        let mut spaces = 0u32;
+        let mut blank = true;
+        'scan: for chunk in self.chunks(display_row..display_row + 1, Highlights::default()) {
+            for ch in chunk.text.chars() {
+                match ch {
+                    '\n' => break 'scan,
+                    ' ' => spaces += 1,
+                    _ => {
+                        blank = false;
+                        break 'scan;
+                    },
+                }
+            }
+        }
+        LineIndent { spaces, blank }
+    }
+
     pub fn is_wrap_continuation(&self, display_row: u32) -> bool {
         self.block_snapshot.is_wrap_continuation(display_row)
     }
@@ -925,7 +966,7 @@ impl Iterator for ReversedBufferCharsAt<'_> {
 mod tests {
     use super::{
         BlockRowKind, DisplayMap, DisplayPoint, DisplayRow, HighlightKey, HighlightLayer,
-        HighlightStyle, InlayKind, InlayPoint,
+        HighlightStyle, InlayKind, InlayPoint, LineIndent,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -1400,6 +1441,38 @@ mod tests {
         let snapshot = display_map.snapshot();
         let lines: Vec<String> = snapshot.display_lines(0..3).collect();
         assert_eq!(lines, vec!["hello", "world", "foo"]);
+    }
+
+    #[test]
+    fn line_indent_reads_leading_whitespace() {
+        let mut display_map = create_display_map("code\n    code\n        x\n   \ny");
+        let snapshot = display_map.snapshot();
+        let indents: Vec<LineIndent> = (0..5).map(|r| snapshot.line_indent(r)).collect();
+        assert_eq!(
+            indents,
+            vec![
+                LineIndent {
+                    spaces: 0,
+                    blank: false
+                },
+                LineIndent {
+                    spaces: 4,
+                    blank: false
+                },
+                LineIndent {
+                    spaces: 8,
+                    blank: false
+                },
+                LineIndent {
+                    spaces: 3,
+                    blank: true
+                },
+                LineIndent {
+                    spaces: 0,
+                    blank: false
+                },
+            ]
+        );
     }
 
     #[test]
