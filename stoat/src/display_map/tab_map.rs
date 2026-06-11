@@ -59,65 +59,27 @@ impl TabMap {
         self.tab_size = size;
     }
 
+    /// Advances to `fold_snapshot` and returns the tab-row patch for the
+    /// wrap layer.
+    ///
+    /// The patch is `fold_edits` unchanged. Tab expansion only widens columns
+    /// within a row, never row counts, so a row-granular fold edit already
+    /// covers every row whose expansion can change and the translation is the
+    /// identity. Extending an edit to a neighboring row would only
+    /// over-invalidate the wrap layer.
     pub fn sync(
         &mut self,
         fold_snapshot: Arc<FoldSnapshot>,
         fold_edits: Patch<u32>,
     ) -> (TabSnapshot, Patch<u32>) {
-        let tab_size = self.tab_size.get();
-
-        let expanded_edits = if fold_edits.is_empty() {
-            fold_edits
-        } else {
-            let mut expanded = Vec::new();
-            for edit in fold_edits.into_iter() {
-                let mut new_end = edit.new.end;
-                for row in edit.new.start..edit.new.end {
-                    let has_tab = fold_snapshot.fold_line_chars(row).any(|ch| ch == '\t');
-                    if has_tab {
-                        new_end = new_end.max(row + 1);
-                    }
-                }
-                // Check the row past the edit end if the edit did not change
-                // line count -- tabs on that line may have shifted.
-                let old_rows = edit.old.end - edit.old.start;
-                let new_rows = edit.new.end - edit.new.start;
-                if old_rows == new_rows && edit.new.end < fold_snapshot.line_count() {
-                    let has_tab = fold_snapshot
-                        .fold_line_chars(edit.new.end)
-                        .any(|ch| ch == '\t');
-                    if has_tab {
-                        new_end = new_end.max(edit.new.end + 1);
-                    }
-                }
-
-                let new_edit = stoat_text::patch::Edit {
-                    old: edit.old.start
-                        ..edit.old.end.max(new_end - edit.new.start + edit.old.start),
-                    new: edit.new.start..new_end,
-                };
-
-                if let Some(last) = expanded.last_mut() {
-                    let last: &mut stoat_text::patch::Edit<u32> = last;
-                    if new_edit.old.start <= last.old.end {
-                        last.old.end = last.old.end.max(new_edit.old.end);
-                        last.new.end = last.new.end.max(new_edit.new.end);
-                        continue;
-                    }
-                }
-                expanded.push(new_edit);
-            }
-            Patch::new(expanded)
-        };
-
         self.version += 1;
         let snapshot = TabSnapshot {
             fold_snapshot,
-            tab_size,
+            tab_size: self.tab_size.get(),
             max_expansion_column: MAX_EXPANSION_COLUMN,
             version: self.version,
         };
-        (snapshot, expanded_edits)
+        (snapshot, fold_edits)
     }
 }
 
@@ -548,7 +510,7 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
-            fold_map::{FoldMap, FoldPoint},
+            fold_map::{FoldMap, FoldPoint, FoldSnapshot},
             inlay_map::InlayMap,
         },
         multi_buffer::MultiBuffer,
@@ -557,18 +519,43 @@ mod tests {
         num::NonZeroU32,
         sync::{Arc, RwLock},
     };
-    use stoat_text::{patch::Patch, Bias};
+    use stoat_text::{
+        patch::{Edit, Patch},
+        Bias,
+    };
 
-    fn make_snapshot(content: &str) -> super::TabSnapshot {
+    fn make_fold_snapshot(content: &str) -> Arc<FoldSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
         let buffer_snapshot = multi_buffer.snapshot();
         let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot);
         let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        fold_snapshot
+    }
+
+    fn make_snapshot(content: &str) -> super::TabSnapshot {
         let mut tab_map = TabMap::new(NonZeroU32::new(4).unwrap());
-        let (snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        let (snapshot, _) = tab_map.sync(make_fold_snapshot(content), Patch::empty());
         snapshot
+    }
+
+    #[test]
+    fn sync_passes_fold_row_patch_through_unchanged() {
+        let fold_snapshot = make_fold_snapshot("abc\n\tdef");
+        let mut tab_map = TabMap::new(NonZeroU32::new(4).unwrap());
+        let fold_edits = Patch::new(vec![Edit {
+            old: 0..1,
+            new: 0..1,
+        }]);
+
+        let (snapshot, tab_edits) = tab_map.sync(fold_snapshot, fold_edits.clone());
+
+        assert_eq!(
+            tab_edits, fold_edits,
+            "tab translation must be the identity"
+        );
+        assert_eq!(snapshot.version(), 1);
     }
 
     #[test]
