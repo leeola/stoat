@@ -4248,9 +4248,14 @@ impl Editor {
                         mode,
                         &selection_paint,
                     ),
+                    invisible_rows: rows
+                        .iter()
+                        .map(|r| r.whitespace.invisibles.clone())
+                        .collect(),
                     range_start: start as u32,
                     glyph_color: theme.whitespace,
                     trailing_color: theme.diagnostic_error,
+                    invisible_color: theme.diagnostic_error,
                     cell_width: cell.width,
                     cell_height: cell.height,
                 })

@@ -15,7 +15,9 @@ use std::{
     path::Path,
 };
 use stoat::{
-    display_map::{Block, BlockContext, BlockId, HighlightStyle as StoatHighlightStyle},
+    display_map::{
+        invisibles, Block, BlockContext, BlockId, HighlightStyle as StoatHighlightStyle,
+    },
     host::BlameLine,
     review::MoveProvenance,
     review_session::ChunkStatus,
@@ -124,6 +126,7 @@ pub(crate) struct RenderedRow {
 #[derive(Clone, Default)]
 pub(crate) struct RowWhitespace {
     pub cells: Vec<(u32, WsKind)>,
+    pub invisibles: Vec<(u32, char)>,
     pub first_content: Option<u32>,
     pub last_content_end: Option<u32>,
 }
@@ -241,6 +244,11 @@ fn classify_ws_segment(seg: &str, ws: &mut RowWhitespace, column: &mut u32) {
         if ch == ' ' {
             ws.cells.push((*column, WsKind::Space));
         } else {
+            if invisibles::is_invisible(ch) {
+                if let Some(glyph) = invisibles::replacement(ch) {
+                    ws.invisibles.push((*column, glyph));
+                }
+            }
             if ws.first_content.is_none() {
                 ws.first_content = Some(*column);
             }
@@ -1726,9 +1734,11 @@ pub(crate) struct WsGlyph {
 /// [`ShowWhitespace::None`].
 pub(crate) struct WhitespacePaint {
     pub rows: Vec<Vec<WsGlyph>>,
+    pub invisible_rows: Vec<Vec<(u32, char)>>,
     pub range_start: u32,
     pub glyph_color: Hsla,
     pub trailing_color: Hsla,
+    pub invisible_color: Hsla,
     pub cell_width: Pixels,
     pub cell_height: Pixels,
 }
@@ -1833,6 +1843,9 @@ pub(crate) fn render_row_with_gutter(
         .child(StyledText::new(body.text).with_highlights(body_runs))
         .child(StyledText::new(SharedString::from(suffix.text)).with_highlights(suffix_runs));
     for overlay in whitespace_overlay_lines(display_row, paint) {
+        row_el = row_el.child(overlay);
+    }
+    for overlay in invisible_overlay_lines(display_row, paint) {
         row_el = row_el.child(overlay);
     }
     if let Some(cell) = inline_blame_cell(display_row, paint) {
@@ -2070,6 +2083,43 @@ fn whitespace_overlay_lines(display_row: u32, paint: &GutterPaint<'_>) -> Vec<Di
         }
     }
     out
+}
+
+/// Per-row overlay cells for marked invisible characters: a faint
+/// warning-tinted background plus the replacement glyph, so even fixed-width
+/// space replacements read as an occupied cell. Always shown regardless of the
+/// whitespace mode -- bidi overrides and the like are a security concern, not a
+/// display preference.
+fn invisible_overlay_lines(display_row: u32, paint: &GutterPaint<'_>) -> Vec<Div> {
+    let Some(ws) = paint.whitespace.as_ref() else {
+        return Vec::new();
+    };
+    let Some(cells) = display_row
+        .checked_sub(ws.range_start)
+        .and_then(|idx| ws.invisible_rows.get(idx as usize))
+    else {
+        return Vec::new();
+    };
+    let gutter_cols = paint.metrics.total_width as u32;
+    let cell_w = f32::from(ws.cell_width);
+    cells
+        .iter()
+        .map(|&(column, glyph)| {
+            let x = cell_w * (gutter_cols + column) as f32;
+            div()
+                .absolute()
+                .left(px(x))
+                .top(px(0.0))
+                .w(ws.cell_width)
+                .h(ws.cell_height)
+                .bg(Hsla {
+                    a: 0.3,
+                    ..ws.invisible_color
+                })
+                .text_color(ws.invisible_color)
+                .child(SharedString::from(glyph.to_string()))
+        })
+        .collect()
 }
 
 /// Resolve the blame entry for `buffer_row`. The list is row-sorted
@@ -2698,6 +2748,16 @@ mod tests {
             vec![(0, WsKind::Tab), (5, WsKind::Space), (6, WsKind::Space)]
         );
         assert_eq!((ws.first_content, ws.last_content_end), (Some(4), Some(5)));
+    }
+
+    #[test]
+    fn build_rendered_rows_records_invisibles() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "a\u{202e}b\u{200d}c");
+        let rows = build_rendered_rows(&snapshot, 0..1);
+        // The bidi override is marked with a fixed-width space; the ZWJ at
+        // column 3 is preserved (not recorded) so composed glyphs survive.
+        assert_eq!(rows[0].whitespace.invisibles, vec![(1, '\u{2007}')]);
     }
 
     #[test]
