@@ -238,6 +238,14 @@ impl Emulator {
         self.term.mode().intersects(TermMode::MOUSE_MODE)
     }
 
+    /// Whether the active mouse protocol reports motion (button-event or
+    /// any-event tracking), as opposed to press/release only.
+    pub fn mouse_motion(&self) -> bool {
+        self.term
+            .mode()
+            .intersects(TermMode::MOUSE_DRAG | TermMode::MOUSE_MOTION)
+    }
+
     /// Whether mouse reports use the SGR (1006) extended encoding.
     pub fn sgr_mouse(&self) -> bool {
         self.term.mode().contains(TermMode::SGR_MOUSE)

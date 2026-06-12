@@ -1,18 +1,18 @@
 //! GUI full-screen terminal ItemView (Way-2 embedded terminal).
 //!
 //! Pane-hosted entity wrapping a single PTY-backed [`TerminalSession`]
-//! and one [`VtermGrid`] rendered to fill the pane. Unlike the
-//! Warp-style [`crate::run_pane::Run`], it has no command blocks and no
-//! command-line input: the grid is the whole surface, so an interactive
-//! TUI running in the PTY paints directly into it.
+//! and an [`Emulator`] rendered to fill the pane. Unlike the Warp-style
+//! [`crate::run_pane::Run`], it has no command blocks and no command-line
+//! input: the emulator screen is the whole surface, so an interactive TUI
+//! running in the PTY paints directly into it.
 //!
 //! [`Terminal::with_command`] spawns the session in the background via
 //! [`TerminalHost`]; once installed, the same task loops on
-//! [`TerminalSession::read`] and feeds each chunk into the grid through
-//! [`Terminal::on_read`]. The render measures cell metrics in its canvas
-//! prepaint and resizes the PTY to the whole-cell grid, and forwards
-//! mouse events to the program as reports. The styled-cell paint reuses
-//! [`crate::run_pane::render`].
+//! [`TerminalSession::read`] and feeds each chunk into the emulator through
+//! [`Terminal::on_read`], which also writes the emulator's replies back to the
+//! PTY. The render measures cell metrics in its canvas prepaint and resizes the
+//! PTY and emulator to the whole-cell grid, and forwards mouse events to the
+//! program as reports. The styled-cell paint reuses [`crate::run_pane::render`].
 
 use crate::{
     globals::{ClipboardHostGlobal, EnvHostGlobal, TerminalHostGlobal},
@@ -31,19 +31,23 @@ use gpui::{
     Styled, Task, WeakEntity, Window,
 };
 use std::{
-    path::{Path, PathBuf},
+    path::PathBuf,
     sync::Arc,
     time::{Duration, Instant},
 };
 use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
-    run::{MouseProtocol, VtermGrid},
+    run::{
+        encode_mouse_report,
+        term::{CursorShape as EmuCursorShape, Emulator, RenderCell, TermColor as EmuColor},
+        CursorShape, StyledCell, TermColor, TermModifier,
+    },
 };
 
-/// Fixed grid column count. [`VtermGrid`] has no in-place resize, so --
-/// like the run pane's blocks -- the grid stays this wide while the PTY
-/// is resized to the measured cell dimensions.
-const TERMINAL_WIDTH: u16 = 80;
+/// Initial emulator/PTY size before the canvas measures the pane. The first
+/// render resizes both to the measured whole-cell dimensions.
+const INITIAL_COLS: u16 = 80;
+const INITIAL_ROWS: u16 = 24;
 
 /// Minimum interval between foreground-process-name polls.
 const FOREGROUND_POLL_INTERVAL: Duration = Duration::from_millis(500);
@@ -62,15 +66,50 @@ fn matched_agent(process_name: &str) -> Option<&'static str> {
         .find(|&agent| agent == process_name)
 }
 
-/// The final component of `path`, used as a compact label for the cwd.
-fn cwd_basename(path: &str) -> Option<String> {
-    Path::new(path)
-        .file_name()
-        .map(|name| name.to_string_lossy().into_owned())
+/// Map an emulator cell color to the renderer's [`TermColor`]. The emulator's
+/// default-fg/bg sentinel becomes `None` so the renderer substitutes its theme.
+fn emulator_color(color: EmuColor) -> Option<TermColor> {
+    match color {
+        EmuColor::Default => None,
+        EmuColor::Indexed(index) => Some(TermColor::Indexed(index)),
+        EmuColor::Rgb(r, g, b) => Some(TermColor::Rgb(r, g, b)),
+    }
+}
+
+/// Collapse an emulator cell's style flags into the renderer's modifier set.
+fn emulator_modifiers(cell: &RenderCell) -> TermModifier {
+    let mut modifiers = TermModifier::empty();
+    if cell.bold {
+        modifiers |= TermModifier::BOLD;
+    }
+    if cell.italic {
+        modifiers |= TermModifier::ITALIC;
+    }
+    if cell.underline {
+        modifiers |= TermModifier::UNDERLINED;
+    }
+    if cell.inverse {
+        modifiers |= TermModifier::REVERSED;
+    }
+    modifiers
+}
+
+/// The renderer cursor shape for an emulator cursor, or `None` when the cursor
+/// is hidden (`?25l`) so the view draws no cursor.
+fn emulator_cursor_shape(shape: EmuCursorShape) -> Option<CursorShape> {
+    match shape {
+        EmuCursorShape::Block | EmuCursorShape::HollowBlock => Some(CursorShape::Block),
+        EmuCursorShape::Underline => Some(CursorShape::Underline),
+        EmuCursorShape::Beam => Some(CursorShape::Bar),
+        EmuCursorShape::Hidden => None,
+    }
 }
 
 pub(crate) struct Terminal {
-    grid: VtermGrid,
+    emulator: Emulator,
+    /// Latest window title the program set (OSC 0/2), drained from the
+    /// emulator. Surfaced in the tab label below a recognized agent name.
+    title: Option<String>,
     session: Option<Arc<dyn TerminalSession>>,
     cwd: PathBuf,
     /// Program and arguments the session was launched with. Read back by
@@ -114,7 +153,8 @@ impl Terminal {
             install_session(host, this, cx).await;
         });
         Self {
-            grid: VtermGrid::new(TERMINAL_WIDTH),
+            emulator: Emulator::new(INITIAL_ROWS, INITIAL_COLS),
+            title: None,
             session: None,
             cwd,
             program,
@@ -140,9 +180,8 @@ impl Terminal {
     }
 
     /// Read the system clipboard and write it to the PTY, wrapped in
-    /// bracketed-paste markers when the program enabled `?2004h` (see
-    /// [`VtermGrid::wrap_paste`]). A no-op when the clipboard is empty or
-    /// unavailable.
+    /// bracketed-paste markers when the program enabled `?2004h`. A no-op when
+    /// the clipboard is empty or unavailable.
     pub(crate) fn paste(&self, cx: &mut Context<'_, Self>) {
         let Some(clipboard) = cx.try_global::<ClipboardHostGlobal>().map(|g| g.0.clone()) else {
             return;
@@ -159,7 +198,14 @@ impl Terminal {
                 return;
             },
         };
-        let bytes = self.grid.wrap_paste(&text);
+        let bytes = if self.emulator.bracketed_paste() {
+            let mut wrapped = b"\x1b[200~".to_vec();
+            wrapped.extend_from_slice(text.as_bytes());
+            wrapped.extend_from_slice(b"\x1b[201~");
+            wrapped
+        } else {
+            text.into_bytes()
+        };
         self.write_to_pty(bytes, cx);
     }
 
@@ -181,9 +227,21 @@ impl Terminal {
         cx.notify();
     }
 
-    /// Append `chunk` to the grid and request a repaint.
+    /// Feed `chunk` to the emulator, write any replies (DA/DSR) back to the
+    /// PTY, absorb a new title, and request a repaint.
     pub(crate) fn on_read(&mut self, chunk: &[u8], cx: &mut Context<'_, Self>) {
-        self.grid.feed(chunk);
+        self.emulator.feed(chunk);
+        let events = self.emulator.drain_events();
+        if let Some(title) = events.title {
+            self.title = Some(title);
+        }
+        if !events.pty_writes.is_empty() {
+            if let Some(session) = self.session.clone() {
+                for reply in events.pty_writes {
+                    spawn_write_bytes(session.clone(), reply, cx);
+                }
+            }
+        }
         self.refresh_foreground_name();
         cx.notify();
     }
@@ -222,7 +280,7 @@ impl Terminal {
         }
         self.last_terminal_size = Some(size);
         let (rows, cols) = size;
-        self.grid.resize(cols);
+        self.emulator.resize(rows, cols);
         if let Err(err) = session.resize(rows, cols) {
             tracing::warn!(
                 target: "stoat_gui::terminal_view",
@@ -261,11 +319,7 @@ impl Terminal {
         modifiers: Modifiers,
         cx: &mut Context<'_, Self>,
     ) -> bool {
-        let reporting = match self.grid.mouse_protocol() {
-            MouseProtocol::None => false,
-            MouseProtocol::Press => !motion,
-            MouseProtocol::ButtonEvent | MouseProtocol::AnyEvent => true,
-        };
+        let reporting = self.emulator.mouse_report() && (!motion || self.emulator.mouse_motion());
         if !reporting || modifiers.shift {
             return false;
         }
@@ -280,16 +334,41 @@ impl Terminal {
             mods += 16;
         }
         let code = button + if motion { 32 } else { 0 };
-        let Some(bytes) = self
-            .grid
-            .encode_mouse(code, mods, col as u16, row as u16, pressed)
-        else {
+        let Some(bytes) = encode_mouse_report(
+            self.emulator.sgr_mouse(),
+            code,
+            mods,
+            col as u16,
+            row as u16,
+            pressed,
+        ) else {
             return false;
         };
         if let Some(session) = self.session.clone() {
             spawn_write_bytes(session, bytes, cx);
         }
         true
+    }
+
+    /// Build one screen row as styled cells for [`render_grid_row`]. The spacer
+    /// column that follows a wide glyph is skipped: the flow-layout paint
+    /// advances by the glyph's own width, so a placeholder cell would over-pad
+    /// the row. (The next sibling's grid painter handles cell geometry exactly.)
+    fn styled_row(&self, row: usize) -> Vec<StyledCell> {
+        (0..self.emulator.columns())
+            .filter_map(|col| {
+                let cell = self.emulator.cell(row, col);
+                if cell.wide_spacer {
+                    return None;
+                }
+                Some(StyledCell {
+                    ch: cell.c,
+                    fg: emulator_color(cell.fg),
+                    bg: emulator_color(cell.bg),
+                    modifiers: emulator_modifiers(&cell),
+                })
+            })
+            .collect()
     }
 }
 
@@ -306,10 +385,13 @@ async fn install_session(
     let spawn_args = SpawnArgs {
         program,
         args,
-        env: vec![("TERM".into(), "xterm-256color".into())],
+        env: vec![
+            ("TERM".into(), "xterm-256color".into()),
+            ("COLORTERM".into(), "truecolor".into()),
+        ],
         cwd,
-        width: TERMINAL_WIDTH,
-        rows: 24,
+        width: INITIAL_COLS,
+        rows: INITIAL_ROWS,
     };
     let session: Arc<dyn TerminalSession> = match host.spawn(spawn_args).await {
         Ok(s) => Arc::from(s),
@@ -379,8 +461,8 @@ impl ItemView for Terminal {
         if let Some(agent) = self.foreground_name.as_deref().and_then(matched_agent) {
             return SharedString::from(agent);
         }
-        if let Some(dir) = self.grid.cwd().and_then(cwd_basename) {
-            return SharedString::from(dir);
+        if let Some(title) = self.title.as_deref().filter(|title| !title.is_empty()) {
+            return SharedString::from(title.to_owned());
         }
         SharedString::from("Terminal")
     }
@@ -412,26 +494,22 @@ impl Render for Terminal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let (font_family, font_size) = editor_font(cx);
         let focused = self.is_pane_focused(cx);
-        let cursor = self.cell_size.map(|cell| {
-            let (row, col) = self.grid.cursor_position();
-            CursorRender {
-                row,
-                col,
-                shape: self.grid.cursor_shape(),
+        let emu_cursor = self.emulator.cursor();
+        let cursor = self
+            .cell_size
+            .zip(emulator_cursor_shape(emu_cursor.shape))
+            .map(|(cell, shape)| CursorRender {
+                row: emu_cursor.line,
+                col: emu_cursor.column,
+                shape,
                 cell,
                 focused,
-            }
-        });
+            });
         let mut body = div().flex().flex_col().flex_grow().w_full();
-        for row_idx in 0..self.grid.line_count() {
+        for row_idx in 0..self.emulator.rows() {
+            let styled = self.styled_row(row_idx);
             let row_cursor = cursor.as_ref().filter(|c| c.row == row_idx);
-            body = body.child(render_grid_row(
-                self.grid.row(row_idx),
-                row_idx,
-                None,
-                None,
-                row_cursor,
-            ));
+            body = body.child(render_grid_row(&styled, row_idx, None, None, row_cursor));
         }
         let bounds_handle = cx.weak_entity();
         let cell_family = font_family.clone();
@@ -753,18 +831,16 @@ mod tests {
     }
 
     #[test]
-    fn tab_label_falls_back_to_cwd_basename() {
+    fn tab_label_reflects_window_title() {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);
         let term = open_terminal(&mut h);
 
-        term.update(h.vcx, |t, cx| {
-            t.on_read(b"\x1b]7;file://host/Users/lee/stoat\x07", cx)
-        });
+        term.update(h.vcx, |t, cx| t.on_read(b"\x1b]2;my-session\x07", cx));
         assert_eq!(
             term.read_with(h.vcx, |t, cx| t.tab_label(cx)),
-            SharedString::from("stoat"),
-            "with no agent, the tab shows the cwd directory name",
+            SharedString::from("my-session"),
+            "with no agent, the tab shows the title the program set",
         );
     }
 
@@ -795,7 +871,7 @@ mod tests {
         h.vcx.run_until_parked();
 
         let first_row: String = term.read_with(h.vcx, |t, _| {
-            t.grid.row(0).iter().take(5).map(|c| c.ch).collect()
+            (0..5).map(|col| t.emulator.cell(0, col).c).collect()
         });
         assert_eq!(first_row, "hello");
     }
@@ -817,24 +893,24 @@ mod tests {
     }
 
     #[test]
-    fn grid_width_tracks_measured_columns() {
+    fn emulator_width_tracks_measured_columns() {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);
         let term = open_terminal(&mut h);
         h.vcx.run_until_parked();
 
-        let (grid_width, measured_cols) = term.read_with(h.vcx, |t, _| {
+        let (emulator_width, measured_cols) = term.read_with(h.vcx, |t, _| {
             let cols = t
                 .output_bounds
                 .zip(t.cell_size)
                 .and_then(|(bounds, cell)| terminal_cells(bounds, cell))
                 .map(|(_, cols)| cols);
-            (t.grid.width(), cols)
+            (t.emulator.columns() as u16, cols)
         });
         assert_eq!(
-            Some(grid_width),
+            Some(emulator_width),
             measured_cols,
-            "grid width tracks the measured PTY column count"
+            "emulator width tracks the measured PTY column count"
         );
     }
 
