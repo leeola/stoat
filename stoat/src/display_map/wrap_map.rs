@@ -706,19 +706,25 @@ fn compute_wrap_columns(
             super::display_width(ch)
         };
 
-        if ch == ' ' || ch == '\t' || ch == '-' {
+        if ch == ' ' || ch == '\t' {
             last_break_candidate = Some(expanded_col + char_width);
-        } else if char_width >= 2 {
-            // CJK and other wide characters can break at any boundary.
+        } else if !is_word_char(ch) {
+            // Break before non-word characters (punctuation, CJK, ...) so long
+            // tokens like paths wrap at `/` or `(` rather than mid-token.
             last_break_candidate = Some(expanded_col);
         }
 
         expanded_col += char_width;
 
         let segment_start = *breaks.last().expect("breaks starts with [0]");
-        if expanded_col - segment_start >= width {
+        if expanded_col - segment_start > width {
             let break_at = match last_break_candidate {
                 Some(b) if b > segment_start => b,
+                // No break opportunity: hard-break before the char that
+                // overflowed so the segment stays within the width. Only fall
+                // through to after it when a single char already exceeds the
+                // width, which would otherwise make no progress.
+                _ if expanded_col - char_width > segment_start => expanded_col - char_width,
                 _ => expanded_col,
             };
             breaks.push(break_at);
@@ -731,6 +737,29 @@ fn compute_wrap_columns(
     }
 
     breaks
+}
+
+/// Whether `c` is a word character for soft-wrap purposes -- one that should not
+/// trigger a break before it, keeping tokens like `well-known`, `var_name`,
+/// `3.1415`, and `@mention` whole. Mirrors the reference wrapper's set:
+/// alphanumerics, common Latin/Cyrillic/Vietnamese/Bengali ranges, and the
+/// token-attaching punctuation. Everything else (`/`, `(`, CJK, ...) may break
+/// before it.
+fn is_word_char(c: char) -> bool {
+    c.is_ascii_alphanumeric()
+        || matches!(c, '\u{00C0}'..='\u{00FF}') // Latin-1 Supplement
+        || matches!(c, '\u{0100}'..='\u{017F}') // Latin Extended-A
+        || matches!(c, '\u{0180}'..='\u{024F}') // Latin Extended-B
+        || matches!(c, '\u{0400}'..='\u{04FF}') // Cyrillic
+        || matches!(c, '\u{1E00}'..='\u{1EFF}') // Latin Extended Additional
+        || matches!(c, '\u{0300}'..='\u{036F}') // Combining Diacritical Marks
+        || matches!(c, '\u{0980}'..='\u{09FF}') // Bengali
+        // Token-attaching punctuation, incl. curly apostrophes for "won't" / "I'm".
+        || matches!(
+            c,
+            '-' | '_' | '.' | '\'' | '\u{2019}' | '\u{2018}' | '$' | '%' | '@' | '#' | '^' | '~'
+                | ',' | '=' | ':' | ';'
+        )
 }
 
 impl WrapSnapshot {
@@ -2103,6 +2132,33 @@ mod tests {
                 "line_len mismatch at row {row}"
             );
         }
+    }
+
+    #[test]
+    fn wrap_columns_keep_hyphenated_word_whole() {
+        // "-" is word-attached: "well-known" stays whole, wrapping at the space.
+        assert_eq!(
+            super::compute_wrap_columns("well-known x".chars(), 12, 10, 4, 1000),
+            vec![0, 11]
+        );
+    }
+
+    #[test]
+    fn wrap_columns_break_before_punctuation() {
+        // A spaceless path breaks before each '/' rather than mid-token.
+        assert_eq!(
+            super::compute_wrap_columns("aaa/bbb/ccc".chars(), 11, 5, 4, 1000),
+            vec![0, 3, 7]
+        );
+    }
+
+    #[test]
+    fn wrap_columns_segment_exactly_filling_width_is_kept() {
+        // The trigger is `>`, so a segment that exactly fills the width stays.
+        assert_eq!(
+            super::compute_wrap_columns("abcde fghij".chars(), 11, 5, 4, 1000),
+            vec![0, 6]
+        );
     }
 
     #[test]
