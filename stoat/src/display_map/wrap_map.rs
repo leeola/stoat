@@ -92,6 +92,9 @@ struct Transform {
     summary: TransformSummary,
     wrap_columns: Vec<u32>,
     tab_line_len: u32,
+    /// Expanded columns the wrapped line's continuation rows hang-indent to,
+    /// capped at [`MAX_INDENT`]. Zero for unwrapped lines and the primary row.
+    indent: u32,
 }
 
 impl Item for Transform {
@@ -156,6 +159,11 @@ impl<'a> Dimension<'a, TransformSummary> for LongestInRange {
 }
 
 const WRAP_SYNC_THRESHOLD: u32 = 100;
+
+/// Maximum columns a wrapped line's continuation rows are indented to align
+/// under the line's own indentation. Bounds the width a long-indented line
+/// surrenders to the hanging indent.
+const MAX_INDENT: u32 = 256;
 
 pub struct WrapMap {
     snapshot: WrapSnapshot,
@@ -505,6 +513,7 @@ fn single_isomorphic_transform(
             },
             wrap_columns: Vec::new(),
             tab_line_len: 0,
+            indent: 0,
         },
         (),
     );
@@ -553,7 +562,7 @@ fn build_wrapped_transforms(tab_snapshot: &TabSnapshot, width: u32) -> SumTree<T
     for tab_row in 0..tab_line_count {
         let tab_line_len = tab_snapshot.line_len(tab_row);
         let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
-        let wrap_columns = compute_wrap_columns(
+        let (wrap_columns, indent) = compute_wrap_columns(
             chars,
             tab_line_len,
             width,
@@ -575,6 +584,7 @@ fn build_wrapped_transforms(tab_snapshot: &TabSnapshot, width: u32) -> SumTree<T
                 },
                 wrap_columns,
                 tab_line_len,
+                indent,
             },
             (),
         );
@@ -604,8 +614,8 @@ fn sync_incremental(
 
         for tab_row in edit.new.start..edit.new.end {
             let tab_line_len = tab_snapshot.line_len(tab_row);
-            let wrap_columns = match wrap_width {
-                None => vec![0],
+            let (wrap_columns, indent) = match wrap_width {
+                None => (vec![0], 0),
                 Some(width) => {
                     let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
                     compute_wrap_columns(
@@ -630,6 +640,7 @@ fn sync_incremental(
                     },
                     wrap_columns,
                     tab_line_len,
+                    indent,
                 },
                 (),
             );
@@ -686,14 +697,16 @@ fn compute_wrap_columns(
     width: u32,
     tab_size: u32,
     max_expansion_column: u32,
-) -> Vec<u32> {
+) -> (Vec<u32>, u32) {
     if width == 0 || tab_line_len <= width {
-        return vec![0];
+        return (vec![0], 0);
     }
 
     let mut breaks = vec![0u32];
     let mut expanded_col = 0u32;
     let mut last_break_candidate: Option<u32> = None;
+    let mut indent = 0u32;
+    let mut in_leading_whitespace = true;
 
     for ch in chars {
         let char_width = if ch == '\t' {
@@ -706,6 +719,14 @@ fn compute_wrap_columns(
             super::display_width(ch)
         };
 
+        if in_leading_whitespace {
+            if ch == ' ' || ch == '\t' {
+                indent = (indent + char_width).min(MAX_INDENT);
+            } else {
+                in_leading_whitespace = false;
+            }
+        }
+
         if ch == ' ' || ch == '\t' {
             last_break_candidate = Some(expanded_col + char_width);
         } else if !is_word_char(ch) {
@@ -717,7 +738,14 @@ fn compute_wrap_columns(
         expanded_col += char_width;
 
         let segment_start = *breaks.last().expect("breaks starts with [0]");
-        if expanded_col - segment_start > width {
+        // Continuation rows hang-indent by `indent`, so budget their content
+        // width down by it (keeping at least one column to make progress).
+        let segment_width = if breaks.len() > 1 {
+            width.saturating_sub(indent).max(1)
+        } else {
+            width
+        };
+        if expanded_col - segment_start > segment_width {
             let break_at = match last_break_candidate {
                 Some(b) if b > segment_start => b,
                 // No break opportunity: hard-break before the char that
@@ -736,7 +764,7 @@ fn compute_wrap_columns(
         breaks.pop();
     }
 
-    breaks
+    (breaks, indent)
 }
 
 /// Whether `c` is a word character for soft-wrap purposes -- one that should not
@@ -828,6 +856,7 @@ impl WrapSnapshot {
                         },
                         wrap_columns: vec![0],
                         tab_line_len,
+                        indent: 0,
                     },
                     (),
                 );
@@ -1022,12 +1051,7 @@ impl WrapSnapshot {
             return 0;
         }
 
-        let tab_row = cursor.start().0 .0;
-        self.tab_snapshot
-            .fold_snapshot()
-            .fold_line_chars(tab_row)
-            .take_while(|c| c.is_whitespace())
-            .count() as u32
+        cursor.item().map_or(0, |transform| transform.indent)
     }
 
     pub fn write_display_line(&self, buf: &mut String, wrap_row: u32) {
@@ -2139,7 +2163,7 @@ mod tests {
         // "-" is word-attached: "well-known" stays whole, wrapping at the space.
         assert_eq!(
             super::compute_wrap_columns("well-known x".chars(), 12, 10, 4, 1000),
-            vec![0, 11]
+            (vec![0, 11], 0)
         );
     }
 
@@ -2148,7 +2172,7 @@ mod tests {
         // A spaceless path breaks before each '/' rather than mid-token.
         assert_eq!(
             super::compute_wrap_columns("aaa/bbb/ccc".chars(), 11, 5, 4, 1000),
-            vec![0, 3, 7]
+            (vec![0, 3, 7], 0)
         );
     }
 
@@ -2157,8 +2181,33 @@ mod tests {
         // The trigger is `>`, so a segment that exactly fills the width stays.
         assert_eq!(
             super::compute_wrap_columns("abcde fghij".chars(), 11, 5, 4, 1000),
-            vec![0, 6]
+            (vec![0, 6], 0)
         );
+    }
+
+    #[test]
+    fn wrap_columns_tab_indent_uses_expanded_columns() {
+        // A leading tab indents continuations by tab_size columns, not one.
+        let (_, indent) = super::compute_wrap_columns("\thello world".chars(), 15, 8, 4, 1000);
+        assert_eq!(indent, 4);
+    }
+
+    #[test]
+    fn wrap_columns_continuations_budget_the_indent() {
+        // After a 4-col indent, continuation rows wrap at width - indent (5),
+        // so "bbbbbbbb" splits at column 15 rather than filling the full width.
+        assert_eq!(
+            super::compute_wrap_columns("    aaaaa bbbbbbbb".chars(), 18, 9, 4, 1000),
+            (vec![0, 10, 15], 4)
+        );
+    }
+
+    #[test]
+    fn wrap_columns_indent_caps_at_max() {
+        // Indentation beyond MAX_INDENT is clamped.
+        let line = format!("{}xy", " ".repeat(300));
+        let (_, indent) = super::compute_wrap_columns(line.chars(), 302, 8, 4, 1000);
+        assert_eq!(indent, super::MAX_INDENT);
     }
 
     #[test]
