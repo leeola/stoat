@@ -757,8 +757,52 @@ impl TextBufferSnapshot {
         (item, start.1)
     }
 
+    /// Resolve many anchors to byte offsets, returning offsets in the same
+    /// order as `anchors`.
+    ///
+    /// Equivalent to mapping [`Self::resolve_anchor`] over the slice, but the
+    /// `fragments`-tree half of resolution is served by one forward cursor walk
+    /// instead of an independent descent per anchor. Anchors are visited in
+    /// document order internally and scattered back, so the input need not be
+    /// sorted; the per-anchor [`Self::fragment_id_for_anchor`] lookup is the
+    /// only remaining per-anchor descent.
     pub fn resolve_anchors_batch(&self, anchors: &[Anchor]) -> Vec<usize> {
-        anchors.iter().map(|a| self.resolve_anchor(a)).collect()
+        let text_len = self.visible_text.len();
+        let locators: Vec<&Locator> = anchors
+            .iter()
+            .map(|anchor| self.fragment_id_for_anchor(anchor))
+            .collect();
+
+        let mut order: Vec<usize> = (0..anchors.len()).collect();
+        order.sort_by(|&i, &j| locators[i].cmp(locators[j]));
+
+        let mut offsets = vec![0usize; anchors.len()];
+        let mut cursor = self
+            .fragments
+            .cursor::<Dimensions<Option<Locator>, usize>>(&None);
+
+        for &i in &order {
+            let anchor = &anchors[i];
+            if anchor.is_min() {
+                offsets[i] = 0;
+                continue;
+            }
+            if anchor.is_max() {
+                offsets[i] = text_len;
+                continue;
+            }
+
+            cursor.seek_forward(&Some(locators[i].clone()), Bias::Left);
+            let base_offset = cursor.start().1;
+            offsets[i] = match cursor.item() {
+                Some(fragment) if fragment.visible => {
+                    base_offset + anchor.offset.saturating_sub(fragment.insertion_offset) as usize
+                },
+                _ => base_offset,
+            };
+        }
+
+        offsets
     }
 
     pub fn point_for_anchor(&self, anchor: &Anchor) -> Point {
@@ -1089,6 +1133,51 @@ mod tests {
         b.edit(0..0, "XX");
         let offsets = b.snapshot.resolve_anchors_batch(&[a1, a2]);
         assert_eq!(offsets, vec![3, 5]);
+    }
+
+    #[test]
+    fn batch_resolve_unsorted_matches_per_anchor() {
+        let mut b = buf("hello world");
+        b.edit(5..5, " BIG"); // splits the original insertion around a new one
+        b.edit(0..0, "X"); // a leading fragment
+        let snap = &b.snapshot;
+        let id = BufferId::new(0);
+
+        let mut anchors = Vec::new();
+        for off in 0..=snap.len() {
+            anchors.push(snap.anchor_at(off, Bias::Right));
+            anchors.push(snap.anchor_at(off, Bias::Left));
+        }
+        anchors.reverse(); // descending input exercises the sort + scatter path
+        anchors.insert(anchors.len() / 2, Anchor::min_for_buffer(id));
+        anchors.insert(anchors.len() / 3, Anchor::max_for_buffer(id));
+
+        let expected: Vec<usize> = anchors.iter().map(|a| snap.resolve_anchor(a)).collect();
+        assert_eq!(snap.resolve_anchors_batch(&anchors), expected);
+    }
+
+    #[test]
+    fn batch_resolve_min_max_interspersed() {
+        let mut b = buf("hello");
+        let a1 = b.anchor_at(1, Bias::Right);
+        let a3 = b.anchor_at(3, Bias::Right);
+        b.edit(0..0, "XX"); // shifts both anchors right by two
+        let snap = &b.snapshot;
+        let id = BufferId::new(0);
+
+        let anchors = [
+            a3,
+            Anchor::min_for_buffer(id),
+            a1,
+            Anchor::max_for_buffer(id),
+        ];
+        assert_eq!(snap.resolve_anchors_batch(&anchors), vec![5, 0, 3, 7]);
+    }
+
+    #[test]
+    fn batch_resolve_empty() {
+        let b = buf("hello");
+        assert_eq!(b.snapshot.resolve_anchors_batch(&[]), Vec::<usize>::new());
     }
 
     #[test]
