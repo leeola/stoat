@@ -891,11 +891,24 @@ fn sync_fold_incremental(
 
     let mut edits_iter = inlay_edits.into_iter().peekable();
     while let Some(edit) = edits_iter.next() {
-        let old_start_offset = old_row_to_offset(edit.old.start);
+        let mut old_start_offset = old_row_to_offset(edit.old.start);
         let old_end_offset = old_row_to_offset(edit.old.end).min(old_text_len);
 
         // Preserve unchanged prefix
         new_transforms.append(cursor.slice(&InputOffset(old_start_offset), Bias::Left), ());
+
+        // If the edit begins inside a placeholder, snap its start back to that
+        // placeholder's boundary so the rebuild replaces the whole fold instead
+        // of emitting the fold's leading input as an isomorphic gap (which would
+        // also be re-counted under the rebuilt placeholder). The skipped bytes
+        // are unchanged prefix, so the new start moves back by the same amount.
+        let mut start_delta = 0;
+        if let Some(item) = cursor.item() {
+            if item.placeholder.is_some() && cursor.start().0 < old_start_offset {
+                start_delta = old_start_offset - cursor.start().0;
+                old_start_offset = cursor.start().0;
+            }
+        }
 
         // If cursor item ends exactly at edit start, merge it with prefix
         if let Some(item) = cursor.item() {
@@ -924,7 +937,7 @@ fn sync_fold_incremental(
         cursor.seek_forward(&InputOffset(old_end_offset), Bias::Right);
 
         // Push gap from current position to edit.new.start
-        let new_start_offset = row_to_offset(edit.new.start);
+        let new_start_offset = row_to_offset(edit.new.start) - start_delta;
         let current_pos = new_transforms.summary().input.len;
         if new_start_offset > current_pos {
             let summary = text_summary(current_pos, new_start_offset);
@@ -2641,5 +2654,91 @@ mod tests {
             .map(|c| c.text.into_owned())
             .collect();
         assert_eq!(chunks, "*");
+    }
+
+    /// An edit whose rows fall inside a multi-row fold must rebuild the whole
+    /// fold transform, not emit the fold's pre-edit rows as isomorphic text
+    /// beside the rebuilt placeholder (which double-counts that input).
+    #[test]
+    fn incremental_edit_inside_fold() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "a\nbb\nc",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap1 = multi_buffer.snapshot();
+        let version1 = snap1.version();
+        let (mut inlay_map, inlay1) = InlayMap::new(snap1.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay1.clone());
+
+        // Fold "a\nbb\n" (offsets [0,5)), spanning rows 0-1, and settle so the
+        // edit's sync takes the incremental path.
+        fold_map.fold(
+            vec![snap1.anchor_at(0, Bias::Right)..snap1.anchor_at(5, Bias::Left)],
+            one_char_placeholder(false),
+            &snap1,
+        );
+        fold_map.sync(inlay1, &Patch::empty());
+
+        // Delete a 'b' inside the fold's span.
+        shared.write().unwrap().edit(2..3, "");
+        let snap2 = multi_buffer.snapshot();
+        let buffer_edits = snap2.edits_since(version1);
+        let (inlay2, inlay_edits) = inlay_map.sync(snap2, &buffer_edits);
+        let (snapshot, _) = fold_map.sync(inlay2, &inlay_edits);
+
+        snapshot.check_invariants();
+
+        let text: String = snapshot.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "*c");
+        assert_eq!(snapshot.len().0, 2, "transform output length");
+
+        let chunks: String = snapshot
+            .chunks(FoldOffset(0)..snapshot.len(), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(chunks, "*c");
+    }
+
+    /// As above, but the fold continues past the edited row, so the rebuild
+    /// must also carry the fold's trailing rows correctly.
+    #[test]
+    fn incremental_edit_inside_fold_extending_past_edit() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "a\nbb\ncc\nd",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap1 = multi_buffer.snapshot();
+        let version1 = snap1.version();
+        let (mut inlay_map, inlay1) = InlayMap::new(snap1.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay1.clone());
+
+        // Fold "a\nbb\ncc\n" (offsets [0,8)), spanning rows 0-2, and settle.
+        fold_map.fold(
+            vec![snap1.anchor_at(0, Bias::Right)..snap1.anchor_at(8, Bias::Left)],
+            one_char_placeholder(false),
+            &snap1,
+        );
+        fold_map.sync(inlay1, &Patch::empty());
+
+        // Delete a 'b' on row 1, inside the fold but before its last rows.
+        shared.write().unwrap().edit(2..3, "");
+        let snap2 = multi_buffer.snapshot();
+        let buffer_edits = snap2.edits_since(version1);
+        let (inlay2, inlay_edits) = inlay_map.sync(snap2, &buffer_edits);
+        let (snapshot, _) = fold_map.sync(inlay2, &inlay_edits);
+
+        snapshot.check_invariants();
+
+        let text: String = snapshot.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "*d");
+        assert_eq!(snapshot.len().0, 2, "transform output length");
+
+        let chunks: String = snapshot
+            .chunks(FoldOffset(0)..snapshot.len(), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(chunks, "*d");
     }
 }
