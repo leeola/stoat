@@ -1546,8 +1546,12 @@ fn block_region(placement: &BlockPlacement, snapshot: &WrapSnapshot) -> (u32, u3
 
     let start_wrap = buffer_row_to_wrap_row(start_buf, snapshot);
     let end_wrap = buffer_row_to_wrap_row(end_buf, snapshot);
-    let start = snapshot.prev_row_boundary(WrapPoint::new(start_wrap, 0));
-    let end = snapshot.next_row_boundary(WrapPoint::new(end_wrap, 0));
+    // Widen by one row on each side. A Below(r-1) and an Above(r) resolve to the
+    // same inter-row boundary, so a mutation touching either must reconstruct
+    // the whole boundary to re-order them as a full rebuild would, rather than
+    // preserve one and append the other.
+    let start = snapshot.prev_row_boundary(WrapPoint::new(start_wrap.saturating_sub(1), 0));
+    let end = snapshot.next_row_boundary(WrapPoint::new(end_wrap + 1, 0));
     (start, end)
 }
 
@@ -2608,6 +2612,37 @@ mod tests {
                 old: 3..4,
                 new: 3..4,
             }]),
+        );
+    }
+
+    /// Inserting a block incrementally next to an existing block in the same
+    /// inter-row gap must order them the same as a full rebuild.
+    #[test]
+    fn incremental_block_add_orders_with_neighbor() {
+        let wrap = create_wrap_snapshot("a\nb");
+
+        let mut incremental = BlockMap::new();
+        incremental.insert(vec![text_block(BlockPlacement::Below(0), "X")]);
+        incremental.sync(wrap.clone(), &Patch::empty(), None);
+        incremental.insert(vec![text_block(BlockPlacement::Above(1), "Y")]);
+        let incremental = incremental.sync(wrap.clone(), &Patch::empty(), None);
+
+        let mut full = BlockMap::new();
+        full.insert(vec![
+            text_block(BlockPlacement::Below(0), "X"),
+            text_block(BlockPlacement::Above(1), "Y"),
+        ]);
+        let full = full.sync(wrap.clone(), &Patch::empty(), None);
+
+        let lines = |snap: &BlockSnapshot| {
+            (0..snap.total_lines())
+                .map(|r| snap.display_line(r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&incremental),
+            lines(&full),
+            "incremental block add must match full rebuild"
         );
     }
 
