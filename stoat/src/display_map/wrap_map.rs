@@ -243,8 +243,13 @@ impl WrapMap {
             || new_inlay_ver != old_inlay_ver;
 
         let needs_full_rebuild = wrap_width_changed || (version_changed && tab_edits.is_empty());
+        let large_width_rewrap = wrap_width_changed
+            && self.wrap_width.is_some()
+            && tab_snapshot.line_count() >= WRAP_SYNC_THRESHOLD;
 
-        if needs_full_rebuild {
+        if large_width_rewrap {
+            self.spawn_width_rewrap(tab_snapshot);
+        } else if needs_full_rebuild {
             let old_line_count = self.snapshot.line_count();
             self.snapshot = build_snapshot(tab_snapshot, self.wrap_width);
             let new_line_count = self.snapshot.line_count();
@@ -350,10 +355,7 @@ impl WrapMap {
                     }
                     (snapshot, edits)
                 };
-                self.background_task = Some(match &self.redraw {
-                    Some(redraw) => self.executor.spawn_with_redraw(redraw.clone(), rewrap),
-                    None => self.executor.spawn(rewrap),
-                });
+                self.background_task = Some(self.spawn_rewrap(rewrap));
             }
 
             // Apply interpolated edits for any remaining pending
@@ -377,6 +379,43 @@ impl WrapMap {
                 self.pending_edits.drain(..to_remove);
             }
         }
+    }
+
+    /// Spawn a rewrap future, routing through [`Executor::spawn_with_redraw`]
+    /// when a redraw handle is set so completion kicks a render.
+    fn spawn_rewrap(
+        &self,
+        future: impl Future<Output = (WrapSnapshot, Patch<u32>)> + Send + 'static,
+    ) -> Task<(WrapSnapshot, Patch<u32>)> {
+        match &self.redraw {
+            Some(redraw) => self.executor.spawn_with_redraw(redraw.clone(), future),
+            None => self.executor.spawn(future),
+        }
+    }
+
+    /// Recompute the whole wrap off the UI thread after a width change.
+    ///
+    /// The current snapshot keeps its stale transforms (briefly showing the old
+    /// wrap) but adopts the new width so the change is not re-detected on the
+    /// next sync; [`Self::poll_background_task`] installs the rewrapped snapshot,
+    /// whose width matches, clearing the dirty state.
+    fn spawn_width_rewrap(&mut self, tab_snapshot: TabSnapshot) {
+        self.background_task = None;
+        self.pending_edits.clear();
+        self.interpolated_edits = Patch::empty();
+
+        let width = self.wrap_width;
+        let total = tab_snapshot.line_count();
+        let whole_file = Patch::new(vec![Edit {
+            old: 0..total,
+            new: 0..total,
+        }]);
+        let base = self.snapshot.clone();
+        self.snapshot.wrap_width = width;
+
+        self.background_task = Some(self.spawn_rewrap(async move {
+            sync_incremental(&base, tab_snapshot, &whole_file, width)
+        }));
     }
 
     fn poll_background_task(&mut self) {
@@ -1415,7 +1454,7 @@ mod tests {
         display_map::{
             fold_map::FoldMap,
             inlay_map::{InlayKind, InlayMap},
-            tab_map::{TabMap, TabPoint},
+            tab_map::{TabMap, TabPoint, TabSnapshot},
         },
         multi_buffer::MultiBuffer,
     };
@@ -1994,6 +2033,68 @@ mod tests {
         let (incremental, _) = wrap_map.sync(tab2.clone(), &Patch::empty());
 
         let full = super::build_snapshot(tab2, Some(4));
+        assert_eq!(incremental.line_count(), full.line_count());
+        for row in 0..full.line_count() {
+            assert_eq!(
+                incremental.line_len(row),
+                full.line_len(row),
+                "line_len mismatch at row {row}"
+            );
+        }
+    }
+
+    fn build_tab_snapshot(content: &str) -> TabSnapshot {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let (_, inlay) = InlayMap::new(multi_buffer.snapshot());
+        let (_, fold) = FoldMap::new(inlay);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        tab_map.sync(fold, Patch::empty()).0
+    }
+
+    #[test]
+    fn small_width_change_rewraps_synchronously() {
+        let tab = build_tab_snapshot("abcdefghij\nshort");
+        let (mut wrap_map, _) = WrapMap::new(tab.clone(), None, test_executor());
+
+        wrap_map.set_wrap_width(Some(5));
+        let (snapshot, _) = wrap_map.sync(tab.clone(), &Patch::empty());
+
+        // A small buffer rewraps in place, leaving no pending background work.
+        assert!(!wrap_map.is_dirty());
+        let full = super::build_snapshot(tab, Some(5));
+        assert_eq!(snapshot.line_count(), full.line_count());
+        for row in 0..full.line_count() {
+            assert_eq!(
+                snapshot.line_len(row),
+                full.line_len(row),
+                "line_len mismatch at row {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn large_width_change_rewraps_in_background() {
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+
+        // >= WRAP_SYNC_THRESHOLD rows so the rewrap takes the background path.
+        let tab = build_tab_snapshot(&"abcdefghij\n".repeat(150));
+        let (mut wrap_map, _) = WrapMap::new(tab.clone(), None, executor);
+
+        wrap_map.set_wrap_width(Some(4));
+        wrap_map.sync(tab.clone(), &Patch::empty());
+        assert!(
+            wrap_map.is_dirty(),
+            "a large width change spawns a background rewrap"
+        );
+
+        scheduler.run_until_parked();
+        let (incremental, _) = wrap_map.sync(tab.clone(), &Patch::empty());
+        assert!(!wrap_map.is_dirty(), "the finished rewrap clears dirtiness");
+
+        let full = super::build_snapshot(tab, Some(4));
         assert_eq!(incremental.line_count(), full.line_count());
         for row in 0..full.line_count() {
             assert_eq!(
