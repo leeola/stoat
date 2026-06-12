@@ -1668,15 +1668,20 @@ fn sync_incremental(
             }
         }
 
-        // Discard only below/spacer blocks at edit end; they are reconstructed
-        // below. An Above block at the boundary belongs to the next region and
-        // must survive (matching Zed lines 980-991).
+        // Discard below/spacer blocks at edit end; they are reconstructed
+        // below. An interior Above at the boundary belongs to the next region
+        // and must survive (matching Zed lines 980-991). At the buffer end
+        // there is no next region, so a trailing zero-input Above/Near is
+        // reconstructed rather than preserved: discard it too, otherwise the
+        // cursor suffix and the reconstruction would both emit it.
+        let at_buffer_end = new_end >= wrap_line_count;
         while let Some(item) = cursor.item() {
-            if item
-                .block
-                .as_ref()
-                .is_some_and(|b| b.place_below() || matches!(b, Block::Spacer { .. }))
-            {
+            let discard = item.block.as_ref().is_some_and(|b| {
+                b.place_below()
+                    || matches!(b, Block::Spacer { .. })
+                    || (at_buffer_end && item.summary.input_rows == 0 && !b.is_replacement())
+            });
+            if discard {
                 cursor.next();
             } else {
                 break;
@@ -1728,10 +1733,14 @@ fn sync_incremental(
                 };
                 // Below/spacer blocks resolving to edit_end were discarded
                 // above for reconstruction, so the end bound must include
-                // them; Above/Replace blocks at edit_end are preserved by
-                // the cursor, and excluding them avoids a duplicate.
+                // them; an interior Above/Replace at edit_end is preserved by
+                // the cursor, so excluding it avoids a duplicate. At the buffer
+                // end there is no following row to carry a trailing Above/Near,
+                // and the cursor suffix holds none, so it must be included here
+                // or a full rebuild would place it where the incremental drops
+                // it.
                 let discarded_at_end = b.place_below() || matches!(b, Block::Spacer { .. });
-                let within_end = if discarded_at_end {
+                let within_end = if discarded_at_end || edit_end == wrap_line_count {
                     block_start <= edit_end
                 } else {
                     block_start < edit_end
@@ -2653,6 +2662,61 @@ mod tests {
             lines(&incremental),
             lines(&full),
             "incremental block add must match full rebuild"
+        );
+    }
+
+    /// An `Above` whose buffer row exceeds the line count resolves past the
+    /// last row, sitting after the final row. Inserting one next to a settled
+    /// `Replace` must keep it, matching a full rebuild, rather than excluding
+    /// it because its resolved row equals the reconstruction's end bound.
+    #[test]
+    fn incremental_add_trailing_block_past_buffer() {
+        let wrap = create_wrap_snapshot("a");
+
+        let mut incremental = BlockMap::new();
+        incremental.insert(vec![text_block(
+            BlockPlacement::Replace { start: 0, end: 0 },
+            "R",
+        )]);
+        incremental.sync(wrap.clone(), &Patch::empty(), None);
+        incremental.insert(vec![text_block(BlockPlacement::Above(1), "T")]);
+        let incremental = incremental.sync(wrap.clone(), &Patch::empty(), None);
+
+        let mut full = BlockMap::new();
+        full.insert(vec![
+            text_block(BlockPlacement::Replace { start: 0, end: 0 }, "R"),
+            text_block(BlockPlacement::Above(1), "T"),
+        ]);
+        let full = full.sync(wrap.clone(), &Patch::empty(), None);
+
+        let lines = |snap: &BlockSnapshot| {
+            (0..snap.total_lines())
+                .map(|r| snap.display_line(r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(lines(&incremental), vec!["R", "T"]);
+        assert_eq!(
+            lines(&incremental),
+            lines(&full),
+            "trailing block must survive incremental add"
+        );
+    }
+
+    /// With a block already past the buffer's last row, an edit whose
+    /// reconstructed region reaches the buffer end must emit that trailing
+    /// block once: the cursor would otherwise carry it while the
+    /// reconstruction re-emits it, doubling the block.
+    #[test]
+    fn incremental_edit_keeps_single_trailing_block() {
+        let wrap = create_wrap_snapshot("a\nb");
+        let blocks = blocks_for(vec![text_block(BlockPlacement::Above(2), "T")]);
+        assert_incremental_matches_full(
+            &wrap,
+            &blocks,
+            Patch::new(vec![Edit {
+                old: 1..2,
+                new: 1..2,
+            }]),
         );
     }
 
