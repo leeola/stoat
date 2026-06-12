@@ -15,7 +15,7 @@
 
 use alacritty_terminal::{
     event::{Event, EventListener},
-    grid::Dimensions,
+    grid::{Dimensions, Scroll},
     index::{Column, Line},
     term::{cell::Flags, Config, Term, TermMode},
     vte::ansi::{Color as AnsiColor, CursorShape as AnsiCursorShape, Processor},
@@ -205,10 +205,13 @@ impl Emulator {
         self.term.columns()
     }
 
-    /// The cell at screen `(row, col)`. Out-of-range coordinates are the
-    /// caller's responsibility; valid ranges are `0..rows()` x `0..columns()`.
+    /// The cell at visible viewport `(row, col)`. Row 0 is the top of what is
+    /// currently on screen: with the view scrolled up by [`Self::display_offset`]
+    /// it reads from scrollback. Out-of-range coordinates are the caller's
+    /// responsibility; valid ranges are `0..rows()` x `0..columns()`.
     pub fn cell(&self, row: usize, col: usize) -> RenderCell {
-        let cell = &self.term.grid()[Line(row as i32)][Column(col)];
+        let grid_row = row as i32 - self.term.grid().display_offset() as i32;
+        let cell = &self.term.grid()[Line(grid_row)][Column(col)];
         let flags = cell.flags;
         RenderCell {
             c: cell.c,
@@ -224,13 +227,36 @@ impl Emulator {
         }
     }
 
+    /// The cursor in viewport coordinates. Its line is the grid line plus
+    /// [`Self::display_offset`], so when the view is scrolled up into history
+    /// the cursor reports a line at or past [`Self::rows`] and the caller draws
+    /// nothing.
     pub fn cursor(&self) -> Cursor {
         let cursor = self.term.renderable_content().cursor;
+        let viewport_line = cursor.point.line.0 + self.term.grid().display_offset() as i32;
         Cursor {
-            line: cursor.point.line.0.max(0) as usize,
+            line: viewport_line.max(0) as usize,
             column: cursor.point.column.0,
             shape: cursor.shape.into(),
         }
+    }
+
+    /// How many lines the view is scrolled up into scrollback. 0 is pinned to
+    /// the live bottom; output while scrolled keeps this offset so the visible
+    /// content stays put.
+    pub fn display_offset(&self) -> usize {
+        self.term.grid().display_offset()
+    }
+
+    /// Scroll the viewport by `delta` lines, positive toward history (up).
+    /// Clamped to the available scrollback and to the live bottom.
+    pub fn scroll_lines(&mut self, delta: i32) {
+        self.term.scroll_display(Scroll::Delta(delta));
+    }
+
+    /// Pin the viewport back to the live bottom, discarding any scroll offset.
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
     }
 
     /// Whether the program enabled any mouse-reporting protocol.
@@ -263,6 +289,13 @@ impl Emulator {
     /// encode as SS3 rather than CSI.
     pub fn app_cursor(&self) -> bool {
         self.term.mode().contains(TermMode::APP_CURSOR)
+    }
+
+    /// Whether alternate-scroll mode is active. Programs on the alt screen
+    /// (which has no scrollback) enable it to translate wheel ticks into
+    /// cursor-key presses.
+    pub fn alternate_scroll(&self) -> bool {
+        self.term.mode().contains(TermMode::ALTERNATE_SCROLL)
     }
 }
 
@@ -324,5 +357,68 @@ mod tests {
             vec![b"\x1b[1;1R".to_vec()],
             "DSR 6n reports the 1-based cursor position"
         );
+    }
+
+    /// Feed six lines into a three-row screen, scrolling lines 0-2 into
+    /// scrollback. The live view then shows 3, 4, 5.
+    fn scrolled_emulator() -> Emulator {
+        let mut emu = Emulator::new(3, 10);
+        emu.feed(b"0\r\n1\r\n2\r\n3\r\n4\r\n5");
+        emu
+    }
+
+    #[test]
+    fn scroll_up_reveals_scrollback_history() {
+        let mut emu = scrolled_emulator();
+        assert_eq!(emu.cell(0, 0).c, '3', "the live view starts at line 3");
+        assert_eq!(emu.display_offset(), 0);
+
+        emu.scroll_lines(1);
+        assert_eq!(emu.display_offset(), 1);
+        assert_eq!(emu.cell(0, 0).c, '2', "scrolling up reveals the prior line");
+
+        emu.scroll_to_bottom();
+        assert_eq!(emu.display_offset(), 0);
+        assert_eq!(emu.cell(0, 0).c, '3', "back to the live bottom");
+    }
+
+    #[test]
+    fn scroll_clamps_to_history_and_bottom() {
+        let mut emu = scrolled_emulator();
+        emu.scroll_lines(100);
+        assert_eq!(
+            emu.display_offset(),
+            3,
+            "clamped to the three lines of history"
+        );
+        assert_eq!(emu.cell(0, 0).c, '0', "showing the oldest line");
+
+        emu.scroll_lines(-100);
+        assert_eq!(emu.display_offset(), 0, "clamped back to the live bottom");
+    }
+
+    #[test]
+    fn cursor_leaves_viewport_when_scrolled_up() {
+        let mut emu = scrolled_emulator();
+        assert!(
+            emu.cursor().line < emu.rows(),
+            "cursor is visible at the live bottom"
+        );
+
+        emu.scroll_lines(2);
+        assert!(
+            emu.cursor().line >= emu.rows(),
+            "a scrolled-up cursor sits off the viewport"
+        );
+    }
+
+    #[test]
+    fn alternate_scroll_tracks_mode() {
+        let mut emu = Emulator::new(3, 10);
+        assert!(emu.alternate_scroll(), "alternate-scroll is on by default");
+        emu.feed(b"\x1b[?1007l");
+        assert!(!emu.alternate_scroll());
+        emu.feed(b"\x1b[?1007h");
+        assert!(emu.alternate_scroll());
     }
 }
