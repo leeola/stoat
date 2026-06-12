@@ -754,6 +754,7 @@ mod tests {
             fold_map::FoldOffset,
             highlights::{
                 create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
+                OffsetAnchorResolver,
             },
         };
         use ratatui::style::Color;
@@ -778,13 +779,12 @@ mod tests {
         };
         highlights_map.insert(key, Arc::new((red, vec![mk_anchor(0)..mk_anchor(6)])));
         let highlights = Arc::new(highlights_map);
-        let resolve = |a: &Anchor| a.offset as usize;
         let endpoints: Arc<[_]> = Arc::from(create_highlight_endpoints(
             &(0..6),
             &highlights,
             None,
             None,
-            &resolve,
+            &OffsetAnchorResolver,
         ));
 
         let chunks: Vec<_> = snap.chunks(FoldOffset(0)..end, 0, endpoints).collect();

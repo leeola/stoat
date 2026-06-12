@@ -31,6 +31,7 @@ pub use highlights::{
 };
 pub use inlay_map::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint, InlaySnapshot};
 use std::{
+    cmp::Ordering,
     collections::{HashMap, HashSet},
     sync::{
         atomic::{AtomicU64, Ordering as AtomicOrdering},
@@ -611,6 +612,20 @@ pub struct LineIndent {
     pub blank: bool,
 }
 
+impl highlights::HighlightAnchorResolver for MultiBufferSnapshot {
+    fn anchor_at(&self, offset: usize, bias: Bias) -> Anchor {
+        self.anchor_at(offset, bias)
+    }
+
+    fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Ordering {
+        self.cmp_anchors(a, b)
+    }
+
+    fn resolve_anchors_batch(&self, anchors: &[Anchor]) -> Vec<usize> {
+        self.resolve_anchors_batch(anchors)
+    }
+}
+
 impl DisplaySnapshot {
     pub fn version(&self) -> usize {
         self.fold_snapshot().version()
@@ -710,7 +725,6 @@ impl DisplaySnapshot {
         let text_highlights_ref = highlights.text_highlights.unwrap_or(&empty);
         let semantic_ref = highlights.semantic_token_highlights;
         let decoration_ref = highlights.decoration_highlights;
-        let resolve = |a: &Anchor| buffer.resolve_anchor(a);
         let mut cache = self
             .highlight_endpoint_cache
             .lock()
@@ -720,7 +734,7 @@ impl DisplaySnapshot {
             text_highlights_ref,
             semantic_ref,
             decoration_ref,
-            &resolve,
+            buffer,
             &mut cache,
         )
     }

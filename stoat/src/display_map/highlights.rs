@@ -8,11 +8,12 @@ use crate::{
 use ratatui::style::{Color, Modifier, Style};
 use std::{
     borrow::Cow,
+    cmp::Ordering,
     collections::{BTreeMap, HashMap},
     ops::Range,
     sync::Arc,
 };
-use stoat_text::{Anchor, ChunksInRange, Rope};
+use stoat_text::{Anchor, Bias, ChunksInRange, Rope};
 
 #[derive(Clone, Debug, Default, PartialEq, Eq, Hash)]
 pub struct HighlightStyle {
@@ -240,7 +241,7 @@ pub struct HighlightEndpoint {
 }
 
 impl Ord for HighlightEndpoint {
-    fn cmp(&self, other: &Self) -> std::cmp::Ordering {
+    fn cmp(&self, other: &Self) -> Ordering {
         self.offset
             .cmp(&other.offset)
             .then(self.is_start.cmp(&other.is_start))
@@ -249,7 +250,7 @@ impl Ord for HighlightEndpoint {
 }
 
 impl PartialOrd for HighlightEndpoint {
-    fn partial_cmp(&self, other: &Self) -> Option<std::cmp::Ordering> {
+    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
         Some(self.cmp(other))
     }
 }
@@ -282,12 +283,61 @@ impl CachedHighlightEndpoints {
     }
 }
 
+/// Anchor operations [`create_highlight_endpoints`] needs to locate the
+/// highlights overlapping a byte range without resolving an anchor inside every
+/// binary-search probe.
+///
+/// Keeping these behind a trait leaves endpoint construction independent of the
+/// buffer type: production passes a multi-buffer snapshot, tests pass an offset
+/// model.
+pub trait HighlightAnchorResolver {
+    /// Anchor at `offset` with the given bias, used to turn the query range
+    /// bounds into anchors comparable against the highlight ranges. The start
+    /// bound is resolved with [`Bias::Right`] and the end bound with
+    /// [`Bias::Left`] so a highlight touching a bound only by its excluded edge
+    /// is dropped.
+    fn anchor_at(&self, offset: usize, bias: Bias) -> Anchor;
+
+    /// Order two anchors in document order without resolving either to an
+    /// offset.
+    fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Ordering;
+
+    /// Resolve many anchors to byte offsets, returning offsets in input order.
+    fn resolve_anchors_batch(&self, anchors: &[Anchor]) -> Vec<usize>;
+}
+
+/// Test resolver over a trivial offset model: an anchor's `offset` field is its
+/// byte offset and document order. Shared by the display-map layer tests that
+/// drive highlights without building a real buffer.
+#[cfg(test)]
+pub(crate) struct OffsetAnchorResolver;
+
+#[cfg(test)]
+impl HighlightAnchorResolver for OffsetAnchorResolver {
+    fn anchor_at(&self, offset: usize, bias: Bias) -> Anchor {
+        Anchor {
+            timestamp: 0,
+            offset: offset as u32,
+            bias,
+            buffer_id: None,
+        }
+    }
+
+    fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Ordering {
+        a.offset.cmp(&b.offset).then(a.bias.cmp(&b.bias))
+    }
+
+    fn resolve_anchors_batch(&self, anchors: &[Anchor]) -> Vec<usize> {
+        anchors.iter().map(|a| a.offset as usize).collect()
+    }
+}
+
 pub fn create_highlight_endpoints_cached(
     range: &Range<usize>,
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
     decoration_highlights: Option<&DecorationHighlights>,
-    resolve: &impl Fn(&Anchor) -> usize,
+    resolver: &impl HighlightAnchorResolver,
     cache: &mut Option<CachedHighlightEndpoints>,
 ) -> Arc<[HighlightEndpoint]> {
     if let Some(ref cached) = cache {
@@ -305,7 +355,7 @@ pub fn create_highlight_endpoints_cached(
         highlights,
         semantic_highlights,
         decoration_highlights,
-        resolve,
+        resolver,
     );
     let arc: Arc<[HighlightEndpoint]> = Arc::from(endpoints);
     *cache = Some(CachedHighlightEndpoints {
@@ -323,130 +373,126 @@ pub fn create_highlight_endpoints(
     highlights: &TextHighlights,
     semantic_highlights: Option<&SemanticTokensHighlights>,
     decoration_highlights: Option<&DecorationHighlights>,
-    resolve: &impl Fn(&Anchor) -> usize,
+    resolver: &impl HighlightAnchorResolver,
 ) -> Vec<HighlightEndpoint> {
     let mut endpoints = Vec::new();
+    let start_bound = resolver.anchor_at(range.start, Bias::Right);
+    let end_bound = resolver.anchor_at(range.end, Bias::Left);
 
     for (&key, hl) in highlights.iter() {
         let style = &hl.0;
-        let ranges = &hl.1;
-
-        let start_ix = ranges
-            .binary_search_by(|probe| {
-                resolve(&probe.end)
-                    .cmp(&range.start)
-                    .then(std::cmp::Ordering::Less)
-            })
-            .unwrap_or_else(|i| i);
-
-        for anchor_range in &ranges[start_ix..] {
-            let s = resolve(&anchor_range.start);
-            let e = resolve(&anchor_range.end);
-            if s >= range.end {
-                break;
-            }
-            if s == e {
-                continue;
-            }
-            endpoints.push(HighlightEndpoint {
-                offset: s,
-                is_start: true,
-                key,
-                style: Some(style.clone()),
-            });
-            endpoints.push(HighlightEndpoint {
-                offset: e,
-                is_start: false,
-                key,
-                style: None,
-            });
-        }
+        push_overlapping_endpoints(
+            &mut endpoints,
+            resolver,
+            &start_bound,
+            &end_bound,
+            &hl.1[..],
+            |anchor_range| anchor_range,
+            |_| (key, style.clone()),
+        );
     }
 
     if let Some(semantic) = semantic_highlights {
         for (_buffer_id, (tokens, interner)) in semantic.iter() {
-            let start_ix = tokens
-                .binary_search_by(|probe| {
-                    resolve(&probe.range.end)
-                        .cmp(&range.start)
-                        .then(std::cmp::Ordering::Less)
-                })
-                .unwrap_or_else(|i| i);
-
-            for (offset_in_slice, token) in tokens[start_ix..].iter().enumerate() {
-                let s = resolve(&token.range.start);
-                let e = resolve(&token.range.end);
-                if s >= range.end {
-                    break;
-                }
-                if s == e {
-                    continue;
-                }
-                // Unique slot per token keeps nested captures (e.g. escape
-                // inside string) in distinct entries of the merger's active map.
-                let key = HighlightKey::new(
-                    HighlightLayer::SemanticToken,
-                    (start_ix + offset_in_slice) as u32,
-                );
-                endpoints.push(HighlightEndpoint {
-                    offset: s,
-                    is_start: true,
-                    key,
-                    style: Some(interner[token.style].clone()),
-                });
-                endpoints.push(HighlightEndpoint {
-                    offset: e,
-                    is_start: false,
-                    key,
-                    style: None,
-                });
-            }
+            push_overlapping_endpoints(
+                &mut endpoints,
+                resolver,
+                &start_bound,
+                &end_bound,
+                &tokens[..],
+                |token| &token.range,
+                |ix| {
+                    // Unique slot per token keeps nested captures (e.g. escape
+                    // inside string) in distinct entries of the merger's active map.
+                    let key = HighlightKey::new(HighlightLayer::SemanticToken, ix as u32);
+                    (key, interner[tokens[ix].style].clone())
+                },
+            );
         }
     }
 
     if let Some(decoration) = decoration_highlights {
         for (_buffer_id, decorations) in decoration.iter() {
-            let start_ix = decorations
-                .binary_search_by(|probe| {
-                    resolve(&probe.range.end)
-                        .cmp(&range.start)
-                        .then(std::cmp::Ordering::Less)
-                })
-                .unwrap_or_else(|i| i);
-
-            for (offset_in_slice, decoration) in decorations[start_ix..].iter().enumerate() {
-                let s = resolve(&decoration.range.start);
-                let e = resolve(&decoration.range.end);
-                if s >= range.end {
-                    break;
-                }
-                if s == e {
-                    continue;
-                }
-                // Unique slot per decoration keeps overlapping overlays in
-                // distinct entries of the merger's active map.
-                let key = HighlightKey::new(
-                    HighlightLayer::Decoration,
-                    (start_ix + offset_in_slice) as u32,
-                );
-                endpoints.push(HighlightEndpoint {
-                    offset: s,
-                    is_start: true,
-                    key,
-                    style: Some(decoration.style.clone()),
-                });
-                endpoints.push(HighlightEndpoint {
-                    offset: e,
-                    is_start: false,
-                    key,
-                    style: None,
-                });
-            }
+            push_overlapping_endpoints(
+                &mut endpoints,
+                resolver,
+                &start_bound,
+                &end_bound,
+                &decorations[..],
+                |decoration| &decoration.range,
+                |ix| {
+                    // Unique slot per decoration keeps overlapping overlays in
+                    // distinct entries of the merger's active map.
+                    let key = HighlightKey::new(HighlightLayer::Decoration, ix as u32);
+                    (key, decorations[ix].style.clone())
+                },
+            );
         }
     }
 
     endpoints.sort();
     endpoints
+}
+
+/// Append the start/end endpoints of every range in `items` overlapping the
+/// `[start_bound, end_bound)` query window.
+///
+/// Two structural binary searches bound the overlapping run without resolving
+/// any anchor, then only the survivors are batch-resolved to offsets.
+/// `range_of` extracts an item's anchor range; `endpoint_meta` maps an item's
+/// index within `items` to the merger key and style for its endpoints.
+fn push_overlapping_endpoints<T>(
+    endpoints: &mut Vec<HighlightEndpoint>,
+    resolver: &impl HighlightAnchorResolver,
+    start_bound: &Anchor,
+    end_bound: &Anchor,
+    items: &[T],
+    range_of: impl Fn(&T) -> &Range<Anchor>,
+    mut endpoint_meta: impl FnMut(usize) -> (HighlightKey, HighlightStyle),
+) {
+    let start_ix = items
+        .binary_search_by(|probe| {
+            resolver
+                .cmp_anchors(&range_of(probe).end, start_bound)
+                .then(Ordering::Less)
+        })
+        .unwrap_or_else(|i| i);
+    let end_ix = items[start_ix..]
+        .binary_search_by(|probe| {
+            resolver
+                .cmp_anchors(&range_of(probe).start, end_bound)
+                .then(Ordering::Greater)
+        })
+        .unwrap_or_else(|i| i);
+
+    let survivors = &items[start_ix..][..end_ix];
+    if survivors.is_empty() {
+        return;
+    }
+
+    let starts: Vec<Anchor> = survivors.iter().map(|item| range_of(item).start).collect();
+    let ends: Vec<Anchor> = survivors.iter().map(|item| range_of(item).end).collect();
+    let start_offsets = resolver.resolve_anchors_batch(&starts);
+    let end_offsets = resolver.resolve_anchors_batch(&ends);
+
+    for (i, (&s, &e)) in start_offsets.iter().zip(&end_offsets).enumerate() {
+        if s == e {
+            continue;
+        }
+        let (key, style) = endpoint_meta(start_ix + i);
+        endpoints.push(HighlightEndpoint {
+            offset: s,
+            is_start: true,
+            key,
+            style: Some(style),
+        });
+        endpoints.push(HighlightEndpoint {
+            offset: e,
+            is_start: false,
+            key,
+            style: None,
+        });
+    }
 }
 
 /// Iterate text chunks with merged highlight styles applied.
@@ -620,7 +666,8 @@ impl<'a> Iterator for BufferChunks<'a> {
 mod tests {
     use super::{
         create_highlight_endpoints, create_highlight_endpoints_cached, highlighted_chunks, Chunk,
-        HighlightKey, HighlightLayer, HighlightStyle, TextHighlights,
+        HighlightEndpoint, HighlightKey, HighlightLayer, HighlightStyle, OffsetAnchorResolver,
+        TextHighlights,
     };
     use ratatui::style::Color;
     use std::{collections::HashMap, ops::Range, sync::Arc};
@@ -653,8 +700,8 @@ mod tests {
     fn no_highlights() {
         let text = "hello world";
         let highlights = Arc::new(HashMap::new());
-        let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolver = OffsetAnchorResolver;
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello world");
@@ -674,8 +721,8 @@ mod tests {
             style.clone(),
             vec![6..11],
         )]);
-        let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolver = OffsetAnchorResolver;
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 2);
         assert_eq!(chunks[0].text, "hello ");
@@ -699,7 +746,7 @@ mod tests {
             style,
             vec![6..11],
         )]);
-        let resolve = |a: &Anchor| a.offset as usize;
+        let resolver = OffsetAnchorResolver;
 
         let mut cache = None;
         let first = create_highlight_endpoints_cached(
@@ -707,7 +754,7 @@ mod tests {
             &highlights,
             None,
             None,
-            &resolve,
+            &resolver,
             &mut cache,
         );
         let second = create_highlight_endpoints_cached(
@@ -715,7 +762,7 @@ mod tests {
             &highlights,
             None,
             None,
-            &resolve,
+            &resolver,
             &mut cache,
         );
         assert!(
@@ -728,7 +775,7 @@ mod tests {
             &highlights,
             None,
             None,
-            &resolve,
+            &resolver,
             &mut cache,
         );
         assert!(
@@ -762,8 +809,8 @@ mod tests {
                 vec![4..6],
             ),
         ]);
-        let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolver = OffsetAnchorResolver;
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" (no style), "cd" (blue+bold), "ef" (red+bold, red overrides blue fg),
@@ -791,6 +838,45 @@ mod tests {
     }
 
     #[test]
+    fn query_range_trims_to_overlapping_highlights() {
+        let text = "0123456789abcdefgh"; // 18 ASCII bytes
+        let style = HighlightStyle {
+            foreground: Some(Color::Red),
+            ..Default::default()
+        };
+        let highlights = make_highlights(vec![(
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
+            style,
+            vec![0..2, 4..6, 8..10, 12..14, 16..18],
+        )]);
+
+        let styled = |eps: &[HighlightEndpoint]| -> Vec<usize> {
+            let mut offsets = Vec::new();
+            let mut pos = 0;
+            for chunk in highlighted_chunks(text, 0, eps) {
+                let len = chunk.text.len();
+                if chunk.style.is_some() {
+                    offsets.extend(pos..pos + len);
+                }
+                pos += len;
+            }
+            offsets
+        };
+
+        // Window [5, 13): drops 0..2 (ends left of the window) and 16..18
+        // (starts right of it); keeps the edge-overlapping and interior ranges.
+        let eps =
+            create_highlight_endpoints(&(5..13), &highlights, None, None, &OffsetAnchorResolver);
+        assert_eq!(styled(&eps), vec![4, 5, 8, 9, 12, 13]);
+
+        // Window [6, 12): 4..6 ends exactly at the start and 12..14 starts
+        // exactly at the end; both are excluded, leaving only the interior range.
+        let eps =
+            create_highlight_endpoints(&(6..12), &highlights, None, None, &OffsetAnchorResolver);
+        assert_eq!(styled(&eps), vec![8, 9]);
+    }
+
+    #[test]
     fn empty_range_ignored() {
         let text = "hello";
         #[allow(clippy::single_range_in_vec_init)]
@@ -802,8 +888,8 @@ mod tests {
             },
             vec![2..2],
         )]);
-        let resolve = |a: &Anchor| a.offset as usize;
-        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolve);
+        let resolver = OffsetAnchorResolver;
+        let eps = create_highlight_endpoints(&(0..text.len()), &highlights, None, None, &resolver);
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
         assert_eq!(chunks.len(), 1);
         assert_eq!(chunks[0].text, "hello");
@@ -861,10 +947,15 @@ mod tests {
         semantic_map.insert(BufferId::new(0), (tokens, Arc::new(interner)));
         let semantic: SemanticTokensHighlights = Arc::new(semantic_map);
         let text_hl: TextHighlights = Arc::new(HashMap::new());
-        let resolve = |a: &Anchor| a.offset as usize;
+        let resolver = OffsetAnchorResolver;
 
-        let eps =
-            create_highlight_endpoints(&(0..text.len()), &text_hl, Some(&semantic), None, &resolve);
+        let eps = create_highlight_endpoints(
+            &(0..text.len()),
+            &text_hl,
+            Some(&semantic),
+            None,
+            &resolver,
+        );
         let chunks: Vec<_> = highlighted_chunks(text, 0, &eps).collect();
 
         // "ab" unstyled; "cd" outer only (blue+bold); "ef" outer+inner (inner slot

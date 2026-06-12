@@ -739,8 +739,11 @@ impl MultiBufferSnapshot {
         self.buffer_snapshot.is_anchor_valid(anchor)
     }
 
+    /// Order two anchors in document order without resolving either to an
+    /// offset, delegating to the underlying buffer's fragment-locator
+    /// comparison.
     pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> std::cmp::Ordering {
-        a.cmp(b, &|anchor| self.resolve_anchor(anchor))
+        self.buffer_snapshot.cmp_anchors(a, b)
     }
 
     pub fn edits_since(&self, since_version: u64) -> Patch<usize> {
