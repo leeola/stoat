@@ -1507,22 +1507,32 @@ fn resolve_block_placement(
         wrap_cursor.map(tab_point).row()
     };
 
+    // Clamp resolved rows to the wrap line count. A block placement is a static
+    // buffer row, so an edit shrinking the buffer (or an end past it) can resolve
+    // beyond the last row; left unclamped, an Above/Below gap or a Replace's
+    // consumed input would exceed the wrap line count. A zero-input Above/Below
+    // sits after the last row at `line_count`; a Replace spans real rows, so it
+    // clamps to the last one.
+    let line_count = wrap_snapshot.line_count();
     match placement {
-        BlockPlacement::Above(row) => {
-            ResolvedPlacement::Above(map_row(row, inlay_cursor, fold_cursor, wrap_cursor))
-        },
-        BlockPlacement::Below(row) => {
-            ResolvedPlacement::Below(map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
-        },
-        BlockPlacement::Near(row) => {
-            ResolvedPlacement::Near(map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
-        },
+        BlockPlacement::Above(row) => ResolvedPlacement::Above(
+            map_row(row, inlay_cursor, fold_cursor, wrap_cursor).min(line_count),
+        ),
+        BlockPlacement::Below(row) => ResolvedPlacement::Below(
+            (map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1).min(line_count),
+        ),
+        BlockPlacement::Near(row) => ResolvedPlacement::Near(
+            (map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1).min(line_count),
+        ),
         BlockPlacement::Replace { start, end } => {
-            let start_wrap = map_row(start, inlay_cursor, fold_cursor, wrap_cursor);
-            let end_wrap = map_last_row(end, inlay_cursor, fold_cursor, wrap_cursor);
+            let last_row = line_count.saturating_sub(1);
+            let start_wrap = map_row(start, inlay_cursor, fold_cursor, wrap_cursor).min(last_row);
+            let end_wrap = map_last_row(end, inlay_cursor, fold_cursor, wrap_cursor)
+                .min(last_row)
+                .max(start_wrap);
             ResolvedPlacement::Replace {
                 start: start_wrap,
-                end: end_wrap.max(start_wrap),
+                end: end_wrap,
             }
         },
     }
@@ -3099,5 +3109,44 @@ mod tests {
         block_map.remove(&[ids[0]].into_iter().collect());
         let snap = block_map.sync(wrap_snapshot, &Patch::empty(), None);
         assert_eq!(snap.total_lines(), 4);
+    }
+
+    /// A Replace whose end is past the buffer (e.g. a stale placement after a
+    /// shrinking edit) clamps to the last row rather than over-counting input.
+    #[test]
+    fn out_of_range_replace_clamps() {
+        let wrap = create_wrap_snapshot("a\nb\nc");
+        let mut block_map = BlockMap::new();
+        block_map.insert(vec![text_block(
+            BlockPlacement::Replace { start: 0, end: 9 },
+            "X",
+        )]);
+        let snap = block_map.sync(wrap, &Patch::empty(), None);
+        let lines: Vec<String> = (0..snap.total_lines())
+            .map(|r| snap.display_line(r))
+            .collect();
+        assert_eq!(lines, vec!["X".to_string()]);
+    }
+
+    /// An Above/Below row past the buffer clamps to after the last row rather
+    /// than pushing an isomorphic gap beyond the wrap line count.
+    #[test]
+    fn out_of_range_above_clamps() {
+        let wrap = create_wrap_snapshot("a\nb\nc");
+        let mut block_map = BlockMap::new();
+        block_map.insert(vec![text_block(BlockPlacement::Above(9), "TOP")]);
+        let snap = block_map.sync(wrap, &Patch::empty(), None);
+        let lines: Vec<String> = (0..snap.total_lines())
+            .map(|r| snap.display_line(r))
+            .collect();
+        assert_eq!(
+            lines,
+            vec![
+                "a".to_string(),
+                "b".to_string(),
+                "c".to_string(),
+                "TOP".to_string()
+            ]
+        );
     }
 }
