@@ -965,15 +965,27 @@ fn sync_fold_incremental(
         let folds_in_range: Vec<&Fold> = {
             let new_start_inlay = InlayPoint::new(edit.new.start, 0);
             let new_end_inlay = InlayPoint::new(edit.new.end, 0);
+            // When the start snapped into a placeholder, the fold the edit
+            // landed in was changed (e.g. shrunk by a deletion) and may now end
+            // exactly at the snapped edit start, so a fold ending there is in
+            // the rebuild region. Without a snap, a fold ending at the edit
+            // start is unchanged and already carried into the prefix.
+            let ends_in_region = |end: InlayPoint| {
+                if start_delta > 0 {
+                    end >= new_start_inlay
+                } else {
+                    end > new_start_inlay
+                }
+            };
             let mut fold_cursor = resolved_folds.filter::<_, FoldStart>((), |summary| {
-                summary.max_end > new_start_inlay && summary.min_start < new_end_inlay
+                ends_in_region(summary.max_end) && summary.min_start < new_end_inlay
             });
             let mut result = Vec::new();
             for fold in &mut fold_cursor {
                 if fold.range.start >= new_end_inlay {
                     break;
                 }
-                if fold.range.end > new_start_inlay {
+                if ends_in_region(fold.range.end) {
                     result.push(fold);
                 }
             }
@@ -2839,6 +2851,49 @@ mod tests {
         assert_eq!(chunks, "*cXd");
     }
 
+    /// An edit that deletes content inside a fold shrinks the fold, which now
+    /// ends at the edit point. Its placeholder must still be rebuilt rather than
+    /// the shrunk region filled with isomorphic text.
+    #[test]
+    fn incremental_edit_shrinks_fold() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "\n\nb",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap1 = multi_buffer.snapshot();
+        let version1 = snap1.version();
+        let (mut inlay_map, inlay1) = InlayMap::new(snap1.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay1.clone());
+
+        // Fold the whole buffer, settle.
+        fold_map.fold(
+            vec![snap1.anchor_at(0, Bias::Right)..snap1.anchor_at(3, Bias::Left)],
+            one_char_placeholder(false),
+            &snap1,
+        );
+        fold_map.sync(inlay1, &Patch::empty());
+
+        // Delete folded content, shrinking the fold to the leading newline.
+        shared.write().unwrap().edit(1..3, "");
+        let snap2 = multi_buffer.snapshot();
+        let buffer_edits = snap2.edits_since(version1);
+        let (inlay2, inlay_edits) = inlay_map.sync(snap2, &buffer_edits);
+        let (snapshot, _) = fold_map.sync(inlay2, &inlay_edits);
+
+        snapshot.check_invariants();
+
+        let text: String = snapshot.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "*");
+        assert_eq!(snapshot.len().0, 1, "transform output length");
+
+        let chunks: String = snapshot
+            .chunks(FoldOffset(0)..snapshot.len(), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(chunks, "*");
+    }
+
     /// Deterministic xorshift64 PRNG. Tests stay pure, so seeds come from a
     /// fixed range rather than the environment.
     struct Rng(u64);
@@ -2955,13 +3010,6 @@ mod tests {
                         fold_map.unfold(vec![a..b], &buffer_snapshot);
                     },
                     _ => {
-                        // Unfold everything before editing. An edit that
-                        // deletes folded content (shrinking a fold) still drops
-                        // the shrunk fold's placeholder, so scope edits to a
-                        // fold-free buffer; fold/edit interaction is out of scope
-                        // until that gap is fixed.
-                        #[allow(clippy::single_range_in_vec_init)]
-                        fold_map.unfold(vec![0..len], &buffer_snapshot);
                         let (a, b) = random_range(&mut rng, len);
                         let insert_len = rng.below(4) as usize;
                         let insert = random_text(&mut rng, insert_len);
