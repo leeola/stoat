@@ -392,7 +392,9 @@ impl WrapMap {
                     .compose(edits.edits().iter().cloned());
                 self.snapshot = snapshot;
                 self.background_task = None;
-                self.pending_edits.clear();
+                // Keep pending_edits: the task only folded in the entries cloned
+                // at spawn time. flush_edits drains those (by tab version) and
+                // re-applies edits that arrived while the task ran.
                 self.flush_edits();
             }
         }
@@ -1939,6 +1941,67 @@ mod tests {
             notified.load(SeqCst),
             "a finished background rewrap notifies the redraw handle"
         );
+    }
+
+    #[test]
+    fn rewrap_completion_keeps_concurrent_edit() {
+        // An edit that arrives while a background rewrap runs must survive the
+        // task's completion, not be cleared with the entries the task folded in.
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+
+        let buffer = TextBuffer::with_text(BufferId::new(0), "abcd\nefgh");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+
+        let snap0 = multi_buffer.snapshot();
+        let v0 = snap0.version();
+        let (mut inlay_map, inlay0) = InlayMap::new(snap0);
+        let (mut fold_map, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab0, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab0, Some(4), executor);
+
+        // Edit 1: 150-row insert spawns the background rewrap.
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..0, &"ab\n".repeat(150));
+        let snap1 = multi_buffer.snapshot();
+        let v1 = snap1.version();
+        let (inlay1, ie1) = inlay_map.sync(snap1.clone(), &snap1.edits_since(v0));
+        let (fold1, fe1) = fold_map.sync(inlay1, &ie1);
+        let (tab1, te1) = tab_map.sync(fold1, fe1);
+        wrap_map.sync(tab1, &te1);
+
+        // Edit 2: a small insert arrives while the task is still running.
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..0, "Z");
+        let snap2 = multi_buffer.snapshot();
+        let (inlay2, ie2) = inlay_map.sync(snap2.clone(), &snap2.edits_since(v1));
+        let (fold2, fe2) = fold_map.sync(inlay2, &ie2);
+        let (tab2, te2) = tab_map.sync(fold2, fe2);
+        wrap_map.sync(tab2.clone(), &te2);
+
+        // Complete the rewrap and poll it in with an empty-edit sync.
+        scheduler.run_until_parked();
+        let (incremental, _) = wrap_map.sync(tab2.clone(), &Patch::empty());
+
+        let full = super::build_snapshot(tab2, Some(4));
+        assert_eq!(incremental.line_count(), full.line_count());
+        for row in 0..full.line_count() {
+            assert_eq!(
+                incremental.line_len(row),
+                full.line_len(row),
+                "line_len mismatch at row {row}"
+            );
+        }
     }
 
     #[test]
