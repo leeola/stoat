@@ -683,7 +683,10 @@ impl MultiBufferSnapshot {
     }
 
     pub fn line_count(&self) -> u32 {
-        self.buffer_snapshot.line_count()
+        match &self.excerpt_tree {
+            Some(tree) => tree.summary().text.lines.row + 1,
+            None => self.buffer_snapshot.line_count(),
+        }
     }
 
     pub fn text(&self) -> &str {
@@ -820,7 +823,7 @@ impl Iterator for ExcerptBoundaryIter {
 
 #[cfg(test)]
 mod tests {
-    use super::{ExcerptId, MultiBuffer, MultiBufferAnchor, MultiBufferPoint};
+    use super::{ExcerptId, MultiBuffer, MultiBufferAnchor, MultiBufferPoint, MultiBufferSnapshot};
     use crate::buffer::{BufferId, TextBuffer};
     use std::{
         iter,
@@ -832,6 +835,38 @@ mod tests {
         let id = BufferId::new(0);
         let buffer = TextBuffer::with_text(id, content);
         (id, Arc::new(RwLock::new(buffer)))
+    }
+
+    /// Build a genuine multi-excerpt snapshot: one full-buffer excerpt per text,
+    /// in order, each from its own buffer so the excerpts span distinct buffers
+    /// like a real multi-buffer.
+    #[allow(clippy::single_range_in_vec_init)]
+    fn multi_excerpt_snapshot(texts: &[&str]) -> MultiBufferSnapshot {
+        let buffers: Vec<(BufferId, Arc<RwLock<TextBuffer>>)> = texts
+            .iter()
+            .enumerate()
+            .map(|(i, text)| {
+                let id = BufferId::new(i as u64 + 1);
+                (id, Arc::new(RwLock::new(TextBuffer::with_text(id, text))))
+            })
+            .collect();
+
+        let mut multi = MultiBuffer::singleton(buffers[0].0, buffers[0].1.clone());
+        for (i, (id, buffer)) in buffers.iter().enumerate().skip(1) {
+            multi.insert_excerpts(*id, buffer.clone(), vec![0..texts[i].len()]);
+        }
+        multi.snapshot()
+    }
+
+    #[test]
+    fn line_count_sums_every_excerpt() {
+        // "ab\ncd" + "ef\ngh" concatenate to "ab\ncd\nef\ngh" -- four rows.
+        assert_eq!(
+            multi_excerpt_snapshot(&["ab\ncd", "ef\ngh"]).line_count(),
+            4
+        );
+        // Three single-row excerpts concatenate to "x\ny\nz" -- three rows.
+        assert_eq!(multi_excerpt_snapshot(&["x", "y", "z"]).line_count(), 3);
     }
 
     #[test]
