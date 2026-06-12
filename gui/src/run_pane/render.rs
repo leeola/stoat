@@ -20,7 +20,7 @@ use stoat::run::{
 
 /// Translucent fill for the terminal cursor so the character shows
 /// through a block cursor.
-const CURSOR_COLOR: Hsla = Hsla {
+pub(crate) const CURSOR_COLOR: Hsla = Hsla {
     h: 0.,
     s: 0.,
     l: 0.75,
@@ -40,7 +40,7 @@ pub(crate) struct CursorRender {
 
 /// The overlay size for a cursor shape within one cell: a full block, a
 /// baseline underline strip, or a left-edge bar.
-fn cursor_dimensions(shape: CursorShape, cell: Size<Pixels>) -> Size<Pixels> {
+pub(crate) fn cursor_dimensions(shape: CursorShape, cell: Size<Pixels>) -> Size<Pixels> {
     let thickness = px(2.);
     match shape {
         CursorShape::Block => cell,

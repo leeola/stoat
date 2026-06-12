@@ -18,17 +18,18 @@ use crate::{
     globals::{ClipboardHostGlobal, EnvHostGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     run_pane::{
-        editor_font, mouse, mouse_button_code,
-        render::{render_grid_row, CursorRender},
-        scroll_is_up, terminal_cells, GPUI_DEFAULT_LINE_HEIGHT_RATIO,
+        editor_font, mouse, mouse_button_code, render::term_color_to_hsla, scroll_is_up,
+        terminal_cells, GPUI_DEFAULT_LINE_HEIGHT_RATIO,
     },
+    terminal_paint::{self, PaintCell, PaintCursor, PaintScreen},
+    theme::ActiveTheme,
     workspace::Workspace,
 };
 use gpui::{
     canvas, div, font, point, px, size, App, AppContext, Bounds, Context, FocusHandle, Focusable,
-    InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
-    MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollWheelEvent, SharedString, Size,
-    Styled, Task, WeakEntity, Window,
+    Font, FontFeatures, FontStyle, FontWeight, InteractiveElement, IntoElement, Modifiers,
+    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
+    Render, ScrollWheelEvent, SharedString, Size, Styled, Task, WeakEntity, Window,
 };
 use std::{
     path::PathBuf,
@@ -39,8 +40,8 @@ use stoat::{
     host::{SpawnArgs, TerminalHost, TerminalSession},
     run::{
         encode_mouse_report,
-        term::{CursorShape as EmuCursorShape, Emulator, RenderCell, TermColor as EmuColor},
-        CursorShape, StyledCell, TermColor, TermModifier,
+        term::{CursorShape as EmuCursorShape, Emulator, TermColor as EmuColor},
+        CursorShape, TermColor,
     },
 };
 
@@ -74,24 +75,6 @@ fn emulator_color(color: EmuColor) -> Option<TermColor> {
         EmuColor::Indexed(index) => Some(TermColor::Indexed(index)),
         EmuColor::Rgb(r, g, b) => Some(TermColor::Rgb(r, g, b)),
     }
-}
-
-/// Collapse an emulator cell's style flags into the renderer's modifier set.
-fn emulator_modifiers(cell: &RenderCell) -> TermModifier {
-    let mut modifiers = TermModifier::empty();
-    if cell.bold {
-        modifiers |= TermModifier::BOLD;
-    }
-    if cell.italic {
-        modifiers |= TermModifier::ITALIC;
-    }
-    if cell.underline {
-        modifiers |= TermModifier::UNDERLINED;
-    }
-    if cell.inverse {
-        modifiers |= TermModifier::REVERSED;
-    }
-    modifiers
 }
 
 /// The renderer cursor shape for an emulator cursor, or `None` when the cursor
@@ -350,25 +333,50 @@ impl Terminal {
         true
     }
 
-    /// Build one screen row as styled cells for [`render_grid_row`]. The spacer
-    /// column that follows a wide glyph is skipped: the flow-layout paint
-    /// advances by the glyph's own width, so a placeholder cell would over-pad
-    /// the row. (The next sibling's grid painter handles cell geometry exactly.)
-    fn styled_row(&self, row: usize) -> Vec<StyledCell> {
-        (0..self.emulator.columns())
-            .filter_map(|col| {
-                let cell = self.emulator.cell(row, col);
-                if cell.wide_spacer {
-                    return None;
-                }
-                Some(StyledCell {
-                    ch: cell.c,
-                    fg: emulator_color(cell.fg),
-                    bg: emulator_color(cell.bg),
-                    modifiers: emulator_modifiers(&cell),
-                })
+    /// Snapshot the emulator screen for the paint pass, resolving each cell's
+    /// colors against the theme. A cell's default fg falls back to the theme
+    /// text color; a default bg is left transparent. An inverse cell swaps the
+    /// two, using the theme background as the substituted foreground.
+    fn paint_snapshot(&self, focused: bool, cx: &App) -> PaintScreen {
+        let theme = cx.theme();
+        let default_fg = theme.editor_text;
+        let default_bg = theme.editor_background;
+        let rows = (0..self.emulator.rows())
+            .map(|row| {
+                (0..self.emulator.columns())
+                    .map(|col| {
+                        let cell = self.emulator.cell(row, col);
+                        let mut fg = emulator_color(cell.fg)
+                            .and_then(term_color_to_hsla)
+                            .unwrap_or(default_fg);
+                        let mut bg = emulator_color(cell.bg).and_then(term_color_to_hsla);
+                        if cell.inverse {
+                            let swapped_fg = bg.unwrap_or(default_bg);
+                            bg = Some(fg);
+                            fg = swapped_fg;
+                        }
+                        PaintCell {
+                            ch: cell.c,
+                            fg,
+                            bg,
+                            bold: cell.bold,
+                            italic: cell.italic,
+                            underline: cell.underline,
+                            wide: cell.wide,
+                            wide_spacer: cell.wide_spacer,
+                        }
+                    })
+                    .collect()
             })
-            .collect()
+            .collect();
+        let emu_cursor = self.emulator.cursor();
+        let cursor = emulator_cursor_shape(emu_cursor.shape).map(|shape| PaintCursor {
+            line: emu_cursor.line,
+            column: emu_cursor.column,
+            shape,
+            focused,
+        });
+        PaintScreen { rows, cursor }
     }
 }
 
@@ -494,26 +502,20 @@ impl Render for Terminal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let (font_family, font_size) = editor_font(cx);
         let focused = self.is_pane_focused(cx);
-        let emu_cursor = self.emulator.cursor();
-        let cursor = self
-            .cell_size
-            .zip(emulator_cursor_shape(emu_cursor.shape))
-            .map(|(cell, shape)| CursorRender {
-                row: emu_cursor.line,
-                col: emu_cursor.column,
-                shape,
-                cell,
-                focused,
-            });
-        let mut body = div().flex().flex_col().flex_grow().w_full();
-        for row_idx in 0..self.emulator.rows() {
-            let styled = self.styled_row(row_idx);
-            let row_cursor = cursor.as_ref().filter(|c| c.row == row_idx);
-            body = body.child(render_grid_row(&styled, row_idx, None, None, row_cursor));
-        }
+        let screen = self.paint_snapshot(focused, cx);
+        let paint_font = Font {
+            family: font_family.clone(),
+            features: FontFeatures::default(),
+            weight: FontWeight::NORMAL,
+            style: FontStyle::Normal,
+            fallbacks: None,
+        };
         let bounds_handle = cx.weak_entity();
         let cell_family = font_family.clone();
-        let bounds_capture = canvas(
+        // The prepaint measures the whole-cell metrics (cell width is the
+        // font's em-advance), captures the bounds for mouse mapping, and hands
+        // the cell size to the paint pass for the grid.
+        let grid = canvas(
             move |bounds, window, cx| {
                 let font_id = window
                     .text_system()
@@ -531,8 +533,21 @@ impl Render for Terminal {
                         term.set_cell_size(cell, cx);
                     }
                 });
+                measured
             },
-            |_, _, _, _| {},
+            move |bounds, cell_size, window, cx| {
+                if let Some(cell) = cell_size {
+                    terminal_paint::paint_screen(
+                        &screen,
+                        bounds,
+                        cell,
+                        &paint_font,
+                        px(font_size),
+                        window,
+                        cx,
+                    );
+                }
+            },
         )
         .absolute()
         .size_full();
@@ -540,8 +555,7 @@ impl Render for Terminal {
             .relative()
             .flex_grow()
             .w_full()
-            .child(body)
-            .child(bounds_capture)
+            .child(grid)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
