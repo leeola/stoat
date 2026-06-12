@@ -544,7 +544,13 @@ impl FoldMap {
                 .iter()
                 .map(|fold| fold_inlay_region(&fold.range, &snapshot.inlay_snapshot))
                 .collect();
-            self.merge_deferred_regions(regions);
+            // A new fold can coalesce with an existing fold it overlaps or
+            // abuts, changing that fold's rendered span. Defer those rows too so
+            // the incremental rebuild replaces the neighbor's now-stale
+            // placeholder rather than leaving it beside the coalesced one with
+            // its collapsed input counted twice.
+            let neighbors = neighbor_fold_regions(&self.folds, &regions, &snapshot.inlay_snapshot);
+            self.merge_deferred_regions(regions.into_iter().chain(neighbors));
         }
 
         let resolve = |a: &Anchor| buffer_snapshot.resolve_anchor(a);
@@ -594,7 +600,11 @@ impl FoldMap {
                 .iter()
                 .map(|fold| fold_inlay_region(&fold.range, &snapshot.inlay_snapshot))
                 .collect();
-            self.merge_deferred_regions(regions);
+            // A removed fold may have been coalesced with a surviving fold; that
+            // survivor now renders on its own, so defer its rows too and let the
+            // rebuild re-emit it as a separate placeholder.
+            let neighbors = neighbor_fold_regions(&self.folds, &regions, &snapshot.inlay_snapshot);
+            self.merge_deferred_regions(regions.into_iter().chain(neighbors));
         }
 
         self.version += 1;
@@ -687,6 +697,30 @@ fn fold_inlay_region(range: &Range<Anchor>, inlay_snapshot: &InlaySnapshot) -> (
         .row();
     let end_row = inlay_snapshot.to_inlay_point(end_point, Bias::Right).row();
     (start_row, end_row + 1)
+}
+
+/// Inlay-row regions of `folds` whose rows overlap any of `regions`.
+///
+/// Used to extend a fold mutation's deferred rebuild regions to its coalescing
+/// neighbors: a fold sharing or abutting a mutated fold's rows renders
+/// differently once they merge or split, so those rows must be rebuilt too.
+/// Because [`fold_inlay_region`] ends a fold one row past its last, abutting
+/// folds already have overlapping regions, so this catches adjacency as well as
+/// overlap.
+fn neighbor_fold_regions(
+    folds: &SumTree<AnchoredFold>,
+    regions: &[(u32, u32)],
+    inlay_snapshot: &InlaySnapshot,
+) -> Vec<(u32, u32)> {
+    folds
+        .iter()
+        .map(|fold| fold_inlay_region(&fold.range, inlay_snapshot))
+        .filter(|region| {
+            regions
+                .iter()
+                .any(|&(start, end)| region.0 < end && start < region.1)
+        })
+        .collect()
 }
 
 fn build_fold_transforms(
@@ -2495,11 +2529,11 @@ mod tests {
         assert_eq!(s, "...ccc ...aaa");
     }
 
-    fn one_char_placeholder() -> FoldPlaceholder {
+    fn one_char_placeholder(merge_adjacent: bool) -> FoldPlaceholder {
         FoldPlaceholder {
             text: Arc::from("*"),
             collapsed_text: None,
-            merge_adjacent: false,
+            merge_adjacent,
             type_tag: None,
         }
     }
@@ -2528,7 +2562,7 @@ mod tests {
                     buffer_snapshot.anchor_at(start, Bias::Right)
                         ..buffer_snapshot.anchor_at(end, Bias::Left),
                 ],
-                one_char_placeholder(),
+                one_char_placeholder(false),
                 &buffer_snapshot,
             );
         };
@@ -2561,5 +2595,51 @@ mod tests {
             .map(|c| c.text.into_owned())
             .collect();
         assert_eq!(after_placeholder, "a", "chunk after the row-1 placeholder");
+    }
+
+    /// Folding a row that abuts an existing fold coalesces the two (with
+    /// merge_adjacent placeholders). The incremental rebuild must cover the
+    /// existing fold's rows so its placeholder is replaced by the coalesced
+    /// one, not left beside it with its collapsed input counted twice.
+    #[test]
+    fn incremental_fold_coalesces_with_neighbor() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "\ndaa",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let fold = |fold_map: &mut FoldMap, start: usize, end: usize| {
+            fold_map.fold(
+                vec![
+                    buffer_snapshot.anchor_at(start, Bias::Right)
+                        ..buffer_snapshot.anchor_at(end, Bias::Left),
+                ],
+                one_char_placeholder(true),
+                &buffer_snapshot,
+            );
+        };
+
+        // Fold the leading newline, settle, then fold the rest. The two folds
+        // abut and coalesce into one placeholder spanning the whole buffer.
+        fold(&mut fold_map, 0, 1);
+        fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
+        fold(&mut fold_map, 1, 4);
+        let (snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
+
+        snapshot.check_invariants();
+
+        let text: String = snapshot.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "*");
+        assert_eq!(snapshot.len().0, 1, "transform output length");
+
+        let chunks: String = snapshot
+            .chunks(FoldOffset(0)..snapshot.len(), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(chunks, "*");
     }
 }
