@@ -1006,20 +1006,29 @@ fn sync_fold_incremental(
                 .peek()
                 .is_none_or(|next| old_row_to_offset(next.old.start) >= cursor_end)
             {
-                let tail = cursor_end - old_end_offset;
-                let tail_end_new = new_end_offset + tail;
-                let current_pos = new_transforms.summary().input.len;
-                if tail_end_new > current_pos {
-                    let summary = text_summary(current_pos, tail_end_new);
-                    push_fold_isomorphic(
-                        &mut new_transforms,
-                        TransformSummary {
-                            input: summary.clone(),
-                            output: summary,
-                        },
-                    );
+                // A placeholder beginning at or after the edit end lies wholly
+                // outside the edit. Re-emitting its tail as isomorphic text would
+                // drop the fold and count its folded input as output, so leave it
+                // for `cursor.suffix()` to carry over intact. Only an isomorphic
+                // tail (or a placeholder the edit reaches into) is re-emitted here.
+                let preserved_placeholder =
+                    item.placeholder.is_some() && cursor.start().0 >= old_end_offset;
+                if !preserved_placeholder {
+                    let tail = cursor_end - old_end_offset;
+                    let tail_end_new = new_end_offset + tail;
+                    let current_pos = new_transforms.summary().input.len;
+                    if tail_end_new > current_pos {
+                        let summary = text_summary(current_pos, tail_end_new);
+                        push_fold_isomorphic(
+                            &mut new_transforms,
+                            TransformSummary {
+                                input: summary.clone(),
+                                output: summary,
+                            },
+                        );
+                    }
+                    cursor.next();
                 }
-                cursor.next();
             }
         }
     }
@@ -2484,5 +2493,73 @@ mod tests {
         );
         let s: String = snap.reversed_chars_at(snap.max_point()).collect();
         assert_eq!(s, "...ccc ...aaa");
+    }
+
+    fn one_char_placeholder() -> FoldPlaceholder {
+        FoldPlaceholder {
+            text: Arc::from("*"),
+            collapsed_text: None,
+            merge_adjacent: false,
+            type_tag: None,
+        }
+    }
+
+    /// Folding an early row incrementally must not drop an existing fold's
+    /// placeholder on a later row from the transform tree.
+    ///
+    /// `chars_at` reads the fold tree directly while `len` and `chunks` derive
+    /// from the transforms, so a placeholder dropped from the transforms alone
+    /// leaves the transform-derived length over-reporting by the folded
+    /// region's collapsed bytes and `chunks` reading past the lost fold.
+    #[test]
+    fn incremental_fold_keeps_later_placeholder() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "c\nccad\na",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let fold = |fold_map: &mut FoldMap, start: usize, end: usize| {
+            fold_map.fold(
+                vec![
+                    buffer_snapshot.anchor_at(start, Bias::Right)
+                        ..buffer_snapshot.anchor_at(end, Bias::Left),
+                ],
+                one_char_placeholder(),
+                &buffer_snapshot,
+            );
+        };
+
+        // Fold "cc" on row 1 and "a" on row 2, settling each so the next sync
+        // takes the incremental path.
+        fold(&mut fold_map, 2, 4);
+        fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
+        fold(&mut fold_map, 7, 8);
+        fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
+
+        // Folding "c" on row 0 incrementally must keep the row-1 placeholder.
+        fold(&mut fold_map, 0, 1);
+        let (snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
+
+        snapshot.check_invariants();
+
+        let text: String = snapshot.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "*\n*ad\n*");
+        assert_eq!(snapshot.len().0, 7, "transform output length");
+
+        let chunks: String = snapshot
+            .chunks(FoldOffset(0)..snapshot.len(), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(chunks, "*\n*ad\n*");
+
+        let after_placeholder: String = snapshot
+            .chunks(FoldOffset(3)..FoldOffset(4), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(after_placeholder, "a", "chunk after the row-1 placeholder");
     }
 }
