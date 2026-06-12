@@ -1476,6 +1476,7 @@ fn resolve_block_placement(
     inlay_cursor: &mut InlayPointCursor<'_>,
     fold_cursor: &mut FoldPointCursor<'_>,
     wrap_cursor: &mut WrapPointCursor<'_>,
+    wrap_snapshot: &WrapSnapshot,
 ) -> ResolvedPlacement {
     let map_row = |buffer_row: u32,
                    inlay_cursor: &mut InlayPointCursor<'_>,
@@ -1488,19 +1489,37 @@ fn resolve_block_placement(
         wrap_cursor.map(tab_point).row()
     };
 
+    // Map a buffer row to its *last* wrap segment. Mapping the row's start
+    // column lands on the first segment, which would split a wrapped line: a
+    // Below/Near block would sit after the first segment, and a Replace would
+    // leave the end row's continuation segments visible. Mapping the fold row's
+    // full line length instead resolves to the last segment.
+    let map_last_row = |buffer_row: u32,
+                        inlay_cursor: &mut InlayPointCursor<'_>,
+                        fold_cursor: &mut FoldPointCursor<'_>,
+                        wrap_cursor: &mut WrapPointCursor<'_>|
+     -> u32 {
+        let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0), Bias::Right);
+        let fold_point = fold_cursor.map(inlay_point, Bias::Right);
+        let fold_row = fold_point.row();
+        let tab_len = wrap_snapshot.tab_snapshot().line_len(fold_row);
+        let tab_point = super::tab_map::TabPoint::new(fold_row, tab_len);
+        wrap_cursor.map(tab_point).row()
+    };
+
     match placement {
         BlockPlacement::Above(row) => {
             ResolvedPlacement::Above(map_row(row, inlay_cursor, fold_cursor, wrap_cursor))
         },
         BlockPlacement::Below(row) => {
-            ResolvedPlacement::Below(map_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
+            ResolvedPlacement::Below(map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
         },
         BlockPlacement::Near(row) => {
-            ResolvedPlacement::Near(map_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
+            ResolvedPlacement::Near(map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1)
         },
         BlockPlacement::Replace { start, end } => {
             let start_wrap = map_row(start, inlay_cursor, fold_cursor, wrap_cursor);
-            let end_wrap = map_row(end, inlay_cursor, fold_cursor, wrap_cursor);
+            let end_wrap = map_last_row(end, inlay_cursor, fold_cursor, wrap_cursor);
             ResolvedPlacement::Replace {
                 start: start_wrap,
                 end: end_wrap.max(start_wrap),
@@ -1686,6 +1705,7 @@ fn sync_incremental(
                     &mut inlay_cursor,
                     &mut fold_cursor,
                     &mut wrap_cursor,
+                    wrap_snapshot,
                 );
                 let block_start = placement.start_wrap_row();
                 let block_end = match placement {
@@ -1813,7 +1833,13 @@ fn build_transforms(
     let mut keyed_blocks: Vec<(ResolvedPlacement, &Block)> = Vec::with_capacity(blocks.len());
     for (bp, b) in blocks {
         keyed_blocks.push((
-            resolve_block_placement(*bp, &mut inlay_cursor, &mut fold_cursor, &mut wrap_cursor),
+            resolve_block_placement(
+                *bp,
+                &mut inlay_cursor,
+                &mut fold_cursor,
+                &mut wrap_cursor,
+                wrap_snapshot,
+            ),
             b,
         ));
     }
@@ -2028,9 +2054,9 @@ fn push_isomorphic(
 #[cfg(test)]
 mod tests {
     use super::{
-        build_transforms, longest_block_line, sync_incremental, Block, BlockMap, BlockPlacement,
-        BlockPoint, BlockProperties, BlockRowKind, BlockSnapshot, BlockStyle, Line, OutputRow,
-        Transform,
+        build_transforms, longest_block_line, resolve_block_placement, sync_incremental, Block,
+        BlockMap, BlockPlacement, BlockPoint, BlockProperties, BlockRowKind, BlockSnapshot,
+        BlockStyle, Line, OutputRow, ResolvedPlacement, Transform, WrapSnapshot,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
@@ -2072,6 +2098,53 @@ mod tests {
             content.lines().map(String::from).collect(),
             BlockStyle::Fixed,
         )
+    }
+
+    fn wrapped_snapshot(content: &str, wrap_width: u32) -> Arc<WrapSnapshot> {
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let (_, inlay_snapshot) = InlayMap::new(multi_buffer.snapshot());
+        let (_, fold_snapshot) = FoldMap::new(inlay_snapshot);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+        WrapMap::new(tab_snapshot, Some(wrap_width), test_executor()).1
+    }
+
+    fn resolve_placement(snapshot: &WrapSnapshot, placement: BlockPlacement) -> ResolvedPlacement {
+        let mut inlay_cursor = snapshot
+            .fold_snapshot()
+            .inlay_snapshot()
+            .inlay_point_cursor();
+        let mut fold_cursor = snapshot.fold_snapshot().fold_point_cursor();
+        let mut wrap_cursor = snapshot.wrap_point_cursor();
+        resolve_block_placement(
+            placement,
+            &mut inlay_cursor,
+            &mut fold_cursor,
+            &mut wrap_cursor,
+            snapshot,
+        )
+    }
+
+    #[test]
+    fn below_block_resolves_after_last_wrap_segment() {
+        let snapshot = wrapped_snapshot("abcdefghij\nx", 5);
+        let resolved = resolve_placement(&snapshot, BlockPlacement::Below(0));
+        assert!(
+            matches!(resolved, ResolvedPlacement::Below(2)),
+            "Below(0) on a two-segment line must land past both segments, got {resolved:?}"
+        );
+    }
+
+    #[test]
+    fn replace_covers_through_last_wrap_segment() {
+        let snapshot = wrapped_snapshot("abcdefghij\nx", 5);
+        let resolved = resolve_placement(&snapshot, BlockPlacement::Replace { start: 0, end: 0 });
+        assert!(
+            matches!(resolved, ResolvedPlacement::Replace { start: 0, end: 1 }),
+            "Replace of a two-segment line must cover both segments, got {resolved:?}"
+        );
     }
 
     #[test]
@@ -2471,7 +2544,7 @@ mod tests {
         }
     }
 
-    fn create_wrap_snapshot(content: &str) -> Arc<super::WrapSnapshot> {
+    fn create_wrap_snapshot(content: &str) -> Arc<WrapSnapshot> {
         let buffer = TextBuffer::with_text(BufferId::new(0), content);
         let shared = Arc::new(RwLock::new(buffer));
         let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
@@ -2494,10 +2567,7 @@ mod tests {
             .collect()
     }
 
-    fn render_transforms(
-        transforms: &SumTree<Transform>,
-        wrap: &Arc<super::WrapSnapshot>,
-    ) -> Vec<String> {
+    fn render_transforms(transforms: &SumTree<Transform>, wrap: &Arc<WrapSnapshot>) -> Vec<String> {
         let total = transforms.extent::<OutputRow>(()).0;
         let snapshot = BlockSnapshot {
             wrap_snapshot: wrap.clone(),
@@ -2512,7 +2582,7 @@ mod tests {
     /// still drives the full boundary reconstruction, so divergence here is a
     /// boundary bug in [`sync_incremental`].
     fn assert_incremental_matches_full(
-        wrap: &Arc<super::WrapSnapshot>,
+        wrap: &Arc<WrapSnapshot>,
         blocks: &[(BlockPlacement, Block)],
         edits: Patch<u32>,
     ) {
