@@ -15,7 +15,7 @@
 //! [`crate::run_pane::render`].
 
 use crate::{
-    globals::{ClipboardHostGlobal, TerminalHostGlobal},
+    globals::{ClipboardHostGlobal, EnvHostGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     run_pane::{
         editor_font, mouse, mouse_button_code,
@@ -542,12 +542,33 @@ pub fn dispatch_open_claude_terminal(workspace: &mut Workspace, cx: &mut Context
     });
 }
 
+/// Dispatch [`stoat_action::OpenTerminal`]. Opens a full-screen terminal
+/// running the user's shell -- `$SHELL` read through the installed
+/// [`EnvHostGlobal`], falling back to `/bin/sh` when unset -- in the
+/// workspace's git root and adds it to the focused pane.
+pub fn dispatch_open_terminal(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+    let pane_id = workspace.pane_tree().read(cx).focus();
+    let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
+        return;
+    };
+    let shell = cx
+        .try_global::<EnvHostGlobal>()
+        .and_then(|env| env.0.var("SHELL"))
+        .unwrap_or_else(|| "/bin/sh".to_string());
+    let cwd = workspace.git_root().clone();
+    let weak_workspace = cx.weak_entity();
+    let terminal = cx.new(|cx| Terminal::with_command(weak_workspace, cwd, shell, Vec::new(), cx));
+    pane.update(cx, |p, cx| {
+        p.add_item(Box::new(terminal), cx);
+    });
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{
         globals::{
-            ClipboardHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal,
+            ClipboardHostGlobal, EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal,
             TerminalHostGlobal,
         },
         item::ItemHandle,
@@ -558,8 +579,8 @@ mod tests {
         VisualTestContext,
     };
     use stoat::host::{
-        fake::{terminal::FakeTerminalSession, FakeClipboard, FakeFs, FakeTerminalHost},
-        ClipboardHost, FsHost, FsWatchHost,
+        fake::{terminal::FakeTerminalSession, FakeClipboard, FakeEnv, FakeFs, FakeTerminalHost},
+        ClipboardHost, EnvHost, FsHost, FsWatchHost,
     };
     use stoat_host::NoopFsWatcher;
     use stoat_scheduler::{Executor, TestScheduler};
@@ -568,6 +589,7 @@ mod tests {
         cx: &mut TestAppContext,
         terminal: Arc<FakeTerminalSession>,
         clipboard: Arc<FakeClipboard>,
+        env: Arc<FakeEnv>,
     ) {
         let executor = Executor::new(Arc::new(TestScheduler::new()));
         let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
@@ -580,6 +602,7 @@ mod tests {
             ));
             cx.set_global(ClipboardHostGlobal(clipboard as Arc<dyn ClipboardHost>));
             cx.set_global(TerminalHostGlobal(terminal_host));
+            cx.set_global(EnvHostGlobal(env as Arc<dyn EnvHost>));
         });
     }
 
@@ -587,19 +610,22 @@ mod tests {
         workspace: Entity<Workspace>,
         terminal: Arc<FakeTerminalSession>,
         clipboard: Arc<FakeClipboard>,
+        env: Arc<FakeEnv>,
         vcx: &'a mut VisualTestContext,
     }
 
     fn new_harness(cx: &mut TestAppContext) -> Harness<'_> {
         let terminal = Arc::new(FakeTerminalSession::new());
         let clipboard = Arc::new(FakeClipboard::new());
-        install_globals(cx, terminal.clone(), clipboard.clone());
+        let env = Arc::new(FakeEnv::new());
+        install_globals(cx, terminal.clone(), clipboard.clone(), env.clone());
         let (workspace, vcx) =
             cx.add_window_view(|_window, cx| Workspace::new("main", PathBuf::from("/repo"), cx));
         Harness {
             workspace,
             terminal,
             clipboard,
+            env,
             vcx,
         }
     }
@@ -662,6 +688,34 @@ mod tests {
         let (program, args) = term.read_with(h.vcx, |t, _| (t.program.clone(), t.args.clone()));
         assert_eq!(program, "claude");
         assert!(args.is_empty(), "claude is launched with no extra args");
+    }
+
+    #[test]
+    fn open_terminal_runs_the_shell_from_env() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        h.env.set("SHELL", "/usr/bin/fish");
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_open_terminal(w, cx);
+        });
+
+        let term = focused_terminal(&mut h).expect("shell terminal is the focused item");
+        let (program, args) = term.read_with(h.vcx, |t, _| (t.program.clone(), t.args.clone()));
+        assert_eq!(program, "/usr/bin/fish");
+        assert!(args.is_empty(), "the shell is launched with no extra args");
+    }
+
+    #[test]
+    fn open_terminal_falls_back_to_sh_without_shell_env() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_open_terminal(w, cx);
+        });
+
+        let term = focused_terminal(&mut h).expect("shell terminal is the focused item");
+        let program = term.read_with(h.vcx, |t, _| t.program.clone());
+        assert_eq!(program, "/bin/sh");
     }
 
     #[test]

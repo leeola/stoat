@@ -698,7 +698,8 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         | ActionKind::DecreaseFontSize
         // The Way-2 terminal is a GUI-only item view; the ratatui TUI has
         // no surface to host it.
-        | ActionKind::OpenClaudeTerminal => UpdateEffect::None,
+        | ActionKind::OpenClaudeTerminal
+        | ActionKind::OpenTerminal => UpdateEffect::None,
     };
     if matches!(effect, UpdateEffect::Redraw) && is_picker_open_kind(action.kind()) {
         stoat.last_picker_action = Some(action.def().name());

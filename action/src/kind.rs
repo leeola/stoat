@@ -209,6 +209,7 @@ pub enum ActionKind {
     OpenRun,
     OpenTerminalDock,
     OpenClaudeTerminal,
+    OpenTerminal,
     RunSubmit,
     RunInterrupt,
     Run,

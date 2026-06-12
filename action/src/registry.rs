@@ -103,8 +103,8 @@ use crate::{
             ReviewToggleStage, ReviewUnstageChunk,
         },
         run::{
-            OpenClaudeTerminal, OpenRun, OpenTerminalDock, Run, RunHistoryNext, RunHistoryPrev,
-            RunInterrupt, RunSubmit,
+            OpenClaudeTerminal, OpenRun, OpenTerminal, OpenTerminalDock, Run, RunHistoryNext,
+            RunHistoryPrev, RunInterrupt, RunSubmit,
         },
         set::Set,
         theme::OpenThemePicker,
@@ -655,6 +655,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     add(OpenClaudeTerminal::DEF, |_| {
         Ok(Box::new(OpenClaudeTerminal))
     });
+    add(OpenTerminal::DEF, |_| Ok(Box::new(OpenTerminal)));
     add(RunSubmit::DEF, |_| Ok(Box::new(RunSubmit)));
     add(RunInterrupt::DEF, |_| Ok(Box::new(RunInterrupt)));
     add(RunHistoryPrev::DEF, |_| Ok(Box::new(RunHistoryPrev)));
@@ -1079,6 +1080,7 @@ mod tests {
         "OpenRun",
         "OpenTerminalDock",
         "OpenClaudeTerminal",
+        "terminal",
         "RunSubmit",
         "RunInterrupt",
         "RunHistoryPrev",
@@ -1346,8 +1348,9 @@ mod tests {
         // + 2 ReviewNextCommit / ReviewPrevCommit (commit-group navigation).
         // + 1 CommitsOpenBranchReview (branch review from the commits view).
         // + 1 OpenClaudeTerminal (terminal pane running the claude CLI).
+        // + 1 OpenTerminal (terminal pane running the user's shell).
         // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
-        assert_eq!(all().count(), 345);
+        assert_eq!(all().count(), 346);
     }
 
     #[test]

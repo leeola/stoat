@@ -38,6 +38,17 @@ define_action!(
 );
 
 define_action!(
+    OpenTerminalDef,
+    OpenTerminal,
+    "terminal",
+    ActionKind::OpenTerminal,
+    "open shell terminal",
+    "Open a terminal pane running your shell in the project root.",
+    ActionPriority::Common,
+    false
+);
+
+define_action!(
     RunSubmitDef,
     RunSubmit,
     "RunSubmit",
@@ -155,5 +166,12 @@ mod tests {
         assert_eq!(OpenClaudeTerminal.kind(), ActionKind::OpenClaudeTerminal);
         assert_eq!(OpenClaudeTerminal.def().name(), "OpenClaudeTerminal");
         assert!(!OpenClaudeTerminal.def().hint_visible());
+    }
+
+    #[test]
+    fn open_terminal() {
+        assert_eq!(OpenTerminal.kind(), ActionKind::OpenTerminal);
+        assert_eq!(OpenTerminal.def().name(), "terminal");
+        assert!(!OpenTerminal.def().hint_visible());
     }
 }

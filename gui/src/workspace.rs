@@ -2731,6 +2731,7 @@ impl Workspace {
             ActionKind::OpenClaudeTerminal => {
                 crate::terminal_view::dispatch_open_claude_terminal(self, cx)
             },
+            ActionKind::OpenTerminal => crate::terminal_view::dispatch_open_terminal(self, cx),
             ActionKind::OpenTerminalDock => {
                 crate::run_pane::dispatch_open_terminal_dock(self, window, cx)
             },
