@@ -215,6 +215,22 @@ impl<'a> SeekTarget<'a, TransformSummary, Dimensions<InlayPoint, FoldPoint>> for
     }
 }
 
+/// Accumulates the fold-space (`output`) text summary across transforms, so a
+/// cursor can sum the interior of a fold-point range in O(log n) for
+/// [`FoldSnapshot::text_summary_for_range`].
+#[derive(Clone, Default)]
+struct FoldOutputSummary(TextSummary);
+
+impl<'a> Dimension<'a, TransformSummary> for FoldOutputSummary {
+    fn zero(_cx: ()) -> Self {
+        Self(TextSummary::default())
+    }
+
+    fn add_summary(&mut self, s: &'a TransformSummary, _cx: ()) {
+        ContextLessSummary::add_summary(&mut self.0, &s.output);
+    }
+}
+
 #[derive(Clone, Debug)]
 struct AnchoredFold {
     id: FoldId,
@@ -1280,6 +1296,74 @@ impl FoldSnapshot {
         self.fold_line_chars(fold_row)
             .map(|ch| ch.len_utf8() as u32)
             .sum()
+    }
+
+    /// Text summary of a fold-point range without materializing the text.
+    ///
+    /// Sums the fold-space (`output`) summary across the range: a partial
+    /// summary at each boundary transform -- placeholder text for a fold, or
+    /// an [`InlaySnapshot::text_summary_for_range`] for an isomorphic span --
+    /// and an O(log n) interior via `cursor.summary`. `longest_row` /
+    /// `longest_row_chars` are char counts (a tab counts as one char), not
+    /// tab-expanded display columns.
+    pub fn text_summary_for_range(&self, range: Range<FoldPoint>) -> TextSummary {
+        let mut summary = TextSummary::default();
+
+        let mut cursor = self
+            .transforms
+            .cursor::<Dimensions<FoldPoint, InlayPoint>>(());
+        cursor.seek(&range.start, Bias::Right);
+        if let Some(transform) = cursor.item() {
+            let start_in_transform = range.start.0 - cursor.start().0 .0;
+            let end_in_transform = range.end.min(cursor.end().0).0 - cursor.start().0 .0;
+            if let Some(placeholder) = transform.placeholder.as_ref() {
+                summary = TextSummary::from_str(
+                    &placeholder.text
+                        [start_in_transform.column as usize..end_in_transform.column as usize],
+                );
+            } else {
+                let inlay_start = self
+                    .inlay_snapshot
+                    .inlay_point_to_offset(InlayPoint(cursor.start().1 .0 + start_in_transform));
+                let inlay_end = self
+                    .inlay_snapshot
+                    .inlay_point_to_offset(InlayPoint(cursor.start().1 .0 + end_in_transform));
+                summary = self
+                    .inlay_snapshot
+                    .text_summary_for_range(inlay_start..inlay_end);
+            }
+        }
+
+        if range.end > cursor.end().0 {
+            cursor.next();
+            let interior: FoldOutputSummary = cursor.summary(&range.end, Bias::Right);
+            ContextLessSummary::add_summary(&mut summary, &interior.0);
+
+            if let Some(transform) = cursor.item() {
+                let end_in_transform = range.end.0 - cursor.start().0 .0;
+                if let Some(placeholder) = transform.placeholder.as_ref() {
+                    ContextLessSummary::add_summary(
+                        &mut summary,
+                        &TextSummary::from_str(
+                            &placeholder.text[..end_in_transform.column as usize],
+                        ),
+                    );
+                } else {
+                    let inlay_start = self.inlay_snapshot.inlay_point_to_offset(cursor.start().1);
+                    let inlay_end = self
+                        .inlay_snapshot
+                        .inlay_point_to_offset(InlayPoint(cursor.start().1 .0 + end_in_transform));
+                    ContextLessSummary::add_summary(
+                        &mut summary,
+                        &self
+                            .inlay_snapshot
+                            .text_summary_for_range(inlay_start..inlay_end),
+                    );
+                }
+            }
+        }
+
+        summary
     }
 
     pub fn folds_in_range(&self, range: Range<InlayPoint>) -> Vec<&Fold> {

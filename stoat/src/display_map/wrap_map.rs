@@ -1,5 +1,5 @@
 use super::{
-    fold_map::FoldOffset,
+    fold_map::{FoldOffset, FoldPoint},
     highlights::{Chunk, HighlightEndpoint},
     tab_map::{TabChunks, TabPoint, TabSnapshot},
 };
@@ -377,25 +377,117 @@ impl WrapMap {
 }
 
 fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSnapshot {
+    let transforms = match wrap_width {
+        None => build_isomorphic_transforms(&tab_snapshot),
+        Some(width) => build_wrapped_transforms(&tab_snapshot, width),
+    };
+
+    let s = transforms.summary();
+    let total_rows = s.output_rows;
+    let longest_row = s.longest_row;
+    let longest_row_chars = s.longest_row_chars;
+
+    WrapSnapshot {
+        tab_snapshot,
+        transforms,
+        wrap_width,
+        total_rows,
+        longest_row,
+        longest_row_chars,
+        interpolated: false,
+    }
+}
+
+/// Build the `wrap_width = None` transform tree: a single coalesced isomorphic
+/// transform spanning the whole buffer.
+///
+/// Every input row maps 1:1 to an output row, so the unwrapped buffer needs no
+/// per-row state -- `wrap_columns` and `tab_line_len` are never read while
+/// `wrap_width` is `None`, so they are left empty/zero. The summary's
+/// `longest_row`/`longest_row_chars` come from the fold-snapshot summary (char
+/// counts), and serve the whole-buffer `longest_in_output_range(0, line_count)`
+/// query directly.
+fn build_isomorphic_transforms(tab_snapshot: &TabSnapshot) -> SumTree<Transform> {
+    let line_count = tab_snapshot.line_count();
+    let fold = tab_snapshot.fold_snapshot();
+    let summary = fold.text_summary_for_range(FoldPoint::new(0, 0)..fold.max_point());
+    single_isomorphic_transform(line_count, summary.longest_row, summary.longest_row_chars)
+}
+
+/// A `wrap_width = None` transform tree of one isomorphic transform spanning
+/// `rows` input rows. `wrap_columns`/`tab_line_len` are left empty/zero because
+/// no `wrap_width = None` consumer reads them.
+fn single_isomorphic_transform(
+    rows: u32,
+    longest_row: u32,
+    longest_row_chars: u32,
+) -> SumTree<Transform> {
+    let mut transforms = SumTree::new(());
+    transforms.push(
+        Transform {
+            summary: TransformSummary {
+                input_rows: rows,
+                output_rows: rows,
+                longest_row,
+                longest_row_chars,
+            },
+            wrap_columns: Vec::new(),
+            tab_line_len: 0,
+        },
+        (),
+    );
+    transforms
+}
+
+/// Clamp a tab-row patch to a `wrap_width = None` row count, returning the new
+/// row count and the wrap-row patch.
+///
+/// The old wrap tree spans `[0, old_total)`. Each edit preserves the rows ahead
+/// of it, clamps its own old side into that range -- so an old side that runs
+/// past the count (an end-of-buffer append references the new trailing row
+/// before this layer holds it) collapses to an insertion rather than removing
+/// rows that are not there -- and contributes its new rows. The trailing rows
+/// are preserved. This mirrors the row counting and patch shape of the former
+/// per-row interpolate, keeping this layer and the block layer (which rebuilds
+/// from the returned patch) in step.
+fn clamp_isomorphic_edits(old_total: u32, tab_edits: &Patch<u32>) -> (u32, Patch<u32>) {
+    let mut edits = Vec::new();
+    let mut old_cursor = 0u32;
+    let mut new_cursor = 0u32;
+
+    for edit in tab_edits {
+        let old_start = edit.old.start.min(old_total);
+        new_cursor += old_start - old_cursor;
+
+        let old_end = edit.old.end.min(old_total);
+        let new_start = new_cursor;
+        new_cursor += edit.new.end - edit.new.start;
+
+        edits.push(Edit {
+            old: old_start..old_end,
+            new: new_start..new_cursor,
+        });
+        old_cursor = old_end;
+    }
+
+    new_cursor += old_total - old_cursor;
+    (new_cursor, Patch::new(edits))
+}
+
+fn build_wrapped_transforms(tab_snapshot: &TabSnapshot, width: u32) -> SumTree<Transform> {
     let tab_line_count = tab_snapshot.line_count();
     let mut transforms = SumTree::new(());
 
     for tab_row in 0..tab_line_count {
         let tab_line_len = tab_snapshot.line_len(tab_row);
-
-        let wrap_columns = match wrap_width {
-            None => vec![0],
-            Some(width) => {
-                let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
-                compute_wrap_columns(
-                    chars,
-                    tab_line_len,
-                    width,
-                    tab_snapshot.tab_size(),
-                    tab_snapshot.max_expansion_column(),
-                )
-            },
-        };
+        let chars = tab_snapshot.fold_snapshot().fold_line_chars(tab_row);
+        let wrap_columns = compute_wrap_columns(
+            chars,
+            tab_line_len,
+            width,
+            tab_snapshot.tab_size(),
+            tab_snapshot.max_expansion_column(),
+        );
 
         let output_rows = wrap_columns.len() as u32;
         let (local_longest_row, local_longest_chars) =
@@ -416,20 +508,7 @@ fn build_snapshot(tab_snapshot: TabSnapshot, wrap_width: Option<u32>) -> WrapSna
         );
     }
 
-    let s = transforms.summary();
-    let total_rows = s.output_rows;
-    let longest_row = s.longest_row;
-    let longest_row_chars = s.longest_row_chars;
-
-    WrapSnapshot {
-        tab_snapshot,
-        transforms,
-        wrap_width,
-        total_rows,
-        longest_row,
-        longest_row_chars,
-        interpolated: false,
-    }
+    transforms
 }
 
 fn sync_incremental(
@@ -583,9 +662,44 @@ fn compute_wrap_columns(
 }
 
 impl WrapSnapshot {
-    /// Cheap approximation: replaces edited regions with 1:1 identity transforms
-    /// (no wrapping). Fast but inaccurate -- sets `interpolated = true`.
+    /// Advance the transforms across `tab_edits` without recomputing wraps.
+    ///
+    /// With `wrap_width = None` the unwrapped buffer stays a single coalesced
+    /// isomorphic transform and `interpolated` stays `false`. The returned wrap
+    /// patch has its old side clamped to the current row count rather than
+    /// copied from `tab_edits`: the block layer rebuilds from the same patch,
+    /// and an append at end-of-buffer produces a tab patch that references the
+    /// new trailing row before this layer holds it, so an unclamped old side
+    /// would seek the block layer past its tree.
+    ///
+    /// With wrapping active this is the cheap approximation -- edited regions
+    /// become 1:1 identity transforms pending a real rewrap, so it sets
+    /// `interpolated = true`.
     fn interpolate(&mut self, new_tab_snapshot: TabSnapshot, tab_edits: &Patch<u32>) -> Patch<u32> {
+        if self.wrap_width.is_none() {
+            let (new_total, wrap_edits) = clamp_isomorphic_edits(self.total_rows, tab_edits);
+            self.tab_snapshot = new_tab_snapshot;
+
+            let fold = self.tab_snapshot.fold_snapshot();
+            let end_point = if new_total >= fold.line_count() {
+                fold.max_point()
+            } else {
+                FoldPoint::new(new_total, 0)
+            };
+            let summary = fold.text_summary_for_range(FoldPoint::new(0, 0)..end_point);
+
+            self.transforms = single_isomorphic_transform(
+                new_total,
+                summary.longest_row,
+                summary.longest_row_chars,
+            );
+            self.total_rows = new_total;
+            self.longest_row = summary.longest_row;
+            self.longest_row_chars = summary.longest_row_chars;
+            self.interpolated = false;
+            return wrap_edits;
+        }
+
         let mut new_transforms = SumTree::new(());
         let mut cursor = self
             .transforms
@@ -905,12 +1019,14 @@ impl WrapSnapshot {
         let end = start + count;
 
         if self.wrap_width.is_none() {
-            let mut cursor = self
-                .transforms
-                .cursor::<Dimensions<InputRow, OutputRow>>(());
-            cursor.seek(&OutputRow(start + 1), Bias::Left);
-            let result: LongestInRange = cursor.summary(&OutputRow(end), Bias::Right);
-            return (result.longest_row, result.longest_row_chars);
+            let fold = self.tab_snapshot.fold_snapshot();
+            let end_point = if end >= self.total_rows {
+                fold.max_point()
+            } else {
+                FoldPoint::new(end, 0)
+            };
+            let summary = fold.text_summary_for_range(FoldPoint::new(start, 0)..end_point);
+            return (summary.longest_row, summary.longest_row_chars);
         }
 
         let mut cursor = self
@@ -1272,7 +1388,41 @@ mod tests {
     };
     use std::sync::{Arc, RwLock};
     use stoat_scheduler::{Executor, TestScheduler};
-    use stoat_text::{patch::Patch, Bias, Point};
+    use stoat_text::{
+        patch::{Edit, Patch},
+        Bias, Point,
+    };
+
+    #[test]
+    fn clamp_isomorphic_edits_clamps_old_side_past_count() {
+        // End-of-buffer append: the tab patch references row 1, but the
+        // unwrapped tree still holds one row, so the old side must collapse to
+        // an insertion and the count grow to two.
+        let tab_edits = Patch::new(vec![Edit {
+            old: 1..2,
+            new: 1..2,
+        }]);
+        let (new_total, wrap_edits) = super::clamp_isomorphic_edits(1, &tab_edits);
+        assert_eq!(new_total, 2);
+        assert_eq!(
+            wrap_edits,
+            Patch::new(vec![Edit {
+                old: 1..1,
+                new: 1..2,
+            }])
+        );
+    }
+
+    #[test]
+    fn clamp_isomorphic_edits_replacement_within_count() {
+        let tab_edits = Patch::new(vec![Edit {
+            old: 1..2,
+            new: 1..3,
+        }]);
+        let (new_total, wrap_edits) = super::clamp_isomorphic_edits(4, &tab_edits);
+        assert_eq!(new_total, 5);
+        assert_eq!(wrap_edits, tab_edits);
+    }
 
     fn test_executor() -> Executor {
         Executor::new(Arc::new(TestScheduler::new()))
@@ -1356,6 +1506,17 @@ mod tests {
         assert_eq!(wp, WrapPoint::new(1, 3));
         let back = snap.to_tab_point(wp);
         assert_eq!(back, tp);
+    }
+
+    #[test]
+    fn wrap_none_coalesces_to_single_transform() {
+        let snap = make_snapshot("l0\nl1\nl2\nl3\nl4", None);
+        assert_eq!(snap.line_count(), 5);
+        assert_eq!(
+            snap.transforms.iter().count(),
+            1,
+            "wrap=None must coalesce into a single isomorphic transform"
+        );
     }
 
     #[test]
