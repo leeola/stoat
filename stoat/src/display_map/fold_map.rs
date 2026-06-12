@@ -904,18 +904,27 @@ fn sync_fold_incremental(
         // are unchanged prefix, so the new start moves back by the same amount.
         let mut start_delta = 0;
         if let Some(item) = cursor.item() {
-            if item.placeholder.is_some() && cursor.start().0 < old_start_offset {
+            let cursor_end = cursor.start().0 + item.summary.input.len;
+            if item.placeholder.is_some()
+                && cursor.start().0 < old_start_offset
+                && old_start_offset < cursor_end
+            {
                 start_delta = old_start_offset - cursor.start().0;
                 old_start_offset = cursor.start().0;
             }
         }
 
-        // If cursor item ends exactly at edit start, merge it with prefix
+        // If the cursor item ends exactly at the edit start, carry it into the
+        // prefix: an isomorphic run merges into the preceding transforms, and a
+        // placeholder (a fold wholly before the edit) is preserved intact rather
+        // than re-emitted as an isomorphic gap.
         if let Some(item) = cursor.item() {
-            if item.placeholder.is_none()
-                && cursor.start().0 + item.summary.input.len == old_start_offset
-            {
-                push_fold_isomorphic(&mut new_transforms, item.summary.clone());
+            if cursor.start().0 + item.summary.input.len == old_start_offset {
+                if item.placeholder.is_some() {
+                    new_transforms.push(item.clone(), ());
+                } else {
+                    push_fold_isomorphic(&mut new_transforms, item.summary.clone());
+                }
                 cursor.next();
             }
         }
@@ -2790,6 +2799,46 @@ mod tests {
         assert_eq!(chunks, "**");
     }
 
+    /// An edit on the row where a fold ends leaves the fold (wholly before the
+    /// edit) untouched, so its placeholder must stay in the transform tree
+    /// rather than being re-emitted as isomorphic text.
+    #[test]
+    fn incremental_edit_after_fold() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "\ncd")));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+        let snap1 = multi_buffer.snapshot();
+        let version1 = snap1.version();
+        let (mut inlay_map, inlay1) = InlayMap::new(snap1.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay1.clone());
+
+        // Fold the leading newline (ends at the start of row 1), settle.
+        fold_map.fold(
+            vec![snap1.anchor_at(0, Bias::Right)..snap1.anchor_at(1, Bias::Left)],
+            one_char_placeholder(false),
+            &snap1,
+        );
+        fold_map.sync(inlay1, &Patch::empty());
+
+        // Insert on row 1, where the fold ends.
+        shared.write().unwrap().edit(2..2, "X");
+        let snap2 = multi_buffer.snapshot();
+        let buffer_edits = snap2.edits_since(version1);
+        let (inlay2, inlay_edits) = inlay_map.sync(snap2, &buffer_edits);
+        let (snapshot, _) = fold_map.sync(inlay2, &inlay_edits);
+
+        snapshot.check_invariants();
+
+        let text: String = snapshot.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "*cXd");
+        assert_eq!(snapshot.len().0, 4, "transform output length");
+
+        let chunks: String = snapshot
+            .chunks(FoldOffset(0)..snapshot.len(), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(chunks, "*cXd");
+    }
+
     /// Deterministic xorshift64 PRNG. Tests stay pure, so seeds come from a
     /// fixed range rather than the environment.
     struct Rng(u64);
@@ -2906,11 +2955,11 @@ mod tests {
                         fold_map.unfold(vec![a..b], &buffer_snapshot);
                     },
                     _ => {
-                        // Unfold everything before editing: an edit adjacent to
-                        // a surviving fold still drops or desyncs that fold's
-                        // placeholder. Scope edits to a fold-free buffer so this
-                        // exercises the no-fold incremental edit path; fold/edit
-                        // interaction is out of scope until that gap is fixed.
+                        // Unfold everything before editing. An edit that
+                        // deletes folded content (shrinking a fold) still drops
+                        // the shrunk fold's placeholder, so scope edits to a
+                        // fold-free buffer; fold/edit interaction is out of scope
+                        // until that gap is fixed.
                         #[allow(clippy::single_range_in_vec_init)]
                         fold_map.unfold(vec![0..len], &buffer_snapshot);
                         let (a, b) = random_range(&mut rng, len);
