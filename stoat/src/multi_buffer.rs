@@ -703,7 +703,10 @@ impl MultiBufferSnapshot {
     }
 
     pub fn max_point(&self) -> MultiBufferPoint {
-        let p = self.buffer_snapshot.max_point();
+        let p = match &self.excerpt_tree {
+            Some(tree) => tree.summary().text.lines,
+            None => self.buffer_snapshot.max_point(),
+        };
         MultiBufferPoint::new(p.row, p.column)
     }
 
@@ -867,6 +870,15 @@ mod tests {
         );
         // Three single-row excerpts concatenate to "x\ny\nz" -- three rows.
         assert_eq!(multi_excerpt_snapshot(&["x", "y", "z"]).line_count(), 3);
+    }
+
+    #[test]
+    fn max_point_spans_every_excerpt() {
+        // "ab\ncd" + "ef\ngh" concatenate to "ab\ncd\nef\ngh": last line "gh"
+        // sits at row 3, column 2.
+        let snapshot = multi_excerpt_snapshot(&["ab\ncd", "ef\ngh"]);
+        assert_eq!(snapshot.max_point(), MultiBufferPoint::new(3, 2));
+        assert_eq!(snapshot.max_point().row + 1, snapshot.line_count());
     }
 
     #[test]
