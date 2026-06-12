@@ -29,7 +29,7 @@ use gpui::{
     canvas, div, font, point, px, size, App, AppContext, Bounds, Context, FocusHandle, Focusable,
     Font, FontFeatures, FontStyle, FontWeight, InteractiveElement, IntoElement, Modifiers,
     MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollWheelEvent, SharedString, Size, Styled, Task, WeakEntity, Window,
+    Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled, Task, WeakEntity, Window,
 };
 use std::{
     path::PathBuf,
@@ -156,7 +156,14 @@ impl Terminal {
     /// Forward `bytes` to the PTY off the foreground thread. Used by the
     /// input pipeline to write encoded keystrokes to the focused
     /// terminal; a no-op until the session is installed.
-    pub(crate) fn write_to_pty(&self, bytes: Vec<u8>, cx: &mut Context<'_, Self>) {
+    ///
+    /// Any keyboard or paste write snaps a scrolled-up viewport back to the
+    /// live bottom, so typing always lands in view.
+    pub(crate) fn write_to_pty(&mut self, bytes: Vec<u8>, cx: &mut Context<'_, Self>) {
+        if self.emulator.display_offset() != 0 {
+            self.emulator.scroll_to_bottom();
+            cx.notify();
+        }
         if let Some(session) = self.session.clone() {
             spawn_write_bytes(session, bytes, cx);
         }
@@ -165,7 +172,7 @@ impl Terminal {
     /// Read the system clipboard and write it to the PTY, wrapped in
     /// bracketed-paste markers when the program enabled `?2004h`. A no-op when
     /// the clipboard is empty or unavailable.
-    pub(crate) fn paste(&self, cx: &mut Context<'_, Self>) {
+    pub(crate) fn paste(&mut self, cx: &mut Context<'_, Self>) {
         let Some(clipboard) = cx.try_global::<ClipboardHostGlobal>().map(|g| g.0.clone()) else {
             return;
         };
@@ -333,6 +340,38 @@ impl Terminal {
         true
     }
 
+    /// Route a wheel event. With a mouse mode active and Shift not held it
+    /// reports to the program. Otherwise, on the alt screen under
+    /// alternate-scroll it sends cursor-key presses (that screen keeps no
+    /// scrollback), and on the primary screen it scrolls the emulator's
+    /// viewport into history.
+    fn on_scroll(&mut self, event: &ScrollWheelEvent, cx: &mut Context<'_, Self>) {
+        let up = scroll_is_up(&event.delta);
+        let code = if up { 64 } else { 65 };
+        if self.report_mouse(code, false, true, event.position, event.modifiers, cx) {
+            return;
+        }
+        let line_height = self.cell_size.map(|cell| cell.height).unwrap_or(px(1.));
+        let lines = scroll_line_count(&event.delta, line_height);
+        if lines == 0 {
+            return;
+        }
+        if self.emulator.alt_screen() && self.emulator.alternate_scroll() {
+            let seq = arrow_scroll_sequence(up, self.emulator.app_cursor());
+            let mut bytes = Vec::with_capacity(seq.len() * lines);
+            for _ in 0..lines {
+                bytes.extend_from_slice(seq);
+            }
+            if let Some(session) = self.session.clone() {
+                spawn_write_bytes(session, bytes, cx);
+            }
+            return;
+        }
+        let delta = if up { lines as i32 } else { -(lines as i32) };
+        self.emulator.scroll_lines(delta);
+        cx.notify();
+    }
+
     /// Snapshot the emulator screen for the paint pass, resolving each cell's
     /// colors against the theme. A cell's default fg falls back to the theme
     /// text color; a default bg is left transparent. An inverse cell swaps the
@@ -370,12 +409,16 @@ impl Terminal {
             })
             .collect();
         let emu_cursor = self.emulator.cursor();
-        let cursor = emulator_cursor_shape(emu_cursor.shape).map(|shape| PaintCursor {
-            line: emu_cursor.line,
-            column: emu_cursor.column,
-            shape,
-            focused,
-        });
+        let cursor = if emu_cursor.line < self.emulator.rows() {
+            emulator_cursor_shape(emu_cursor.shape).map(|shape| PaintCursor {
+                line: emu_cursor.line,
+                column: emu_cursor.column,
+                shape,
+                focused,
+            })
+        } else {
+            None
+        };
         PaintScreen { rows, cursor }
     }
 }
@@ -462,6 +505,32 @@ fn spawn_write_bytes(
         }
     })
     .detach();
+}
+
+/// Number of lines a wheel event scrolls. Line deltas are taken directly;
+/// pixel deltas are divided by the cell height. A non-zero delta always
+/// scrolls at least one line.
+fn scroll_line_count(delta: &ScrollDelta, line_height: Pixels) -> usize {
+    let lines = match delta {
+        ScrollDelta::Lines(p) => p.y.abs(),
+        ScrollDelta::Pixels(p) => {
+            let height = f32::from(line_height).max(1.0);
+            f32::from(p.y.abs()) / height
+        },
+    };
+    lines.ceil().max(0.0) as usize
+}
+
+/// The cursor-key bytes a wheel tick sends under alternate-scroll: up or down
+/// arrows, in SS3 form when application-cursor-keys mode (DECCKM) is set and
+/// CSI form otherwise.
+fn arrow_scroll_sequence(up: bool, app_cursor: bool) -> &'static [u8] {
+    match (up, app_cursor) {
+        (true, true) => b"\x1bOA",
+        (true, false) => b"\x1b[A",
+        (false, true) => b"\x1bOB",
+        (false, false) => b"\x1b[B",
+    }
 }
 
 impl ItemView for Terminal {
@@ -603,8 +672,7 @@ impl Render for Terminal {
                 }
             }))
             .on_scroll_wheel(cx.listener(|this, event: &ScrollWheelEvent, _window, cx| {
-                let code = if scroll_is_up(&event.delta) { 64 } else { 65 };
-                this.report_mouse(code, false, true, event.position, event.modifiers, cx);
+                this.on_scroll(event, cx);
             }));
         div()
             .track_focus(&self.focus_handle)
@@ -1048,5 +1116,117 @@ mod tests {
         h.vcx.run_until_parked();
 
         h.terminal.assert_sent(0, b"\x1b[200~hi\x1b[201~");
+    }
+
+    /// A three-row terminal fed six lines: lines 0-2 land in scrollback, the
+    /// live view shows 3, 4, 5.
+    fn scrolled_terminal(h: &mut Harness<'_>) -> Entity<Terminal> {
+        let term = open_terminal(h);
+        h.vcx.run_until_parked();
+        term.update(h.vcx, |t, cx| {
+            t.emulator.resize(3, 10);
+            t.on_read(b"0\r\n1\r\n2\r\n3\r\n4\r\n5", cx);
+        });
+        term
+    }
+
+    #[test]
+    fn keystroke_snaps_viewport_to_bottom() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = scrolled_terminal(&mut h);
+
+        term.update(h.vcx, |t, _| t.emulator.scroll_lines(2));
+        assert_eq!(term.read_with(h.vcx, |t, _| t.emulator.display_offset()), 2);
+
+        term.update(h.vcx, |t, cx| t.write_to_pty(b"x".to_vec(), cx));
+        assert_eq!(
+            term.read_with(h.vcx, |t, _| t.emulator.display_offset()),
+            0,
+            "a keystroke snaps the viewport back to the live bottom",
+        );
+    }
+
+    #[test]
+    fn wheel_scrolls_viewport_on_primary_screen() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = scrolled_terminal(&mut h);
+
+        term.update(h.vcx, |t, cx| {
+            t.on_scroll(&wheel(2.0), cx);
+        });
+        assert_eq!(
+            term.read_with(h.vcx, |t, _| t.emulator.display_offset()),
+            2,
+            "wheel up scrolls into history",
+        );
+
+        term.update(h.vcx, |t, cx| {
+            t.on_scroll(&wheel(-1.0), cx);
+        });
+        assert_eq!(
+            term.read_with(h.vcx, |t, _| t.emulator.display_offset()),
+            1,
+            "wheel down scrolls back toward the bottom",
+        );
+    }
+
+    #[test]
+    fn wheel_sends_arrows_under_alt_scroll() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = open_terminal(&mut h);
+        h.vcx.run_until_parked();
+        term.update(h.vcx, |t, cx| t.on_read(b"\x1b[?1049h", cx));
+
+        term.update(h.vcx, |t, cx| {
+            t.on_scroll(&wheel(3.0), cx);
+        });
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            h.terminal.sent_bytes().last().cloned().unwrap_or_default(),
+            b"\x1b[A\x1b[A\x1b[A".to_vec(),
+            "three wheel-up lines send three up-arrows on the alt screen",
+        );
+    }
+
+    /// A line-delta wheel event scrolling `lines` (positive = up).
+    fn wheel(lines: f32) -> ScrollWheelEvent {
+        ScrollWheelEvent {
+            delta: ScrollDelta::Lines(point(0., lines)),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn scroll_line_count_handles_both_deltas() {
+        assert_eq!(
+            scroll_line_count(&ScrollDelta::Lines(point(0., 3.0)), px(20.)),
+            3
+        );
+        assert_eq!(
+            scroll_line_count(&ScrollDelta::Lines(point(0., -2.0)), px(20.)),
+            2
+        );
+        assert_eq!(
+            scroll_line_count(&ScrollDelta::Pixels(point(px(0.), px(50.))), px(20.)),
+            3,
+            "50px over a 20px cell rounds up to three lines",
+        );
+        assert_eq!(
+            scroll_line_count(&ScrollDelta::Lines(point(0., 0.0)), px(20.)),
+            0,
+            "a zero delta scrolls nothing",
+        );
+    }
+
+    #[test]
+    fn arrow_scroll_sequence_respects_app_cursor() {
+        assert_eq!(arrow_scroll_sequence(true, false), b"\x1b[A");
+        assert_eq!(arrow_scroll_sequence(false, false), b"\x1b[B");
+        assert_eq!(arrow_scroll_sequence(true, true), b"\x1bOA");
+        assert_eq!(arrow_scroll_sequence(false, true), b"\x1bOB");
     }
 }
