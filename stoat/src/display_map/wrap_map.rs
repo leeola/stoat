@@ -14,6 +14,7 @@ use std::{
     sync::Arc,
     task::{Context, Poll},
 };
+use tokio::sync::Notify;
 
 /// Yields control back to the executor once, allowing other tasks to run.
 fn yield_now() -> impl Future<Output = ()> {
@@ -164,6 +165,7 @@ pub struct WrapMap {
     wrap_width: Option<u32>,
     background_task: Option<Task<(WrapSnapshot, Patch<u32>)>>,
     executor: Executor,
+    redraw: Option<Arc<Notify>>,
 }
 
 #[derive(Clone)]
@@ -200,8 +202,18 @@ impl WrapMap {
             wrap_width,
             background_task: None,
             executor,
+            redraw: None,
         };
         (map, snapshot_arc)
+    }
+
+    /// Set the handle a background rewrap notifies on completion, so the
+    /// frontend's render loop wakes and re-syncs the finished wrap rather than
+    /// waiting for the next event. Unset by default; when unset the rewrap still
+    /// surfaces on the next sync (see [`Self::is_dirty`]) without a proactive
+    /// redraw.
+    pub fn set_redraw(&mut self, redraw: Arc<Notify>) {
+        self.redraw = Some(redraw);
     }
 
     pub fn sync(
@@ -327,7 +339,7 @@ impl WrapMap {
 
                 let mut snapshot = self.snapshot.clone();
                 let pending = self.pending_edits.clone();
-                self.background_task = Some(self.executor.spawn(async move {
+                let rewrap = async move {
                     let mut edits = Patch::empty();
                     for (tab_snapshot, tab_edits) in pending {
                         let (new_snap, wrap_edits) =
@@ -337,7 +349,11 @@ impl WrapMap {
                         yield_now().await;
                     }
                     (snapshot, edits)
-                }));
+                };
+                self.background_task = Some(match &self.redraw {
+                    Some(redraw) => self.executor.spawn_with_redraw(redraw.clone(), rewrap),
+                    None => self.executor.spawn(rewrap),
+                });
             }
 
             // Apply interpolated edits for any remaining pending
@@ -1867,6 +1883,62 @@ mod tests {
                 "line_len mismatch at row {row}"
             );
         }
+    }
+
+    #[test]
+    fn background_rewrap_notifies_redraw_on_completion() {
+        use std::sync::atomic::{AtomicBool, Ordering::SeqCst};
+
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+
+        let buffer = TextBuffer::with_text(BufferId::new(0), "abcd\nefgh");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+
+        let snap0 = multi_buffer.snapshot();
+        let v0 = snap0.version();
+        let (mut inlay_map, inlay0) = InlayMap::new(snap0);
+        let (mut fold_map, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab0, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab0, Some(4), executor.clone());
+
+        let redraw = Arc::new(tokio::sync::Notify::new());
+        wrap_map.set_redraw(redraw.clone());
+
+        // Watcher records the redraw signal the finished rewrap should raise.
+        let notified = Arc::new(AtomicBool::new(false));
+        let _watcher = executor.spawn({
+            let redraw = redraw.clone();
+            let notified = notified.clone();
+            async move {
+                redraw.notified().await;
+                notified.store(true, SeqCst);
+            }
+        });
+
+        // Insert 150 rows so flush_edits takes the background rewrap path.
+        let big = "ab\n".repeat(150);
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..0, &big);
+
+        let snap1 = multi_buffer.snapshot();
+        let buffer_edits = snap1.edits_since(v0);
+        let (inlay1, inlay_edits) = inlay_map.sync(snap1, &buffer_edits);
+        let (fold1, fold_edits) = fold_map.sync(inlay1, &inlay_edits);
+        let (tab1, tab_edits) = tab_map.sync(fold1, fold_edits);
+        wrap_map.sync(tab1, &tab_edits);
+
+        scheduler.run_until_parked();
+        assert!(
+            notified.load(SeqCst),
+            "a finished background rewrap notifies the redraw handle"
+        );
     }
 
     #[test]
