@@ -1,5 +1,6 @@
 pub mod key_encode;
 pub mod pty;
+pub mod term;
 pub mod vterm;
 
 use crate::{
