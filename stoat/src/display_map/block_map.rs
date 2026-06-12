@@ -1,8 +1,7 @@
 use super::{
-    fold_map::FoldPointCursor,
     highlights::Chunk,
-    inlay_map::InlayPointCursor,
-    wrap_map::{WrapPoint, WrapPointCursor, WrapSnapshot},
+    tab_map::TabPoint,
+    wrap_map::{WrapPoint, WrapSnapshot},
     Companion, DisplayMapId,
 };
 use crate::{
@@ -1473,20 +1472,23 @@ fn block_id(block: &Block) -> Option<CustomBlockId> {
 
 fn resolve_block_placement(
     placement: BlockPlacement,
-    inlay_cursor: &mut InlayPointCursor<'_>,
-    fold_cursor: &mut FoldPointCursor<'_>,
-    wrap_cursor: &mut WrapPointCursor<'_>,
     wrap_snapshot: &WrapSnapshot,
 ) -> ResolvedPlacement {
-    let map_row = |buffer_row: u32,
-                   inlay_cursor: &mut InlayPointCursor<'_>,
-                   fold_cursor: &mut FoldPointCursor<'_>,
-                   wrap_cursor: &mut WrapPointCursor<'_>|
-     -> u32 {
-        let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0), Bias::Right);
-        let fold_point = fold_cursor.map(inlay_point, Bias::Right);
-        let tab_point = super::tab_map::TabPoint::new(fold_point.row(), fold_point.column());
-        wrap_cursor.map(tab_point).row()
+    // Resolve a buffer row to a wrap row by point conversion through each layer,
+    // not a forward cursor. Blocks are resolved in buffer-row order, but a
+    // multi-row Replace advances past a later block's start, so a shared forward
+    // cursor would seek backward and panic; per-call point conversion has no
+    // ordering constraint.
+    let map_row = |buffer_row: u32| -> u32 {
+        let inlay_point = wrap_snapshot
+            .fold_snapshot()
+            .inlay_snapshot()
+            .to_inlay_point(Point::new(buffer_row, 0), Bias::Right);
+        let fold_point = wrap_snapshot
+            .fold_snapshot()
+            .to_fold_point(inlay_point, Bias::Right);
+        let tab_point = wrap_snapshot.tab_snapshot().to_tab_point(fold_point);
+        wrap_snapshot.to_wrap_point(tab_point).row()
     };
 
     // Map a buffer row to its *last* wrap segment. Mapping the row's start
@@ -1494,17 +1496,18 @@ fn resolve_block_placement(
     // Below/Near block would sit after the first segment, and a Replace would
     // leave the end row's continuation segments visible. Mapping the fold row's
     // full line length instead resolves to the last segment.
-    let map_last_row = |buffer_row: u32,
-                        inlay_cursor: &mut InlayPointCursor<'_>,
-                        fold_cursor: &mut FoldPointCursor<'_>,
-                        wrap_cursor: &mut WrapPointCursor<'_>|
-     -> u32 {
-        let inlay_point = inlay_cursor.map(Point::new(buffer_row, 0), Bias::Right);
-        let fold_point = fold_cursor.map(inlay_point, Bias::Right);
+    let map_last_row = |buffer_row: u32| -> u32 {
+        let inlay_point = wrap_snapshot
+            .fold_snapshot()
+            .inlay_snapshot()
+            .to_inlay_point(Point::new(buffer_row, 0), Bias::Right);
+        let fold_point = wrap_snapshot
+            .fold_snapshot()
+            .to_fold_point(inlay_point, Bias::Right);
         let fold_row = fold_point.row();
         let tab_len = wrap_snapshot.tab_snapshot().line_len(fold_row);
-        let tab_point = super::tab_map::TabPoint::new(fold_row, tab_len);
-        wrap_cursor.map(tab_point).row()
+        let tab_point = TabPoint::new(fold_row, tab_len);
+        wrap_snapshot.to_wrap_point(tab_point).row()
     };
 
     // Clamp resolved rows to the wrap line count. A block placement is a static
@@ -1515,21 +1518,17 @@ fn resolve_block_placement(
     // clamps to the last one.
     let line_count = wrap_snapshot.line_count();
     match placement {
-        BlockPlacement::Above(row) => ResolvedPlacement::Above(
-            map_row(row, inlay_cursor, fold_cursor, wrap_cursor).min(line_count),
-        ),
-        BlockPlacement::Below(row) => ResolvedPlacement::Below(
-            (map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1).min(line_count),
-        ),
-        BlockPlacement::Near(row) => ResolvedPlacement::Near(
-            (map_last_row(row, inlay_cursor, fold_cursor, wrap_cursor) + 1).min(line_count),
-        ),
+        BlockPlacement::Above(row) => ResolvedPlacement::Above(map_row(row).min(line_count)),
+        BlockPlacement::Below(row) => {
+            ResolvedPlacement::Below((map_last_row(row) + 1).min(line_count))
+        },
+        BlockPlacement::Near(row) => {
+            ResolvedPlacement::Near((map_last_row(row) + 1).min(line_count))
+        },
         BlockPlacement::Replace { start, end } => {
             let last_row = line_count.saturating_sub(1);
-            let start_wrap = map_row(start, inlay_cursor, fold_cursor, wrap_cursor).min(last_row);
-            let end_wrap = map_last_row(end, inlay_cursor, fold_cursor, wrap_cursor)
-                .min(last_row)
-                .max(start_wrap);
+            let start_wrap = map_row(start).min(last_row);
+            let end_wrap = map_last_row(end).min(last_row).max(start_wrap);
             ResolvedPlacement::Replace {
                 start: start_wrap,
                 end: end_wrap,
@@ -1583,12 +1582,6 @@ fn sync_incremental(
     let mut cursor = old_transforms.cursor::<InputRow>(());
     let mut last_block_idx: usize = 0;
 
-    let mut inlay_cursor = wrap_snapshot
-        .fold_snapshot()
-        .inlay_snapshot()
-        .inlay_point_cursor();
-    let mut fold_cursor = wrap_snapshot.fold_snapshot().fold_point_cursor();
-    let mut wrap_cursor = wrap_snapshot.wrap_point_cursor();
     let mut blocks_in_range: Vec<(ResolvedPlacement, &Block)> = Vec::new();
     let mut edits = wrap_edits.edits().iter().peekable();
 
@@ -1719,13 +1712,7 @@ fn sync_incremental(
         blocks_in_range.clear();
         blocks_in_range.extend(blocks[start_block_idx..end_block_idx].iter().filter_map(
             |(bp, b)| {
-                let placement = resolve_block_placement(
-                    *bp,
-                    &mut inlay_cursor,
-                    &mut fold_cursor,
-                    &mut wrap_cursor,
-                    wrap_snapshot,
-                );
+                let placement = resolve_block_placement(*bp, wrap_snapshot);
                 let block_start = placement.start_wrap_row();
                 let block_end = match placement {
                     ResolvedPlacement::Replace { end, .. } => end,
@@ -1846,25 +1833,9 @@ fn build_transforms(
         return transforms;
     }
 
-    let mut inlay_cursor = wrap_snapshot
-        .fold_snapshot()
-        .inlay_snapshot()
-        .inlay_point_cursor();
-    let mut fold_cursor = wrap_snapshot.fold_snapshot().fold_point_cursor();
-    let mut wrap_cursor = wrap_snapshot.wrap_point_cursor();
-
     let mut keyed_blocks: Vec<(ResolvedPlacement, &Block)> = Vec::with_capacity(blocks.len());
     for (bp, b) in blocks {
-        keyed_blocks.push((
-            resolve_block_placement(
-                *bp,
-                &mut inlay_cursor,
-                &mut fold_cursor,
-                &mut wrap_cursor,
-                wrap_snapshot,
-            ),
-            b,
-        ));
+        keyed_blocks.push((resolve_block_placement(*bp, wrap_snapshot), b));
     }
     sort_and_dedup_blocks(&mut keyed_blocks);
 
@@ -2135,19 +2106,7 @@ mod tests {
     }
 
     fn resolve_placement(snapshot: &WrapSnapshot, placement: BlockPlacement) -> ResolvedPlacement {
-        let mut inlay_cursor = snapshot
-            .fold_snapshot()
-            .inlay_snapshot()
-            .inlay_point_cursor();
-        let mut fold_cursor = snapshot.fold_snapshot().fold_point_cursor();
-        let mut wrap_cursor = snapshot.wrap_point_cursor();
-        resolve_block_placement(
-            placement,
-            &mut inlay_cursor,
-            &mut fold_cursor,
-            &mut wrap_cursor,
-            snapshot,
-        )
+        resolve_block_placement(placement, snapshot)
     }
 
     #[test]
@@ -2718,6 +2677,23 @@ mod tests {
                 new: 1..2,
             }]),
         );
+    }
+
+    /// Resolving block placements must not require monotonic wrap-row order. A
+    /// multi-row Replace advances the resolution past a later block's start
+    /// row, so resolving through a shared forward cursor would seek backward
+    /// and panic. Two Replaces over the same first row, the wider one resolved
+    /// first, reproduce that order; point-based resolution handles it and the
+    /// pair coalesces into one block spanning both rows.
+    #[test]
+    fn resolve_handles_multi_row_replace_before_earlier_block() {
+        let wrap = create_wrap_snapshot("a\nb");
+        let blocks = blocks_for(vec![
+            text_block(BlockPlacement::Replace { start: 0, end: 1 }, "R"),
+            text_block(BlockPlacement::Replace { start: 0, end: 0 }, "S"),
+        ]);
+        let transforms = build_transforms(wrap.line_count(), &blocks, &wrap);
+        assert_eq!(render_transforms(&transforms, &wrap), vec!["R"]);
     }
 
     #[test]
