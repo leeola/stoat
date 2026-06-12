@@ -1,4 +1,4 @@
-use crate::{Bias, BufferId};
+use crate::{Bias, BufferId, Locator};
 use serde::{Deserialize, Serialize};
 use std::{cmp::Ordering, ops::Range};
 
@@ -66,6 +66,31 @@ impl Anchor {
         let self_off = resolve(self);
         let other_off = resolve(other);
         self_off.cmp(&other_off).then(self.bias.cmp(&other.bias))
+    }
+
+    /// Order two anchors without resolving either to a buffer offset, using the
+    /// fragment-tree [`Locator`]s supplied by `locator_for`.
+    ///
+    /// Compares `(fragment locator, insertion offset, bias)` lexicographically.
+    /// Equal timestamps skip the locator lookup: the fragments of one insertion
+    /// stay in insertion-offset order in the document, so the offset alone gives
+    /// the relative order.
+    ///
+    /// Reproduces the order of [`Anchor::cmp`] without its O(log n) offset
+    /// resolve, so it can be used inside a binary-search probe.
+    pub fn cmp_structural<'a, L: Fn(&Anchor) -> &'a Locator>(
+        &self,
+        other: &Anchor,
+        locator_for: &L,
+    ) -> Ordering {
+        let fragment_cmp = if self.timestamp == other.timestamp {
+            Ordering::Equal
+        } else {
+            locator_for(self).cmp(locator_for(other))
+        };
+        fragment_cmp
+            .then(self.offset.cmp(&other.offset))
+            .then(self.bias.cmp(&other.bias))
     }
 }
 
@@ -138,8 +163,40 @@ impl AnchorRangeExt for Range<Anchor> {
 #[cfg(test)]
 mod tests {
     use super::{Anchor, AnchorRangeExt};
-    use crate::Bias;
+    use crate::{Bias, Locator};
     use std::{cmp::Ordering, collections::HashSet};
+
+    #[test]
+    fn cmp_structural_orders_by_fragment_then_offset_then_bias() {
+        let lo = Locator::between(&Locator::min(), &Locator::max());
+        let hi = Locator::between(&lo, &Locator::max());
+        let locator_for = |a: &Anchor| if a.timestamp == 1 { &lo } else { &hi };
+        let mk = |timestamp: u64, offset: u32, bias: Bias| Anchor {
+            timestamp,
+            offset,
+            bias,
+            buffer_id: None,
+        };
+
+        // Different fragments: locator order wins even against a higher offset.
+        let early = mk(1, 9, Bias::Right);
+        let late = mk(2, 0, Bias::Left);
+        assert_eq!(early.cmp_structural(&late, &locator_for), Ordering::Less);
+        assert_eq!(late.cmp_structural(&early, &locator_for), Ordering::Greater);
+
+        // Same timestamp: offset decides via the shortcut, no locator lookup.
+        assert_eq!(
+            early.cmp_structural(&mk(1, 2, Bias::Left), &locator_for),
+            Ordering::Greater
+        );
+
+        // Same fragment and offset: bias is the final tie-break.
+        assert_eq!(
+            mk(1, 9, Bias::Left).cmp_structural(&early, &locator_for),
+            Ordering::Less
+        );
+        assert_eq!(early.cmp_structural(&early, &locator_for), Ordering::Equal);
+    }
 
     fn anchor(offset: usize) -> Anchor {
         Anchor {

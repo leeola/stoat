@@ -1,7 +1,7 @@
 use crate::diff_map::DiffMap;
 use encoding_rs::{GBK, SHIFT_JIS, UTF_16BE, UTF_16LE, UTF_8, WINDOWS_1252};
 use serde::{Deserialize, Serialize};
-use std::{collections::HashMap, ops::Range, sync::Arc};
+use std::{cmp::Ordering, collections::HashMap, ops::Range, sync::Arc};
 pub use stoat_text::BufferId;
 use stoat_text::{
     patch::{Edit, Patch},
@@ -687,7 +687,22 @@ impl TextBufferSnapshot {
         }
     }
 
-    fn find_fragment_for_anchor(&self, anchor: &Anchor) -> (Option<&Fragment>, usize) {
+    /// Document-order [`Locator`] of the fragment an anchor sits in.
+    ///
+    /// This is the structural half of resolution: it locates the anchor's
+    /// fragment in the insertions tree but skips the fragment-tree seek that
+    /// [`TextBufferSnapshot::resolve_anchor`] performs to turn the fragment into
+    /// a byte offset. It underlies [`TextBufferSnapshot::cmp_anchors`], which
+    /// orders anchors without resolving them. The min/max sentinels map to
+    /// [`Locator::min`]/[`Locator::max`] so they sort first/last.
+    pub fn fragment_id_for_anchor(&self, anchor: &Anchor) -> &Locator {
+        if anchor.is_min() {
+            return Locator::min_ref();
+        }
+        if anchor.is_max() {
+            return Locator::max_ref();
+        }
+
         let key = InsertionFragmentKey {
             timestamp: anchor.timestamp,
             split_offset: anchor.offset,
@@ -697,7 +712,7 @@ impl TextBufferSnapshot {
             self.insertions
                 .find_with_prev::<InsertionFragmentKey, _>((), &key, anchor.bias);
 
-        let fragment_id = match result {
+        match result {
             Some((prev, insertion)) => {
                 let ins_key = InsertionFragmentKey {
                     timestamp: insertion.timestamp,
@@ -718,10 +733,23 @@ impl TextBufferSnapshot {
                 Some(ins) => &ins.fragment_id,
                 None => Locator::min_ref(),
             },
-        };
+        }
+    }
 
+    /// Order two anchors in document order without resolving either to a byte
+    /// offset, comparing their fragment [`Locator`]s instead.
+    ///
+    /// Agrees with the offset order of [`Anchor::cmp`] for any anchor produced
+    /// by [`TextBufferSnapshot::anchor_at`]: at a fragment boundary a `Left`
+    /// anchor lands in the earlier fragment and a `Right` anchor in the later
+    /// one, so fragment order and the offset+bias tie-break coincide.
+    pub fn cmp_anchors(&self, a: &Anchor, b: &Anchor) -> Ordering {
+        a.cmp_structural(b, &|anchor| self.fragment_id_for_anchor(anchor))
+    }
+
+    fn find_fragment_for_anchor(&self, anchor: &Anchor) -> (Option<&Fragment>, usize) {
+        let target = Some(self.fragment_id_for_anchor(anchor).clone());
         let cx = &None;
-        let target = Some(fragment_id.clone());
         let (start, _end, item) = self
             .fragments
             .find::<Dimensions<Option<Locator>, usize>, _>(cx, &target, Bias::Left);
@@ -888,10 +916,47 @@ pub fn decode(bytes: &[u8], encoding: Encoding) -> (String, bool) {
 #[cfg(test)]
 mod tests {
     use super::{Encoding, LineEnding, TextBuffer};
-    use stoat_text::{Bias, BufferId, Point};
+    use std::cmp::Ordering;
+    use stoat_text::{Anchor, Bias, BufferId, Point};
 
     fn buf(content: &str) -> TextBuffer {
         TextBuffer::with_text(BufferId::new(0), content)
+    }
+
+    #[test]
+    fn cmp_anchors_matches_offset_order_across_fragments() {
+        let mut b = buf("hello world");
+        b.edit(5..5, " BIG"); // splits the original insertion around a new one
+        b.edit(0..0, "X"); // a leading fragment
+        let snap = &b.snapshot;
+
+        let mut anchors = Vec::new();
+        for off in 0..=snap.len() {
+            anchors.push(snap.anchor_at(off, Bias::Left));
+            anchors.push(snap.anchor_at(off, Bias::Right));
+        }
+
+        let mut by_structural = anchors.clone();
+        by_structural.sort_by(|a, c| snap.cmp_anchors(a, c));
+        let mut by_offset = anchors.clone();
+        by_offset.sort_by(|a, c| a.cmp(c, &|x| snap.resolve_anchor(x)));
+
+        assert_eq!(by_structural, by_offset);
+    }
+
+    #[test]
+    fn cmp_anchors_orders_sentinels_first_and_last() {
+        let mut b = buf("abc");
+        b.edit(1..1, "Z");
+        let snap = &b.snapshot;
+        let mid = snap.anchor_at(2, Bias::Left);
+        let min = Anchor::min_for_buffer(BufferId::new(0));
+        let max = Anchor::max_for_buffer(BufferId::new(0));
+
+        assert_eq!(snap.cmp_anchors(&min, &mid), Ordering::Less);
+        assert_eq!(snap.cmp_anchors(&mid, &max), Ordering::Less);
+        assert_eq!(snap.cmp_anchors(&min, &max), Ordering::Less);
+        assert_eq!(snap.cmp_anchors(&min, &min), Ordering::Equal);
     }
 
     #[test]
@@ -1007,8 +1072,8 @@ mod tests {
     #[test]
     fn anchor_min_max() {
         let mut b = buf("hello");
-        let min = stoat_text::Anchor::min();
-        let max = stoat_text::Anchor::max();
+        let min = Anchor::min();
+        let max = Anchor::max();
         assert_eq!(b.resolve_anchor(&min), 0);
         assert_eq!(b.resolve_anchor(&max), 5);
         b.edit(5..5, " world");
