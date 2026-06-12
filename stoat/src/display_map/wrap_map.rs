@@ -263,10 +263,10 @@ impl WrapMap {
         self.poll_background_task();
 
         if !self.snapshot.interpolated {
-            let snap_version = self.snapshot.tab_snapshot.fold_snapshot().version();
+            let snap_version = self.snapshot.tab_snapshot.version();
             let mut to_remove = 0;
             for (tab_snapshot, _) in &self.pending_edits {
-                if tab_snapshot.fold_snapshot().version() <= snap_version {
+                if tab_snapshot.version() <= snap_version {
                     to_remove += 1;
                 } else {
                     break;
@@ -327,10 +327,10 @@ impl WrapMap {
 
             // Apply interpolated edits for any remaining pending
             let was_interpolated = self.snapshot.interpolated;
-            let snap_version = self.snapshot.tab_snapshot.fold_snapshot().version();
+            let snap_version = self.snapshot.tab_snapshot.version();
             let mut to_remove = 0;
             for (tab_snapshot, edits) in &self.pending_edits {
-                if tab_snapshot.fold_snapshot().version() <= snap_version {
+                if tab_snapshot.version() <= snap_version {
                     to_remove += 1;
                 } else {
                     let interpolated = self.snapshot.interpolate(tab_snapshot.clone(), edits);
@@ -1741,6 +1741,57 @@ mod tests {
         for row in 0..full.line_count() {
             assert_eq!(
                 result.line_len(row),
+                full.line_len(row),
+                "line_len mismatch at row {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn wrap_sync_keeps_text_edit_when_folds_unchanged() {
+        // With wrap enabled, a text edit's tab snapshot shares the prior fold
+        // version (folds unchanged) but advances the tab version. Dedup must key
+        // on the tab version, or flush_edits drops the edit and the wrap snapshot
+        // never reflects the typed text.
+        let buffer = TextBuffer::with_text(BufferId::new(0), "abcdefghij\nshort");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+
+        let snap0 = multi_buffer.snapshot();
+        let v0 = snap0.version();
+        let (mut inlay_map, inlay0) = InlayMap::new(snap0);
+        let (mut fold_map, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab0, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab0, Some(5), test_executor());
+
+        // Prepend two columns so the first line gains a wrap segment.
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..0, "ZZ");
+
+        let snap1 = multi_buffer.snapshot();
+        let buffer_edits = snap1.edits_since(v0);
+        let (inlay1, inlay_edits) = inlay_map.sync(snap1, &buffer_edits);
+        let (fold1, fold_edits) = fold_map.sync(inlay1, &inlay_edits);
+        let (tab1, tab_edits) = tab_map.sync(fold1, fold_edits);
+        assert!(!tab_edits.is_empty(), "the edit must produce tab edits");
+        let (incremental, _) = wrap_map.sync(tab1, &tab_edits);
+
+        let full_snapshot = multi_buffer.snapshot();
+        let (_, full_inlay) = InlayMap::new(full_snapshot);
+        let (_, full_fold) = FoldMap::new(full_inlay);
+        let mut full_tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (full_tab, _) = full_tab_map.sync(full_fold, Patch::empty());
+        let full = super::build_snapshot(full_tab, Some(5));
+
+        assert_eq!(incremental.line_count(), full.line_count());
+        for row in 0..full.line_count() {
+            assert_eq!(
+                incremental.line_len(row),
                 full.line_len(row),
                 "line_len mismatch at row {row}"
             );
