@@ -971,7 +971,11 @@ fn param_at(params: &[u16], idx: usize, default: u16) -> u16 {
 /// position as decimals with an `M`/`m` press/release suffix; X10 packs
 /// them into single bytes offset by 32 and is limited to positions under
 /// 223, with button 3 standing in for any release.
-fn encode_mouse_report(
+/// Encode a mouse event as the bytes the program expects: SGR (1006) form when
+/// `sgr`, else the legacy X10/normal form. `col`/`row` are zero-based; the
+/// encodings emit them one-based. Returns `None` when the coordinates exceed
+/// what the legacy form can encode.
+pub fn encode_mouse_report(
     sgr: bool,
     button: u8,
     mods: u8,

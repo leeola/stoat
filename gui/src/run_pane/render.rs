@@ -16,7 +16,6 @@ use gpui::{
 use std::ops::Range;
 use stoat::run::{
     BlockStatus, CursorShape, GridSelection, OutputBlock, StyledCell, TermColor, TermModifier,
-    VtermGrid,
 };
 
 /// Translucent fill for the terminal cursor so the character shows
@@ -169,13 +168,12 @@ fn cell_is_blank_unstyled(cell: &StyledCell) -> bool {
 }
 
 pub(crate) fn render_grid_row(
-    grid: &VtermGrid,
+    row: &[StyledCell],
     row_idx: usize,
     selection: Option<&GridSelection>,
     hovered: Option<&GridSelection>,
     cursor: Option<&CursorRender>,
 ) -> Div {
-    let row = grid.row(row_idx);
     let row_u16 = u16::try_from(row_idx).unwrap_or(u16::MAX);
     let mut text = String::with_capacity(row.len());
     let mut runs: Vec<(Range<usize>, HighlightStyle)> = Vec::new();
@@ -234,7 +232,7 @@ pub(crate) fn render_block(
     for row_idx in 0..block.grid.line_count() {
         let row_cursor = cursor.as_ref().filter(|c| c.row == row_idx);
         rows = rows.child(div().px_2().child(render_grid_row(
-            &block.grid,
+            block.grid.row(row_idx),
             row_idx,
             block.selection.as_ref(),
             hovered,
@@ -264,6 +262,7 @@ pub(crate) fn render_block(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use stoat::run::VtermGrid;
 
     fn hex_of(color: Hsla) -> u32 {
         let rgba = color.to_rgb();
@@ -356,7 +355,7 @@ mod tests {
             anchor: (0, 0),
             head: (2, 0),
         };
-        let _ = render_grid_row(&grid, 0, None, Some(&hovered), None);
+        let _ = render_grid_row(grid.row(0), 0, None, Some(&hovered), None);
         let row_chars: String = grid.row(0).iter().map(|c| c.ch).collect();
         assert!(
             row_chars.starts_with("hello"),

@@ -13,8 +13,8 @@ use slotmap::new_key_type;
 use std::{path::PathBuf, time::Instant};
 use stoat_scheduler::Executor;
 pub use vterm::{
-    BlockStatus, CommandMark, CursorShape, GridSelection, LinkTarget, MouseProtocol, OutputBlock,
-    StyledCell, TermColor, TermModifier, TerminalLink, VtermGrid,
+    encode_mouse_report, BlockStatus, CommandMark, CursorShape, GridSelection, LinkTarget,
+    MouseProtocol, OutputBlock, StyledCell, TermColor, TermModifier, TerminalLink, VtermGrid,
 };
 
 new_key_type! {
