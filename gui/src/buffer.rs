@@ -380,9 +380,10 @@ mod tests {
     #[test]
     fn undo_returns_false_and_does_not_emit_on_empty_history() {
         let mut cx = TestAppContext::single();
-        // Buffer::with_text seeds history with the initial population edit
-        // when text is non-empty, so use the empty constructor to get a
-        // genuinely empty history.
+        // An empty buffer has an empty op log; the empty constructor exercises
+        // the no-history path directly. A non-empty Buffer::with_text also has
+        // an empty op log now -- its content installs as base text below the
+        // undo floor -- but the empty case is the clearest fixture.
         let buffer = new_buffer(&mut cx, "");
         let (_recorder, events) = Recorder::install(&mut cx, &buffer);
 

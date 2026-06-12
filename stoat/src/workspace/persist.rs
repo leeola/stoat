@@ -704,9 +704,7 @@ mod tests {
     }
 
     #[test]
-    fn clean_buffer_has_single_insert_op() {
-        use crate::buffer::BufferOp;
-
+    fn clean_buffer_persists_load_as_base_text() {
         let fake = FakeFs::new();
         let ws_dir = PathBuf::from("/test");
         let file = ws_dir.join("untouched.txt");
@@ -728,14 +726,14 @@ mod tests {
         let buffer = fresh.buffers.get(id).expect("buffer missing");
         let guard = buffer.read().expect("buffer poisoned");
         let history = guard.history();
-        assert_eq!(history.ops.len(), 1);
-        match &history.ops[0] {
-            BufferOp::Edit { old, text } => {
-                assert_eq!(*old, 0..0);
-                assert_eq!(text, "hello world\n");
-            },
-            other => panic!("expected single Edit op, got {other:?}"),
-        }
+        // The file load is base text below the undo floor, not a logged op, so
+        // undo cannot blank a freshly opened buffer and a save preserves it.
+        assert_eq!(history.base_text, "hello world\n");
+        assert!(
+            history.ops.is_empty(),
+            "clean buffer has no ops, got {:?}",
+            history.ops
+        );
     }
 
     #[test]

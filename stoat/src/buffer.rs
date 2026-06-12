@@ -92,6 +92,11 @@ pub struct TextBuffer {
     /// undo map, which is how workspace save/restore preserves selections and
     /// undo stack across sessions.
     ops: Vec<BufferOp>,
+    /// Initial file content installed below the undo floor by
+    /// [`Self::with_text`] / [`Self::from_history`]. Reproduced by the fragment
+    /// tree but absent from [`Self::ops`] and [`Self::edit_history`], so `undo`
+    /// cannot revert the file load. Serialized so restore reinstalls it.
+    base_text: String,
     next_checkpoint_id: u32,
     /// Named markers on the op log placed by `commit_undo_checkpoint`. Read by
     /// checkpoint-navigation actions; never mutated by `edit` / `undo` / `redo`.
@@ -108,10 +113,17 @@ pub enum BufferOp {
     Redo,
 }
 
-/// Serializable buffer state: the op log plus the `dirty` flag. Replay via
-/// [`TextBuffer::from_history`].
+/// Serializable buffer state: the base file content, the op log, and the
+/// `dirty` flag. Replay via [`TextBuffer::from_history`].
+///
+/// `base_text` is the initial file load, installed below the undo floor so
+/// `undo` cannot revert it. It defaults to empty for snapshots written before
+/// the field existed, which recorded the load as the first entry in `ops`
+/// instead; those still replay correctly.
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct BufferHistory {
+    #[serde(default)]
+    pub base_text: String,
     pub ops: Vec<BufferOp>,
     pub dirty: bool,
 }
@@ -178,6 +190,7 @@ impl TextBuffer {
             edit_history: Vec::new(),
             redo_history: Vec::new(),
             ops: Vec::new(),
+            base_text: String::new(),
             next_checkpoint_id: 0,
             checkpoints: Vec::new(),
         }
@@ -185,10 +198,7 @@ impl TextBuffer {
 
     pub fn with_text(buffer_id: BufferId, text: &str) -> Self {
         let mut buf = Self::new(buffer_id);
-        if !text.is_empty() {
-            buf.edit(0..0, text);
-            buf.dirty = false;
-        }
+        buf.install_base_text(text);
         buf
     }
 
@@ -200,7 +210,17 @@ impl TextBuffer {
         });
         let timestamp = self.next_timestamp;
         self.next_timestamp += 1;
+        self.apply_edit(range, text, timestamp);
+        self.dirty = true;
+        self.edit_history.push(timestamp);
+    }
 
+    /// Apply a `(range, text)` mutation to the fragment tree at `timestamp`,
+    /// updating the visible/deleted ropes, insertions, and version. Records no
+    /// history -- callers own `ops`, `edit_history`, and `dirty`. Separating
+    /// this from [`Self::edit`] lets the initial file load install as base
+    /// text below the undo floor via [`Self::install_base_text`].
+    fn apply_edit(&mut self, range: Range<usize>, text: &str, timestamp: u64) {
         let cx = &None;
         let mut new_fragments = SumTree::new(cx);
         let mut new_insertions = Vec::new();
@@ -424,8 +444,21 @@ impl TextBuffer {
         self.snapshot.fragments = new_fragments;
         self.snapshot.insertions = all_insertions;
         self.snapshot.version = timestamp;
-        self.dirty = true;
-        self.edit_history.push(timestamp);
+    }
+
+    /// Install `text` as the buffer's base content at the first timestamp,
+    /// below the undo floor: it is reproduced by the fragment tree but recorded
+    /// in neither `ops` nor `edit_history`, so `undo` cannot revert it and it
+    /// is not treated as a user edit. Empty text is a no-op, leaving the buffer
+    /// genuinely empty.
+    fn install_base_text(&mut self, text: &str) {
+        if text.is_empty() {
+            return;
+        }
+        let timestamp = self.next_timestamp;
+        self.next_timestamp += 1;
+        self.apply_edit(0..0, text, timestamp);
+        self.base_text = text.to_owned();
     }
 
     pub fn undo(&mut self) -> bool {
@@ -587,16 +620,21 @@ impl TextBuffer {
     /// with [`Self::from_history`] to reconstruct an identical buffer.
     pub fn history(&self) -> BufferHistory {
         BufferHistory {
+            base_text: self.base_text.clone(),
             ops: self.ops.clone(),
             dirty: self.dirty,
         }
     }
 
     /// Reconstruct a [`TextBuffer`] by replaying `history` on a fresh buffer.
-    /// Sequential timestamp assignment means anchors from the original buffer
-    /// resolve to identical byte offsets in the reconstructed one.
+    /// The base file content is installed first (below the undo floor), then
+    /// the op log replays. Sequential timestamp assignment means anchors from
+    /// the original buffer resolve to identical byte offsets in the
+    /// reconstructed one. Pre-`base_text` snapshots default the base to empty
+    /// and carry the load as the first op, so they replay unchanged.
     pub fn from_history(buffer_id: BufferId, history: &BufferHistory) -> Self {
         let mut buf = Self::new(buffer_id);
+        buf.install_base_text(&history.base_text);
         for op in &history.ops {
             match op {
                 BufferOp::Edit { old, text } => buf.edit(old.clone(), text),
@@ -959,7 +997,7 @@ pub fn decode(bytes: &[u8], encoding: Encoding) -> (String, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{Encoding, LineEnding, TextBuffer};
+    use super::{BufferHistory, BufferOp, Encoding, LineEnding, TextBuffer};
     use std::cmp::Ordering;
     use stoat_text::{Anchor, Bias, BufferId, Point};
 
@@ -1371,6 +1409,56 @@ mod tests {
     }
 
     #[test]
+    fn undo_does_not_revert_initial_load() {
+        let mut b = buf("hello");
+        assert!(!b.undo(), "undo with no user edits is a no-op");
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello");
+        assert!(!b.dirty, "a freshly loaded buffer is not dirty");
+    }
+
+    #[test]
+    fn history_keeps_load_below_undo_floor() {
+        let mut b = buf("hello world");
+        let anchor = b.anchor_at(6, Bias::Right);
+        b.edit(11..11, "!");
+
+        let history = b.history();
+        assert_eq!(history.base_text, "hello world");
+        assert_eq!(history.ops.len(), 1, "only the user edit is logged");
+
+        let restored = TextBuffer::from_history(BufferId::new(0), &history);
+        assert_eq!(restored.snapshot.visible_text.to_string(), "hello world!");
+        assert_eq!(
+            restored.resolve_anchor(&anchor),
+            6,
+            "anchors survive restore"
+        );
+    }
+
+    #[test]
+    fn old_format_history_round_trips() {
+        // Snapshots predating `base_text` recorded the file load as the first
+        // op with an empty base; they must still reconstruct the same text.
+        let history = BufferHistory {
+            base_text: String::new(),
+            ops: vec![
+                BufferOp::Edit {
+                    old: 0..0,
+                    text: "hello".to_string(),
+                },
+                BufferOp::Edit {
+                    old: 5..5,
+                    text: " world".to_string(),
+                },
+            ],
+            dirty: true,
+        };
+        let b = TextBuffer::from_history(BufferId::new(0), &history);
+        assert_eq!(b.snapshot.visible_text.to_string(), "hello world");
+        assert!(b.dirty);
+    }
+
+    #[test]
     fn undo_preserves_anchors() {
         let mut b = buf("hello world");
         let a = b.anchor_at(8, Bias::Right);
@@ -1437,7 +1525,8 @@ mod tests {
         b.edit(2..2, "!");
         b.edit(0..0, "X");
         b.checkpoint(None);
-        assert_eq!(b.checkpoints()[0].op_index, 3);
+        // The initial load is base text, not an op, so only the two edits count.
+        assert_eq!(b.checkpoints()[0].op_index, 2);
     }
 
     #[test]
