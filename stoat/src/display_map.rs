@@ -512,6 +512,7 @@ impl DisplayMap {
             && self.fold_map.version_unchanged()
             && self.inlay_map.version_unchanged()
             && !self.block_map.is_dirty()
+            && !self.wrap_map.is_dirty()
             && companion_wrap_data.is_none()
         {
             if let Some(ref cached) = self.cached_snapshot {

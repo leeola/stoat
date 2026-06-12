@@ -251,12 +251,27 @@ impl WrapMap {
                 .edits_since_sync
                 .compose(interpolated.edits().iter().cloned());
             self.snapshot.interpolated = false;
+        } else if self.background_task.is_some() || !self.pending_edits.is_empty() {
+            // Empty-edit sync with a rewrap in flight: drive it forward so a
+            // finished background task is polled and installed without waiting
+            // for the next edit to reach flush_edits.
+            self.flush_edits();
         }
 
         (
             Arc::new(self.snapshot.clone()),
             mem::take(&mut self.edits_since_sync),
         )
+    }
+
+    /// Whether a wrap recompute is outstanding: the width changed without a
+    /// rebuild, a background rewrap is running, or edits are queued. The
+    /// display-map cache treats a dirty wrap map as a miss so the pending or
+    /// just-finished rewrap is synced in rather than served stale.
+    pub fn is_dirty(&self) -> bool {
+        self.wrap_width != self.snapshot.wrap_width
+            || self.background_task.is_some()
+            || !self.pending_edits.is_empty()
     }
 
     fn flush_edits(&mut self) {
@@ -1788,6 +1803,62 @@ mod tests {
         let (full_tab, _) = full_tab_map.sync(full_fold, Patch::empty());
         let full = super::build_snapshot(full_tab, Some(5));
 
+        assert_eq!(incremental.line_count(), full.line_count());
+        for row in 0..full.line_count() {
+            assert_eq!(
+                incremental.line_len(row),
+                full.line_len(row),
+                "line_len mismatch at row {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn background_rewrap_surfaces_on_empty_edit_sync() {
+        // A multi-row edit past WRAP_SYNC_THRESHOLD takes the background rewrap
+        // path. The finished task must be polled and installed on a later
+        // empty-edit sync, rather than stalling until the next edit.
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+
+        let buffer = TextBuffer::with_text(BufferId::new(0), "abcd\nefgh");
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+
+        let snap0 = multi_buffer.snapshot();
+        let v0 = snap0.version();
+        let (mut inlay_map, inlay0) = InlayMap::new(snap0);
+        let (mut fold_map, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab0, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab0, Some(4), executor);
+
+        // Insert 150 rows so the tab edit spans well past WRAP_SYNC_THRESHOLD.
+        let big = "ab\n".repeat(150);
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(0..0, &big);
+
+        let snap1 = multi_buffer.snapshot();
+        let buffer_edits = snap1.edits_since(v0);
+        let (inlay1, inlay_edits) = inlay_map.sync(snap1, &buffer_edits);
+        let (fold1, fold_edits) = fold_map.sync(inlay1, &inlay_edits);
+        let (tab1, tab_edits) = tab_map.sync(fold1, fold_edits);
+        wrap_map.sync(tab1.clone(), &tab_edits);
+        assert!(wrap_map.is_dirty(), "a spawned rewrap leaves the map dirty");
+
+        // Run the background rewrap to completion, then re-sync with no edits.
+        scheduler.run_until_parked();
+        let (incremental, _) = wrap_map.sync(tab1.clone(), &Patch::empty());
+        assert!(
+            !wrap_map.is_dirty(),
+            "an empty-edit sync must poll the finished rewrap"
+        );
+
+        let full = super::build_snapshot(tab1, Some(4));
         assert_eq!(incremental.line_count(), full.line_count());
         for row in 0..full.line_count() {
             assert_eq!(
