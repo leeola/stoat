@@ -2741,4 +2741,49 @@ mod tests {
             .collect();
         assert_eq!(chunks, "*d");
     }
+
+    /// Folding a lone newline next to another fold keeps both placeholders.
+    /// The newline fold spans rows 0-1 and the next fold spans row 1; with
+    /// non-merging placeholders they render as two placeholders, and the
+    /// newline fold must not be dropped from the transforms (which would render
+    /// the newline literally).
+    #[test]
+    fn incremental_fold_lone_newline_adjacent() {
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            "\ndaa",
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+        let buffer_snapshot = multi_buffer.snapshot();
+        let (_, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, _) = FoldMap::new(inlay_snapshot.clone());
+
+        let fold = |fold_map: &mut FoldMap, start: usize, end: usize| {
+            fold_map.fold(
+                vec![
+                    buffer_snapshot.anchor_at(start, Bias::Right)
+                        ..buffer_snapshot.anchor_at(end, Bias::Left),
+                ],
+                one_char_placeholder(false),
+                &buffer_snapshot,
+            );
+        };
+
+        fold(&mut fold_map, 0, 1);
+        fold_map.sync(inlay_snapshot.clone(), &Patch::empty());
+        fold(&mut fold_map, 1, 4);
+        let (snapshot, _) = fold_map.sync(inlay_snapshot, &Patch::empty());
+
+        snapshot.check_invariants();
+
+        let text: String = snapshot.chars_at(FoldPoint::new(0, 0)).collect();
+        assert_eq!(text, "**");
+        assert_eq!(snapshot.len().0, 2, "transform output length");
+
+        let chunks: String = snapshot
+            .chunks(FoldOffset(0)..snapshot.len(), Arc::from(Vec::new()))
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(chunks, "**");
+    }
 }
