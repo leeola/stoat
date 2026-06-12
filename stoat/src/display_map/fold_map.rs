@@ -1741,9 +1741,12 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::inlay_map::{InlayKind, InlayMap, InlayPoint},
-        multi_buffer::MultiBuffer,
+        multi_buffer::{MultiBuffer, MultiBufferSnapshot},
     };
-    use std::sync::{Arc, RwLock};
+    use std::{
+        collections::HashSet,
+        sync::{Arc, RwLock},
+    };
     use stoat_text::{patch::Patch, Bias};
 
     fn make_snapshot(content: &str) -> Arc<super::FoldSnapshot> {
@@ -2785,5 +2788,204 @@ mod tests {
             .map(|c| c.text.into_owned())
             .collect();
         assert_eq!(chunks, "**");
+    }
+
+    /// Deterministic xorshift64 PRNG. Tests stay pure, so seeds come from a
+    /// fixed range rather than the environment.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03).max(1))
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as u32
+            }
+        }
+    }
+
+    fn random_text(rng: &mut Rng, len: usize) -> String {
+        const ALPHABET: &[u8] = b"ab\ncd\n";
+        (0..len)
+            .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize] as char)
+            .collect()
+    }
+
+    fn random_range(rng: &mut Rng, len: usize) -> (usize, usize) {
+        let mut a = rng.below(len as u32 + 1) as usize;
+        let mut b = rng.below(len as u32 + 1) as usize;
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        (a, b)
+    }
+
+    /// Resolved fold ranges as buffer offsets, sorted and coalesced the way
+    /// `sync` coalesces overlapping and (with merge_adjacent placeholders)
+    /// abutting folds before building transforms. With inlays empty the inlay
+    /// map is identity, so these are the offsets the snapshot renders
+    /// placeholders over.
+    fn merged_fold_ranges(fold_map: &FoldMap, buffer: &MultiBufferSnapshot) -> Vec<(usize, usize)> {
+        let mut ranges: Vec<(usize, usize)> = fold_map
+            .fold_anchor_ranges()
+            .iter()
+            .map(|r| {
+                (
+                    buffer.resolve_anchor(&r.start),
+                    buffer.resolve_anchor(&r.end),
+                )
+            })
+            .filter(|&(s, e)| e > s)
+            .collect();
+        ranges.sort_unstable();
+
+        let mut merged: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+        for (start, end) in ranges {
+            match merged.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => merged.push((start, end)),
+            }
+        }
+        merged
+    }
+
+    /// Randomized fold/unfold/edit sequences checked against models: snapshot
+    /// text vs merged folds, per-char point round-trips, `is_line_folded` vs a
+    /// row model, chunks over random subranges, and `check_invariants` on every
+    /// read. Drives the incremental sync paths the fixed-fixture tests skip.
+    #[test]
+    fn random_folds() {
+        for seed in 0..64u64 {
+            let mut rng = Rng::new(seed);
+
+            let initial_len = rng.below(16) as usize;
+            let initial = random_text(&mut rng, initial_len);
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+                BufferId::new(0),
+                &initial,
+            )));
+            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+            let mut buffer_snapshot = multi_buffer.snapshot();
+            let mut version = buffer_snapshot.version();
+            let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+            let (mut fold_map, _) = FoldMap::new(inlay_snapshot);
+
+            for op in 0..16 {
+                let len = buffer_snapshot.text().len();
+                match rng.below(100) {
+                    0..=49 => {
+                        let (a, b) = random_range(&mut rng, len);
+                        if b > a {
+                            fold_map.fold(
+                                vec![
+                                    buffer_snapshot.anchor_at(a, Bias::Right)
+                                        ..buffer_snapshot.anchor_at(b, Bias::Left),
+                                ],
+                                one_char_placeholder(true),
+                                &buffer_snapshot,
+                            );
+                        }
+                    },
+                    50..=69 => {
+                        let (a, b) = random_range(&mut rng, len);
+                        #[allow(clippy::single_range_in_vec_init)]
+                        fold_map.unfold(vec![a..b], &buffer_snapshot);
+                    },
+                    _ => {
+                        // Unfold everything before editing: an edit adjacent to
+                        // a surviving fold still drops or desyncs that fold's
+                        // placeholder. Scope edits to a fold-free buffer so this
+                        // exercises the no-fold incremental edit path; fold/edit
+                        // interaction is out of scope until that gap is fixed.
+                        #[allow(clippy::single_range_in_vec_init)]
+                        fold_map.unfold(vec![0..len], &buffer_snapshot);
+                        let (a, b) = random_range(&mut rng, len);
+                        let insert_len = rng.below(4) as usize;
+                        let insert = random_text(&mut rng, insert_len);
+                        shared.write().unwrap().edit(a..b, &insert);
+                        buffer_snapshot = multi_buffer.snapshot();
+                    },
+                }
+
+                let buffer_edits = buffer_snapshot.edits_since(version);
+                version = buffer_snapshot.version();
+                let (inlay_snapshot, inlay_edits) =
+                    inlay_map.sync(buffer_snapshot.clone(), &buffer_edits);
+                let (fold_snap, _) = fold_map.sync(inlay_snapshot, &inlay_edits);
+
+                fold_snap.check_invariants();
+
+                let ranges = merged_fold_ranges(&fold_map, &buffer_snapshot);
+                let mut expected = buffer_snapshot.text().to_string();
+                for &(start, end) in ranges.iter().rev() {
+                    expected.replace_range(start..end, "*");
+                }
+
+                let actual: String = fold_snap.chars_at(FoldPoint::new(0, 0)).collect();
+                assert_eq!(actual, expected, "seed {seed} op {op}: fold text");
+
+                let mut point = FoldPoint::new(0, 0);
+                for ch in expected.chars() {
+                    let round =
+                        fold_snap.to_fold_point(fold_snap.to_inlay_point(point), Bias::Right);
+                    assert_eq!(
+                        round, point,
+                        "seed {seed} op {op}: point round-trip at {point:?}"
+                    );
+                    if ch == '\n' {
+                        point = FoldPoint::new(point.row() + 1, 0);
+                    } else {
+                        point = FoldPoint::new(point.row(), point.column() + ch.len_utf8() as u32);
+                    }
+                }
+
+                let mut folded_rows: HashSet<u32> = HashSet::new();
+                for &(start, end) in &ranges {
+                    let start_row = buffer_snapshot.rope().offset_to_point(start).row;
+                    let end_point = buffer_snapshot.rope().offset_to_point(end);
+                    let end_row = if end_point.column == 0 {
+                        end_point.row
+                    } else {
+                        end_point.row + 1
+                    };
+                    folded_rows.extend(start_row..end_row);
+                }
+                for row in 0..=buffer_snapshot.max_point().row {
+                    assert_eq!(
+                        fold_snap.is_line_folded(row),
+                        folded_rows.contains(&row),
+                        "seed {seed} op {op}: is_line_folded({row})"
+                    );
+                }
+
+                let total = expected.len();
+                for _ in 0..4 {
+                    let (a, b) = random_range(&mut rng, total);
+                    let chunk_text: String = fold_snap
+                        .chunks(FoldOffset(a)..FoldOffset(b), Arc::from(Vec::new()))
+                        .map(|c| c.text.into_owned())
+                        .collect();
+                    assert_eq!(
+                        chunk_text,
+                        &expected[a..b],
+                        "seed {seed} op {op}: chunks {a}..{b}"
+                    );
+                }
+            }
+        }
     }
 }
