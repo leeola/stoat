@@ -1782,6 +1782,14 @@ fn sync_incremental(
 
         if edit_end > row {
             push_isomorphic(&mut new_transforms, edit_end - row, row, wrap_snapshot);
+        } else if row > edit_end {
+            // A coalesced Replace can span more rows than a shrinking edit
+            // removed, filling past edit_end. Each over-covered new row maps to
+            // one old input row the reconstruction has now replaced; skip them
+            // on the cursor so the suffix does not re-emit the removed rows.
+            // Bias::Right consumes the transform ending exactly at the target.
+            let target = cursor.start().0 + (row - edit_end);
+            cursor.seek(&InputRow(target), Bias::Right);
         }
 
         last_block_idx = end_block_idx;
@@ -2729,6 +2737,51 @@ mod tests {
                 old: 0..1,
                 new: 0..1,
             }]),
+        );
+    }
+
+    /// A shrinking edit that removes the buffer's last wrap row, under
+    /// overlapping `Replace` blocks that coalesce to span every surviving
+    /// row plus a trailing `Above`, must not over-count transform input
+    /// rows. The coalesced Replace covers the whole post-edit buffer during
+    /// reconstruction, so the now-removed trailing row carried in the
+    /// pre-edit tree must be consumed rather than re-appended via the cursor
+    /// suffix.
+    #[test]
+    fn incremental_shrinking_edit_with_overlapping_replace() {
+        let wrap_pre = create_wrap_snapshot("bbb\ncc\na\n");
+        let wrap_post = create_wrap_snapshot("bbbcc\na\n");
+        let blocks = vec![
+            text_block(BlockPlacement::Replace { start: 0, end: 1 }, "R0"),
+            text_block(BlockPlacement::Replace { start: 1, end: 2 }, "R1"),
+            text_block(BlockPlacement::Above(2), "T"),
+        ];
+
+        let mut incremental = BlockMap::new();
+        incremental.insert(blocks.clone());
+        incremental.sync(wrap_pre, &Patch::empty(), None);
+        let incremental = incremental.sync(
+            wrap_post.clone(),
+            &Patch::new(vec![Edit {
+                old: 0..2,
+                new: 0..1,
+            }]),
+            None,
+        );
+
+        let mut full = BlockMap::new();
+        full.insert(blocks);
+        let full = full.sync(wrap_post, &Patch::empty(), None);
+
+        let lines = |snap: &BlockSnapshot| {
+            (0..snap.total_lines())
+                .map(|r| snap.display_line(r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&incremental),
+            lines(&full),
+            "shrinking edit with overlapping replace must match full rebuild"
         );
     }
 
