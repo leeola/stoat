@@ -1667,7 +1667,19 @@ fn sync_incremental(
         // there is no next region, so a trailing zero-input Above/Near is
         // reconstructed rather than preserved: discard it too, otherwise the
         // cursor suffix and the reconstruction would both emit it.
+        //
+        // Whether the boundary's below blocks are discarded here decides
+        // whether the filter below reconstructs them: at a wrap row, Above
+        // blocks sort before Below blocks, so a below block at edit end is only
+        // reached by this loop when no Above precedes it. When an Above does
+        // precede it, the loop stops at the Above and the below survives in the
+        // cursor suffix, so the filter must not reconstruct it.
         let at_buffer_end = new_end >= wrap_line_count;
+        let boundary_starts_below = cursor.item().is_some_and(|item| {
+            item.block
+                .as_ref()
+                .is_some_and(|b| b.place_below() || matches!(b, Block::Spacer { .. }))
+        });
         while let Some(item) = cursor.item() {
             let discard = item.block.as_ref().is_some_and(|b| {
                 b.place_below()
@@ -1718,16 +1730,18 @@ fn sync_incremental(
                     ResolvedPlacement::Replace { end, .. } => end,
                     _ => block_start,
                 };
-                // Below/spacer blocks resolving to edit_end were discarded
-                // above for reconstruction, so the end bound must include
-                // them; an interior Above/Replace at edit_end is preserved by
-                // the cursor, so excluding it avoids a duplicate. At the buffer
-                // end there is no following row to carry a trailing Above/Near,
-                // and the cursor suffix holds none, so it must be included here
-                // or a full rebuild would place it where the incremental drops
-                // it.
-                let discarded_at_end = b.place_below() || matches!(b, Block::Spacer { .. });
-                let within_end = if discarded_at_end || edit_end == wrap_line_count {
+                // A block at edit_end is reconstructed only when the cursor
+                // does not also carry it, or it would be emitted twice. At the
+                // buffer end there is no following row to carry a trailing
+                // block, so include it. A below/spacer block at edit_end is
+                // carried by the cursor unless the discard loop reached it,
+                // which it only does when no Above precedes it at that wrap row
+                // (`boundary_starts_below`). An interior Above/Replace at
+                // edit_end is always carried by the cursor, so it is excluded.
+                let is_below_or_spacer = b.place_below() || matches!(b, Block::Spacer { .. });
+                let reconstructed_at_end =
+                    edit_end == wrap_line_count || (is_below_or_spacer && boundary_starts_below);
+                let within_end = if reconstructed_at_end {
                     block_start <= edit_end
                 } else {
                     block_start < edit_end
@@ -2694,6 +2708,28 @@ mod tests {
         ]);
         let transforms = build_transforms(wrap.line_count(), &blocks, &wrap);
         assert_eq!(render_transforms(&transforms, &wrap), vec!["R"]);
+    }
+
+    /// An interior edit must not duplicate a below block the cursor still
+    /// carries. An `Above` and a `Below` resolving to the same boundary wrap
+    /// row sort Above-first, so the discard loop stops at the Above and the
+    /// below survives in the cursor suffix. The reconstruction must then not
+    /// also emit the below, or the output over-counts rows.
+    #[test]
+    fn incremental_edit_keeps_below_after_above() {
+        let wrap = create_wrap_snapshot("a\nb");
+        let blocks = blocks_for(vec![
+            text_block(BlockPlacement::Below(0), "B"),
+            text_block(BlockPlacement::Above(1), "A"),
+        ]);
+        assert_incremental_matches_full(
+            &wrap,
+            &blocks,
+            Patch::new(vec![Edit {
+                old: 0..1,
+                new: 0..1,
+            }]),
+        );
     }
 
     #[test]
