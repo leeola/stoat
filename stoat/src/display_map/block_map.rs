@@ -790,8 +790,13 @@ impl BlockMap {
             return Vec::new();
         }
 
+        let boundaries: Vec<_> = buffer
+            .excerpt_boundaries_in_range(0..buffer.line_count())
+            .collect();
+        let last_row = buffer.line_count().saturating_sub(1);
+
         let mut results = Vec::new();
-        for boundary in buffer.excerpt_boundaries_in_range(0..buffer.line_count()) {
+        for (i, boundary) in boundaries.iter().enumerate() {
             if self
                 .buffers_with_disabled_headers
                 .contains(&boundary.next.buffer_id)
@@ -799,12 +804,20 @@ impl BlockMap {
                 continue;
             }
 
+            let folded = self.folded_buffers.contains(&boundary.next.buffer_id);
+
             if boundary.starts_new_buffer() {
-                if self.folded_buffers.contains(&boundary.next.buffer_id) {
+                if folded {
+                    // Collapse the buffer's whole row span -- from this boundary
+                    // to just before the next buffer starts, or the last row.
+                    let end = boundaries[i + 1..]
+                        .iter()
+                        .find(|b| b.starts_new_buffer())
+                        .map_or(last_row, |b| b.row.saturating_sub(1));
                     results.push((
                         BlockPlacement::Replace {
                             start: boundary.row,
-                            end: boundary.row,
+                            end,
                         },
                         Block::FoldedBuffer {
                             first_excerpt: boundary.next.clone(),
@@ -815,16 +828,16 @@ impl BlockMap {
                     results.push((
                         BlockPlacement::Above(boundary.row),
                         Block::BufferHeader {
-                            excerpt: boundary.next,
+                            excerpt: boundary.next.clone(),
                             height: self.buffer_header_height,
                         },
                     ));
                 }
-            } else if boundary.prev.is_some() {
+            } else if boundary.prev.is_some() && !folded {
                 results.push((
                     BlockPlacement::Above(boundary.row),
                     Block::ExcerptBoundary {
-                        excerpt: boundary.next,
+                        excerpt: boundary.next.clone(),
                         height: self.excerpt_header_height,
                     },
                 ));
@@ -2552,6 +2565,65 @@ mod tests {
             .collect();
         assert_eq!(header_rows.len(), 2);
         assert!(header_rows[1] > header_rows[0] + 1);
+    }
+
+    #[test]
+    fn folded_buffer_replaces_full_excerpt_span() {
+        // Two single-excerpt buffers: buf0 spans rows 0..=1, buf1 rows 2..=3.
+        let buf0 = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "a\nb")));
+        let mut multi = MultiBuffer::singleton(BufferId::new(0), buf0);
+        let buf1 = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(1), "c\nd")));
+        multi.insert_excerpts(BufferId::new(1), buf1, std::iter::once(0..3).collect());
+        let snapshot = multi.snapshot();
+
+        let folded_spans = |fold: u64| {
+            let mut block_map = BlockMap::new();
+            block_map.fold_buffer(BufferId::new(fold));
+            block_map
+                .header_and_footer_blocks(&snapshot)
+                .into_iter()
+                .filter_map(|(placement, block)| match (placement, block) {
+                    (BlockPlacement::Replace { start, end }, Block::FoldedBuffer { .. }) => {
+                        Some((start, end))
+                    },
+                    _ => None,
+                })
+                .collect::<Vec<_>>()
+        };
+
+        // Folding the first buffer spans to the next buffer's boundary - 1.
+        assert_eq!(folded_spans(0), vec![(0, 1)]);
+        // Folding the last buffer spans to the multibuffer's last row.
+        assert_eq!(folded_spans(1), vec![(2, 3)]);
+    }
+
+    #[test]
+    fn folded_multi_excerpt_buffer_collapses_inner_boundaries() {
+        // buf1 contributes two excerpts after buf0; folding buf1 spans both
+        // (rows 2..=5) and emits no inner excerpt-boundary block.
+        let buf0 = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(0), "a\nb")));
+        let mut multi = MultiBuffer::singleton(BufferId::new(0), buf0);
+        let buf1 = Arc::new(RwLock::new(TextBuffer::with_text(BufferId::new(1), "c\nd")));
+        multi.insert_excerpts(BufferId::new(1), buf1, vec![0..1, 0..1]);
+        let snapshot = multi.snapshot();
+
+        let mut block_map = BlockMap::new();
+        block_map.fold_buffer(BufferId::new(1));
+        let blocks = block_map.header_and_footer_blocks(&snapshot);
+
+        let folded: Vec<_> = blocks
+            .iter()
+            .filter_map(|(placement, block)| match (placement, block) {
+                (BlockPlacement::Replace { start, end }, Block::FoldedBuffer { .. }) => {
+                    Some((*start, *end))
+                },
+                _ => None,
+            })
+            .collect();
+        assert_eq!(folded, vec![(2, 5)]);
+        assert!(!blocks
+            .iter()
+            .any(|(_, block)| matches!(block, Block::ExcerptBoundary { .. })));
     }
 
     #[test]
