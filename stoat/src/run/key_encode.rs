@@ -7,16 +7,21 @@
 //! `Insert`/`Delete`, function keys). Used by the full-screen terminal
 //! view to forward keystrokes straight to the PTY.
 //!
-//! Cursor keys are emitted in their normal-mode CSI form (`\x1b[A`). The
-//! application-cursor-key (DECCKM) SS3 form is not produced here -- that
-//! needs the emulator's DECCKM state threaded in.
+//! Cursor keys and `Home`/`End` default to their normal-mode CSI form
+//! (`\x1b[A`). When `app_cursor` is set, the unmodified case switches to
+//! the application-cursor-key (DECCKM) SS3 form (`\x1bOA`). Modified
+//! cursor keys always keep the CSI `1;<m>` form.
 
 use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Encode `event` as the bytes a terminal program reads from stdin, or
 /// `None` for a key that produces no input (e.g. a modifier-only event or
 /// an unsupported code).
-pub fn encode_key(event: KeyEvent) -> Option<Vec<u8>> {
+///
+/// `app_cursor` selects the application-cursor-key (DECCKM) SS3 form for
+/// unmodified cursor and `Home`/`End` keys. Pass the program's current
+/// `TermMode::APP_CURSOR` state.
+pub fn encode_key(event: KeyEvent, app_cursor: bool) -> Option<Vec<u8>> {
     let m = event.modifiers;
     let alt = m.contains(KeyModifiers::ALT);
     match event.code {
@@ -26,12 +31,12 @@ pub fn encode_key(event: KeyEvent) -> Option<Vec<u8>> {
         KeyCode::BackTab => Some(b"\x1b[Z".to_vec()),
         KeyCode::Backspace => Some(with_alt(alt, vec![0x7f])),
         KeyCode::Esc => Some(vec![0x1b]),
-        KeyCode::Up => Some(csi_cursor(b'A', m)),
-        KeyCode::Down => Some(csi_cursor(b'B', m)),
-        KeyCode::Right => Some(csi_cursor(b'C', m)),
-        KeyCode::Left => Some(csi_cursor(b'D', m)),
-        KeyCode::Home => Some(csi_cursor(b'H', m)),
-        KeyCode::End => Some(csi_cursor(b'F', m)),
+        KeyCode::Up => Some(csi_cursor(b'A', m, app_cursor)),
+        KeyCode::Down => Some(csi_cursor(b'B', m, app_cursor)),
+        KeyCode::Right => Some(csi_cursor(b'C', m, app_cursor)),
+        KeyCode::Left => Some(csi_cursor(b'D', m, app_cursor)),
+        KeyCode::Home => Some(csi_cursor(b'H', m, app_cursor)),
+        KeyCode::End => Some(csi_cursor(b'F', m, app_cursor)),
         KeyCode::Insert => Some(csi_tilde(2, m)),
         KeyCode::Delete => Some(csi_tilde(3, m)),
         KeyCode::PageUp => Some(csi_tilde(5, m)),
@@ -83,12 +88,14 @@ fn modifier_param(m: KeyModifiers) -> u8 {
         + 4 * u8::from(m.contains(KeyModifiers::CONTROL))
 }
 
-/// A CSI cursor / `Home` / `End` key with final byte `final_byte`:
-/// `\x1b[A` unmodified, `\x1b[1;<m>A` when modified.
-fn csi_cursor(final_byte: u8, m: KeyModifiers) -> Vec<u8> {
+/// A cursor / `Home` / `End` key with final byte `final_byte`. Unmodified,
+/// it is `\x1bOA` (SS3) when `app_cursor` is set and `\x1b[A` (CSI)
+/// otherwise. Modified, it is always `\x1b[1;<m>A`.
+fn csi_cursor(final_byte: u8, m: KeyModifiers, app_cursor: bool) -> Vec<u8> {
     let param = modifier_param(m);
     if param == 1 {
-        vec![0x1b, b'[', final_byte]
+        let intro = if app_cursor { b'O' } else { b'[' };
+        vec![0x1b, intro, final_byte]
     } else {
         let mut bytes = format!("\x1b[1;{param}").into_bytes();
         bytes.push(final_byte);
@@ -154,27 +161,34 @@ mod tests {
         KeyEvent::new(code, m)
     }
 
+    /// Encode with DECCKM off, the normal-cursor case.
+    fn enc(event: KeyEvent) -> Option<Vec<u8>> {
+        encode_key(event, false)
+    }
+
+    /// Encode with DECCKM on, the application-cursor case.
+    fn enc_app(event: KeyEvent) -> Option<Vec<u8>> {
+        encode_key(event, true)
+    }
+
     #[test]
     fn plain_char_is_literal_utf8() {
-        assert_eq!(encode_key(key(KeyCode::Char('a'))), Some(b"a".to_vec()));
-        assert_eq!(
-            encode_key(key(KeyCode::Char('é'))),
-            Some("é".as_bytes().to_vec())
-        );
+        assert_eq!(enc(key(KeyCode::Char('a'))), Some(b"a".to_vec()));
+        assert_eq!(enc(key(KeyCode::Char('é'))), Some("é".as_bytes().to_vec()));
     }
 
     #[test]
     fn ctrl_letters_map_to_control_bytes() {
         assert_eq!(
-            encode_key(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL)),
+            enc(key_mod(KeyCode::Char('c'), KeyModifiers::CONTROL)),
             Some(vec![0x03])
         );
         assert_eq!(
-            encode_key(key_mod(KeyCode::Char('a'), KeyModifiers::CONTROL)),
+            enc(key_mod(KeyCode::Char('a'), KeyModifiers::CONTROL)),
             Some(vec![0x01])
         );
         assert_eq!(
-            encode_key(key_mod(KeyCode::Char(' '), KeyModifiers::CONTROL)),
+            enc(key_mod(KeyCode::Char(' '), KeyModifiers::CONTROL)),
             Some(vec![0x00])
         );
     }
@@ -182,42 +196,52 @@ mod tests {
     #[test]
     fn alt_prefixes_escape() {
         assert_eq!(
-            encode_key(key_mod(KeyCode::Char('x'), KeyModifiers::ALT)),
+            enc(key_mod(KeyCode::Char('x'), KeyModifiers::ALT)),
             Some(vec![0x1b, b'x'])
         );
     }
 
     #[test]
     fn named_control_keys() {
-        assert_eq!(encode_key(key(KeyCode::Enter)), Some(vec![b'\r']));
-        assert_eq!(encode_key(key(KeyCode::Tab)), Some(vec![b'\t']));
-        assert_eq!(encode_key(key(KeyCode::Backspace)), Some(vec![0x7f]));
-        assert_eq!(encode_key(key(KeyCode::Esc)), Some(vec![0x1b]));
-        assert_eq!(encode_key(key(KeyCode::BackTab)), Some(b"\x1b[Z".to_vec()));
+        assert_eq!(enc(key(KeyCode::Enter)), Some(vec![b'\r']));
+        assert_eq!(enc(key(KeyCode::Tab)), Some(vec![b'\t']));
+        assert_eq!(enc(key(KeyCode::Backspace)), Some(vec![0x7f]));
+        assert_eq!(enc(key(KeyCode::Esc)), Some(vec![0x1b]));
+        assert_eq!(enc(key(KeyCode::BackTab)), Some(b"\x1b[Z".to_vec()));
     }
 
     #[test]
     fn cursor_keys_use_csi() {
-        assert_eq!(encode_key(key(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::Down)), Some(b"\x1b[B".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::Right)), Some(b"\x1b[C".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::Left)), Some(b"\x1b[D".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::Home)), Some(b"\x1b[H".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::End)), Some(b"\x1b[F".to_vec()));
+        assert_eq!(enc(key(KeyCode::Up)), Some(b"\x1b[A".to_vec()));
+        assert_eq!(enc(key(KeyCode::Down)), Some(b"\x1b[B".to_vec()));
+        assert_eq!(enc(key(KeyCode::Right)), Some(b"\x1b[C".to_vec()));
+        assert_eq!(enc(key(KeyCode::Left)), Some(b"\x1b[D".to_vec()));
+        assert_eq!(enc(key(KeyCode::Home)), Some(b"\x1b[H".to_vec()));
+        assert_eq!(enc(key(KeyCode::End)), Some(b"\x1b[F".to_vec()));
+    }
+
+    #[test]
+    fn cursor_keys_use_ss3_under_app_cursor() {
+        assert_eq!(enc_app(key(KeyCode::Up)), Some(b"\x1bOA".to_vec()));
+        assert_eq!(enc_app(key(KeyCode::Down)), Some(b"\x1bOB".to_vec()));
+        assert_eq!(enc_app(key(KeyCode::Right)), Some(b"\x1bOC".to_vec()));
+        assert_eq!(enc_app(key(KeyCode::Left)), Some(b"\x1bOD".to_vec()));
+        assert_eq!(enc_app(key(KeyCode::Home)), Some(b"\x1bOH".to_vec()));
+        assert_eq!(enc_app(key(KeyCode::End)), Some(b"\x1bOF".to_vec()));
     }
 
     #[test]
     fn modified_cursor_keys_carry_param() {
         assert_eq!(
-            encode_key(key_mod(KeyCode::Up, KeyModifiers::CONTROL)),
+            enc(key_mod(KeyCode::Up, KeyModifiers::CONTROL)),
             Some(b"\x1b[1;5A".to_vec())
         );
         assert_eq!(
-            encode_key(key_mod(KeyCode::Right, KeyModifiers::SHIFT)),
+            enc(key_mod(KeyCode::Right, KeyModifiers::SHIFT)),
             Some(b"\x1b[1;2C".to_vec())
         );
         assert_eq!(
-            encode_key(key_mod(
+            enc(key_mod(
                 KeyCode::Left,
                 KeyModifiers::CONTROL | KeyModifiers::SHIFT
             )),
@@ -226,35 +250,50 @@ mod tests {
     }
 
     #[test]
-    fn tilde_keys() {
-        assert_eq!(encode_key(key(KeyCode::PageUp)), Some(b"\x1b[5~".to_vec()));
+    fn modified_cursor_keys_stay_csi_under_app_cursor() {
         assert_eq!(
-            encode_key(key(KeyCode::PageDown)),
-            Some(b"\x1b[6~".to_vec())
+            enc_app(key_mod(KeyCode::Up, KeyModifiers::CONTROL)),
+            Some(b"\x1b[1;5A".to_vec())
         );
-        assert_eq!(encode_key(key(KeyCode::Insert)), Some(b"\x1b[2~".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::Delete)), Some(b"\x1b[3~".to_vec()));
         assert_eq!(
-            encode_key(key_mod(KeyCode::PageUp, KeyModifiers::CONTROL)),
+            enc_app(key_mod(KeyCode::Home, KeyModifiers::SHIFT)),
+            Some(b"\x1b[1;2H".to_vec())
+        );
+    }
+
+    #[test]
+    fn tilde_keys() {
+        assert_eq!(enc(key(KeyCode::PageUp)), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(enc(key(KeyCode::PageDown)), Some(b"\x1b[6~".to_vec()));
+        assert_eq!(enc(key(KeyCode::Insert)), Some(b"\x1b[2~".to_vec()));
+        assert_eq!(enc(key(KeyCode::Delete)), Some(b"\x1b[3~".to_vec()));
+        assert_eq!(
+            enc(key_mod(KeyCode::PageUp, KeyModifiers::CONTROL)),
             Some(b"\x1b[5;5~".to_vec())
         );
     }
 
     #[test]
+    fn tilde_keys_unaffected_by_app_cursor() {
+        assert_eq!(enc_app(key(KeyCode::PageUp)), Some(b"\x1b[5~".to_vec()));
+        assert_eq!(enc_app(key(KeyCode::Delete)), Some(b"\x1b[3~".to_vec()));
+    }
+
+    #[test]
     fn function_keys() {
-        assert_eq!(encode_key(key(KeyCode::F(1))), Some(b"\x1bOP".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::F(4))), Some(b"\x1bOS".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::F(5))), Some(b"\x1b[15~".to_vec()));
-        assert_eq!(encode_key(key(KeyCode::F(12))), Some(b"\x1b[24~".to_vec()));
+        assert_eq!(enc(key(KeyCode::F(1))), Some(b"\x1bOP".to_vec()));
+        assert_eq!(enc(key(KeyCode::F(4))), Some(b"\x1bOS".to_vec()));
+        assert_eq!(enc(key(KeyCode::F(5))), Some(b"\x1b[15~".to_vec()));
+        assert_eq!(enc(key(KeyCode::F(12))), Some(b"\x1b[24~".to_vec()));
         assert_eq!(
-            encode_key(key_mod(KeyCode::F(1), KeyModifiers::SHIFT)),
+            enc(key_mod(KeyCode::F(1), KeyModifiers::SHIFT)),
             Some(b"\x1b[1;2P".to_vec())
         );
     }
 
     #[test]
     fn unsupported_key_is_none() {
-        assert_eq!(encode_key(key(KeyCode::Null)), None);
-        assert_eq!(encode_key(key(KeyCode::F(13))), None);
+        assert_eq!(enc(key(KeyCode::Null)), None);
+        assert_eq!(enc(key(KeyCode::F(13))), None);
     }
 }

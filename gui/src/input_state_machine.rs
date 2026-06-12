@@ -1163,9 +1163,11 @@ impl InputStateMachine {
                 let plain_printable =
                     matches!(event.code, KeyCode::Char(_)) && event.modifiers.is_empty();
                 if !plain_printable {
-                    if let Some(bytes) = encode_key(event) {
-                        terminal.update(cx, |term, cx| term.write_to_pty(bytes, cx));
-                    }
+                    terminal.update(cx, |term, cx| {
+                        if let Some(bytes) = encode_key(event, term.app_cursor()) {
+                            term.write_to_pty(bytes, cx);
+                        }
+                    });
                 }
                 return Vec::new();
             }

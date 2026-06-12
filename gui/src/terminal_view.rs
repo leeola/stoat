@@ -169,6 +169,13 @@ impl Terminal {
         }
     }
 
+    /// Whether the program has enabled application-cursor-key mode
+    /// (DECCKM). The input pipeline reads this to encode arrows and
+    /// `Home`/`End` in their SS3 form.
+    pub(crate) fn app_cursor(&self) -> bool {
+        self.emulator.app_cursor()
+    }
+
     /// Read the system clipboard and write it to the PTY, wrapped in
     /// bracketed-paste markers when the program enabled `?2004h`. A no-op when
     /// the clipboard is empty or unavailable.
