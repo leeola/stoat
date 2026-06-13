@@ -8,8 +8,8 @@ use crate::{
     buffer::BufferId,
     diff_map::DiffHunkStatus,
     multi_buffer::{ExcerptId, ExcerptInfo, MultiBufferSnapshot},
+    style::Line,
 };
-use ratatui::text::Line;
 use std::{
     cmp::Ordering,
     collections::HashSet,
@@ -55,7 +55,7 @@ pub enum BlockStyle {
 }
 
 /// Render callback producing styled terminal lines for a block.
-pub type RenderBlock = Arc<dyn Fn(&BlockContext<'_>) -> Vec<Line<'static>> + Send + Sync>;
+pub type RenderBlock = Arc<dyn Fn(&BlockContext<'_>) -> Vec<Line> + Send + Sync>;
 
 pub struct BlockContext<'a> {
     pub block_id: BlockId,
@@ -278,7 +278,7 @@ impl Block {
         }
     }
 
-    pub fn render_lines(&self, ctx: &BlockContext<'_>) -> Vec<Line<'static>> {
+    pub fn render_lines(&self, ctx: &BlockContext<'_>) -> Vec<Line> {
         match self {
             Block::Custom(b) => (b.render)(ctx),
             _ => vec![Line::raw(String::new()); self.height() as usize],

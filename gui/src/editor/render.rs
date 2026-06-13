@@ -7,7 +7,6 @@ use gpui::{
 };
 use lru::LruCache;
 use lsp_types::DiagnosticSeverity;
-use ratatui::style::{Color as RatatuiColor, Modifier as RatatuiModifier, Style as RatatuiStyle};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -21,7 +20,7 @@ use stoat::{
     host::BlameLine,
     review::MoveProvenance,
     review_session::ChunkStatus,
-    style::Color,
+    style::{Color, Modifier, Style},
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot, RowInfo,
 };
 use stoat_config::{LineNumberMode, ShowWhitespace};
@@ -286,72 +285,39 @@ fn block_context_for<'a>(
     }
 }
 
-/// Bridge a ratatui color into the native [`Color`] space.
-///
-/// Block content is carried as `ratatui::text::Line` spans, so the block
-/// rendering path is the one place still speaking ratatui styling. This
-/// adapter funnels it through the single native [`color_to_hsla`]; it goes
-/// away once block lines adopt the native style vocabulary.
-fn ratatui_color_to_native(color: RatatuiColor) -> Color {
-    match color {
-        RatatuiColor::Reset => Color::Reset,
-        RatatuiColor::Black => Color::Black,
-        RatatuiColor::Red => Color::Red,
-        RatatuiColor::Green => Color::Green,
-        RatatuiColor::Yellow => Color::Yellow,
-        RatatuiColor::Blue => Color::Blue,
-        RatatuiColor::Magenta => Color::Magenta,
-        RatatuiColor::Cyan => Color::Cyan,
-        RatatuiColor::Gray => Color::Gray,
-        RatatuiColor::DarkGray => Color::DarkGray,
-        RatatuiColor::LightRed => Color::LightRed,
-        RatatuiColor::LightGreen => Color::LightGreen,
-        RatatuiColor::LightYellow => Color::LightYellow,
-        RatatuiColor::LightBlue => Color::LightBlue,
-        RatatuiColor::LightMagenta => Color::LightMagenta,
-        RatatuiColor::LightCyan => Color::LightCyan,
-        RatatuiColor::White => Color::White,
-        RatatuiColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
-        RatatuiColor::Indexed(n) => Color::Indexed(n),
-    }
-}
-
-fn convert_ratatui_style(style: &RatatuiStyle) -> gpui::HighlightStyle {
+/// Convert a block span's native [`Style`] into a gpui highlight style.
+fn convert_block_style(style: &Style) -> gpui::HighlightStyle {
     let modifier = style.add_modifier;
     gpui::HighlightStyle {
-        color: style
-            .fg
-            .map(ratatui_color_to_native)
-            .and_then(color_to_hsla),
-        background_color: style
-            .bg
-            .map(ratatui_color_to_native)
-            .and_then(color_to_hsla),
+        color: style.fg.and_then(color_to_hsla),
+        background_color: style.bg.and_then(color_to_hsla),
         font_weight: modifier
-            .contains(RatatuiModifier::BOLD)
+            .contains(Modifier::BOLD)
             .then_some(FontWeight::BOLD),
         font_style: modifier
-            .contains(RatatuiModifier::ITALIC)
+            .contains(Modifier::ITALIC)
             .then_some(FontStyle::Italic),
         underline: modifier
-            .contains(RatatuiModifier::UNDERLINED)
+            .contains(Modifier::UNDERLINED)
             .then(|| UnderlineStyle {
                 thickness: px(1.0),
                 color: None,
                 wavy: false,
             }),
-        strikethrough: modifier.contains(RatatuiModifier::CROSSED_OUT).then(|| {
-            StrikethroughStyle {
+        strikethrough: modifier
+            .contains(Modifier::CROSSED_OUT)
+            .then(|| StrikethroughStyle {
                 thickness: px(1.0),
                 color: None,
-            }
-        }),
+            }),
         fade_out: None,
     }
 }
 
-fn convert_block_span_style(style: &RatatuiStyle, fallback_color: u32) -> gpui::HighlightStyle {
-    let mut converted = convert_ratatui_style(style);
+/// As [`convert_block_style`], but fills an unset foreground with the block's
+/// fallback color so block text is always painted.
+fn convert_block_span_style(style: &Style, fallback_color: u32) -> gpui::HighlightStyle {
+    let mut converted = convert_block_style(style);
     if converted.color.is_none() {
         converted.color = Some(rgb(fallback_color).into());
     }
@@ -4683,11 +4649,11 @@ mod tests {
 
     #[test]
     fn block_spans_with_color_become_highlight_runs() {
-        use ratatui::text::{Line, Span};
+        use stoat::style::{Line, Span};
         let mut cx = TestAppContext::single();
         let render: stoat::display_map::RenderBlock = Arc::new(|_ctx| {
             vec![Line::from(vec![
-                Span::styled("red", RatatuiStyle::new().fg(RatatuiColor::Red)),
+                Span::styled("red", Style::default().fg(Color::Red)),
                 Span::raw("plain"),
             ])]
         });
@@ -4710,12 +4676,12 @@ mod tests {
 
     #[test]
     fn block_span_modifier_maps_to_font_attribute() {
-        use ratatui::text::{Line, Span};
+        use stoat::style::{Line, Span};
         let mut cx = TestAppContext::single();
         let render: stoat::display_map::RenderBlock = Arc::new(|_ctx| {
             vec![Line::from(vec![Span::styled(
                 "bold",
-                RatatuiStyle::new().add_modifier(RatatuiModifier::BOLD),
+                Style::default().add_modifier(Modifier::BOLD),
             )])]
         });
         let snapshot = snapshot_with_render_block(

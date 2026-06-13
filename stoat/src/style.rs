@@ -1,13 +1,17 @@
-//! Native color, modifier, and style vocabulary for the shared theme and
-//! highlight core.
+//! Native color, modifier, style, and styled-text vocabulary for the shared
+//! theme and highlight core.
 //!
 //! [`Theme`](crate::theme::Theme), the syntax highlight pipeline, and the
 //! diff palette describe styling in these terms, and the GUI converts them
 //! to its own rendering types at the boundary. The set mirrors the subset
 //! of terminal styling the editor actually uses: a 16-color ANSI palette
-//! plus 24-bit and 256-indexed colors, and the common text modifiers.
+//! plus 24-bit and 256-indexed colors, the common text modifiers, and the
+//! [`Span`] / [`Line`] pair custom block content is rendered as.
 
-use std::ops::{BitOr, BitOrAssign};
+use std::{
+    borrow::Cow,
+    ops::{BitOr, BitOrAssign},
+};
 
 /// A foreground or background color.
 ///
@@ -110,6 +114,66 @@ impl Style {
     pub fn add_modifier(mut self, modifier: Modifier) -> Style {
         self.add_modifier |= modifier;
         self
+    }
+}
+
+/// A run of text with a single [`Style`].
+///
+/// Content is owned-or-borrowed for the program's lifetime, so a span built
+/// from a string literal stays zero-copy while one built from a computed
+/// `String` owns its text.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Span {
+    pub content: Cow<'static, str>,
+    pub style: Style,
+}
+
+impl Span {
+    /// A span with no styling - the renderer applies its own defaults.
+    pub fn raw(content: impl Into<Cow<'static, str>>) -> Span {
+        Span {
+            content: content.into(),
+            style: Style::default(),
+        }
+    }
+
+    pub fn styled(content: impl Into<Cow<'static, str>>, style: Style) -> Span {
+        Span {
+            content: content.into(),
+            style,
+        }
+    }
+}
+
+/// A single line of styled text, as an ordered list of [`Span`]s.
+#[derive(Clone, Debug, Default, PartialEq, Eq)]
+pub struct Line {
+    pub spans: Vec<Span>,
+}
+
+impl Line {
+    /// A line of one unstyled [`Span`].
+    pub fn raw(content: impl Into<Cow<'static, str>>) -> Line {
+        Line {
+            spans: vec![Span::raw(content)],
+        }
+    }
+}
+
+impl From<Vec<Span>> for Line {
+    fn from(spans: Vec<Span>) -> Line {
+        Line { spans }
+    }
+}
+
+/// Renders the concatenated span content, dropping styling, so a [`Line`]
+/// flattens to its plain text via `to_string`.
+impl std::fmt::Display for Line {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        for span in &self.spans {
+            f.write_str(&span.content)?;
+        }
+        Ok(())
     }
 }
 
