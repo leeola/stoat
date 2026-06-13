@@ -789,6 +789,45 @@ mod tests {
     }
 
     #[test]
+    fn confirm_removes_preview_buffer_from_registry() {
+        let mut cx = TestAppContext::single();
+        let fake_fs = fake_fs_with_files(&[("a.rs", "")]);
+        let h = new_harness(&mut cx, fake_fs);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            open_file_finder(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let picker: Entity<Picker<FileFinderDelegate>> = h
+            .workspace
+            .read_with(h.vcx, |w, cx| w.modal_layer().read(cx).active_modal())
+            .expect("file finder modal is open");
+
+        let preview_id = picker.read_with(h.vcx, |p, cx| {
+            let buffer = p
+                .delegate()
+                .preview_buffer
+                .clone()
+                .expect("preview installed");
+            buffer.read(cx).read(|b| b.buffer_id())
+        });
+
+        picker.update_in(h.vcx, |p, window, cx| {
+            p.handle_action(&stoat_action::PickerConfirm, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        let has_buffer = h.workspace.read_with(h.vcx, |w, cx| {
+            w.buffer_registry().read(cx).get(preview_id).is_some()
+        });
+        assert!(
+            !has_buffer,
+            "confirming a selection must drop the preview scratch like cancel does",
+        );
+    }
+
+    #[test]
     fn open_file_finder_installs_preview_editor() {
         let mut cx = TestAppContext::single();
         let fake_fs = fake_fs_with_files(&[("a.rs", "")]);

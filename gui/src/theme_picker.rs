@@ -30,6 +30,10 @@ pub struct ThemePickerDelegate {
     /// The theme active when the picker opened. Restored on dismiss so
     /// arrowing through previews leaves no trace when the user cancels.
     prior_theme: stoat::theme::Theme,
+    /// Set by [`Self::confirm`] so the shared dismiss path keeps the chosen
+    /// theme instead of reverting to [`Self::prior_theme`]. Confirm runs
+    /// through the same `dismissed` teardown as cancel.
+    confirmed: bool,
 }
 
 impl ThemePickerDelegate {
@@ -46,6 +50,7 @@ impl ThemePickerDelegate {
             matches: Vec::new(),
             selected,
             prior_theme,
+            confirmed: false,
         };
         delegate.set_matches_for_empty_query();
         delegate
@@ -128,6 +133,7 @@ impl PickerDelegate for ThemePickerDelegate {
         cx: &mut Context<'_, Picker<Self>>,
     ) {
         self.apply_selected(cx);
+        self.confirmed = true;
         if let Some(name) = self.selected_theme() {
             if let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) {
                 persist_theme(fs.as_ref(), name);
@@ -137,6 +143,9 @@ impl PickerDelegate for ThemePickerDelegate {
     }
 
     fn dismissed(&mut self, cx: &mut Context<'_, Picker<Self>>) {
+        if self.confirmed {
+            return;
+        }
         set_active_theme(cx, Theme(self.prior_theme.clone()));
     }
 

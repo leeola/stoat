@@ -289,6 +289,10 @@ impl<D: PickerDelegate> Picker<D> {
             return true;
         }
         self.delegate.confirm(secondary, window, cx);
+        // Tear down like the cancel paths (`DismissModal`, `cancel_prompt`):
+        // a delegate that stages a buffer for preview (the file finder) leaks
+        // it otherwise, since the modal layer's dismiss does not call this.
+        self.delegate.dismissed(cx);
         true
     }
 }
