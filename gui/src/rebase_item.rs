@@ -151,10 +151,18 @@ impl ItemView for RebaseItem {
         SharedString::from("Rebase")
     }
 
+    /// Always errors: [`RebaseItem`] is a deliberately transient pane kind.
+    ///
+    /// The item is a pre-execution rebase plan editor seeded from the live
+    /// commit list, and stoat's rebase never leaves git in an on-disk
+    /// in-flight state, so there is nothing to rebuild from. It serializes to
+    /// `Null` and the workspace restore drops it at its unknown-kind dispatch
+    /// arm rather than reconstructing it, so this method -- required by
+    /// [`ItemView`] but never reached by the restore path -- has no state to
+    /// deserialize.
     fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError> {
         DeserializeSnafu {
-            reason: "RebaseItem deserialize requires workspace-persistence wiring \
-                     that has not yet landed",
+            reason: "RebaseItem is a deliberately transient pane kind and is never restored",
         }
         .fail()
     }
@@ -258,7 +266,7 @@ mod tests {
     }
 
     #[test]
-    fn deserialize_returns_error_until_persistence_wires_through() {
+    fn deserialize_errors_because_kind_is_transient() {
         let mut cx = TestAppContext::single();
         let item = cx.update(|cx| {
             let state = mk_state(vec![mk_entry(RebaseTodoOp::Pick, "abc1234", "first")]);
