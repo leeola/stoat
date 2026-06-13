@@ -121,6 +121,11 @@ pub struct Workspace {
     /// a single minimap follows the focused pane's active editor rather
     /// than each editor owning one. Persisted via [`WorkspaceStateV1`].
     minimap_visible: bool,
+    /// Last observed root-window geometry, cached so [`Self::to_state`]
+    /// can persist it without a `Window` at save time. Updated by the
+    /// hosting view's window-bounds observer; `None` until the first
+    /// observation or a restore. Persisted via [`WorkspaceStateV1`].
+    window_bounds: Option<crate::workspace_persist::WindowBoundsV1>,
     /// The minimap mirror of the active editor, present while
     /// [`Self::minimap_visible`] holds and an editor is focused.
     /// Rebuilt by [`Self::refresh_minimap`] when the active editor
@@ -411,6 +416,7 @@ impl Workspace {
             status_bar,
             key_hint_banner,
             minimap_visible: false,
+            window_bounds: None,
             minimap: None,
             input_state_machine,
             editor_input,
@@ -1132,6 +1138,7 @@ impl Workspace {
             buffers,
             command_palette_history: self.command_palette_history.clone(),
             minimap_visible: self.minimap_visible,
+            window_bounds: self.window_bounds,
         }
     }
 
@@ -1228,6 +1235,7 @@ impl Workspace {
             }
         }
         self.minimap_visible = state.minimap_visible;
+        self.window_bounds = state.window_bounds;
         self.pane_tree
             .update(cx, |tree, cx| tree.set_focus(state.focused_pane, cx));
 
@@ -3813,6 +3821,13 @@ impl Workspace {
         self.minimap_visible
     }
 
+    /// Cache the latest root-window geometry so the next [`Self::to_state`]
+    /// persists it. Called by the hosting view's window-bounds observer,
+    /// which is the only context with a `Window` to read bounds from.
+    pub(crate) fn set_window_bounds(&mut self, bounds: crate::workspace_persist::WindowBoundsV1) {
+        self.window_bounds = Some(bounds);
+    }
+
     /// The minimap mirror currently following the active editor, or
     /// `None` when the minimap is hidden or no editor is focused.
     #[cfg(test)]
@@ -4013,7 +4028,9 @@ impl Workspace {
                 }),
                 ..Default::default()
             },
-            move |_window, cx| cx.new(|cx| crate::stoat_app::StoatApp::new_with_state(state, cx)),
+            move |window, cx| {
+                cx.new(|cx| crate::stoat_app::StoatApp::new_with_state(state, window, cx))
+            },
         );
         if let Err(err) = result {
             tracing::warn!(?err, "CopyWorkspace: failed to open window");
@@ -4035,9 +4052,14 @@ impl Workspace {
                 }),
                 ..Default::default()
             },
-            |_window, cx| {
+            |window, cx| {
                 cx.new(|cx| {
-                    crate::stoat_app::StoatApp::new(Vec::new(), crate::RestoreMode::None, cx)
+                    crate::stoat_app::StoatApp::new(
+                        Vec::new(),
+                        crate::RestoreMode::None,
+                        window,
+                        cx,
+                    )
                 })
             },
         );
@@ -19126,6 +19148,48 @@ mod tests {
                 "restored dock editor has no file path"
             );
         });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_window_bounds() {
+        use crate::workspace_persist::{WindowBoundsV1, WindowModeV1};
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/win.rs", b"x\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/win.rs")], cx);
+        });
+        vcx.run_until_parked();
+        let bounds = WindowBoundsV1 {
+            mode: WindowModeV1::Windowed,
+            x: 100.0,
+            y: 200.0,
+            width: 1024.0,
+            height: 768.0,
+        };
+        ws.update(vcx, |w, _| w.set_window_bounds(bounds));
+
+        let path = PathBuf::from("/tmp/state/window-bounds.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        let restored = fresh_ws.read_with(vcx2, |w, cx| w.to_state(cx).window_bounds);
+        assert_eq!(
+            restored,
+            Some(bounds),
+            "window bounds round-trip through save/restore"
+        );
     }
 
     #[test]

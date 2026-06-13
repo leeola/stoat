@@ -30,12 +30,18 @@ pub(crate) struct StoatApp {
     /// and that subscription and drops them together -- so the quit
     /// path needs its own save. The periodic timer remains a backstop.
     _workspace_quit: Subscription,
+    /// Drops with the app; mirrors each root-window move/resize onto the
+    /// workspace's cached bounds so the next save persists the current
+    /// geometry. The save path has no `Window` to read bounds from, so
+    /// this observer is the only place that geometry is captured.
+    _window_bounds: Subscription,
 }
 
 impl StoatApp {
     pub(crate) fn new(
         files: Vec<PathBuf>,
         restore: RestoreMode,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
@@ -74,12 +80,14 @@ impl StoatApp {
             app.workspace.read(cx).save_state_to_default_path(cx);
             async {}
         });
+        let _window_bounds = track_window_bounds(&workspace, window, cx);
 
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
             _workspace_release,
             _workspace_quit,
+            _window_bounds,
         }
     }
 }
@@ -114,6 +122,27 @@ fn try_restore_workspace(
     }
 }
 
+/// Capture the root window's geometry onto the workspace and keep it
+/// current. Records the bounds once now -- the window opens before any
+/// move or resize fires -- and re-records on every subsequent bounds
+/// change, so the save path, which has no `Window`, always has fresh
+/// geometry to persist.
+fn track_window_bounds(
+    workspace: &Entity<Workspace>,
+    window: &mut Window,
+    cx: &mut Context<'_, StoatApp>,
+) -> Subscription {
+    let initial =
+        crate::workspace_persist::WindowBoundsV1::from_window_bounds(window.window_bounds());
+    workspace.update(cx, |w, _| w.set_window_bounds(initial));
+    cx.observe_window_bounds(window, |this, window, cx| {
+        let bounds =
+            crate::workspace_persist::WindowBoundsV1::from_window_bounds(window.window_bounds());
+        this.workspace
+            .update(cx, |w, _| w.set_window_bounds(bounds));
+    })
+}
+
 impl StoatApp {
     /// Borrow the hosted workspace entity. The `--inputs` driver reaches
     /// the workspace through this to feed its keystroke sequence, and
@@ -133,6 +162,7 @@ impl StoatApp {
     /// window.
     pub(crate) fn new_with_state(
         state: crate::workspace_persist::WorkspaceStateV1,
+        window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let name = SharedString::from(state.name.clone());
@@ -146,12 +176,14 @@ impl StoatApp {
             app.workspace.read(cx).save_state_to_default_path(cx);
             async {}
         });
+        let _window_bounds = track_window_bounds(&workspace, window, cx);
 
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
             _workspace_release,
             _workspace_quit,
+            _window_bounds,
         }
     }
 
@@ -207,8 +239,8 @@ mod tests {
     fn new_constructs_workspace_anchored_to_cwd() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
-        let (app, _vcx) =
-            cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), RestoreMode::None, cx));
+        let (app, _vcx) = cx
+            .add_window_view(|window, cx| StoatApp::new(Vec::new(), RestoreMode::None, window, cx));
         let cwd = std::env::current_dir().expect("current_dir");
         let expected_name: SharedString = cwd
             .file_name()
@@ -227,8 +259,8 @@ mod tests {
     fn new_seeds_focused_pane_with_scratch_editor() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
-        let (app, _vcx) =
-            cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), RestoreMode::None, cx));
+        let (app, _vcx) = cx
+            .add_window_view(|window, cx| StoatApp::new(Vec::new(), RestoreMode::None, window, cx));
 
         app.read_with(&cx, |app, cx| {
             let ws = app.workspace.read(cx);
@@ -288,8 +320,8 @@ mod tests {
         let fs_global: Arc<dyn stoat::host::FsHost> = fs.clone();
         cx.update(|cx| cx.set_global(FsHostGlobal(fs_global.clone())));
 
-        let (app, _vcx) =
-            cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), RestoreMode::None, cx));
+        let (app, _vcx) = cx
+            .add_window_view(|window, cx| StoatApp::new(Vec::new(), RestoreMode::None, window, cx));
 
         // The initial scratch workspace is fresh and saves nothing, so
         // split a pane to make the quit save produce a state file.
@@ -322,8 +354,9 @@ mod tests {
         install_executor_global(&mut cx);
         let fs: Arc<dyn stoat::host::FsHost> = Arc::new(stoat::host::FakeFs::new());
         cx.update(|cx| cx.set_global(FsHostGlobal(fs)));
-        let (app, _vcx) =
-            cx.add_window_view(|_window, cx| StoatApp::new(Vec::new(), RestoreMode::Continue, cx));
+        let (app, _vcx) = cx.add_window_view(|window, cx| {
+            StoatApp::new(Vec::new(), RestoreMode::Continue, window, cx)
+        });
 
         app.read_with(&cx, |app, cx| {
             let ws = app.workspace.read(cx);

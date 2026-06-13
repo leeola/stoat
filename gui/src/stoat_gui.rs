@@ -171,18 +171,20 @@ pub fn run(
     Application::new().run(move |cx: &mut App| {
         tracing::info!("stoat gui starting");
         install_production_globals(cx, globals);
-        let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), cx);
+        let window_bounds = restored_window_bounds(restore, cx).unwrap_or_else(|| {
+            WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(800.0)), cx))
+        });
         let window = cx
             .open_window(
                 WindowOptions {
-                    window_bounds: Some(WindowBounds::Windowed(bounds)),
+                    window_bounds: Some(window_bounds),
                     titlebar: Some(TitlebarOptions {
                         title: Some(SharedString::from("Stoat")),
                         ..Default::default()
                     }),
                     ..Default::default()
                 },
-                move |_window, cx| cx.new(|cx| StoatApp::new(files, restore, cx)),
+                move |window, cx| cx.new(|cx| StoatApp::new(files, restore, window, cx)),
             )
             .expect("open root window");
         if let Some(keystrokes) = inputs {
@@ -205,4 +207,29 @@ pub fn run(
         .detach();
         cx.activate(true);
     });
+}
+
+/// Peek the window geometry saved for the resume anchor so the root
+/// window can open at its previous bounds before any view is built.
+///
+/// Returns `None` outside `--continue`, when no persisted state exists,
+/// or when the newest state predates window-bounds tracking. Reads the
+/// most-recent state file via the same anchor resolution
+/// [`StoatApp::new`] uses for the full restore.
+fn restored_window_bounds(restore: RestoreMode, cx: &App) -> Option<WindowBounds> {
+    if restore != RestoreMode::Continue {
+        return None;
+    }
+    let fs = cx.try_global::<FsHostGlobal>()?.0.clone();
+    let cwd = std::env::current_dir().ok()?;
+    let anchor = stoat::workspace::persist::find_resume_anchor(&cwd, &*fs).ok()??;
+    let newest = workspace_persist::list_workspace_files(&anchor, &*fs)
+        .ok()?
+        .into_iter()
+        .next()?;
+    let mut buf = Vec::new();
+    fs.read(&newest, &mut buf).ok()?;
+    let body = String::from_utf8(buf).ok()?;
+    let state: workspace_persist::WorkspaceStateV1 = ron::from_str(&body).ok()?;
+    Some(state.window_bounds?.to_window_bounds())
 }

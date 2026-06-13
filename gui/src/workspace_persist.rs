@@ -21,6 +21,7 @@ use crate::{
     dock::{DockSide, DockVisibility},
     item::ItemKind,
 };
+use gpui::{point, px, size, Bounds, WindowBounds};
 use serde::{Deserialize, Serialize};
 use std::{
     collections::{BTreeMap, VecDeque},
@@ -65,6 +66,63 @@ pub struct WorkspaceStateV1 {
     /// per-pane default.
     #[serde(default = "default_true")]
     pub minimap_visible: bool,
+    /// Window geometry restored before the window opens. `None` for
+    /// snapshots written before window bounds were tracked, which reopen
+    /// at the centered default.
+    #[serde(default)]
+    pub window_bounds: Option<WindowBoundsV1>,
+}
+
+/// Window placement mode persisted alongside the bounds rect, mirroring
+/// gpui's [`WindowBounds`] variants.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub enum WindowModeV1 {
+    Windowed,
+    Maximized,
+    Fullscreen,
+}
+
+/// Persisted window geometry: the placement mode plus the bounds rect in
+/// logical pixels (origin + size). Restored into a [`WindowBounds`] before
+/// the window opens so a `--continue` session reopens where it was.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct WindowBoundsV1 {
+    pub mode: WindowModeV1,
+    pub x: f32,
+    pub y: f32,
+    pub width: f32,
+    pub height: f32,
+}
+
+impl WindowBoundsV1 {
+    /// Capture a gpui [`WindowBounds`] as the persisted shape.
+    pub fn from_window_bounds(bounds: WindowBounds) -> Self {
+        let (mode, rect) = match bounds {
+            WindowBounds::Windowed(rect) => (WindowModeV1::Windowed, rect),
+            WindowBounds::Maximized(rect) => (WindowModeV1::Maximized, rect),
+            WindowBounds::Fullscreen(rect) => (WindowModeV1::Fullscreen, rect),
+        };
+        Self {
+            mode,
+            x: f32::from(rect.origin.x),
+            y: f32::from(rect.origin.y),
+            width: f32::from(rect.size.width),
+            height: f32::from(rect.size.height),
+        }
+    }
+
+    /// Rebuild the gpui [`WindowBounds`] for `WindowOptions` on restore.
+    pub fn to_window_bounds(self) -> WindowBounds {
+        let rect = Bounds {
+            origin: point(px(self.x), px(self.y)),
+            size: size(px(self.width), px(self.height)),
+        };
+        match self.mode {
+            WindowModeV1::Windowed => WindowBounds::Windowed(rect),
+            WindowModeV1::Maximized => WindowBounds::Maximized(rect),
+            WindowModeV1::Fullscreen => WindowBounds::Fullscreen(rect),
+        }
+    }
 }
 
 /// V1 dock snapshot: position, current visibility (open width /
@@ -330,5 +388,36 @@ mod tests {
         };
         let (_, _, _, item) = snap.into_parts();
         assert_eq!(item.expect("item present").kind, ItemKind::Terminal);
+    }
+
+    #[test]
+    fn window_bounds_records_origin_and_size() {
+        let v1 = WindowBoundsV1::from_window_bounds(WindowBounds::Windowed(Bounds {
+            origin: point(px(12.0), px(34.0)),
+            size: size(px(800.0), px(600.0)),
+        }));
+        assert_eq!(v1.mode, WindowModeV1::Windowed);
+        assert_eq!(
+            (v1.x, v1.y, v1.width, v1.height),
+            (12.0, 34.0, 800.0, 600.0)
+        );
+    }
+
+    #[test]
+    fn window_bounds_round_trips_every_mode() {
+        let rect = Bounds {
+            origin: point(px(12.0), px(34.0)),
+            size: size(px(800.0), px(600.0)),
+        };
+        for original in [
+            WindowBounds::Windowed(rect),
+            WindowBounds::Maximized(rect),
+            WindowBounds::Fullscreen(rect),
+        ] {
+            assert_eq!(
+                WindowBoundsV1::from_window_bounds(original).to_window_bounds(),
+                original
+            );
+        }
     }
 }
