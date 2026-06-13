@@ -1,9 +1,9 @@
 use crate::{
     display_map::highlights::{HighlightStyle, HighlightStyleId, HighlightStyleInterner},
     host::DiffStatus,
+    style::{Color, Modifier, Style},
     theme::Theme,
 };
-use ratatui::style::{Color, Modifier, Style};
 use std::sync::Arc;
 use stoat_language::HighlightId;
 
@@ -247,7 +247,7 @@ impl DiffTheme {
 #[cfg(test)]
 mod tests {
     use super::{theme_scope_for_key, DiffTheme, SyntaxStyles, THEME_KEYS};
-    use crate::theme::Theme;
+    use crate::{style::Color, theme::Theme};
     use stoat_config::parse;
     use stoat_language::{HighlightId, HighlightMap};
 
@@ -371,35 +371,17 @@ mod tests {
     #[test]
     fn diff_theme_default_carries_staged_palette() {
         let dt = DiffTheme::default();
-        assert_eq!(
-            dt.staged_added,
-            ratatui::style::Color::Rgb(0xbb, 0xb5, 0x29)
-        );
-        assert_eq!(
-            dt.staged_modified,
-            ratatui::style::Color::Rgb(0xd4, 0xaa, 0x32)
-        );
-        assert_eq!(
-            dt.staged_deleted,
-            ratatui::style::Color::Rgb(0xd0, 0x88, 0x40)
-        );
+        assert_eq!(dt.staged_added, Color::Rgb(0xbb, 0xb5, 0x29));
+        assert_eq!(dt.staged_modified, Color::Rgb(0xd4, 0xaa, 0x32));
+        assert_eq!(dt.staged_deleted, Color::Rgb(0xd0, 0x88, 0x40));
     }
 
     #[test]
     fn diff_theme_default_carries_committed_palette() {
         let dt = DiffTheme::default();
-        assert_eq!(
-            dt.committed_added,
-            ratatui::style::Color::Rgb(0x9b, 0x7e, 0xd8)
-        );
-        assert_eq!(
-            dt.committed_modified,
-            ratatui::style::Color::Rgb(0x84, 0x70, 0xc4)
-        );
-        assert_eq!(
-            dt.committed_deleted,
-            ratatui::style::Color::Rgb(0xb0, 0x7c, 0xc0)
-        );
+        assert_eq!(dt.committed_added, Color::Rgb(0x9b, 0x7e, 0xd8));
+        assert_eq!(dt.committed_modified, Color::Rgb(0x84, 0x70, 0xc4));
+        assert_eq!(dt.committed_deleted, Color::Rgb(0xb0, 0x7c, 0xc0));
     }
 
     #[test]
@@ -419,34 +401,16 @@ mod tests {
             }"##,
         );
         let dt = DiffTheme::from_theme(&theme);
-        assert_eq!(dt.added, ratatui::style::Color::Green);
-        assert_eq!(dt.deleted, ratatui::style::Color::Red);
-        assert_eq!(dt.modified, ratatui::style::Color::Yellow);
-        assert_eq!(dt.moved, ratatui::style::Color::Cyan);
-        assert_eq!(
-            dt.staged_added,
-            ratatui::style::Color::Rgb(0x11, 0x22, 0x33)
-        );
-        assert_eq!(
-            dt.staged_modified,
-            ratatui::style::Color::Rgb(0x44, 0x55, 0x66)
-        );
-        assert_eq!(
-            dt.staged_deleted,
-            ratatui::style::Color::Rgb(0x77, 0x88, 0x99)
-        );
-        assert_eq!(
-            dt.committed_added,
-            ratatui::style::Color::Rgb(0xaa, 0xbb, 0xcc)
-        );
-        assert_eq!(
-            dt.committed_modified,
-            ratatui::style::Color::Rgb(0xdd, 0xee, 0xff)
-        );
-        assert_eq!(
-            dt.committed_deleted,
-            ratatui::style::Color::Rgb(0x10, 0x20, 0x30)
-        );
+        assert_eq!(dt.added, Color::Green);
+        assert_eq!(dt.deleted, Color::Red);
+        assert_eq!(dt.modified, Color::Yellow);
+        assert_eq!(dt.moved, Color::Cyan);
+        assert_eq!(dt.staged_added, Color::Rgb(0x11, 0x22, 0x33));
+        assert_eq!(dt.staged_modified, Color::Rgb(0x44, 0x55, 0x66));
+        assert_eq!(dt.staged_deleted, Color::Rgb(0x77, 0x88, 0x99));
+        assert_eq!(dt.committed_added, Color::Rgb(0xaa, 0xbb, 0xcc));
+        assert_eq!(dt.committed_modified, Color::Rgb(0xdd, 0xee, 0xff));
+        assert_eq!(dt.committed_deleted, Color::Rgb(0x10, 0x20, 0x30));
     }
 
     #[test]

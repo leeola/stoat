@@ -1004,8 +1004,8 @@ mod tests {
         buffer::{BufferId, TextBuffer},
         diff_map::{DiffHunk, DiffHunkStatus, DiffMap},
         multi_buffer::MultiBuffer,
+        style::Color,
     };
-    use ratatui::style::Color;
     use std::{
         ops::Range,
         sync::{Arc, RwLock},

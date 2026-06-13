@@ -4,8 +4,8 @@ use crate::{
         inlay_map::{InlayId, InlayKind},
         DiagnosticSeverity,
     },
+    style::{Color, Modifier, Style},
 };
-use ratatui::style::{Color, Modifier, Style};
 use std::{
     borrow::Cow,
     cmp::Ordering,
@@ -669,7 +669,7 @@ mod tests {
         HighlightEndpoint, HighlightKey, HighlightLayer, HighlightStyle, OffsetAnchorResolver,
         TextHighlights,
     };
-    use ratatui::style::Color;
+    use crate::style::Color;
     use std::{collections::HashMap, ops::Range, sync::Arc};
     use stoat_text::{Anchor, Bias};
 

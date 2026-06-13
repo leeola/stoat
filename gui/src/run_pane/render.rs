@@ -77,7 +77,7 @@ fn cursor_overlay(cursor: &CursorRender) -> Div {
 /// Named-color hex table mirroring
 /// `gui/src/editor/render.rs::NAMED_COLOR_HEX`. Indexed-color and
 /// 24-bit RGB resolve through the same fallback ramps the editor's
-/// `ratatui_color_to_hsla` uses; the duplication is intentional --
+/// `color_to_hsla` uses; the duplication is intentional --
 /// the editor table is private and pulling vterm rendering into
 /// the editor module would be the wrong direction.
 const NAMED_COLOR_HEX: [u32; 16] = [

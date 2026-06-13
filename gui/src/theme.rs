@@ -1,4 +1,4 @@
-use crate::editor::render::ratatui_color_to_hsla;
+use crate::editor::render::color_to_hsla;
 use gpui::{hsla, rgb, App, Global, Hsla};
 
 /// Default monospace font family used by the editor pane when the
@@ -476,7 +476,7 @@ fn theme_fg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
     let Some(color) = theme.0.try_get(scope).and_then(|style| style.fg) else {
         return fallback;
     };
-    let Some(mut hsla) = ratatui_color_to_hsla(color) else {
+    let Some(mut hsla) = color_to_hsla(color) else {
         return fallback;
     };
     if let Some(alpha) = theme.0.fg_alpha(scope) {
@@ -492,7 +492,7 @@ fn theme_bg_or(cx: &App, scope: &str, fallback: Hsla) -> Hsla {
     let Some(color) = theme.0.try_get(scope).and_then(|style| style.bg) else {
         return fallback;
     };
-    let Some(mut hsla) = ratatui_color_to_hsla(color) else {
+    let Some(mut hsla) = color_to_hsla(color) else {
         return fallback;
     };
     if let Some(alpha) = theme.0.bg_alpha(scope) {

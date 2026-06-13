@@ -751,14 +751,16 @@ mod tests {
 
     #[test]
     fn tab_chunk_inherits_surrounding_style() {
-        use crate::display_map::{
-            fold_map::FoldOffset,
-            highlights::{
-                create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
-                OffsetAnchorResolver,
+        use crate::{
+            display_map::{
+                fold_map::FoldOffset,
+                highlights::{
+                    create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
+                    OffsetAnchorResolver,
+                },
             },
+            style::Color,
         };
-        use ratatui::style::Color;
         use std::collections::HashMap;
         use stoat_text::Anchor;
 

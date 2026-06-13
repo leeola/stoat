@@ -4,7 +4,7 @@
 //! use progressive-broadening fallback so tree-sitter captures like
 //! `syntax.keyword.control` inherit from `syntax.keyword` when unspecified.
 
-use ratatui::style::{Color, Modifier, Style};
+use crate::style::{Color, Modifier, Style};
 use snafu::{OptionExt, Snafu};
 use std::collections::{HashMap, HashSet};
 use stoat_config::{Config, Expr, Setting, Spanned, Statement, ThemeBlock, Value};

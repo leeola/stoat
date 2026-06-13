@@ -2496,11 +2496,13 @@ mod tests {
 
     #[test]
     fn wrapped_chunks_preserve_highlights() {
-        use crate::display_map::highlights::{
-            create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
-            OffsetAnchorResolver,
+        use crate::{
+            display_map::highlights::{
+                create_highlight_endpoints, HighlightKey, HighlightLayer, HighlightStyle,
+                OffsetAnchorResolver,
+            },
+            style::Color,
         };
-        use ratatui::style::Color;
         use std::collections::HashMap;
         use stoat_text::Anchor;
 

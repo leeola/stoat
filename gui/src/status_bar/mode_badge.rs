@@ -1,6 +1,6 @@
 use crate::{
-    editor::render::ratatui_color_to_hsla, input_state_machine::InputStateMachine,
-    item::ItemHandle, settings::Settings, status_bar::StatusItemView, theme::Theme,
+    editor::render::color_to_hsla, input_state_machine::InputStateMachine, item::ItemHandle,
+    settings::Settings, status_bar::StatusItemView, theme::Theme,
 };
 use gpui::{
     div, rgb, Context, Entity, Hsla, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -61,7 +61,7 @@ impl StatusItemView for ModeBadge {
 fn theme_color(cx: &gpui::App, scope: &str) -> Option<Hsla> {
     let theme = cx.try_global::<Theme>()?;
     let style = theme.0.try_get(scope)?;
-    ratatui_color_to_hsla(style.fg?)
+    color_to_hsla(style.fg?)
 }
 
 /// Per-mode descriptor: 3-letter abbreviation, default

@@ -10,7 +10,6 @@ use gpui::{
     div, App, AppContext, Context, Entity, FontWeight, Hsla, IntoElement, ParentElement, Render,
     SharedString, Styled, Subscription, Window,
 };
-use ratatui::style::Color;
 use serde_json::Value;
 use std::{
     ops::Range,
@@ -21,6 +20,7 @@ use stoat::{
     buffer::BufferId,
     display_map::highlights::{DecorationHighlight, HighlightStyle},
     host::ConflictedFile,
+    style::Color,
 };
 use stoat_text::Bias;
 

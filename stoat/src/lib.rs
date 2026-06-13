@@ -28,6 +28,7 @@ pub mod review_session;
 pub mod run;
 pub mod selection;
 pub mod snippet;
+pub mod style;
 pub mod theme;
 pub mod workspace;
 

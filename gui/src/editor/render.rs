@@ -7,7 +7,7 @@ use gpui::{
 };
 use lru::LruCache;
 use lsp_types::DiagnosticSeverity;
-use ratatui::style::{Color, Modifier, Style as RatatuiStyle};
+use ratatui::style::{Color as RatatuiColor, Modifier as RatatuiModifier, Style as RatatuiStyle};
 use std::{
     cell::RefCell,
     collections::{BTreeMap, BTreeSet},
@@ -21,6 +21,7 @@ use stoat::{
     host::BlameLine,
     review::MoveProvenance,
     review_session::ChunkStatus,
+    style::Color,
     BlockRowKind, DisplayPoint, DisplaySnapshot, MultiBufferSnapshot, RowInfo,
 };
 use stoat_config::{LineNumberMode, ShowWhitespace};
@@ -45,7 +46,7 @@ const NAMED_COLOR_HEX: [u32; 16] = [
     0xffffff, // 15 White
 ];
 
-pub(crate) fn ratatui_color_to_hsla(color: Color) -> Option<Hsla> {
+pub(crate) fn color_to_hsla(color: Color) -> Option<Hsla> {
     let hex = match color {
         Color::Reset => return None,
         Color::Black => NAMED_COLOR_HEX[0],
@@ -88,8 +89,8 @@ fn indexed_color_hex(n: u8) -> u32 {
 
 pub(crate) fn convert_highlight_style(src: &StoatHighlightStyle) -> gpui::HighlightStyle {
     gpui::HighlightStyle {
-        color: src.foreground.and_then(ratatui_color_to_hsla),
-        background_color: src.background.and_then(ratatui_color_to_hsla),
+        color: src.foreground.and_then(color_to_hsla),
+        background_color: src.background.and_then(color_to_hsla),
         font_weight: src.bold.and_then(|b| b.then_some(FontWeight::BOLD)),
         font_style: src.italic.and_then(|b| b.then_some(FontStyle::Italic)),
         underline: src.underline.and_then(|b| {
@@ -285,30 +286,66 @@ fn block_context_for<'a>(
     }
 }
 
+/// Bridge a ratatui color into the native [`Color`] space.
+///
+/// Block content is carried as `ratatui::text::Line` spans, so the block
+/// rendering path is the one place still speaking ratatui styling. This
+/// adapter funnels it through the single native [`color_to_hsla`]; it goes
+/// away once block lines adopt the native style vocabulary.
+fn ratatui_color_to_native(color: RatatuiColor) -> Color {
+    match color {
+        RatatuiColor::Reset => Color::Reset,
+        RatatuiColor::Black => Color::Black,
+        RatatuiColor::Red => Color::Red,
+        RatatuiColor::Green => Color::Green,
+        RatatuiColor::Yellow => Color::Yellow,
+        RatatuiColor::Blue => Color::Blue,
+        RatatuiColor::Magenta => Color::Magenta,
+        RatatuiColor::Cyan => Color::Cyan,
+        RatatuiColor::Gray => Color::Gray,
+        RatatuiColor::DarkGray => Color::DarkGray,
+        RatatuiColor::LightRed => Color::LightRed,
+        RatatuiColor::LightGreen => Color::LightGreen,
+        RatatuiColor::LightYellow => Color::LightYellow,
+        RatatuiColor::LightBlue => Color::LightBlue,
+        RatatuiColor::LightMagenta => Color::LightMagenta,
+        RatatuiColor::LightCyan => Color::LightCyan,
+        RatatuiColor::White => Color::White,
+        RatatuiColor::Rgb(r, g, b) => Color::Rgb(r, g, b),
+        RatatuiColor::Indexed(n) => Color::Indexed(n),
+    }
+}
+
 fn convert_ratatui_style(style: &RatatuiStyle) -> gpui::HighlightStyle {
     let modifier = style.add_modifier;
     gpui::HighlightStyle {
-        color: style.fg.and_then(ratatui_color_to_hsla),
-        background_color: style.bg.and_then(ratatui_color_to_hsla),
+        color: style
+            .fg
+            .map(ratatui_color_to_native)
+            .and_then(color_to_hsla),
+        background_color: style
+            .bg
+            .map(ratatui_color_to_native)
+            .and_then(color_to_hsla),
         font_weight: modifier
-            .contains(Modifier::BOLD)
+            .contains(RatatuiModifier::BOLD)
             .then_some(FontWeight::BOLD),
         font_style: modifier
-            .contains(Modifier::ITALIC)
+            .contains(RatatuiModifier::ITALIC)
             .then_some(FontStyle::Italic),
         underline: modifier
-            .contains(Modifier::UNDERLINED)
+            .contains(RatatuiModifier::UNDERLINED)
             .then(|| UnderlineStyle {
                 thickness: px(1.0),
                 color: None,
                 wavy: false,
             }),
-        strikethrough: modifier
-            .contains(Modifier::CROSSED_OUT)
-            .then(|| StrikethroughStyle {
+        strikethrough: modifier.contains(RatatuiModifier::CROSSED_OUT).then(|| {
+            StrikethroughStyle {
                 thickness: px(1.0),
                 color: None,
-            }),
+            }
+        }),
         fade_out: None,
     }
 }
@@ -2516,68 +2553,56 @@ mod tests {
     }
 
     #[test]
-    fn ratatui_color_to_hsla_named_colors() {
-        assert_eq!(
-            ratatui_color_to_hsla(Color::Black).map(hex_of),
-            Some(0x000000),
-        );
-        assert_eq!(
-            ratatui_color_to_hsla(Color::Red).map(hex_of),
-            Some(0xcd0000),
-        );
-        assert_eq!(
-            ratatui_color_to_hsla(Color::White).map(hex_of),
-            Some(0xffffff),
-        );
+    fn color_to_hsla_named_colors() {
+        assert_eq!(color_to_hsla(Color::Black).map(hex_of), Some(0x000000),);
+        assert_eq!(color_to_hsla(Color::Red).map(hex_of), Some(0xcd0000),);
+        assert_eq!(color_to_hsla(Color::White).map(hex_of), Some(0xffffff),);
     }
 
     #[test]
-    fn ratatui_color_to_hsla_rgb_passthrough() {
+    fn color_to_hsla_rgb_passthrough() {
         assert_eq!(
-            ratatui_color_to_hsla(Color::Rgb(0x12, 0x34, 0x56)).map(hex_of),
+            color_to_hsla(Color::Rgb(0x12, 0x34, 0x56)).map(hex_of),
             Some(0x123456),
         );
     }
 
     #[test]
-    fn ratatui_color_to_hsla_indexed_named() {
+    fn color_to_hsla_indexed_named() {
+        assert_eq!(color_to_hsla(Color::Indexed(1)).map(hex_of), Some(0xcd0000),);
         assert_eq!(
-            ratatui_color_to_hsla(Color::Indexed(1)).map(hex_of),
-            Some(0xcd0000),
-        );
-        assert_eq!(
-            ratatui_color_to_hsla(Color::Indexed(15)).map(hex_of),
+            color_to_hsla(Color::Indexed(15)).map(hex_of),
             Some(0xffffff),
         );
     }
 
     #[test]
-    fn ratatui_color_to_hsla_indexed_cube() {
+    fn color_to_hsla_indexed_cube() {
         assert_eq!(
-            ratatui_color_to_hsla(Color::Indexed(16)).map(hex_of),
+            color_to_hsla(Color::Indexed(16)).map(hex_of),
             Some(0x000000),
         );
         assert_eq!(
-            ratatui_color_to_hsla(Color::Indexed(231)).map(hex_of),
+            color_to_hsla(Color::Indexed(231)).map(hex_of),
             Some(0xffffff),
         );
     }
 
     #[test]
-    fn ratatui_color_to_hsla_indexed_grayscale() {
+    fn color_to_hsla_indexed_grayscale() {
         assert_eq!(
-            ratatui_color_to_hsla(Color::Indexed(232)).map(hex_of),
+            color_to_hsla(Color::Indexed(232)).map(hex_of),
             Some(0x080808),
         );
         assert_eq!(
-            ratatui_color_to_hsla(Color::Indexed(255)).map(hex_of),
+            color_to_hsla(Color::Indexed(255)).map(hex_of),
             Some(0xeeeeee),
         );
     }
 
     #[test]
-    fn ratatui_color_to_hsla_reset_returns_none() {
-        assert_eq!(ratatui_color_to_hsla(Color::Reset), None);
+    fn color_to_hsla_reset_returns_none() {
+        assert_eq!(color_to_hsla(Color::Reset), None);
     }
 
     fn stoat_style(
@@ -4662,7 +4687,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let render: stoat::display_map::RenderBlock = Arc::new(|_ctx| {
             vec![Line::from(vec![
-                Span::styled("red", RatatuiStyle::new().fg(Color::Red)),
+                Span::styled("red", RatatuiStyle::new().fg(RatatuiColor::Red)),
                 Span::raw("plain"),
             ])]
         });
@@ -4690,7 +4715,7 @@ mod tests {
         let render: stoat::display_map::RenderBlock = Arc::new(|_ctx| {
             vec![Line::from(vec![Span::styled(
                 "bold",
-                RatatuiStyle::new().add_modifier(Modifier::BOLD),
+                RatatuiStyle::new().add_modifier(RatatuiModifier::BOLD),
             )])]
         });
         let snapshot = snapshot_with_render_block(
