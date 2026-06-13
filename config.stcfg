@@ -270,7 +270,7 @@ on key {
         ~ -> SwitchCase();
         ` -> SwitchToLowercase();
         Alt-` -> SwitchToUppercase();
-        Ctrl-` -> OpenTerminalDock();
+        Ctrl-` -> terminal-dock();
         Ctrl-a -> Increment();
         Ctrl-x -> Decrement();
         d -> DeleteSelection();
@@ -278,7 +278,7 @@ on key {
         U -> Redo();
         Ctrl-s -> CommitUndoCheckpoint();
         G -> goto();
-        Ctrl-g -> OpenGotoLineModal();
+        Ctrl-g -> goto-line();
         > -> IndentSelection();
         < -> UnindentSelection();
         = -> FormatSelections();
@@ -614,7 +614,7 @@ on key {
         Escape -> SetMode(normal);
         q -> quit();
         a -> SetMode(space_pane_nav);
-        t -> [OpenRun(), SetMode(run)];
+        t -> [run(), SetMode(run)];
         w -> SetMode(space_workspace);
         b -> SetMode(space_buffer);
         l -> SetMode(space_lsp);
@@ -683,7 +683,7 @@ on key {
         m -> [minimap(), SetMode(normal)];
         o -> [outline-panel(), SetMode(normal)];
         d -> [diagnostics-panel(), SetMode(normal)];
-        M -> [OpenMarkdownPreview(), SetMode(normal)];
+        M -> [markdown-preview(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == run {
@@ -708,8 +708,8 @@ on key {
         s -> [vsplit(), SetMode(normal)];
         v -> [hsplit(), SetMode(normal)];
         n -> SetMode(space_pane_nav_new);
-        f -> OpenFileFinderHSplit();
-        F -> OpenFileFinderVSplit();
+        f -> files-hsplit();
+        F -> files-vsplit();
         q -> [close(), SetMode(normal)];
         o -> [only(), SetMode(normal)];
         w -> [FocusNext(), SetMode(normal)];

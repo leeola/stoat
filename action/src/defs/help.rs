@@ -56,7 +56,7 @@ pub struct OpenAboutDef;
 
 impl ActionDef for OpenAboutDef {
     fn name(&self) -> &'static str {
-        "OpenAbout"
+        "about"
     }
 
     fn kind(&self) -> ActionKind {

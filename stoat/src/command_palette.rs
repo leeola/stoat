@@ -686,14 +686,13 @@ mod tests {
 
     #[test]
     fn tier_boundary_dominates_priority() {
-        // `OpenRun` is Common but matches `"Run"` only as a substring, so it
-        // must sink below every prefix-tier match regardless of that match's
-        // priority (Common `Run`, Normal `RunSubmit`, etc.).
-        let listed = names_for("Run");
-        let open_run = pos_in(&listed, "OpenRun");
-        assert!(pos_in(&listed, "Run") < open_run);
-        assert!(pos_in(&listed, "RunSubmit") < open_run);
-        assert!(pos_in(&listed, "RunHistoryNext") < open_run);
+        // `claude-terminal` is Common but matches `"terminal"` only as a
+        // substring, so it must sink below every prefix-tier match regardless
+        // of that match's priority (Common `terminal`, `terminal-dock`).
+        let listed = names_for("terminal");
+        let claude_terminal = pos_in(&listed, "claude-terminal");
+        assert!(pos_in(&listed, "terminal") < claude_terminal);
+        assert!(pos_in(&listed, "terminal-dock") < claude_terminal);
     }
 
     #[test]

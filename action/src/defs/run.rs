@@ -7,7 +7,7 @@ use std::any::Any;
 define_action!(
     OpenRunDef,
     OpenRun,
-    "OpenRun",
+    "run",
     ActionKind::OpenRun,
     "open terminal",
     "Open a terminal pane for running commands.",
@@ -18,7 +18,7 @@ define_action!(
 define_action!(
     OpenTerminalDockDef,
     OpenTerminalDock,
-    "OpenTerminalDock",
+    "terminal-dock",
     ActionKind::OpenTerminalDock,
     "open terminal dock",
     "Open the run pane in a bottom dock, or toggle its visibility when it is already open.",
@@ -29,7 +29,7 @@ define_action!(
 define_action!(
     OpenClaudeTerminalDef,
     OpenClaudeTerminal,
-    "OpenClaudeTerminal",
+    "claude-terminal",
     ActionKind::OpenClaudeTerminal,
     "open claude terminal",
     "Open a terminal pane running the claude CLI in the project root.",
@@ -150,21 +150,21 @@ mod tests {
     #[test]
     fn open_run() {
         assert_eq!(OpenRun.kind(), ActionKind::OpenRun);
-        assert_eq!(OpenRun.def().name(), "OpenRun");
+        assert_eq!(OpenRun.def().name(), "run");
         assert!(!OpenRun.def().hint_visible());
     }
 
     #[test]
     fn open_terminal_dock() {
         assert_eq!(OpenTerminalDock.kind(), ActionKind::OpenTerminalDock);
-        assert_eq!(OpenTerminalDock.def().name(), "OpenTerminalDock");
+        assert_eq!(OpenTerminalDock.def().name(), "terminal-dock");
         assert!(!OpenTerminalDock.def().hint_visible());
     }
 
     #[test]
     fn open_claude_terminal() {
         assert_eq!(OpenClaudeTerminal.kind(), ActionKind::OpenClaudeTerminal);
-        assert_eq!(OpenClaudeTerminal.def().name(), "OpenClaudeTerminal");
+        assert_eq!(OpenClaudeTerminal.def().name(), "claude-terminal");
         assert!(!OpenClaudeTerminal.def().hint_visible());
     }
 

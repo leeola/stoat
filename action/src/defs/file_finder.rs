@@ -54,7 +54,7 @@ pub struct OpenFileFinderHSplitDef;
 
 impl ActionDef for OpenFileFinderHSplitDef {
     fn name(&self) -> &'static str {
-        "OpenFileFinderHSplit"
+        "files-hsplit"
     }
 
     fn kind(&self) -> ActionKind {
@@ -102,7 +102,7 @@ pub struct OpenFileFinderVSplitDef;
 
 impl ActionDef for OpenFileFinderVSplitDef {
     fn name(&self) -> &'static str {
-        "OpenFileFinderVSplit"
+        "files-vsplit"
     }
 
     fn kind(&self) -> ActionKind {
@@ -498,14 +498,14 @@ mod tests {
             OpenFileFinderHSplit.kind(),
             ActionKind::OpenFileFinderHSplit
         );
-        assert_eq!(OpenFileFinderHSplit.def().name(), "OpenFileFinderHSplit");
+        assert_eq!(OpenFileFinderHSplit.def().name(), "files-hsplit");
         assert!(OpenFileFinderHSplit.def().palette_visible());
 
         assert_eq!(
             OpenFileFinderVSplit.kind(),
             ActionKind::OpenFileFinderVSplit
         );
-        assert_eq!(OpenFileFinderVSplit.def().name(), "OpenFileFinderVSplit");
+        assert_eq!(OpenFileFinderVSplit.def().name(), "files-vsplit");
         assert!(OpenFileFinderVSplit.def().palette_visible());
 
         assert_eq!(

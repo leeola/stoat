@@ -655,7 +655,7 @@ impl TestHarness {
 
     pub fn open_run(&mut self) -> crate::run::RunId {
         use crate::pane::View;
-        self.type_action("OpenRun()");
+        self.type_action("run()");
         let ws = self.stoat.active_workspace();
         let focused = ws.panes.focus();
         match ws.panes.pane(focused).view {
