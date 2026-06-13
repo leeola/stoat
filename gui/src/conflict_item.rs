@@ -389,6 +389,66 @@ fn format_conflict_markers(ours: Option<&str>, theirs: Option<&str>) -> String {
     out
 }
 
+/// Reconstruct a [`ConflictedFile`] from the on-disk content of a
+/// conflicted file, for restoring a conflict view across a restart
+/// where the 3-way merge state is no longer in memory. Walks the
+/// `<<<<<<< / ======= / >>>>>>>` blocks, accumulating full-file
+/// versions: lines outside a block belong to both sides, `ours` /
+/// `theirs` lines to their respective side, and marker lines are
+/// dropped. The common ancestor is not recoverable from two-way
+/// markers, so it is left absent.
+///
+/// Returns [`None`] when `content` carries no complete conflict block:
+/// the conflict is resolved and the view should not be restored.
+pub fn conflicted_file_from_markers(rel_path: PathBuf, content: &str) -> Option<ConflictedFile> {
+    enum Side {
+        Outside,
+        Ours,
+        Theirs,
+    }
+    let mut side = Side::Outside;
+    let mut ours = String::new();
+    let mut theirs = String::new();
+    let mut saw_complete_block = false;
+    for line in content.split_inclusive('\n') {
+        let marker = line.strip_suffix('\n').unwrap_or(line);
+        match side {
+            Side::Outside => {
+                if marker.starts_with("<<<<<<<") {
+                    side = Side::Ours;
+                } else {
+                    ours.push_str(line);
+                    theirs.push_str(line);
+                }
+            },
+            Side::Ours => {
+                if marker.starts_with("=======") {
+                    side = Side::Theirs;
+                } else {
+                    ours.push_str(line);
+                }
+            },
+            Side::Theirs => {
+                if marker.starts_with(">>>>>>>") {
+                    side = Side::Outside;
+                    saw_complete_block = true;
+                } else {
+                    theirs.push_str(line);
+                }
+            },
+        }
+    }
+    if !saw_complete_block {
+        return None;
+    }
+    Some(ConflictedFile {
+        path: rel_path,
+        ancestor: None,
+        ours: Some(ours),
+        theirs: Some(theirs),
+    })
+}
+
 impl Render for ConflictItem {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
         let theme = cx.theme();

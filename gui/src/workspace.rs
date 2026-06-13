@@ -1276,6 +1276,33 @@ impl Workspace {
                         });
                         materialized += 1;
                     },
+                    crate::item::ItemKind::Conflict => {
+                        let Some(rel_path) = snap.blob.get("rel_path").and_then(|v| v.as_str())
+                        else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping conflict item with no rel_path during restore"
+                            );
+                            continue;
+                        };
+                        let rel_path = PathBuf::from(rel_path);
+                        let abs = self.git_root.join(&rel_path);
+                        let content = read_path_or_empty(&abs, cx);
+                        let Some(file) =
+                            crate::conflict_item::conflicted_file_from_markers(rel_path, &content)
+                        else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping conflict item: no conflict markers remain during restore"
+                            );
+                            continue;
+                        };
+                        let item = cx.new(|cx| ConflictItem::from_conflicted_file(file, cx));
+                        pane.update(cx, |p, cx| {
+                            p.add_item(Box::new(item), cx);
+                        });
+                        materialized += 1;
+                    },
                     crate::item::ItemKind::Terminal => {
                         let cwd = snap
                             .blob
@@ -18179,6 +18206,96 @@ mod tests {
                 rows,
                 vec![12],
                 "restored editor should keep its saved scroll row"
+            );
+        });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_conflict_item() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file(
+            "/tmp/repo/c.txt",
+            b"<<<<<<< ours\nA\n=======\nB\n>>>>>>> theirs\n",
+        );
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("c.txt", "A\n", "B\n"));
+
+        let path = PathBuf::from("/tmp/state/conflict-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let mut conflict_paths: Vec<PathBuf> = Vec::new();
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if let Ok(c) = item.to_any_view().downcast::<ConflictItem>() {
+                        conflict_paths.push(c.read(cx).path().to_path_buf());
+                    }
+                }
+            }
+            assert_eq!(
+                conflict_paths,
+                vec![PathBuf::from("c.txt")],
+                "conflict view restores while the file still has markers"
+            );
+        });
+    }
+
+    #[test]
+    fn restore_drops_conflict_item_when_markers_resolved() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/c.txt", b"resolved\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        open_conflict_item_in_focused_pane(vcx, &ws, conflicted_file("c.txt", "A\n", "B\n"));
+
+        let path = PathBuf::from("/tmp/state/conflict-resolved.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let mut conflict_count = 0;
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if item.to_any_view().downcast::<ConflictItem>().is_ok() {
+                        conflict_count += 1;
+                    }
+                }
+            }
+            assert_eq!(
+                conflict_count, 0,
+                "a resolved file drops the conflict view on restore"
             );
         });
     }
