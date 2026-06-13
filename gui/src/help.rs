@@ -1,6 +1,6 @@
 //! GUI help modal.
 //!
-//! Mirrors the TUI [`stoat::help::Help`] surface: lists every
+//! Mirrors the TUI `stoat::help::Help` surface: lists every
 //! palette-visible action (Active scope shows only keybindings live
 //! in the current mode; All scope shows every registry entry),
 //! supports search, scope toggle, list navigation, detail scroll,

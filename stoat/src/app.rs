@@ -6,12 +6,11 @@ use crate::{
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
     file_finder::FileFinder,
-    help::Help,
     host::{
         EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspServer,
         NoopFsWatcher, NoopLspServer,
     },
-    keymap::{is_text_input_mode, normalize_shift_event, resolve_action, Keymap, ResolvedAction},
+    keymap::{is_text_input_mode, normalize_shift_event, resolve_action, Keymap},
     keymap_state::StoatKeymapState,
     pane::{FocusTarget, View},
     rebase::RebasePause,
@@ -62,7 +61,6 @@ pub struct Stoat {
     pub settings: Settings,
     pub theme: crate::theme::Theme,
     pub(crate) command_palette: Option<CommandPalette>,
-    pub(crate) help: Option<Help>,
     pub(crate) file_finder: Option<FileFinder>,
     /// Name of the action that most recently opened a picker
     /// successfully. Used by `OpenLastPicker` (`space '`) to
@@ -492,18 +490,12 @@ impl Stoat {
     pub(crate) fn active_keys_for_mode(
         &self,
         mode: &str,
-    ) -> Vec<(&crate::keymap::CompiledKey, &[ResolvedAction])> {
+    ) -> Vec<(
+        &crate::keymap::CompiledKey,
+        &[crate::keymap::ResolvedAction],
+    )> {
         let state = StoatKeymapState::new(mode);
         self.keymap.active_keys(&state)
-    }
-
-    pub(crate) fn active_bindings_for_current_mode(&self) -> Vec<(String, Vec<ResolvedAction>)> {
-        let state = StoatKeymapState::new(&self.mode);
-        self.keymap
-            .active_bindings(&state)
-            .into_iter()
-            .map(|(label, actions)| (label, actions.to_vec()))
-            .collect()
     }
 
     pub fn new(executor: Executor, cli_settings: Settings, initial_git_root: PathBuf) -> Self {
@@ -562,7 +554,6 @@ impl Stoat {
             settings,
             theme,
             command_palette: None,
-            help: None,
             file_finder: None,
             last_picker_action: None,
             global_search_input: None,
@@ -1319,10 +1310,6 @@ impl Stoat {
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.help.is_some() {
-                action_handlers::close_help(self);
-                return UpdateEffect::Redraw;
-            }
             if self.file_finder.is_some() {
                 action_handlers::close_file_finder(self);
                 return UpdateEffect::Redraw;
@@ -1370,15 +1357,6 @@ impl Stoat {
 
         if is_text_input_mode(&self.mode) {
             if let Some(effect) = self.handle_insert_key(key) {
-                // If help is open, keep its filtered list in sync after every
-                // text mutation in the prompt input.
-                if self.help.is_some() {
-                    let active_idx = self.active_workspace;
-                    let workspaces = &mut self.workspaces;
-                    if let Some(help) = self.help.as_mut() {
-                        help.sync_filter(&workspaces[active_idx]);
-                    }
-                }
                 return effect;
             }
         }
@@ -1777,10 +1755,6 @@ impl Stoat {
             if let Some(input) = palette.focused_input() {
                 return Some((input.editor_id, input.buffer_id));
             }
-        }
-
-        if let Some(help) = &self.help {
-            return Some((help.input.editor_id, help.input.buffer_id));
         }
 
         if let Some(rename) = &self.rename_input {

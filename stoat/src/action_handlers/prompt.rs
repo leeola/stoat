@@ -32,9 +32,6 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(effect) = super::palette::palette_submit(stoat) {
         return effect;
     }
-    if stoat.help.is_some() {
-        return super::help::help_submit(stoat);
-    }
     if let Some(crate::input_view::SubmitTarget::Run) = focused_target(stoat) {
         return super::run::run_submit(stoat);
     }

@@ -35,7 +35,7 @@ impl StoatKeymapState {
         Self::with_flags(
             stoat.mode.as_str(),
             stoat.command_palette.is_some(),
-            stoat.help.is_some(),
+            false,
             stoat.file_finder.is_some(),
         )
     }

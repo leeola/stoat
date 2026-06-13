@@ -8,7 +8,6 @@ pub(crate) mod dock;
 pub(crate) mod editor;
 pub(crate) mod file_finder;
 pub(crate) mod global_search;
-pub(crate) mod help;
 pub(crate) mod hints;
 pub(crate) mod hover;
 pub(crate) mod layout;
@@ -239,34 +238,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         &stoat.theme,
         buf,
     );
-    if let Some(help) = &stoat.help {
-        help::render_help(
-            help,
-            &stoat.mode,
-            ws,
-            &stoat.theme,
-            &stoat.settings.mode_badges,
-            size,
-            buf,
-        );
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, true, false);
-        let raw = stoat.keymap.scoped_bindings(&state, "help_open");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
-            "help",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(finder) = &mut stoat.file_finder {
+    if let Some(finder) = &mut stoat.file_finder {
         file_finder::render_file_finder(
             finder,
             ws,

@@ -18,7 +18,6 @@ pub mod file_finder;
 pub mod fuzzy;
 pub mod global_search;
 pub mod goto_word;
-pub mod help;
 pub mod host;
 mod input_view;
 pub mod jumplist;
