@@ -9,10 +9,12 @@ pub use ast::{
     LetBinding, Predicate, PredicateBlock, Setting, Span, Spanned, Statement, ThemeBlock, Value,
 };
 pub use error::{format_errors, ParseError};
+use etcetera::{base_strategy::Xdg, BaseStrategy};
 pub use settings::{
     ClaudePlacement, LanguageServerCommand, LineNumberMode, MouseCapturePolicy, Settings,
     ShowWhitespace,
 };
+use std::path::PathBuf;
 pub use writer::set_theme;
 
 pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
@@ -21,6 +23,19 @@ pub fn parse(source: &str) -> (Option<Config>, Vec<ParseError>) {
 
 pub fn parse_action(source: &str) -> Result<Action, Vec<ParseError>> {
     parser::parse_action(source)
+}
+
+/// Path to the user's config file at
+/// `$XDG_CONFIG_HOME/stoat/config.stcfg`.
+///
+/// Resolves the XDG config directory via etcetera's `Xdg` strategy,
+/// which applies XDG paths on every platform (not the macOS
+/// application-support directory). Returns `None` when no base
+/// directory can be resolved. Path only: the caller does its own IO.
+pub fn user_config_path() -> Option<PathBuf> {
+    Xdg::new()
+        .ok()
+        .map(|xdg| xdg.config_dir().join("stoat").join("config.stcfg"))
 }
 
 #[cfg(test)]

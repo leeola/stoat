@@ -6,6 +6,7 @@ edition.workspace = true
 [dependencies]
 chumsky = "0.12"
 ariadne = "0.6"
+etcetera.workspace = true
 snafu = { workspace = true }
 
 [lints]

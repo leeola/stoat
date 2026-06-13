@@ -1,4 +1,3 @@
-use etcetera::{base_strategy::Xdg, BaseStrategy};
 use snafu::{whatever, ResultExt, Whatever};
 use std::{fs, io::ErrorKind, path::PathBuf, sync::Arc};
 use stoat::host::{
@@ -108,11 +107,7 @@ fn load_default_settings_and_theme() -> (Settings, Theme) {
 /// so the caller keeps the bundled default; a genuine read error (e.g. a
 /// permissions problem) is logged and also yields `None`.
 fn read_user_config() -> Option<String> {
-    let path = Xdg::new()
-        .ok()?
-        .config_dir()
-        .join("stoat")
-        .join("config.stcfg");
+    let path = stoat_config::user_config_path()?;
     match fs::read_to_string(&path) {
         Ok(source) => Some(source),
         Err(err) if err.kind() == ErrorKind::NotFound => None,

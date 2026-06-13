@@ -13,12 +13,11 @@ use crate::{
     theme::{set_active_theme, ActiveTheme, Theme},
     workspace::Workspace,
 };
-use etcetera::{base_strategy::Xdg, BaseStrategy};
 use gpui::{
     div, AnyElement, Context, DismissEvent, HighlightStyle, IntoElement, ParentElement,
     SharedString, Styled, StyledText, Task, Window,
 };
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use stoat::host::FsHost;
 
 pub struct ThemePickerDelegate {
@@ -175,7 +174,7 @@ impl PickerDelegate for ThemePickerDelegate {
 /// is logged and otherwise ignored, since the theme is already applied
 /// for the running session.
 fn persist_theme(fs: &dyn FsHost, name: &str) {
-    let Some(path) = user_config_path() else {
+    let Some(path) = stoat_config::user_config_path() else {
         tracing::warn!("could not resolve user config path; theme not persisted");
         return;
     };
@@ -210,15 +209,6 @@ fn write_theme_at(fs: &dyn FsHost, path: &Path, name: &str) {
     if let Err(err) = fs.write(path, updated.as_bytes()) {
         tracing::warn!(path = %path.display(), ?err, "could not write user config; theme not persisted");
     }
-}
-
-/// Path to the user's stcfg config at `$XDG_CONFIG_HOME/stoat/config.stcfg`.
-/// Mirrors the read-side resolution in the `stoat gui` launcher; the two
-/// must agree for a persisted theme to be restored on the next launch.
-fn user_config_path() -> Option<PathBuf> {
-    Xdg::new()
-        .ok()
-        .map(|xdg| xdg.config_dir().join("stoat").join("config.stcfg"))
 }
 
 /// Open the theme picker as a modal. Constructed in
