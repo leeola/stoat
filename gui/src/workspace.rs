@@ -2163,6 +2163,16 @@ impl Workspace {
         }
     }
 
+    /// Handle the `write-quit` action (`wq` / `x`): save the focused
+    /// buffer, then run the [`Self::handle_quit`] behavior. Because the
+    /// save clears the focused buffer's dirty flag, the last-pane confirm
+    /// fires only for other buffers that remain unsaved. A path-less
+    /// scratch buffer clears its dirty flag without writing.
+    pub fn handle_write_quit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
+        self.dispatch_save_buffer(cx);
+        self.handle_quit(window, cx);
+    }
+
     /// Handle `QuitAll`: quit immediately when no buffer is dirty;
     /// otherwise open the [`crate::quit_confirm::QuitConfirmModal`]
     /// and wait for the user to confirm or cancel.
@@ -2245,6 +2255,7 @@ impl Workspace {
         match action.kind() {
             ActionKind::Quit => self.handle_quit(window, cx),
             ActionKind::QuitForce => self.handle_quit_force(cx),
+            ActionKind::WriteQuit => self.handle_write_quit(window, cx),
             ActionKind::QuitAll => self.handle_quit_all(window, cx),
             ActionKind::SplitRight => {
                 self.pane_tree.update(cx, |tree, cx| {
@@ -8819,6 +8830,70 @@ mod tests {
         assert!(
             active.is_none(),
             "quit! force-quits the last pane without confirming"
+        );
+    }
+
+    #[test]
+    fn workspace_handle_write_quit_saves_focused_buffer_then_exits() {
+        use stoat::host::FsHost;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/wq.rs", b"before");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/wq.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let editor = ws.read_with(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            w.pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .read(cx)
+                .active_item()
+                .expect("active item")
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("editor")
+        });
+        let sm = ws.read_with(vcx, |w, _| w.input_state_machine().clone());
+        sm.update(vcx, |sm, _| sm.set_active_editor(Some(editor.downgrade())));
+
+        let buffer = editor
+            .read_with(vcx, |ed, cx| {
+                ed.multi_buffer().read(cx).as_singleton().cloned()
+            })
+            .expect("singleton buffer");
+        buffer.update(vcx, |b, cx| b.edit(6..6, " after", cx));
+        vcx.run_until_parked();
+        assert!(buffer.read_with(vcx, |b, _| b.is_dirty()));
+
+        ws.update_in(vcx, |w, window, cx| w.handle_write_quit(window, cx));
+        vcx.run_until_parked();
+
+        assert!(
+            !buffer.read_with(vcx, |b, _| b.is_dirty()),
+            "write-quit saves the focused buffer before exiting"
+        );
+        let mut on_disk = Vec::new();
+        (*fs)
+            .read(Path::new("/tmp/repo/wq.rs"), &mut on_disk)
+            .expect("save wrote through");
+        assert_eq!(String::from_utf8(on_disk).expect("utf8"), "before after");
+
+        let modal = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::quit_confirm::QuitConfirmModal>()
+                .is_some()
+        });
+        assert!(
+            !modal,
+            "the saved buffer was the only dirty one, so no confirm opens"
         );
     }
 

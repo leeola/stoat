@@ -3,6 +3,7 @@ pub enum ActionKind {
     Quit,
     QuitAll,
     QuitForce,
+    WriteQuit,
     SplitRight,
     SplitDown,
     SplitNewRight,

@@ -25,6 +25,18 @@ define_action!(
 );
 
 define_action!(
+    WriteQuitDef,
+    WriteQuit,
+    "write-quit",
+    ActionKind::WriteQuit,
+    "write the focused buffer, then close pane or exit",
+    "Write the focused buffer to disk, then close the focused pane. Exit when closing the last remaining pane, confirming first if other buffers have unsaved changes. A path-less scratch buffer clears its dirty flag without writing.",
+    ActionPriority::Common,
+    true,
+    &["wq", "x"]
+);
+
+define_action!(
     QuitAllDef,
     QuitAll,
     "quit-all",
@@ -89,6 +101,17 @@ mod tests {
         assert_eq!(
             QuitForce.def().short_desc(),
             "close pane or exit, discarding unsaved changes"
+        );
+    }
+
+    #[test]
+    fn write_quit() {
+        assert_eq!(WriteQuit.kind(), ActionKind::WriteQuit);
+        assert_eq!(WriteQuit.def().name(), "write-quit");
+        assert!(WriteQuit.def().params().is_empty());
+        assert_eq!(
+            WriteQuit.def().short_desc(),
+            "write the focused buffer, then close pane or exit"
         );
     }
 

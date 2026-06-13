@@ -1,6 +1,8 @@
 use crate::{
     defs::{
-        app::{DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll, QuitForce},
+        app::{
+            DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll, QuitForce, WriteQuit,
+        },
         claude::{ToggleDockLeft, ToggleDockRight},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenBranchReview,
@@ -137,6 +139,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
     add(QuitForce::DEF, |_| Ok(Box::new(QuitForce)));
+    add(WriteQuit::DEF, |_| Ok(Box::new(WriteQuit)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
     add(DismissModal::DEF, |_| Ok(Box::new(DismissModal)));
     add(IncreaseFontSize::DEF, |_| Ok(Box::new(IncreaseFontSize)));
@@ -935,6 +938,7 @@ mod tests {
     const ZERO_ARG_NAMES: &[&str] = &[
         "quit",
         "quit!",
+        "write-quit",
         "quit-all",
         "vsplit",
         "hsplit",
@@ -1366,7 +1370,8 @@ mod tests {
         // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
         // + 1 Screenshot (capture the window to an image file).
         // + 1 QuitForce (quit! / q!, force-quit discarding unsaved buffers).
-        assert_eq!(all().count(), 348);
+        // + 1 WriteQuit (write-quit / wq / x, save then quit).
+        assert_eq!(all().count(), 349);
     }
 
     #[test]
