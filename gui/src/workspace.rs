@@ -924,6 +924,42 @@ impl Workspace {
         editor
     }
 
+    /// Reattach an editor to a registered scratch/unsaved buffer during
+    /// restore. The buffer's content is rehydrated into the
+    /// [`BufferRegistry`] from the op-log before pane items are
+    /// materialized, so this builds an editor over the existing buffer
+    /// keyed by the `buffer_id` recorded in `blob`. Mirrors the editor
+    /// construction in [`Self::open_scratch_in_pane`].
+    ///
+    /// Returns [`None`] when the blob carries no `buffer_id` or the
+    /// registry holds no such buffer (such as the initial standalone
+    /// scratch that never registered), leaving the caller to skip the
+    /// item.
+    fn build_editor_for_registry_buffer(
+        &mut self,
+        blob: &serde_json::Value,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Entity<Editor>> {
+        let buffer_id: BufferId = serde_json::from_value(blob.get("buffer_id")?.clone()).ok()?;
+        let shared = self.buffer_registry.read(cx).get(buffer_id)?;
+        let weak_workspace = cx.weak_entity();
+        let buffer = cx.new(|_| Buffer::from_shared(shared));
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            cx.new(|cx| MultiBuffer::singleton(buffer, cx))
+        };
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let display_map = {
+            let buffer = buffer.clone();
+            cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+        };
+        let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
+        let editor =
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+        editor.update(cx, |ed, _| ed.set_workspace(Some(weak_workspace)));
+        Some(editor)
+    }
+
     /// Build a stand-alone preview [`Entity<Editor>`] backed by a
     /// fresh scratch [`Buffer`] in the workspace's [`BufferRegistry`].
     /// The editor carries the same `MultiBuffer` + `DisplayMap` +
@@ -1145,14 +1181,19 @@ impl Workspace {
                             .get("file_path")
                             .and_then(|v| v.as_str())
                             .map(PathBuf::from);
-                        let Some(path) = path else {
+                        let editor = if let Some(path) = path {
+                            self.build_editor_for_path(&path, cx)
+                        } else if let Some(editor) =
+                            self.build_editor_for_registry_buffer(&snap.blob, cx)
+                        {
+                            editor
+                        } else {
                             tracing::info!(
                                 pane_id = ?pane_id,
-                                "skipping editor item with no file_path during restore"
+                                "skipping editor item with no restorable buffer during restore"
                             );
                             continue;
                         };
-                        let editor = self.build_editor_for_path(&path, cx);
                         let folds = crate::workspace_persist::folds_from_blob(&snap.blob);
                         if !folds.is_empty() {
                             let display_map = editor.read(cx).display_map().clone();
@@ -17867,6 +17908,83 @@ mod tests {
                     PathBuf::from("/tmp/repo/bar.rs"),
                     PathBuf::from("/tmp/repo/foo.rs"),
                 ]
+            );
+        });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_scratch_editor_content() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            w.open_scratch_in_pane(pane_id, cx);
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .clone();
+            let editor = pane
+                .read(cx)
+                .items()
+                .iter()
+                .find_map(|item| item.to_any_view().downcast::<Editor>().ok())
+                .expect("scratch editor present");
+            let buffer = editor
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .cloned()
+                .expect("scratch editor is a singleton");
+            buffer.update(cx, |b, cx| b.edit(0..0, "scratch contents", cx));
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/scratch-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+        assert!(
+            fs_dyn.exists(&path),
+            "workspace with a dirty scratch must write"
+        );
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let mut scratch_texts: Vec<String> = Vec::new();
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if let Ok(editor) = item.to_any_view().downcast::<Editor>() {
+                        let editor = editor.read(cx);
+                        if editor.file_path().is_none() {
+                            if let Some(buffer) = editor.multi_buffer().read(cx).as_singleton() {
+                                scratch_texts.push(buffer.read(cx).text());
+                            }
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                scratch_texts,
+                vec!["scratch contents".to_string()],
+                "the registered scratch editor should restore with its content"
             );
         });
     }

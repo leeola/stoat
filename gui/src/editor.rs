@@ -4977,7 +4977,12 @@ impl ItemView for Editor {
             .into_iter()
             .map(|r| [r.start.row, r.start.column, r.end.row, r.end.column])
             .collect();
-        serde_json::json!({ "file_path": file_path, "folds": folds })
+        let buffer_id = self
+            .multi_buffer
+            .read(cx)
+            .as_singleton()
+            .map(|buffer| buffer.read(cx).read(|b| b.buffer_id()));
+        serde_json::json!({ "file_path": file_path, "folds": folds, "buffer_id": buffer_id })
     }
 }
 
