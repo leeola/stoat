@@ -1711,10 +1711,10 @@ impl Stoat {
             if ra.name == "RenameSymbol" {
                 dispatched_rename_symbol = true;
             }
-            if ra.name == "OpenSymbolPicker" {
+            if ra.name == "symbols" {
                 dispatched_symbol_picker = true;
             }
-            if ra.name == "OpenWorkspaceSymbolPicker" {
+            if ra.name == "workspace-symbols" {
                 dispatched_workspace_symbol_picker = true;
             }
             if let Some(action) = resolve_action(&ra.name, &ra.args) {

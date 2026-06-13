@@ -6587,11 +6587,11 @@ impl Workspace {
         use crate::picker::PickerDelegate;
         let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
         let Some(repo) = git.discover(&self.git_root) else {
-            tracing::warn!(action = "OpenCommits", "not inside a git repository");
+            tracing::warn!(action = "commits", "not inside a git repository");
             return;
         };
         let Some(workdir) = repo.workdir() else {
-            tracing::warn!(action = "OpenCommits", "git repo has no workdir");
+            tracing::warn!(action = "commits", "git repo has no workdir");
             return;
         };
 

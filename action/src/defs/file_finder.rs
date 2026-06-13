@@ -6,7 +6,7 @@ pub struct OpenFileFinderDef;
 
 impl ActionDef for OpenFileFinderDef {
     fn name(&self) -> &'static str {
-        "OpenFileFinder"
+        "files"
     }
 
     fn kind(&self) -> ActionKind {
@@ -150,7 +150,7 @@ pub struct OpenChangedFilePickerDef;
 
 impl ActionDef for OpenChangedFilePickerDef {
     fn name(&self) -> &'static str {
-        "OpenChangedFilePicker"
+        "changed-files"
     }
 
     fn kind(&self) -> ActionKind {
@@ -198,7 +198,7 @@ pub struct OpenGitStatusDef;
 
 impl ActionDef for OpenGitStatusDef {
     fn name(&self) -> &'static str {
-        "OpenGitStatus"
+        "git-status"
     }
 
     fn kind(&self) -> ActionKind {
@@ -246,7 +246,7 @@ pub struct OpenConflictPickerDef;
 
 impl ActionDef for OpenConflictPickerDef {
     fn name(&self) -> &'static str {
-        "OpenConflictPicker"
+        "conflicts"
     }
 
     fn kind(&self) -> ActionKind {
@@ -298,7 +298,7 @@ pub struct OpenBufferPickerDef;
 
 impl ActionDef for OpenBufferPickerDef {
     fn name(&self) -> &'static str {
-        "OpenBufferPicker"
+        "buffers"
     }
 
     fn kind(&self) -> ActionKind {
@@ -490,7 +490,7 @@ mod tests {
     #[test]
     fn kinds_and_names() {
         assert_eq!(OpenFileFinder.kind(), ActionKind::OpenFileFinder);
-        assert_eq!(OpenFileFinder.def().name(), "OpenFileFinder");
+        assert_eq!(OpenFileFinder.def().name(), "files");
         assert!(OpenFileFinder.def().params().is_empty());
         assert!(OpenFileFinder.def().palette_visible());
 
@@ -512,11 +512,11 @@ mod tests {
             OpenChangedFilePicker.kind(),
             ActionKind::OpenChangedFilePicker
         );
-        assert_eq!(OpenChangedFilePicker.def().name(), "OpenChangedFilePicker");
+        assert_eq!(OpenChangedFilePicker.def().name(), "changed-files");
         assert!(OpenChangedFilePicker.def().palette_visible());
 
         assert_eq!(OpenBufferPicker.kind(), ActionKind::OpenBufferPicker);
-        assert_eq!(OpenBufferPicker.def().name(), "OpenBufferPicker");
+        assert_eq!(OpenBufferPicker.def().name(), "buffers");
         assert!(OpenBufferPicker.def().palette_visible());
 
         assert_eq!(

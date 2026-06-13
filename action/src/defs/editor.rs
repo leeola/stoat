@@ -633,7 +633,7 @@ define_action!(
 define_action!(
     OpenJumplistPickerDef,
     OpenJumplistPicker,
-    "OpenJumplistPicker",
+    "jumplist",
     ActionKind::OpenJumplistPicker,
     "open jumplist picker",
     "Open a modal listing every entry in the focused editor's jumplist with line:column and a snippet of the line content. Enter jumps to the selected entry; Esc cancels. No-op when the jumplist is empty.",
@@ -653,7 +653,7 @@ define_action!(
 define_action!(
     OpenGlobalSearchDef,
     OpenGlobalSearch,
-    "OpenGlobalSearch",
+    "search",
     ActionKind::OpenGlobalSearch,
     "open workspace regex search",
     "Open an input modal for a regex pattern. On submit, scan every workspace file for matches and present them as a picker listing path:line:column with a snippet of the matched line. Enter opens the selected match's file at the match offset; Esc cancels.",

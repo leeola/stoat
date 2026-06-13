@@ -1799,11 +1799,9 @@ mod tests {
     fn set_last_picker_action_round_trips() {
         let mut cx = TestAppContext::single();
         let (sm, vcx) = new_state_machine(&mut cx);
-        sm.update(vcx, |sm, _| {
-            sm.set_last_picker_action(Some("OpenJumplistPicker"))
-        });
+        sm.update(vcx, |sm, _| sm.set_last_picker_action(Some("jumplist")));
         sm.read_with(vcx, |sm, _| {
-            assert_eq!(sm.last_picker_action(), Some("OpenJumplistPicker"));
+            assert_eq!(sm.last_picker_action(), Some("jumplist"));
         });
         sm.update(vcx, |sm, _| sm.set_last_picker_action(None));
         sm.read_with(vcx, |sm, _| assert_eq!(sm.last_picker_action(), None));

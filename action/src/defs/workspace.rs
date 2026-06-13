@@ -47,7 +47,7 @@ define_action!(
 define_action!(
     OpenWorkspacePickerDef,
     OpenWorkspacePicker,
-    "OpenWorkspacePicker",
+    "workspaces",
     ActionKind::OpenWorkspacePicker,
     "resume a saved workspace",
     "Open a picker listing every persisted workspace under the current git root. Confirm rehydrates the chosen workspace into the active window, replacing the current panes, buffers, docks, and Claude session.",
@@ -290,7 +290,7 @@ mod tests {
         assert_eq!(CloseWorkspace.kind(), ActionKind::CloseWorkspace);
         assert_eq!(CloseWorkspace.def().name(), "workspace-close");
         assert_eq!(OpenWorkspacePicker.kind(), ActionKind::OpenWorkspacePicker);
-        assert_eq!(OpenWorkspacePicker.def().name(), "OpenWorkspacePicker");
+        assert_eq!(OpenWorkspacePicker.def().name(), "workspaces");
         assert_eq!(ToggleProjectTree.kind(), ActionKind::ToggleProjectTree);
         assert_eq!(ToggleProjectTree.def().name(), "project-tree");
         assert_eq!(Pwd.kind(), ActionKind::Pwd);

@@ -27,7 +27,7 @@ define_action!(
 define_action!(
     OpenDiagnosticsPickerDef,
     OpenDiagnosticsPicker,
-    "OpenDiagnosticsPicker",
+    "diagnostics",
     ActionKind::OpenDiagnosticsPicker,
     "open the diagnostics picker for the focused buffer",
     "Open a modal listing every diagnostic in the focused buffer's diagnostic set. \
@@ -40,7 +40,7 @@ define_action!(
 define_action!(
     OpenWorkspaceDiagnosticsPickerDef,
     OpenWorkspaceDiagnosticsPicker,
-    "OpenWorkspaceDiagnosticsPicker",
+    "workspace-diagnostics",
     ActionKind::OpenWorkspaceDiagnosticsPicker,
     "open the diagnostics picker for the entire workspace",
     "Open a modal listing every (path, diagnostic) pair currently known to the workspace. \
@@ -153,7 +153,7 @@ define_action!(
 define_action!(
     OpenSymbolPickerDef,
     OpenSymbolPicker,
-    "OpenSymbolPicker",
+    "symbols",
     ActionKind::OpenSymbolPicker,
     "show document symbols",
     "Issue an LSP `textDocument/documentSymbol` request for the focused \
@@ -167,7 +167,7 @@ define_action!(
 define_action!(
     OpenWorkspaceSymbolPickerDef,
     OpenWorkspaceSymbolPicker,
-    "OpenWorkspaceSymbolPicker",
+    "workspace-symbols",
     ActionKind::OpenWorkspaceSymbolPicker,
     "search workspace symbols",
     "Open a one-line input modal for a workspace-symbol query. \

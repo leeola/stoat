@@ -620,14 +620,14 @@ on key {
         l -> SetMode(space_lsp);
         G -> SetMode(space_git);
         " -> SetMode(space_clipboard);
-        p -> OpenFileFinder();
-        g -> OpenChangedFilePicker();
+        p -> files();
+        g -> changed-files();
         e -> project-tree();
-        T -> OpenThemePicker();
+        T -> theme();
         s -> [SaveSelection(), SetMode(normal)];
         j -> [JumpBackward(), SetMode(normal)];
         k -> [JumpForward(), SetMode(normal)];
-        / -> OpenGlobalSearch();
+        / -> search();
         ' -> [OpenLastPicker(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
@@ -641,7 +641,7 @@ on key {
     }
     mode == space_buffer {
         Escape -> SetMode(normal);
-        b -> OpenBufferPicker();
+        b -> buffers();
         d -> [buffer-close(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
@@ -656,17 +656,17 @@ on key {
         i -> [Hover(), SetMode(normal)];
         a -> [CodeAction(), SetMode(normal)];
         r -> [RenameSymbol(), SetMode(normal)];
-        s -> [OpenSymbolPicker(), SetMode(normal)];
-        S -> OpenWorkspaceSymbolPicker();
-        d -> [OpenDiagnosticsPicker(), SetMode(normal)];
-        D -> [OpenWorkspaceDiagnosticsPicker(), SetMode(normal)];
+        s -> [symbols(), SetMode(normal)];
+        S -> workspace-symbols();
+        d -> [diagnostics(), SetMode(normal)];
+        D -> [workspace-diagnostics(), SetMode(normal)];
         : -> OpenCommandPalette();
     }
     mode == space_git {
         Escape -> SetMode(normal);
         b -> [blame(), SetMode(normal)];
-        s -> [OpenGitStatus(), SetMode(normal)];
-        x -> [OpenConflictPicker(), SetMode(normal)];
+        s -> [git-status(), SetMode(normal)];
+        x -> [conflicts(), SetMode(normal)];
         r -> [review(), SetMode(normal)];
         d -> [diff-hunk-panel(), SetMode(normal)];
         : -> OpenCommandPalette();

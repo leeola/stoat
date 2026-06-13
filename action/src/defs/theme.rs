@@ -3,7 +3,7 @@ use crate::{action::define_action, ActionKind, ActionPriority};
 define_action!(
     OpenThemePickerDef,
     OpenThemePicker,
-    "OpenThemePicker",
+    "theme",
     ActionKind::OpenThemePicker,
     "open theme picker",
     "Open a picker to switch the active theme. Arrow through entries to \
@@ -21,7 +21,7 @@ mod tests {
     #[test]
     fn open_theme_picker() {
         assert_eq!(OpenThemePicker.kind(), ActionKind::OpenThemePicker);
-        assert_eq!(OpenThemePicker.def().name(), "OpenThemePicker");
+        assert_eq!(OpenThemePicker.def().name(), "theme");
         assert!(!OpenThemePicker.def().hint_visible());
     }
 }

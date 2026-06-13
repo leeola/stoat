@@ -3,7 +3,7 @@ use crate::{action::define_action, ActionKind, ActionPriority};
 define_action!(
     OpenLineEndingPickerDef,
     OpenLineEndingPicker,
-    "OpenLineEndingPicker",
+    "line-ending",
     ActionKind::OpenLineEndingPicker,
     "open line-ending picker",
     "Open a picker to change the active buffer's line endings between \

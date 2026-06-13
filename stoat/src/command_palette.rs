@@ -726,13 +726,13 @@ mod tests {
 
     #[test]
     fn multi_token_query_matches_in_either_order() {
-        // `OpenFileFinder` contains both `open` and `file` tokens. Pattern
+        // `git-status` contains both `git` and `status` tokens. Pattern
         // splits on whitespace, so the order of tokens does not change
         // the hit set.
-        let forward = names_for("open file");
-        let reverse = names_for("file open");
-        assert!(forward.contains(&"OpenFileFinder"));
-        assert!(reverse.contains(&"OpenFileFinder"));
+        let forward = names_for("git status");
+        let reverse = names_for("status git");
+        assert!(forward.contains(&"git-status"));
+        assert!(reverse.contains(&"git-status"));
     }
 
     #[test]
@@ -818,14 +818,7 @@ mod tests {
         ] {
             assert!(!listed.contains(&name), "{name} unexpectedly visible");
         }
-        for name in [
-            "quit",
-            "open",
-            "review",
-            "OpenCommits",
-            "FocusLeft",
-            "OpenGlobalSearch",
-        ] {
+        for name in ["quit", "open", "review", "commits", "FocusLeft", "search"] {
             assert!(
                 listed.contains(&name),
                 "{name} missing from applicable list"
@@ -1123,7 +1116,7 @@ mod tests {
     #[test]
     fn snapshot_command_palette_multi_token_highlight() {
         let mut h = Stoat::test();
-        h.type_text(":open file");
+        h.type_text(":git status");
         h.assert_snapshot("command_palette_multi_token_highlight");
     }
 }

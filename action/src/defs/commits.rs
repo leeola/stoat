@@ -3,7 +3,7 @@ use crate::{action::define_action, ActionKind, ActionPriority};
 define_action!(
     OpenCommitsDef,
     OpenCommits,
-    "OpenCommits",
+    "commits",
     ActionKind::OpenCommits,
     "browse commit history",
     "Open the commit-list view: a left pane of commits on the current \

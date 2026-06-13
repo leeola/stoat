@@ -3,7 +3,7 @@ use crate::{action::define_action, ActionKind, ActionPriority};
 define_action!(
     OpenEncodingPickerDef,
     OpenEncodingPicker,
-    "OpenEncodingPicker",
+    "encoding",
     ActionKind::OpenEncodingPicker,
     "open encoding picker",
     "Open a picker to re-decode the active buffer with a different \

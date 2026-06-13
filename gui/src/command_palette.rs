@@ -1331,18 +1331,15 @@ mod tests {
     }
 
     #[test]
-    fn refilter_open_query_lists_open_actions() {
-        let mut delegate = new_delegate();
-        delegate.refilter("Open");
+    fn refilter_query_lists_matching_actions() {
+        let mut delegate = new_all_scope_delegate();
+        delegate.refilter("co");
 
         let names = matched_names(&delegate);
+        assert!(names.contains(&"commits"), "commits expected in {names:?}");
         assert!(
-            names.contains(&"OpenCommits"),
-            "OpenCommits expected in {names:?}"
-        );
-        assert!(
-            names.contains(&"OpenGlobalSearch"),
-            "OpenGlobalSearch expected in {names:?}",
+            names.contains(&"conflicts"),
+            "conflicts expected in {names:?}",
         );
     }
 
@@ -1421,14 +1418,7 @@ mod tests {
                     "{name} unexpectedly visible in Active scope with empty Availability",
                 );
             }
-            for name in [
-                "quit",
-                "open",
-                "review",
-                "OpenCommits",
-                "FocusLeft",
-                "OpenGlobalSearch",
-            ] {
+            for name in ["quit", "open", "review", "commits", "FocusLeft", "search"] {
                 assert!(
                     names.contains(&name),
                     "{name} missing from globally-applicable listing"
@@ -1983,7 +1973,7 @@ mod tests {
             cx.update(|cx| {
                 cx.set_global(Settings::load_from_source(
                     "on key { mode == normal { Space -> SetMode(space); } \
-                     mode == space { p -> OpenFileFinder(); } }",
+                     mode == space { p -> files(); } }",
                 ));
             });
             let (ws, vcx) = cx.add_window_view(|_, cx| {
@@ -2009,10 +1999,8 @@ mod tests {
                 let row = delegate
                     .matches
                     .iter()
-                    .position(|(entry_idx, _)| {
-                        delegate.entries[*entry_idx].def.name() == "OpenFileFinder"
-                    })
-                    .expect("OpenFileFinder row present in palette");
+                    .position(|(entry_idx, _)| delegate.entries[*entry_idx].def.name() == "files")
+                    .expect("files row present in palette");
                 assert_eq!(
                     delegate.keybinding_for_index(row, cx),
                     Some(SharedString::from("Spc p")),

@@ -224,7 +224,7 @@ mod tests {
 
     #[test]
     fn hint_entries_drops_hint_hidden_actions() {
-        let pairs = entries(&[("i", "GotoFirstNonwhitespace"), ("t", "OpenThemePicker")]);
+        let pairs = entries(&[("i", "GotoFirstNonwhitespace"), ("t", "theme")]);
         let i_desc = registry::lookup("GotoFirstNonwhitespace")
             .expect("registered")
             .def
