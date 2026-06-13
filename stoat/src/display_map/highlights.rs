@@ -48,7 +48,7 @@ impl HighlightStyle {
         }
     }
 
-    pub fn to_ratatui_style(&self) -> Style {
+    pub fn to_style(&self) -> Style {
         let mut style = Style::default();
         if let Some(fg) = self.foreground {
             style = style.fg(fg);
