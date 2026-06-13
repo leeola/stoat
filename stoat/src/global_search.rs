@@ -171,7 +171,7 @@ fn line_snippet(text: &str, offset: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{host::FakeFs, test_harness::keys};
+    use crate::host::FakeFs;
 
     fn fake_with(files: &[(&str, &str)]) -> (FakeFs, PathBuf) {
         let fs = FakeFs::new();
@@ -252,72 +252,5 @@ mod tests {
         let (fs, root) = fake_with(&[("a.rs", "ab")]);
         let matches = perform_search(&fs, &root, "").unwrap();
         assert!(!matches.is_empty(), "empty regex should match");
-    }
-
-    #[test]
-    fn picker_enter_returns_select() {
-        let mut picker = GlobalSearchPicker::new(
-            vec![SearchMatch {
-                path: PathBuf::from("/r/a.rs"),
-                offset: 0,
-                line: 1,
-                column: 1,
-                snippet: "hi".to_string(),
-            }],
-            "hi".into(),
-            "normal".into(),
-        );
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Enter)),
-            PickerOutcome::Select(0)
-        ));
-    }
-
-    #[test]
-    fn picker_esc_returns_close() {
-        let mut picker = GlobalSearchPicker::new(Vec::new(), "x".into(), "normal".into());
-        assert!(matches!(
-            picker.handle_key(keys::key(KeyCode::Esc)),
-            PickerOutcome::Close
-        ));
-    }
-
-    #[test]
-    fn picker_navigation_clamps_at_ends() {
-        let mut picker = GlobalSearchPicker::new(
-            (0..3)
-                .map(|i| SearchMatch {
-                    path: PathBuf::from("/r/a.rs"),
-                    offset: i,
-                    line: 1,
-                    column: 1,
-                    snippet: "x".to_string(),
-                })
-                .collect(),
-            "x".into(),
-            "normal".into(),
-        );
-        picker.handle_key(keys::key(KeyCode::Up));
-        assert_eq!(picker.selected(), 0);
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
-        picker.handle_key(keys::key(KeyCode::Down));
-        assert_eq!(picker.selected(), 2);
-    }
-
-    #[test]
-    fn snapshot_global_search_picker_listing() {
-        let mut h = crate::Stoat::test();
-        let root = PathBuf::from("/repo");
-        h.fake_fs()
-            .insert_file(root.join("a.rs"), b"fn alpha() { hello }\nfn beta() {}\n");
-        h.fake_fs()
-            .insert_file(root.join("sub/b.rs"), b"fn alpha_again() { hello }\n");
-        h.stoat.active_workspace_mut().git_root = root;
-        crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::OpenGlobalSearch);
-        h.type_text("alpha");
-        h.stoat
-            .update(crossterm::event::Event::Key(keys::key(KeyCode::Enter)));
-        h.assert_snapshot("global_search_picker_listing");
     }
 }

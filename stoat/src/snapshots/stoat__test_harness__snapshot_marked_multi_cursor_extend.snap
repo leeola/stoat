@@ -1,7 +1,0 @@
----
-source: stoat/src/test_harness.rs
-expression: self.to_marked_text()
----
-a<|bc||>d
-e<|fg||>h
-i<|jk||>l

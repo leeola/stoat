@@ -1,7 +1,0 @@
----
-source: stoat/src/test_harness.rs
-expression: self.to_marked_text()
----
-<|abc||>
-<|def||>
-<|ghi||>

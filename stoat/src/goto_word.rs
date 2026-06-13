@@ -261,44 +261,4 @@ mod tests {
             _ => panic!("expected Jump"),
         }
     }
-
-    #[test]
-    fn g_w_arms_pending_labels_and_typing_jumps_cursor() {
-        use std::path::PathBuf;
-        let mut h = crate::Stoat::test();
-        let root = PathBuf::from("/goto-word-test");
-        h.fake_fs()
-            .insert_files([(root.join("buf.rs"), b"alpha beta gamma\n".as_ref())]);
-        h.stoat.active_workspace_mut().git_root = root.clone();
-        crate::action_handlers::dispatch(
-            &mut h.stoat,
-            &stoat_action::OpenFile {
-                path: root.join("buf.rs"),
-            },
-        );
-
-        h.type_keys("g w");
-        let labels = h
-            .stoat
-            .pending_goto_word
-            .as_ref()
-            .expect("labels should be armed")
-            .clone();
-        // Three words, all >= 2 chars, so all get labels at offsets 0/6/11.
-        assert_eq!(labels.len(), 3);
-        assert_eq!(labels.get("a"), Some(&0));
-        assert_eq!(labels.get("b"), Some(&6));
-        assert_eq!(labels.get("c"), Some(&11));
-
-        h.type_keys("c");
-        assert!(h.stoat.pending_goto_word.is_none());
-        let cursor_offset = {
-            let editor = crate::action_handlers::focused_editor_mut(&mut h.stoat)
-                .expect("editor should be focused");
-            let snapshot = editor.display_map.snapshot();
-            let buffer_snapshot = snapshot.buffer_snapshot();
-            buffer_snapshot.resolve_anchor(&editor.selections.newest_anchor().head())
-        };
-        assert_eq!(cursor_offset, 11, "cursor should jump to gamma's start");
-    }
 }

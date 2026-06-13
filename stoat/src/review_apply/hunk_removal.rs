@@ -33,14 +33,10 @@ pub fn remove_chunks_from_buffer(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::{
-        review_session::{ChunkStatus, ReviewSession, ReviewSource},
-        test_harness::TestHarness,
-    };
+    use crate::review_session::{ChunkStatus, ReviewSession, ReviewSource};
     use std::{path::PathBuf, sync::Arc};
 
     fn session_for(base: &str, buffer: &str) -> ReviewSession {
-        let _h = TestHarness::with_size(80, 10);
         let mut session = ReviewSession::new(ReviewSource::Commit {
             workdir: PathBuf::from("/r"),
             sha: "sha".into(),
