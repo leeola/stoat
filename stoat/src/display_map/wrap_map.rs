@@ -2734,4 +2734,277 @@ mod tests {
             );
         }
     }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03).max(1))
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as u32
+            }
+        }
+    }
+
+    fn random_text(rng: &mut Rng, len: usize) -> String {
+        const ALPHABET: &[u8] = b"ab\ncd\n";
+        (0..len)
+            .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize] as char)
+            .collect()
+    }
+
+    fn random_range(rng: &mut Rng, len: usize) -> (usize, usize) {
+        let mut a = rng.below(len as u32 + 1) as usize;
+        let mut b = rng.below(len as u32 + 1) as usize;
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        (a, b)
+    }
+
+    fn random_width(rng: &mut Rng) -> Option<u32> {
+        if rng.below(100) < 20 {
+            None
+        } else {
+            Some(1 + rng.below(12))
+        }
+    }
+
+    fn rows_of(snapshot: &super::WrapSnapshot) -> Vec<String> {
+        (0..snapshot.line_count())
+            .map(|row| snapshot.display_line(row))
+            .collect()
+    }
+
+    /// Assert a settled incremental snapshot matches a from-scratch rebuild:
+    /// same row count, same rendered rows, same per-row width, same longest
+    /// row width.
+    fn assert_converges(
+        incremental: &super::WrapSnapshot,
+        reference: &super::WrapSnapshot,
+        ctx: &str,
+    ) {
+        assert_eq!(
+            incremental.line_count(),
+            reference.line_count(),
+            "{ctx}: line_count"
+        );
+        assert_eq!(
+            rows_of(incremental),
+            rows_of(reference),
+            "{ctx}: display lines"
+        );
+        for row in 0..reference.line_count() {
+            assert_eq!(
+                incremental.line_len(row),
+                reference.line_len(row),
+                "{ctx}: line_len row {row}"
+            );
+        }
+        assert_eq!(
+            incremental.longest_row_chars, reference.longest_row_chars,
+            "{ctx}: longest_row_chars"
+        );
+    }
+
+    /// Replay the recorded wrap patches over the initial snapshot's rows and
+    /// assert each reproduces its snapshot's rows -- the patch faithfully
+    /// describes the row delta.
+    fn replay_patches(
+        initial: &super::WrapSnapshot,
+        collected: &[(Arc<super::WrapSnapshot>, Patch<u32>)],
+        seed: u64,
+    ) {
+        let mut replayed = rows_of(initial);
+        for (snapshot, patch) in collected {
+            let snap_rows = rows_of(snapshot);
+            for edit in patch {
+                assert!(
+                    edit.new.end as usize <= snap_rows.len(),
+                    "seed {seed}: patch new end {} exceeds rows {}",
+                    edit.new.end,
+                    snap_rows.len()
+                );
+                let new_rows: Vec<String> = (edit.new.start..edit.new.end)
+                    .map(|row| snap_rows[row as usize].clone())
+                    .collect();
+                let old_len = (edit.old.end - edit.old.start) as usize;
+                let start = (edit.new.start as usize).min(replayed.len());
+                let end = (start + old_len).min(replayed.len());
+                replayed.splice(start..end, new_rows);
+            }
+            assert_eq!(replayed, snap_rows, "seed {seed}: patch replay diverged");
+        }
+    }
+
+    type Collected = Vec<(Arc<super::WrapSnapshot>, Patch<u32>)>;
+
+    /// Sync the wrap map, assert its invariants, and record the
+    /// `(snapshot, patch)` for replay when the patch is non-empty. An empty
+    /// patch means no change since the last sync (or an interim width-rewrap
+    /// snapshot whose change the later flushed patch describes), so it is not
+    /// recorded -- keeping the replay chain consistent.
+    fn sync_collect(
+        wrap_map: &mut WrapMap,
+        tab: TabSnapshot,
+        tab_edits: &Patch<u32>,
+        collected: &mut Collected,
+    ) -> Arc<super::WrapSnapshot> {
+        let (snap, patch) = wrap_map.sync(tab, tab_edits);
+        snap.check_invariants();
+        if !patch.is_empty() {
+            collected.push((snap.clone(), patch));
+        }
+        snap
+    }
+
+    /// Drive any pending background rewrap to completion on the scheduler and
+    /// install it, leaving the wrap map settled.
+    fn settle(
+        wrap_map: &mut WrapMap,
+        scheduler: &TestScheduler,
+        tab: &TabSnapshot,
+        collected: &mut Collected,
+    ) {
+        let mut guard = 0;
+        while wrap_map.is_dirty() {
+            scheduler.run_until_parked();
+            sync_collect(wrap_map, tab.clone(), &Patch::empty(), collected);
+            guard += 1;
+            assert!(guard < 100, "settle did not converge");
+        }
+    }
+
+    #[test]
+    fn random_wraps() {
+        for seed in 0..64u64 {
+            random_wraps_seed(seed);
+        }
+    }
+
+    fn random_wraps_seed(seed: u64) {
+        let mut rng = Rng::new(seed);
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+        let tab_size = std::num::NonZeroU32::new(1 + rng.below(4)).unwrap();
+        let mut wrap_width = random_width(&mut rng);
+
+        let initial_len = rng.below(16) as usize;
+        let initial = random_text(&mut rng, initial_len);
+        let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+            BufferId::new(0),
+            &initial,
+        )));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let mut buffer_snapshot = multi_buffer.snapshot();
+        let mut version = buffer_snapshot.version();
+        let (mut inlay_map, inlay0) = InlayMap::new(buffer_snapshot.clone());
+        let (mut fold_map, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(tab_size);
+        let (mut tab_snapshot, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab_snapshot.clone(), wrap_width, executor);
+
+        let mut collected: Collected = Vec::new();
+        let initial_snapshot = sync_collect(
+            &mut wrap_map,
+            tab_snapshot.clone(),
+            &Patch::empty(),
+            &mut collected,
+        );
+        assert_converges(
+            &initial_snapshot,
+            &super::build_snapshot(tab_snapshot.clone(), wrap_width),
+            &format!("seed {seed} init"),
+        );
+
+        for op in 0..24 {
+            if rng.below(100) < 15 {
+                // Width change. Settle first so it starts clean, then apply and
+                // settle again so the recorded patch is the bridging/whole-file
+                // delta rather than an empty interim.
+                settle(&mut wrap_map, &scheduler, &tab_snapshot, &mut collected);
+                wrap_width = random_width(&mut rng);
+                wrap_map.set_wrap_width(wrap_width);
+                sync_collect(
+                    &mut wrap_map,
+                    tab_snapshot.clone(),
+                    &Patch::empty(),
+                    &mut collected,
+                );
+                settle(&mut wrap_map, &scheduler, &tab_snapshot, &mut collected);
+            } else {
+                // Buffer edit; occasionally a large block to cross the rewrap
+                // threshold and drive a background rewrap.
+                let len = buffer_snapshot.text().len();
+                let (a, b) = random_range(&mut rng, len);
+                let insert = if rng.below(100) < 12 {
+                    let rows = 40 + rng.below(120) as usize;
+                    "ab\n".repeat(rows)
+                } else {
+                    let insert_len = rng.below(6) as usize;
+                    random_text(&mut rng, insert_len)
+                };
+                shared.write().unwrap().edit(a..b, &insert);
+                buffer_snapshot = multi_buffer.snapshot();
+
+                let buffer_edits = buffer_snapshot.edits_since(version);
+                version = buffer_snapshot.version();
+                let (inlay1, inlay_edits) = inlay_map.sync(buffer_snapshot.clone(), &buffer_edits);
+                let (fold1, fold_edits) = fold_map.sync(inlay1, &inlay_edits);
+                let (tab1, tab_edits) = tab_map.sync(fold1, fold_edits);
+                tab_snapshot = tab1.clone();
+                sync_collect(&mut wrap_map, tab1, &tab_edits, &mut collected);
+            }
+
+            // Sometimes flush a pending background rewrap; sometimes leave it
+            // interpolated to exercise the held-interim state across ops.
+            if wrap_map.is_dirty() && rng.below(100) < 60 {
+                settle(&mut wrap_map, &scheduler, &tab_snapshot, &mut collected);
+            }
+
+            if !wrap_map.is_dirty() {
+                let snap = sync_collect(
+                    &mut wrap_map,
+                    tab_snapshot.clone(),
+                    &Patch::empty(),
+                    &mut collected,
+                );
+                assert_converges(
+                    &snap,
+                    &super::build_snapshot(tab_snapshot.clone(), wrap_width),
+                    &format!("seed {seed} op {op}"),
+                );
+            }
+        }
+
+        settle(&mut wrap_map, &scheduler, &tab_snapshot, &mut collected);
+        let final_snap = sync_collect(
+            &mut wrap_map,
+            tab_snapshot.clone(),
+            &Patch::empty(),
+            &mut collected,
+        );
+        assert_converges(
+            &final_snap,
+            &super::build_snapshot(tab_snapshot, wrap_width),
+            &format!("seed {seed} final"),
+        );
+
+        replay_patches(&initial_snapshot, &collected, seed);
+    }
 }
