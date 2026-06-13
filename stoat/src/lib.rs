@@ -1,6 +1,5 @@
 pub mod action_handlers;
 pub mod app;
-pub mod badge;
 pub mod buffer;
 pub mod buffer_registry;
 pub mod commit_list;
@@ -40,7 +39,6 @@ pub mod workspace;
 pub use app::{Stoat, UpdateEffect};
 #[cfg(test)]
 mod test_harness;
-pub use badge::{Anchor, BadgeId, BadgeSource, BadgeState};
 pub use buffer::{BufferId, SharedBuffer, TextBuffer, TextBufferSnapshot};
 pub use buffer_registry::BufferRegistry;
 pub use diff_map::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};

@@ -7,7 +7,6 @@ pub use patch::chunk_to_unified_diff;
 #[cfg(test)]
 mod tests {
     use crate::{
-        badge::{BadgeSource, BadgeState},
         review_session::ChunkStatus,
         test_harness::{TestHarness, REVIEW_TWO_HUNK_BASE, REVIEW_TWO_HUNK_BUFFER},
     };
@@ -179,16 +178,10 @@ mod tests {
             .fake_git
             .applied_patches(std::path::Path::new("/work"))
             .is_empty());
-
-        let ws = h.stoat.active_workspace();
-        assert!(
-            ws.badges.find_by_source(BadgeSource::Review).is_none(),
-            "nothing staged must not create a badge"
-        );
     }
 
     #[test]
-    fn review_apply_surfaces_failure_badge() {
+    fn review_apply_failure_keeps_chunks_staged() {
         let mut h = TestHarness::with_size(80, 14);
         h.stage_review_scenario(
             "/work",
@@ -205,18 +198,6 @@ mod tests {
         h.dispatch_review_apply();
 
         let ws = h.stoat.active_workspace();
-        let badge_id = ws
-            .badges
-            .find_by_source(BadgeSource::Review)
-            .expect("error badge");
-        let badge = ws.badges.get(badge_id).unwrap();
-        assert_eq!(badge.state, BadgeState::Error);
-        assert_eq!(
-            badge.detail.as_deref(),
-            Some("simulated backend failure"),
-            "detail must carry the backend message"
-        );
-
         let session = ws.review.as_ref().unwrap();
         assert_eq!(
             session.chunks[&chunk0_id].status,
@@ -265,17 +246,6 @@ mod tests {
             "carried statuses must survive auto-refresh"
         );
 
-        let badge_id = ws
-            .badges
-            .find_by_source(BadgeSource::Review)
-            .expect("complete badge");
-        let badge = ws.badges.get(badge_id).unwrap();
-        assert_eq!(badge.state, BadgeState::Complete);
-        assert!(
-            badge.label.contains("applied 2"),
-            "badge must report count: {}",
-            badge.label
-        );
         assert_eq!(
             h.fake_git
                 .applied_patches(std::path::Path::new("/work"))

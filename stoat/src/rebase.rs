@@ -241,13 +241,6 @@ mod tests {
         h.type_keys("i");
         assert_eq!(h.stoat.mode, "commits");
         assert!(h.stoat.active_workspace().rebase.is_none());
-        let ws = h.stoat.active_workspace();
-        let badge_id = ws
-            .badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .expect("info badge about empty todo");
-        let badge = ws.badges.get(badge_id).unwrap();
-        assert!(badge.label.contains("nothing"));
     }
 
     #[test]

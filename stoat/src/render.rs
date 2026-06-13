@@ -1,4 +1,3 @@
-pub(crate) mod badges;
 pub(crate) mod code_action;
 pub(crate) mod commits;
 pub(crate) mod completion;
@@ -227,14 +226,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
     symbol_picker::render_symbol_picker(stoat, buf);
     workspace_symbol_picker::render_workspace_symbol(stoat, buf);
     let ws = &mut stoat.workspaces[stoat.active_workspace];
-    badges::render_badges(
-        &ws.badges,
-        &stoat.badges,
-        size,
-        stoat.render_tick,
-        &stoat.theme,
-        buf,
-    );
     if let Some(picker) = &stoat.global_search {
         let git_root = ws.git_root.clone();
         global_search::render_global_search(picker, &git_root, &stoat.theme, size, buf);

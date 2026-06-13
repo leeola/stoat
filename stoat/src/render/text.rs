@@ -1,11 +1,5 @@
 use ratatui::{buffer::Buffer, style::Style};
 
-pub(crate) fn write_cell(buf: &mut Buffer, x: u16, y: u16, ch: char, style: Style) {
-    if x < buf.area.x + buf.area.width && y < buf.area.y + buf.area.height {
-        buf[(x, y)].set_char(ch).set_style(style);
-    }
-}
-
 pub(crate) fn write_str(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style) {
     for (i, ch) in s.chars().enumerate() {
         let col = x + i as u16;

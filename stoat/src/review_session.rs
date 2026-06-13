@@ -3139,13 +3139,6 @@ mod tests {
         h.type_keys("s n s");
         h.assert_snapshot("review_complete_state");
         assert!(h.with_review(|s| s.is_complete()));
-        let has_badge = h
-            .stoat
-            .active_workspace()
-            .badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .is_some();
-        assert!(has_badge, "complete review should surface a badge");
     }
 
     #[test]

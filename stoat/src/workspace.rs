@@ -3,7 +3,6 @@ pub mod persist;
 
 use crate::{
     app::{parse_buffer_async, parse_buffer_step, ParseJobOutput},
-    badge::BadgeTray,
     buffer::BufferId,
     buffer_registry::BufferRegistry,
     commit_list::CommitListState,
@@ -118,7 +117,6 @@ pub struct Workspace {
     /// between rebases.
     pub(crate) reword_input: Option<crate::input_view::InputView>,
     parse_jobs: HashMap<BufferId, ParseJob>,
-    pub(crate) badges: BadgeTray,
 }
 
 struct ParseJob {
@@ -156,7 +154,6 @@ impl Workspace {
             rebase_active: None,
             reword_input: None,
             parse_jobs: HashMap::new(),
-            badges: BadgeTray::new(),
         }
     }
 

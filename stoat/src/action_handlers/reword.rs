@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::rebase::{drive_rebase, emit_rebase_error},
+    action_handlers::rebase::drive_rebase,
     app::{Stoat, UpdateEffect},
     input_view::{InputView, SubmitTarget},
 };
@@ -20,11 +20,6 @@ pub(super) fn reword_abort(stoat: &mut Stoat) -> UpdateEffect {
         }
     }
     stoat.active_workspace_mut().rebase_active = None;
-    emit_rebase_error(
-        stoat,
-        "rebase aborted during reword",
-        Some("HEAD left at partial rebase state".into()),
-    );
     stoat.mode = if stoat.active_workspace().commits.is_some() {
         "commits".into()
     } else {
@@ -69,11 +64,6 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
     if new_message.trim().is_empty() {
         input.dispose(stoat.active_workspace_mut());
         stoat.active_workspace_mut().rebase_active = None;
-        emit_rebase_error(
-            stoat,
-            "rebase aborted: empty commit message",
-            Some("HEAD left at partial rebase state".into()),
-        );
         stoat.mode = if stoat.active_workspace().commits.is_some() {
             "commits".into()
         } else {
@@ -83,11 +73,9 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
     }
 
     let Some(repo) = stoat.git_host.discover(&workdir) else {
-        emit_rebase_error(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
     let Some(tree) = repo.commit_tree(&picked_sha) else {
-        emit_rebase_error(stoat, "reword: commit tree unreadable", None);
         return UpdateEffect::Redraw;
     };
     let real_parent = repo.parent_sha(&picked_sha).or(fallback_parent);
@@ -110,10 +98,7 @@ pub(super) fn reword_confirm(stoat: &mut Stoat) -> UpdateEffect {
             active.pause = None;
             drive_rebase(stoat)
         },
-        Err(GitApplyError::Backend { reason, .. }) => {
-            emit_rebase_error(stoat, "reword failed", Some(reason));
-            UpdateEffect::Redraw
-        },
+        Err(GitApplyError::Backend { .. }) => UpdateEffect::Redraw,
     }
 }
 

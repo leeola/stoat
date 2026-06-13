@@ -1,5 +1,5 @@
 use crate::{
-    action_handlers::rebase::{drive_rebase, emit_rebase_error},
+    action_handlers::rebase::drive_rebase,
     app::{Stoat, UpdateEffect},
 };
 
@@ -77,7 +77,6 @@ pub(super) fn conflict_skip_entry(stoat: &mut Stoat) -> UpdateEffect {
 
 pub(super) fn conflict_abort(stoat: &mut Stoat) -> UpdateEffect {
     stoat.active_workspace_mut().rebase_active = None;
-    emit_rebase_error(stoat, "rebase aborted during conflict", None);
     stoat.mode = if stoat.active_workspace().commits.is_some() {
         "commits".into()
     } else {
@@ -147,7 +146,6 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     let Some(repo) = stoat.git_host.discover(&workdir) else {
-        emit_rebase_error(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
     match repo.create_commit(
@@ -167,9 +165,6 @@ pub(super) fn conflict_apply(stoat: &mut Stoat) -> UpdateEffect {
             active.pause = None;
             drive_rebase(stoat)
         },
-        Err(GitApplyError::Backend { reason, .. }) => {
-            emit_rebase_error(stoat, "conflict commit failed", Some(reason));
-            UpdateEffect::Redraw
-        },
+        Err(GitApplyError::Backend { .. }) => UpdateEffect::Redraw,
     }
 }

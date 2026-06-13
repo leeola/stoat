@@ -5,7 +5,7 @@ use crate::{
     host::{self, WatchToken},
     pane::View,
     review::ReviewFileInput,
-    review_session::{ReviewProgress, ReviewSession, ReviewSource, ReviewViewState},
+    review_session::{ReviewSession, ReviewSource, ReviewViewState},
     workspace::Workspace,
 };
 use ratatui::{
@@ -34,7 +34,6 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
             ReviewSource::Commit { workdir, sha } => (workdir.clone(), sha.clone()),
             _ => {
                 tracing::warn!("ReviewRemoveSelected: only commit-source reviews support removal");
-                emit_review_error_badge(stoat, "remove only valid for commit reviews", None);
                 return UpdateEffect::Redraw;
             },
         };
@@ -68,21 +67,17 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
     };
 
     if staged_groups.is_empty() {
-        emit_review_info_badge(stoat, "nothing staged for removal");
         return UpdateEffect::Redraw;
     }
 
     let Some(repo) = stoat.git_host.discover(&workdir) else {
-        emit_review_error_badge(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
     if !repo.changed_files().is_empty() {
-        emit_review_error_badge(stoat, "working tree dirty: commit or stash first", None);
         return UpdateEffect::Redraw;
     }
 
     let Some(mut new_tree) = repo.commit_tree(&sha) else {
-        emit_review_error_badge(stoat, "commit tree unreadable", None);
         return UpdateEffect::Redraw;
     };
 
@@ -109,18 +104,9 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
     if is_head {
         match repo.amend_head(&new_tree, None) {
             Ok(new_sha) => {
-                emit_review_complete_badge(
-                    stoat,
-                    &format!(
-                        "removed {} hunk(s), HEAD amended",
-                        staged_groups.iter().map(|(_, v)| v.len()).sum::<usize>()
-                    ),
-                );
                 reopen_review_on_commit(stoat, &workdir, &new_sha);
             },
-            Err(GitApplyError::Backend { reason, .. }) => {
-                emit_review_error_badge(stoat, "amend failed", Some(reason));
-            },
+            Err(GitApplyError::Backend { .. }) => {},
         }
     } else {
         let descendants = repo
@@ -135,19 +121,9 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
         match repo.rewrite_commit(&sha, &new_tree, None, &descendants) {
             Ok(result) => {
                 let new_sha = result.mapping.get(&sha).cloned().unwrap_or(result.new_head);
-                let total: usize = staged_groups.iter().map(|(_, v)| v.len()).sum();
-                emit_review_complete_badge(
-                    stoat,
-                    &format!(
-                        "removed {total} hunk(s), rewrote {} commit(s)",
-                        descendants.len() + 1
-                    ),
-                );
                 reopen_review_on_commit(stoat, &workdir, &new_sha);
             },
-            Err(GitApplyError::Backend { reason, .. }) => {
-                emit_review_error_badge(stoat, "rewrite failed", Some(reason));
-            },
+            Err(GitApplyError::Backend { .. }) => {},
         }
     }
 
@@ -170,45 +146,6 @@ fn reopen_review_on_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
         // user launched from.
         close_review(stoat);
     }
-}
-
-fn emit_review_complete_badge(stoat: &mut Stoat, label: &str) {
-    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
-    let ws = stoat.active_workspace_mut();
-    ws.badges.remove_by_source(BadgeSource::Review);
-    ws.badges.insert(Badge {
-        source: BadgeSource::Review,
-        anchor: Anchor::BottomRight,
-        state: BadgeState::Complete,
-        label: label.to_string(),
-        detail: None,
-    });
-}
-
-fn emit_review_info_badge(stoat: &mut Stoat, label: &str) {
-    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
-    let ws = stoat.active_workspace_mut();
-    ws.badges.remove_by_source(BadgeSource::Review);
-    ws.badges.insert(Badge {
-        source: BadgeSource::Review,
-        anchor: Anchor::BottomRight,
-        state: BadgeState::Active,
-        label: label.to_string(),
-        detail: None,
-    });
-}
-
-fn emit_review_error_badge(stoat: &mut Stoat, label: &str, detail: Option<String>) {
-    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
-    let ws = stoat.active_workspace_mut();
-    ws.badges.remove_by_source(BadgeSource::Review);
-    ws.badges.insert(Badge {
-        source: BadgeSource::Review,
-        anchor: Anchor::BottomRight,
-        state: BadgeState::Error,
-        label: label.to_string(),
-        detail,
-    });
 }
 
 pub(super) fn commits_open_review(stoat: &mut Stoat) -> UpdateEffect {
@@ -334,9 +271,7 @@ pub(super) fn review_reset_progress(stoat: &mut Stoat) -> UpdateEffect {
     session.reset_progress();
     let chunk_id = session.cursor.current;
     let editor_id = session.view_editor;
-    let progress = session.progress();
     sync_review_view_and_scroll(ws, editor_id, chunk_id);
-    emit_review_progress_badge(ws, &progress);
     UpdateEffect::Redraw
 }
 
@@ -388,9 +323,7 @@ pub(super) fn review_mark(stoat: &mut Stoat, mark: ReviewMark) -> UpdateEffect {
         ReviewMark::ToggleApproval => session.toggle_approved(id),
     }
     let editor_id = session.view_editor;
-    let progress = session.progress();
     sync_review_view_and_scroll(ws, editor_id, moved_to);
-    emit_review_progress_badge(ws, &progress);
 
     UpdateEffect::Redraw
 }
@@ -453,9 +386,7 @@ pub(super) fn git_stage_hunk(stoat: &mut Stoat, force_unstage: bool) -> UpdateEf
     };
     session.set_status(id, next_status);
     let editor_id = session.view_editor;
-    let progress = session.progress();
     sync_review_view_and_scroll(ws, editor_id, None);
-    emit_review_progress_badge(ws, &progress);
 
     UpdateEffect::Redraw
 }
@@ -523,9 +454,7 @@ pub(super) fn git_stage_line(stoat: &mut Stoat) -> UpdateEffect {
     };
     session.set_chunk_staged_rows(id, plan.rows, plan.status);
     let editor_id = session.view_editor;
-    let progress = session.progress();
     sync_review_view_and_scroll(ws, editor_id, None);
-    emit_review_progress_badge(ws, &progress);
 
     UpdateEffect::Redraw
 }
@@ -578,48 +507,6 @@ pub(super) fn review_revert_hunk(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::Redraw
 }
 
-/// Insert or update the [`crate::badge::BadgeSource::Review`] badge to
-/// match `progress`. Inserts a [`crate::badge::BadgeState::Complete`]
-/// badge with running counters when the review is complete; removes any
-/// existing review badge otherwise. Idempotent: callers run this on
-/// every progress-affecting transition, including external-edit
-/// refreshes, so the badge tracks the latest counters.
-fn emit_review_progress_badge(ws: &mut Workspace, progress: &ReviewProgress) {
-    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
-
-    let existing = ws.badges.find_by_source(BadgeSource::Review);
-    if !progress.is_complete() {
-        if let Some(bid) = existing {
-            ws.badges.remove(bid);
-        }
-        return;
-    }
-
-    let label = format!("review complete: {} chunks", progress.total);
-    let detail = format!(
-        "{} staged · {} unstaged · {} skipped",
-        progress.staged, progress.unstaged, progress.skipped
-    );
-    match existing {
-        Some(bid) => {
-            if let Some(badge) = ws.badges.get_mut(bid) {
-                badge.state = BadgeState::Complete;
-                badge.label = label;
-                badge.detail = Some(detail);
-            }
-        },
-        None => {
-            ws.badges.insert(Badge {
-                source: BadgeSource::Review,
-                anchor: Anchor::BottomRight,
-                state: BadgeState::Complete,
-                label,
-                detail: Some(detail),
-            });
-        },
-    }
-}
-
 /// Refresh the editor's review view cache from the session and, if a chunk
 /// is supplied, scroll so that chunk sits near the top of the pane. Split
 /// borrow of `ws.editors` and `ws.review` is done here so callers can drop
@@ -648,7 +535,6 @@ fn sync_review_view_and_scroll(
 
 pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
     use crate::{
-        badge::{Anchor, Badge, BadgeSource, BadgeState},
         host::GitApplyError,
         review_apply::chunk_to_unified_diff,
         review_session::{ChunkStatus, ReviewChunkId},
@@ -696,7 +582,6 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
         return UpdateEffect::None;
     };
 
-    let total = staged.len();
     let mut applied = 0usize;
     let mut failures: Vec<String> = Vec::new();
     for (_, patch) in &staged {
@@ -706,43 +591,10 @@ pub(super) fn review_apply_staged(stoat: &mut Stoat) -> UpdateEffect {
         }
     }
 
-    {
-        let ws = stoat.active_workspace_mut();
-        ws.badges.remove_by_source(BadgeSource::Review);
-        let (state, label, detail) = if failures.is_empty() {
-            (
-                BadgeState::Complete,
-                format!("applied {applied} chunk{}", plural(applied)),
-                None,
-            )
-        } else {
-            (
-                BadgeState::Error,
-                format!("applied {applied} of {total} chunks"),
-                Some(failures.first().cloned().unwrap_or_default()),
-            )
-        };
-        ws.badges.insert(Badge {
-            source: BadgeSource::Review,
-            anchor: Anchor::BottomRight,
-            state,
-            label,
-            detail,
-        });
-    }
-
     if failures.is_empty() && applied > 0 {
         return review_refresh(stoat);
     }
     UpdateEffect::Redraw
-}
-
-fn plural(n: usize) -> &'static str {
-    if n == 1 {
-        ""
-    } else {
-        "s"
-    }
 }
 
 pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffect {
@@ -770,14 +622,12 @@ pub(super) fn review_external_edit(stoat: &mut Stoat, path: &Path) -> UpdateEffe
         return effect;
     };
     let editor_id = session.view_editor;
-    let progress = session.progress();
     let chunk_id = session
         .files
         .iter()
         .position(|f| f.path == path)
         .and_then(|file_index| session.chunk_containing_buffer_byte(file_index, 0));
     sync_review_view_and_scroll(ws, editor_id, chunk_id);
-    emit_review_progress_badge(ws, &progress);
     UpdateEffect::Redraw
 }
 
@@ -858,7 +708,6 @@ fn review_watch_edit(stoat: &mut Stoat, path: &Path, workdir: &Path) -> UpdateEf
         return UpdateEffect::Redraw;
     };
     let editor_id = session.view_editor;
-    let progress = session.progress();
     let scroll_to = new_ids
         .iter()
         .filter_map(|id| {
@@ -870,7 +719,6 @@ fn review_watch_edit(stoat: &mut Stoat, path: &Path, workdir: &Path) -> UpdateEf
         .min_by_key(|(start, _)| *start)
         .map(|(_, id)| id);
     sync_review_view_and_scroll(ws, editor_id, scroll_to);
-    emit_review_progress_badge(ws, &progress);
     UpdateEffect::Redraw
 }
 
@@ -1094,9 +942,7 @@ pub(super) fn line_select_stage(stoat: &mut Stoat, unstage: bool) -> UpdateEffec
     session.set_chunk_staged_rows(id, plan.rows, plan.status);
     session.cancel_line_select();
     let editor_id = session.view_editor;
-    let progress = session.progress();
     sync_review_view_and_scroll(ws, editor_id, None);
-    emit_review_progress_badge(ws, &progress);
     stoat.mode = "review".to_string();
     UpdateEffect::Redraw
 }
@@ -1127,7 +973,7 @@ fn rescan_source(stoat: &Stoat, source: &ReviewSource) -> Option<ReviewSession> 
 }
 
 pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
-    use crate::{badge::BadgeSource, review_session::ReviewOrigin};
+    use crate::review_session::ReviewOrigin;
 
     let executor = stoat.executor.clone();
     let fs_watch_host = stoat.fs_watch_host.clone();
@@ -1139,7 +985,6 @@ pub(super) fn close_review(stoat: &mut Stoat) -> UpdateEffect {
         fs_watch_host.unwatch(token);
     }
     let origin = session.origin;
-    ws.badges.remove_by_source(BadgeSource::Review);
     let next_mode = match origin {
         ReviewOrigin::FromCommits if ws.commits.is_some() => "commits",
         _ => "normal",
@@ -1933,7 +1778,7 @@ mod tests {
     }
 
     /// (c) A watcher event for a path that is not in the session
-    /// is a no-op: chunks, cursor, and review badges all stay put.
+    /// is a no-op: chunks and cursor all stay put.
     #[test]
     fn external_edit_off_session_path_is_noop() {
         let head = "a\nb\nc\nd\ne\nf\ng\nh\ni\nj\nk\n";
@@ -1957,14 +1802,6 @@ mod tests {
             h.with_review(|s| s.version),
             before_version,
             "off-session path must not bump the session version",
-        );
-        assert!(
-            h.stoat
-                .active_workspace()
-                .badges
-                .find_by_source(crate::badge::BadgeSource::Review)
-                .is_none(),
-            "no badge for a no-op event",
         );
     }
 

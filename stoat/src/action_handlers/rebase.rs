@@ -35,11 +35,6 @@ pub(super) fn enter_rebase(stoat: &mut Stoat) -> UpdateEffect {
     // onto it. Cursor at HEAD leaves nothing to rebase.
     let selected = state.selected;
     if selected == 0 || selected >= state.commits.len() {
-        emit_rebase_error(
-            stoat,
-            "nothing to rebase",
-            Some("select an older commit first; commits above it become the rebase plan".into()),
-        );
         return UpdateEffect::Redraw;
     }
 
@@ -165,13 +160,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                     if let Some(repo) = stoat.git_host.discover(&workdir) {
                         let _ = repo.update_head(&final_head);
                     }
-                    emit_rebase_complete(
-                        stoat,
-                        &format!(
-                            "rebase complete, HEAD at {}",
-                            &final_head[..final_head.len().min(7)]
-                        ),
-                    );
                     stoat.mode = if stoat.active_workspace().commits.is_some() {
                         "commits".into()
                     } else {
@@ -195,7 +183,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                     (active.workdir.clone(), active.current_head.clone())
                 };
                 let Some(repo) = stoat.git_host.discover(&workdir) else {
-                    emit_rebase_error(stoat, "git repo not found", None);
                     return UpdateEffect::Redraw;
                 };
                 match repo.cherry_pick_tree(&entry.commit.sha, &current_head) {
@@ -245,8 +232,7 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                                 _ => unreachable!(),
                             }
                         },
-                        Err(GitApplyError::Backend { reason, .. }) => {
-                            emit_rebase_error(stoat, "create_commit failed", Some(reason));
+                        Err(GitApplyError::Backend { .. }) => {
                             return UpdateEffect::Redraw;
                         },
                     },
@@ -265,8 +251,7 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                         stoat.mode = "conflict".into();
                         return UpdateEffect::Redraw;
                     },
-                    Err(GitApplyError::Backend { reason, .. }) => {
-                        emit_rebase_error(stoat, "cherry-pick failed", Some(reason));
+                    Err(GitApplyError::Backend { .. }) => {
                         return UpdateEffect::Redraw;
                     },
                 }
@@ -283,11 +268,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                         match active.last_pick_sha.clone() {
                             Some(s) => s,
                             None => {
-                                emit_rebase_error(
-                                    stoat,
-                                    "squash/fixup without preceding pick",
-                                    None,
-                                );
                                 return UpdateEffect::Redraw;
                             },
                         },
@@ -295,7 +275,6 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                     )
                 };
                 let Some(repo) = stoat.git_host.discover(&workdir) else {
-                    emit_rebase_error(stoat, "git repo not found", None);
                     return UpdateEffect::Redraw;
                 };
                 match repo.cherry_pick_tree(&entry.commit.sha, &last_pick) {
@@ -330,8 +309,7 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                                 active.last_pick_sha = Some(new_sha);
                                 active.last_message = Some(combined);
                             },
-                            Err(GitApplyError::Backend { reason, .. }) => {
-                                emit_rebase_error(stoat, "squash commit failed", Some(reason));
+                            Err(GitApplyError::Backend { .. }) => {
                                 return UpdateEffect::Redraw;
                             },
                         }
@@ -351,27 +329,13 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                         stoat.mode = "conflict".into();
                         return UpdateEffect::Redraw;
                     },
-                    Err(GitApplyError::Backend { reason, .. }) => {
-                        emit_rebase_error(stoat, "squash cherry-pick failed", Some(reason));
+                    Err(GitApplyError::Backend { .. }) => {
                         return UpdateEffect::Redraw;
                     },
                 }
             },
         }
     }
-}
-
-fn emit_rebase_complete(stoat: &mut Stoat, label: &str) {
-    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
-    let ws = stoat.active_workspace_mut();
-    ws.badges.remove_by_source(BadgeSource::Review);
-    ws.badges.insert(Badge {
-        source: BadgeSource::Review,
-        anchor: Anchor::BottomRight,
-        state: BadgeState::Complete,
-        label: label.to_string(),
-        detail: None,
-    });
 }
 
 pub(super) fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
@@ -383,27 +347,12 @@ pub(super) fn execute_rebase(stoat: &mut Stoat) -> UpdateEffect {
     let workdir = plan.workdir.clone();
 
     let Some(repo) = stoat.git_host.discover(&workdir) else {
-        emit_rebase_error(stoat, "git repo not found", None);
         return UpdateEffect::Redraw;
     };
     if !repo.changed_files().is_empty() {
-        emit_rebase_error(stoat, "working tree dirty: commit or stash first", None);
         return UpdateEffect::Redraw;
     }
 
     stoat.active_workspace_mut().rebase_active = Some(ActiveRebase::new(plan));
     drive_rebase(stoat)
-}
-
-pub(super) fn emit_rebase_error(stoat: &mut Stoat, label: &str, detail: Option<String>) {
-    use crate::badge::{Anchor, Badge, BadgeSource, BadgeState};
-    let ws = stoat.active_workspace_mut();
-    ws.badges.remove_by_source(BadgeSource::Review);
-    ws.badges.insert(Badge {
-        source: BadgeSource::Review,
-        anchor: Anchor::BottomRight,
-        state: BadgeState::Error,
-        label: label.to_string(),
-        detail,
-    });
 }

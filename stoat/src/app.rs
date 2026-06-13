@@ -1,6 +1,5 @@
 use crate::{
     action_handlers,
-    badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
@@ -108,11 +107,6 @@ pub struct Stoat {
     pub(crate) syntax_styles: SyntaxStyles,
     pub(crate) workspaces: SlotMap<WorkspaceId, Workspace>,
     pub(crate) active_workspace: WorkspaceId,
-    /// App-level badge tray for cross-workspace notifications. Badges here
-    /// render regardless of which workspace is active, complementing each
-    /// workspace's own [`Workspace::badges`]. The tray the badge lives in
-    /// is the source of truth for its scope.
-    pub(crate) badges: BadgeTray,
     pub(crate) pty_tx: Sender<PtyNotification>,
     pty_rx: Receiver<PtyNotification>,
     /// Wake-up signal for [`Self::run`]'s `tokio::select!`. Background
@@ -564,7 +558,6 @@ impl Stoat {
             syntax_styles,
             workspaces,
             active_workspace,
-            badges: BadgeTray::new(),
             pty_tx,
             pty_rx,
             redraw_notify: Arc::new(tokio::sync::Notify::new()),

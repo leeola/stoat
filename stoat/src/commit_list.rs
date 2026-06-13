@@ -461,19 +461,6 @@ mod tests {
         h.set_review_status(0, ChunkStatus::Staged);
         crate::action_handlers::dispatch(&mut h.stoat, &stoat_action::ReviewRemoveSelected);
 
-        let ws = h.stoat.active_workspace();
-        let badge_id = ws
-            .badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .expect("error badge");
-        let badge = ws.badges.get(badge_id).unwrap();
-        assert_eq!(badge.state, crate::badge::BadgeState::Error);
-        assert!(
-            badge.label.to_lowercase().contains("rewrite"),
-            "badge mentions rewrite: {}",
-            badge.label
-        );
-
         // Original history intact; no new commits were published.
         let repo = h.fake_git.discover(std::path::Path::new("/repo")).unwrap();
         let log = repo.log_commits(None, 10);
@@ -505,18 +492,10 @@ mod tests {
 
         let amends = h.fake_git().amend_history(&workdir);
         assert!(amends.is_empty(), "dirty worktree must refuse the amend");
-        let ws = h.stoat.active_workspace();
-        let badge_id = ws
-            .badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .expect("error badge visible");
-        let badge = ws.badges.get(badge_id).unwrap();
-        assert_eq!(badge.state, crate::badge::BadgeState::Error);
-        assert!(badge.label.to_lowercase().contains("dirty"));
     }
 
     #[test]
-    fn review_remove_selected_nothing_staged_badges_info() {
+    fn review_remove_selected_nothing_staged_is_noop() {
         let mut h = Stoat::test();
         h.resize(90, 16);
         h.fake_git
@@ -530,13 +509,6 @@ mod tests {
             .fake_git
             .amend_history(std::path::Path::new("/repo"))
             .is_empty());
-        let ws = h.stoat.active_workspace();
-        let badge_id = ws
-            .badges
-            .find_by_source(crate::badge::BadgeSource::Review)
-            .expect("info badge visible");
-        let badge = ws.badges.get(badge_id).unwrap();
-        assert!(badge.label.contains("nothing"));
     }
 
     #[test]
