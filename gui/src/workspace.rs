@@ -1239,6 +1239,9 @@ impl Workspace {
                             display_map.update(cx, |dm, dm_cx| dm.fold(folds, dm_cx));
                         }
                         Self::apply_saved_selections(&editor, &snap.blob, cx);
+                        if let Some(row) = snap.blob.get("scroll_row").and_then(|v| v.as_u64()) {
+                            editor.update(cx, |ed, cx| ed.set_scroll_row(row as u32, cx));
+                        }
                         pane.update(cx, |p, cx| {
                             p.add_item(Box::new(editor), cx);
                         });
@@ -18110,6 +18113,72 @@ mod tests {
                 ranges,
                 vec![(2, 7, false)],
                 "restored editor should carry the saved selection"
+            );
+        });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_editor_scroll() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let content: String = (0..30).map(|i| format!("line {i}\n")).collect();
+        fs.insert_file("/tmp/repo/long.rs", content.as_bytes());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/long.rs")], cx);
+        });
+        vcx.run_until_parked();
+
+        ws.update(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .clone();
+            let editor = pane
+                .read(cx)
+                .items()
+                .iter()
+                .find_map(|item| item.to_any_view().downcast::<Editor>().ok())
+                .expect("editor present");
+            editor.update(cx, |ed, cx| ed.set_scroll_row(12, cx));
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/scroll-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let mut rows: Vec<u32> = Vec::new();
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if let Ok(editor) = item.to_any_view().downcast::<Editor>() {
+                        rows.push(editor.read(cx).scroll_row());
+                    }
+                }
+            }
+            assert_eq!(
+                rows,
+                vec![12],
+                "restored editor should keep its saved scroll row"
             );
         });
     }

@@ -5000,6 +5000,7 @@ impl ItemView for Editor {
             "folds": folds,
             "buffer_id": buffer_id,
             "selections": selections,
+            "scroll_row": self.scroll_row(),
         })
     }
 }
