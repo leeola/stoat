@@ -18,6 +18,7 @@ pub enum ActionKind {
     CloseOtherPanes,
     OpenFile,
     OpenConfig,
+    ReloadConfig,
     OpenFileFinder,
     OpenFileFinderHSplit,
     OpenFileFinderVSplit,

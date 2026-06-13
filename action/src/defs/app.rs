@@ -37,6 +37,18 @@ define_action!(
 );
 
 define_action!(
+    ReloadConfigDef,
+    ReloadConfig,
+    "reload-config",
+    ActionKind::ReloadConfig,
+    "reload settings and theme from the user config",
+    "Rebuild the settings and theme from the bundled default layered with the user config on disk. Discards session-only runtime overrides such as :set and tab-bar. A user config that fails to parse is rejected with a warning, leaving the current settings in place.",
+    ActionPriority::Common,
+    true,
+    &["config-reload"]
+);
+
+define_action!(
     QuitAllDef,
     QuitAll,
     "quit-all",
@@ -113,6 +125,14 @@ mod tests {
             WriteQuit.def().short_desc(),
             "write the focused buffer, then close pane or exit"
         );
+    }
+
+    #[test]
+    fn reload_config() {
+        assert_eq!(ReloadConfig.kind(), ActionKind::ReloadConfig);
+        assert_eq!(ReloadConfig.def().name(), "reload-config");
+        assert!(ReloadConfig.def().params().is_empty());
+        assert_eq!(ReloadConfig.def().aliases(), &["config-reload"]);
     }
 
     #[test]

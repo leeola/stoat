@@ -2883,6 +2883,7 @@ impl Workspace {
             ActionKind::ToggleDiagnosticsPanel => self.dispatch_toggle_diagnostics_panel(cx),
             ActionKind::OpenMarkdownPreview => self.dispatch_open_markdown_preview(cx),
             ActionKind::OpenConfig => self.handle_open_config(cx),
+            ActionKind::ReloadConfig => self.handle_reload_config(cx),
             ActionKind::ProjectTreeSelectNext => {
                 self.update_project_tree(cx, ProjectTree::select_next)
             },
@@ -4334,6 +4335,65 @@ impl Workspace {
             }
         }
         self.open_paths(&[path], cx);
+    }
+
+    /// Handle the `reload-config` action: rebuild the settings and theme
+    /// globals from disk. Reads the user config source (the env-resolved
+    /// path via [`FsHostGlobal`]) and delegates to
+    /// [`Self::reload_config_with`].
+    fn handle_reload_config(&mut self, cx: &mut Context<'_, Self>) {
+        let user_source = stoat_config::user_config_path().and_then(|path| {
+            let fs = cx.global::<FsHostGlobal>().0.clone();
+            let mut buf = Vec::new();
+            fs.read(&path, &mut buf).ok()?;
+            String::from_utf8(buf).ok()
+        });
+        self.reload_config_with(user_source, cx);
+    }
+
+    /// Recompose the [`Settings`] and [`crate::theme::Theme`] globals
+    /// from the bundled default layered with `user_source`, then replace
+    /// them. The `observe_global::<Settings>` subscription recompiles the
+    /// keymap, and the theme is re-read on the next render.
+    ///
+    /// A `user_source` that fails to parse is rejected with a warning
+    /// toast, leaving the current globals untouched. The source is
+    /// pre-parsed for this rather than relying on `layer_user_source`,
+    /// which logs and falls back. Reloading discards session-only runtime
+    /// overrides (`:set`, `tab-bar`) since it rebuilds from disk.
+    fn reload_config_with(&mut self, user_source: Option<String>, cx: &mut Context<'_, Self>) {
+        let default_source = crate::keymap_loader::DEFAULT_KEYMAP;
+        let (default_config, errors) = stoat_config::parse(default_source);
+        let Some(default_config) = default_config else {
+            tracing::error!(
+                "bundled default config failed to parse: {}",
+                stoat_config::format_errors(default_source, &errors)
+            );
+            return;
+        };
+
+        if let Some(source) = &user_source {
+            let (_, errors) = stoat_config::parse(source);
+            if !errors.is_empty() {
+                self.show_toast(Toast::warning("Config has parse errors; not reloaded"), cx);
+                return;
+            }
+        }
+
+        let mut settings = Settings::from_config(default_config);
+        if let Some(source) = user_source {
+            settings = settings.layer_user_source(&source);
+        }
+        let theme_name = settings
+            .resolved
+            .theme
+            .clone()
+            .unwrap_or_else(|| "default_dark".to_string());
+        let theme = crate::theme::Theme::from_config(&settings.config, &theme_name);
+
+        cx.set_global(settings);
+        cx.set_global(theme);
+        self.show_toast(Toast::success("Config reloaded"), cx);
     }
 
     /// Resolve the project tree hosted in a left dock, if one is open.
@@ -10338,6 +10398,59 @@ mod tests {
                 .and_then(|editor| editor.read(cx).file_path().map(Path::to_path_buf))
         });
         assert_eq!(opened, Some(path), "the config opens in the focused pane");
+    }
+
+    #[test]
+    fn reload_config_with_valid_source_replaces_settings() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.reload_config_with(Some("on init { theme = zzz_reload_test; }".to_string()), cx);
+        });
+        vcx.run_until_parked();
+
+        let theme = ws.read_with(vcx, |_w, cx| cx.global::<Settings>().resolved.theme.clone());
+        assert_eq!(
+            theme.as_deref(),
+            Some("zzz_reload_test"),
+            "reload applies the user override to the settings global"
+        );
+    }
+
+    #[test]
+    fn reload_config_with_invalid_source_keeps_settings_and_warns() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |_w, cx| {
+            cx.set_global(Settings::load_from_source("on init { theme = sentinel; }"));
+        });
+        vcx.run_until_parked();
+
+        ws.update(vcx, |w, cx| {
+            w.reload_config_with(Some("on key { @@@ not valid".to_string()), cx);
+        });
+        vcx.run_until_parked();
+
+        let theme = ws.read_with(vcx, |_w, cx| cx.global::<Settings>().resolved.theme.clone());
+        assert_eq!(
+            theme.as_deref(),
+            Some("sentinel"),
+            "an unparseable user config leaves the current settings in place"
+        );
+        let warned = ws.read_with(vcx, |w, cx| {
+            w.toast_view()
+                .read(cx)
+                .toasts()
+                .iter()
+                .any(|t| matches!(t.kind, crate::toast::ToastKind::Warning))
+        });
+        assert!(warned, "an unparseable user config raises a warning toast");
     }
 
     #[test]

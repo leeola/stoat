@@ -1,7 +1,8 @@
 use crate::{
     defs::{
         app::{
-            DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll, QuitForce, WriteQuit,
+            DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll, QuitForce,
+            ReloadConfig, WriteQuit,
         },
         claude::{ToggleDockLeft, ToggleDockRight},
         commits::{
@@ -655,6 +656,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
         }))
     });
     add(OpenConfig::DEF, |_| Ok(Box::new(OpenConfig)));
+    add(ReloadConfig::DEF, |_| Ok(Box::new(ReloadConfig)));
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
     add(OpenTerminalDock::DEF, |_| Ok(Box::new(OpenTerminalDock)));
     add(OpenClaudeTerminal::DEF, |_| {
@@ -1098,6 +1100,7 @@ mod tests {
         "ConflictAbort",
         "run",
         "open-config",
+        "reload-config",
         "terminal-dock",
         "claude-terminal",
         "terminal",
@@ -1374,7 +1377,8 @@ mod tests {
         // + 1 QuitForce (quit! / q!, force-quit discarding unsaved buffers).
         // + 1 WriteQuit (write-quit / wq / x, save then quit).
         // + 1 OpenConfig (open-config / config-open).
-        assert_eq!(all().count(), 350);
+        // + 1 ReloadConfig (reload-config / config-reload).
+        assert_eq!(all().count(), 351);
     }
 
     #[test]
