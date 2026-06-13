@@ -277,24 +277,30 @@ fn comment_tokens_for_editor(
     language.comment_tokens
 }
 
-/// `OpenBelow` action: insert a blank line after each selection's
-/// head row and collapse every selection to a cursor on that new
-/// blank line. The keymap's `SetMode(insert)` step that follows
-/// switches the workspace into insert mode.
+/// `OpenBelow` action: open a line after each selection's head row and
+/// collapse every selection to a cursor on the new line, continuing the
+/// row's line comment when it has one (see [`Editor::open_line`]). The
+/// keymap's `SetMode(insert)` step that follows switches the workspace
+/// into insert mode.
 pub fn handle_open_below(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
-    if let Some(editor) = active_editor(workspace, cx) {
-        editor.update(cx, |ed, cx| ed.open_line(OpenLineDir::Below, cx));
-    }
+    let Some(editor) = active_editor(workspace, cx) else {
+        return;
+    };
+    let tokens = comment_tokens_for_editor(&editor, cx);
+    editor.update(cx, |ed, cx| ed.open_line(OpenLineDir::Below, tokens, cx));
 }
 
-/// `OpenAbove` action: insert a blank line before each selection's
-/// head row and collapse every selection to a cursor on that new
-/// blank line. The keymap's `SetMode(insert)` step that follows
-/// switches the workspace into insert mode.
+/// `OpenAbove` action: open a line before each selection's head row and
+/// collapse every selection to a cursor on the new line, continuing the
+/// row's line comment when it has one (see [`Editor::open_line`]). The
+/// keymap's `SetMode(insert)` step that follows switches the workspace
+/// into insert mode.
 pub fn handle_open_above(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
-    if let Some(editor) = active_editor(workspace, cx) {
-        editor.update(cx, |ed, cx| ed.open_line(OpenLineDir::Above, cx));
-    }
+    let Some(editor) = active_editor(workspace, cx) else {
+        return;
+    };
+    let tokens = comment_tokens_for_editor(&editor, cx);
+    editor.update(cx, |ed, cx| ed.open_line(OpenLineDir::Above, tokens, cx));
 }
 
 /// `SwitchCase` action: flip the case of every alphabetic char in

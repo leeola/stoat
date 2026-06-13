@@ -1192,14 +1192,24 @@ impl Editor {
         cx.notify();
     }
 
-    /// Insert a blank line above or below each selection's head
-    /// row and collapse every selection to a cursor on that new
-    /// blank line. Cursors that share a row collapse to a single
-    /// insert: only one blank line is opened per row, and all of
-    /// the row's cursors land at the same offset on it.
-    /// Multi-excerpt buffers are skipped with a `tracing::warn`,
-    /// matching [`Self::apply_text_to_all_cursors`].
-    pub fn open_line(&mut self, dir: OpenLineDir, cx: &mut Context<'_, Self>) {
+    /// Open a line above or below each selection's head row and collapse
+    /// every selection to a cursor on the new line.
+    ///
+    /// When the head row begins a line comment in `tokens`, the new line is
+    /// seeded with that row's [`comment_continuation_prefix`] and the cursor
+    /// lands after it; otherwise the new line is blank. An empty `tokens`
+    /// slice always opens a blank line. Cursors that share a row collapse to
+    /// a single insert: one line is opened per row, and all of the row's
+    /// cursors land at the same offset on it.
+    ///
+    /// Multi-excerpt buffers are skipped with a `tracing::warn`, matching
+    /// [`Self::apply_text_to_all_cursors`].
+    pub fn open_line(
+        &mut self,
+        dir: OpenLineDir,
+        tokens: &[&'static str],
+        cx: &mut Context<'_, Self>,
+    ) {
         let buffer = match self.multi_buffer.read(cx).as_singleton() {
             Some(b) => b.clone(),
             None => {
@@ -1211,52 +1221,76 @@ impl Editor {
             },
         };
 
-        let (selection_rows, row_to_pre_offset) = {
+        // One open per head row (cursors sharing a row collapse to a single
+        // insert): where the new line is inserted, the text inserted there,
+        // and where the cursor lands within that text.
+        struct RowOpen {
+            offset: usize,
+            text: String,
+            cursor_in_text: usize,
+        }
+
+        let (selection_rows, row_opens) = {
             let snapshot = self.multi_buffer.read(cx).snapshot();
             let rope = snapshot.rope();
             let mut selection_rows: Vec<(usize, u32)> = Vec::new();
-            let mut row_to_pre_offset: std::collections::HashMap<u32, usize> =
+            let mut row_opens: std::collections::HashMap<u32, RowOpen> =
                 std::collections::HashMap::new();
             for sel in self.selections.all_anchors().iter() {
                 let row = snapshot.point_for_anchor(&sel.head()).row;
                 selection_rows.push((sel.id, row));
-                row_to_pre_offset.entry(row).or_insert_with(|| match dir {
-                    OpenLineDir::Above => rope.point_to_offset(stoat_text::Point::new(row, 0)),
-                    OpenLineDir::Below => {
-                        rope.point_to_offset(stoat_text::Point::new(row, rope.line_len(row)))
-                    },
+                row_opens.entry(row).or_insert_with(|| {
+                    let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                    let line_len = rope.line_len(row) as usize;
+                    let line = rope.slice(line_start..line_start + line_len).to_string();
+                    let prefix =
+                        comment_continuation_prefix(&line, line.len(), tokens).unwrap_or_default();
+                    match dir {
+                        OpenLineDir::Above => RowOpen {
+                            offset: line_start,
+                            cursor_in_text: prefix.len(),
+                            text: format!("{prefix}\n"),
+                        },
+                        OpenLineDir::Below => RowOpen {
+                            offset: line_start + line_len,
+                            cursor_in_text: 1 + prefix.len(),
+                            text: format!("\n{prefix}"),
+                        },
+                    }
                 });
             }
-            (selection_rows, row_to_pre_offset)
+            (selection_rows, row_opens)
         };
 
-        if row_to_pre_offset.is_empty() {
+        if row_opens.is_empty() {
             return;
         }
 
-        let mut sorted_offsets: Vec<usize> = row_to_pre_offset.values().copied().collect();
-        sorted_offsets.sort_unstable();
+        let mut ordered: Vec<&RowOpen> = row_opens.values().collect();
+        ordered.sort_by_key(|o| o.offset);
 
-        for offset in sorted_offsets.iter().rev() {
-            buffer.update(cx, |b, cx| b.edit(*offset..*offset, "\n", cx));
+        for open in ordered.iter().rev() {
+            buffer.update(cx, |b, cx| {
+                b.edit(open.offset..open.offset, open.text.as_str(), cx)
+            });
         }
 
         let bias = match dir {
             OpenLineDir::Above => Bias::Left,
             OpenLineDir::Below => Bias::Right,
         };
-        let cursor_delta: usize = match dir {
-            OpenLineDir::Above => 0,
-            OpenLineDir::Below => 1,
-        };
 
         let new_snapshot = self.multi_buffer.read(cx).snapshot();
         let mut new_selections: Vec<Selection<Anchor>> = selection_rows
             .into_iter()
             .map(|(id, row)| {
-                let pre_offset = row_to_pre_offset[&row];
-                let earlier_inserts = sorted_offsets.iter().filter(|o| **o < pre_offset).count();
-                let cursor_offset = pre_offset + earlier_inserts + cursor_delta;
+                let open = &row_opens[&row];
+                let earlier_shift: usize = ordered
+                    .iter()
+                    .filter(|o| o.offset < open.offset)
+                    .map(|o| o.text.len())
+                    .sum();
+                let cursor_offset = open.offset + earlier_shift + open.cursor_in_text;
                 let anchor = new_snapshot.anchor_at(cursor_offset, bias);
                 Selection {
                     id,
@@ -6145,7 +6179,7 @@ mod tests {
         let (buffer, editor) = new_editor(&mut cx, "line0\nline1\n");
         seed_cursors(&editor, &mut cx, &[2]);
 
-        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Below, cx));
+        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Below, &[], cx));
         cx.run_until_parked();
 
         assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "line0\n\nline1\n");
@@ -6158,7 +6192,7 @@ mod tests {
         let (buffer, editor) = new_editor(&mut cx, "line0\nline1\n");
         seed_cursors(&editor, &mut cx, &[8]);
 
-        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Above, cx));
+        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Above, &[], cx));
         cx.run_until_parked();
 
         assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "line0\n\nline1\n");
@@ -6171,11 +6205,74 @@ mod tests {
         let (buffer, editor) = new_editor(&mut cx, "hello\n");
         seed_cursors(&editor, &mut cx, &[1, 3]);
 
-        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Below, cx));
+        editor.update(&mut cx, |ed, cx| ed.open_line(OpenLineDir::Below, &[], cx));
         cx.run_until_parked();
 
         assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "hello\n\n");
         assert_eq!(cursor_offsets(&editor, &mut cx), vec![6]);
+    }
+
+    fn open_line_result(
+        cx: &mut TestAppContext,
+        text: &str,
+        cursors: &[usize],
+        dir: OpenLineDir,
+        tokens: &[&'static str],
+    ) -> (String, Vec<usize>) {
+        let (buffer, editor) = new_editor(cx, text);
+        seed_cursors(&editor, cx, cursors);
+        editor.update(cx, |ed, cx| ed.open_line(dir, tokens, cx));
+        cx.run_until_parked();
+        (
+            buffer.read_with(cx, |b, _| b.text()),
+            cursor_offsets(&editor, cx),
+        )
+    }
+
+    #[test]
+    fn open_line_continues_comments() {
+        const RUST: &[&str] = &["//", "///", "//!"];
+        let mut cx = TestAppContext::single();
+
+        assert_eq!(
+            open_line_result(&mut cx, "// foo\nbar", &[3], OpenLineDir::Below, RUST),
+            ("// foo\n// \nbar".to_string(), vec![10]),
+        );
+        assert_eq!(
+            open_line_result(&mut cx, "//! foo", &[3], OpenLineDir::Above, RUST),
+            ("//! \n//! foo".to_string(), vec![4]),
+        );
+        assert_eq!(
+            open_line_result(&mut cx, "# note", &[2], OpenLineDir::Below, &["#"]),
+            ("# note\n# ".to_string(), vec![9]),
+        );
+        assert_eq!(
+            open_line_result(&mut cx, "    // x", &[6], OpenLineDir::Below, RUST),
+            ("    // x\n    // ".to_string(), vec![16]),
+        );
+        assert_eq!(
+            open_line_result(&mut cx, "let x", &[2], OpenLineDir::Below, RUST),
+            ("let x\n".to_string(), vec![6]),
+        );
+    }
+
+    #[test]
+    fn open_line_below_continues_each_row_independently() {
+        const RUST: &[&str] = &["//", "///", "//!"];
+        let mut cx = TestAppContext::single();
+        assert_eq!(
+            open_line_result(
+                &mut cx,
+                "// a\nplain\n//! c",
+                &[3, 7, 13],
+                OpenLineDir::Below,
+                RUST,
+            ),
+            (
+                "// a\n// \nplain\n\n//! c\n//! ".to_string(),
+                vec![8, 15, 26]
+            ),
+        );
     }
 
     fn install_executor_global(cx: &mut TestAppContext) {
