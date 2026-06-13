@@ -15,6 +15,7 @@ pub mod global_search;
 pub mod goto_word;
 pub mod host;
 pub mod jumplist;
+pub mod key;
 pub mod keymap;
 pub mod lsp;
 pub mod multi_buffer;

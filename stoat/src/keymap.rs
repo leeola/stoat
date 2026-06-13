@@ -1,5 +1,5 @@
+use crate::key::{KeyCode, KeyEvent, KeyModifiers};
 use compact_str::CompactString;
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use std::collections::HashMap;
 use stoat_action::{registry, Action, ParamValue};
 use stoat_config::{
@@ -294,7 +294,7 @@ pub struct ResolvedArg {
 /// already carried by the keycode, so bindings written without an explicit
 /// `S-` prefix still match what the terminal emits.
 ///
-/// Default crossterm without the kitty keyboard protocol reports Shift+a as
+/// A terminal without the kitty keyboard protocol reports Shift+a as
 /// `(Char('A'), SHIFT)` and Shift-Tab (CSI Z) as `(BackTab, SHIFT)`, but
 /// bindings written as `A` or `BackTab` compile to `(_, NONE)` and modifier
 /// comparison in [`CompiledKey::matches`] is strict. For `Char(letter)` the
@@ -315,7 +315,6 @@ pub fn normalize_shift_event(key: KeyEvent) -> KeyEvent {
     KeyEvent {
         code: new_code,
         modifiers,
-        ..key
     }
 }
 

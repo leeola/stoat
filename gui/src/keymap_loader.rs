@@ -98,11 +98,8 @@ mod tests {
         TestState { values }
     }
 
-    fn enter_event() -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Enter,
-            crossterm::event::KeyModifiers::NONE,
-        )
+    fn enter_event() -> stoat::key::KeyEvent {
+        stoat::key::KeyEvent::new(stoat::key::KeyCode::Enter, stoat::key::KeyModifiers::NONE)
     }
 
     #[test]
@@ -115,10 +112,10 @@ mod tests {
         assert_eq!(actions[0].name, "AcceptCompletion");
     }
 
-    fn ctrl_event(c: char) -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(c),
-            crossterm::event::KeyModifiers::CONTROL,
+    fn ctrl_event(c: char) -> stoat::key::KeyEvent {
+        stoat::key::KeyEvent::new(
+            stoat::key::KeyCode::Char(c),
+            stoat::key::KeyModifiers::CONTROL,
         )
     }
 
@@ -148,11 +145,8 @@ mod tests {
         TestState { values }
     }
 
-    fn char_event(c: char) -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char(c),
-            crossterm::event::KeyModifiers::NONE,
-        )
+    fn char_event(c: char) -> stoat::key::KeyEvent {
+        stoat::key::KeyEvent::new(stoat::key::KeyCode::Char(c), stoat::key::KeyModifiers::NONE)
     }
 
     #[test]
@@ -175,15 +169,15 @@ mod tests {
         assert_eq!(actions[0].name, "NewFolderInTree");
     }
 
-    fn alt_event(code: crossterm::event::KeyCode) -> crossterm::event::KeyEvent {
-        crossterm::event::KeyEvent::new(code, crossterm::event::KeyModifiers::ALT)
+    fn alt_event(code: stoat::key::KeyCode) -> stoat::key::KeyEvent {
+        stoat::key::KeyEvent::new(code, stoat::key::KeyModifiers::ALT)
     }
 
     #[test]
     fn default_keymap_alt_left_in_insert_moves_to_prev_word() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(&insert_state(), &alt_event(crossterm::event::KeyCode::Left))
+            .lookup(&insert_state(), &alt_event(stoat::key::KeyCode::Left))
             .expect("Alt-Left has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "MovePrevWordStart");
@@ -193,10 +187,7 @@ mod tests {
     fn default_keymap_alt_right_in_insert_moves_to_next_word() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(
-                &insert_state(),
-                &alt_event(crossterm::event::KeyCode::Right),
-            )
+            .lookup(&insert_state(), &alt_event(stoat::key::KeyCode::Right))
             .expect("Alt-Right has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "MoveNextWordStart");
@@ -206,10 +197,7 @@ mod tests {
     fn default_keymap_alt_backspace_in_insert_deletes_word_backward() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(
-                &insert_state(),
-                &alt_event(crossterm::event::KeyCode::Backspace),
-            )
+            .lookup(&insert_state(), &alt_event(stoat::key::KeyCode::Backspace))
             .expect("Alt-Backspace has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "DeleteWordBackward");
@@ -219,10 +207,7 @@ mod tests {
     fn default_keymap_alt_delete_in_insert_deletes_word_forward() {
         let keymap = compile_default_keymap();
         let actions = keymap
-            .lookup(
-                &insert_state(),
-                &alt_event(crossterm::event::KeyCode::Delete),
-            )
+            .lookup(&insert_state(), &alt_event(stoat::key::KeyCode::Delete))
             .expect("Alt-Delete has an insert-mode binding");
         assert_eq!(actions.len(), 1);
         assert_eq!(actions[0].name, "DeleteWordForward");
@@ -244,9 +229,9 @@ mod tests {
         // Ctrl+Shift+z reaches lookup as {Char('Z'), CONTROL}: the input
         // pipeline uppercases shifted letters and drops SHIFT, so the redo
         // binding is Ctrl-Z, mirroring normal mode's `U -> Redo()`.
-        let event = normalize_shift_event(crossterm::event::KeyEvent::new(
-            crossterm::event::KeyCode::Char('z'),
-            crossterm::event::KeyModifiers::CONTROL | crossterm::event::KeyModifiers::SHIFT,
+        let event = normalize_shift_event(stoat::key::KeyEvent::new(
+            stoat::key::KeyCode::Char('z'),
+            stoat::key::KeyModifiers::CONTROL | stoat::key::KeyModifiers::SHIFT,
         ));
         let actions = keymap
             .lookup(&insert_state(), &event)
@@ -266,7 +251,7 @@ mod tests {
 
     #[test]
     fn default_keymap_editing_key_suite_in_every_text_entry_mode() {
-        use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+        use stoat::key::{KeyCode, KeyEvent, KeyModifiers};
 
         let keymap = compile_default_keymap();
 

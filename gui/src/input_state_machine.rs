@@ -11,7 +11,6 @@ use crate::{
     terminal_view::Terminal,
     workspace::Workspace,
 };
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 use gpui::{Context, Entity, FocusHandle, Keystroke, Modifiers, WeakEntity, Window};
 use std::{
     collections::{HashMap, HashSet},
@@ -19,6 +18,7 @@ use std::{
     time::{Duration, Instant},
 };
 use stoat::{
+    key::{KeyCode, KeyEvent, KeyModifiers},
     keymap::{
         arg_as_str, is_text_input_mode, normalize_shift_event, resolve_action, Keymap, KeymapState,
         StateValue,
@@ -1095,8 +1095,8 @@ impl InputStateMachine {
     }
 
     /// Drive one platform keystroke through the input pipeline:
-    /// translate it to the crossterm shape the keymap engine matches
-    /// against, fold an ASCII digit into the pending count when one
+    /// translate it to the native [`KeyEvent`] shape the keymap engine
+    /// matches against, fold an ASCII digit into the pending count when one
     /// is in flight (normal/select modes only), look up bindings
     /// against `self` as the [`KeymapState`], and resolve each
     /// match into a [`stoat_action::Action`] via [`resolve_action`].
@@ -1128,7 +1128,7 @@ impl InputStateMachine {
     /// Workspace`, and re-entering [`Entity::update`] from
     /// underneath that borrow would panic.
     ///
-    /// Keystrokes the crossterm shape cannot represent (modifier-only
+    /// Keystrokes the native key shape cannot represent (modifier-only
     /// events, unknown named keys) are silently dropped. Unknown
     /// action names and bad arg shapes are dropped after a
     /// `tracing::warn` inside [`resolve_action`].
@@ -1461,7 +1461,7 @@ fn keystroke_to_key_event(keystroke: &Keystroke) -> Option<KeyEvent> {
     }
 
     // GPUI reports Shift-Tab as `(tab, SHIFT)`, but the chord compiles to
-    // `BackTab` with no modifier (as `normalize_shift_event` and crossterm's
+    // `BackTab` with no modifier (as `normalize_shift_event` and a terminal's
     // CSI-Z decoding both treat it). Fold it here so the chord reaches its
     // bindings.
     if keystroke.modifiers.shift && keystroke.key == "tab" {

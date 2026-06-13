@@ -1,6 +1,6 @@
 //! Keyboard-to-terminal-input byte encoding.
 //!
-//! Translates a crossterm [`KeyEvent`] into the byte sequence a terminal
+//! Translates a [`KeyEvent`] into the byte sequence a terminal
 //! program expects on its stdin: control bytes for `Ctrl`-modified keys,
 //! `ESC`-prefixed bytes for `Alt`, and CSI / SS3 escape sequences for the
 //! named keys (cursor keys, `Home`/`End`, `PageUp`/`PageDown`,
@@ -12,7 +12,7 @@
 //! the application-cursor-key (DECCKM) SS3 form (`\x1bOA`). Modified
 //! cursor keys always keep the CSI `1;<m>` form.
 
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::key::{KeyCode, KeyEvent, KeyModifiers};
 
 /// Encode `event` as the bytes a terminal program reads from stdin, or
 /// `None` for a key that produces no input (e.g. a modifier-only event or
