@@ -25,14 +25,14 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, App, Context, DismissEvent, Entity, FontWeight, HighlightStyle, IntoElement,
-    ParentElement, SharedString, Styled, StyledText, Task, WeakEntity, Window,
+    div, AnyElement, App, Context, DismissEvent, Entity, FontWeight, HighlightStyle, Hsla,
+    IntoElement, ParentElement, SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use std::collections::VecDeque;
 use stoat::rebase::RebasePause;
 use stoat_action::{
     registry::{self, RegistryEntry},
-    ActionKind, ParamValue,
+    ActionKind, ParamDef, ParamValue,
 };
 
 /// Maximum number of confirmed queries retained for history recall.
@@ -1002,28 +1002,40 @@ impl PickerDelegate for CommandPaletteDelegate {
                 .into_any_element()
         };
 
-        Some(
-            pane.child(
+        let aliases = entry.def.aliases();
+        let mut name_line = div().flex().flex_row().items_center().gap_2().child(
+            div()
+                .text_sm()
+                .font_weight(FontWeight::SEMIBOLD)
+                .text_color(text_color)
+                .child(SharedString::from(name)),
+        );
+        if !aliases.is_empty() {
+            name_line = name_line.child(
                 div()
-                    .text_sm()
-                    .font_weight(FontWeight::SEMIBOLD)
-                    .text_color(text_color)
-                    .child(SharedString::from(name)),
-            )
+                    .text_xs()
+                    .text_color(muted_color)
+                    .child(SharedString::from(aliases.join(", "))),
+            );
+        }
+
+        let keybindings = div()
+            .flex()
+            .flex_col()
+            .gap_1()
             .child(
                 div()
-                    .flex()
-                    .flex_col()
-                    .gap_1()
-                    .child(
-                        div()
-                            .text_xs()
-                            .text_color(muted_color)
-                            .child(SharedString::from("Keybindings")),
-                    )
-                    .child(chord_rows),
+                    .text_xs()
+                    .text_color(muted_color)
+                    .child(SharedString::from("Keybindings")),
             )
-            .into_any_element(),
+            .child(chord_rows);
+
+        Some(
+            pane.child(name_line)
+                .child(keybindings)
+                .child(action_help(entry, text_color, muted_color))
+                .into_any_element(),
         )
     }
 }
@@ -1053,6 +1065,59 @@ impl CommandPaletteDelegate {
             .child(label)
             .into_any_element()
     }
+}
+
+/// The help block for the palette detail pane, rendered below the keybindings
+/// section: the action's [`ActionDef::short_desc`] summary, its
+/// [`ActionDef::long_desc`] body (wrapped by GPUI within the pane), and a muted
+/// "Parameters" list for param-taking actions.
+fn action_help(entry: &RegistryEntry, text_color: Hsla, muted_color: Hsla) -> AnyElement {
+    let mut section = div().flex().flex_col().gap_1().child(
+        div()
+            .text_xs()
+            .text_color(text_color)
+            .child(SharedString::from(entry.def.short_desc())),
+    );
+
+    let long_desc = entry.def.long_desc();
+    if !long_desc.is_empty() {
+        section = section.child(
+            div()
+                .text_xs()
+                .text_color(muted_color)
+                .child(SharedString::from(long_desc)),
+        );
+    }
+
+    let params = entry.def.params();
+    if !params.is_empty() {
+        section = section.child(
+            div()
+                .text_xs()
+                .text_color(muted_color)
+                .child(SharedString::from("Parameters")),
+        );
+        for param in params {
+            section = section.child(
+                div()
+                    .text_xs()
+                    .text_color(text_color)
+                    .child(SharedString::from(param_line(param))),
+            );
+        }
+    }
+
+    section.into_any_element()
+}
+
+/// One parameter's detail line for the help block: `name*: kind: description`,
+/// where a trailing `*` on the name marks a required parameter.
+fn param_line(param: &ParamDef) -> String {
+    let required = if param.required { "*" } else { "" };
+    format!(
+        "{}{}: {}: {}",
+        param.name, required, param.kind, param.description
+    )
 }
 
 fn dispatch_action(
@@ -1153,7 +1218,7 @@ pub fn open_command_palette(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use stoat_action::ActionKind;
+    use stoat_action::{ActionKind, ParamKind};
 
     fn new_delegate() -> CommandPaletteDelegate {
         CommandPaletteDelegate::new(WeakEntity::new_invalid(), Availability::default())
@@ -1212,6 +1277,25 @@ mod tests {
             Some(other.def.name()),
             "CollectArgs targets the in-flight entry, not the selection",
         );
+    }
+
+    #[test]
+    fn param_line_marks_required_and_formats_fields() {
+        let required = ParamDef {
+            name: "path",
+            kind: ParamKind::String,
+            required: true,
+            description: "file to open",
+        };
+        assert_eq!(param_line(&required), "path*: string: file to open");
+
+        let optional = ParamDef {
+            name: "count",
+            kind: ParamKind::Number,
+            required: false,
+            description: "repeat count",
+        };
+        assert_eq!(param_line(&optional), "count: number: repeat count");
     }
 
     #[test]
