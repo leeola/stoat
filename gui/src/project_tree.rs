@@ -440,6 +440,10 @@ impl ItemView for ProjectTree {
             .into()
     }
 
+    fn serialize(&self, _cx: &App) -> Value {
+        serde_json::json!({ "expanded": self.expanded_paths() })
+    }
+
     fn item_kind(&self) -> ItemKind {
         ItemKind::ProjectTree
     }
@@ -448,8 +452,11 @@ impl ItemView for ProjectTree {
     where
         Self: Sized,
     {
+        // Restore flows through Workspace::apply_state, which supplies the
+        // git root and fs host this trait method cannot reach.
         DeserializeSnafu {
-            reason: "ProjectTree persistence is not yet implemented",
+            reason: "ProjectTree is restored via Workspace::apply_state, \
+                     not from its serialized blob alone",
         }
         .fail()
     }

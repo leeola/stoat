@@ -1213,217 +1213,13 @@ impl Workspace {
             };
             let mut materialized: usize = 0;
             for snap in &items.items {
-                match snap.kind {
-                    crate::item::ItemKind::Editor => {
-                        let path = snap
-                            .blob
-                            .get("file_path")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from);
-                        let editor = if let Some(path) = path {
-                            self.build_editor_for_path(&path, cx)
-                        } else if let Some(editor) =
-                            self.build_editor_for_registry_buffer(&snap.blob, cx)
-                        {
-                            editor
-                        } else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping editor item with no restorable buffer during restore"
-                            );
-                            continue;
-                        };
-                        let folds = crate::workspace_persist::folds_from_blob(&snap.blob);
-                        if !folds.is_empty() {
-                            let display_map = editor.read(cx).display_map().clone();
-                            display_map.update(cx, |dm, dm_cx| dm.fold(folds, dm_cx));
-                        }
-                        Self::apply_saved_selections(&editor, &snap.blob, cx);
-                        if let Some(row) = snap.blob.get("scroll_row").and_then(|v| v.as_u64()) {
-                            editor.update(cx, |ed, cx| ed.set_scroll_row(row as u32, cx));
-                        }
-                        pane.update(cx, |p, cx| {
-                            p.add_item(Box::new(editor), cx);
-                        });
-                        materialized += 1;
-                    },
-                    crate::item::ItemKind::Review => {
-                        let Some(persist) =
-                            crate::review_item::review_persist_from_blob(&snap.blob)
-                        else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping review item with unparseable blob during restore"
-                            );
-                            continue;
-                        };
-                        let source = crate::review_item::source_from_persist(persist.source);
-                        let statuses: HashMap<ChunkFingerprint, ChunkStatus> =
-                            persist.statuses.into_iter().collect();
-                        let approvals: HashMap<ChunkFingerprint, bool> =
-                            persist.approvals.into_iter().map(|fp| (fp, true)).collect();
-                        let Some(review) =
-                            self.build_review_item(source, &statuses, &approvals, cx)
-                        else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping review item with no reviewable content during restore"
-                            );
-                            continue;
-                        };
-                        pane.update(cx, |p, cx| {
-                            p.add_item(Box::new(review), cx);
-                        });
-                        materialized += 1;
-                    },
-                    crate::item::ItemKind::Conflict => {
-                        let Some(rel_path) = snap.blob.get("rel_path").and_then(|v| v.as_str())
-                        else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping conflict item with no rel_path during restore"
-                            );
-                            continue;
-                        };
-                        let rel_path = PathBuf::from(rel_path);
-                        let abs = self.git_root.join(&rel_path);
-                        let content = read_path_or_empty(&abs, cx);
-                        let Some(file) =
-                            crate::conflict_item::conflicted_file_from_markers(rel_path, &content)
-                        else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping conflict item: no conflict markers remain during restore"
-                            );
-                            continue;
-                        };
-                        let item = cx.new(|cx| ConflictItem::from_conflicted_file(file, cx));
-                        pane.update(cx, |p, cx| {
-                            p.add_item(Box::new(item), cx);
-                        });
-                        materialized += 1;
-                    },
-                    crate::item::ItemKind::MarkdownPreview => {
-                        let Some(source_path) =
-                            snap.blob.get("source_path").and_then(|v| v.as_str())
-                        else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping markdown preview with no source path during restore"
-                            );
-                            continue;
-                        };
-                        let abs = PathBuf::from(source_path);
-                        let text = read_path_or_empty(&abs, cx);
-                        let shared = self
-                            .buffer_registry
-                            .update(cx, |reg, cx| reg.open(&abs, &text, cx).1);
-                        let buffer = cx.new(|_| Buffer::from_shared(shared));
-                        buffer.update(cx, |b, cx| b.set_file_path(Some(abs), cx));
-                        let preview =
-                            cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(buffer, cx));
-                        pane.update(cx, |p, cx| {
-                            p.add_item(Box::new(preview), cx);
-                        });
-                        materialized += 1;
-                    },
-                    crate::item::ItemKind::CommitList => {
-                        use crate::picker::PickerDelegate;
-                        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
-                        let Some(repo) = git.discover(&self.git_root) else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping commit list: not in a git repo during restore"
-                            );
-                            continue;
-                        };
-                        let Some(workdir) = repo.workdir() else {
-                            tracing::info!(
-                                pane_id = ?pane_id,
-                                "skipping commit list: git repo has no workdir during restore"
-                            );
-                            continue;
-                        };
-                        let snapshot: stoat::commit_list::CommitListSnapshot =
-                            serde_json::from_value(snap.blob.clone()).unwrap_or_default();
-                        let inner = {
-                            let mut inner = stoat::commit_list::CommitListState::new(workdir);
-                            inner.apply_snapshot(snapshot);
-                            inner
-                        };
-                        let state = cx.new(|_| crate::commit_list::CommitListState::new(inner));
-                        let buffer_registry = self.buffer_registry.clone();
-                        let item = cx.new(|cx| {
-                            crate::commit_list::CommitListItem::restored(state, buffer_registry, cx)
-                        });
-                        let picker = item.read(cx).picker().clone();
-                        picker.update(cx, |p, picker_cx| {
-                            p.delegate_mut()
-                                .update_matches(String::new(), picker_cx)
-                                .detach();
-                        });
-                        pane.update(cx, |p, cx| {
-                            p.add_item(Box::new(item), cx);
-                        });
-                        materialized += 1;
-                    },
-                    crate::item::ItemKind::Terminal => {
-                        let cwd = snap
-                            .blob
-                            .get("cwd")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| self.git_root.clone());
-                        let program = snap
-                            .blob
-                            .get("program")
-                            .and_then(|v| v.as_str())
-                            .unwrap_or("bash")
-                            .to_string();
-                        let args = snap
-                            .blob
-                            .get("args")
-                            .and_then(|v| v.as_array())
-                            .map(|items| {
-                                items
-                                    .iter()
-                                    .filter_map(|v| v.as_str().map(String::from))
-                                    .collect()
-                            })
-                            .unwrap_or_default();
-                        let weak = cx.weak_entity();
-                        let terminal = cx.new(|cx| {
-                            crate::terminal_view::Terminal::with_command(
-                                weak, cwd, program, args, cx,
-                            )
-                        });
-                        pane.update(cx, |p, cx| {
-                            p.add_item(Box::new(terminal), cx);
-                        });
-                        materialized += 1;
-                    },
-                    crate::item::ItemKind::Run => {
-                        let cwd = snap
-                            .blob
-                            .get("cwd")
-                            .and_then(|v| v.as_str())
-                            .map(PathBuf::from)
-                            .unwrap_or_else(|| self.git_root.clone());
-                        let weak = cx.weak_entity();
-                        let run = cx.new(|cx| crate::run_pane::Run::restored(weak, cwd, cx));
-                        pane.update(cx, |p, cx| {
-                            p.add_item(Box::new(run), cx);
-                        });
-                        materialized += 1;
-                    },
-                    other => {
-                        tracing::info!(
-                            pane_id = ?pane_id,
-                            kind = ?other,
-                            "skipping non-editor item during workspace restore v1"
-                        );
-                    },
-                }
+                let Some(item) = self.materialize_item(snap, cx) else {
+                    continue;
+                };
+                pane.update(cx, |p, cx| {
+                    p.add_item(item, cx);
+                });
+                materialized += 1;
             }
             if materialized > 0 {
                 let active = items.active_index.min(materialized - 1);
@@ -1463,6 +1259,218 @@ impl Workspace {
             });
         }
         self.broadcast_active_editor(cx);
+    }
+
+    /// Rebuild one persisted item from its [`ItemSnap`] discriminator and
+    /// blob. Returns the materialized handle, or `None` when the item
+    /// cannot be restored: an unparseable blob, a missing on-disk source,
+    /// or a kind with no restore path (e.g. `Rebase`, `Unknown`).
+    ///
+    /// Shared by the per-pane restore loop and the dock restore loop so
+    /// every kind rebuilds through one dispatch rather than duplicating
+    /// per-kind construction.
+    fn materialize_item(
+        &mut self,
+        snap: &crate::workspace_persist::ItemSnap,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Box<dyn ItemHandle>> {
+        match snap.kind {
+            crate::item::ItemKind::Editor => {
+                let path = snap
+                    .blob
+                    .get("file_path")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from);
+                let editor = if let Some(path) = path {
+                    self.build_editor_for_path(&path, cx)
+                } else if let Some(editor) = self.build_editor_for_registry_buffer(&snap.blob, cx) {
+                    editor
+                } else {
+                    tracing::info!("skipping editor item with no restorable buffer during restore");
+                    return None;
+                };
+                let folds = crate::workspace_persist::folds_from_blob(&snap.blob);
+                if !folds.is_empty() {
+                    let display_map = editor.read(cx).display_map().clone();
+                    display_map.update(cx, |dm, dm_cx| dm.fold(folds, dm_cx));
+                }
+                Self::apply_saved_selections(&editor, &snap.blob, cx);
+                if let Some(row) = snap.blob.get("scroll_row").and_then(|v| v.as_u64()) {
+                    editor.update(cx, |ed, cx| ed.set_scroll_row(row as u32, cx));
+                }
+                Some(Box::new(editor))
+            },
+            crate::item::ItemKind::Review => {
+                let Some(persist) = crate::review_item::review_persist_from_blob(&snap.blob) else {
+                    tracing::info!("skipping review item with unparseable blob during restore");
+                    return None;
+                };
+                let source = crate::review_item::source_from_persist(persist.source);
+                let statuses: HashMap<ChunkFingerprint, ChunkStatus> =
+                    persist.statuses.into_iter().collect();
+                let approvals: HashMap<ChunkFingerprint, bool> =
+                    persist.approvals.into_iter().map(|fp| (fp, true)).collect();
+                let Some(review) = self.build_review_item(source, &statuses, &approvals, cx) else {
+                    tracing::info!(
+                        "skipping review item with no reviewable content during restore"
+                    );
+                    return None;
+                };
+                Some(Box::new(review))
+            },
+            crate::item::ItemKind::Conflict => {
+                let Some(rel_path) = snap.blob.get("rel_path").and_then(|v| v.as_str()) else {
+                    tracing::info!("skipping conflict item with no rel_path during restore");
+                    return None;
+                };
+                let rel_path = PathBuf::from(rel_path);
+                let abs = self.git_root.join(&rel_path);
+                let content = read_path_or_empty(&abs, cx);
+                let Some(file) =
+                    crate::conflict_item::conflicted_file_from_markers(rel_path, &content)
+                else {
+                    tracing::info!(
+                        "skipping conflict item: no conflict markers remain during restore"
+                    );
+                    return None;
+                };
+                Some(Box::new(
+                    cx.new(|cx| ConflictItem::from_conflicted_file(file, cx)),
+                ))
+            },
+            crate::item::ItemKind::MarkdownPreview => {
+                let Some(source_path) = snap.blob.get("source_path").and_then(|v| v.as_str())
+                else {
+                    tracing::info!("skipping markdown preview with no source path during restore");
+                    return None;
+                };
+                let abs = PathBuf::from(source_path);
+                let text = read_path_or_empty(&abs, cx);
+                let shared = self
+                    .buffer_registry
+                    .update(cx, |reg, cx| reg.open(&abs, &text, cx).1);
+                let buffer = cx.new(|_| Buffer::from_shared(shared));
+                buffer.update(cx, |b, cx| b.set_file_path(Some(abs), cx));
+                Some(Box::new(cx.new(|cx| {
+                    crate::markdown_preview::MarkdownPreview::new(buffer, cx)
+                })))
+            },
+            crate::item::ItemKind::CommitList => {
+                use crate::picker::PickerDelegate;
+                let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+                let Some(repo) = git.discover(&self.git_root) else {
+                    tracing::info!("skipping commit list: not in a git repo during restore");
+                    return None;
+                };
+                let Some(workdir) = repo.workdir() else {
+                    tracing::info!("skipping commit list: git repo has no workdir during restore");
+                    return None;
+                };
+                let snapshot: stoat::commit_list::CommitListSnapshot =
+                    serde_json::from_value(snap.blob.clone()).unwrap_or_default();
+                let inner = {
+                    let mut inner = stoat::commit_list::CommitListState::new(workdir);
+                    inner.apply_snapshot(snapshot);
+                    inner
+                };
+                let state = cx.new(|_| crate::commit_list::CommitListState::new(inner));
+                let buffer_registry = self.buffer_registry.clone();
+                let item = cx.new(|cx| {
+                    crate::commit_list::CommitListItem::restored(state, buffer_registry, cx)
+                });
+                let picker = item.read(cx).picker().clone();
+                picker.update(cx, |p, picker_cx| {
+                    p.delegate_mut()
+                        .update_matches(String::new(), picker_cx)
+                        .detach();
+                });
+                Some(Box::new(item))
+            },
+            crate::item::ItemKind::Terminal => {
+                let cwd = snap
+                    .blob
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.git_root.clone());
+                let program = snap
+                    .blob
+                    .get("program")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("bash")
+                    .to_string();
+                let args = snap
+                    .blob
+                    .get("args")
+                    .and_then(|v| v.as_array())
+                    .map(|items| {
+                        items
+                            .iter()
+                            .filter_map(|v| v.as_str().map(String::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let weak = cx.weak_entity();
+                Some(Box::new(cx.new(|cx| {
+                    crate::terminal_view::Terminal::with_command(weak, cwd, program, args, cx)
+                })))
+            },
+            crate::item::ItemKind::Run => {
+                let cwd = snap
+                    .blob
+                    .get("cwd")
+                    .and_then(|v| v.as_str())
+                    .map(PathBuf::from)
+                    .unwrap_or_else(|| self.git_root.clone());
+                let weak = cx.weak_entity();
+                Some(Box::new(
+                    cx.new(|cx| crate::run_pane::Run::restored(weak, cwd, cx)),
+                ))
+            },
+            crate::item::ItemKind::ProjectTree => {
+                let expanded: Vec<PathBuf> = snap
+                    .blob
+                    .get("expanded")
+                    .and_then(|v| v.as_array())
+                    .map(|entries| {
+                        entries
+                            .iter()
+                            .filter_map(|v| v.as_str().map(PathBuf::from))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let git_root = self.git_root.clone();
+                let fs = cx.global::<FsHostGlobal>().0.clone();
+                Some(Box::new(cx.new(|cx| {
+                    let mut tree = ProjectTree::new(git_root, fs, cx);
+                    tree.set_expanded(expanded);
+                    tree
+                })))
+            },
+            crate::item::ItemKind::OutlinePanel => {
+                let workspace = cx.entity();
+                Some(Box::new(cx.new(|cx| {
+                    crate::outline_panel::OutlinePanel::new(workspace, cx)
+                })))
+            },
+            crate::item::ItemKind::DiagnosticsPanel => {
+                let workspace = cx.entity();
+                let diagnostics = self.diagnostics().clone();
+                let git_root = self.git_root.clone();
+                Some(Box::new(cx.new(|cx| {
+                    crate::diagnostics_panel::DiagnosticsPanel::new(
+                        workspace,
+                        diagnostics,
+                        git_root,
+                        cx,
+                    )
+                })))
+            },
+            other => {
+                tracing::info!(kind = ?other, "skipping non-restorable item during restore");
+                None
+            },
+        }
     }
 
     /// Read and apply the persisted state at `path`.
