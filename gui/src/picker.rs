@@ -2,6 +2,7 @@ mod delegate;
 
 use crate::{
     editor::{Editor, EditorEvent},
+    keycaps,
     modal_layer::ModalView,
     theme::ActiveTheme,
 };
@@ -328,6 +329,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                 let separators = this.delegate.separators_after_indices();
                 let separator_color = cx.theme().border_inactive;
                 let keybinding_color = cx.theme().muted_text;
+                let keybinding_border = cx.theme().border_inactive;
                 let selected_bg = this.delegate.selected_background(cx);
                 range
                     .map(|ix| {
@@ -339,13 +341,11 @@ impl<D: PickerDelegate> Render for Picker<D> {
                                 .items_center()
                                 .w_full()
                                 .child(div().flex_grow().min_w_0().child(match_el))
-                                .child(
-                                    div()
-                                        .flex_none()
-                                        .px_2()
-                                        .text_color(keybinding_color)
-                                        .child(keybinding),
-                                )
+                                .child(div().flex_none().px_2().child(keycaps::chord(
+                                    &keybinding,
+                                    keybinding_color,
+                                    keybinding_border,
+                                )))
                                 .into_any_element(),
                             None => match_el,
                         };
