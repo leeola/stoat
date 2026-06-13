@@ -9,10 +9,11 @@
 //! [`crate::workspace::Workspace::dispatch_action`] handling
 //! `ActionKind::QuitAll`.
 
-use crate::{modal_layer::ModalView, workspace::Workspace};
+use crate::{modal_layer::ModalView, theme::ActiveTheme, workspace::Workspace};
 use gpui::{
-    div, App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, InteractiveElement,
-    IntoElement, ParentElement, Render, SharedString, Styled, WeakEntity, Window,
+    div, px, App, Context, DismissEvent, EventEmitter, FocusHandle, Focusable, FontWeight,
+    InteractiveElement, IntoElement, ParentElement, Render, SharedString, Styled, WeakEntity,
+    Window,
 };
 use std::path::Path;
 use stoat::{buffer_registry::DirtyBuffer, paths::display_relative};
@@ -83,7 +84,8 @@ impl QuitConfirmModal {
 }
 
 impl Render for QuitConfirmModal {
-    fn render(&mut self, _window: &mut Window, _cx: &mut Context<'_, Self>) -> impl IntoElement {
+    fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
+        let theme = cx.theme();
         let prompt = if self.entries.len() == 1 {
             SharedString::from("1 buffer has unsaved changes:")
         } else {
@@ -100,12 +102,20 @@ impl Render for QuitConfirmModal {
         div()
             .flex()
             .flex_col()
-            .size_full()
+            .gap_2()
+            .p_4()
+            .min_w(px(320.))
+            .max_w(px(560.))
+            .text_color(theme.popup_text)
             .track_focus(&self.focus_handle)
-            .child(div().child("unsaved buffers"))
+            .child(div().font_weight(FontWeight::BOLD).child("Unsaved buffers"))
             .child(div().child(prompt))
-            .child(div().flex().flex_col().children(rows))
-            .child(div().child("Enter to quit, Esc to cancel"))
+            .child(div().flex().flex_col().pl_2().children(rows))
+            .child(
+                div()
+                    .text_color(theme.muted_text)
+                    .child("Enter to quit, Esc to cancel"),
+            )
     }
 }
 
@@ -136,6 +146,10 @@ impl ModalView for QuitConfirmModal {
 
     fn cancel_prompt(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> bool {
         self.cancel(cx)
+    }
+
+    fn self_sizes(&self) -> bool {
+        true
     }
 }
 

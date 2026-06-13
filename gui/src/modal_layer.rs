@@ -1,8 +1,8 @@
 use crate::{editor::Editor, elevation::StyledExt, theme::ActiveTheme, workspace::Workspace};
 use gpui::{
-    div, px, relative, AnyView, App, AppContext, Context, DismissEvent, Entity, EntityId,
-    EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement, ManagedView,
-    MouseButton, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
+    div, prelude::FluentBuilder, px, relative, AnyView, App, AppContext, Context, DismissEvent,
+    Entity, EntityId, EventEmitter, FocusHandle, Focusable, InteractiveElement, IntoElement,
+    ManagedView, MouseButton, ParentElement, Render, Styled, Subscription, WeakEntity, Window,
 };
 use stoat_action::{ActionKind, DismissModal};
 
@@ -75,6 +75,14 @@ pub trait ModalView: ManagedView {
     fn text_input_editor(&self) -> Option<WeakEntity<Editor>> {
         None
     }
+
+    /// Whether the modal sizes itself to its content rather than
+    /// filling the layer's default 90%-of-window box. Confirmation-style
+    /// modals (a compact card) return `true`; the layer then centers
+    /// them at their natural size. Defaults to `false`.
+    fn self_sizes(&self) -> bool {
+        false
+    }
 }
 
 trait ModalViewHandle {
@@ -90,6 +98,7 @@ trait ModalViewHandle {
     fn cancel_prompt(&mut self, window: &mut Window, cx: &mut App) -> bool;
     fn insert_newline(&mut self, window: &mut Window, cx: &mut App) -> bool;
     fn text_input_editor(&self, cx: &App) -> Option<WeakEntity<Editor>>;
+    fn self_sizes(&self, cx: &App) -> bool;
 }
 
 impl<V: ModalView> ModalViewHandle for Entity<V> {
@@ -124,6 +133,10 @@ impl<V: ModalView> ModalViewHandle for Entity<V> {
 
     fn text_input_editor(&self, cx: &App) -> Option<WeakEntity<Editor>> {
         self.read(cx).text_input_editor()
+    }
+
+    fn self_sizes(&self, cx: &App) -> bool {
+        self.read(cx).self_sizes()
     }
 }
 
@@ -380,10 +393,14 @@ impl Render for ModalLayer {
                 div()
                     .flex()
                     .flex_col()
-                    .w(relative(0.9))
                     .max_w(px(1400.))
-                    .h(relative(0.9))
                     .max_h(px(1000.))
+                    // Default modals fill most of the window; a self-sizing
+                    // modal (a compact confirmation card) keeps its natural
+                    // size and is centered by the overlay above.
+                    .when(!top.modal.self_sizes(cx), |this| {
+                        this.w(relative(0.9)).h(relative(0.9))
+                    })
                     .overflow_hidden()
                     .elevation_3(cx)
                     // Clicks inside the modal must not reach the overlay's
