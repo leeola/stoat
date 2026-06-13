@@ -13,6 +13,7 @@ use crate::{
     editor::Editor,
     globals::{GitHostGlobal, LanguageRegistry},
     item::ItemKind,
+    keycaps,
     picker::{
         match_and_rank_aliased, match_highlight_runs, Picker, PickerDelegate, PickerSecondary,
     },
@@ -24,7 +25,7 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    div, AnyElement, App, Context, DismissEvent, Entity, HighlightStyle, IntoElement,
+    div, AnyElement, App, Context, DismissEvent, Entity, FontWeight, HighlightStyle, IntoElement,
     ParentElement, SharedString, Styled, StyledText, Task, WeakEntity, Window,
 };
 use std::collections::VecDeque;
@@ -570,6 +571,27 @@ impl CommandPaletteDelegate {
         self.entries.get(*idx).copied()
     }
 
+    /// The action the detail pane describes: the selected match in
+    /// [`PalettePhase::Filter`], or the in-flight entry being collected in
+    /// [`PalettePhase::CollectArgs`] (where [`Self::matches`] is empty).
+    fn detail_target(&self) -> Option<&'static RegistryEntry> {
+        match &self.phase {
+            PalettePhase::Filter => self.selected_entry(),
+            PalettePhase::CollectArgs { entry, .. } => Some(entry),
+        }
+    }
+
+    /// Every chord bound to `name`, resolved through the workspace's
+    /// state-machine keymap -- the same path the row hints take. Empty when
+    /// the workspace handle has been dropped.
+    fn resolved_chords(&self, name: &str, cx: &App) -> Vec<String> {
+        let Some(workspace) = self.workspace.upgrade() else {
+            return Vec::new();
+        };
+        let state_machine = workspace.read(cx).input_state_machine().clone();
+        state_machine.read(cx).keymap().chords_for_action(name)
+    }
+
     /// Replace the picker query editor's text with `text`. No-op when
     /// the editor has been dropped (the picker entity is gone),
     /// [`on_attach`] hasn't run yet, or the editor is already empty and
@@ -939,6 +961,71 @@ impl PickerDelegate for CommandPaletteDelegate {
         let chord = state_machine.read(cx).keymap().chord_for_action(name)?;
         Some(SharedString::from(chord))
     }
+
+    fn render_preview(&self, cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        let text_color = cx.theme().modal_palette;
+        let muted_color = cx.theme().muted_text;
+        let border_color = cx.theme().border_inactive;
+
+        let pane = div()
+            .flex()
+            .flex_col()
+            .gap_2()
+            .size_full()
+            .overflow_hidden()
+            .border_1()
+            .border_color(border_color)
+            .p_2();
+
+        let Some(entry) = self.detail_target() else {
+            return Some(pane.into_any_element());
+        };
+
+        let name = entry.def.name();
+        let chords = self.resolved_chords(name, cx);
+        let chord_rows = if chords.is_empty() {
+            div()
+                .text_xs()
+                .text_color(muted_color)
+                .child(SharedString::from("unbound"))
+                .into_any_element()
+        } else {
+            div()
+                .flex()
+                .flex_col()
+                .gap_1()
+                .children(
+                    chords
+                        .into_iter()
+                        .map(|chord| keycaps::chord(&chord, text_color, border_color)),
+                )
+                .into_any_element()
+        };
+
+        Some(
+            pane.child(
+                div()
+                    .text_sm()
+                    .font_weight(FontWeight::SEMIBOLD)
+                    .text_color(text_color)
+                    .child(SharedString::from(name)),
+            )
+            .child(
+                div()
+                    .flex()
+                    .flex_col()
+                    .gap_1()
+                    .child(
+                        div()
+                            .text_xs()
+                            .text_color(muted_color)
+                            .child(SharedString::from("Keybindings")),
+                    )
+                    .child(chord_rows),
+            )
+            .into_any_element(),
+        )
+    }
 }
 
 impl CommandPaletteDelegate {
@@ -1085,6 +1172,46 @@ mod tests {
             .iter()
             .map(|(i, _)| delegate.entries[*i].def.name())
             .collect()
+    }
+
+    #[test]
+    fn detail_target_follows_selection_in_filter_phase() {
+        let mut delegate = new_all_scope_delegate();
+        let names = matched_names(&delegate);
+        assert_eq!(
+            delegate.detail_target().map(|e| e.def.name()),
+            Some(names[0]),
+            "Filter phase targets the selected match",
+        );
+        delegate.selected = 2;
+        assert_eq!(
+            delegate.detail_target().map(|e| e.def.name()),
+            Some(names[2]),
+            "moving the selection moves the detail target",
+        );
+    }
+
+    #[test]
+    fn detail_target_is_in_flight_entry_in_collect_args() {
+        let mut delegate = new_all_scope_delegate();
+        let selected = delegate.detail_target().expect("a selected match");
+        let other = delegate
+            .entries
+            .iter()
+            .copied()
+            .find(|e| e.def.name() != selected.def.name())
+            .expect("a second entry");
+        delegate.phase = PalettePhase::CollectArgs {
+            entry: other,
+            collected: Vec::new(),
+            current: 0,
+            error: None,
+        };
+        assert_eq!(
+            delegate.detail_target().map(|e| e.def.name()),
+            Some(other.def.name()),
+            "CollectArgs targets the in-flight entry, not the selection",
+        );
     }
 
     #[test]
