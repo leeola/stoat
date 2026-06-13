@@ -8,7 +8,6 @@ pub(crate) mod lsp;
 pub(crate) mod macro_recording;
 pub(crate) mod marks;
 pub mod movement;
-mod palette;
 mod pane;
 mod prompt;
 mod rebase;
@@ -26,7 +25,6 @@ pub mod yank;
 
 use crate::{
     app::{Stoat, UpdateEffect},
-    command_palette::CommandPalette,
     editor_state::EditorState,
     host::FsHost,
     pane::{Axis, Direction, DockSide, FocusTarget, View},
@@ -130,20 +128,7 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::FileFinderSelectPrev => file_finder::file_finder_move_selection(stoat, -1),
         ActionKind::FileFinderSelectNext => file_finder::file_finder_move_selection(stoat, 1),
         ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
-        ActionKind::OpenCommandPalette => {
-            let previous_mode = stoat.mode.clone();
-            let executor = stoat.executor.clone();
-            let availability = crate::command_palette::Availability::from_stoat(stoat);
-            let ws = stoat.active_workspace_mut();
-            stoat.command_palette = Some(CommandPalette::new(
-                ws,
-                executor,
-                previous_mode,
-                availability,
-            ));
-            stoat.mode = "prompt".into();
-            UpdateEffect::Redraw
-        },
+        ActionKind::OpenCommandPalette => UpdateEffect::None,
         ActionKind::OpenHelp => UpdateEffect::None,
         ActionKind::OpenReview => {
             review::open_review(stoat);
@@ -609,9 +594,9 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
         ActionKind::SubmitPromptInput => prompt::submit_prompt_input(stoat),
         ActionKind::CancelPromptInput => prompt::cancel_prompt_input(stoat),
         ActionKind::PromptInsertNewline => prompt::prompt_insert_newline(stoat),
-        ActionKind::PaletteSelectPrev => prompt::palette_select_prev(stoat),
-        ActionKind::PaletteSelectNext => prompt::palette_select_next(stoat),
-        ActionKind::PaletteScopeToggle => palette::palette_scope_toggle(stoat),
+        ActionKind::PaletteSelectPrev => UpdateEffect::None,
+        ActionKind::PaletteSelectNext => UpdateEffect::None,
+        ActionKind::PaletteScopeToggle => UpdateEffect::None,
         ActionKind::OpenLastPicker => open_last_picker(stoat),
         ActionKind::SetActivePane
         | ActionKind::DismissModal
@@ -1934,10 +1919,10 @@ mod tests {
     }
 
     #[test]
-    fn last_picker_action_records_command_palette() {
+    fn last_picker_action_records_global_search() {
         let mut stoat = stoat();
-        dispatch(&mut stoat, &stoat_action::OpenCommandPalette);
-        assert_eq!(stoat.last_picker_action, Some("OpenCommandPalette"));
+        dispatch(&mut stoat, &stoat_action::OpenGlobalSearch);
+        assert_eq!(stoat.last_picker_action, Some("search"));
     }
 
     #[test]
@@ -1947,6 +1932,5 @@ mod tests {
             dispatch(&mut stoat, &stoat_action::OpenLastPicker),
             UpdateEffect::None
         );
-        assert!(stoat.command_palette.is_none());
     }
 }

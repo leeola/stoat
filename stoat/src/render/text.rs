@@ -39,47 +39,6 @@ pub(crate) fn write_str_clipped(
     }
 }
 
-pub(crate) fn wrap_text(text: &str, width: usize) -> Vec<String> {
-    if width == 0 {
-        return Vec::new();
-    }
-    let trimmed_start = text.trim_start();
-    if trimmed_start.is_empty() {
-        return Vec::new();
-    }
-    let indent_byte_len = text.len() - trimmed_start.len();
-    let indent = text[..indent_byte_len].to_string();
-    let indent_w = indent.chars().count();
-    if indent_w >= width {
-        return vec![text.to_string()];
-    }
-
-    let mut lines = Vec::new();
-    let mut current = indent.clone();
-    let mut current_w = indent_w;
-    for word in trimmed_start.split_whitespace() {
-        let needs_space = current_w > indent_w;
-        let word_w = word.chars().count();
-        let add_w = word_w + usize::from(needs_space);
-        if current_w + add_w <= width {
-            if needs_space {
-                current.push(' ');
-            }
-            current.push_str(word);
-            current_w += add_w;
-        } else {
-            lines.push(std::mem::take(&mut current));
-            current = indent.clone();
-            current.push_str(word);
-            current_w = indent_w + word_w;
-        }
-    }
-    if current_w > indent_w {
-        lines.push(current);
-    }
-    lines
-}
-
 pub(crate) fn truncate_to_cols(text: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();

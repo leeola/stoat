@@ -2,7 +2,6 @@ use crate::{
     action_handlers,
     badge::BadgeTray,
     buffer::{BufferId, TextBufferSnapshot},
-    command_palette::CommandPalette,
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
     file_finder::FileFinder,
@@ -60,7 +59,6 @@ pub struct Stoat {
     pub(crate) keymap: Keymap,
     pub settings: Settings,
     pub theme: crate::theme::Theme,
-    pub(crate) command_palette: Option<CommandPalette>,
     pub(crate) file_finder: Option<FileFinder>,
     /// Name of the action that most recently opened a picker
     /// successfully. Used by `OpenLastPicker` (`space '`) to
@@ -553,7 +551,6 @@ impl Stoat {
             keymap,
             settings,
             theme,
-            command_palette: None,
             file_finder: None,
             last_picker_action: None,
             global_search_input: None,
@@ -1314,12 +1311,6 @@ impl Stoat {
                 action_handlers::close_file_finder(self);
                 return UpdateEffect::Redraw;
             }
-            if let Some(palette) = self.command_palette.take() {
-                let active_idx = self.active_workspace;
-                palette.dispose(&mut self.workspaces[active_idx]);
-                self.mode = palette.previous_mode;
-                return UpdateEffect::Redraw;
-            }
             if let Some(picker) = self.global_search.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1749,12 +1740,6 @@ impl Stoat {
 
         if let Some(finder) = &self.file_finder {
             return Some((finder.input.editor_id, finder.input.buffer_id));
-        }
-
-        if let Some(palette) = &self.command_palette {
-            if let Some(input) = palette.focused_input() {
-                return Some((input.editor_id, input.buffer_id));
-            }
         }
 
         if let Some(rename) = &self.rename_input {

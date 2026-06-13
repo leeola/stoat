@@ -1,6 +1,5 @@
 pub(crate) mod badges;
 pub(crate) mod code_action;
-pub(crate) mod command_palette;
 pub(crate) mod commits;
 pub(crate) mod completion;
 pub(crate) mod conflict;
@@ -259,25 +258,6 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
             .collect();
         hints::render_hints(
             "finder",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(palette) = &mut stoat.command_palette {
-        command_palette::render_command_palette(palette, ws, &stoat.theme, size, buf);
-        let state = StoatKeymapState::with_flags(&stoat.mode, true, false, false);
-        let raw = stoat.keymap.scoped_bindings(&state, "palette_open");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
-            "palette",
             &bindings,
             None,
             &stoat.theme,

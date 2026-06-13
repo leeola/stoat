@@ -29,9 +29,6 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(effect) = super::file_finder::file_finder_submit(stoat) {
         return effect;
     }
-    if let Some(effect) = super::palette::palette_submit(stoat) {
-        return effect;
-    }
     if let Some(crate::input_view::SubmitTarget::Run) = focused_target(stoat) {
         return super::run::run_submit(stoat);
     }
@@ -77,9 +74,6 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(effect) = super::file_finder::file_finder_cancel(stoat) {
         return effect;
     }
-    if let Some(effect) = super::palette::palette_cancel(stoat) {
-        return effect;
-    }
     // For pane-tied or modal inputs (help), Escape in prompt
     // leaves the user in normal sub-mode so they can navigate with hjkl /
     // drop into modal editing. A second Escape - routed via a separate
@@ -92,17 +86,6 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::None
 }
 
-pub(super) fn prompt_insert_newline(stoat: &mut Stoat) -> UpdateEffect {
-    if let Some(effect) = super::palette::palette_insert_newline(stoat) {
-        return effect;
-    }
+pub(super) fn prompt_insert_newline(_stoat: &mut Stoat) -> UpdateEffect {
     UpdateEffect::None
-}
-
-pub(super) fn palette_select_prev(stoat: &mut Stoat) -> UpdateEffect {
-    super::palette::palette_move_selection(stoat, -1).unwrap_or(UpdateEffect::None)
-}
-
-pub(super) fn palette_select_next(stoat: &mut Stoat) -> UpdateEffect {
-    super::palette::palette_move_selection(stoat, 1).unwrap_or(UpdateEffect::None)
 }
