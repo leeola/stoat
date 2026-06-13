@@ -2123,19 +2123,30 @@ impl Workspace {
         Some(removed)
     }
 
-    /// Handle the [`Quit`] action: close the focused pane, then
-    /// exit the application when that pane was the last remaining
-    /// one. [`PaneTree::close`] returns `false` for the last-pane
-    /// case, which is how this distinguishes "closed a pane" from
-    /// "refused to close the last pane".
-    pub fn handle_quit(&self, cx: &mut Context<'_, Self>) {
+    /// Handle the [`Quit`] action. Closes the focused pane. On the last
+    /// remaining pane it exits the application instead, first confirming
+    /// through the [`crate::quit_confirm::QuitConfirmModal`] when buffers
+    /// are unsaved.
+    ///
+    /// Closing a non-last pane is unconditional. Buffers live in the
+    /// registry rather than the pane, so closing one loses no edits.
+    /// Only the last-pane exit can discard unsaved work and needs the
+    /// guard. [`PaneTree::close`] returns `false` for the last-pane case,
+    /// distinguishing a closed pane from a refused last-pane close.
+    pub fn handle_quit(&mut self, window: &mut Window, cx: &mut Context<'_, Self>) {
         let closed = self.pane_tree.update(cx, |tree, cx| {
             let focus = tree.focus();
             tree.close(focus, cx)
         });
-        if !closed {
-            cx.quit();
+        if closed {
+            return;
         }
+        let dirty = self.buffer_registry.read(cx).dirty_buffers();
+        if dirty.is_empty() {
+            cx.quit();
+            return;
+        }
+        crate::quit_confirm::open_quit_confirm(self, &dirty, window, cx);
     }
 
     /// Handle `QuitAll`: quit immediately when no buffer is dirty;
@@ -2196,7 +2207,7 @@ impl Workspace {
             return;
         }
         match action.kind() {
-            ActionKind::Quit => self.handle_quit(cx),
+            ActionKind::Quit => self.handle_quit(window, cx),
             ActionKind::QuitAll => self.handle_quit_all(window, cx),
             ActionKind::SplitRight => {
                 self.pane_tree.update(cx, |tree, cx| {
@@ -8694,30 +8705,58 @@ mod tests {
     fn workspace_handle_quit_closes_focused_pane_when_multiple_exist() {
         use stoat::pane::Axis;
         let mut cx = TestAppContext::single();
-        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
-        let pane_tree = ws.read_with(&cx, |w, _| w.pane_tree().clone());
-        pane_tree.update(&mut cx, |t, cx| {
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        pane_tree.update(vcx, |t, cx| {
             t.split(Axis::Vertical, cx);
         });
-        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 2);
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 2);
 
-        ws.update(&mut cx, |w, cx| w.handle_quit(cx));
-        cx.run_until_parked();
+        ws.update_in(vcx, |w, window, cx| w.handle_quit(window, cx));
+        vcx.run_until_parked();
 
-        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
     }
 
     #[test]
     fn workspace_handle_quit_keeps_last_pane() {
         let mut cx = TestAppContext::single();
-        let ws = new_workspace(&mut cx, "main", "/tmp/repo");
-        let pane_tree = ws.read_with(&cx, |w, _| w.pane_tree().clone());
-        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
 
-        ws.update(&mut cx, |w, cx| w.handle_quit(cx));
-        cx.run_until_parked();
+        ws.update_in(vcx, |w, window, cx| w.handle_quit(window, cx));
+        vcx.run_until_parked();
 
-        assert_eq!(pane_tree.read_with(&cx, |t, _| t.pane_count()), 1);
+        assert_eq!(pane_tree.read_with(vcx, |t, _| t.pane_count()), 1);
+    }
+
+    #[test]
+    fn workspace_handle_quit_last_pane_with_dirty_buffer_opens_modal() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let shared = ws.update_in(vcx, |w, _window, cx| {
+            w.buffer_registry()
+                .update(cx, |r, cx| r.open(Path::new("/tmp/repo/foo.rs"), "x", cx))
+                .1
+        });
+        shared.write().expect("buffer poisoned").dirty = true;
+
+        ws.update_in(vcx, |w, window, cx| w.handle_quit(window, cx));
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::quit_confirm::QuitConfirmModal>()
+        });
+        assert!(
+            active.is_some(),
+            "quitting the last pane with a dirty buffer must confirm, not discard"
+        );
+        let panes = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count());
+        assert_eq!(panes, 1, "the pane stays open while the confirm is pending");
     }
 
     #[test]
