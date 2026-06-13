@@ -1432,28 +1432,55 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
             .then_with(|| block_id(block_a).cmp(&block_id(block_b)))
     });
 
-    blocks.dedup_by(|right, left| match (&mut left.0, &right.0) {
-        (
-            ResolvedPlacement::Replace {
-                start: left_start,
-                end: left_end,
+    // Merge overlapping Replace spans into disjoint, ascending intervals. A
+    // Replace's coverage can extend across intervening blocks, so the hiding
+    // below tests each block's anchor row against these spans rather than
+    // relying on the sort placing a covered block adjacent to its Replace.
+    let mut spans: Vec<(u32, u32)> = Vec::new();
+    for (placement, _) in blocks.iter() {
+        if let ResolvedPlacement::Replace { start, end } = *placement {
+            match spans.last_mut() {
+                Some(last) if start <= last.1 => last.1 = last.1.max(end),
+                _ => spans.push((start, end)),
+            }
+        }
+    }
+    let covers = |row: u32| spans.iter().any(|&(s, e)| row >= s && row <= e);
+
+    // Drop blocks a Replace covers and collapse each merged span to one
+    // Replace. An Above hides when its row is covered; a Below/Near resolves
+    // one row past its anchor (the `+1` in `resolve_block_placement`), so it
+    // hides when its anchor -- the row before it -- is covered, matching Zed's
+    // pinned semantics where a block anchored at any replaced row is hidden.
+    let mut emitted = vec![false; spans.len()];
+    let mut kept = Vec::with_capacity(blocks.len());
+    for &(placement, block) in blocks.iter() {
+        match placement {
+            ResolvedPlacement::Above(row) => {
+                if !covers(row) {
+                    kept.push((placement, block));
+                }
             },
-            ResolvedPlacement::Above(row)
-            | ResolvedPlacement::Below(row)
-            | ResolvedPlacement::Near(row),
-        ) => *row >= *left_start && *row <= *left_end,
-        (
-            ResolvedPlacement::Replace { end: left_end, .. },
-            ResolvedPlacement::Replace {
-                start: right_start,
-                end: right_end,
+            ResolvedPlacement::Below(row) | ResolvedPlacement::Near(row) => {
+                if row == 0 || !covers(row - 1) {
+                    kept.push((placement, block));
+                }
             },
-        ) if *right_start <= *left_end => {
-            *left_end = (*left_end).max(*right_end);
-            true
-        },
-        _ => false,
-    });
+            ResolvedPlacement::Replace { start, .. } => {
+                let idx = spans
+                    .iter()
+                    .position(|&(s, e)| start >= s && start <= e)
+                    .expect("a Replace's start lies in its own merged span");
+                if !emitted[idx] {
+                    emitted[idx] = true;
+                    let (start, end) = spans[idx];
+                    kept.push((ResolvedPlacement::Replace { start, end }, block));
+                }
+            },
+        }
+    }
+
+    *blocks = kept;
 }
 
 fn block_priority(block: &Block) -> usize {
@@ -3440,6 +3467,39 @@ mod tests {
             .map(|r| snap.display_line(r))
             .collect();
         assert_eq!(lines, vec!["X".to_string()]);
+    }
+
+    /// A Replace hides every Above/Below/Near anchored at a row it covers --
+    /// an Above at the start row and a Below/Near at the end row -- matching
+    /// Zed's pinned semantics, while blocks anchored past the span render. The
+    /// incremental sync must agree with the full rebuild.
+    #[test]
+    fn replace_hides_blocks_anchored_in_its_span() {
+        let wrap = create_wrap_snapshot("a\nb\nc\nd");
+        let blocks = blocks_for(vec![
+            text_block(BlockPlacement::Replace { start: 0, end: 1 }, "REPL"),
+            text_block(BlockPlacement::Above(0), "A0"),
+            text_block(BlockPlacement::Below(1), "B1"),
+            text_block(BlockPlacement::Near(1), "N1"),
+            text_block(BlockPlacement::Above(2), "A2"),
+            text_block(BlockPlacement::Below(3), "B3"),
+        ]);
+
+        let line_count = wrap.line_count();
+        let full = build_transforms(line_count, &blocks, &wrap);
+        assert_eq!(
+            render_transforms(&full, &wrap),
+            vec![
+                "REPL".to_string(),
+                "A2".to_string(),
+                "c".to_string(),
+                "d".to_string(),
+                "B3".to_string(),
+            ],
+            "Above@start and Below/Near@end of a Replace are hidden; blocks past it render"
+        );
+
+        assert_incremental_matches_full(&wrap, &blocks, Patch::empty());
     }
 
     /// An Above/Below row past the buffer clamps to after the last row rather
