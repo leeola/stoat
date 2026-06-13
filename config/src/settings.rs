@@ -75,6 +75,10 @@ pub struct LanguageServerCommand {
 pub struct Settings {
     /// Enables the Claude Code / LSP text-protocol transcript log.
     pub text_proto_log: Option<bool>,
+    /// Re-apply the user config automatically when it is saved in the
+    /// editor. `None` defaults to enabled, so the edit-and-save loop
+    /// works without opting in.
+    pub auto_reload_config: Option<bool>,
     /// Default placement of `OpenClaude`. `None` means "pane".
     pub claude_default_placement: Option<ClaudePlacement>,
     /// Name of the active theme block. Resolves against `theme NAME { ... }`
@@ -176,6 +180,7 @@ impl Settings {
         item_modes.extend(other.item_modes);
         Settings {
             text_proto_log: other.text_proto_log.or(self.text_proto_log),
+            auto_reload_config: other.auto_reload_config.or(self.auto_reload_config),
             claude_default_placement: other
                 .claude_default_placement
                 .or(self.claude_default_placement),
@@ -217,6 +222,11 @@ impl Settings {
             ["text_proto_log"] => {
                 if let Value::Bool(b) = setting.value.node {
                     self.text_proto_log = Some(b);
+                }
+            },
+            ["auto_reload_config"] => {
+                if let Value::Bool(b) = setting.value.node {
+                    self.auto_reload_config = Some(b);
                 }
             },
             ["claude", "default_placement"] => {
@@ -377,6 +387,18 @@ impl Settings {
     pub fn apply_runtime(&mut self, path: &str, raw: &str) -> Result<(), SettingsApplyError> {
         let tokens: Vec<&str> = path.split('.').collect();
         match tokens.as_slice() {
+            ["auto_reload_config"] => {
+                let b = parse_bool(raw).ok_or_else(|| {
+                    InvalidValueSnafu {
+                        key: path.to_string(),
+                        expected: "bool",
+                        got: raw.to_string(),
+                    }
+                    .build()
+                })?;
+                self.auto_reload_config = Some(b);
+                Ok(())
+            },
             ["ui", "pane", "show_tab_bar"] => {
                 let b = parse_bool(raw).ok_or_else(|| {
                     InvalidValueSnafu {
@@ -729,12 +751,20 @@ mod tests {
     }
 
     #[test]
+    fn from_config_extracts_auto_reload_config() {
+        let config = parse_ok("on init { auto_reload_config = false; }");
+        let settings = Settings::from_config(&config);
+        assert_eq!(settings.auto_reload_config, Some(false));
+    }
+
+    #[test]
     fn from_config_extracts_text_proto_log() {
         let config = parse_ok("on init { text_proto_log = true; }");
         assert_eq!(
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                auto_reload_config: None,
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
@@ -764,6 +794,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(false),
+                auto_reload_config: None,
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
@@ -793,6 +824,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: Some(true),
+                auto_reload_config: None,
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
@@ -831,6 +863,7 @@ mod tests {
     fn merge_right_wins_over_some() {
         let left = Settings {
             text_proto_log: Some(false),
+            auto_reload_config: None,
             claude_default_placement: None,
             theme: None,
             mouse_capture: None,
@@ -852,6 +885,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: Some(true),
+            auto_reload_config: None,
             claude_default_placement: None,
             theme: None,
             mouse_capture: None,
@@ -875,6 +909,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                auto_reload_config: None,
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
@@ -901,6 +936,7 @@ mod tests {
     fn merge_right_none_preserves_left() {
         let left = Settings {
             text_proto_log: Some(true),
+            auto_reload_config: None,
             claude_default_placement: None,
             theme: None,
             mouse_capture: None,
@@ -925,6 +961,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: Some(true),
+                auto_reload_config: None,
                 claude_default_placement: None,
                 theme: None,
                 mouse_capture: None,
@@ -962,6 +999,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                auto_reload_config: None,
                 claude_default_placement: Some(ClaudePlacement::Pane),
                 theme: None,
                 mouse_capture: None,
@@ -991,6 +1029,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                auto_reload_config: None,
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
                 theme: None,
                 mouse_capture: None,
@@ -1020,6 +1059,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                auto_reload_config: None,
                 claude_default_placement: Some(ClaudePlacement::DockRight),
                 theme: None,
                 mouse_capture: None,
@@ -1058,6 +1098,7 @@ mod tests {
     fn merge_preserves_claude_placement() {
         let left = Settings {
             text_proto_log: None,
+            auto_reload_config: None,
             claude_default_placement: Some(ClaudePlacement::DockRight),
             theme: None,
             mouse_capture: None,
@@ -1082,6 +1123,7 @@ mod tests {
             left.clone().merge(right),
             Settings {
                 text_proto_log: None,
+                auto_reload_config: None,
                 claude_default_placement: Some(ClaudePlacement::DockRight),
                 theme: None,
                 mouse_capture: None,
@@ -1111,6 +1153,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                auto_reload_config: None,
                 claude_default_placement: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
@@ -1140,6 +1183,7 @@ mod tests {
             Settings::from_config(&config),
             Settings {
                 text_proto_log: None,
+                auto_reload_config: None,
                 claude_default_placement: None,
                 theme: Some("default_dark".into()),
                 mouse_capture: None,
@@ -1166,6 +1210,7 @@ mod tests {
     fn merge_right_overrides_theme() {
         let left = Settings {
             text_proto_log: None,
+            auto_reload_config: None,
             claude_default_placement: None,
             theme: Some("a".into()),
             mouse_capture: None,
@@ -1187,6 +1232,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: None,
+            auto_reload_config: None,
             claude_default_placement: None,
             theme: Some("b".into()),
             mouse_capture: None,
@@ -1213,6 +1259,7 @@ mod tests {
     fn merge_right_overrides_claude_placement() {
         let left = Settings {
             text_proto_log: None,
+            auto_reload_config: None,
             claude_default_placement: Some(ClaudePlacement::Pane),
             theme: None,
             mouse_capture: None,
@@ -1234,6 +1281,7 @@ mod tests {
         };
         let right = Settings {
             text_proto_log: None,
+            auto_reload_config: None,
             claude_default_placement: Some(ClaudePlacement::DockLeft),
             theme: None,
             mouse_capture: None,
@@ -1257,6 +1305,7 @@ mod tests {
             left.merge(right),
             Settings {
                 text_proto_log: None,
+                auto_reload_config: None,
                 claude_default_placement: Some(ClaudePlacement::DockLeft),
                 theme: None,
                 mouse_capture: None,
