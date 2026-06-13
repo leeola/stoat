@@ -1680,6 +1680,22 @@ fn sync_incremental(
             }
         }
 
+        // Pull a replacement block starting at the edit end into the
+        // reconstruction. Its input rows cover buffer content that a static
+        // placement re-resolves against the new wrap, so an edit shifting that
+        // content (e.g. a grown row above it) leaves the block's coverage
+        // stale. The cursor advances past the old copy and the edit widens by
+        // its input rows so the reconstruction re-emits it once and
+        // materializes any rows shifted out of its coverage, rather than the
+        // suffix carrying a stale duplicate.
+        while cursor
+            .item()
+            .is_some_and(|item| item.block.as_ref().is_some_and(|b| b.is_replacement()))
+        {
+            new_end += cursor.item().expect("checked above").summary.input_rows;
+            cursor.next();
+        }
+
         // Discard below/spacer blocks at edit end; they are reconstructed
         // below. An interior Above at the boundary belongs to the next region
         // and must survive (matching Zed lines 980-991). At the buffer end
@@ -2844,6 +2860,49 @@ mod tests {
             lines(&incremental),
             lines(&full),
             "growing edit must not duplicate moved trailing blocks"
+        );
+    }
+
+    /// A growing edit that grows a row above a `Replace` block, so the block
+    /// straddles the grown region, must not double-count its input rows. The
+    /// static placement re-resolves to cover shifted content, so the
+    /// incremental sync must rebuild the Replace once (materializing the row
+    /// that shifted out of its coverage) rather than reconstruct it and also
+    /// carry the stale copy in the suffix.
+    #[test]
+    fn incremental_growing_edit_with_straddling_replace() {
+        let wrap_pre = create_wrap_snapshot("a\nb\nc");
+        let wrap_post = create_wrap_snapshot("a\nX\nb\nc");
+        let blocks = vec![
+            text_block(BlockPlacement::Replace { start: 1, end: 2 }, "R\nR\nR"),
+            text_block(BlockPlacement::Below(2), "B\nB\nB"),
+        ];
+
+        let mut incremental = BlockMap::new();
+        incremental.insert(blocks.clone());
+        incremental.sync(wrap_pre, &Patch::empty(), None);
+        let incremental = incremental.sync(
+            wrap_post.clone(),
+            &Patch::new(vec![Edit {
+                old: 0..1,
+                new: 0..2,
+            }]),
+            None,
+        );
+
+        let mut full = BlockMap::new();
+        full.insert(blocks);
+        let full = full.sync(wrap_post, &Patch::empty(), None);
+
+        let lines = |snap: &BlockSnapshot| {
+            (0..snap.total_lines())
+                .map(|r| snap.display_line(r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&incremental),
+            lines(&full),
+            "growing edit must not duplicate a straddling replace"
         );
     }
 
