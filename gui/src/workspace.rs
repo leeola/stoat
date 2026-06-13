@@ -2149,6 +2149,20 @@ impl Workspace {
         crate::quit_confirm::open_quit_confirm(self, &dirty, window, cx);
     }
 
+    /// Handle the `quit!` action: the force counterpart to
+    /// [`Self::handle_quit`]. Closes the focused pane and, on the last
+    /// remaining pane, exits the application unconditionally, discarding
+    /// unsaved buffers without confirmation.
+    pub fn handle_quit_force(&self, cx: &mut Context<'_, Self>) {
+        let closed = self.pane_tree.update(cx, |tree, cx| {
+            let focus = tree.focus();
+            tree.close(focus, cx)
+        });
+        if !closed {
+            cx.quit();
+        }
+    }
+
     /// Handle `QuitAll`: quit immediately when no buffer is dirty;
     /// otherwise open the [`crate::quit_confirm::QuitConfirmModal`]
     /// and wait for the user to confirm or cancel.
@@ -2230,6 +2244,7 @@ impl Workspace {
         }
         match action.kind() {
             ActionKind::Quit => self.handle_quit(window, cx),
+            ActionKind::QuitForce => self.handle_quit_force(cx),
             ActionKind::QuitAll => self.handle_quit_all(window, cx),
             ActionKind::SplitRight => {
                 self.pane_tree.update(cx, |tree, cx| {
@@ -8779,6 +8794,32 @@ mod tests {
         );
         let panes = ws.read_with(vcx, |w, cx| w.pane_tree().read(cx).pane_count());
         assert_eq!(panes, 1, "the pane stays open while the confirm is pending");
+    }
+
+    #[test]
+    fn workspace_handle_quit_force_skips_confirm_with_dirty_buffer() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let shared = ws.update_in(vcx, |w, _window, cx| {
+            w.buffer_registry()
+                .update(cx, |r, cx| r.open(Path::new("/tmp/repo/foo.rs"), "x", cx))
+                .1
+        });
+        shared.write().expect("buffer poisoned").dirty = true;
+
+        ws.update(vcx, |w, cx| w.handle_quit_force(cx));
+        vcx.run_until_parked();
+
+        let active = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<crate::quit_confirm::QuitConfirmModal>()
+        });
+        assert!(
+            active.is_none(),
+            "quit! force-quits the last pane without confirming"
+        );
     }
 
     #[test]

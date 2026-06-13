@@ -1,6 +1,6 @@
 use crate::{
     defs::{
-        app::{DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll},
+        app::{DecreaseFontSize, DismissModal, IncreaseFontSize, Quit, QuitAll, QuitForce},
         claude::{ToggleDockLeft, ToggleDockRight},
         commits::{
             CloseCommits, CommitsFirst, CommitsLast, CommitsNext, CommitsOpenBranchReview,
@@ -136,6 +136,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
     };
 
     add(Quit::DEF, |_| Ok(Box::new(Quit)));
+    add(QuitForce::DEF, |_| Ok(Box::new(QuitForce)));
     add(QuitAll::DEF, |_| Ok(Box::new(QuitAll)));
     add(DismissModal::DEF, |_| Ok(Box::new(DismissModal)));
     add(IncreaseFontSize::DEF, |_| Ok(Box::new(IncreaseFontSize)));
@@ -933,6 +934,7 @@ mod tests {
 
     const ZERO_ARG_NAMES: &[&str] = &[
         "quit",
+        "quit!",
         "quit-all",
         "vsplit",
         "hsplit",
@@ -1363,7 +1365,8 @@ mod tests {
         // + 1 OpenTerminal (terminal pane running the user's shell).
         // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
         // + 1 Screenshot (capture the window to an image file).
-        assert_eq!(all().count(), 347);
+        // + 1 QuitForce (quit! / q!, force-quit discarding unsaved buffers).
+        assert_eq!(all().count(), 348);
     }
 
     #[test]

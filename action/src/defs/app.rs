@@ -13,6 +13,18 @@ define_action!(
 );
 
 define_action!(
+    QuitForceDef,
+    QuitForce,
+    "quit!",
+    ActionKind::QuitForce,
+    "close pane or exit, discarding unsaved changes",
+    "Close the focused pane. Exit immediately when closing the last remaining pane, discarding any unsaved buffers without confirmation. See also quit, which confirms before discarding on the last pane.",
+    ActionPriority::Common,
+    true,
+    &["q!"]
+);
+
+define_action!(
     QuitAllDef,
     QuitAll,
     "quit-all",
@@ -67,6 +79,17 @@ mod tests {
         assert_eq!(Quit.def().name(), "quit");
         assert!(Quit.def().params().is_empty());
         assert_eq!(Quit.def().short_desc(), "close pane or exit");
+    }
+
+    #[test]
+    fn quit_force() {
+        assert_eq!(QuitForce.kind(), ActionKind::QuitForce);
+        assert_eq!(QuitForce.def().name(), "quit!");
+        assert!(QuitForce.def().params().is_empty());
+        assert_eq!(
+            QuitForce.def().short_desc(),
+            "close pane or exit, discarding unsaved changes"
+        );
     }
 
     #[test]
