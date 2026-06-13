@@ -1044,9 +1044,28 @@ impl WrapSnapshot {
     pub fn clip_point(&self, point: WrapPoint, bias: Bias) -> WrapPoint {
         let max_row = self.total_rows.saturating_sub(1);
         let row = point.row().min(max_row);
-        let tab_point = self.to_tab_point(WrapPoint::new(row, point.column()));
-        let clipped = self.tab_snapshot().clip_point(tab_point, bias);
-        self.to_wrap_point(clipped)
+
+        if self.wrap_width.is_none() {
+            let tab_point = self.to_tab_point(WrapPoint::new(row, point.column()));
+            return self.to_wrap_point(self.tab_snapshot().clip_point(tab_point, bias));
+        }
+
+        // A soft-wrapped tab row spans several wrap rows. Confine the clip to
+        // `row`'s own tab-column span so the result stays on `row`: the sole
+        // caller keeps the block row and takes only this column, so a column
+        // bleeding into the next segment's row would paste a foreign (possibly
+        // mid-glyph) column back onto `row` and break idempotence. The row's
+        // end column is the soft-wrap point, itself a valid caret.
+        let seg_start = self.to_tab_point(WrapPoint::new(row, 0));
+        let seg_end_col = seg_start.column() + self.line_len(row);
+        let tab_col = (seg_start.column() + point.column()).min(seg_end_col);
+
+        let clipped = self
+            .tab_snapshot()
+            .clip_point(TabPoint::new(seg_start.row(), tab_col), bias);
+        let clipped_col = clipped.column().clamp(seg_start.column(), seg_end_col);
+
+        WrapPoint::new(row, clipped_col - seg_start.column())
     }
 
     pub fn line_len(&self, wrap_row: u32) -> u32 {
@@ -1678,6 +1697,43 @@ mod tests {
         assert_eq!(snap.next_row_boundary(WrapPoint::new(1, 0)), 2);
         assert_eq!(snap.prev_row_boundary(WrapPoint::new(0, 0)), 0);
         assert_eq!(snap.next_row_boundary(WrapPoint::new(2, 0)), 3);
+    }
+
+    #[test]
+    fn clip_point_stays_on_input_row_under_wrap() {
+        // The block layer keeps the block row and takes only the clipped
+        // column, so clip must stay on the input wrap row, keep the column
+        // within that row (its end -- the soft-wrap point -- is a valid caret),
+        // and be idempotent. A wide glyph makes off-segment columns land
+        // mid-glyph, which is where a row-crossing clip breaks idempotence.
+        let wide = '\u{4E16}';
+        let content = format!("{wide}{wide}ab cd\nxy\n{wide}z w");
+        for width in [2u32, 3, 4, 6] {
+            let snap = make_snapshot(&content, Some(width));
+            for row in 0..snap.line_count() {
+                let len = snap.line_len(row);
+                for col in 0..=len + 2 {
+                    for bias in [Bias::Left, Bias::Right] {
+                        let clipped = snap.clip_point(WrapPoint::new(row, col), bias);
+                        assert_eq!(
+                            clipped.row(),
+                            row,
+                            "row preserved width {width} row {row} col {col} {bias:?}"
+                        );
+                        assert!(
+                            clipped.column() <= len,
+                            "column {} in bounds width {width} row {row} col {col} {bias:?}",
+                            clipped.column()
+                        );
+                        assert_eq!(
+                            snap.clip_point(clipped, bias),
+                            clipped,
+                            "idempotent width {width} row {row} col {col} {bias:?}"
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[test]

@@ -1880,27 +1880,21 @@ mod tests {
                 .join("\n");
             assert_eq!(from_chunks, from_lines, "chunks vs display_lines {}", ctx());
 
-            // Clip idempotence is asserted only without soft wrap: a wrapped
-            // row's end column is not a clip fixed point today -- a wrap-layer
-            // clip bug tracked under the wrap-map item, independent of the
-            // coordinator's composition tested here.
-            if snapshot.wrap_width().is_none() {
-                for row in 0..total {
-                    for col in 0..=snapshot.line_len(row) + 2 {
-                        let clipped = snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
-                        assert!(clipped.row < total.max(1), "clip row in bounds {}", ctx());
-                        assert!(
-                            clipped.column <= snapshot.line_len(clipped.row),
-                            "clip col in bounds {}",
-                            ctx()
-                        );
-                        assert_eq!(
-                            snapshot.clip_point(clipped, Bias::Left),
-                            clipped,
-                            "clip idempotent row {row} col {col} {}",
-                            ctx()
-                        );
-                    }
+            for row in 0..total {
+                for col in 0..=snapshot.line_len(row) + 2 {
+                    let clipped = snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
+                    assert!(clipped.row < total.max(1), "clip row in bounds {}", ctx());
+                    assert!(
+                        clipped.column <= snapshot.line_len(clipped.row),
+                        "clip col in bounds {}",
+                        ctx()
+                    );
+                    assert_eq!(
+                        snapshot.clip_point(clipped, Bias::Left),
+                        clipped,
+                        "clip idempotent row {row} col {col} {}",
+                        ctx()
+                    );
                 }
             }
 
