@@ -19,9 +19,7 @@
 
 use crate::{
     dock::{DockSide, DockVisibility},
-    editor::Editor,
     item::ItemKind,
-    project_tree::ProjectTree,
 };
 use serde::{Deserialize, Serialize};
 use std::{
@@ -50,10 +48,9 @@ pub struct WorkspaceStateV1 {
     pub focused_pane: PaneId,
     pub pane_items: BTreeMap<PaneId, PaneItemsV1>,
     /// Per-dock snapshot list ordered by `Workspace::docks`'s
-    /// vector order, so left/right pinning round-trips. Non-editor
-    /// items drop with a tracing line on save and the restored
-    /// dock comes back without an item until non-editor
-    /// persistence lands.
+    /// vector order, so left/right pinning round-trips. Each dock
+    /// records its hosted item generically (kind + blob), so every
+    /// dockable kind restores through the same dispatch as pane items.
     #[serde(default)]
     pub docks: Vec<DockSnapV1>,
     pub buffers: BufferRegistrySnapshot,
@@ -71,8 +68,8 @@ pub struct WorkspaceStateV1 {
 }
 
 /// V1 dock snapshot: position, current visibility (open width /
-/// minimized / hidden), default open width, and the file path of
-/// the hosted editor when the dock holds one.
+/// minimized / hidden), default open width, and the hosted item as
+/// a generic kind + blob snapshot.
 #[derive(Debug, Serialize, Deserialize)]
 pub struct DockSnapV1 {
     pub side: DockSide,
@@ -81,16 +78,67 @@ pub struct DockSnapV1 {
     /// (`Dock::default_extent`). Retains the `default_width` name so
     /// snapshots written before [`DockSide::Bottom`] still deserialize.
     pub default_width: u16,
-    /// `Some` when the dock's item is an [`Editor`] with a file
-    /// path; `None` for editors without a path or non-editor items.
-    /// Non-`None` entries rebuild the editor via
-    /// `Workspace::build_editor_for_path` on restore.
+    /// The dock's hosted item as a kind + blob snapshot, mirroring the
+    /// pane-side [`ItemSnap`] shape so every dockable kind round-trips
+    /// through its [`crate::item::ItemView::serialize`] and the shared
+    /// restore dispatch. `None` only for snapshots written before docks
+    /// recorded their item generically; those fall back to the legacy
+    /// fields below.
+    #[serde(default)]
+    pub item: Option<ItemSnap>,
+    /// Legacy field: the hosted editor's file path. Retained
+    /// deserialize-only so pre-[`Self::item`] snapshots still load; new
+    /// snapshots leave it `None` and carry the editor in [`Self::item`].
+    #[serde(default)]
     pub editor_path: Option<PathBuf>,
-    /// `Some` when the dock hosts a [`ProjectTree`]; carries the
-    /// expanded-directory set so the tree restores with the same
-    /// directories open. Mutually exclusive with `editor_path`.
+    /// Legacy field: the hosted project tree's expanded set. Retained
+    /// deserialize-only for the same reason as [`Self::editor_path`].
     #[serde(default)]
     pub project_tree: Option<ProjectTreeSnapV1>,
+}
+
+impl DockSnapV1 {
+    /// Split a dock snapshot into its metadata and hosted item.
+    ///
+    /// Prefers the generic [`Self::item`] snapshot and falls back to the
+    /// legacy `editor_path` / `project_tree` fields so pre-`item`
+    /// snapshots still restore. The [`ItemSnap`] is `None` when the dock
+    /// recorded no restorable item.
+    pub(crate) fn into_parts(self) -> (DockSide, DockVisibility, u16, Option<ItemSnap>) {
+        let DockSnapV1 {
+            side,
+            visibility,
+            default_width,
+            item,
+            editor_path,
+            project_tree,
+        } = self;
+        let item = item.or_else(|| legacy_dock_item(editor_path, project_tree));
+        (side, visibility, default_width, item)
+    }
+}
+
+/// Map a pre-`item` dock snapshot's legacy fields onto the generic
+/// [`ItemSnap`] shape: an `editor_path` becomes an `Editor` blob with a
+/// `file_path`, a `project_tree` becomes a `ProjectTree` blob with its
+/// `expanded` set. Returns `None` when neither legacy field is set.
+fn legacy_dock_item(
+    editor_path: Option<PathBuf>,
+    project_tree: Option<ProjectTreeSnapV1>,
+) -> Option<ItemSnap> {
+    if let Some(path) = editor_path {
+        return Some(ItemSnap {
+            kind: ItemKind::Editor,
+            blob: serde_json::json!({ "file_path": path }),
+        });
+    }
+    if let Some(tree) = project_tree {
+        return Some(ItemSnap {
+            kind: ItemKind::ProjectTree,
+            blob: serde_json::json!({ "expanded": tree.expanded }),
+        });
+    }
+    None
 }
 
 /// V1 project tree dock payload: the set of directory paths that
@@ -170,44 +218,23 @@ pub(crate) fn snapshot_pane_items(
     }
 }
 
-/// Snapshot one dock for workspace persistence. Captures
-/// position + visibility + default width unconditionally; the
-/// hosted editor's file path lands in `editor_path` when the
-/// dock's item is an [`Editor`] with a path, otherwise the field
-/// is `None` and a tracing line records why.
-pub(crate) fn snapshot_dock(dock: &crate::dock::Dock, cx: &gpui::App, index: usize) -> DockSnapV1 {
-    let mut editor_path = None;
-    let mut project_tree = None;
-    match dock.item().to_any_view().downcast::<Editor>() {
-        Ok(editor) => {
-            editor_path = editor.read(cx).file_path().map(Path::to_path_buf);
-            if editor_path.is_none() {
-                tracing::info!(
-                    dock_index = index,
-                    "skipping editor with no file_path in dock persistence v1"
-                );
-            }
-        },
-        Err(any) => match any.downcast::<ProjectTree>() {
-            Ok(tree) => {
-                project_tree = Some(ProjectTreeSnapV1 {
-                    expanded: tree.read(cx).expanded_paths(),
-                });
-            },
-            Err(_) => {
-                tracing::info!(
-                    dock_index = index,
-                    "skipping non-editor item in dock persistence v1"
-                );
-            },
-        },
-    }
+/// Snapshot one dock for workspace persistence: position, visibility,
+/// and default extent, plus the hosted item as a generic [`ItemSnap`]
+/// (kind + the item's [`crate::item::ItemView::serialize`] blob), the
+/// same shape pane items use. The legacy `editor_path` / `project_tree`
+/// fields stay `None`; new snapshots carry the item in `item`.
+pub(crate) fn snapshot_dock(dock: &crate::dock::Dock, cx: &gpui::App) -> DockSnapV1 {
+    let handle = dock.item();
     DockSnapV1 {
         side: dock.side(),
         visibility: dock.visibility(),
         default_width: dock.default_extent(),
-        editor_path,
-        project_tree,
+        item: Some(ItemSnap {
+            kind: handle.item_kind(cx),
+            blob: handle.serialize(cx),
+        }),
+        editor_path: None,
+        project_tree: None,
     }
 }
 
@@ -252,5 +279,56 @@ mod tests {
     fn folds_from_blob_missing_or_malformed_is_empty() {
         assert!(folds_from_blob(&serde_json::json!({ "file_path": "/x" })).is_empty());
         assert!(folds_from_blob(&serde_json::json!({ "folds": [[0, 1, 2]] })).is_empty());
+    }
+
+    #[test]
+    fn into_parts_maps_legacy_editor_path() {
+        let snap = DockSnapV1 {
+            side: DockSide::Left,
+            visibility: DockVisibility::Minimized,
+            default_width: 220,
+            item: None,
+            editor_path: Some(PathBuf::from("/x/y.rs")),
+            project_tree: None,
+        };
+        let (_, _, _, item) = snap.into_parts();
+        let item = item.expect("legacy editor_path yields an item");
+        assert_eq!(item.kind, ItemKind::Editor);
+        assert_eq!(item.blob, serde_json::json!({ "file_path": "/x/y.rs" }));
+    }
+
+    #[test]
+    fn into_parts_maps_legacy_project_tree() {
+        let snap = DockSnapV1 {
+            side: DockSide::Left,
+            visibility: DockVisibility::Minimized,
+            default_width: 240,
+            item: None,
+            editor_path: None,
+            project_tree: Some(ProjectTreeSnapV1 {
+                expanded: vec![PathBuf::from("/a"), PathBuf::from("/a/b")],
+            }),
+        };
+        let (_, _, _, item) = snap.into_parts();
+        let item = item.expect("legacy project_tree yields an item");
+        assert_eq!(item.kind, ItemKind::ProjectTree);
+        assert_eq!(item.blob, serde_json::json!({ "expanded": ["/a", "/a/b"] }));
+    }
+
+    #[test]
+    fn into_parts_prefers_item_over_legacy_fields() {
+        let snap = DockSnapV1 {
+            side: DockSide::Right,
+            visibility: DockVisibility::Minimized,
+            default_width: 320,
+            item: Some(ItemSnap {
+                kind: ItemKind::Terminal,
+                blob: serde_json::json!({ "cwd": "/t" }),
+            }),
+            editor_path: Some(PathBuf::from("/ignored.rs")),
+            project_tree: None,
+        };
+        let (_, _, _, item) = snap.into_parts();
+        assert_eq!(item.expect("item present").kind, ItemKind::Terminal);
     }
 }

@@ -1116,10 +1116,9 @@ impl Workspace {
         let docks: Vec<crate::workspace_persist::DockSnapV1> = self
             .docks
             .iter()
-            .enumerate()
-            .map(|(idx, dock_entity)| {
+            .map(|dock_entity| {
                 let dock = dock_entity.read(cx);
-                crate::workspace_persist::snapshot_dock(dock, cx, idx)
+                crate::workspace_persist::snapshot_dock(dock, cx)
             })
             .collect();
         crate::workspace_persist::WorkspaceStateV1 {
@@ -1234,28 +1233,25 @@ impl Workspace {
 
         self.docks.clear();
         for (idx, snap) in state.docks.into_iter().enumerate() {
-            if let Some(path) = snap.editor_path {
-                let editor = self.build_editor_for_path(&path, cx);
-                self.add_dock(Box::new(editor), snap.side, snap.default_width, cx);
-            } else if let Some(tree_snap) = snap.project_tree {
-                let git_root = self.git_root.clone();
-                let fs = cx.global::<FsHostGlobal>().0.clone();
-                let tree = cx.new(|cx| {
-                    let mut tree = ProjectTree::new(git_root, fs, cx);
-                    tree.set_expanded(tree_snap.expanded);
-                    tree
-                });
-                self.add_dock(Box::new(tree), snap.side, snap.default_width, cx);
-            } else {
+            let (side, visibility, default_width, item_snap) = snap.into_parts();
+            let Some(item_snap) = item_snap else {
                 tracing::info!(
                     dock_index = idx,
-                    "skipping dock with no restorable item during workspace restore v1"
+                    "skipping dock with no recorded item during restore"
                 );
                 continue;
-            }
+            };
+            let Some(handle) = self.materialize_item(&item_snap, cx) else {
+                tracing::info!(
+                    dock_index = idx,
+                    "skipping dock: item kind not restorable during restore"
+                );
+                continue;
+            };
+            self.add_dock(handle, side, default_width, cx);
             let dock = self.docks.last().cloned().expect("just-added dock present");
             dock.update(cx, |d, cx| {
-                d.set_visibility(snap.visibility, cx);
+                d.set_visibility(visibility, cx);
             });
         }
         self.broadcast_active_editor(cx);
@@ -18967,6 +18963,168 @@ mod tests {
             let dock = w.docks()[0].read(cx);
             assert_eq!(dock.side(), DockSide::Bottom);
             assert_eq!(dock.default_extent(), 200);
+        });
+    }
+
+    #[test]
+    fn restore_rebuilds_terminal_dock() {
+        use stoat::host::{
+            fake::{terminal::FakeTerminalSession, FakeTerminalHost},
+            TerminalHost,
+        };
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        cx.update(|cx| {
+            let host: Arc<dyn TerminalHost> =
+                Arc::new(FakeTerminalHost::new(Arc::new(FakeTerminalSession::new())));
+            cx.set_global(crate::globals::TerminalHostGlobal(host));
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            let weak = cx.weak_entity();
+            let term = cx.new(|cx| {
+                crate::terminal_view::Terminal::with_command(
+                    weak,
+                    PathBuf::from("/tmp/repo"),
+                    "bash".into(),
+                    vec![],
+                    cx,
+                )
+            });
+            w.add_dock(Box::new(term), DockSide::Bottom, 200, cx);
+        });
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/terminal-dock.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            assert_eq!(w.docks().len(), 1, "terminal dock restores");
+            let dock = w.docks()[0].read(cx);
+            assert_eq!(dock.side(), DockSide::Bottom);
+            assert_eq!(dock.item().item_kind(cx), crate::item::ItemKind::Terminal);
+        });
+    }
+
+    #[test]
+    fn restore_rebuilds_outline_panel_dock() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        dispatch(&ws, vcx, stoat_action::ToggleOutlinePanel);
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/outline-dock.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let panels = w
+                .docks()
+                .iter()
+                .filter(|d| d.read(cx).item().item_kind(cx) == crate::item::ItemKind::OutlinePanel)
+                .count();
+            assert_eq!(panels, 1, "outline panel dock restores");
+        });
+    }
+
+    #[test]
+    fn restore_rebuilds_diagnostics_panel_dock() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        dispatch(&ws, vcx, stoat_action::ToggleDiagnosticsPanel);
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/diagnostics-dock.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let panels = w
+                .docks()
+                .iter()
+                .filter(|d| {
+                    d.read(cx).item().item_kind(cx) == crate::item::ItemKind::DiagnosticsPanel
+                })
+                .count();
+            assert_eq!(panels, 1, "diagnostics panel dock restores");
+        });
+    }
+
+    #[test]
+    fn restore_rebuilds_pathless_dock_editor() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            let (_id, shared) = w
+                .buffer_registry()
+                .update(cx, |reg, cx| reg.new_scratch(cx));
+            let buffer = cx.new(|_| Buffer::from_shared(shared));
+            let multi_buffer = {
+                let buffer = buffer.clone();
+                cx.new(|cx| MultiBuffer::singleton(buffer, cx))
+            };
+            let executor = cx.global::<ExecutorGlobal>().0.clone();
+            let display_map = {
+                let buffer = buffer.clone();
+                cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+            };
+            let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
+            let editor = cx
+                .new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+            w.add_dock(Box::new(editor), DockSide::Left, 220, cx);
+        });
+        vcx.run_until_parked();
+        let path = PathBuf::from("/tmp/state/pathless-dock-editor.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+        fresh_ws.read_with(vcx2, |w, cx| {
+            assert_eq!(w.docks().len(), 1, "pathless dock editor restores");
+            let editor = w.docks()[0]
+                .read(cx)
+                .item()
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("dock holds an Editor");
+            assert_eq!(
+                editor.read(cx).file_path(),
+                None,
+                "restored dock editor has no file path"
+            );
         });
     }
 
