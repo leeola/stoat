@@ -81,6 +81,14 @@ impl StoatApp {
             async {}
         });
         let _window_bounds = track_window_bounds(&workspace, window, cx);
+        window.on_window_should_close(cx, {
+            let workspace = workspace.downgrade();
+            move |window, cx| {
+                workspace
+                    .update(cx, |w, cx| w.confirm_window_close(window, cx))
+                    .unwrap_or(true)
+            }
+        });
 
         Self {
             workspace,
@@ -177,6 +185,14 @@ impl StoatApp {
             async {}
         });
         let _window_bounds = track_window_bounds(&workspace, window, cx);
+        window.on_window_should_close(cx, {
+            let workspace = workspace.downgrade();
+            move |window, cx| {
+                workspace
+                    .update(cx, |w, cx| w.confirm_window_close(window, cx))
+                    .unwrap_or(true)
+            }
+        });
 
         Self {
             workspace,

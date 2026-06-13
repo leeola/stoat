@@ -2176,6 +2176,28 @@ impl Workspace {
         crate::quit_confirm::open_close_workspace_confirm(self, &dirty, window, cx);
     }
 
+    /// Decide whether the OS window close button may proceed. Returns
+    /// `true` to allow the close when no buffer is dirty. Otherwise opens
+    /// the close-workspace confirm and returns `false` to veto, leaving
+    /// the modal's confirm to remove the window.
+    ///
+    /// Registered on the root window via
+    /// [`gpui::Window::on_window_should_close`]. Unlike
+    /// [`Self::handle_close_workspace`], the clean path does not call
+    /// `remove_window`: returning `true` lets the OS perform the close.
+    pub fn confirm_window_close(
+        &mut self,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> bool {
+        let dirty = self.buffer_registry.read(cx).dirty_buffers();
+        if dirty.is_empty() {
+            return true;
+        }
+        crate::quit_confirm::open_close_workspace_confirm(self, &dirty, window, cx);
+        false
+    }
+
     /// Dispatch a Stoat action resolved by the input state machine.
     /// Routes by [`ActionKind`]: pane-targeted variants update
     /// [`Entity<PaneTree>`], root-targeted variants mutate the
@@ -10288,6 +10310,50 @@ mod tests {
             1,
             "window stays open while the modal is up",
         );
+    }
+
+    #[test]
+    fn confirm_window_close_allows_when_clean_and_vetoes_when_dirty() {
+        use crate::quit_confirm::QuitConfirmModal;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"alpha");
+        install_globals_with_fs(&mut cx, fs);
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let allow = ws.update_in(vcx, |w, window, cx| w.confirm_window_close(window, cx));
+        assert!(allow, "a clean workspace lets the close button proceed");
+        let modal = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<QuitConfirmModal>()
+                .is_some()
+        });
+        assert!(!modal, "no confirm modal opens when nothing is dirty");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/a.rs")], cx);
+        });
+        vcx.run_until_parked();
+        ws.update(vcx, |w, cx| {
+            let registry = w.buffer_registry().clone();
+            registry.update(cx, |r, _| {
+                let id = r.ids().next().expect("a.rs registered");
+                let shared = r.get(id).expect("buffer shared").clone();
+                shared.write().expect("buffer lock").edit(0..0, "x");
+            });
+        });
+        vcx.run_until_parked();
+
+        let veto = ws.update_in(vcx, |w, window, cx| w.confirm_window_close(window, cx));
+        assert!(!veto, "a dirty workspace vetoes the close button");
+        let modal = ws.read_with(vcx, |w, cx| {
+            w.modal_layer()
+                .read(cx)
+                .active_modal::<QuitConfirmModal>()
+                .is_some()
+        });
+        assert!(modal, "a dirty close opens the confirm modal");
     }
 
     #[test]
