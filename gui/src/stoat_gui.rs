@@ -53,6 +53,7 @@ mod input_state_machine;
 mod item;
 mod jumplist_picker;
 mod key_hint_banner;
+mod keycaps;
 mod keymap_loader;
 mod line_ending_picker;
 mod lsp;

@@ -10,7 +10,7 @@
 //! binding (key chip + description), and a `? for full help` footer.
 //! Non-transient modes render nothing.
 
-use crate::{input_state_machine::InputStateMachine, theme::ActiveTheme};
+use crate::{input_state_machine::InputStateMachine, keycaps, theme::ActiveTheme};
 use gpui::{
     div, App, Context, Entity, FontWeight, IntoElement, ParentElement, Render, SharedString,
     Styled, Subscription, Window,
@@ -76,16 +76,7 @@ impl Render for KeyHintBanner {
                     .flex_row()
                     .items_center()
                     .gap_2()
-                    .child(
-                        div()
-                            .px_1()
-                            .rounded_sm()
-                            .border_1()
-                            .border_color(border_color)
-                            .text_color(text_color)
-                            .text_xs()
-                            .child(SharedString::from(key)),
-                    )
+                    .child(keycaps::chord(&key, text_color, border_color))
                     .child(
                         div()
                             .text_xs()
