@@ -6,13 +6,13 @@
 //! [`crate::workspace::Workspace::take_count`] is the number of
 //! indent groups to apply (default 1). `ToggleComments` looks up
 //! the active buffer's language via the global
-//! [`crate::globals::LanguageRegistry`], reads its
-//! [`stoat_language::Language::line_comment`] prefix, and toggles
-//! that prefix on each touched line via
+//! [`crate::globals::LanguageRegistry`], reads the first of its
+//! [`stoat_language::Language::comment_tokens`], and toggles that
+//! prefix on each touched line via
 //! [`crate::editor::Editor::toggle_line_comments`].
 //!
 //! Buffers whose path resolves to no registered language, or
-//! whose language has no `line_comment` set, are a `ToggleComments`
+//! whose language has no comment tokens, are a `ToggleComments`
 //! no-op.
 
 use crate::{editor::Editor, globals::LanguageRegistry, workspace::Workspace};
@@ -60,7 +60,7 @@ pub fn handle_toggle_comments(workspace: &mut Workspace, cx: &mut Context<'_, Wo
     else {
         return;
     };
-    let Some(prefix) = language.line_comment else {
+    let Some(&prefix) = language.comment_tokens.first() else {
         return;
     };
     let prefix = prefix.to_string();

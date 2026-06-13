@@ -44,11 +44,15 @@ pub struct Language {
     /// `select_textobject_inner`. `None` for languages without
     /// structural textobjects (json, markdown).
     pub textobjects_query: Option<Query>,
-    /// Line-comment marker for languages that have one (e.g. `"//"`
-    /// for rust, `"#"` for toml). `None` for languages without line
-    /// comments (e.g. JSON, markdown). Used by the `ToggleComments`
-    /// action to insert / remove the prefix on each line.
-    pub line_comment: Option<&'static str>,
+    /// Line-comment tokens for this language, e.g. `["//", "///", "//!"]`
+    /// for rust or `["#"]` for toml. Empty for languages without line
+    /// comments (e.g. JSON, markdown).
+    ///
+    /// The `ToggleComments` action toggles the first token, so it stays the
+    /// canonical marker. [`comment_token_for_line`] resolves which flavor a
+    /// given line carries by longest match, so doc-comment markers (`///`,
+    /// `//!`) are recognized distinctly from a plain `//`.
+    pub comment_tokens: &'static [&'static str],
 }
 
 impl Language {
@@ -73,6 +77,26 @@ impl Language {
             .expect("highlight map poisoned")
             .clone()
     }
+}
+
+/// The longest token in `tokens` that `line` opens with at its first
+/// non-whitespace character, or `None` for a blank line or one starting
+/// with no token.
+///
+/// Longest match so `///` and `//!` win over `//`: a line carries the
+/// comment flavor of its most specific token. Pure over the inputs --
+/// callers pass a language's [`Language::comment_tokens`] and a single
+/// line's text.
+pub fn comment_token_for_line(line: &str, tokens: &[&'static str]) -> Option<&'static str> {
+    let rest = line.trim_start();
+    if rest.is_empty() {
+        return None;
+    }
+    tokens
+        .iter()
+        .copied()
+        .filter(|token| rest.starts_with(token))
+        .max_by_key(|token| token.len())
 }
 
 /// Pairs an inner [`Language`] with the host node kind it should be parsed
@@ -142,7 +166,7 @@ struct AuxQuerySources {
     brackets: Option<&'static str>,
     indents: Option<&'static str>,
     textobjects: Option<&'static str>,
-    line_comment: Option<&'static str>,
+    comment_tokens: &'static [&'static str],
 }
 
 fn make_language(
@@ -186,7 +210,7 @@ fn make_language_with_injections(
         bracket_query,
         indent_query,
         textobjects_query,
-        line_comment: aux.line_comment,
+        comment_tokens: aux.comment_tokens,
     }
 }
 
@@ -242,7 +266,7 @@ fn make_rust() -> Language {
             textobjects: Some(include_str!(
                 "../../vendor/helix/runtime/queries/rust/textobjects.scm"
             )),
-            line_comment: Some("//"),
+            comment_tokens: &["//", "///", "//!"],
         },
     )
 }
@@ -261,7 +285,7 @@ fn make_json() -> Language {
                 "../../vendor/zed/crates/languages/src/json/indents.scm"
             )),
             textobjects: None,
-            line_comment: None,
+            comment_tokens: &[],
         },
     )
 }
@@ -276,7 +300,7 @@ fn make_toml() -> Language {
             textobjects: Some(include_str!(
                 "../../vendor/helix/runtime/queries/toml/textobjects.scm"
             )),
-            line_comment: Some("#"),
+            comment_tokens: &["#"],
             ..Default::default()
         },
     )
@@ -297,7 +321,7 @@ fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language
                 "../../vendor/zed/crates/languages/src/markdown/indents.scm"
             )),
             textobjects: None,
-            line_comment: None,
+            comment_tokens: &[],
         },
     )
 }
@@ -317,8 +341,22 @@ fn make_markdown_inline() -> Language {
 
 #[cfg(test)]
 mod tests {
-    use super::LanguageRegistry;
+    use super::{comment_token_for_line, LanguageRegistry};
     use std::path::Path;
+
+    #[test]
+    fn comment_token_for_line_returns_longest_match() {
+        let rust = &["//", "///", "//!"];
+        assert_eq!(comment_token_for_line("// x", rust), Some("//"));
+        assert_eq!(comment_token_for_line("/// x", rust), Some("///"));
+        assert_eq!(comment_token_for_line("//! x", rust), Some("//!"));
+        assert_eq!(comment_token_for_line("    /// x", rust), Some("///"));
+        assert_eq!(comment_token_for_line("code // trailing", rust), None);
+        assert_eq!(comment_token_for_line("   ", rust), None);
+        assert_eq!(comment_token_for_line("", rust), None);
+        assert_eq!(comment_token_for_line("# x", &["#"]), Some("#"));
+        assert_eq!(comment_token_for_line("// x", &[]), None);
+    }
 
     #[test]
     fn for_path_resolves_extensions() {

@@ -1226,7 +1226,7 @@ pub(super) fn toggle_comments(stoat: &mut Stoat) -> UpdateEffect {
     let Some(language) = ws.buffers.language_for(buffer_id) else {
         return UpdateEffect::None;
     };
-    let Some(prefix) = language.line_comment else {
+    let Some(&prefix) = language.comment_tokens.first() else {
         return UpdateEffect::None;
     };
 
