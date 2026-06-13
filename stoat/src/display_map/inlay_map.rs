@@ -889,6 +889,27 @@ impl InlaySnapshot {
         self.inlay_count > 0
     }
 
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        let input = &self.transforms.summary().input;
+        let buffer = self.buffer.rope().summary();
+        assert_eq!(input.len, buffer.len, "transform input len == buffer len");
+        assert_eq!(
+            input.lines, buffer.lines,
+            "transform input lines == buffer lines"
+        );
+
+        let mut prev_isomorphic = false;
+        for transform in self.transforms.iter() {
+            let is_isomorphic = matches!(transform, Transform::Isomorphic(_));
+            assert!(
+                !(is_isomorphic && prev_isomorphic),
+                "two adjacent isomorphic transforms"
+            );
+            prev_isomorphic = is_isomorphic;
+        }
+    }
+
     pub fn inlay_point_to_offset(&self, point: InlayPoint) -> InlayOffset {
         if !self.has_inlays() {
             return InlayOffset(self.buffer.rope().point_to_offset(point.0));
@@ -1099,7 +1120,7 @@ impl InlayPointCursor<'_> {
 
 #[cfg(test)]
 mod tests {
-    use super::{InlayKind, InlayMap, InlayOffset, InlayPoint};
+    use super::{InlayId, InlayKind, InlayMap, InlayOffset, InlayPoint};
     use crate::{
         buffer::{BufferId, TextBuffer},
         multi_buffer::MultiBuffer,
@@ -1620,5 +1641,209 @@ mod tests {
             !after.has_inlays(),
             "stale hint dropped once its anchor is invalidated"
         );
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03).max(1))
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as u32
+            }
+        }
+    }
+
+    fn random_text(rng: &mut Rng, len: usize) -> String {
+        const ALPHABET: &[u8] = b"ab\ncd\n";
+        (0..len)
+            .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize] as char)
+            .collect()
+    }
+
+    fn random_range(rng: &mut Rng, len: usize) -> (usize, usize) {
+        let mut a = rng.below(len as u32 + 1) as usize;
+        let mut b = rng.below(len as u32 + 1) as usize;
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        (a, b)
+    }
+
+    /// Random inlay splices and buffer edits cross-checked against an
+    /// independent rope-splice oracle: the inlay text is the buffer text with
+    /// every still-valid inlay spliced in at its resolved offset. Also checks
+    /// the buffer->inlay->buffer round-trip, clip idempotence/monotonicity,
+    /// chunks over random subranges, and the transform invariants.
+    #[test]
+    fn random_inlays() {
+        for seed in 0..64u64 {
+            let mut rng = Rng::new(seed);
+
+            let initial_len = rng.below(16) as usize;
+            let initial = random_text(&mut rng, initial_len);
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+                BufferId::new(0),
+                &initial,
+            )));
+            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+            let mut buffer_snapshot = multi_buffer.snapshot();
+            let mut version = buffer_snapshot.version();
+            let (mut inlay_map, _) = InlayMap::new(buffer_snapshot.clone());
+            let mut inlay_ids: Vec<InlayId> = Vec::new();
+
+            for op in 0..16 {
+                let mut buffer_edits = Patch::empty();
+
+                match rng.below(100) {
+                    0..=49 => {
+                        if !inlay_ids.is_empty() && rng.below(3) == 0 {
+                            let victim =
+                                inlay_ids.swap_remove(rng.below(inlay_ids.len() as u32) as usize);
+                            inlay_map.splice(vec![victim], Vec::new());
+                        } else {
+                            let count = 1 + rng.below(3);
+                            let text_len = buffer_snapshot.text().len();
+                            let insert: Vec<_> = (0..count)
+                                .map(|_| {
+                                    let off = rng.below(text_len as u32 + 1) as usize;
+                                    let anchor = buffer_snapshot.anchor_at(off, Bias::Right);
+                                    let txt_len = 1 + rng.below(3) as usize;
+                                    let txt = random_text(&mut rng, txt_len);
+                                    (anchor, txt, InlayKind::Hint)
+                                })
+                                .collect();
+                            inlay_ids.extend(inlay_map.splice(Vec::new(), insert));
+                        }
+                    },
+                    _ => {
+                        let len = buffer_snapshot.text().len();
+                        let (a, b) = random_range(&mut rng, len);
+                        let insert_len = rng.below(4) as usize;
+                        let insert = random_text(&mut rng, insert_len);
+                        shared.write().unwrap().edit(a..b, &insert);
+                        buffer_snapshot = multi_buffer.snapshot();
+                        buffer_edits = buffer_snapshot.edits_since(version);
+                        version = buffer_snapshot.version();
+                    },
+                }
+
+                let (snap, _) = inlay_map.sync(buffer_snapshot.clone(), &buffer_edits);
+                snap.check_invariants();
+
+                let buffer_text = buffer_snapshot.text().to_string();
+                let text_len = buffer_text.len();
+                let anchors = inlay_map
+                    .inlays
+                    .iter()
+                    .map(|ai| ai.position)
+                    .collect::<Vec<_>>();
+                let offsets = buffer_snapshot.resolve_anchors_batch(&anchors);
+                let mut items: Vec<(usize, String)> = inlay_map
+                    .inlays
+                    .iter()
+                    .zip(&offsets)
+                    .filter(|(ai, _)| buffer_snapshot.is_anchor_valid(&ai.position))
+                    .map(|(ai, &off)| (off.min(text_len), ai.text.to_string()))
+                    .collect();
+                items.sort_by_key(|(off, _)| *off);
+                let mut expected = buffer_text.clone();
+                for (off, txt) in items.iter().rev() {
+                    expected.insert_str(*off, txt);
+                }
+                assert_eq!(
+                    snap.inlay_text(),
+                    expected,
+                    "seed {seed} op {op}: inlay text"
+                );
+
+                let mut buffer_point = Point::new(0, 0);
+                let mut inlay_point = snap.to_inlay_point(buffer_point, Bias::Left);
+                let mut chars = buffer_text.chars();
+                loop {
+                    assert_eq!(
+                        snap.to_buffer_point(inlay_point),
+                        buffer_point,
+                        "seed {seed} op {op}: round-trip at {buffer_point:?}"
+                    );
+                    if let Some(ch) = chars.next() {
+                        buffer_point = if ch == '\n' {
+                            Point::new(buffer_point.row + 1, 0)
+                        } else {
+                            Point::new(buffer_point.row, buffer_point.column + ch.len_utf8() as u32)
+                        };
+                        let next = snap.to_inlay_point(buffer_point, Bias::Left);
+                        assert!(
+                            next > inlay_point,
+                            "seed {seed} op {op}: to_inlay_point not monotonic at {buffer_point:?}"
+                        );
+                        inlay_point = next;
+                    } else {
+                        break;
+                    }
+                }
+
+                let mut ip = InlayPoint::new(0, 0);
+                let mut prev_clip = snap.clip_point(ip, Bias::Left);
+                for ch in expected.chars() {
+                    let clipped = snap.clip_point(ip, Bias::Left);
+                    assert_eq!(
+                        snap.clip_point(clipped, Bias::Left),
+                        clipped,
+                        "seed {seed} op {op}: clip not idempotent at {ip:?}"
+                    );
+                    assert!(
+                        clipped >= prev_clip,
+                        "seed {seed} op {op}: clip not monotonic at {ip:?}"
+                    );
+                    prev_clip = clipped;
+                    ip = if ch == '\n' {
+                        InlayPoint::new(ip.row() + 1, 0)
+                    } else {
+                        InlayPoint::new(ip.row(), ip.column() + ch.len_utf8() as u32)
+                    };
+                }
+
+                // Chunks emit each inlay atomically (the inlay text is never
+                // sliced at an arbitrary byte), so the full range reproduces
+                // the inlay text exactly. Exact subrange slicing is checked
+                // through `text_summary_for_range`, which does slice.
+                let total = expected.len();
+                let chunk_text: String = snap
+                    .chunks(InlayOffset(0)..InlayOffset(total), Arc::from(Vec::new()))
+                    .map(|c| c.text.into_owned())
+                    .collect();
+                assert_eq!(chunk_text, expected, "seed {seed} op {op}: full chunks");
+
+                for _ in 0..4 {
+                    let (a, b) = random_range(&mut rng, total);
+                    let got = snap.text_summary_for_range(InlayOffset(a)..InlayOffset(b));
+                    let want = TextSummary::from_str(&expected[a..b]);
+                    assert_eq!(
+                        got.len, want.len,
+                        "seed {seed} op {op}: summary len {a}..{b}"
+                    );
+                    assert_eq!(
+                        got.lines, want.lines,
+                        "seed {seed} op {op}: summary lines {a}..{b}"
+                    );
+                }
+            }
+        }
     }
 }
