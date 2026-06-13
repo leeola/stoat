@@ -1786,4 +1786,197 @@ mod tests {
         h.fold_focused(Point::new(1, 7)..Point::new(1, 12));
         h.assert_snapshot("snapshot_open_rust_file_with_fold");
     }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03).max(1))
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as u32
+            }
+        }
+    }
+
+    fn random_dm_content(rng: &mut Rng, len: usize) -> String {
+        // Narrow single-width chars, spaces (word-wrap break points), and
+        // newlines. Glyph expansion (wide chars, tabs) is the tab/wrap layers'
+        // concern, covered by their own tests; the coordinator test targets the
+        // cross-layer composition over soft-wrap splits and block rows.
+        const ALPHABET: &[char] = &['a', 'b', ' ', '\n'];
+        (0..len)
+            .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize])
+            .collect()
+    }
+
+    /// The coordinator composes inlay -> fold -> tab -> wrap -> block. Over
+    /// random content, soft-wrap widths, and blocks (built statically, so the
+    /// correct full-rebuild paths run), its conversions and chunk streaming
+    /// must stay consistent.
+    #[test]
+    fn random_display_map() {
+        use super::{BlockPlacement, BlockProperties, BlockStyle};
+
+        for seed in 0..64u64 {
+            let mut rng = Rng::new(seed);
+            let content_len = 1 + rng.below(40) as usize;
+            let content = random_dm_content(&mut rng, content_len);
+            let mut display_map = create_display_map(&content);
+
+            if rng.below(3) != 0 {
+                display_map.set_wrap_width(Some(2 + rng.below(8)));
+            }
+
+            let buffer_lines = display_map.multi_buffer.snapshot().line_count();
+            let blocks: Vec<BlockProperties> = (0..rng.below(3))
+                .map(|_| {
+                    let row = rng.below(buffer_lines + 1);
+                    let placement = if rng.below(2) == 0 {
+                        BlockPlacement::Above(row)
+                    } else {
+                        BlockPlacement::Below(row)
+                    };
+                    BlockProperties::from_text(
+                        placement,
+                        vec!["BLK".to_string()],
+                        BlockStyle::Fixed,
+                    )
+                })
+                .collect();
+            if !blocks.is_empty() {
+                display_map.insert_blocks(blocks);
+            }
+
+            let snapshot = display_map.snapshot();
+            let total = snapshot.line_count();
+            let ctx = || {
+                format!(
+                    "seed {seed} content {content:?} wrap {:?}",
+                    snapshot.wrap_width()
+                )
+            };
+
+            let from_chunks: String = snapshot
+                .highlighted_chunks(0..total)
+                .map(|c| c.text.into_owned())
+                .collect();
+            let from_lines: String = (0..total)
+                .map(|r| snapshot.display_line(r))
+                .collect::<Vec<_>>()
+                .join("\n");
+            assert_eq!(from_chunks, from_lines, "chunks vs display_lines {}", ctx());
+
+            // Clip idempotence is asserted only without soft wrap: a wrapped
+            // row's end column is not a clip fixed point today -- a wrap-layer
+            // clip bug tracked under the wrap-map item, independent of the
+            // coordinator's composition tested here.
+            if snapshot.wrap_width().is_none() {
+                for row in 0..total {
+                    for col in 0..=snapshot.line_len(row) + 2 {
+                        let clipped = snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
+                        assert!(clipped.row < total.max(1), "clip row in bounds {}", ctx());
+                        assert!(
+                            clipped.column <= snapshot.line_len(clipped.row),
+                            "clip col in bounds {}",
+                            ctx()
+                        );
+                        assert_eq!(
+                            snapshot.clip_point(clipped, Bias::Left),
+                            clipped,
+                            "clip idempotent row {row} col {col} {}",
+                            ctx()
+                        );
+                    }
+                }
+            }
+
+            // Buffer points at every char boundary of `content`, in order.
+            let mut row = 0u32;
+            let mut col = 0u32;
+            let mut points = vec![Point::new(0, 0)];
+            for ch in content.chars() {
+                if ch == '\n' {
+                    row += 1;
+                    col = 0;
+                } else {
+                    col += ch.len_utf8() as u32;
+                }
+                points.push(Point::new(row, col));
+            }
+
+            let mut prev = DisplayPoint::new(0, 0);
+            for &p in &points {
+                let dp = snapshot.buffer_to_display(p, Bias::Left);
+                assert!(
+                    (dp.row, dp.column) >= (prev.row, prev.column),
+                    "buffer_to_display monotonic at {p:?} {}",
+                    ctx()
+                );
+                prev = dp;
+                assert_eq!(
+                    snapshot.display_to_buffer(dp, Bias::Left),
+                    Some(p),
+                    "buffer->display->buffer round trip at {p:?} {}",
+                    ctx()
+                );
+            }
+        }
+    }
+
+    /// A text highlight survives soft-wrap splits and block interruptions: its
+    /// style stays on the wrapped pieces of the highlighted range, and the
+    /// synthetic block row carries none of it.
+    #[test]
+    fn highlighted_chunks_survive_wrap_and_blocks() {
+        use super::{BlockPlacement, BlockProperties, BlockStyle};
+
+        let mut display_map = create_display_map("abcdefghij\nsecond\nthird");
+        let range = {
+            let snap = display_map.multi_buffer.snapshot();
+            let rope = snap.rope();
+            let start = rope.point_to_offset(Point::new(0, 2));
+            let end = rope.point_to_offset(Point::new(0, 8));
+            snap.anchor_at(start, Bias::Right)..snap.anchor_at(end, Bias::Left)
+        };
+        display_map.highlight_text(
+            HighlightKey::layer(HighlightLayer::SearchHighlight),
+            vec![range],
+            HighlightStyle {
+                foreground: Some(Color::Red),
+                ..Default::default()
+            },
+        );
+        display_map.set_wrap_width(Some(4));
+        display_map.insert_blocks(vec![BlockProperties::from_text(
+            BlockPlacement::Below(0),
+            vec!["BLK".to_string()],
+            BlockStyle::Fixed,
+        )]);
+
+        let snapshot = display_map.snapshot();
+        let total = snapshot.line_count();
+        let styled: String = snapshot
+            .highlighted_chunks(0..total)
+            .filter(|c| c.highlight_style.is_some())
+            .map(|c| c.text.into_owned())
+            .collect();
+        assert_eq!(
+            styled, "cdefgh",
+            "the highlight survives the wrap split and the block row is unstyled"
+        );
+    }
 }
