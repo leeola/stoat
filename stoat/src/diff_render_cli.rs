@@ -1,7 +1,7 @@
 //! ANSI-rendering of [`ReviewHunk`] for the `stoat diff` CLI subcommand.
 //!
 //! Mirrors the per-row content of the review pane but writes byte
-//! streams to an `io::Write` instead of painting ratatui cells.
+//! streams to an `io::Write` instead of painting a terminal cell grid.
 //! Color choices match
 //! [`crate::display_map::syntax_theme::DiffTheme::default`] (green
 //! adds, red deletes, cyan italic moves, dim context).

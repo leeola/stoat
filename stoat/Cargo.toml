@@ -18,7 +18,6 @@ stoat_language = { path = "../language" }
 stoat_log = { path = "../log" }
 stoat_scheduler = { path = "../scheduler" }
 stoat_text = { path = "../text" }
-ratatui.workspace = true
 crossterm.workspace = true
 serde = { workspace = true, features = ["derive"] }
 serde_json.workspace = true
