@@ -960,6 +960,45 @@ impl Workspace {
         Some(editor)
     }
 
+    /// Re-apply the cursor/selections recorded by [`Editor`]'s
+    /// serialization onto a restored editor. Offsets are clamped to the
+    /// rehydrated buffer length so a file that shrank on disk between
+    /// save and restore cannot place an anchor past the end. No-op when
+    /// the blob predates selection persistence or records none.
+    fn apply_saved_selections(
+        editor: &Entity<Editor>,
+        blob: &serde_json::Value,
+        cx: &mut Context<'_, Self>,
+    ) {
+        use stoat_text::{Anchor, Selection, SelectionGoal};
+
+        let Some(saved) = blob
+            .get("selections")
+            .and_then(|v| serde_json::from_value::<Vec<(usize, usize, bool)>>(v.clone()).ok())
+        else {
+            return;
+        };
+        if saved.is_empty() {
+            return;
+        }
+        editor.update(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            let len = snapshot.rope().len();
+            let restored: Vec<Selection<Anchor>> = saved
+                .iter()
+                .enumerate()
+                .map(|(id, &(start, end, reversed))| Selection {
+                    id,
+                    start: snapshot.anchor_at(start.min(len), Bias::Right),
+                    end: snapshot.anchor_at(end.min(len), Bias::Right),
+                    reversed,
+                    goal: SelectionGoal::None,
+                })
+                .collect();
+            ed.selections_mut().replace_with(restored, &snapshot);
+        });
+    }
+
     /// Build a stand-alone preview [`Entity<Editor>`] backed by a
     /// fresh scratch [`Buffer`] in the workspace's [`BufferRegistry`].
     /// The editor carries the same `MultiBuffer` + `DisplayMap` +
@@ -1199,6 +1238,7 @@ impl Workspace {
                             let display_map = editor.read(cx).display_map().clone();
                             display_map.update(cx, |dm, dm_cx| dm.fold(folds, dm_cx));
                         }
+                        Self::apply_saved_selections(&editor, &snap.blob, cx);
                         pane.update(cx, |p, cx| {
                             p.add_item(Box::new(editor), cx);
                         });
@@ -17985,6 +18025,91 @@ mod tests {
                 scratch_texts,
                 vec!["scratch contents".to_string()],
                 "the registered scratch editor should restore with its content"
+            );
+        });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_editor_selection() {
+        use stoat_text::{Bias, Selection, SelectionGoal};
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"hello world\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx);
+        });
+        vcx.run_until_parked();
+
+        ws.update(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .clone();
+            let editor = pane
+                .read(cx)
+                .items()
+                .iter()
+                .find_map(|item| item.to_any_view().downcast::<Editor>().ok())
+                .expect("editor present");
+            editor.update(cx, |ed, cx| {
+                let snapshot = ed.multi_buffer().read(cx).snapshot();
+                let sel = Selection {
+                    id: 0,
+                    start: snapshot.anchor_at(2, Bias::Right),
+                    end: snapshot.anchor_at(7, Bias::Right),
+                    reversed: false,
+                    goal: SelectionGoal::None,
+                };
+                ed.selections_mut().replace_with(vec![sel], &snapshot);
+            });
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/selection-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let mut ranges: Vec<(usize, usize, bool)> = Vec::new();
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if let Ok(editor) = item.to_any_view().downcast::<Editor>() {
+                        let editor = editor.read(cx);
+                        let snapshot = editor.multi_buffer().read(cx).snapshot();
+                        for sel in editor.selections().all_anchors() {
+                            ranges.push((
+                                snapshot.resolve_anchor(&sel.start),
+                                snapshot.resolve_anchor(&sel.end),
+                                sel.reversed,
+                            ));
+                        }
+                    }
+                }
+            }
+            assert_eq!(
+                ranges,
+                vec![(2, 7, false)],
+                "restored editor should carry the saved selection"
             );
         });
     }

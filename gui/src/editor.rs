@@ -4982,7 +4982,25 @@ impl ItemView for Editor {
             .read(cx)
             .as_singleton()
             .map(|buffer| buffer.read(cx).read(|b| b.buffer_id()));
-        serde_json::json!({ "file_path": file_path, "folds": folds, "buffer_id": buffer_id })
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let selections: Vec<(usize, usize, bool)> = self
+            .selections
+            .all_anchors()
+            .iter()
+            .map(|sel| {
+                (
+                    snapshot.resolve_anchor(&sel.start),
+                    snapshot.resolve_anchor(&sel.end),
+                    sel.reversed,
+                )
+            })
+            .collect();
+        serde_json::json!({
+            "file_path": file_path,
+            "folds": folds,
+            "buffer_id": buffer_id,
+            "selections": selections,
+        })
     }
 }
 
