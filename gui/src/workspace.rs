@@ -592,6 +592,10 @@ impl Workspace {
     /// `theme_picker_open` / `global_search_open` / `buffer_picker_open`
     /// flag. When that modal is no longer on top (closed or buried under
     /// another modal), restores the prior mode and clears the flag.
+    ///
+    /// The quit-confirm modal is the exception: it has no text input and
+    /// stays in `normal` mode, so only its `quit_confirm_open` flag is
+    /// toggled.
     fn refresh_modal_keymap_state(&self, layer: &Entity<ModalLayer>, cx: &mut Context<'_, Self>) {
         let palette_active = layer
             .read(cx)
@@ -616,6 +620,10 @@ impl Workspace {
         let buffer_picker_active = layer
             .read(cx)
             .active_modal::<crate::picker::Picker<crate::buffer_picker::BufferPickerDelegate>>()
+            .is_some();
+        let quit_confirm_active = layer
+            .read(cx)
+            .active_modal::<crate::quit_confirm::QuitConfirmModal>()
             .is_some();
         self.input_state_machine.update(cx, |sm, cx_sm| {
             if palette_active {
@@ -682,6 +690,14 @@ impl Workspace {
                 if let Some(prev) = sm.take_prev_mode_for_modal() {
                     sm.set_mode(prev, cx_sm);
                 }
+            }
+
+            // The quit-confirm modal stays in `normal` mode (it has no text
+            // input), so only the flag is toggled -- no mode capture/switch.
+            if quit_confirm_active {
+                sm.set_quit_confirm_open(true, cx_sm);
+            } else if sm.quit_confirm_open() {
+                sm.set_quit_confirm_open(false, cx_sm);
             }
         });
     }

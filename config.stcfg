@@ -197,6 +197,9 @@ on key {
         PageDown -> HelpScrollDetailDown();
         BackTab -> HelpScopeToggle();
     }
+    mode == normal && quit_confirm_open {
+        Enter -> SubmitPromptInput();
+    }
     mode == normal {
         Escape -> DismissModal();
         q -> ReplayMacro();

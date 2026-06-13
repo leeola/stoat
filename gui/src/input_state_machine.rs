@@ -182,7 +182,7 @@ pub enum Operator {}
 /// machinery (observe_keystrokes, dispatch_action, sequence
 /// lowering) will reach for in subsequent items.
 ///
-/// The nine predicate-visible fields are stored as [`StateValue`]
+/// The ten predicate-visible fields are stored as [`StateValue`]
 /// carriers so [`KeymapState::get`] can hand out borrows directly,
 /// matching `StoatKeymapState`'s storage layout.
 pub struct InputStateMachine {
@@ -193,6 +193,7 @@ pub struct InputStateMachine {
     theme_picker_open: StateValue,
     global_search_open: StateValue,
     buffer_picker_open: StateValue,
+    quit_confirm_open: StateValue,
     review_active: StateValue,
     input_active: StateValue,
     pending_count: Option<u32>,
@@ -378,6 +379,7 @@ impl InputStateMachine {
             theme_picker_open: StateValue::Bool(false),
             global_search_open: StateValue::Bool(false),
             buffer_picker_open: StateValue::Bool(false),
+            quit_confirm_open: StateValue::Bool(false),
             review_active: StateValue::Bool(false),
             input_active: StateValue::Bool(false),
             pending_count: None,
@@ -442,6 +444,10 @@ impl InputStateMachine {
 
     pub fn buffer_picker_open(&self) -> bool {
         matches!(self.buffer_picker_open, StateValue::Bool(true))
+    }
+
+    pub fn quit_confirm_open(&self) -> bool {
+        matches!(self.quit_confirm_open, StateValue::Bool(true))
     }
 
     pub fn review_active(&self) -> bool {
@@ -660,6 +666,17 @@ impl InputStateMachine {
         let new = StateValue::Bool(open);
         if self.buffer_picker_open != new {
             self.buffer_picker_open = new;
+            cx.notify();
+        }
+    }
+
+    /// Set the `quit_confirm_open` keymap-state flag. The quit-confirm
+    /// modal stays in `normal` mode, so the flag is what gates its
+    /// `Enter -> SubmitPromptInput` binding. No-ops on unchanged value.
+    pub fn set_quit_confirm_open(&mut self, open: bool, cx: &mut Context<'_, Self>) {
+        let new = StateValue::Bool(open);
+        if self.quit_confirm_open != new {
+            self.quit_confirm_open = new;
             cx.notify();
         }
     }
@@ -1438,6 +1455,7 @@ impl KeymapState for InputStateMachine {
             "theme_picker_open" => Some(&self.theme_picker_open),
             "global_search_open" => Some(&self.global_search_open),
             "buffer_picker_open" => Some(&self.buffer_picker_open),
+            "quit_confirm_open" => Some(&self.quit_confirm_open),
             "review_active" => Some(&self.review_active),
             "input_active" => Some(&self.input_active),
             _ => None,
@@ -1786,6 +1804,7 @@ mod tests {
             assert!(!sm.theme_picker_open());
             assert!(!sm.global_search_open());
             assert!(!sm.buffer_picker_open());
+            assert!(!sm.quit_confirm_open());
             assert!(!sm.review_active());
             assert_eq!(sm.pending_count(), None);
             assert!(sm.pending_chord().is_empty());
@@ -1818,6 +1837,7 @@ mod tests {
             assert_eq!(sm.get("help_open"), Some(&StateValue::Bool(false)));
             assert_eq!(sm.get("theme_picker_open"), Some(&StateValue::Bool(false)));
             assert_eq!(sm.get("global_search_open"), Some(&StateValue::Bool(false)));
+            assert_eq!(sm.get("quit_confirm_open"), Some(&StateValue::Bool(false)));
             assert_eq!(sm.get("unknown"), None);
         });
     }

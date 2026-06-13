@@ -112,6 +112,23 @@ mod tests {
         assert_eq!(actions[0].name, "AcceptCompletion");
     }
 
+    fn quit_confirm_state() -> TestState {
+        let mut values = HashMap::new();
+        values.insert("mode".into(), StateValue::String("normal".into()));
+        values.insert("quit_confirm_open".into(), StateValue::Bool(true));
+        TestState { values }
+    }
+
+    #[test]
+    fn default_keymap_enter_confirms_open_quit_confirm_dialog() {
+        let keymap = compile_default_keymap();
+        let actions = keymap
+            .lookup(&quit_confirm_state(), &enter_event())
+            .expect("Enter has a binding when the quit-confirm dialog is open");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions[0].name, "SubmitPromptInput");
+    }
+
     fn ctrl_event(c: char) -> stoat::key::KeyEvent {
         stoat::key::KeyEvent::new(
             stoat::key::KeyCode::Char(c),
