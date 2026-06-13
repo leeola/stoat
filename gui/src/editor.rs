@@ -396,6 +396,45 @@ fn touched_rows(snapshot: &MultiBufferSnapshot, selections: &SelectionsCollectio
     rows
 }
 
+/// The comment-continuation prefix for a newline split at `cursor_col` (a
+/// byte offset within `line`), or `None` when `line` is not a comment line
+/// or no non-whitespace precedes the cursor.
+///
+/// Continues the line comment Helix-style: the next line repeats this line's
+/// leading whitespace and comment token. Where Helix appends a single
+/// hardcoded space, the line's own post-token whitespace run is replicated
+/// (truncated at the cursor), so `//foo` continues as `//` and `//! foo` as
+/// `//! `. `tokens` is a language's [`stoat_language::Language::comment_tokens`];
+/// an empty slice always yields `None`.
+///
+/// `cursor_col` is assumed to fall on a char boundary (a cursor position);
+/// every derived split point then falls on a char boundary too.
+fn comment_continuation_prefix(
+    line: &str,
+    cursor_col: usize,
+    tokens: &[&'static str],
+) -> Option<String> {
+    if line.get(..cursor_col)?.trim().is_empty() {
+        return None;
+    }
+
+    let token = stoat_language::language::comment_token_for_line(line, tokens)?;
+    let leading_ws_len = line.len() - line.trim_start().len();
+    let token_end = leading_ws_len + token.len();
+
+    let ws_end = line[token_end..]
+        .char_indices()
+        .find(|(_, c)| !c.is_whitespace())
+        .map_or(line.len(), |(i, _)| token_end + i);
+    let clamped_end = ws_end.min(cursor_col).max(token_end);
+
+    let mut prefix = String::with_capacity(clamped_end);
+    prefix.push_str(&line[..leading_ws_len]);
+    prefix.push_str(token);
+    prefix.push_str(&line[token_end..clamped_end]);
+    Some(prefix)
+}
+
 /// Cross-file move provenances keyed by buffer row, sorted ascending for
 /// binary-search lookup during gutter paint.
 type MoveProvenances = Vec<(u32, stoat::review::MoveProvenance)>;
@@ -843,29 +882,77 @@ impl Editor {
     /// selection collapses to a single cursor immediately after the
     /// inserted text in the post-edit buffer.
     ///
-    /// Edits are applied in reverse-offset order so an earlier
-    /// edit's range is still valid after later edits have committed.
-    /// Each cursor's post-edit offset accounts for cumulative shifts
-    /// from edits at earlier offsets: for cursor `i` (ascending
-    /// offset order) the new offset is
-    /// `pre_start_i + text.len() + sum_{j<i}(text.len() - (pre_end_j - pre_start_j))`.
-    /// Multi-excerpt buffers are skipped with a `tracing::warn` --
-    /// the multi-buffer edit surface is not yet built.
+    /// Multi-excerpt buffers are skipped with a `tracing::warn` -- the
+    /// multi-buffer edit surface is not yet built.
     pub fn apply_text_to_all_cursors(&mut self, text: &str, cx: &mut Context<'_, Self>) {
+        self.replace_selections_with(|_, _| text.to_string(), cx);
+    }
+
+    /// Insert a newline at every selection, continuing a line comment for
+    /// each cursor that sits inside one.
+    ///
+    /// A cursor continues the comment when its line begins (at its first
+    /// non-whitespace) with one of `tokens` and non-whitespace precedes the
+    /// cursor: the inserted text is `"\n"` followed by the line's
+    /// [`comment_continuation_prefix`]. Every other cursor inserts a plain
+    /// `"\n"`. An empty `tokens` slice (pathless or unregistered-language
+    /// buffer) yields plain-newline behavior everywhere.
+    pub fn insert_newline_continuing_comments(
+        &mut self,
+        tokens: &[&'static str],
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.replace_selections_with(
+            |rope, range| {
+                let row = rope.offset_to_point(range.start).row;
+                let line_start = rope.point_to_offset(stoat_text::Point::new(row, 0));
+                let line_end = line_start + rope.line_len(row) as usize;
+                let line = rope.slice(line_start..line_end).to_string();
+
+                match comment_continuation_prefix(&line, range.start - line_start, tokens) {
+                    Some(prefix) => format!("\n{prefix}"),
+                    None => "\n".to_string(),
+                }
+            },
+            cx,
+        );
+    }
+
+    /// Replace every selection's range with text from `text_for`, collapsing
+    /// each selection to a single cursor immediately after its inserted text.
+    /// Range selections are replaced; empty selections (cursors) insert at
+    /// their position.
+    ///
+    /// `text_for(rope, range)` is called once per selection against the
+    /// pre-edit rope in ascending offset order. Edits then apply in
+    /// reverse-offset order so an earlier edit's range stays valid after
+    /// later edits commit. Each cursor's post-edit offset accounts for the
+    /// cumulative length change of edits at earlier offsets: for cursor `i`
+    /// the new offset is
+    /// `pre_start_i + text_i.len() + sum_{j<i}(text_j.len() - (pre_end_j - pre_start_j))`.
+    ///
+    /// Multi-excerpt buffers are skipped with a `tracing::warn` -- the
+    /// multi-buffer edit surface is not yet built.
+    fn replace_selections_with<F>(&mut self, text_for: F, cx: &mut Context<'_, Self>)
+    where
+        F: Fn(&stoat_text::Rope, &Range<usize>) -> String,
+    {
         let buffer = match self.multi_buffer.read(cx).as_singleton() {
             Some(b) => b.clone(),
             None => {
                 tracing::warn!(
                     target: "stoat::editor",
-                    "apply_text_to_all_cursors on multi-excerpt buffer is not yet supported",
+                    "replace_selections_with on multi-excerpt buffer is not yet supported",
                 );
                 return;
             },
         };
 
-        let mut ascending: Vec<(usize, Range<usize>)> = {
+        let ascending: Vec<(usize, Range<usize>, String)> = {
             let snapshot = self.multi_buffer.read(cx).snapshot();
-            self.selections
+            let rope = snapshot.rope();
+            let mut ranges: Vec<(usize, Range<usize>)> = self
+                .selections
                 .all_anchors()
                 .iter()
                 .map(|sel| {
@@ -878,21 +965,27 @@ impl Editor {
                     };
                     (sel.id, lo..hi)
                 })
+                .collect();
+            ranges.sort_by_key(|(_, range)| range.start);
+            ranges
+                .into_iter()
+                .map(|(id, range)| {
+                    let text = text_for(rope, &range);
+                    (id, range, text)
+                })
                 .collect()
         };
-        ascending.sort_by_key(|(_, range)| range.start);
 
-        let text_len = text.len();
         let mut cumulative_shift: isize = 0;
         let mut post_offsets: Vec<(usize, usize)> = Vec::with_capacity(ascending.len());
-        for (id, range) in &ascending {
-            let post = (range.start as isize + cumulative_shift) as usize + text_len;
+        for (id, range, text) in &ascending {
+            let post = (range.start as isize + cumulative_shift) as usize + text.len();
             post_offsets.push((*id, post));
-            cumulative_shift += text_len as isize - (range.end - range.start) as isize;
+            cumulative_shift += text.len() as isize - (range.end - range.start) as isize;
         }
 
-        for (_id, range) in ascending.iter().rev() {
-            buffer.update(cx, |b, cx| b.edit(range.clone(), text, cx));
+        for (_id, range, text) in ascending.iter().rev() {
+            buffer.update(cx, |b, cx| b.edit(range.clone(), text.as_str(), cx));
         }
 
         let new_snapshot = self.multi_buffer.read(cx).snapshot();
@@ -5797,6 +5890,97 @@ mod tests {
             "unexpected event in {observed:?}",
         );
         assert!(!observed.is_empty(), "expected at least one Changed event");
+    }
+
+    #[test]
+    fn comment_continuation_prefix_cases() {
+        let rust = &["//", "///", "//!"];
+        let cases: &[(&str, usize, Option<&str>)] = &[
+            ("// foo", 6, Some("// ")),
+            ("//foo", 5, Some("//")),
+            ("//! foo", 7, Some("//! ")),
+            ("/// foo", 7, Some("/// ")),
+            ("    // x", 8, Some("    // ")),
+            ("//   x", 6, Some("//   ")),
+            ("//   x", 3, Some("// ")),
+            ("//   x", 2, Some("//")),
+            ("// café", 8, Some("// ")),
+            ("code // x", 9, None),
+            ("   ", 3, None),
+            ("// foo", 0, None),
+            ("  // x", 2, None),
+        ];
+        for &(line, col, expected) in cases {
+            assert_eq!(
+                comment_continuation_prefix(line, col, rust).as_deref(),
+                expected,
+                "line={line:?} col={col}",
+            );
+        }
+        assert_eq!(comment_continuation_prefix("// foo", 6, &[]), None);
+    }
+
+    #[test]
+    fn insert_newline_continues_rust_comment() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "// foo");
+        seed_cursors(&editor, &mut cx, &[6]);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.insert_newline_continuing_comments(&["//", "///", "//!"], cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "// foo\n// ");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![10]);
+    }
+
+    #[test]
+    fn insert_newline_continues_toml_comment() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "# note");
+        seed_cursors(&editor, &mut cx, &[6]);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.insert_newline_continuing_comments(&["#"], cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "# note\n# ");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![9]);
+    }
+
+    #[test]
+    fn insert_newline_without_tokens_inserts_plain_newline() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "// foo");
+        seed_cursors(&editor, &mut cx, &[6]);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.insert_newline_continuing_comments(&[], cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(buffer.read_with(&cx, |b, _| b.text()), "// foo\n");
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![7]);
+    }
+
+    #[test]
+    fn insert_newline_continues_each_comment_line_independently() {
+        let mut cx = TestAppContext::single();
+        let (buffer, editor) = new_editor(&mut cx, "// a\n//! b\nlet x");
+        seed_cursors(&editor, &mut cx, &[4, 10, 16]);
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.insert_newline_continuing_comments(&["//", "///", "//!"], cx)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            buffer.read_with(&cx, |b, _| b.text()),
+            "// a\n// \n//! b\n//! \nlet x\n",
+        );
+        assert_eq!(cursor_offsets(&editor, &mut cx), vec![8, 19, 26]);
     }
 
     #[test]

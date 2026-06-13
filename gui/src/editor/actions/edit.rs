@@ -13,7 +13,7 @@
 
 use crate::{
     editor::{DeleteDirection, Editor, OpenLineDir, PastePosition},
-    globals::ClipboardHostGlobal,
+    globals::{ClipboardHostGlobal, LanguageRegistry},
     toast::Toast,
     workspace::Workspace,
 };
@@ -244,11 +244,37 @@ pub fn handle_append(
 }
 
 /// `InsertNewline` action: insert a line-feed at every cursor /
-/// selection range.
+/// selection range, continuing a line comment when the cursor sits
+/// inside one (see [`Editor::insert_newline_continuing_comments`]).
 pub fn handle_insert_newline(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
-    if let Some(editor) = active_editor(workspace, cx) {
-        editor.update(cx, |ed, cx| ed.apply_text_to_all_cursors("\n", cx));
-    }
+    let Some(editor) = active_editor(workspace, cx) else {
+        return;
+    };
+    let tokens = comment_tokens_for_editor(&editor, cx);
+    editor.update(cx, |ed, cx| {
+        ed.insert_newline_continuing_comments(tokens, cx)
+    });
+}
+
+/// Resolve the active buffer's line-comment tokens from its file path and
+/// the global [`LanguageRegistry`], mirroring the lookup in
+/// [`super::indent::handle_toggle_comments`]. Pathless buffers and
+/// extensions with no registered language resolve to an empty slice, which
+/// yields plain-newline behavior.
+fn comment_tokens_for_editor(
+    editor: &Entity<Editor>,
+    cx: &Context<'_, Workspace>,
+) -> &'static [&'static str] {
+    let Some(path) = editor.read(cx).file_path().map(|p| p.to_path_buf()) else {
+        return &[];
+    };
+    let Some(language) = cx
+        .try_global::<LanguageRegistry>()
+        .and_then(|reg| reg.0.for_path(&path))
+    else {
+        return &[];
+    };
+    language.comment_tokens
 }
 
 /// `OpenBelow` action: insert a blank line after each selection's
