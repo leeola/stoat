@@ -468,6 +468,7 @@ mod tests {
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{
+            display_width,
             fold_map::{FoldMap, FoldPoint, FoldSnapshot},
             inlay_map::InlayMap,
         },
@@ -793,6 +794,162 @@ mod tests {
             tab.highlight_style.as_ref().and_then(|s| s.foreground),
             Some(Color::Red),
             "tab-expansion chunk inherits the surrounding highlight"
+        );
+    }
+
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03).max(1))
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as u32
+            }
+        }
+    }
+
+    fn random_tab_content(rng: &mut Rng, len: usize) -> String {
+        // narrow ASCII, space, tab, a 3-byte wide CJK char, a 4-byte wide
+        // char, and newline (escaped so the source stays ASCII).
+        const ALPHABET: &[char] = &['a', 'b', ' ', '\t', '\u{4E16}', '\u{1F680}', '\n'];
+        (0..len)
+            .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize])
+            .collect()
+    }
+
+    /// Independent char-walk expansion: the tab-stop and cap rule implemented
+    /// from the spec, reusing the shared `display_width` primitive. Returns the
+    /// expanded (tab) column at byte offset `up_to_byte` of `chars`.
+    fn ref_expand(chars: &[char], up_to_byte: u32, tab_size: u32, max: u32) -> u32 {
+        let mut expanded = 0u32;
+        let mut byte = 0u32;
+        for &ch in chars {
+            if byte >= up_to_byte {
+                break;
+            }
+            expanded += if ch == '\t' {
+                if expanded >= max {
+                    1
+                } else {
+                    tab_size - expanded % tab_size
+                }
+            } else {
+                display_width(ch)
+            };
+            byte += ch.len_utf8() as u32;
+        }
+        expanded
+    }
+
+    #[test]
+    fn random_tabs() {
+        for seed in 0..64u64 {
+            let mut rng = Rng::new(seed);
+            let tab_size = 1 + rng.below(8);
+            let content_len = rng.below(40) as usize;
+            let content = random_tab_content(&mut rng, content_len);
+
+            let mut tab_map = TabMap::new(NonZeroU32::new(tab_size).unwrap());
+            let (snapshot, _) = tab_map.sync(make_fold_snapshot(&content), Patch::empty());
+            let max = snapshot.max_expansion_column();
+            let ctx = || format!("seed {seed} tab_size {tab_size} content {content:?}");
+
+            for row in 0..snapshot.line_count() {
+                let chars: Vec<char> = snapshot.fold_snapshot().fold_line_chars(row).collect();
+                let mut byte = 0u32;
+                let mut boundaries = vec![0u32];
+                for ch in &chars {
+                    byte += ch.len_utf8() as u32;
+                    boundaries.push(byte);
+                }
+                let total = *boundaries.last().expect("includes 0");
+
+                assert_eq!(
+                    snapshot.line_len(row),
+                    ref_expand(&chars, total, tab_size, max),
+                    "line_len row {row} {}",
+                    ctx()
+                );
+
+                let expanded = snapshot.expand_line(row);
+                assert!(
+                    !expanded.contains('\t'),
+                    "expand_line keeps a tab, row {row} {}",
+                    ctx()
+                );
+                assert_eq!(
+                    expanded.chars().map(display_width).sum::<u32>(),
+                    snapshot.line_len(row),
+                    "expand_line width row {row} {}",
+                    ctx()
+                );
+
+                for &p in &boundaries {
+                    let tab_col = snapshot.to_tab_point(FoldPoint::new(row, p)).column();
+                    assert_eq!(
+                        tab_col,
+                        ref_expand(&chars, p, tab_size, max),
+                        "to_tab_point row {row} byte {p} {}",
+                        ctx()
+                    );
+                    assert_eq!(
+                        snapshot
+                            .to_fold_point(TabPoint::new(row, tab_col), Bias::Left)
+                            .column(),
+                        p,
+                        "expand/collapse round trip row {row} byte {p} {}",
+                        ctx()
+                    );
+                }
+
+                for tab_col in 0..=snapshot.line_len(row) {
+                    let clipped = snapshot.clip_point(TabPoint::new(row, tab_col), Bias::Left);
+                    assert_eq!(
+                        snapshot.clip_point(clipped, Bias::Left),
+                        clipped,
+                        "clip_point idempotent row {row} col {tab_col} {}",
+                        ctx()
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn tab_expansion_caps_at_max_expansion_column() {
+        // 255 narrow chars reach column 255; the wide char straddles column 256
+        // (255 -> 257); each following tab sits past the cap and expands to 1.
+        let mut content = "a".repeat(255);
+        content.push('\u{4E16}');
+        content.push_str("\t\t");
+        let snapshot = make_snapshot(&content);
+        let max = snapshot.max_expansion_column();
+        let chars: Vec<char> = snapshot.fold_snapshot().fold_line_chars(0).collect();
+        let total: u32 = chars.iter().map(|c| c.len_utf8() as u32).sum();
+
+        assert_eq!(
+            snapshot.line_len(0),
+            ref_expand(&chars, total, snapshot.tab_size(), max),
+            "line_len matches the reference across the expansion cap"
+        );
+        assert_eq!(
+            snapshot.line_len(0),
+            259,
+            "255 narrow + wide(2) + two capped tabs(1 each)"
         );
     }
 }
