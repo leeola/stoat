@@ -11,6 +11,7 @@ pub mod display_map;
 pub mod dump;
 mod editor_state;
 pub mod fuzzy;
+pub mod geometry;
 pub mod global_search;
 pub mod goto_word;
 pub mod host;

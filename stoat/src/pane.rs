@@ -1,5 +1,4 @@
-use crate::{editor_state::EditorId, run::RunId};
-use ratatui::layout::Rect;
+use crate::{editor_state::EditorId, geometry::Rect, run::RunId};
 use serde::{Deserialize, Serialize};
 use slotmap::{new_key_type, SlotMap};
 
@@ -183,7 +182,7 @@ pub struct PaneTree {
 }
 
 impl PaneTree {
-    /// Convenience for callers that have no ratatui area at hand
+    /// Convenience for callers that have no layout area at hand
     /// (the gpui-backed renderer computes pane geometry from
     /// flex layout rather than reading the stored `Rect`). Equivalent
     /// to `Self::new(Rect::default())`.
