@@ -19,26 +19,6 @@ pub(crate) fn write_str(buf: &mut Buffer, x: u16, y: u16, s: &str, style: Style)
     }
 }
 
-pub(crate) fn write_str_clipped(
-    buf: &mut Buffer,
-    x: u16,
-    y: u16,
-    s: &str,
-    style: Style,
-    end_x: u16,
-) {
-    for (i, ch) in s.chars().enumerate() {
-        let col = x + i as u16;
-        if col >= end_x || col >= buf.area.x + buf.area.width {
-            break;
-        }
-        if y >= buf.area.y + buf.area.height {
-            break;
-        }
-        buf[(col, y)].set_char(ch).set_style(style);
-    }
-}
-
 pub(crate) fn truncate_to_cols(text: &str, max_cols: usize) -> String {
     if max_cols == 0 {
         return String::new();

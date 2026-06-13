@@ -32,12 +32,7 @@ impl StoatKeymapState {
     }
 
     pub(crate) fn from_stoat(stoat: &Stoat) -> Self {
-        Self::with_flags(
-            stoat.mode.as_str(),
-            false,
-            false,
-            stoat.file_finder.is_some(),
-        )
+        Self::with_flags(stoat.mode.as_str(), false, false, false)
     }
 }
 

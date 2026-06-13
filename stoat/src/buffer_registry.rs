@@ -106,15 +106,6 @@ impl BufferRegistry {
         self.new_scratch_inner(false)
     }
 
-    /// Allocate a scratch buffer flagged as a preview surface. The
-    /// parse pipeline includes preview buffers in its visibility set
-    /// so syntax highlighting reaches the file finder's preview pane
-    /// (and any future preview surface). Callers evict the entry via
-    /// [`Self::remove`] when the surface closes.
-    pub(crate) fn new_scratch_preview(&mut self) -> (BufferId, SharedBuffer) {
-        self.new_scratch_inner(true)
-    }
-
     fn new_scratch_inner(&mut self, preview: bool) -> (BufferId, SharedBuffer) {
         let id = self.allocate_id();
         let buffer = Arc::new(RwLock::new(TextBuffer::new(id)));
@@ -206,15 +197,6 @@ impl BufferRegistry {
         self.buffers.keys().copied()
     }
 
-    /// Returns paths of currently-open path-bound buffers in lexicographic
-    /// order. Scratch buffers (with no path) are skipped. The deterministic
-    /// ordering matches what the file finder shows for the All scope.
-    pub(crate) fn open_paths(&self) -> Vec<PathBuf> {
-        let mut paths: Vec<PathBuf> = self.path_to_id.keys().cloned().collect();
-        paths.sort();
-        paths
-    }
-
     /// Every buffer whose `dirty` flag is set: path-bound first sorted by
     /// path, scratch buffers after sorted by id. Used by `QuitAll` to drive
     /// the unsaved-buffers confirmation modal.
@@ -258,19 +240,6 @@ impl BufferRegistry {
             .iter()
             .filter_map(|(id, entry)| entry.preview.then_some(*id))
             .collect()
-    }
-
-    /// Drop any cached syntax / syntax_map for `id`. Used by callers
-    /// that swap a preview buffer's content -- the new content's
-    /// syntax must be parsed from scratch, not merged into stale
-    /// state.
-    pub(crate) fn clear_syntax(&mut self, id: BufferId) {
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            if let Some(state) = entry.syntax.take() {
-                drop_syntax_in_background(state);
-            }
-            entry.syntax_map = None;
-        }
     }
 
     pub(crate) fn syntax_version(&self, id: BufferId) -> Option<u64> {
@@ -481,25 +450,6 @@ mod tests {
         assert!(Arc::ptr_eq(&buf1, &buf2));
         let guard = buf1.read().unwrap();
         assert_eq!(guard.rope().to_string(), "hello");
-    }
-
-    #[test]
-    fn new_scratch_preview_marks_entry_and_lists_via_preview_buffer_ids() {
-        let mut reg = BufferRegistry::new();
-        let (plain_id, _) = reg.new_scratch();
-        let (preview_id, _) = reg.new_scratch_preview();
-        let preview_ids = reg.preview_buffer_ids();
-        assert_eq!(preview_ids, vec![preview_id]);
-        assert!(!preview_ids.contains(&plain_id));
-    }
-
-    #[test]
-    fn clear_syntax_is_noop_when_no_state_stored() {
-        let mut reg = BufferRegistry::new();
-        let (id, _) = reg.new_scratch_preview();
-        assert_eq!(reg.syntax_version(id), None);
-        reg.clear_syntax(id);
-        assert_eq!(reg.syntax_version(id), None);
     }
 
     #[test]

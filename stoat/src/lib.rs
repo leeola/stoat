@@ -13,7 +13,6 @@ pub mod diff_render_cli;
 pub mod display_map;
 pub mod dump;
 mod editor_state;
-pub mod file_finder;
 pub mod fuzzy;
 pub mod global_search;
 pub mod goto_word;

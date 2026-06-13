@@ -5,7 +5,6 @@ pub(crate) mod completion;
 pub(crate) mod conflict;
 pub(crate) mod dock;
 pub(crate) mod editor;
-pub(crate) mod file_finder;
 pub(crate) mod global_search;
 pub(crate) mod hints;
 pub(crate) mod hover;
@@ -16,7 +15,6 @@ pub(crate) mod rename_input;
 pub(crate) mod review;
 pub(crate) mod reword;
 pub(crate) mod run_pane;
-pub(crate) mod sanitize;
 pub(crate) mod symbol_picker;
 pub(crate) mod text;
 pub(crate) mod workspace_symbol_picker;
@@ -237,34 +235,7 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
         &stoat.theme,
         buf,
     );
-    if let Some(finder) = &mut stoat.file_finder {
-        file_finder::render_file_finder(
-            finder,
-            ws,
-            &*stoat.fs_host,
-            &stoat.language_registry,
-            &stoat.theme,
-            size,
-            buf,
-        );
-        let state = StoatKeymapState::with_flags(&stoat.mode, false, false, true);
-        let raw = stoat.keymap.scoped_bindings(&state, "finder_open");
-        let bindings: Vec<_> = raw
-            .iter()
-            .map(|(key, actions)| {
-                let desc = actions.first().map(action_display_desc).unwrap_or_default();
-                (key.as_str(), desc)
-            })
-            .collect();
-        hints::render_hints(
-            "finder",
-            &bindings,
-            None,
-            &stoat.theme,
-            hints_overlay_area(size),
-            buf,
-        );
-    } else if let Some(picker) = &stoat.global_search {
+    if let Some(picker) = &stoat.global_search {
         let git_root = ws.git_root.clone();
         global_search::render_global_search(picker, &git_root, &stoat.theme, size, buf);
         let bindings = picker.hint_bindings();

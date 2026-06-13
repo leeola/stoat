@@ -2,7 +2,6 @@ mod commits;
 pub(crate) mod completion;
 mod conflict;
 pub(crate) mod file;
-mod file_finder;
 pub(crate) mod filter_selections;
 pub(crate) mod lsp;
 pub(crate) mod macro_recording;
@@ -30,7 +29,6 @@ use crate::{
     pane::{Axis, Direction, DockSide, FocusTarget, View},
 };
 pub(crate) use commits::pump_commits;
-pub(crate) use file_finder::close_file_finder;
 pub(crate) use lsp::pump_lsp_jumps;
 #[cfg(test)]
 pub(crate) use review::install_review_session;
@@ -100,34 +98,14 @@ pub fn dispatch(stoat: &mut Stoat, action: &dyn Action) -> UpdateEffect {
             file::open_file(stoat, &open.path);
             UpdateEffect::Redraw
         },
-        ActionKind::OpenFileFinder => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::Replace,
-            crate::file_finder::FinderScope::All,
-        ),
-        ActionKind::OpenFileFinderHSplit => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::HSplit,
-            crate::file_finder::FinderScope::All,
-        ),
-        ActionKind::OpenFileFinderVSplit => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::VSplit,
-            crate::file_finder::FinderScope::All,
-        ),
-        ActionKind::OpenChangedFilePicker => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::Replace,
-            crate::file_finder::FinderScope::Modified,
-        ),
-        ActionKind::OpenBufferPicker => file_finder::open_file_finder(
-            stoat,
-            crate::file_finder::OpenIntent::Replace,
-            crate::file_finder::FinderScope::Buffers,
-        ),
-        ActionKind::FileFinderSelectPrev => file_finder::file_finder_move_selection(stoat, -1),
-        ActionKind::FileFinderSelectNext => file_finder::file_finder_move_selection(stoat, 1),
-        ActionKind::FileFinderScopeToggle => file_finder::file_finder_scope_toggle(stoat),
+        ActionKind::OpenFileFinder
+        | ActionKind::OpenFileFinderHSplit
+        | ActionKind::OpenFileFinderVSplit
+        | ActionKind::OpenChangedFilePicker
+        | ActionKind::OpenBufferPicker
+        | ActionKind::FileFinderSelectPrev
+        | ActionKind::FileFinderSelectNext
+        | ActionKind::FileFinderScopeToggle => UpdateEffect::None,
         ActionKind::OpenCommandPalette => UpdateEffect::None,
         ActionKind::OpenHelp => UpdateEffect::None,
         ActionKind::OpenReview => {

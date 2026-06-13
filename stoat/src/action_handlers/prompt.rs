@@ -26,9 +26,6 @@ pub(super) fn submit_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     if super::lsp::workspace_symbol_submit(stoat) {
         return UpdateEffect::Redraw;
     }
-    if let Some(effect) = super::file_finder::file_finder_submit(stoat) {
-        return effect;
-    }
     if let Some(crate::input_view::SubmitTarget::Run) = focused_target(stoat) {
         return super::run::run_submit(stoat);
     }
@@ -70,9 +67,6 @@ pub(super) fn cancel_prompt_input(stoat: &mut Stoat) -> UpdateEffect {
     }
     if super::lsp::workspace_symbol_cancel(stoat) {
         return UpdateEffect::Redraw;
-    }
-    if let Some(effect) = super::file_finder::file_finder_cancel(stoat) {
-        return effect;
     }
     // For pane-tied or modal inputs (help), Escape in prompt
     // leaves the user in normal sub-mode so they can navigate with hjkl /

@@ -4,7 +4,6 @@ use crate::{
     buffer::{BufferId, TextBufferSnapshot},
     display_map::{highlights::SemanticTokenHighlight, syntax_theme::SyntaxStyles},
     editor_state::EditorId,
-    file_finder::FileFinder,
     host::{
         EnvHost, FsHost, FsWatchHost, GitHost, LocalEnv, LocalFs, LocalGit, LspServer,
         NoopFsWatcher, NoopLspServer,
@@ -59,7 +58,6 @@ pub struct Stoat {
     pub(crate) keymap: Keymap,
     pub settings: Settings,
     pub theme: crate::theme::Theme,
-    pub(crate) file_finder: Option<FileFinder>,
     /// Name of the action that most recently opened a picker
     /// successfully. Used by `OpenLastPicker` (`space '`) to
     /// re-fire the same action and rebuild the picker fresh.
@@ -551,7 +549,6 @@ impl Stoat {
             keymap,
             settings,
             theme,
-            file_finder: None,
             last_picker_action: None,
             global_search_input: None,
             global_search: None,
@@ -1307,10 +1304,6 @@ impl Stoat {
 
     fn handle_key(&mut self, key: KeyEvent) -> UpdateEffect {
         if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
-            if self.file_finder.is_some() {
-                action_handlers::close_file_finder(self);
-                return UpdateEffect::Redraw;
-            }
             if let Some(picker) = self.global_search.take() {
                 self.mode = picker.previous_mode;
                 return UpdateEffect::Redraw;
@@ -1737,10 +1730,6 @@ impl Stoat {
 
     pub(crate) fn focused_editor_ids(&self) -> Option<(EditorId, BufferId)> {
         let ws = self.active_workspace();
-
-        if let Some(finder) = &self.file_finder {
-            return Some((finder.input.editor_id, finder.input.buffer_id));
-        }
 
         if let Some(rename) = &self.rename_input {
             return Some((rename.input.editor_id, rename.input.buffer_id));
