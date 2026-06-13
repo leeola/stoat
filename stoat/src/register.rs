@@ -26,7 +26,7 @@ pub enum Register {
     /// Selection index. Writes are no-ops; pastes expand to one
     /// "1", "2", ... per selection in start-offset order.
     SelectionIndex,
-    /// Last inserted text recorded by [`crate::app::Stoat::editor_insert`].
+    /// Last inserted text recorded on insert.
     /// Writes are no-ops; reads return the most recent insert.
     LastInsert,
 }

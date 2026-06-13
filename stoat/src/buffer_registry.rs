@@ -5,9 +5,7 @@ use std::{
     path::{Path, PathBuf},
     sync::{Arc, RwLock},
 };
-use stoat_language::{
-    drop_syntax_in_background, structural_diff::DiffResult, Language, SyntaxMap, SyntaxState,
-};
+use stoat_language::{structural_diff::DiffResult, Language, SyntaxMap, SyntaxState};
 
 /// Memoized [`DiffResult`] for a `(buffer, base_text)` pair. Cached
 /// on [`BufferRegistry`] so repeat review-view renders and consumer
@@ -71,29 +69,6 @@ impl BufferRegistry {
 
     pub fn is_empty(&self) -> bool {
         self.buffers.is_empty()
-    }
-
-    /// True when the registry holds exactly one buffer, that buffer has no
-    /// backing file path, and its text is empty: the state left by
-    /// [`Self::new_scratch`] without any subsequent edits. Used by
-    /// [`crate::workspace::Workspace::is_fresh`] to decide whether a
-    /// workspace is worth persisting.
-    pub(crate) fn only_empty_scratch(&self) -> bool {
-        if self.buffers.len() != 1 || !self.path_to_id.is_empty() {
-            return false;
-        }
-        let Some(entry) = self.buffers.values().next() else {
-            return false;
-        };
-        if entry.path.is_some() {
-            return false;
-        }
-        entry
-            .buffer
-            .read()
-            .expect("buffer poisoned")
-            .snapshot
-            .is_empty()
     }
 
     fn allocate_id(&mut self) -> BufferId {
@@ -170,21 +145,6 @@ impl BufferRegistry {
         Some(path)
     }
 
-    /// Updates the path of an open buffer in place. No-op when `old` has no
-    /// open buffer. Returns `true` if a remapping happened. Used by
-    /// `WorkspaceEdit::Rename` so an open buffer for the renamed file
-    /// stays addressable by its new path.
-    pub(crate) fn rename_path(&mut self, old: &Path, new: &Path) -> bool {
-        let Some(id) = self.path_to_id.remove(old) else {
-            return false;
-        };
-        self.path_to_id.insert(new.to_path_buf(), id);
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.path = Some(new.to_path_buf());
-        }
-        true
-    }
-
     pub fn path_for(&self, id: BufferId) -> Option<&Path> {
         self.buffers.get(&id).and_then(|e| e.path.as_deref())
     }
@@ -217,74 +177,6 @@ impl BufferRegistry {
             (None, None) => a.id.cmp(&b.id),
         });
         out
-    }
-
-    pub(crate) fn language_for(&self, id: BufferId) -> Option<Arc<Language>> {
-        self.buffers.get(&id)?.language.clone()
-    }
-
-    pub(crate) fn set_language(&mut self, id: BufferId, lang: Arc<Language>) {
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.language = Some(lang);
-            entry.syntax = None;
-            entry.syntax_map = None;
-        }
-    }
-
-    /// All buffer ids flagged as preview surfaces. The parse pipeline
-    /// pulls these into its visibility set so syntax highlighting
-    /// reaches transient preview panes (currently only the file
-    /// finder).
-    pub(crate) fn preview_buffer_ids(&self) -> Vec<BufferId> {
-        self.buffers
-            .iter()
-            .filter_map(|(id, entry)| entry.preview.then_some(*id))
-            .collect()
-    }
-
-    pub(crate) fn syntax_version(&self, id: BufferId) -> Option<u64> {
-        self.buffers.get(&id)?.syntax.as_ref().map(|s| s.version)
-    }
-
-    pub(crate) fn store_syntax(&mut self, id: BufferId, state: SyntaxState) {
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            // Send the displaced state to a background drainer so its
-            // potentially-large tree-sitter tree drops off the main thread.
-            if let Some(prev) = entry.syntax.replace(state) {
-                drop_syntax_in_background(prev);
-            }
-        }
-    }
-
-    /// Move the prior [`SyntaxState`] out of the registry. The caller is
-    /// expected to update it (`tree.edit` + reparse) and put it back via
-    /// [`Self::store_syntax`]. Returns `None` if no state has been stored.
-    pub(crate) fn take_syntax(&mut self, id: BufferId) -> Option<SyntaxState> {
-        self.buffers.get_mut(&id)?.syntax.take()
-    }
-
-    /// Borrow the multi-layer [`SyntaxMap`] for `id`, if one has been
-    /// installed by the parse pipeline. Used by the capture-merging
-    /// highlight path.
-    #[allow(dead_code)]
-    pub(crate) fn syntax_map(&self, id: BufferId) -> Option<&SyntaxMap> {
-        self.buffers.get(&id)?.syntax_map.as_ref()
-    }
-
-    /// Replace the multi-layer [`SyntaxMap`] for `id`. Called by
-    /// `parse_buffer_step` after each successful reparse so the
-    /// capture-merging consumers always see the latest layer set.
-    pub(crate) fn store_syntax_map(&mut self, id: BufferId, map: SyntaxMap) {
-        if let Some(entry) = self.buffers.get_mut(&id) {
-            entry.syntax_map = Some(map);
-        }
-    }
-
-    /// Move the multi-layer [`SyntaxMap`] for `id` out of the
-    /// registry, so the next reparse can interpolate it incrementally
-    /// before reinstalling.
-    pub(crate) fn take_syntax_map(&mut self, id: BufferId) -> Option<SyntaxMap> {
-        self.buffers.get_mut(&id)?.syntax_map.take()
     }
 
     /// Return a cached [`DiffResult`] for `(buffer, base_text)` if one

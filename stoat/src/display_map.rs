@@ -221,10 +221,6 @@ pub struct DisplayMap {
 }
 
 impl DisplayMap {
-    pub(crate) fn multi_buffer(&self) -> &MultiBuffer {
-        &self.multi_buffer
-    }
-
     pub fn new(multi_buffer: MultiBuffer, executor: Executor) -> Self {
         let buffer_snapshot = multi_buffer.snapshot();
         let version = buffer_snapshot.version();
@@ -1415,7 +1411,7 @@ mod tests {
     }
 
     fn anchor_range(display_map: &DisplayMap) -> Range<super::Anchor> {
-        let buffer = display_map.multi_buffer().snapshot();
+        let buffer = display_map.multi_buffer.snapshot();
         buffer.anchor_at(0, Bias::Right)..buffer.anchor_at(5, Bias::Left)
     }
 

@@ -1,5 +1,3 @@
-pub mod action_handlers;
-pub mod app;
 pub mod buffer;
 pub mod buffer_registry;
 pub mod commit_list;
@@ -16,17 +14,14 @@ pub mod fuzzy;
 pub mod global_search;
 pub mod goto_word;
 pub mod host;
-mod input_view;
 pub mod jumplist;
 pub mod keymap;
-pub mod keymap_state;
 pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;
 pub mod paths;
 pub mod rebase;
 pub mod register;
-pub(crate) mod render;
 pub mod review;
 pub mod review_apply;
 pub mod review_session;
@@ -36,7 +31,6 @@ pub mod snippet;
 pub mod theme;
 pub mod workspace;
 
-pub use app::{Stoat, UpdateEffect};
 pub use buffer::{BufferId, SharedBuffer, TextBuffer, TextBufferSnapshot};
 pub use buffer_registry::BufferRegistry;
 pub use diff_map::{ChangeKind, ChangeSpan, DiffHunk, DiffHunkStatus, DiffMap, TokenDetail};
@@ -63,13 +57,15 @@ pub use run::RunId;
 pub use stoat_config::{MouseCapturePolicy, Settings};
 pub use stoat_log as log;
 
+pub(crate) const DEFAULT_KEYMAP: &str = include_str!("../../config.stcfg");
+
 /// Resolves the [`MouseCapturePolicy`] from the compiled-in default
 /// keymap. Returns [`MouseCapturePolicy::Auto`] when the setting is
 /// unset or the keymap has parse errors, since the UI thread starts
-/// before the main `Stoat` instance and must not block on config
+/// before the editor is initialized and must not block on config
 /// failure.
 pub fn default_mouse_capture_policy() -> MouseCapturePolicy {
-    let (config, _errors) = stoat_config::parse(app::DEFAULT_KEYMAP);
+    let (config, _errors) = stoat_config::parse(DEFAULT_KEYMAP);
     config
         .as_ref()
         .map(Settings::from_config)
@@ -81,9 +77,9 @@ pub fn default_mouse_capture_policy() -> MouseCapturePolicy {
 /// `env_host` for `TMUX` / `ZELLIJ` and skips capture when either is
 /// set, since a parent multiplexer owns the mouse drag-select
 /// gesture and stealing its events breaks the user's workflow. The
-/// UI thread starts before [`Stoat`] is constructed, so callers
-/// thread an `EnvHost` from the bin layer instead of reading
-/// [`Stoat::env_host`].
+/// UI thread starts before the editor is initialized, so callers
+/// thread an `EnvHost` from the bin layer rather than reading it
+/// from editor state.
 pub fn resolve_mouse_captured(policy: MouseCapturePolicy, env_host: &dyn host::EnvHost) -> bool {
     match policy {
         MouseCapturePolicy::Always => true,

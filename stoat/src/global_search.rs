@@ -1,15 +1,6 @@
-use crate::{host::FsHost, input_view::InputView};
-use crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
+use crate::host::FsHost;
 use regex::Regex;
 use std::path::{Path, PathBuf};
-
-/// Active state while the user is typing a global-search regex into
-/// the input modal. Disposed by `global_search_submit` /
-/// `global_search_cancel`.
-pub(crate) struct GlobalSearchInputState {
-    pub(crate) input: InputView,
-    pub(crate) previous_mode: String,
-}
 
 /// One match site surfaced by [`perform_search`].
 #[derive(Debug, Clone)]
@@ -21,92 +12,7 @@ pub struct SearchMatch {
     pub snippet: String,
 }
 
-/// Modal showing the result list after a regex submit.
-pub struct GlobalSearchPicker {
-    matches: Vec<SearchMatch>,
-    selected: usize,
-    query: String,
-    pub previous_mode: String,
-}
-
-pub enum PickerOutcome {
-    /// Re-render but keep the modal open.
-    None,
-    /// User cancelled; caller should drop the modal.
-    Close,
-    /// User selected match index `usize`; caller should open and jump.
-    Select(usize),
-}
-
 const SNIPPET_MAX_CHARS: usize = 80;
-
-impl GlobalSearchPicker {
-    pub fn new(matches: Vec<SearchMatch>, query: String, previous_mode: String) -> Self {
-        Self {
-            matches,
-            selected: 0,
-            query,
-            previous_mode,
-        }
-    }
-
-    pub fn matches(&self) -> &[SearchMatch] {
-        &self.matches
-    }
-
-    pub fn selected(&self) -> usize {
-        self.selected
-    }
-
-    pub fn query(&self) -> &str {
-        &self.query
-    }
-
-    pub fn hint_bindings(&self) -> Vec<(&'static str, String)> {
-        vec![
-            ("Enter", "open".to_string()),
-            ("Esc", "cancel".to_string()),
-            ("Ctrl-N", "next".to_string()),
-            ("Ctrl-P", "prev".to_string()),
-        ]
-    }
-
-    pub fn handle_key(&mut self, key: KeyEvent) -> PickerOutcome {
-        match key.code {
-            KeyCode::Esc => PickerOutcome::Close,
-            KeyCode::Enter => match self.matches.get(self.selected) {
-                Some(_) => PickerOutcome::Select(self.selected),
-                None => PickerOutcome::Close,
-            },
-            KeyCode::Up => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Down => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(-1);
-                PickerOutcome::None
-            },
-            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
-                self.move_selection(1);
-                PickerOutcome::None
-            },
-            _ => PickerOutcome::None,
-        }
-    }
-
-    fn move_selection(&mut self, delta: i32) {
-        if self.matches.is_empty() {
-            self.selected = 0;
-            return;
-        }
-        let max = (self.matches.len() - 1) as i32;
-        self.selected = (self.selected as i32 + delta).clamp(0, max) as usize;
-    }
-}
 
 /// Walk every workspace file via `fs_host`, scan for `pattern`, and
 /// return one [`SearchMatch`] per match site. Skips files whose

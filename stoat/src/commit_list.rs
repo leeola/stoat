@@ -25,7 +25,7 @@ pub struct CommitListSnapshot {
     pub scroll_top: usize,
 }
 
-/// Commit-listing state owned by a [`crate::workspace::Workspace`] while
+/// Commit-listing state owned by a workspace while
 /// the user is in `"commits"` mode.
 ///
 /// The log is virtualized: `commits` holds only the pages fetched so

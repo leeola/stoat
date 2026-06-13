@@ -8,10 +8,8 @@
 //! [`crate::host::LspServer`], rope-walk word source) live in
 //! sibling submodules.
 
-pub(crate) mod accept;
 pub mod lsp;
 pub mod path;
-pub(crate) mod request;
 pub mod snippet;
 pub mod word;
 
@@ -104,12 +102,11 @@ pub struct CompletionItem {
     pub is_snippet: bool,
 }
 
-/// In-flight completion popup. Held on
-/// [`crate::Stoat::pending_completion`] while the popup is showing;
-/// the trigger pipeline (item 83) replaces the items as the prefix
+/// In-flight completion popup. Held by the workspace while the popup
+/// is showing; the trigger pipeline replaces the items as the prefix
 /// changes and clears the field when the cursor leaves
-/// [`Self::prefix_range`]; the acceptance handler (item 89)
-/// consumes the entry on `Tab`.
+/// [`Self::prefix_range`]; the acceptance handler consumes the entry
+/// on `Tab`.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CompletionPopup {
     /// Rows the popup paints, in display order (already filtered

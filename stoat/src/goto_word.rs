@@ -3,9 +3,8 @@
 //! two-character labels; the user types a label to jump the cursor.
 //!
 //! The pure logic in this module - viewport word detection and label
-//! assignment - is independent of [`crate::Stoat`]; the action wiring
-//! and rendering live in [`crate::action_handlers`] and
-//! [`crate::render`].
+//! assignment - is independent of any UI layer; the action wiring and
+//! rendering live in the consuming front end.
 
 use std::collections::BTreeMap;
 use stoat_text::Rope;

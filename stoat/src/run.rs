@@ -3,15 +3,10 @@ pub mod pty;
 pub mod term;
 pub mod vterm;
 
-use crate::{
-    input_view::{InputView, SubmitTarget},
-    workspace::Workspace,
-};
 pub use key_encode::encode_key;
 pub use pty::{spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
-use std::{path::PathBuf, time::Instant};
-use stoat_scheduler::Executor;
+use std::path::PathBuf;
 pub use vterm::{
     encode_mouse_report, BlockStatus, CommandMark, CursorShape, GridSelection, LinkTarget,
     MouseProtocol, OutputBlock, StyledCell, TermColor, TermModifier, TerminalLink, VtermGrid,
@@ -22,38 +17,15 @@ new_key_type! {
 }
 
 pub struct RunState {
-    pub(crate) input: InputView,
     pub blocks: Vec<OutputBlock>,
     pub scroll_offset: usize,
     pub cwd: PathBuf,
     pub shell_handle: Option<ShellHandle>,
     pub history: Vec<String>,
     pub history_cursor: Option<usize>,
-    /// Whether the active block's command has begun executing, set by the
-    /// OSC 133 `C` mark. Gates [`Self::apply_command_marks`] so the shell's
-    /// startup `D` mark -- emitted before the first command runs -- does not
-    /// finish the block before its command has started.
-    command_started: bool,
 }
 
 impl RunState {
-    /// Construct a new run state with an empty [`InputView`] for the command
-    /// prompt. The actual [`RunId`] is resolved from pane focus at submit
-    /// time, so construction does not need the key yet.
-    pub fn new(cwd: PathBuf, ws: &mut Workspace, executor: Executor) -> Self {
-        let input = InputView::create(ws, executor, SubmitTarget::Run, "", "prompt", 1);
-        Self {
-            input,
-            blocks: Vec::new(),
-            scroll_offset: 0,
-            cwd,
-            shell_handle: None,
-            history: Vec::new(),
-            history_cursor: None,
-            command_started: false,
-        }
-    }
-
     pub fn active_block(&self) -> Option<&OutputBlock> {
         self.blocks.last()
     }
@@ -66,68 +38,11 @@ impl RunState {
         self.blocks.last().is_some_and(|b| !b.finished)
     }
 
-    /// Apply OSC 133 command marks drained from the active block's grid. A
-    /// `Start` (`C`) mark records that the command's output has begun; a
-    /// `Done` (`D`) mark then finishes the active block with its exit code
-    /// and clears the started flag. Gating on `Start` keeps the shell's
-    /// startup `D` mark -- emitted before the first command runs -- from
-    /// finishing the block prematurely.
-    pub(crate) fn apply_command_marks(&mut self, marks: &[CommandMark], now: Instant) {
-        for mark in marks {
-            match mark {
-                CommandMark::Start => self.command_started = true,
-                CommandMark::Done { exit } => {
-                    if self.command_started {
-                        self.command_started = false;
-                        if let Some(block) = self.blocks.last_mut() {
-                            block.finish(*exit, now);
-                        }
-                    }
-                },
-            }
-        }
-    }
-
-    pub fn history_up(&mut self, ws: &mut Workspace) {
-        if self.history.is_empty() {
-            return;
-        }
-        let idx = match self.history_cursor {
-            Some(i) if i > 0 => i - 1,
-            Some(_) => return,
-            None => self.history.len() - 1,
-        };
-        self.history_cursor = Some(idx);
-        let entry = self.history[idx].clone();
-        self.input.replace_text(ws, &entry);
-    }
-
-    pub fn history_down(&mut self, ws: &mut Workspace) {
-        let Some(idx) = self.history_cursor else {
-            return;
-        };
-        if idx + 1 < self.history.len() {
-            self.history_cursor = Some(idx + 1);
-            let entry = self.history[idx + 1].clone();
-            self.input.replace_text(ws, &entry);
-        } else {
-            self.history_cursor = None;
-            self.input.replace_text(ws, "");
-        }
-    }
-
-    /// Remove the run's [`InputView`] scratch editor. Called on pane close to
-    /// avoid leaking editor slots.
-    pub fn dispose(&self, ws: &mut Workspace) {
-        self.input.dispose(ws);
-    }
-
     /// Translates a focused-pane-relative `(col, row)` cell into the active
     /// block's `(grid_col, grid_row)`. Returns `None` when the position falls
     /// on the input row, on a non-active block's region, on a header / status
     /// / blank line, on a row scrolled off-screen, or past the active grid's
-    /// width. Mirrors the layout that
-    /// [`crate::render::run_pane::render_run_pane`] builds.
+    /// width. Mirrors the layout that the run-pane renderer builds.
     pub fn active_block_grid_pos(
         &self,
         area_width: u16,
@@ -185,7 +100,7 @@ impl RunState {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::time::Duration;
+    use std::time::{Duration, Instant};
 
     #[test]
     fn grid_default_empty() {

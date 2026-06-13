@@ -23,7 +23,6 @@ const FORCE_INCLUDE_DIRS: &[&str] = &[".git", ".stoat"];
 
 use crate::host::FsHost;
 pub use meta::DumpMeta;
-pub use save::save_at;
 use snafu::{ResultExt, Snafu};
 use std::{
     io,
@@ -444,15 +443,10 @@ pub(crate) fn read_archive(
     Ok(())
 }
 
-/// Thin wrapper around [`save_at`] using the current UTC time.
-pub fn save(stoat: &crate::app::Stoat, name: &str, fs: &dyn FsHost) -> Result<DumpId, DumpError> {
-    save_at(stoat, name, OffsetDateTime::now_utc(), fs)
-}
-
-/// Write a dump bundle for a workspace that has no TUI [`crate::app::Stoat`]
-/// state to snapshot, such as the GUI. Captures the working tree under
-/// `git_root` (force-including `.git`/`.stoat`) plus minimal metadata --
-/// the input `mode` at capture time and no rebase plan -- to
+/// Write a dump bundle for a workspace directory with no in-memory
+/// editor state to snapshot, such as the GUI. Captures the working tree
+/// under `git_root` (force-including `.git`/`.stoat`) plus minimal
+/// metadata -- the input `mode` at capture time and no rebase plan -- to
 /// `<XDG_DATA_HOME>/stoat/dumps/<id>.dump`. Returns the generated
 /// [`DumpId`].
 pub fn save_workspace_dir(
@@ -470,66 +464,6 @@ pub fn save_workspace_dir(
     let archive_path = dumps.join(id.filename());
     save::write_workspace_dir_archive(git_root, mode, &id, at, &archive_path, fs)?;
     Ok(id)
-}
-
-/// Load the metadata at `meta_path` (typically
-/// `<extracted-dir>/.stoat/dump.ron`) and apply the captured workspace
-/// snapshot to `stoat`'s active workspace.
-///
-/// Paths captured inside the snapshot (rebase workdirs) are rewritten
-/// to point at the new (extracted) git root because the archive has
-/// been unpacked to a different location than the original capture.
-pub fn hydrate(
-    stoat: &mut crate::app::Stoat,
-    meta_path: &Path,
-    fs: &dyn FsHost,
-) -> Result<(), DumpError> {
-    let mut buf = Vec::new();
-    fs.read(meta_path, &mut buf)
-        .with_context(|_| ReadDumpSnafu {
-            path: meta_path.to_path_buf(),
-        })?;
-    let ron = String::from_utf8(buf).map_err(|e| {
-        RonSnafu {
-            reason: e.to_string(),
-        }
-        .build()
-    })?;
-    let meta = DumpMeta::from_ron(&ron).map_err(|e| {
-        RonSnafu {
-            reason: e.to_string(),
-        }
-        .build()
-    })?;
-    apply_snapshot(stoat, meta.workspace);
-    Ok(())
-}
-
-fn apply_snapshot(stoat: &mut crate::app::Stoat, snap: snapshot::WorkspaceSnapshot) {
-    let snapshot::WorkspaceSnapshot {
-        rebase,
-        rebase_active,
-        mode,
-    } = snap;
-
-    let new_git_root = stoat.active_workspace().git_root.clone();
-
-    let rebase = rebase.map(|mut r| {
-        r.workdir = new_git_root.clone();
-        r
-    });
-    let rebase_active = rebase_active.map(|s| {
-        let mut active = s.into_active();
-        active.workdir = new_git_root.clone();
-        active
-    });
-
-    if !mode.is_empty() {
-        stoat.mode = mode;
-    }
-    let workspace = stoat.active_workspace_mut();
-    workspace.rebase = rebase;
-    workspace.rebase_active = rebase_active;
 }
 
 #[cfg(test)]
@@ -656,105 +590,5 @@ mod tests {
             .map(|p| p.to_string_lossy().into_owned())
             .collect();
         assert_eq!(files, ["main.rs", "sub/lib.rs"]);
-    }
-
-    #[test]
-    fn hydrate_applies_rebase_state_and_rewrites_workdir() {
-        use crate::{app::Stoat, host::FakeFs, rebase::RebaseState};
-        use std::sync::Arc;
-        use stoat_config::Settings;
-        use stoat_scheduler::TestScheduler;
-
-        let fake = FakeFs::new();
-        let meta_path = PathBuf::from("/dump/dump.ron");
-
-        let original_workdir = PathBuf::from("/original/repo");
-        let meta = DumpMeta {
-            created_at: time::macros::datetime!(2026-04-19 14:23:11 UTC),
-            name: "test".to_string(),
-            stoat_version: "0.1.0".to_string(),
-            git_root: original_workdir.clone(),
-            dropped_fields: vec![],
-            workspace: snapshot::WorkspaceSnapshot {
-                rebase: Some(RebaseState {
-                    workdir: original_workdir.clone(),
-                    todo: vec![],
-                    selected: 2,
-                    onto: "abc123".to_string(),
-                }),
-                rebase_active: None,
-                mode: "rebase".to_string(),
-            },
-        };
-        fake.insert_file(&meta_path, meta.to_ron().unwrap());
-
-        let new_git_root = PathBuf::from("/extracted");
-        let scheduler = Arc::new(TestScheduler::new());
-        let executor = scheduler.executor();
-        let mut stoat = Stoat::new(executor, Settings::default(), new_git_root.clone());
-
-        hydrate(&mut stoat, &meta_path, &fake).unwrap();
-
-        assert_eq!(stoat.mode, "rebase");
-        let rebase = stoat
-            .active_workspace()
-            .rebase
-            .as_ref()
-            .expect("rebase state restored");
-        assert_eq!(
-            rebase.workdir, new_git_root,
-            "workdir rewritten to new git root"
-        );
-        assert_eq!(rebase.onto, "abc123");
-        assert_eq!(rebase.selected, 2);
-    }
-
-    #[test]
-    fn save_extract_roundtrip() {
-        use crate::{host::FakeFs, workspace::Workspace};
-        use std::sync::Arc;
-        use stoat_scheduler::TestScheduler;
-
-        let fake = FakeFs::new();
-        let root = PathBuf::from("/ws");
-        fake.insert_file("/ws/README.md", "hello");
-        fake.insert_file("/ws/src/main.rs", "fn main() {}");
-        fake.insert_file("/ws/.git/HEAD", "ref: refs/heads/main");
-        fake.insert_file("/ws/.gitignore", "ignored/\n");
-        fake.insert_file("/ws/ignored/secret", "dont-include-me");
-
-        let scheduler = Arc::new(TestScheduler::new());
-        let executor = scheduler.executor();
-        let workspace = Workspace::new(root.clone(), &executor);
-
-        let archive_path = PathBuf::from("/dumps/test.dump");
-        let at = time::macros::datetime!(2026-04-19 14:23:11 UTC);
-        let id = DumpId::new("roundtrip-test", at).unwrap();
-        save::write_archive(&workspace, "normal", &id, at, &archive_path, &fake).unwrap();
-
-        let dest = PathBuf::from("/extracted");
-        read_archive(&archive_path, &dest, &fake).unwrap();
-
-        let mut buf = Vec::new();
-        fake.read(&dest.join("README.md"), &mut buf).unwrap();
-        assert_eq!(buf, b"hello");
-        buf.clear();
-        fake.read(&dest.join("src/main.rs"), &mut buf).unwrap();
-        assert_eq!(buf, b"fn main() {}");
-        buf.clear();
-        fake.read(&dest.join(".git/HEAD"), &mut buf).unwrap();
-        assert_eq!(buf, b"ref: refs/heads/main");
-        assert!(
-            !fake.exists(&dest.join("ignored/secret")),
-            "gitignored path should be excluded"
-        );
-
-        buf.clear();
-        fake.read(&dest.join(".stoat/dump.ron"), &mut buf).unwrap();
-        let meta_ron = String::from_utf8(buf).unwrap();
-        let meta = DumpMeta::from_ron(&meta_ron).unwrap();
-        assert_eq!(meta.name, "roundtrip-test");
-        assert_eq!(meta.git_root, root);
-        assert!(meta.dropped_fields.contains(&"buffers".to_string()));
     }
 }

@@ -514,8 +514,7 @@ fn apply_token_overlay(
 /// characters; matches that span multiple display rows or cross
 /// the visible row range are split per-row and clamped to the
 /// visible window. Invalid regex and empty queries are silent
-/// no-ops, matching the TUI's
-/// [`stoat::action_handlers::search`] behaviour.
+/// no-ops, matching the TUI's `action_handlers::search` behaviour.
 pub(crate) fn apply_search_overlay(
     rows: &mut [RenderedRow],
     byte_maps: &[RowByteMap],

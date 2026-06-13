@@ -1,8 +1,8 @@
 //! Per-server [`WorkDoneProgress`] tracking surfaced in the status bar.
 //!
-//! Notifications drain into [`LspProgressMap::update`] from
-//! [`crate::Stoat::update`]; [`LspProgressMap::current`] returns the
-//! freshest in-progress entry for [`crate::render::FrameCtx`] to paint.
+//! Notifications drain into [`LspProgressMap::update`] from the host's
+//! update loop; [`LspProgressMap::current`] returns the freshest
+//! in-progress entry for the status bar to paint.
 
 use crate::host::LspNotification;
 use lsp_types::{ProgressToken, WorkDoneProgress};

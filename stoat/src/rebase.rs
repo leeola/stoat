@@ -5,7 +5,7 @@ use std::{
     path::PathBuf,
 };
 
-/// Editable rebase plan owned by a [`crate::workspace::Workspace`]
+/// Editable rebase plan owned by a workspace
 /// while the user is in `"rebase"` mode. Seeded from the commit list
 /// when the user presses `i` to enter the mode, mutated by todo-list
 /// edits (op changes, reorders), and consumed by `ExecuteRebase`.
@@ -102,7 +102,7 @@ impl RebaseState {
 /// Actively executing rebase: owns state that survives across pauses
 /// (reword input, edit-mode review, conflict resolution). Installed
 /// when `ExecuteRebase` kicks off the plan and consumed when the plan
-/// completes or aborts. Lives on [`crate::workspace::Workspace`] as
+/// completes or aborts. Lives on the workspace as
 /// `rebase_active`.
 pub struct ActiveRebase {
     pub workdir: PathBuf,
@@ -123,11 +123,9 @@ pub struct ActiveRebase {
 
 pub enum RebasePause {
     /// Waiting for the user to edit a commit message. UI-layer
-    /// state (TUI's [`crate::input_view::InputView`] / GUI's
-    /// modal entity) lives separately on the workspace -- see
-    /// [`crate::workspace::Workspace::reword_input`] for the TUI's
-    /// scratch editor -- so the pause variant stays a pure data
-    /// shape constructible from any caller. Cleaned up by
+    /// state (the GUI's modal entity) lives separately on the
+    /// workspace, so the pause variant stays a pure data shape
+    /// constructible from any caller. Cleaned up by
     /// `reword_confirm` / `reword_abort`.
     Reword {
         /// The sha that was just cherry-picked and committed; will be
