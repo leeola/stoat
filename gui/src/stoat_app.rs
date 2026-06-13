@@ -41,8 +41,7 @@ impl StoatApp {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
         let restore_anchor = match restore {
             RestoreMode::None => None,
-            RestoreMode::Continue => Some(cwd.clone()),
-            RestoreMode::Resume => resume_anchor(&cwd, cx).unwrap_or(None),
+            RestoreMode::Continue => resume_anchor(&cwd, cx).unwrap_or(None),
         };
 
         let initial_root = restore_anchor.clone().unwrap_or_else(|| cwd.clone());

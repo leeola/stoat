@@ -23,25 +23,13 @@ pub struct Args {
     #[arg(help = "Files to open")]
     pub files: Vec<PathBuf>,
 
-    /// Restore the most-recently-used workspace for this repository instead
-    /// of starting in a fresh one. `continue` is a Rust keyword so the field
-    /// is named `continue_`; clap exposes it as `--continue` / `-c`.
+    /// Reopen the previous session. Walks the current directory and its
+    /// ancestors and restores the most-recently-saved workspace among
+    /// them, falling back to a fresh workspace anchored at cwd when none
+    /// has any state. `continue` is a Rust keyword so the field is named
+    /// `continue_`; clap exposes it as `--continue` / `-c`.
     #[arg(short = 'c', long = "continue", global = true)]
     pub continue_: bool,
-
-    /// Walk ancestors of the current directory and reopen the workspace
-    /// whose state is the most recently modified. So a session run from
-    /// `~/foo/bar/baz/bang` reopens whichever ancestor (cwd itself, its
-    /// parent, ...) most recently saved a workspace; falls back to a
-    /// fresh workspace anchored at cwd when no ancestor has any state.
-    /// Mutually exclusive with `--continue`.
-    #[arg(
-        short = 'r',
-        long = "resume",
-        conflicts_with = "continue_",
-        global = true
-    )]
-    pub resume: bool,
 
     /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
@@ -91,14 +79,11 @@ pub fn run() -> Result<(), Whatever> {
         command,
         files,
         continue_,
-        resume,
         ..
     } = Args::parse();
 
     let restore = if continue_ {
         stoat_gui::RestoreMode::Continue
-    } else if resume {
-        stoat_gui::RestoreMode::Resume
     } else {
         stoat_gui::RestoreMode::None
     };
@@ -119,28 +104,20 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn resume_parses_after_gui_subcommand() {
-        let args = Args::try_parse_from(["stoat", "gui", "-r"]).expect("`gui -r` parses");
-        assert!(args.resume);
-        assert!(!args.continue_);
-    }
-
-    #[test]
     fn continue_parses_after_gui_subcommand() {
         let args =
             Args::try_parse_from(["stoat", "gui", "--continue"]).expect("`gui --continue` parses");
         assert!(args.continue_);
-        assert!(!args.resume);
     }
 
     #[test]
-    fn resume_parses_before_gui_subcommand() {
-        let args = Args::try_parse_from(["stoat", "-r", "gui"]).expect("`-r gui` parses");
-        assert!(args.resume);
+    fn continue_parses_before_gui_subcommand() {
+        let args = Args::try_parse_from(["stoat", "-c", "gui"]).expect("`-c gui` parses");
+        assert!(args.continue_);
     }
 
     #[test]
-    fn resume_and_continue_conflict() {
-        assert!(Args::try_parse_from(["stoat", "gui", "-r", "-c"]).is_err());
+    fn resume_flag_removed() {
+        assert!(Args::try_parse_from(["stoat", "gui", "-r"]).is_err());
     }
 }

@@ -122,20 +122,18 @@ pub use globals::{
 };
 
 /// Selects whether [`run`] starts in a fresh workspace or rehydrates
-/// a previously persisted one. Mirrors the binary's `--continue` /
-/// `--resume` flags from `bin/src/commands/default.rs`.
+/// a previously persisted one. Mirrors the binary's `--continue` flag
+/// from `bin/src/commands/default.rs`.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum RestoreMode {
     /// Default: a fresh workspace anchored at the current
     /// directory. Files passed alongside are opened normally.
     None,
-    /// Restore the most-recently-modified workspace whose
-    /// `git_root` matches the current directory.
+    /// Walk the current directory and its ancestors and restore the
+    /// most-recently-modified workspace under any of them. Falls back
+    /// to a fresh workspace anchored at cwd when no ancestor has any
+    /// state.
     Continue,
-    /// Walk cwd ancestors and restore the most-recently-modified
-    /// workspace under any of them. Falls back to a fresh
-    /// workspace anchored at cwd when no ancestor has any state.
-    Resume,
 }
 pub use gpui::Keystroke;
 use gpui::{
