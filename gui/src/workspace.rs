@@ -12,7 +12,7 @@ use crate::{
     fold_actions,
     fs_watcher_driver::{FsWatcherDriver, FsWatcherDriverEvent},
     git::coordinator::BlameCoordinator,
-    globals::{EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal},
+    globals::{EnvHostGlobal, ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, ShellHostGlobal},
     input_state_machine::InputStateMachine,
     item::ItemHandle,
     key_hint_banner::KeyHintBanner,
@@ -26,6 +26,7 @@ use crate::{
     rebase_item::{RebaseItem, RebaseMoveDir},
     render_stats::{render_stats_enabled, FrameTimer, RenderStatsOverlay},
     review_session::ReviewApplyResult,
+    screenshot,
     settings::{FontSizeOffset, Settings},
     status_bar::{
         active_file::ActiveFileLabel, count_prefix::CountPrefix, cursor_position::CursorPosition,
@@ -50,7 +51,7 @@ use std::{
     path::{Path, PathBuf},
     rc::Rc,
     sync::Arc,
-    time::{Duration, Instant},
+    time::{Duration, Instant, SystemTime, UNIX_EPOCH},
 };
 use stoat::{
     buffer::{BufferId, Encoding},
@@ -1859,6 +1860,51 @@ impl Workspace {
         self.set_git_root(PathBuf::from(path), cx);
     }
 
+    /// Capture the editor window to a PNG via macOS `screencapture`.
+    ///
+    /// An empty `path_arg` writes a timestamped file under the workspace
+    /// root; a relative one resolves under it. The capture runs off-thread
+    /// and logs the written path on success; a spawn failure (e.g. off
+    /// macOS, where `screencapture` is absent) or a non-zero exit is logged
+    /// as a warning rather than surfaced to the caller.
+    fn dispatch_screenshot(&self, path_arg: &str, window: &Window, cx: &Context<'_, Self>) {
+        let bounds = window.bounds();
+        let unix_millis = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map(|elapsed| elapsed.as_millis())
+            .unwrap_or(0);
+        let path = screenshot::resolve_screenshot_path(path_arg, self.git_root(), unix_millis);
+
+        let x = f32::from(bounds.origin.x).round() as i32;
+        let y = f32::from(bounds.origin.y).round() as i32;
+        let width = f32::from(bounds.size.width).round() as i32;
+        let height = f32::from(bounds.size.height).round() as i32;
+        let cmd = screenshot::screencapture_command(&path, x, y, width, height);
+        let shell = cx.global::<ShellHostGlobal>().0.clone();
+
+        cx.background_executor()
+            .spawn(async move {
+                match shell.run(&cmd, &[]) {
+                    Ok(output) if output.exit_code == 0 => {
+                        tracing::info!(path = %path.display(), "screenshot written");
+                    },
+                    Ok(output) => {
+                        let stderr = String::from_utf8_lossy(&output.stderr).trim().to_owned();
+                        tracing::warn!(
+                            exit_code = output.exit_code,
+                            stderr = %stderr,
+                            path = %path.display(),
+                            "screencapture failed"
+                        );
+                    },
+                    Err(error) => {
+                        tracing::warn!(%error, "screencapture failed to spawn");
+                    },
+                }
+            })
+            .detach();
+    }
+
     pub fn add_dock(
         &mut self,
         item: Box<dyn ItemHandle>,
@@ -2034,6 +2080,14 @@ impl Workspace {
                     .map(|a| a.path.clone())
                     .unwrap_or_default();
                 self.dispatch_set_cwd(&path, cx);
+            },
+            ActionKind::Screenshot => {
+                let path = action
+                    .as_any()
+                    .downcast_ref::<stoat_action::Screenshot>()
+                    .map(|a| a.path.clone())
+                    .unwrap_or_default();
+                self.dispatch_screenshot(&path, window, cx);
             },
             ActionKind::Pwd => {
                 tracing::info!(working_directory = %self.git_root().display(), "pwd");

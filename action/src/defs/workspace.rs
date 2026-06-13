@@ -204,6 +204,57 @@ impl Action for SetCwd {
     }
 }
 
+const SCREENSHOT_PARAMS: &[ParamDef] = &[ParamDef {
+    name: "path",
+    kind: ParamKind::String,
+    required: false,
+    description: "Output file for the capture. Empty writes a timestamped screenshot-<millis>.png under the workspace root; a relative path resolves under that root.",
+}];
+#[derive(Debug)]
+pub struct ScreenshotDef;
+
+impl ActionDef for ScreenshotDef {
+    fn name(&self) -> &'static str {
+        "screenshot"
+    }
+
+    fn kind(&self) -> ActionKind {
+        ActionKind::Screenshot
+    }
+
+    fn params(&self) -> &'static [ParamDef] {
+        SCREENSHOT_PARAMS
+    }
+
+    fn short_desc(&self) -> &'static str {
+        "capture the window to an image"
+    }
+
+    fn long_desc(&self) -> &'static str {
+        "Capture the rendered editor window to a PNG. With no path, writes a timestamped file under the workspace root and logs its location. macOS only; the capture needs Screen Recording permission."
+    }
+
+    fn priority(&self) -> ActionPriority {
+        ActionPriority::Common
+    }
+}
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct Screenshot {
+    pub path: String,
+}
+impl Screenshot {
+    pub const DEF: &ScreenshotDef = &ScreenshotDef;
+}
+impl Action for Screenshot {
+    fn def(&self) -> &'static dyn ActionDef {
+        Self::DEF
+    }
+
+    fn as_any(&self) -> &dyn Any {
+        self
+    }
+}
+
 define_action!(
     PwdDef,
     Pwd,

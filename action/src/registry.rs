@@ -110,7 +110,7 @@ use crate::{
         theme::OpenThemePicker,
         workspace::{
             CloseWorkspace, CopyWorkspace, Env, NewWorkspace, OpenMarkdownPreview,
-            OpenWorkspacePicker, Pwd, RenameWorkspace, SetCwd, SwitchWorkspace,
+            OpenWorkspacePicker, Pwd, RenameWorkspace, Screenshot, SetCwd, SwitchWorkspace,
             ToggleDiagnosticsPanel, ToggleOutlinePanel, ToggleProjectTree,
         },
     },
@@ -799,6 +799,18 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: raw.to_owned(),
         }))
     });
+    add(Screenshot::DEF, |params| {
+        let raw = match params.first() {
+            Some(p) => p.as_string().context(WrongKindSnafu {
+                name: "path",
+                expected: ParamKind::String,
+            })?,
+            None => "",
+        };
+        Ok(Box::new(Screenshot {
+            path: raw.to_owned(),
+        }))
+    });
     add(Pwd::DEF, |_| Ok(Box::new(Pwd)));
     add(Env::DEF, |_| Ok(Box::new(Env)));
     add(SubmitPromptInput::DEF, |_| Ok(Box::new(SubmitPromptInput)));
@@ -1350,7 +1362,8 @@ mod tests {
         // + 1 OpenClaudeTerminal (terminal pane running the claude CLI).
         // + 1 OpenTerminal (terminal pane running the user's shell).
         // + 2 IncreaseFontSize / DecreaseFontSize (editor font zoom).
-        assert_eq!(all().count(), 346);
+        // + 1 Screenshot (capture the window to an image file).
+        assert_eq!(all().count(), 347);
     }
 
     #[test]

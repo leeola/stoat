@@ -310,6 +310,7 @@ pub enum ActionKind {
     SetCwd,
     Pwd,
     Env,
+    Screenshot,
     OpenWorkspacePicker,
     ToggleProjectTree,
     ToggleOutlinePanel,

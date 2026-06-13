@@ -76,6 +76,7 @@ mod review_move_picker;
 mod review_session;
 mod reword_modal;
 mod run_pane;
+mod screenshot;
 mod settings;
 mod shell_input_modal;
 mod status_bar;
