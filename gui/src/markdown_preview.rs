@@ -21,7 +21,11 @@ use gpui::{
 };
 use pulldown_cmark::{CodeBlockKind, Event, HeadingLevel, Parser, Tag, TagEnd};
 use serde_json::Value;
-use std::{ops::Range, path::Path, sync::Arc};
+use std::{
+    ops::Range,
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat::display_map::syntax_theme::SyntaxStyles;
 use stoat_language::{HighlightMap, Language, SyntaxMap};
 use stoat_text::Rope;
@@ -320,6 +324,13 @@ impl MarkdownPreview {
             _subscription: subscription,
         }
     }
+
+    /// Absolute path of the markdown source this preview renders, when
+    /// the source buffer is file-backed. Used by workspace persistence
+    /// to record the preview and reopen its source on restore.
+    pub(crate) fn source_path(&self, cx: &App) -> Option<PathBuf> {
+        self.buffer.read(cx).file_path().map(Path::to_path_buf)
+    }
 }
 
 /// Flatten an inline tree into a single string plus styled runs over it.
@@ -467,6 +478,15 @@ impl ItemView for MarkdownPreview {
 
     fn item_kind(&self) -> ItemKind {
         ItemKind::MarkdownPreview
+    }
+
+    fn serialize(&self, cx: &App) -> Value {
+        let source_path = self
+            .source_path(cx)
+            .as_deref()
+            .and_then(Path::to_str)
+            .map(String::from);
+        serde_json::json!({ "source_path": source_path })
     }
 
     fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError>

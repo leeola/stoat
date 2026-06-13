@@ -1303,6 +1303,30 @@ impl Workspace {
                         });
                         materialized += 1;
                     },
+                    crate::item::ItemKind::MarkdownPreview => {
+                        let Some(source_path) =
+                            snap.blob.get("source_path").and_then(|v| v.as_str())
+                        else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping markdown preview with no source path during restore"
+                            );
+                            continue;
+                        };
+                        let abs = PathBuf::from(source_path);
+                        let text = read_path_or_empty(&abs, cx);
+                        let shared = self
+                            .buffer_registry
+                            .update(cx, |reg, cx| reg.open(&abs, &text, cx).1);
+                        let buffer = cx.new(|_| Buffer::from_shared(shared));
+                        buffer.update(cx, |b, cx| b.set_file_path(Some(abs), cx));
+                        let preview =
+                            cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(buffer, cx));
+                        pane.update(cx, |p, cx| {
+                            p.add_item(Box::new(preview), cx);
+                        });
+                        materialized += 1;
+                    },
                     crate::item::ItemKind::Terminal => {
                         let cwd = snap
                             .blob
@@ -18296,6 +18320,84 @@ mod tests {
             assert_eq!(
                 conflict_count, 0,
                 "a resolved file drops the conflict view on restore"
+            );
+        });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_markdown_preview() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/doc.md", b"# Title\n\nbody\n");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/doc.md")], cx);
+        });
+        vcx.run_until_parked();
+
+        ws.update(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            let pane = w
+                .pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .clone();
+            let editor = pane
+                .read(cx)
+                .items()
+                .iter()
+                .find_map(|item| item.to_any_view().downcast::<Editor>().ok())
+                .expect("editor present");
+            let buffer = editor
+                .read(cx)
+                .multi_buffer()
+                .read(cx)
+                .as_singleton()
+                .cloned()
+                .expect("singleton");
+            let preview = cx.new(|cx| crate::markdown_preview::MarkdownPreview::new(buffer, cx));
+            pane.update(cx, |p, cx| {
+                p.add_item(Box::new(preview), cx);
+            });
+        });
+        vcx.run_until_parked();
+
+        let path = PathBuf::from("/tmp/state/markdown-round-trip.ron");
+        let fs_dyn: Arc<dyn stoat::host::FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        vcx2.run_until_parked();
+
+        fresh_ws.read_with(vcx2, |w, cx| {
+            let mut sources: Vec<Option<PathBuf>> = Vec::new();
+            for id in w.pane_tree().read(cx).split_pane_ids() {
+                let pane = w
+                    .pane_tree()
+                    .read(cx)
+                    .pane(id)
+                    .expect("pane present")
+                    .read(cx);
+                for item in pane.items() {
+                    if let Ok(p) = item
+                        .to_any_view()
+                        .downcast::<crate::markdown_preview::MarkdownPreview>()
+                    {
+                        sources.push(p.read(cx).source_path(cx));
+                    }
+                }
+            }
+            assert_eq!(
+                sources,
+                vec![Some(PathBuf::from("/tmp/repo/doc.md"))],
+                "markdown preview restores with its source path"
             );
         });
     }
