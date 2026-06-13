@@ -151,6 +151,17 @@ impl ResolvedPlacement {
             ResolvedPlacement::Replace { start, end } => end - start + 1,
         }
     }
+
+    /// Wrap row at which the block's transform is inserted. An `Above` (and a
+    /// `Replace`) sits at its anchor row; a `Below`/`Near` sits one row past
+    /// its anchor, so the below-positioning is applied here rather than baked
+    /// into the resolved anchor.
+    fn build_wrap_row(&self) -> u32 {
+        match self {
+            ResolvedPlacement::Above(r) | ResolvedPlacement::Replace { start: r, .. } => *r,
+            ResolvedPlacement::Below(r) | ResolvedPlacement::Near(r) => *r + 1,
+        }
+    }
 }
 
 #[derive(Clone)]
@@ -1448,21 +1459,17 @@ fn sort_and_dedup_blocks(blocks: &mut Vec<(ResolvedPlacement, &Block)>) {
     let covers = |row: u32| spans.iter().any(|&(s, e)| row >= s && row <= e);
 
     // Drop blocks a Replace covers and collapse each merged span to one
-    // Replace. An Above hides when its row is covered; a Below/Near resolves
-    // one row past its anchor (the `+1` in `resolve_block_placement`), so it
-    // hides when its anchor -- the row before it -- is covered, matching Zed's
-    // pinned semantics where a block anchored at any replaced row is hidden.
+    // Replace. Above/Below/Near all resolve to their anchor row, so a block
+    // hides when that row is covered, matching Zed's pinned semantics where a
+    // block anchored at any replaced row is hidden.
     let mut emitted = vec![false; spans.len()];
     let mut kept = Vec::with_capacity(blocks.len());
     for &(placement, block) in blocks.iter() {
         match placement {
-            ResolvedPlacement::Above(row) => {
+            ResolvedPlacement::Above(row)
+            | ResolvedPlacement::Below(row)
+            | ResolvedPlacement::Near(row) => {
                 if !covers(row) {
-                    kept.push((placement, block));
-                }
-            },
-            ResolvedPlacement::Below(row) | ResolvedPlacement::Near(row) => {
-                if row == 0 || !covers(row - 1) {
                     kept.push((placement, block));
                 }
             },
@@ -1539,18 +1546,19 @@ fn resolve_block_placement(
 
     // Clamp resolved rows to the wrap line count. A block placement is a static
     // buffer row, so an edit shrinking the buffer (or an end past it) can resolve
-    // beyond the last row; left unclamped, an Above/Below gap or a Replace's
-    // consumed input would exceed the wrap line count. A zero-input Above/Below
-    // sits after the last row at `line_count`; a Replace spans real rows, so it
-    // clamps to the last one.
+    // beyond the last row; left unclamped, an Above gap or a Replace's consumed
+    // input would exceed the wrap line count. A zero-input Above sits after the
+    // last row at `line_count`; a Below/Near anchors on its (last) wrap row, and
+    // its one-row below offset is added when building transforms, so it clamps
+    // to the last row; a Replace spans real rows, so it clamps to the last one.
     let line_count = wrap_snapshot.line_count();
     match placement {
         BlockPlacement::Above(row) => ResolvedPlacement::Above(map_row(row).min(line_count)),
         BlockPlacement::Below(row) => {
-            ResolvedPlacement::Below((map_last_row(row) + 1).min(line_count))
+            ResolvedPlacement::Below(map_last_row(row).min(line_count.saturating_sub(1)))
         },
         BlockPlacement::Near(row) => {
-            ResolvedPlacement::Near((map_last_row(row) + 1).min(line_count))
+            ResolvedPlacement::Near(map_last_row(row).min(line_count.saturating_sub(1)))
         },
         BlockPlacement::Replace { start, end } => {
             let last_row = line_count.saturating_sub(1);
@@ -1566,12 +1574,11 @@ fn resolve_block_placement(
 
 /// Wrap-row range a block mutation affects, snapped to whole input rows.
 ///
-/// Maps the placement's *buffer-anchor* rows (not the resolved Below/Near `+1`
-/// position) to wrap rows, then widens to the surrounding row boundaries so
-/// [`sync_incremental`] reconstructs the block's rows as a unit. Anchoring at
-/// the buffer row puts a removed below block in the reconstruction zone, so it
-/// is dropped rather than preserved at the edit start. Used to turn a mutation
-/// into a `deferred_edits` entry.
+/// Maps the placement's *buffer-anchor* rows to wrap rows, then widens to the
+/// surrounding row boundaries so [`sync_incremental`] reconstructs the block's
+/// rows as a unit. Anchoring at the buffer row puts a removed below block in the
+/// reconstruction zone, so it is dropped rather than preserved at the edit
+/// start. Used to turn a mutation into a `deferred_edits` entry.
 fn block_region(placement: &BlockPlacement, snapshot: &WrapSnapshot) -> (u32, u32) {
     let (start_buf, end_buf) = match *placement {
         BlockPlacement::Above(row) | BlockPlacement::Below(row) | BlockPlacement::Near(row) => {
@@ -1613,6 +1620,15 @@ fn sync_incremental(
     let mut edits = wrap_edits.edits().iter().peekable();
 
     while let Some(edit) = edits.next() {
+        // A prior edit's reconstruction can reach past a later edit in the same
+        // patch -- a Replace pulled into the rebuild, or the trailing rebuild
+        // running to the buffer end -- leaving the cursor beyond this edit's old
+        // range. Those rows are already rebuilt, so skip this edit rather than
+        // slice the cursor backward.
+        if edit.old.end <= cursor.start().0 {
+            continue;
+        }
+
         let mut new_start = edit.new.start;
 
         new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
@@ -1641,7 +1657,7 @@ fn sync_incremental(
                             && match b {
                                 Block::Custom(c) => {
                                     resolve_block_placement(c.placement, wrap_snapshot)
-                                        .start_wrap_row()
+                                        .build_wrap_row()
                                         == boundary
                                 },
                                 _ => true,
@@ -1779,10 +1795,10 @@ fn sync_incremental(
             push_isomorphic(&mut new_transforms, gap, current_rows.0, wrap_snapshot);
         }
 
-        let edit_end = new_end.min(wrap_line_count);
+        let mut edit_end = new_end.min(wrap_line_count);
 
         let edit_start_buf = wrap_row_to_buffer_row(new_start, wrap_snapshot);
-        let edit_end_buf = if edit_end >= wrap_line_count {
+        let mut edit_end_buf = if edit_end >= wrap_line_count {
             u32::MAX
         } else {
             wrap_row_to_buffer_row(edit_end, wrap_snapshot)
@@ -1794,18 +1810,37 @@ fn sync_incremental(
         // begins inside are reached via the new_start backward extension.
         let start_block_idx = last_block_idx
             + blocks[last_block_idx..].partition_point(|b| block_buffer_row(b) < edit_start_buf);
-        let end_block_idx = if edit_end_buf == u32::MAX {
+        let mut end_block_idx = if edit_end_buf == u32::MAX {
             blocks.len()
         } else {
             start_block_idx
                 + blocks[start_block_idx..].partition_point(|b| block_buffer_row(b) <= edit_end_buf)
         };
 
+        // A block placement is a static buffer row re-resolved against the new
+        // wrap, not an anchor that tracks the text. An edit that changes this
+        // region's row count therefore moves a block sitting inside the edit
+        // relative to the rows around it, while the old transforms still hold it
+        // at its prior position. Copying that stale suffix duplicates or
+        // misplaces the block. When the last edit changes the row count and
+        // blocks fall inside its range, rebuild the tail so each in-range
+        // placement re-resolves against the final wrap exactly once.
+        if edits.peek().is_none()
+            && new_end < wrap_line_count
+            && new_end != old_end
+            && start_block_idx < end_block_idx
+        {
+            edit_end = wrap_line_count;
+            edit_end_buf = u32::MAX;
+            end_block_idx = blocks.len();
+            cursor.seek(&InputRow(u32::MAX), Bias::Right);
+        }
+
         blocks_in_range.clear();
         blocks_in_range.extend(blocks[start_block_idx..end_block_idx].iter().filter_map(
             |(bp, b)| {
                 let placement = resolve_block_placement(*bp, wrap_snapshot);
-                let block_start = placement.start_wrap_row();
+                let block_start = placement.build_wrap_row();
                 let block_end = match placement {
                     ResolvedPlacement::Replace { end, .. } => end,
                     _ => block_start,
@@ -1837,7 +1872,7 @@ fn sync_incremental(
 
         let mut row = new_transforms.extent::<InputRow>(()).0;
         for &(placement, block) in &blocks_in_range {
-            let anchor = placement.start_wrap_row();
+            let anchor = placement.build_wrap_row();
             if anchor > row {
                 push_isomorphic(&mut new_transforms, anchor - row, row, wrap_snapshot);
                 row = anchor;
@@ -1944,7 +1979,7 @@ fn build_transforms(
     let mut current_wrap_row = 0u32;
 
     for &(placement, block) in &keyed_blocks {
-        let anchor = placement.start_wrap_row();
+        let anchor = placement.build_wrap_row();
         if anchor > current_wrap_row {
             push_isomorphic(
                 &mut transforms,
@@ -2152,16 +2187,19 @@ mod tests {
     use super::{
         build_transforms, longest_block_line, resolve_block_placement, sync_incremental, Block,
         BlockMap, BlockPlacement, BlockPoint, BlockProperties, BlockRowKind, BlockSnapshot,
-        BlockStyle, Line, OutputRow, ResolvedPlacement, Transform, WrapSnapshot,
+        BlockStyle, CustomBlockId, Line, OutputRow, ResolvedPlacement, Transform, WrapSnapshot,
     };
     use crate::{
         buffer::{BufferId, TextBuffer},
         display_map::{fold_map::FoldMap, inlay_map::InlayMap, tab_map::TabMap, wrap_map::WrapMap},
         multi_buffer::MultiBuffer,
     };
-    use std::sync::{
-        atomic::{AtomicUsize, Ordering::SeqCst},
-        Arc, RwLock,
+    use std::{
+        collections::HashSet,
+        sync::{
+            atomic::{AtomicUsize, Ordering::SeqCst},
+            Arc, RwLock,
+        },
     };
     use stoat_scheduler::{Executor, TestScheduler};
     use stoat_text::{
@@ -2212,12 +2250,13 @@ mod tests {
     }
 
     #[test]
-    fn below_block_resolves_after_last_wrap_segment() {
+    fn below_block_resolves_to_last_wrap_segment() {
         let snapshot = wrapped_snapshot("abcdefghij\nx", 5);
         let resolved = resolve_placement(&snapshot, BlockPlacement::Below(0));
         assert!(
-            matches!(resolved, ResolvedPlacement::Below(2)),
-            "Below(0) on a two-segment line must land past both segments, got {resolved:?}"
+            matches!(resolved, ResolvedPlacement::Below(1)),
+            "Below(0) on a two-segment line resolves to its last segment; the \
+             below-positioning is applied when building transforms, got {resolved:?}"
         );
     }
 
@@ -2588,7 +2627,7 @@ mod tests {
         assert_eq!(text_props.height, lines_props.height);
         let height = text_props.height.unwrap_or(0);
         let text_ctx = super::BlockContext {
-            block_id: super::BlockId::Custom(super::CustomBlockId(0)),
+            block_id: super::BlockId::Custom(CustomBlockId(0)),
             max_width: 80,
             height,
             selected: false,
@@ -2597,7 +2636,7 @@ mod tests {
             buffer_snapshot: &super::MultiBufferSnapshot::empty(),
         };
         let lines_ctx = super::BlockContext {
-            block_id: super::BlockId::Custom(super::CustomBlockId(1)),
+            block_id: super::BlockId::Custom(CustomBlockId(1)),
             max_width: 80,
             height,
             selected: false,
@@ -3522,5 +3561,203 @@ mod tests {
                 "TOP".to_string()
             ]
         );
+    }
+
+    /// Deterministic xorshift64 PRNG so seeds come from a fixed range rather
+    /// than the environment, keeping the test pure.
+    struct Rng(u64);
+
+    impl Rng {
+        fn new(seed: u64) -> Self {
+            Self((seed.wrapping_mul(0x9E37_79B9_7F4A_7C15) ^ 0xD1B5_4A32_D192_ED03).max(1))
+        }
+
+        fn next(&mut self) -> u64 {
+            let mut x = self.0;
+            x ^= x << 13;
+            x ^= x >> 7;
+            x ^= x << 17;
+            self.0 = x;
+            x
+        }
+
+        fn below(&mut self, n: u32) -> u32 {
+            if n == 0 {
+                0
+            } else {
+                (self.next() % n as u64) as u32
+            }
+        }
+    }
+
+    fn random_text(rng: &mut Rng, len: usize) -> String {
+        const ALPHABET: &[u8] = b"ab\ncd\n";
+        (0..len)
+            .map(|_| ALPHABET[rng.below(ALPHABET.len() as u32) as usize] as char)
+            .collect()
+    }
+
+    fn random_range(rng: &mut Rng, len: usize) -> (usize, usize) {
+        let mut a = rng.below(len as u32 + 1) as usize;
+        let mut b = rng.below(len as u32 + 1) as usize;
+        if a > b {
+            std::mem::swap(&mut a, &mut b);
+        }
+        (a, b)
+    }
+
+    fn random_block_props(rng: &mut Rng, row_count: u32) -> BlockProperties {
+        let lines = 1 + rng.below(3);
+        let content = (0..lines)
+            .map(|_| {
+                let len = 1 + rng.below(3);
+                (0..len)
+                    .map(|_| (b'A' + rng.below(26) as u8) as char)
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        let rows = row_count.max(1);
+        let placement = match rng.below(4) {
+            0 => BlockPlacement::Above(rng.below(row_count + 1)),
+            1 => BlockPlacement::Below(rng.below(row_count + 1)),
+            2 => BlockPlacement::Near(rng.below(row_count + 1)),
+            _ => {
+                let start = rng.below(rows);
+                BlockPlacement::Replace {
+                    start,
+                    end: start + rng.below(rows - start),
+                }
+            },
+        };
+        text_block(placement, &content)
+    }
+
+    fn full_rebuild(block_map: &BlockMap, wrap: &Arc<WrapSnapshot>) -> BlockSnapshot {
+        let blocks: Vec<(BlockPlacement, Block)> = block_map
+            .custom_blocks
+            .iter()
+            .map(|b| (b.placement, Block::Custom(b.clone())))
+            .collect();
+        let transforms = build_transforms(wrap.line_count(), &blocks, wrap);
+        let total_rows = transforms.extent::<OutputRow>(()).0;
+        BlockSnapshot {
+            wrap_snapshot: wrap.clone(),
+            transforms,
+            total_rows,
+        }
+    }
+
+    fn classify_key(snapshot: &BlockSnapshot, row: u32) -> (bool, u32) {
+        match snapshot.classify_row(row) {
+            BlockRowKind::BufferRow { buffer_row } => (false, buffer_row),
+            BlockRowKind::Block { line_index, .. } => (true, line_index),
+        }
+    }
+
+    /// Randomized block insert/remove/edit sequences cross-checked against a
+    /// full rebuild. Block placements are static buffer rows re-resolved against
+    /// the current wrap, so the incremental sync and a full rebuild must agree
+    /// however rows shift under edits; a divergence is a `sync_incremental`
+    /// boundary bug.
+    #[test]
+    fn random_blocks() {
+        for seed in 0..64u64 {
+            let mut rng = Rng::new(seed);
+
+            let initial_len = rng.below(16) as usize;
+            let initial = random_text(&mut rng, initial_len);
+            let shared = Arc::new(RwLock::new(TextBuffer::with_text(
+                BufferId::new(0),
+                &initial,
+            )));
+            let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+            let mut buffer_snapshot = multi_buffer.snapshot();
+            let mut version = buffer_snapshot.version();
+            let (mut inlay_map, inlay_snapshot) = InlayMap::new(buffer_snapshot.clone());
+            let (mut fold_map, fold_snapshot) = FoldMap::new(inlay_snapshot);
+            let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+            let (tab_snapshot, _) = tab_map.sync(fold_snapshot, Patch::empty());
+            let (mut wrap_map, mut wrap_snapshot) =
+                WrapMap::new(tab_snapshot, None, test_executor());
+
+            let mut block_map = BlockMap::new();
+            block_map.sync(wrap_snapshot.clone(), &Patch::empty(), None);
+            let mut ids: Vec<CustomBlockId> = Vec::new();
+
+            for op in 0..16 {
+                let row_count = wrap_snapshot.line_count();
+                let wrap_edits = match rng.below(100) {
+                    0..=44 => {
+                        let count = 1 + rng.below(3);
+                        let props: Vec<BlockProperties> = (0..count)
+                            .map(|_| random_block_props(&mut rng, row_count))
+                            .collect();
+                        ids.extend(block_map.insert(props));
+                        Patch::empty()
+                    },
+                    45..=64 => {
+                        if !ids.is_empty() {
+                            let id = ids.remove(rng.below(ids.len() as u32) as usize);
+                            block_map.remove(&HashSet::from([id]));
+                        }
+                        Patch::empty()
+                    },
+                    _ => {
+                        let len = buffer_snapshot.text().len();
+                        let (a, b) = random_range(&mut rng, len);
+                        let insert_len = rng.below(4) as usize;
+                        let insert = random_text(&mut rng, insert_len);
+                        shared.write().unwrap().edit(a..b, &insert);
+                        buffer_snapshot = multi_buffer.snapshot();
+                        let buffer_edits = buffer_snapshot.edits_since(version);
+                        version = buffer_snapshot.version();
+                        let (inlay_snapshot, inlay_edits) =
+                            inlay_map.sync(buffer_snapshot.clone(), &buffer_edits);
+                        let (fold_snap, fold_edits) = fold_map.sync(inlay_snapshot, &inlay_edits);
+                        let (tab_snap, tab_edits) = tab_map.sync(fold_snap, fold_edits);
+                        let (new_wrap, wrap_edits) = wrap_map.sync(tab_snap, &tab_edits);
+                        wrap_snapshot = new_wrap;
+                        wrap_edits
+                    },
+                };
+
+                let incremental = block_map.sync(wrap_snapshot.clone(), &wrap_edits, None);
+                let full = full_rebuild(&block_map, &wrap_snapshot);
+
+                assert_eq!(
+                    incremental.total_lines(),
+                    full.total_lines(),
+                    "seed {seed} op {op}: total_lines"
+                );
+                for row in 0..full.total_lines() {
+                    assert_eq!(
+                        incremental.display_line(row),
+                        full.display_line(row),
+                        "seed {seed} op {op}: display_line row {row}"
+                    );
+                    assert_eq!(
+                        classify_key(&incremental, row),
+                        classify_key(&full, row),
+                        "seed {seed} op {op}: classify_row row {row}"
+                    );
+                }
+                assert_eq!(
+                    incremental.longest_row(),
+                    full.longest_row(),
+                    "seed {seed} op {op}: longest_row"
+                );
+                let buffer_rows = buffer_snapshot.max_point().row + 1;
+                for row in 0..buffer_rows {
+                    let point = Point::new(row, 0);
+                    assert_eq!(
+                        incremental.buffer_to_block(point, Bias::Left),
+                        full.buffer_to_block(point, Bias::Left),
+                        "seed {seed} op {op}: buffer_to_block row {row}"
+                    );
+                }
+            }
+        }
     }
 }
