@@ -33,12 +33,6 @@ pub struct CommitListSnapshot {
 /// the cursor approaches the tail. Previews are likewise lazy: each
 /// selected sha triggers a background build of a [`ReviewSession`] that
 /// the right pane reuses via `render_review`.
-// FIXME: Commit list selection/scroll not persisted across workspace
-// save/load. `commits: Vec<CommitInfo>` is fetched asynchronously on open, so
-// save/restore must persist the saved selected commit's SHA (not its index),
-// and on load defer scroll restoration until the initial fetch reaches a page
-// containing that SHA. `pending_load` / `pending_preview` are in-flight task
-// handles and are intentionally not restorable.
 pub struct CommitListState {
     pub workdir: PathBuf,
     pub commits: Vec<CommitInfo>,
@@ -204,7 +198,15 @@ impl CommitListState {
         }
     }
 
-    fn resolve_pending_restore_sha(&mut self) {
+    /// Resolve a [`Self::pending_restore_sha`] parked by
+    /// [`Self::apply_snapshot`] against the currently loaded commits.
+    ///
+    /// Moves selection onto the sha and clears the pending state when it
+    /// appears in a loaded page, or clears it without moving selection
+    /// once [`Self::reached_end`] is set and the sha never showed up.
+    /// Call after every page append: [`Self::poll_pending_load`] does so
+    /// for the TUI, and the GUI's own pager calls it directly.
+    pub fn resolve_pending_restore_sha(&mut self) {
         let Some(sha) = self.pending_restore_sha.as_ref() else {
             return;
         };

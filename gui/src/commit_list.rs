@@ -104,12 +104,17 @@ impl CommitListState {
     /// `page` flips `reached_end` because the underlying walker
     /// returns `[]` only when it cannot produce another commit after
     /// the last loaded sha (root commit or unknown anchor).
+    ///
+    /// Resolves a restore selection parked by `apply_snapshot` against
+    /// the newly loaded page, so a session restored via `--continue`
+    /// re-selects its saved commit once that commit pages in.
     pub fn append_page(&mut self, page: Vec<CommitInfo>, cx: &mut Context<'_, Self>) {
         if page.is_empty() {
             self.inner.reached_end = true;
         } else {
             self.inner.commits.extend(page);
         }
+        self.inner.resolve_pending_restore_sha();
         cx.emit(CommitListStateEvent::Changed);
         cx.notify();
     }
@@ -193,6 +198,29 @@ impl CommitListItem {
     ) -> Self {
         let delegate = CommitListDelegate::new(state.clone(), cx);
         let picker = cx.new(|cx| Picker::new(delegate, window, cx));
+        Self::from_picker(state, picker, buffer_registry, cx)
+    }
+
+    /// Window-free counterpart to [`Self::new`] for the workspace
+    /// restore path, which has no window. Builds the picker via
+    /// [`Picker::new_windowless`]; the caller kicks the initial page
+    /// load through [`Self::picker`] exactly as `new` callers do.
+    pub fn restored(
+        state: Entity<CommitListState>,
+        buffer_registry: Entity<BufferRegistry>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
+        let delegate = CommitListDelegate::new(state.clone(), cx);
+        let picker = cx.new(|cx| Picker::new_windowless(delegate, cx));
+        Self::from_picker(state, picker, buffer_registry, cx)
+    }
+
+    fn from_picker(
+        state: Entity<CommitListState>,
+        picker: Entity<Picker<CommitListDelegate>>,
+        buffer_registry: Entity<BufferRegistry>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let workdir = state.read(cx).inner.workdir.clone();
         let git_host = cx.global::<GitHostGlobal>().0.clone();
         let executor = cx.global::<ExecutorGlobal>().0.clone();
@@ -631,13 +659,17 @@ impl ItemView for CommitListItem {
         SharedString::from("Commits")
     }
 
+    fn serialize(&self, cx: &App) -> Value {
+        serde_json::to_value(self.state.read(cx).inner().snapshot()).unwrap_or(Value::Null)
+    }
+
     fn deserialize(_value: Value, _cx: &mut Context<'_, Self>) -> Result<Self, ItemError> {
-        // FIXME: deserialize requires workspace-persistence wiring per
-        // TODO.md "Workspace persistence" group; landing here once the
-        // commit-list persistence shape (selected sha + scroll) is settled.
+        // Restore flows through Workspace::apply_state, which supplies
+        // the git root and buffer registry this trait method cannot
+        // reach; the item cannot be rebuilt from the blob alone.
         DeserializeSnafu {
-            reason: "CommitListItem deserialize requires workspace-persistence wiring \
-                     that has not yet landed",
+            reason: "CommitListItem is restored via Workspace::apply_state, \
+                     not from its serialized blob alone",
         }
         .fail()
     }

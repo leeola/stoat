@@ -151,8 +151,24 @@ pub struct Picker<D: PickerDelegate> {
 }
 
 impl<D: PickerDelegate> Picker<D> {
-    pub fn new(mut delegate: D, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
+    pub fn new(delegate: D, window: &mut Window, cx: &mut Context<'_, Self>) -> Self {
         let query_editor = cx.new(|cx| Editor::single_line(window, cx));
+        Self::with_query_editor(delegate, query_editor, cx)
+    }
+
+    /// Window-free counterpart to [`Self::new`] for restore paths that
+    /// have no window (e.g. workspace reload). Builds the query editor
+    /// via [`Editor::single_line_windowless`].
+    pub fn new_windowless(delegate: D, cx: &mut Context<'_, Self>) -> Self {
+        let query_editor = cx.new(Editor::single_line_windowless);
+        Self::with_query_editor(delegate, query_editor, cx)
+    }
+
+    fn with_query_editor(
+        mut delegate: D,
+        query_editor: Entity<Editor>,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         delegate.on_attach(&query_editor);
         let subscription =
             cx.subscribe(

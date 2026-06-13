@@ -621,6 +621,12 @@ impl Editor {
         Self::new_inline(EditorMode::SingleLine, window, cx)
     }
 
+    /// Window-free counterpart to [`Self::single_line`], for restore
+    /// paths that have no window (e.g. workspace reload).
+    pub(crate) fn single_line_windowless(cx: &mut Context<'_, Self>) -> Self {
+        Self::new_inline_windowless(EditorMode::SingleLine, cx)
+    }
+
     /// Convenience constructor for an empty-buffer editor in
     /// [`EditorMode::AutoHeight`] capped at `max_lines`.
     pub fn auto_height(

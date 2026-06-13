@@ -1327,6 +1327,46 @@ impl Workspace {
                         });
                         materialized += 1;
                     },
+                    crate::item::ItemKind::CommitList => {
+                        use crate::picker::PickerDelegate;
+                        let git = cx.global::<crate::globals::GitHostGlobal>().0.clone();
+                        let Some(repo) = git.discover(&self.git_root) else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping commit list: not in a git repo during restore"
+                            );
+                            continue;
+                        };
+                        let Some(workdir) = repo.workdir() else {
+                            tracing::info!(
+                                pane_id = ?pane_id,
+                                "skipping commit list: git repo has no workdir during restore"
+                            );
+                            continue;
+                        };
+                        let snapshot: stoat::commit_list::CommitListSnapshot =
+                            serde_json::from_value(snap.blob.clone()).unwrap_or_default();
+                        let inner = {
+                            let mut inner = stoat::commit_list::CommitListState::new(workdir);
+                            inner.apply_snapshot(snapshot);
+                            inner
+                        };
+                        let state = cx.new(|_| crate::commit_list::CommitListState::new(inner));
+                        let buffer_registry = self.buffer_registry.clone();
+                        let item = cx.new(|cx| {
+                            crate::commit_list::CommitListItem::restored(state, buffer_registry, cx)
+                        });
+                        let picker = item.read(cx).picker().clone();
+                        picker.update(cx, |p, picker_cx| {
+                            p.delegate_mut()
+                                .update_matches(String::new(), picker_cx)
+                                .detach();
+                        });
+                        pane.update(cx, |p, cx| {
+                            p.add_item(Box::new(item), cx);
+                        });
+                        materialized += 1;
+                    },
                     crate::item::ItemKind::Terminal => {
                         let cwd = snap
                             .blob
@@ -18400,6 +18440,76 @@ mod tests {
                 "markdown preview restores with its source path"
             );
         });
+    }
+
+    #[test]
+    fn save_then_restore_round_trips_commit_list_selection() {
+        use crate::globals::{
+            ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, GitHostGlobal, LanguageRegistry,
+        };
+        use stoat::host::{fake::FakeGit, FsHost, FsWatchHost, GitHost};
+        use stoat_scheduler::TestScheduler;
+
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        let git = Arc::new(FakeGit::new());
+        seed_commits(&git, "/tmp/repo", 5);
+        let scheduler = Arc::new(TestScheduler::new());
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs.clone() as Arc<dyn FsHost>));
+            cx.set_global(FsWatchHostGlobal(
+                Arc::new(stoat_host::FakeFsWatcher::new()) as Arc<dyn FsWatchHost>,
+            ));
+            cx.set_global(ExecutorGlobal(scheduler.executor()));
+            cx.set_global(GitHostGlobal(git.clone() as Arc<dyn GitHost>));
+            cx.set_global(LanguageRegistry::standard());
+        });
+
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        dispatch(&ws, vcx, stoat_action::OpenCommits);
+        settle_commits(&scheduler, vcx);
+
+        let item = active_pane_commit_list(vcx, &ws).expect("commit list installed");
+        let picker = item.read_with(vcx, |item, _| item.picker().clone());
+        picker.update(vcx, |p, cx| p.set_selected_index(2, cx));
+        settle_commits(&scheduler, vcx);
+
+        let saved_sha = item.read_with(vcx, |item, cx| {
+            item.state()
+                .read(cx)
+                .inner()
+                .selected_sha()
+                .map(String::from)
+        });
+        assert!(
+            saved_sha.is_some(),
+            "a commit must be selected before saving"
+        );
+
+        let path = PathBuf::from("/tmp/state/commit-list-round-trip.ron");
+        let fs_dyn: Arc<dyn FsHost> = fs.clone();
+        ws.read_with(vcx, |w, cx| {
+            w.save_state(&path, &*fs_dyn, cx).expect("save");
+        });
+
+        let (fresh_ws, vcx2) = new_workspace_in_window(&mut cx, "other", "/elsewhere");
+        fresh_ws.update(vcx2, |w, cx| {
+            w.restore_state(&path, &*fs_dyn, cx).expect("restore");
+        });
+        settle_commits(&scheduler, vcx2);
+
+        let restored = active_pane_commit_list(vcx2, &fresh_ws).expect("commit list restored");
+        let restored_sha = restored.read_with(vcx2, |item, cx| {
+            item.state()
+                .read(cx)
+                .inner()
+                .selected_sha()
+                .map(String::from)
+        });
+        assert_eq!(
+            restored_sha, saved_sha,
+            "restored commit list re-selects the saved commit"
+        );
     }
 
     #[test]
