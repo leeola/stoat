@@ -50,7 +50,7 @@ use crate::{
             YankToClipboard,
         },
         encoding::OpenEncodingPicker,
-        file::OpenFile,
+        file::{OpenConfig, OpenFile},
         file_finder::{
             FileFinderScopeToggle, FileFinderSelectNext, FileFinderSelectPrev, OpenBufferPicker,
             OpenChangedFilePicker, OpenConflictPicker, OpenFileFinder, OpenFileFinderHSplit,
@@ -654,6 +654,7 @@ fn init() -> HashMap<&'static str, RegistryEntry> {
             path: PathBuf::from(raw),
         }))
     });
+    add(OpenConfig::DEF, |_| Ok(Box::new(OpenConfig)));
     add(OpenRun::DEF, |_| Ok(Box::new(OpenRun)));
     add(OpenTerminalDock::DEF, |_| Ok(Box::new(OpenTerminalDock)));
     add(OpenClaudeTerminal::DEF, |_| {
@@ -1096,6 +1097,7 @@ mod tests {
         "ConflictApply",
         "ConflictAbort",
         "run",
+        "open-config",
         "terminal-dock",
         "claude-terminal",
         "terminal",
@@ -1371,7 +1373,8 @@ mod tests {
         // + 1 Screenshot (capture the window to an image file).
         // + 1 QuitForce (quit! / q!, force-quit discarding unsaved buffers).
         // + 1 WriteQuit (write-quit / wq / x, save then quit).
-        assert_eq!(all().count(), 349);
+        // + 1 OpenConfig (open-config / config-open).
+        assert_eq!(all().count(), 350);
     }
 
     #[test]

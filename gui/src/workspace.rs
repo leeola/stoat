@@ -2882,6 +2882,7 @@ impl Workspace {
             ActionKind::ToggleOutlinePanel => self.dispatch_toggle_outline_panel(cx),
             ActionKind::ToggleDiagnosticsPanel => self.dispatch_toggle_diagnostics_panel(cx),
             ActionKind::OpenMarkdownPreview => self.dispatch_open_markdown_preview(cx),
+            ActionKind::OpenConfig => self.handle_open_config(cx),
             ActionKind::ProjectTreeSelectNext => {
                 self.update_project_tree(cx, ProjectTree::select_next)
             },
@@ -4305,6 +4306,34 @@ impl Workspace {
         pane.update(cx, |p, cx| {
             p.add_item(Box::new(preview), cx);
         });
+    }
+
+    /// Handle the `open-config` action: open the user config file in the
+    /// focused pane. Resolves [`stoat_config::user_config_path`] and
+    /// delegates to [`Self::open_config_at`]. Logs and does nothing when
+    /// the path cannot be resolved.
+    fn handle_open_config(&mut self, cx: &mut Context<'_, Self>) {
+        let Some(path) = stoat_config::user_config_path() else {
+            tracing::warn!("could not resolve user config path; not opening config");
+            return;
+        };
+        self.open_config_at(path, cx);
+    }
+
+    /// Create `path`'s parent directory, then open `path` through the
+    /// normal file-open path. Pre-creating the parent lets a first save
+    /// of a not-yet-existing config succeed. The missing file itself
+    /// opens as an empty file-backed buffer. Logs and does nothing when
+    /// the directory cannot be created.
+    fn open_config_at(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
+        let fs = cx.global::<FsHostGlobal>().0.clone();
+        if let Some(parent) = path.parent() {
+            if let Err(err) = fs.create_dir_all(parent) {
+                tracing::warn!(path = %parent.display(), ?err, "could not create config dir; not opening config");
+                return;
+            }
+        }
+        self.open_paths(&[path], cx);
     }
 
     /// Resolve the project tree hosted in a left dock, if one is open.
@@ -10279,6 +10308,36 @@ mod tests {
             })
         });
         assert!(has_preview, "a pane should host the markdown preview");
+    }
+
+    #[test]
+    fn open_config_at_creates_parent_dir_and_opens_editor() {
+        use stoat::host::FsHost;
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        let path = PathBuf::from("/tmp/cfg/stoat/config.stcfg");
+        ws.update(vcx, |w, cx| w.open_config_at(path.clone(), cx));
+        vcx.run_until_parked();
+
+        assert!(
+            (*fs).exists(Path::new("/tmp/cfg/stoat")),
+            "the parent directory is created so a first save can land"
+        );
+        let opened = ws.read_with(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            w.pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .read(cx)
+                .active_item()
+                .and_then(|item| item.to_any_view().downcast::<Editor>().ok())
+                .and_then(|editor| editor.read(cx).file_path().map(Path::to_path_buf))
+        });
+        assert_eq!(opened, Some(path), "the config opens in the focused pane");
     }
 
     #[test]

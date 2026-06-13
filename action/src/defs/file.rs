@@ -1,4 +1,6 @@
-use crate::{Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind};
+use crate::{
+    action::define_action, Action, ActionDef, ActionKind, ActionPriority, ParamDef, ParamKind,
+};
 use serde::Deserialize;
 use std::{any::Any, path::PathBuf};
 
@@ -61,9 +63,29 @@ impl Action for OpenFile {
     }
 }
 
+define_action!(
+    OpenConfigDef,
+    OpenConfig,
+    "open-config",
+    ActionKind::OpenConfig,
+    "open the user config file",
+    "Open the user config at $XDG_CONFIG_HOME/stoat/config.stcfg in the focused pane, creating its parent directory if absent so a first save succeeds. A not-yet-existing config opens as an empty buffer.",
+    ActionPriority::Common,
+    true,
+    &["config-open"]
+);
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn open_config_kind_and_name() {
+        assert_eq!(OpenConfig.kind(), ActionKind::OpenConfig);
+        assert_eq!(OpenConfig.def().name(), "open-config");
+        assert!(OpenConfig.def().params().is_empty());
+        assert_eq!(OpenConfig.def().aliases(), &["config-open"]);
+    }
 
     #[test]
     fn open_file_kind_and_name() {
