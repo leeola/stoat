@@ -449,19 +449,37 @@ impl Keymap {
         results
     }
 
-    /// The key chord that invokes `action_name`, as a display label
-    /// (e.g. `"Spc p"`, `"z c"`, `":"`). Submode prefixes are
-    /// reconstructed by tracing `SetMode` bindings back to the base
-    /// `normal` mode. `None` when no binding maps to the action. The
-    /// first binding in config order wins, so a direct normal-mode
-    /// binding takes precedence over a deeper submode one.
+    /// The first chord that invokes `action_name`, or `None` when none does.
+    ///
+    /// The first element of [`Self::chords_for_action`]: the earliest
+    /// binding in config order whose mode is reachable, so a direct
+    /// normal-mode binding takes precedence over a deeper submode one.
     pub fn chord_for_action(&self, action_name: &str) -> Option<String> {
-        let binding = self
-            .bindings
-            .iter()
-            .find(|b| b.actions.iter().any(|a| a.name == action_name))?;
-        let prefix = self.mode_entry_prefix(binding_mode(binding), 0)?;
-        Some(join_chord(prefix, &binding.key.display_label()))
+        self.chords_for_action(action_name).into_iter().next()
+    }
+
+    /// Every chord that invokes `action_name`, as display labels
+    /// (e.g. `["Spc p"]`), in config order.
+    ///
+    /// Submode prefixes are reconstructed by tracing `SetMode` bindings back
+    /// to the base `normal` mode; a binding whose mode has no reachable
+    /// `SetMode` chain is skipped, and identical labels are deduped. Empty
+    /// when no binding maps to the action.
+    pub fn chords_for_action(&self, action_name: &str) -> Vec<String> {
+        let mut labels = Vec::new();
+        for binding in &self.bindings {
+            if !binding.actions.iter().any(|a| a.name == action_name) {
+                continue;
+            }
+            let Some(prefix) = self.mode_entry_prefix(binding_mode(binding), 0) else {
+                continue;
+            };
+            let label = join_chord(prefix, &binding.key.display_label());
+            if !labels.contains(&label) {
+                labels.push(label);
+            }
+        }
+        labels
     }
 
     /// The chord that switches into `mode` from the base mode; empty
@@ -743,11 +761,15 @@ mod tests {
             r#"on key {
                 mode == normal {
                     : -> OpenCommandPalette();
+                    a -> Increment();
+                    x -> Yank();
+                    x -> Yank();
                     Space -> SetMode(space);
                     z -> SetMode(z);
                 }
                 mode == space {
                     p -> OpenFileFinder();
+                    i -> Increment();
                     b -> SetMode(space_buffer);
                 }
                 mode == space_buffer { n -> OpenBufferPicker(); }
@@ -777,6 +799,28 @@ mod tests {
             "submode action keeps its entry key"
         );
         assert_eq!(keymap.chord_for_action("Unbound"), None);
+
+        assert_eq!(
+            keymap.chords_for_action("Increment"),
+            ["a", "Spc i"],
+            "every chord, in config order"
+        );
+        assert_eq!(
+            keymap.chord_for_action("Increment").as_deref(),
+            Some("a"),
+            "chord_for_action is the first of chords_for_action"
+        );
+        assert_eq!(
+            keymap.chords_for_action("Yank"),
+            ["x"],
+            "identical labels are deduped"
+        );
+        assert_eq!(
+            keymap.chords_for_action("OpenBufferPicker"),
+            ["Spc b n"],
+            "a singly-bound nested action yields a one-element list"
+        );
+        assert!(keymap.chords_for_action("Unbound").is_empty());
     }
 
     #[test]
