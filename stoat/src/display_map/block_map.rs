@@ -1600,8 +1600,27 @@ fn sync_incremental(
                 new_transforms.push(item.clone(), ());
                 cursor.next();
 
+                // Preserve below blocks at the boundary, but only those that
+                // still resolve to it. A growing edit can shift a block off this
+                // boundary (a trailing block clamped past the old buffer end
+                // resolves to a real row once the edit makes that row exist);
+                // preserving its stale copy here would duplicate the block,
+                // which the discard + reconstruction below re-emits at its new
+                // position. Such a moved block is left for that path.
+                let boundary = new_transforms.extent::<InputRow>(()).0;
                 while let Some(item) = cursor.item() {
-                    if item.block.as_ref().is_some_and(|b| b.place_below()) {
+                    let stays = item.block.as_ref().is_some_and(|b| {
+                        b.place_below()
+                            && match b {
+                                Block::Custom(c) => {
+                                    resolve_block_placement(c.placement, wrap_snapshot)
+                                        .start_wrap_row()
+                                        == boundary
+                                },
+                                _ => true,
+                            }
+                    });
+                    if stays {
                         new_transforms.push(item.clone(), ());
                         cursor.next();
                     } else {
@@ -2782,6 +2801,49 @@ mod tests {
             lines(&incremental),
             lines(&full),
             "shrinking edit with overlapping replace must match full rebuild"
+        );
+    }
+
+    /// A growing edit that inserts rows at a boundary holding trailing below
+    /// blocks must not duplicate them. The blocks (placed past the old
+    /// buffer's last row, so clamped to its trailing position) resolve to a
+    /// real row once the edit makes that row exist; the incremental sync must
+    /// emit them once at the new position, not also preserve a stale copy at
+    /// the old boundary.
+    #[test]
+    fn incremental_growing_edit_moves_trailing_below_block() {
+        let wrap_pre = create_wrap_snapshot("a");
+        let wrap_post = create_wrap_snapshot("a\nb\nc");
+        let blocks = vec![
+            text_block(BlockPlacement::Near(1), "N\nN"),
+            text_block(BlockPlacement::Below(1), "B"),
+        ];
+
+        let mut incremental = BlockMap::new();
+        incremental.insert(blocks.clone());
+        incremental.sync(wrap_pre, &Patch::empty(), None);
+        let incremental = incremental.sync(
+            wrap_post.clone(),
+            &Patch::new(vec![Edit {
+                old: 1..1,
+                new: 1..3,
+            }]),
+            None,
+        );
+
+        let mut full = BlockMap::new();
+        full.insert(blocks);
+        let full = full.sync(wrap_post, &Patch::empty(), None);
+
+        let lines = |snap: &BlockSnapshot| {
+            (0..snap.total_lines())
+                .map(|r| snap.display_line(r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&incremental),
+            lines(&full),
+            "growing edit must not duplicate moved trailing blocks"
         );
     }
 
