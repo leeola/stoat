@@ -1752,6 +1752,12 @@ impl Workspace {
                 },
             }
         }
+        cx.subscribe(&buffer, |this, buffer, event, cx| {
+            if matches!(event, crate::BufferEvent::Saved) {
+                this.reload_config_on_save(&buffer, cx);
+            }
+        })
+        .detach();
         self.fs_watcher_driver.update(cx, |driver, _| {
             driver.track(path, buffer);
         });
@@ -4394,6 +4400,34 @@ impl Workspace {
         cx.set_global(settings);
         cx.set_global(theme);
         self.show_toast(Toast::success("Config reloaded"), cx);
+    }
+
+    /// Reruns [`Self::handle_reload_config`] when a saved buffer is the
+    /// user config and `auto_reload_config` is enabled.
+    ///
+    /// Wired per file-backed buffer in [`Self::register_buffer_watch`].
+    fn reload_config_on_save(&mut self, buffer: &Entity<Buffer>, cx: &mut Context<'_, Self>) {
+        let config_path = stoat_config::user_config_path();
+        let saved_path = buffer.read(cx).file_path().map(Path::to_path_buf);
+        let auto_reload = cx
+            .try_global::<Settings>()
+            .is_none_or(|s| s.resolved.auto_reload_config.unwrap_or(true));
+        if Self::should_reload_on_save(saved_path.as_deref(), config_path.as_deref(), auto_reload) {
+            self.handle_reload_config(cx);
+        }
+    }
+
+    /// Whether saving `saved` should trigger a config reload.
+    ///
+    /// Returns true only when `auto_reload` is on and `saved` equals the
+    /// resolved `config` path. A path-less buffer or an unresolved
+    /// `config` never reloads.
+    fn should_reload_on_save(
+        saved: Option<&Path>,
+        config: Option<&Path>,
+        auto_reload: bool,
+    ) -> bool {
+        auto_reload && saved.is_some() && saved == config
     }
 
     /// Resolve the project tree hosted in a left dock, if one is open.
@@ -10451,6 +10485,34 @@ mod tests {
                 .any(|t| matches!(t.kind, crate::toast::ToastKind::Warning))
         });
         assert!(warned, "an unparseable user config raises a warning toast");
+    }
+
+    #[test]
+    fn should_reload_on_save_only_for_enabled_config_path() {
+        let config = Path::new("/cfg/stoat/config.stcfg");
+        let other = Path::new("/cfg/notes.txt");
+
+        assert!(Workspace::should_reload_on_save(
+            Some(config),
+            Some(config),
+            true
+        ));
+        assert!(
+            !Workspace::should_reload_on_save(Some(other), Some(config), true),
+            "a non-config save does not reload"
+        );
+        assert!(
+            !Workspace::should_reload_on_save(Some(config), Some(config), false),
+            "auto_reload off suppresses the reload"
+        );
+        assert!(
+            !Workspace::should_reload_on_save(None, Some(config), true),
+            "a path-less buffer does not reload"
+        );
+        assert!(
+            !Workspace::should_reload_on_save(Some(config), None, true),
+            "an unresolved config path does not reload"
+        );
     }
 
     #[test]
