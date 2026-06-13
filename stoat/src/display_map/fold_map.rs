@@ -870,7 +870,9 @@ fn sync_fold_incremental(
     inlay_edits: &Patch<u32>,
     resolved_folds: &SumTree<Fold>,
 ) -> (SumTree<Transform>, Patch<u32>) {
-    let total_len = inlay_snapshot.total_summary().len;
+    let total_summary = inlay_snapshot.total_summary();
+    let total_len = total_summary.len;
+    let inlay_line_count = total_summary.lines.row + 1;
 
     let row_to_offset = |row: u32| -> usize { inlay_snapshot.inlay_offset_at_row(row).0 };
 
@@ -1055,8 +1057,17 @@ fn sync_fold_incremental(
             }
         }
 
+        // Exclusive fold-row end of the rebuilt region. Cover one row past
+        // `new_out.row` when its landing row holds edit-touched content: either
+        // the region ended mid-row (`column > 0`), or it reached the buffer's
+        // last inlay row (`edit.new.end >= inlay_line_count`), where a newline
+        // appended at end-of-buffer grows an empty trailing row that still needs
+        // invalidating. An edit ending on an interior boundary leaves that row
+        // unchanged and preserved by the suffix, so `new_out.row` is already the
+        // end; `max` keeps a zero-row edit's span non-empty. Mirrors the inlay
+        // layer's coverage -- under-spanning drops the tail row downstream.
         let new_out = new_transforms.summary().output.lines;
-        let new_fold_end = if new_out.column > 0 {
+        let new_fold_end = if new_out.column > 0 || edit.new.end >= inlay_line_count {
             new_out.row + 1
         } else {
             new_out.row.max(new_fold_start + 1)

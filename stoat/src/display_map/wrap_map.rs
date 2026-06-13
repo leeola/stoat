@@ -1658,6 +1658,66 @@ mod tests {
         assert_eq!(wrap_edits, tab_edits);
     }
 
+    /// Incrementally sync `initial` -> edited through the full
+    /// inlay->fold->tab->wrap pipeline and return the wrap snapshot alongside
+    /// the buffer's true line count.
+    fn wrap_after_edit(
+        initial: &str,
+        range: std::ops::Range<usize>,
+        insert: &str,
+    ) -> (Arc<super::WrapSnapshot>, u32) {
+        let buffer = TextBuffer::with_text(BufferId::new(0), initial);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+
+        let snap0 = multi_buffer.snapshot();
+        let v0 = snap0.version();
+        let (mut inlay_map, inlay0) = InlayMap::new(snap0);
+        let (mut fold_map, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab0, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab0, None, test_executor());
+
+        multi_buffer
+            .as_singleton()
+            .unwrap()
+            .write()
+            .unwrap()
+            .edit(range, insert);
+
+        let snap1 = multi_buffer.snapshot();
+        let true_rows = snap1.line_count();
+        let buffer_edits = snap1.edits_since(v0);
+        let (inlay1, inlay_edits) = inlay_map.sync(snap1, &buffer_edits);
+        let (fold1, fold_edits) = fold_map.sync(inlay1, &inlay_edits);
+        let (tab1, tab_edits) = tab_map.sync(fold1, fold_edits);
+        let (wrap1, _) = wrap_map.sync(tab1, &tab_edits);
+        (wrap1, true_rows)
+    }
+
+    #[test]
+    fn boundary_newline_insert_covers_trailing_row() {
+        // A newline-terminated insert grows the buffer by a trailing row that
+        // holds the tail shifted down by the edit. The incremental row patch
+        // must cover that row, or the unwrapped wrap snapshot's row count lags
+        // the buffer. End-of-buffer appends are the case the fold layer's
+        // column-zero branch under-covered.
+        for (initial, range, insert) in [
+            ("", 0..0, "\n"),
+            ("a", 1..1, "\n"),
+            ("ab\ncd", 5..5, "\n"),
+            ("x\ny\nz", 5..5, "\n"),
+        ] {
+            let (wrap, true_rows) = wrap_after_edit(initial, range.clone(), insert);
+            wrap.check_invariants();
+            assert_eq!(
+                wrap.line_count(),
+                true_rows,
+                "incremental wrap rows must match buffer for {initial:?} + {insert:?} at {range:?}"
+            );
+        }
+    }
+
     fn test_executor() -> Executor {
         Executor::new(Arc::new(TestScheduler::new()))
     }
