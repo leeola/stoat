@@ -1696,6 +1696,24 @@ fn sync_incremental(
             cursor.next();
         }
 
+        // A shrinking edit can push blocks past the new buffer end, where a
+        // static placement clamps to the trailing row. The suffix would carry
+        // them at their stale edit-shifted positions instead, mis-placing and
+        // dropping rows. On the last edit (the clamped blocks sit after every
+        // edit), reconstruct through to the buffer end so they re-resolve to
+        // the clamped trailing position; the cursor consumes the rest of the
+        // old tree so the suffix adds nothing. Earlier edits must leave the
+        // cursor in place for the following edit's slice.
+        if new_end < wrap_line_count
+            && edits.peek().is_none()
+            && blocks
+                .iter()
+                .any(|(bp, _)| bp.start_row() >= wrap_line_count)
+        {
+            new_end = wrap_line_count;
+            cursor.seek(&InputRow(u32::MAX), Bias::Right);
+        }
+
         // Discard below/spacer blocks at edit end; they are reconstructed
         // below. An interior Above at the boundary belongs to the next region
         // and must survive (matching Zed lines 980-991). At the buffer end
@@ -2903,6 +2921,52 @@ mod tests {
             lines(&incremental),
             lines(&full),
             "growing edit must not duplicate a straddling replace"
+        );
+    }
+
+    /// A shrinking edit that pushes blocks past the new buffer end (their
+    /// static rows now clamp to the trailing position) must place them all
+    /// after the last buffer row, not at their edit-shifted positions, and
+    /// must not drop any. The incremental sync must reconstruct the trailing
+    /// region rather than carry the stale shifted copies in the suffix.
+    #[test]
+    fn incremental_shrinking_edit_clamps_trailing_blocks() {
+        let wrap_pre = create_wrap_snapshot("\n\n\nab\n\na");
+        let wrap_post = create_wrap_snapshot("\nab\n\na");
+        let blocks = vec![
+            text_block(BlockPlacement::Above(2), "x\nx"),
+            text_block(BlockPlacement::Above(4), "x\nx"),
+            text_block(BlockPlacement::Below(5), "x\nx"),
+            text_block(BlockPlacement::Near(5), "x\nx"),
+            text_block(BlockPlacement::Above(5), "x\nx\nx"),
+            text_block(BlockPlacement::Near(5), "x"),
+        ];
+
+        let mut incremental = BlockMap::new();
+        incremental.insert(blocks.clone());
+        incremental.sync(wrap_pre, &Patch::empty(), None);
+        let incremental = incremental.sync(
+            wrap_post.clone(),
+            &Patch::new(vec![Edit {
+                old: 0..3,
+                new: 0..1,
+            }]),
+            None,
+        );
+
+        let mut full = BlockMap::new();
+        full.insert(blocks);
+        let full = full.sync(wrap_post, &Patch::empty(), None);
+
+        let lines = |snap: &BlockSnapshot| {
+            (0..snap.total_lines())
+                .map(|r| snap.display_line(r))
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(
+            lines(&incremental),
+            lines(&full),
+            "shrinking edit must clamp trailing blocks like a full rebuild"
         );
     }
 
