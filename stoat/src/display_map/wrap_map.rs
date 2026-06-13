@@ -407,6 +407,11 @@ impl WrapMap {
     /// wrap) but adopts the new width so the change is not re-detected on the
     /// next sync; [`Self::poll_background_task`] installs the rewrapped snapshot,
     /// whose width matches, clearing the dirty state.
+    ///
+    /// Enabling wrapping (`None` to `Some`) leaves isomorphic transforms with no
+    /// wrap columns, which the wrapped render path cannot index. The interim
+    /// rows are re-expressed as 1:1 identity transforms so it renders unwrapped
+    /// until the rewrap installs the real columns.
     fn spawn_width_rewrap(&mut self, tab_snapshot: TabSnapshot) {
         self.background_task = None;
         self.pending_edits.clear();
@@ -419,6 +424,16 @@ impl WrapMap {
             new: 0..total,
         }]);
         let base = self.snapshot.clone();
+
+        if self.snapshot.wrap_width.is_none() {
+            let transforms = identity_wrapped_transforms(&tab_snapshot);
+            let s = transforms.summary();
+            self.snapshot.total_rows = s.output_rows;
+            self.snapshot.longest_row = s.longest_row;
+            self.snapshot.longest_row_chars = s.longest_row_chars;
+            self.snapshot.transforms = transforms;
+            self.snapshot.tab_snapshot = tab_snapshot.clone();
+        }
         self.snapshot.wrap_width = width;
 
         self.background_task = Some(self.spawn_rewrap(async move {
@@ -520,6 +535,31 @@ fn single_isomorphic_transform(
     transforms
 }
 
+/// One identity transform per tab row: each line maps to a single unwrapped
+/// output row whose only wrap column is the primary `0`. Used as the interim
+/// wrapped representation while a background rewrap computes the real columns.
+fn identity_wrapped_transforms(tab_snapshot: &TabSnapshot) -> SumTree<Transform> {
+    let mut transforms = SumTree::new(());
+    for tab_row in 0..tab_snapshot.line_count() {
+        let tab_line_len = tab_snapshot.line_len(tab_row);
+        transforms.push(
+            Transform {
+                summary: TransformSummary {
+                    input_rows: 1,
+                    output_rows: 1,
+                    longest_row: 0,
+                    longest_row_chars: tab_line_len,
+                },
+                wrap_columns: vec![0],
+                tab_line_len,
+                indent: 0,
+            },
+            (),
+        );
+    }
+    transforms
+}
+
 /// Clamp a tab-row patch to a `wrap_width = None` row count, returning the new
 /// row count and the wrap-row patch.
 ///
@@ -604,7 +644,7 @@ fn sync_incremental(
     let mut wrap_edits = Patch::empty();
 
     for edit in tab_edits {
-        new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
+        new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Right), ());
         let old_output_start = cursor.start().1 .0;
 
         cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);
@@ -836,7 +876,7 @@ impl WrapSnapshot {
         let mut wrap_edits = Patch::empty();
 
         for edit in tab_edits {
-            new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Left), ());
+            new_transforms.append(cursor.slice(&InputRow(edit.old.start), Bias::Right), ());
             let old_output_start = cursor.start().1 .0;
 
             cursor.seek_forward(&InputRow(edit.old.end), Bias::Right);
@@ -1219,6 +1259,56 @@ impl WrapSnapshot {
                 .transforms
                 .cursor::<Dimensions<InputRow, OutputRow>>(()),
             wrap_width: self.wrap_width,
+        }
+    }
+
+    #[cfg(test)]
+    fn check_invariants(&self) {
+        let summary = self.transforms.summary();
+        assert_eq!(
+            summary.input_rows,
+            self.tab_snapshot.line_count(),
+            "transform input rows must equal tab line count"
+        );
+        assert_eq!(
+            summary.output_rows, self.total_rows,
+            "transform output rows must equal cached total"
+        );
+
+        for transform in self.transforms.iter() {
+            let cols = &transform.wrap_columns;
+            if self.wrap_width.is_none() {
+                assert!(
+                    cols.is_empty(),
+                    "unwrapped transform must carry no wrap columns: {cols:?}"
+                );
+                continue;
+            }
+
+            assert!(
+                !cols.is_empty(),
+                "wrapped transform must carry wrap columns"
+            );
+
+            assert_eq!(
+                cols.len() as u32,
+                transform.summary.output_rows,
+                "wrap_columns must have one entry per output row"
+            );
+            assert_eq!(cols[0], 0, "first sub-row must start at column 0");
+
+            for window in cols.windows(2) {
+                assert!(
+                    window[0] < window[1],
+                    "wrap_columns must strictly increase: {cols:?}"
+                );
+            }
+
+            assert!(
+                *cols.last().unwrap() < transform.tab_line_len.max(1),
+                "wrap columns {cols:?} must stay under line len {}",
+                transform.tab_line_len
+            );
         }
     }
 }
@@ -2430,6 +2520,99 @@ mod tests {
             assert_eq!(
                 got, expected,
                 "char {idx}: got {got:?}, expected {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn incremental_wrap_keeps_rows_before_a_mid_buffer_edit() {
+        // A mid-buffer edit under wrapping must preserve every input row ahead
+        // of it. The start slice has to include the per-row transform ending
+        // exactly at the edit's first row, or that row is dropped.
+        let content = "aaaaaa\nbbbbbb\ncccccc\ndddddd\neeeeee\nffffff";
+        let buffer = TextBuffer::with_text(BufferId::new(0), content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared.clone());
+
+        let snap0 = multi_buffer.snapshot();
+        let v0 = snap0.version();
+        let (mut inlay_map, inlay0) = InlayMap::new(snap0);
+        let (mut fold_map, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab0, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab0, Some(4), test_executor());
+
+        // Replace one char inside row 3 (byte 21), leaving the row count fixed.
+        shared.write().unwrap().edit(21..22, "X");
+
+        let snap1 = multi_buffer.snapshot();
+        let buffer_edits = snap1.edits_since(v0);
+        let (inlay1, inlay_edits) = inlay_map.sync(snap1, &buffer_edits);
+        let (fold1, fold_edits) = fold_map.sync(inlay1, &inlay_edits);
+        let (tab1, tab_edits) = tab_map.sync(fold1, fold_edits);
+        assert!(!tab_edits.is_empty(), "the edit must produce tab edits");
+
+        let (incremental, _) = wrap_map.sync(tab1.clone(), &tab_edits);
+        incremental.check_invariants();
+
+        let full = super::build_snapshot(tab1, Some(4));
+        assert_eq!(incremental.line_count(), full.line_count());
+        for row in 0..full.line_count() {
+            assert_eq!(
+                incremental.line_len(row),
+                full.line_len(row),
+                "line_len mismatch at row {row}"
+            );
+        }
+    }
+
+    #[test]
+    fn enabling_wrap_on_large_buffer_renders_interim_snapshot() {
+        // Enabling wrapping on a buffer past WRAP_SYNC_THRESHOLD rewraps in the
+        // background. The interim snapshot adopts the new width while the rewrap
+        // runs, so its transforms must carry wrap columns the render path can
+        // walk rather than the unwrapped tree's empty ones.
+        let scheduler = Arc::new(TestScheduler::new());
+        let executor = Executor::new(scheduler.clone());
+
+        let content = "abcdefghij\n".repeat(120);
+        let buffer = TextBuffer::with_text(BufferId::new(0), &content);
+        let shared = Arc::new(RwLock::new(buffer));
+        let multi_buffer = MultiBuffer::singleton(BufferId::new(0), shared);
+
+        let snap0 = multi_buffer.snapshot();
+        let (_, inlay0) = InlayMap::new(snap0);
+        let (_, fold0) = FoldMap::new(inlay0);
+        let mut tab_map = TabMap::new(std::num::NonZeroU32::new(4).unwrap());
+        let (tab0, _) = tab_map.sync(fold0, Patch::empty());
+        let (mut wrap_map, _) = WrapMap::new(tab0.clone(), None, executor);
+
+        wrap_map.set_wrap_width(Some(4));
+        let (interim, _) = wrap_map.sync(tab0.clone(), &Patch::empty());
+        assert!(
+            wrap_map.is_dirty(),
+            "a large width change rewraps in the background"
+        );
+        interim.check_invariants();
+        for row in 0..interim.line_count() {
+            interim.display_line(row);
+        }
+
+        scheduler.run_until_parked();
+        let (flushed, _) = wrap_map.sync(tab0.clone(), &Patch::empty());
+        assert!(
+            !wrap_map.is_dirty(),
+            "the finished rewrap installs on an empty-edit sync"
+        );
+        flushed.check_invariants();
+
+        let full = super::build_snapshot(tab0, Some(4));
+        assert_eq!(flushed.line_count(), full.line_count());
+        for row in 0..full.line_count() {
+            assert_eq!(
+                flushed.line_len(row),
+                full.line_len(row),
+                "line_len mismatch at row {row}"
             );
         }
     }
