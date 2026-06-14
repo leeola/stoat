@@ -1,7 +1,7 @@
 use clap::{ArgAction, Parser, Subcommand};
-use snafu::Whatever;
+use snafu::{ResultExt, Whatever};
 use std::{
-    io::{self, IsTerminal, Read},
+    io::{self, IsTerminal, Read, Write},
     path::PathBuf,
 };
 
@@ -44,6 +44,13 @@ pub struct Args {
     /// no app is running or that session is not live.
     #[arg(long, value_name = "ID", conflicts_with_all = ["continue_", "inputs", "timeout"])]
     pub session: Option<u64>,
+
+    /// Write the text of buffer `ID` in the chosen session (the cwd-matched
+    /// one, or `--session`) to stdout and exit, without opening a window. The
+    /// read counterpart to piping stdin. Errors when no app is running or the
+    /// buffer is unknown.
+    #[arg(long, value_name = "ID", conflicts_with_all = ["files", "new", "continue_", "inputs", "timeout"])]
+    pub buffer: Option<u64>,
 
     /// Drive a vim-style keystroke sequence into the window once it is ready,
     /// e.g. `--inputs ":wq<Enter>"`. Lets a headless run exercise interactive
@@ -96,10 +103,19 @@ pub fn run() -> Result<(), Whatever> {
         continue_,
         new,
         session,
+        buffer,
         inputs,
         timeout,
         ..
     } = Args::parse();
+
+    if let Some(id) = buffer {
+        let text = crate::commands::client::read_buffer_from_app(id, session)?;
+        io::stdout()
+            .write_all(text.as_bytes())
+            .whatever_context("write buffer text to stdout")?;
+        return Ok(());
+    }
 
     let restore = if continue_ {
         stoat_gui::RestoreMode::Continue
@@ -185,6 +201,27 @@ mod tests {
     #[test]
     fn session_conflicts_with_continue() {
         assert!(Args::try_parse_from(["stoat", "--session", "5", "--continue"]).is_err());
+    }
+
+    #[test]
+    fn buffer_parses_an_id() {
+        let args = Args::try_parse_from(["stoat", "--buffer", "7"]).expect("--buffer parses");
+        assert_eq!(args.buffer, Some(7));
+    }
+
+    #[test]
+    fn buffer_conflicts_with_files_and_launch_flags() {
+        assert!(Args::try_parse_from(["stoat", "--buffer", "7", "foo.txt"]).is_err());
+        assert!(Args::try_parse_from(["stoat", "--buffer", "7", "--new"]).is_err());
+        assert!(Args::try_parse_from(["stoat", "--buffer", "7", "--timeout", "2"]).is_err());
+    }
+
+    #[test]
+    fn buffer_allows_session_targeting() {
+        let args = Args::try_parse_from(["stoat", "--buffer", "7", "--session", "5"])
+            .expect("--buffer with --session parses");
+        assert_eq!(args.buffer, Some(7));
+        assert_eq!(args.session, Some(5));
     }
 
     #[test]

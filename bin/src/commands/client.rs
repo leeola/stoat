@@ -125,6 +125,53 @@ async fn send_pipe_buffer(
     Ok(true)
 }
 
+/// Read buffer `buffer_id`'s text from a running Stoat app. `session` targets a
+/// session by uid; absent, the cwd-enclosing session is used.
+///
+/// Errors when no app is running, the session or buffer is unknown, or the
+/// reply is malformed. A read has no launch fallback -- there is nothing to
+/// read without a live app.
+pub fn read_buffer_from_app(buffer_id: u64, session: Option<u64>) -> Result<String, Whatever> {
+    let socket = stoat_log::app_socket_path().whatever_context("resolve app socket path")?;
+    let cwd = std::env::current_dir().whatever_context("resolve current directory")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .whatever_context("build client runtime")?;
+    runtime.block_on(send_read_buffer(&socket, &cwd, buffer_id, session))
+}
+
+async fn send_read_buffer(
+    socket: &Path,
+    cwd: &Path,
+    buffer_id: u64,
+    session: Option<u64>,
+) -> Result<String, Whatever> {
+    let stream = match UnixStream::connect(socket).await {
+        Ok(stream) => stream,
+        Err(_) => whatever!("--buffer: no Stoat app is running"),
+    };
+    let cwd_str = cwd
+        .to_str()
+        .whatever_context("current directory is not valid UTF-8")?;
+    let scheduler = Arc::new(TokioScheduler::new(tokio::runtime::Handle::current()));
+    let (peer, _incoming) = JsonRpcPeer::connect_unix(stream, &scheduler.executor());
+
+    let mut params = serde_json::json!({ "cwd": cwd_str, "buffer_id": buffer_id });
+    if let Some(id) = session {
+        params["session"] = serde_json::Value::from(id);
+    }
+    let result = peer
+        .request("read_buffer", Some(params))
+        .await
+        .whatever_context("read_buffer request failed")?;
+    let text = result
+        .get("text")
+        .and_then(serde_json::Value::as_str)
+        .whatever_context("read_buffer reply missing text")?;
+    Ok(text.to_string())
+}
+
 /// Resolve `path` against `cwd`, mirroring the editor's path handling: an
 /// absolute path is used as-is, a relative one is joined onto `cwd`. Symlinks
 /// are not resolved.
