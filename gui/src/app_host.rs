@@ -9,9 +9,9 @@
 
 use crate::workspace::Workspace;
 use gpui::{AnyWindowHandle, App, Entity, Global};
-use std::path::Path;
+use std::{path::Path, sync::Arc};
 use stoat::workspace::WorkspaceUid;
-use stoat_agent_claude_code::jsonrpc;
+use stoat_agent_claude_code::jsonrpc::{self, IncomingRequest, RpcError};
 use stoat_scheduler::{Executor, Task};
 
 /// A live editor session: one workspace and the windows presenting it.
@@ -120,7 +120,15 @@ impl AppHost {
                 return;
             },
         };
-        match jsonrpc::serve_unix(&path, executor) {
+        let handler = Arc::new(|request: IncomingRequest| {
+            let message = format!("method not found: {}", request.method);
+            let _ = request.respond(Err(RpcError {
+                code: jsonrpc::METHOD_NOT_FOUND,
+                message,
+                data: None,
+            }));
+        });
+        match jsonrpc::serve_unix(&path, executor, handler) {
             Ok(task) => self._ipc = Some(task),
             Err(err) => {
                 tracing::warn!(%err, ?path, "binding the app socket failed; IPC disabled")

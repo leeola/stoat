@@ -360,8 +360,9 @@ impl Responder {
     }
 }
 
-/// JSON-RPC 2.0 reserved code for an unrecognized method.
-const METHOD_NOT_FOUND: i64 = -32601;
+/// JSON-RPC 2.0 reserved code for an unrecognized method. Handlers answer
+/// unknown methods with this code.
+pub const METHOD_NOT_FOUND: i64 = -32601;
 
 /// Bind a listener at `path`, clearing a stale socket left by a crashed
 /// process so a fresh process can take over the well-known path.
@@ -395,16 +396,19 @@ pub fn bind_unix(path: &Path) -> io::Result<std::os::unix::net::UnixListener> {
 }
 
 /// Bind the singleton app IPC socket at `path` and accept client connections
-/// on `executor`, returning the task that owns the accept loop.
+/// on `executor`, routing every inbound request to `handler`.
 ///
-/// Every inbound request is answered with a method-not-found error and
-/// notifications are dropped until session verbs are registered -- the
-/// correct reply for a server exposing no methods yet. Binding (and its
-/// stale-socket replacement, see [`bind_unix`]) happens synchronously so a
+/// `handler` is shared across all connections; it answers each request, either
+/// inline or by handing it to another thread. Binding (and its stale-socket
+/// replacement, see [`bind_unix`]) happens synchronously so a
 /// live-socket conflict surfaces to the caller; the returned task must be held
 /// for the process lifetime, as dropping it stops accepting and releases the
 /// socket.
-pub fn serve_unix(path: &Path, executor: &Executor) -> io::Result<Task<()>> {
+pub fn serve_unix(
+    path: &Path,
+    executor: &Executor,
+    handler: Arc<dyn Fn(IncomingRequest) + Send + Sync>,
+) -> io::Result<Task<()>> {
     let listener = bind_unix(path)?;
     listener.set_nonblocking(true)?;
 
@@ -423,7 +427,9 @@ pub fn serve_unix(path: &Path, executor: &Executor) -> io::Result<Task<()>> {
                 match listener.accept().await {
                     Ok((stream, _addr)) => {
                         let (peer, incoming) = JsonRpcPeer::connect_unix(stream, &executor);
-                        executor.spawn(serve_connection(peer, incoming)).detach();
+                        executor
+                            .spawn(serve_connection(peer, incoming, handler.clone()))
+                            .detach();
                     },
                     Err(err) => {
                         tracing::warn!(%err, "stoat app socket accept loop stopped");
@@ -436,28 +442,29 @@ pub fn serve_unix(path: &Path, executor: &Executor) -> io::Result<Task<()>> {
     Ok(task)
 }
 
-/// Hold one accepted connection's peer alive and answer every request with a
-/// method-not-found error, draining notifications, until the client
-/// disconnects. Session verbs replace this default handler in a later change.
-async fn serve_connection(_peer: JsonRpcPeer, incoming: Incoming) {
+/// Hold one accepted connection's peer alive and route each request to
+/// `handler`, draining notifications, until the client disconnects.
+///
+/// `handler` may answer inline or hand the request off to another thread --
+/// [`IncomingRequest`] is `Send` and its responder writes through a
+/// thread-safe channel, so the reply can come from wherever the request is
+/// ultimately processed.
+async fn serve_connection(
+    _peer: JsonRpcPeer,
+    incoming: Incoming,
+    handler: Arc<dyn Fn(IncomingRequest) + Send + Sync>,
+) {
     let Incoming {
         mut requests,
         mut notifications,
     } = incoming;
     loop {
         tokio::select! {
-            Some(request) = requests.recv() => {
-                let message = format!("method not found: {}", request.method);
-                let _ = request.respond(Err(RpcError {
-                    code: METHOD_NOT_FOUND,
-                    message,
-                    data: None,
-                }));
-            },
+            Some(request) = requests.recv() => handler(request),
             Some(notification) = notifications.recv() => {
                 tracing::debug!(
                     method = %notification.method,
-                    "app socket notification ignored (no verbs registered)",
+                    "app socket notification ignored",
                 );
             },
             else => break,
@@ -806,7 +813,15 @@ mod tests {
         let dir = tempfile::tempdir().expect("tempdir");
         let path = dir.path().join("app.sock");
 
-        let _server = serve_unix(&path, &executor).expect("bind app socket");
+        let handler = Arc::new(|request: IncomingRequest| {
+            let message = format!("method not found: {}", request.method);
+            let _ = request.respond(Err(RpcError {
+                code: METHOD_NOT_FOUND,
+                message,
+                data: None,
+            }));
+        });
+        let _server = serve_unix(&path, &executor, handler).expect("bind app socket");
         let stream = UnixStream::connect(&path).await.expect("client connects");
         let (client, _client_in) = JsonRpcPeer::connect_unix(stream, &executor);
 
