@@ -3,13 +3,14 @@ pub mod pty;
 pub mod term;
 pub mod vterm;
 
+pub use crate::link::LinkTarget;
 pub use key_encode::encode_key;
 pub use pty::{spawn_shell, PtyNotification, ShellHandle};
 use slotmap::new_key_type;
 use std::path::PathBuf;
 pub use vterm::{
-    encode_mouse_report, BlockStatus, CommandMark, CursorShape, GridSelection, LinkTarget,
-    MouseProtocol, OutputBlock, StyledCell, TermColor, TermModifier, TerminalLink, VtermGrid,
+    encode_mouse_report, BlockStatus, CommandMark, CursorShape, GridSelection, MouseProtocol,
+    OutputBlock, StyledCell, TermColor, TermModifier, TerminalLink, VtermGrid,
 };
 
 new_key_type! {

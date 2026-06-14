@@ -1,3 +1,4 @@
+use crate::link::LinkTarget;
 use base64::{engine::general_purpose::STANDARD, Engine};
 use regex::Regex;
 use std::{
@@ -1012,19 +1013,6 @@ pub fn encode_mouse_report(
 pub struct GridSelection {
     pub anchor: (u16, u16),
     pub head: (u16, u16),
-}
-
-/// A clickable target detected in the grid by [`VtermGrid::links`].
-#[derive(Clone, Debug, PartialEq, Eq)]
-pub enum LinkTarget {
-    /// An `http`/`https` URL.
-    Url(String),
-    /// A file path with an optional `line` and `column`.
-    Path {
-        path: String,
-        line: Option<u32>,
-        column: Option<u32>,
-    },
 }
 
 /// A detected link: the cells it spans and where it points.

@@ -18,6 +18,7 @@ pub mod host;
 pub mod jumplist;
 pub mod key;
 pub mod keymap;
+pub mod link;
 pub mod lsp;
 pub mod multi_buffer;
 pub mod pane;
