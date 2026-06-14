@@ -116,14 +116,17 @@ pub fn run() -> Result<(), Whatever> {
             // --inputs/--timeout drive a freshly spawned window, so they bypass
             // the route-into-a-running-app path.
             let drive = inputs.is_some() || timeout.is_some();
-            if !continue_
-                && !drive
-                && crate::commands::client::open_in_running_app(&files, new, session)?
-            {
-                Ok(())
-            } else {
-                crate::commands::gui::run(files, restore, stdin, inputs, timeout)
+            if !continue_ && !drive {
+                if crate::commands::client::open_in_running_app(&files, new, session)? {
+                    return Ok(());
+                }
+                if let Some(text) = &stdin {
+                    if crate::commands::client::pipe_to_running_app(text, new, session)? {
+                        return Ok(());
+                    }
+                }
             }
+            crate::commands::gui::run(files, restore, stdin, inputs, timeout)
         },
     }
 }

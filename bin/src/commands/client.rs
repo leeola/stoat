@@ -73,6 +73,58 @@ async fn send_open_file(
     Ok(true)
 }
 
+/// Hand piped `text` to a Stoat app already listening on the IPC socket,
+/// seeding a scratch buffer.
+///
+/// Returns `Ok(true)` when a live app accepted it -- the caller should exit.
+/// Returns `Ok(false)` when no app is listening, so the caller launches one
+/// instead. Errors when a connected app fails the request, or when `--session`
+/// targets a uid while no app is running.
+pub fn pipe_to_running_app(text: &str, new: bool, session: Option<u64>) -> Result<bool, Whatever> {
+    let socket = stoat_log::app_socket_path().whatever_context("resolve app socket path")?;
+    let cwd = std::env::current_dir().whatever_context("resolve current directory")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .whatever_context("build client runtime")?;
+    runtime.block_on(send_pipe_buffer(&socket, &cwd, text, new, session))
+}
+
+async fn send_pipe_buffer(
+    socket: &Path,
+    cwd: &Path,
+    text: &str,
+    new: bool,
+    session: Option<u64>,
+) -> Result<bool, Whatever> {
+    let stream = match UnixStream::connect(socket).await {
+        Ok(stream) => stream,
+        Err(_) => {
+            if let Some(id) = session {
+                whatever!("--session {id}: no Stoat app is running");
+            }
+            return Ok(false);
+        },
+    };
+    let cwd_str = cwd
+        .to_str()
+        .whatever_context("current directory is not valid UTF-8")?;
+    let scheduler = Arc::new(TokioScheduler::new(tokio::runtime::Handle::current()));
+    let (peer, _incoming) = JsonRpcPeer::connect_unix(stream, &scheduler.executor());
+
+    let mut params = serde_json::json!({ "cwd": cwd_str, "text": text });
+    if new {
+        params["new"] = serde_json::Value::Bool(true);
+    }
+    if let Some(id) = session {
+        params["session"] = serde_json::Value::from(id);
+    }
+    peer.request("pipe_buffer", Some(params))
+        .await
+        .whatever_context("pipe_buffer request failed")?;
+    Ok(true)
+}
+
 /// Resolve `path` against `cwd`, mirroring the editor's path handling: an
 /// absolute path is used as-is, a relative one is joined onto `cwd`. Symlinks
 /// are not resolved.
