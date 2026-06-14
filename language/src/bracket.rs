@@ -17,10 +17,10 @@ use stoat_text::Rope;
 pub fn match_bracket_target(rope: &Rope, head_offset: usize, tree: Option<&Tree>) -> Option<usize> {
     let ch = rope.chars_at(head_offset).next()?;
     let (open, close, forward) = bracket_pair(ch)?;
-    if let Some(t) = tree {
-        if is_in_string_or_comment(t, head_offset) {
-            return None;
-        }
+    if let Some(t) = tree
+        && is_in_string_or_comment(t, head_offset)
+    {
+        return None;
     }
     scan_bracket_match(rope, head_offset, ch, open, close, forward, tree)
 }

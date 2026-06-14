@@ -37,14 +37,14 @@ fn display_relative_with_home(path: &Path, context: &Path, home: Option<&Path>) 
             rel.to_string_lossy().into_owned()
         };
     }
-    if let Some(home) = home {
-        if let Ok(rel) = path.strip_prefix(home) {
-            return if rel.as_os_str().is_empty() {
-                "~".to_string()
-            } else {
-                format!("~/{}", rel.to_string_lossy())
-            };
-        }
+    if let Some(home) = home
+        && let Ok(rel) = path.strip_prefix(home)
+    {
+        return if rel.as_os_str().is_empty() {
+            "~".to_string()
+        } else {
+            format!("~/{}", rel.to_string_lossy())
+        };
     }
     path.to_string_lossy().into_owned()
 }

@@ -692,10 +692,10 @@ impl CommandPaletteDelegate {
     /// history entry it last recalled -- i.e. the user edited the text
     /// after recalling. Returns the still-valid cursor, if any.
     fn validate_history_cursor(&mut self, current_query: &str) -> Option<usize> {
-        if let Some(pos) = self.history_cursor {
-            if self.history.get(pos).map(String::as_str) != Some(current_query) {
-                self.reset_history_cursor();
-            }
+        if let Some(pos) = self.history_cursor
+            && self.history.get(pos).map(String::as_str) != Some(current_query)
+        {
+            self.reset_history_cursor();
         }
         self.history_cursor
     }

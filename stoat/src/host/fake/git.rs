@@ -1042,13 +1042,13 @@ impl GitRepo for FakeGitRepo {
         author_email: &str,
     ) -> Result<String, GitApplyError> {
         let mut state = self.state.lock().unwrap();
-        if let Some(p) = parent_sha {
-            if !state.commits.contains_key(p) {
-                return BackendSnafu {
-                    reason: format!("unknown parent sha: {p}"),
-                }
-                .fail();
+        if let Some(p) = parent_sha
+            && !state.commits.contains_key(p)
+        {
+            return BackendSnafu {
+                reason: format!("unknown parent sha: {p}"),
             }
+            .fail();
         }
         state.synth_counter += 1;
         let parent_frag = parent_sha.unwrap_or("root");

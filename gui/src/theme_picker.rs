@@ -134,10 +134,10 @@ impl PickerDelegate for ThemePickerDelegate {
     ) {
         self.apply_selected(cx);
         self.confirmed = true;
-        if let Some(name) = self.selected_theme() {
-            if let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone()) {
-                persist_theme(fs.as_ref(), name);
-            }
+        if let Some(name) = self.selected_theme()
+            && let Some(fs) = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone())
+        {
+            persist_theme(fs.as_ref(), name);
         }
         cx.emit(DismissEvent);
     }
@@ -209,11 +209,11 @@ fn write_theme_at(fs: &dyn FsHost, path: &Path, name: &str) {
 
     let updated = stoat_config::set_theme(&existing, name);
 
-    if let Some(parent) = path.parent() {
-        if let Err(err) = fs.create_dir_all(parent) {
-            tracing::warn!(path = %parent.display(), ?err, "could not create config dir; theme not persisted");
-            return;
-        }
+    if let Some(parent) = path.parent()
+        && let Err(err) = fs.create_dir_all(parent)
+    {
+        tracing::warn!(path = %parent.display(), ?err, "could not create config dir; theme not persisted");
+        return;
     }
     if let Err(err) = fs.write(path, updated.as_bytes()) {
         tracing::warn!(path = %path.display(), ?err, "could not write user config; theme not persisted");

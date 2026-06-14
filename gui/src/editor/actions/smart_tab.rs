@@ -42,13 +42,13 @@ pub fn handle_smart_tab(workspace: &mut Workspace, cx: &mut Context<'_, Workspac
     }
 
     let popup = editor.read(cx).completion_popup().cloned();
-    if let Some(popup) = popup {
-        if popup.read(cx).is_visible() {
-            popup.update(cx, |p, cx| {
-                p.accept(cx);
-            });
-            return;
-        }
+    if let Some(popup) = popup
+        && popup.read(cx).is_visible()
+    {
+        popup.update(cx, |p, cx| {
+            p.accept(cx);
+        });
+        return;
     }
 
     if editor.read(cx).cursor_after_only_whitespace(cx) {

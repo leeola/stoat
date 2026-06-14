@@ -1310,11 +1310,16 @@ impl Workspace {
                     .map(PathBuf::from);
                 let editor = if let Some(path) = path {
                     self.build_editor_for_path(&path, cx)
-                } else if let Some(editor) = self.build_editor_for_registry_buffer(&snap.blob, cx) {
-                    editor
                 } else {
-                    tracing::info!("skipping editor item with no restorable buffer during restore");
-                    return None;
+                    match self.build_editor_for_registry_buffer(&snap.blob, cx) {
+                        Some(editor) => editor,
+                        _ => {
+                            tracing::info!(
+                                "skipping editor item with no restorable buffer during restore"
+                            );
+                            return None;
+                        },
+                    }
                 };
                 let folds = crate::workspace_persist::folds_from_blob(&snap.blob);
                 if !folds.is_empty() {
@@ -2850,16 +2855,15 @@ impl Workspace {
                 if let Some(apply) = action
                     .as_any()
                     .downcast_ref::<crate::actions::ApplyFindChar>()
+                    && let Some(editor) = self.active_editor(cx)
                 {
-                    if let Some(editor) = self.active_editor(cx) {
-                        let kind = apply.kind;
-                        let ch = apply.ch;
-                        let extend = apply.extend;
-                        let count = apply.count;
-                        editor.update(cx, |ed, cx| {
-                            ed.handle_find_char(kind, ch, extend, count, cx)
-                        });
-                    }
+                    let kind = apply.kind;
+                    let ch = apply.ch;
+                    let extend = apply.extend;
+                    let count = apply.count;
+                    editor.update(cx, |ed, cx| {
+                        ed.handle_find_char(kind, ch, extend, count, cx)
+                    });
                 }
             },
             ActionKind::SetMark => {
@@ -2877,22 +2881,21 @@ impl Workspace {
                 if let Some(apply) = action
                     .as_any()
                     .downcast_ref::<crate::actions::ApplyMarkChar>()
+                    && let Some(editor) = self.active_editor(cx)
                 {
-                    if let Some(editor) = self.active_editor(cx) {
-                        let request = apply.request;
-                        let ch = apply.ch;
-                        editor.update(cx, |ed, cx| match request {
-                            crate::editor::actions::marks::MarkRequest::Set => {
-                                ed.handle_set_mark(ch, cx)
-                            },
-                            crate::editor::actions::marks::MarkRequest::GotoLine => {
-                                ed.handle_goto_mark(ch, false, cx)
-                            },
-                            crate::editor::actions::marks::MarkRequest::GotoExact => {
-                                ed.handle_goto_mark(ch, true, cx)
-                            },
-                        });
-                    }
+                    let request = apply.request;
+                    let ch = apply.ch;
+                    editor.update(cx, |ed, cx| match request {
+                        crate::editor::actions::marks::MarkRequest::Set => {
+                            ed.handle_set_mark(ch, cx)
+                        },
+                        crate::editor::actions::marks::MarkRequest::GotoLine => {
+                            ed.handle_goto_mark(ch, false, cx)
+                        },
+                        crate::editor::actions::marks::MarkRequest::GotoExact => {
+                            ed.handle_goto_mark(ch, true, cx)
+                        },
+                    });
                 }
             },
             ActionKind::SaveSelection => self.dispatch_save_selection(cx),
@@ -3306,11 +3309,10 @@ impl Workspace {
                 if let Some(apply) = action
                     .as_any()
                     .downcast_ref::<crate::actions::ApplyReplaceChar>()
+                    && let Some(editor) = self.active_editor(cx)
                 {
-                    if let Some(editor) = self.active_editor(cx) {
-                        let ch = apply.ch;
-                        editor.update(cx, |ed, cx| ed.replace_char_in_selections(ch, cx));
-                    }
+                    let ch = apply.ch;
+                    editor.update(cx, |ed, cx| ed.replace_char_in_selections(ch, cx));
                 }
             },
             ActionKind::InsertRegister => self.dispatch_insert_register(cx),
@@ -3339,34 +3341,31 @@ impl Workspace {
                 if let Some(apply) = action
                     .as_any()
                     .downcast_ref::<crate::actions::ApplySurroundAddChar>()
+                    && let Some(editor) = self.active_editor(cx)
                 {
-                    if let Some(editor) = self.active_editor(cx) {
-                        let ch = apply.ch;
-                        editor.update(cx, |ed, cx| ed.handle_surround_add(ch, cx));
-                    }
+                    let ch = apply.ch;
+                    editor.update(cx, |ed, cx| ed.handle_surround_add(ch, cx));
                 }
             },
             ActionKind::ApplySurroundDeleteChar => {
                 if let Some(apply) = action
                     .as_any()
                     .downcast_ref::<crate::actions::ApplySurroundDeleteChar>()
+                    && let Some(editor) = self.active_editor(cx)
                 {
-                    if let Some(editor) = self.active_editor(cx) {
-                        let ch = apply.ch;
-                        editor.update(cx, |ed, cx| ed.handle_surround_delete(ch, cx));
-                    }
+                    let ch = apply.ch;
+                    editor.update(cx, |ed, cx| ed.handle_surround_delete(ch, cx));
                 }
             },
             ActionKind::ApplySurroundReplaceChar => {
                 if let Some(apply) = action
                     .as_any()
                     .downcast_ref::<crate::actions::ApplySurroundReplaceChar>()
+                    && let Some(editor) = self.active_editor(cx)
                 {
-                    if let Some(editor) = self.active_editor(cx) {
-                        let from = apply.from;
-                        let to = apply.to;
-                        editor.update(cx, |ed, cx| ed.handle_surround_replace(from, to, cx));
-                    }
+                    let from = apply.from;
+                    let to = apply.to;
+                    editor.update(cx, |ed, cx| ed.handle_surround_replace(from, to, cx));
                 }
             },
             ActionKind::ShellPipe => {
@@ -4394,11 +4393,11 @@ impl Workspace {
     /// the directory cannot be created.
     fn open_config_at(&mut self, path: PathBuf, cx: &mut Context<'_, Self>) {
         let fs = cx.global::<FsHostGlobal>().0.clone();
-        if let Some(parent) = path.parent() {
-            if let Err(err) = fs.create_dir_all(parent) {
-                tracing::warn!(path = %parent.display(), ?err, "could not create config dir; not opening config");
-                return;
-            }
+        if let Some(parent) = path.parent()
+            && let Err(err) = fs.create_dir_all(parent)
+        {
+            tracing::warn!(path = %parent.display(), ?err, "could not create config dir; not opening config");
+            return;
         }
         self.open_paths(&[path], cx);
     }
@@ -6382,10 +6381,10 @@ impl Workspace {
             session.update(cx, |session, cx| session.refresh_file(&path, new_input, cx))
         };
 
-        if session.read(cx).inner().follow {
-            if let Some(chunk_id) = freshest_chunk_id(&session, &new_ids, cx) {
-                self.review_jump_to_chunk(chunk_id, cx);
-            }
+        if session.read(cx).inner().follow
+            && let Some(chunk_id) = freshest_chunk_id(&session, &new_ids, cx)
+        {
+            self.review_jump_to_chunk(chunk_id, cx);
         }
     }
 
@@ -15885,11 +15884,9 @@ mod tests {
 
         dispatch(&ws, vcx, stoat_action::OpenReview);
         vcx.run_until_parked();
-        assert!(ws.read_with(vcx, |w, cx| w
-            .review_progress()
-            .read(cx)
-            .progress()
-            .is_some()));
+        assert!(ws.read_with(vcx, |w, cx| {
+            w.review_progress().read(cx).progress().is_some()
+        }));
 
         dispatch(&ws, vcx, stoat_action::CloseBuffer);
         vcx.run_until_parked();
@@ -18601,10 +18598,10 @@ mod tests {
                     .expect("pane present")
                     .read(cx);
                 for item in pane.items() {
-                    if let Ok(editor) = item.to_any_view().downcast::<Editor>() {
-                        if let Some(p) = editor.read(cx).file_path() {
-                            paths_seen.push(p.to_path_buf());
-                        }
+                    if let Ok(editor) = item.to_any_view().downcast::<Editor>()
+                        && let Some(p) = editor.read(cx).file_path()
+                    {
+                        paths_seen.push(p.to_path_buf());
                     }
                 }
             }
@@ -18680,10 +18677,10 @@ mod tests {
                 for item in pane.items() {
                     if let Ok(editor) = item.to_any_view().downcast::<Editor>() {
                         let editor = editor.read(cx);
-                        if editor.file_path().is_none() {
-                            if let Some(buffer) = editor.multi_buffer().read(cx).as_singleton() {
-                                scratch_texts.push(buffer.read(cx).text());
-                            }
+                        if editor.file_path().is_none()
+                            && let Some(buffer) = editor.multi_buffer().read(cx).as_singleton()
+                        {
+                            scratch_texts.push(buffer.read(cx).text());
                         }
                     }
                 }

@@ -66,7 +66,7 @@ pub trait Action: Debug + Send + 'static {
 }
 
 macro_rules! define_action {
-    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr) => {
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021) => {
         $crate::action::define_action!(
             $def,
             $action,
@@ -77,10 +77,10 @@ macro_rules! define_action {
             $crate::ActionPriority::Normal
         );
     };
-    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr) => {
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021) => {
         $crate::action::define_action!($def, $action, $name, $kind, $short, $long, $priority, true);
     };
-    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr, $hint_visible:expr) => {
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, $hint_visible:expr_2021) => {
         $crate::action::define_action!(
             $def,
             $action,
@@ -93,7 +93,7 @@ macro_rules! define_action {
             &[]
         );
     };
-    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr, $priority:expr, $hint_visible:expr, $aliases:expr) => {
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, $hint_visible:expr_2021, $aliases:expr_2021) => {
         #[derive(Debug)]
         pub struct $def;
 

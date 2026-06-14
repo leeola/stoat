@@ -281,11 +281,11 @@ fn refilter(entries: &[HelpEntry], needle: &str) -> Vec<usize> {
             substring_name.push(i);
             continue;
         }
-        if let Some(label) = entry.key_label.as_deref() {
-            if label.to_lowercase().contains(needle) {
-                key_match.push(i);
-                continue;
-            }
+        if let Some(label) = entry.key_label.as_deref()
+            && label.to_lowercase().contains(needle)
+        {
+            key_match.push(i);
+            continue;
         }
         if entry.def.short_desc().to_lowercase().contains(needle) {
             short_match.push(i);

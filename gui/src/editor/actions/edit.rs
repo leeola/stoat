@@ -141,24 +141,24 @@ pub fn handle_yank_main_to_clipboard(workspace: &mut Workspace, cx: &mut Context
 /// insert its contents after every selection. No-op when the
 /// clipboard is empty or unreadable.
 pub fn handle_paste_clipboard_after(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
-    if let Some(payload) = read_clipboard(cx) {
-        if let Some(editor) = active_editor(workspace, cx) {
-            editor.update(cx, |ed, cx| {
-                ed.paste_at_selections(&payload, PastePosition::After, cx)
-            });
-        }
+    if let Some(payload) = read_clipboard(cx)
+        && let Some(editor) = active_editor(workspace, cx)
+    {
+        editor.update(cx, |ed, cx| {
+            ed.paste_at_selections(&payload, PastePosition::After, cx)
+        });
     }
 }
 
 /// `PasteClipboardBefore` action: read the system clipboard and
 /// insert its contents before every selection.
 pub fn handle_paste_clipboard_before(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
-    if let Some(payload) = read_clipboard(cx) {
-        if let Some(editor) = active_editor(workspace, cx) {
-            editor.update(cx, |ed, cx| {
-                ed.paste_at_selections(&payload, PastePosition::Before, cx)
-            });
-        }
+    if let Some(payload) = read_clipboard(cx)
+        && let Some(editor) = active_editor(workspace, cx)
+    {
+        editor.update(cx, |ed, cx| {
+            ed.paste_at_selections(&payload, PastePosition::Before, cx)
+        });
     }
 }
 
@@ -403,10 +403,10 @@ fn write_register(
             workspace.registers_mut().write(register, payload);
         },
         Register::Clipboard => {
-            if let Some(clipboard) = cx.try_global::<ClipboardHostGlobal>().map(|g| g.0.clone()) {
-                if let Err(err) = clipboard.set(&payload) {
-                    tracing::warn!(target: "stoat_gui::actions::edit", ?err, "clipboard set failed");
-                }
+            if let Some(clipboard) = cx.try_global::<ClipboardHostGlobal>().map(|g| g.0.clone())
+                && let Err(err) = clipboard.set(&payload)
+            {
+                tracing::warn!(target: "stoat_gui::actions::edit", ?err, "clipboard set failed");
             }
         },
         Register::Search | Register::Blackhole => {},

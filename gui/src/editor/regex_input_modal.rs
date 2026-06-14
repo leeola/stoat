@@ -57,15 +57,13 @@ impl RegexInputModal {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let input = cx.new(|cx| Editor::single_line(window, cx));
-        if matches!(kind, RegexInputKind::Search { .. }) {
-            if let Some(prev) = target_editor
+        if matches!(kind, RegexInputKind::Search { .. })
+            && let Some(prev) = target_editor
                 .upgrade()
                 .and_then(|ed| ed.read(cx).search_state().map(|s| s.query().to_string()))
-            {
-                if !prev.is_empty() {
-                    input.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&prev, cx));
-                }
-            }
+            && !prev.is_empty()
+        {
+            input.update(cx, |ed, cx| ed.apply_text_to_all_cursors(&prev, cx));
         }
         let forward_changed = cx.subscribe(&input, |_this, _ed, event: &EditorEvent, cx| {
             if matches!(event, EditorEvent::Changed) {

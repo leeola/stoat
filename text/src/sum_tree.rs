@@ -617,13 +617,18 @@ impl<T: Item> SumTree<T> {
             *self = other;
         } else if !other.0.is_leaf() || !other.0.items().is_empty() {
             if self.0.height() < other.0.height() {
-                if let Some(tree) = Self::append_large(self.clone(), &mut other, cx) {
-                    *self = Self::from_child_trees(tree, other, cx);
-                } else {
-                    *self = other;
+                match Self::append_large(self.clone(), &mut other, cx) {
+                    Some(tree) => {
+                        *self = Self::from_child_trees(tree, other, cx);
+                    },
+                    _ => {
+                        *self = other;
+                    },
                 }
-            } else if let Some(split_tree) = self.push_tree_recursive(other, cx) {
-                *self = Self::from_child_trees(self.clone(), split_tree, cx);
+            } else {
+                if let Some(split_tree) = self.push_tree_recursive(other, cx) {
+                    *self = Self::from_child_trees(self.clone(), split_tree, cx);
+                }
             }
         }
     }
@@ -1095,11 +1100,11 @@ impl<T: KeyedItem> SumTree<T> {
         let mut replaced = None;
         let mut cursor = self.cursor::<T::Key>(cx);
         let mut new_tree = cursor.slice(&item.key(), Bias::Left);
-        if let Some(cursor_item) = cursor.item() {
-            if cursor_item.key() == item.key() {
-                replaced = Some(cursor_item.clone());
-                cursor.next();
-            }
+        if let Some(cursor_item) = cursor.item()
+            && cursor_item.key() == item.key()
+        {
+            replaced = Some(cursor_item.clone());
+            cursor.next();
         }
         new_tree.push(item, cx);
         new_tree.append(cursor.suffix(), cx);
@@ -1113,11 +1118,11 @@ impl<T: KeyedItem> SumTree<T> {
         *self = {
             let mut cursor = self.cursor::<T::Key>(cx);
             let mut new_tree = cursor.slice(key, Bias::Left);
-            if let Some(item) = cursor.item() {
-                if item.key() == *key {
-                    removed = Some(item.clone());
-                    cursor.next();
-                }
+            if let Some(item) = cursor.item()
+                && item.key() == *key
+            {
+                removed = Some(item.clone());
+                cursor.next();
             }
             new_tree.append(cursor.suffix(), cx);
             new_tree
@@ -1154,11 +1159,11 @@ impl<T: KeyedItem> SumTree<T> {
                     old_item = cursor.item();
                 }
 
-                if let Some(old) = old_item {
-                    if old.key() == new_key {
-                        removed.push(old.clone());
-                        cursor.next();
-                    }
+                if let Some(old) = old_item
+                    && old.key() == new_key
+                {
+                    removed.push(old.clone());
+                    cursor.next();
                 }
 
                 match edit {
@@ -1686,10 +1691,10 @@ impl<'a, 'b, T: Item, D: Dimension<'a, T::Summary>> Cursor<'a, 'b, T, D> {
         self.at_end = self.stack.is_empty();
 
         let mut end = self.position.clone();
-        if bias == Bias::Left {
-            if let Some(s) = self.item_summary() {
-                end.add_summary(s, self.cx);
-            }
+        if bias == Bias::Left
+            && let Some(s) = self.item_summary()
+        {
+            end.add_summary(s, self.cx);
         }
         target.cmp(&end, self.cx) == Ordering::Equal
     }

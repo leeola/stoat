@@ -1,7 +1,7 @@
 use tree_sitter::Language;
 use tree_sitter_language::LanguageFn;
 
-extern "C" {
+unsafe extern "C" {
     fn tree_sitter_rust() -> *const ();
     fn tree_sitter_json() -> *const ();
     fn tree_sitter_toml() -> *const ();

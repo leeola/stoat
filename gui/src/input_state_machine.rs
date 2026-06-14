@@ -588,10 +588,11 @@ impl InputStateMachine {
         self.mode = StateValue::String(mode.into().into());
         self.sync_input_active();
         let now_input = self.text_input_allowed();
-        if !was_input && now_input {
-            if let Some(handle) = self.editor_focus_target.as_ref() {
-                window.focus(handle);
-            }
+        if !was_input
+            && now_input
+            && let Some(handle) = self.editor_focus_target.as_ref()
+        {
+            window.focus(handle);
         }
         cx.notify();
     }
@@ -821,13 +822,13 @@ impl InputStateMachine {
             chars.next().filter(|_| chars.next().is_none())
         };
         let in_input_mode = self.text_input_allowed();
-        if let Some(ch) = single_char {
-            if matches!(
+        if let Some(ch) = single_char
+            && matches!(
                 try_consume_duplicate(&mut self.consumed_text_input_char, ch, in_input_mode),
                 DuplicateOutcome::Drop
-            ) {
-                return Vec::new();
-            }
+            )
+        {
+            return Vec::new();
         }
         if !in_input_mode {
             // A focused terminal owns committed IME text: write it to its
@@ -1166,28 +1167,28 @@ impl InputStateMachine {
         // and pending-char machinery, but only outside a text-input mode
         // -- a picker or the command palette opened over the terminal
         // sets `prompt` mode, and must keep receiving its own keys.
-        if !self.text_input_allowed() {
-            if let Some(terminal) = self.active_terminal.as_ref().and_then(WeakEntity::upgrade) {
-                // Cmd-V pastes the clipboard into the terminal -- bracketed
-                // when the program enabled `?2004h` -- instead of encoding
-                // the keystroke to the PTY.
-                if matches!(event.code, KeyCode::Char('v'))
-                    && event.modifiers.contains(KeyModifiers::SUPER)
-                {
-                    terminal.update(cx, |term, cx| term.paste(cx));
-                    return Vec::new();
-                }
-                let plain_printable =
-                    matches!(event.code, KeyCode::Char(_)) && event.modifiers.is_empty();
-                if !plain_printable {
-                    terminal.update(cx, |term, cx| {
-                        if let Some(bytes) = encode_key(event, term.app_cursor()) {
-                            term.write_to_pty(bytes, cx);
-                        }
-                    });
-                }
+        if !self.text_input_allowed()
+            && let Some(terminal) = self.active_terminal.as_ref().and_then(WeakEntity::upgrade)
+        {
+            // Cmd-V pastes the clipboard into the terminal -- bracketed
+            // when the program enabled `?2004h` -- instead of encoding
+            // the keystroke to the PTY.
+            if matches!(event.code, KeyCode::Char('v'))
+                && event.modifiers.contains(KeyModifiers::SUPER)
+            {
+                terminal.update(cx, |term, cx| term.paste(cx));
                 return Vec::new();
             }
+            let plain_printable =
+                matches!(event.code, KeyCode::Char(_)) && event.modifiers.is_empty();
+            if !plain_printable {
+                terminal.update(cx, |term, cx| {
+                    if let Some(bytes) = encode_key(event, term.app_cursor()) {
+                        term.write_to_pty(bytes, cx);
+                    }
+                });
+            }
+            return Vec::new();
         }
 
         let in_input_mode_at_entry = self.text_input_allowed();
@@ -1196,13 +1197,13 @@ impl InputStateMachine {
             _ => None,
         };
 
-        if let Some(ch) = arming_candidate {
-            if matches!(
+        if let Some(ch) = arming_candidate
+            && matches!(
                 try_consume_duplicate(&mut self.pending_duplicate_char, ch, in_input_mode_at_entry),
                 DuplicateOutcome::Drop
-            ) {
-                return Vec::new();
-            }
+            )
+        {
+            return Vec::new();
         }
 
         let count_active_mode = self.mode() == "normal" || self.mode() == "select";
@@ -1316,69 +1317,68 @@ impl InputStateMachine {
             }
         }
 
-        if count_active_mode {
-            if let Some(mode) = self.pending_textobject_select {
-                if let KeyCode::Char(ch) = event.code {
-                    self.pending_textobject_select = None;
-                    cx.notify();
-                    return vec![Box::new(ApplyTextobjectChar { mode, ch })];
-                }
+        if count_active_mode && let Some(mode) = self.pending_textobject_select {
+            if let KeyCode::Char(ch) = event.code {
                 self.pending_textobject_select = None;
                 cx.notify();
+                return vec![Box::new(ApplyTextobjectChar { mode, ch })];
             }
+            self.pending_textobject_select = None;
+            cx.notify();
         }
 
-        if count_active_mode {
-            if let Some(editor) = self.active_editor.as_ref().and_then(WeakEntity::upgrade) {
-                let has_labels = editor.read(cx).pending_goto_word_labels().is_some();
-                if has_labels {
-                    if let KeyCode::Char(ch) = event.code {
-                        let step = editor.read(cx).pending_goto_word_labels().map(|labels| {
-                            stoat::goto_word::step_jump(
-                                labels,
-                                editor.read(cx).pending_goto_word_input(),
-                                ch,
-                            )
-                        });
-                        match step {
-                            Some(stoat::goto_word::JumpStep::Jump(offset)) => {
-                                editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
-                                cx.notify();
-                                return vec![Box::new(GotoWordJump {
-                                    byte_offset: offset,
-                                })];
-                            },
-                            Some(stoat::goto_word::JumpStep::Continue) => {
-                                editor.update(cx, |ed, cx| ed.push_pending_goto_word_input(ch, cx));
-                                cx.notify();
-                                return Vec::new();
-                            },
-                            Some(stoat::goto_word::JumpStep::Cancel) | None => {
-                                editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
-                                cx.notify();
-                                return Vec::new();
-                            },
-                        }
+        if count_active_mode
+            && let Some(editor) = self.active_editor.as_ref().and_then(WeakEntity::upgrade)
+        {
+            let has_labels = editor.read(cx).pending_goto_word_labels().is_some();
+            if has_labels {
+                if let KeyCode::Char(ch) = event.code {
+                    let step = editor.read(cx).pending_goto_word_labels().map(|labels| {
+                        stoat::goto_word::step_jump(
+                            labels,
+                            editor.read(cx).pending_goto_word_input(),
+                            ch,
+                        )
+                    });
+                    match step {
+                        Some(stoat::goto_word::JumpStep::Jump(offset)) => {
+                            editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
+                            cx.notify();
+                            return vec![Box::new(GotoWordJump {
+                                byte_offset: offset,
+                            })];
+                        },
+                        Some(stoat::goto_word::JumpStep::Continue) => {
+                            editor.update(cx, |ed, cx| ed.push_pending_goto_word_input(ch, cx));
+                            cx.notify();
+                            return Vec::new();
+                        },
+                        Some(stoat::goto_word::JumpStep::Cancel) | None => {
+                            editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
+                            cx.notify();
+                            return Vec::new();
+                        },
                     }
-                    editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
-                    cx.notify();
                 }
+                editor.update(cx, |ed, cx| ed.clear_pending_goto_word(cx));
+                cx.notify();
             }
         }
 
         let digit = unmodified_ascii_digit(&event);
 
-        if count_active_mode && self.pending_count.is_some() {
-            if let Some(d) = digit {
-                let new_count = self
-                    .pending_count
-                    .unwrap_or(0)
-                    .saturating_mul(10)
-                    .saturating_add(d);
-                self.pending_count = Some(new_count);
-                cx.notify();
-                return Vec::new();
-            }
+        if count_active_mode
+            && self.pending_count.is_some()
+            && let Some(d) = digit
+        {
+            let new_count = self
+                .pending_count
+                .unwrap_or(0)
+                .saturating_mul(10)
+                .saturating_add(d);
+            self.pending_count = Some(new_count);
+            cx.notify();
+            return Vec::new();
         }
 
         let resolved = self
@@ -1388,20 +1388,18 @@ impl InputStateMachine {
             .unwrap_or_default();
 
         if resolved.is_empty() {
-            if count_active_mode {
-                if let Some(d) = digit {
-                    self.pending_count = Some(d);
-                    cx.notify();
-                }
+            if count_active_mode && let Some(d) = digit {
+                self.pending_count = Some(d);
+                cx.notify();
             }
             return Vec::new();
         }
 
         for ra in &resolved {
-            if ra.name == "SetMode" {
-                if let Some(mode_name) = ra.args.first().and_then(arg_as_str) {
-                    self.transition_mode(mode_name, window, cx);
-                }
+            if ra.name == "SetMode"
+                && let Some(mode_name) = ra.args.first().and_then(arg_as_str)
+            {
+                self.transition_mode(mode_name, window, cx);
             }
         }
 
@@ -1412,10 +1410,8 @@ impl InputStateMachine {
 
         if self.macro_recording.is_some() {
             let is_record_toggle = resolved.iter().any(|ra| ra.name == "RecordMacro");
-            if !is_record_toggle {
-                if let Some(rec) = self.macro_recording.as_mut() {
-                    rec.keys.push(keystroke.clone());
-                }
+            if !is_record_toggle && let Some(rec) = self.macro_recording.as_mut() {
+                rec.keys.push(keystroke.clone());
             }
         }
 
@@ -1487,19 +1483,18 @@ fn keystroke_to_key_event(keystroke: &Keystroke) -> Option<KeyEvent> {
         return Some(KeyEvent::new(KeyCode::BackTab, modifiers));
     }
 
-    if keystroke.modifiers.shift {
-        if let Some(typed) = keystroke
+    if keystroke.modifiers.shift
+        && let Some(typed) = keystroke
             .key_char
             .as_deref()
             .filter(|c| *c != keystroke.key.as_str())
+    {
+        let mut chars = typed.chars();
+        if let Some(first) = chars.next()
+            && chars.next().is_none()
         {
-            let mut chars = typed.chars();
-            if let Some(first) = chars.next() {
-                if chars.next().is_none() {
-                    modifiers.remove(KeyModifiers::SHIFT);
-                    return Some(KeyEvent::new(KeyCode::Char(first), modifiers));
-                }
-            }
+            modifiers.remove(KeyModifiers::SHIFT);
+            return Some(KeyEvent::new(KeyCode::Char(first), modifiers));
         }
     }
 

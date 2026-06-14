@@ -651,11 +651,11 @@ impl ReviewSession {
         let mut applied = 0usize;
         for chunk in self.chunks.values_mut() {
             let fp = chunk.fingerprint();
-            if let Some(&status) = statuses.get(&fp) {
-                if chunk.status != status {
-                    chunk.status = status;
-                    applied += 1;
-                }
+            if let Some(&status) = statuses.get(&fp)
+                && chunk.status != status
+            {
+                chunk.status = status;
+                applied += 1;
             }
         }
         if applied > 0 {
@@ -689,11 +689,11 @@ impl ReviewSession {
         let mut applied = 0usize;
         for chunk in self.chunks.values_mut() {
             let fp = chunk.fingerprint();
-            if let Some(&approved) = approvals.get(&fp) {
-                if chunk.approved != approved {
-                    chunk.approved = approved;
-                    applied += 1;
-                }
+            if let Some(&approved) = approvals.get(&fp)
+                && chunk.approved != approved
+            {
+                chunk.approved = approved;
+                applied += 1;
             }
         }
         if applied > 0 {
@@ -822,18 +822,18 @@ impl ReviewSession {
                             out.push(rel);
                         }
                     }
-                } else if let Some(left) = left {
-                    if let Some(prov) = left.move_provenance.as_ref() {
-                        let rel = MoveRelationship {
-                            source: MoveProvenance {
-                                rel_path: file.rel_path.clone(),
-                                line: left.line_num.saturating_sub(1),
-                            },
-                            target: prov.clone(),
-                        };
-                        if !out.contains(&rel) {
-                            out.push(rel);
-                        }
+                } else if let Some(left) = left
+                    && let Some(prov) = left.move_provenance.as_ref()
+                {
+                    let rel = MoveRelationship {
+                        source: MoveProvenance {
+                            rel_path: file.rel_path.clone(),
+                            line: left.line_num.saturating_sub(1),
+                        },
+                        target: prov.clone(),
+                    };
+                    if !out.contains(&rel) {
+                        out.push(rel);
                     }
                 }
             }
@@ -977,11 +977,11 @@ impl ReviewSession {
     /// when the value actually changes. Independent of
     /// [`Self::set_status`] -- approving a chunk does not stage it.
     pub fn set_approved(&mut self, id: ReviewChunkId, approved: bool) {
-        if let Some(chunk) = self.chunks.get_mut(&id) {
-            if chunk.approved != approved {
-                chunk.approved = approved;
-                self.version += 1;
-            }
+        if let Some(chunk) = self.chunks.get_mut(&id)
+            && chunk.approved != approved
+        {
+            chunk.approved = approved;
+            self.version += 1;
         }
     }
 

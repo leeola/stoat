@@ -244,10 +244,10 @@ fn classify_ws_segment(seg: &str, ws: &mut RowWhitespace, column: &mut u32) {
         if ch == ' ' {
             ws.cells.push((*column, WsKind::Space));
         } else {
-            if invisibles::is_invisible(ch) {
-                if let Some(glyph) = invisibles::replacement(ch) {
-                    ws.invisibles.push((*column, glyph));
-                }
+            if invisibles::is_invisible(ch)
+                && let Some(glyph) = invisibles::replacement(ch)
+            {
+                ws.invisibles.push((*column, glyph));
             }
             if ws.first_content.is_none() {
                 ws.first_content = Some(*column);
@@ -985,11 +985,12 @@ fn append_run(
     let Some(style) = style else {
         return;
     };
-    if let Some((last_range, last_style)) = runs.last_mut() {
-        if *last_style == style && last_range.end == start {
-            last_range.end = end;
-            return;
-        }
+    if let Some((last_range, last_style)) = runs.last_mut()
+        && *last_style == style
+        && last_range.end == start
+    {
+        last_range.end = end;
+        return;
     }
     runs.push((start..end, style));
 }
@@ -1298,11 +1299,12 @@ fn merge_selection_runs(
         if cursor_ranges.iter().any(|r| r.start <= a && r.end >= b) {
             style = style.highlight(cursor_style);
         }
-        if let Some((last_range, last_style)) = merged.last_mut() {
-            if *last_style == style && last_range.end == a {
-                last_range.end = b;
-                continue;
-            }
+        if let Some((last_range, last_style)) = merged.last_mut()
+            && *last_style == style
+            && last_range.end == a
+        {
+            last_range.end = b;
+            continue;
         }
         merged.push((a..b, style));
     }
@@ -1349,11 +1351,12 @@ fn coalesce_runs(
                 style = style.highlight(*s);
             }
         }
-        if let Some((last_range, last_style)) = merged.last_mut() {
-            if *last_style == style && last_range.end == a {
-                last_range.end = b;
-                continue;
-            }
+        if let Some((last_range, last_style)) = merged.last_mut()
+            && *last_style == style
+            && last_range.end == a
+        {
+            last_range.end = b;
+            continue;
         }
         merged.push((a..b, style));
     }

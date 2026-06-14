@@ -483,7 +483,7 @@ impl Render for ConflictItem {
 /// Build a vertical pane: a small bold header label colored from
 /// `color`, then the editor below it. Used by [`ConflictItem`] to
 /// identify each side of the 3-way merge view.
-fn pane_with_header(label: &str, color: Hsla, editor: Entity<Editor>) -> impl IntoElement {
+fn pane_with_header(label: &str, color: Hsla, editor: Entity<Editor>) -> impl IntoElement + use<> {
     div()
         .flex_1()
         .flex()

@@ -46,10 +46,10 @@ impl DiffCoordinator {
     ) -> Self {
         let registry_subscription =
             cx.subscribe(&registry, |this, _, event: &BufferRegistryEvent, cx| {
-                if let BufferRegistryEvent::BufferRemoved(id) = event {
-                    if this.buffers.remove(id).is_some() {
-                        cx.notify();
-                    }
+                if let BufferRegistryEvent::BufferRemoved(id) = event
+                    && this.buffers.remove(id).is_some()
+                {
+                    cx.notify();
                 }
             });
         Self {

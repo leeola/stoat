@@ -69,10 +69,10 @@ impl PickerDelegate for EncodingPickerDelegate {
         _window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
-        if let Some(&choice) = self.options.get(self.selected) {
-            if let Some(workspace) = self.workspace.upgrade() {
-                workspace.update(cx, |ws, cx| ws.apply_encoding_to_active_buffer(choice, cx));
-            }
+        if let Some(&choice) = self.options.get(self.selected)
+            && let Some(workspace) = self.workspace.upgrade()
+        {
+            workspace.update(cx, |ws, cx| ws.apply_encoding_to_active_buffer(choice, cx));
         }
         cx.emit(DismissEvent);
     }

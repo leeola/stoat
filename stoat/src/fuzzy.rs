@@ -235,10 +235,10 @@ fn is_in_order(per_atom: &[Vec<u32>]) -> bool {
         let Some(&first) = indices.first() else {
             return false;
         };
-        if let Some(end) = last_end {
-            if first <= end {
-                return false;
-            }
+        if let Some(end) = last_end
+            && first <= end
+        {
+            return false;
         }
         last_end = Some(*indices.last().unwrap_or(&first));
     }

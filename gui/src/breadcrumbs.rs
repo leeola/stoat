@@ -165,10 +165,10 @@ fn context_segments(editor: &Editor, cx: &App) -> Vec<SharedString> {
     let rope = snapshot.rope();
     let mut segments = Vec::new();
     loop {
-        if CONTAINER_KINDS.contains(&node.kind()) {
-            if let Some(name) = node_name(node, rope) {
-                segments.push(name);
-            }
+        if CONTAINER_KINDS.contains(&node.kind())
+            && let Some(name) = node_name(node, rope)
+        {
+            segments.push(name);
         }
         match node.parent() {
             Some(parent) => node = parent,
@@ -287,8 +287,7 @@ mod tests {
     #[test]
     fn segments_report_nested_rust_context() {
         let mut cx = TestAppContext::single();
-        let text =
-            "mod foo {\n    impl Bar {\n        fn baz() {\n            let x = 1;\n        }\n    }\n}\n";
+        let text = "mod foo {\n    impl Bar {\n        fn baz() {\n            let x = 1;\n        }\n    }\n}\n";
         let editor = new_rust_editor(&mut cx, text);
         seed_cursor(&editor, &mut cx, text.find("let x").expect("cursor anchor"));
 

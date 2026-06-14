@@ -37,10 +37,10 @@ impl BlameCoordinator {
     ) -> Self {
         let registry_subscription =
             cx.subscribe(&registry, |this, _, event: &BufferRegistryEvent, cx| {
-                if let BufferRegistryEvent::BufferRemoved(id) = event {
-                    if this.states.remove(id).is_some() {
-                        cx.notify();
-                    }
+                if let BufferRegistryEvent::BufferRemoved(id) = event
+                    && this.states.remove(id).is_some()
+                {
+                    cx.notify();
                 }
             });
         Self {

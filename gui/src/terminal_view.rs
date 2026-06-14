@@ -232,11 +232,11 @@ impl Terminal {
         if let Some(title) = events.title {
             self.title = Some(title);
         }
-        if !events.pty_writes.is_empty() {
-            if let Some(session) = self.session.clone() {
-                for reply in events.pty_writes {
-                    spawn_write_bytes(session.clone(), reply, cx);
-                }
+        if !events.pty_writes.is_empty()
+            && let Some(session) = self.session.clone()
+        {
+            for reply in events.pty_writes {
+                spawn_write_bytes(session.clone(), reply, cx);
             }
         }
         self.refresh_foreground_name();

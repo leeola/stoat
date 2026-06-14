@@ -87,8 +87,7 @@ mod tests {
     use stoat_language::{Language, LanguageRegistry, SyntaxMap};
     use stoat_scheduler::{Executor, TestScheduler};
 
-    const NESTED: &str =
-        "mod foo {\n    impl Bar {\n        fn baz() {\n            let x = 1;\n        }\n    }\n}\n";
+    const NESTED: &str = "mod foo {\n    impl Bar {\n        fn baz() {\n            let x = 1;\n        }\n    }\n}\n";
 
     fn rust_language() -> Arc<Language> {
         LanguageRegistry::standard()

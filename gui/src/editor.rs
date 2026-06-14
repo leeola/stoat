@@ -2980,12 +2980,12 @@ impl Editor {
         if self.minimap_drag.take().is_none() {
             return;
         }
-        if let EditorMode::Minimap { parent } = &self.mode {
-            if let Some(parent) = parent.upgrade() {
-                parent.update(cx, |parent, _| {
-                    parent.scroll_manager_mut().set_minimap_thumb_state(None);
-                });
-            }
+        if let EditorMode::Minimap { parent } = &self.mode
+            && let Some(parent) = parent.upgrade()
+        {
+            parent.update(cx, |parent, _| {
+                parent.scroll_manager_mut().set_minimap_thumb_state(None);
+            });
         }
         cx.notify();
     }
@@ -3354,10 +3354,10 @@ impl Editor {
         let key = self.scrollbar_marker_key(cx);
         {
             let cache = self.scrollbar_marker_cache.borrow();
-            if let Some((cached_key, set)) = cache.as_ref() {
-                if *cached_key == key {
-                    return set.clone();
-                }
+            if let Some((cached_key, set)) = cache.as_ref()
+                && *cached_key == key
+            {
+                return set.clone();
             }
         }
         let set = self.compute_scrollbar_markers(cx);
@@ -3513,10 +3513,10 @@ impl Editor {
         self.set_scroll_row(0, cx);
 
         self.install_syntax_map_updater(cx);
-        if self.syntax_map_updater.is_none() {
-            if let Some(buffer) = &singleton {
-                buffer.update(cx, |b, cx| b.set_syntax_map(None, cx));
-            }
+        if self.syntax_map_updater.is_none()
+            && let Some(buffer) = &singleton
+        {
+            buffer.update(cx, |b, cx| b.set_syntax_map(None, cx));
         }
     }
 
@@ -4088,10 +4088,10 @@ impl Editor {
         let key = self.review_cache_key(cx);
         {
             let cache = self.review_render_cache.borrow();
-            if let Some((cached_key, data)) = cache.as_ref() {
-                if *cached_key == key {
-                    return data.clone();
-                }
+            if let Some((cached_key, data)) = cache.as_ref()
+                && *cached_key == key
+            {
+                return data.clone();
             }
         }
         let data = Rc::new(self.collect_review_render_data(cx));
@@ -4105,10 +4105,10 @@ impl Editor {
         let version = self.diff_map.read(cx).diff().version();
         {
             let cache = self.diff_provenance_cache.borrow();
-            if let Some((cached_version, data)) = cache.as_ref() {
-                if *cached_version == version {
-                    return data.clone();
-                }
+            if let Some((cached_version, data)) = cache.as_ref()
+                && *cached_version == version
+            {
+                return data.clone();
             }
         }
         let data = Rc::new(collect_move_provenances_from_diff(
@@ -4122,21 +4122,19 @@ impl Editor {
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
         let review_data = self.cached_review_render_data(cx);
 
-        let syntax = if let Some(buffer) = self.multi_buffer.read(cx).as_singleton().cloned() {
-            if let Some(syntax_snapshot) =
-                buffer.read(cx).syntax_map().map(|m| m.snapshot().clone())
-            {
-                let theme = cx
-                    .try_global::<theme::Theme>()
-                    .map(|t| t.0.clone())
-                    .unwrap_or_else(stoat::theme::Theme::empty);
-                let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
-                Some((syntax_snapshot, styles))
-            } else {
-                None
-            }
-        } else {
-            None
+        let syntax = match self.multi_buffer.read(cx).as_singleton().cloned() {
+            Some(buffer) => match buffer.read(cx).syntax_map().map(|m| m.snapshot().clone()) {
+                Some(syntax_snapshot) => {
+                    let theme = cx
+                        .try_global::<theme::Theme>()
+                        .map(|t| t.0.clone())
+                        .unwrap_or_else(stoat::theme::Theme::empty);
+                    let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
+                    Some((syntax_snapshot, styles))
+                },
+                _ => None,
+            },
+            _ => None,
         };
 
         let search_regex = {
@@ -4238,35 +4236,31 @@ impl Editor {
             );
         }
 
-        if !is_minimap {
-            if let Some(regex) = &frame.search_regex {
-                let color = cx.theme().search_match;
-                render::apply_search_overlay(
-                    &mut rows,
-                    &byte_maps,
-                    &display_snapshot,
-                    start as u32..end as u32,
-                    regex,
-                    color,
-                );
-            }
+        if !is_minimap && let Some(regex) = &frame.search_regex {
+            let color = cx.theme().search_match;
+            render::apply_search_overlay(
+                &mut rows,
+                &byte_maps,
+                &display_snapshot,
+                start as u32..end as u32,
+                regex,
+                color,
+            );
         }
 
-        if !is_minimap {
-            if let Some(labels) = self.pending_goto_word_labels.as_ref() {
-                let input = self.pending_goto_word_input.clone();
-                let label_color = cx.theme().goto_word_label;
-                let prefix_color = cx.theme().goto_word_prefix;
-                render::apply_goto_word_overlay(
-                    &mut rows,
-                    &display_snapshot,
-                    start as u32..end as u32,
-                    labels,
-                    &input,
-                    label_color,
-                    prefix_color,
-                );
-            }
+        if !is_minimap && let Some(labels) = self.pending_goto_word_labels.as_ref() {
+            let input = self.pending_goto_word_input.clone();
+            let label_color = cx.theme().goto_word_label;
+            let prefix_color = cx.theme().goto_word_prefix;
+            render::apply_goto_word_overlay(
+                &mut rows,
+                &display_snapshot,
+                start as u32..end as u32,
+                labels,
+                &input,
+                label_color,
+                prefix_color,
+            );
         }
 
         let selection_paint = render::compute_selection_paint(
@@ -4719,24 +4713,24 @@ impl Render for Editor {
                             window.on_mouse_event::<MouseMoveEvent>({
                                 let drag_handle = drag_handle.clone();
                                 move |event, phase, _window, cx| {
-                                    if phase == DispatchPhase::Bubble {
-                                        if let Some(minimap) = drag_handle.upgrade() {
-                                            minimap.update(cx, |minimap, cx| {
-                                                minimap.minimap_thumb_drag_to(event.position, cx);
-                                            });
-                                        }
+                                    if phase == DispatchPhase::Bubble
+                                        && let Some(minimap) = drag_handle.upgrade()
+                                    {
+                                        minimap.update(cx, |minimap, cx| {
+                                            minimap.minimap_thumb_drag_to(event.position, cx);
+                                        });
                                     }
                                 }
                             });
                             window.on_mouse_event::<MouseUpEvent>({
                                 let drag_handle = drag_handle.clone();
                                 move |_event: &MouseUpEvent, phase, _window, cx| {
-                                    if phase == DispatchPhase::Bubble {
-                                        if let Some(minimap) = drag_handle.upgrade() {
-                                            minimap.update(cx, |minimap, cx| {
-                                                minimap.minimap_thumb_drag_end(cx);
-                                            });
-                                        }
+                                    if phase == DispatchPhase::Bubble
+                                        && let Some(minimap) = drag_handle.upgrade()
+                                    {
+                                        minimap.update(cx, |minimap, cx| {
+                                            minimap.minimap_thumb_drag_end(cx);
+                                        });
                                     }
                                 }
                             });
@@ -6952,22 +6946,22 @@ mod tests {
             // Apply only the syntax overlay (the minimap keeps this)
             // to mirror what render_visible_rows does for the minimap;
             // search overlay must NOT run.
-            if let Some(buffer) = mm.multi_buffer.read(cx).as_singleton().cloned() {
-                if let Some(syntax) = buffer.read(cx).syntax_map().map(|m| m.snapshot().clone()) {
-                    let theme = cx
-                        .try_global::<theme::Theme>()
-                        .map(|t| t.0.clone())
-                        .unwrap_or_else(stoat::theme::Theme::empty);
-                    let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
-                    render::apply_syntax_overlay(
-                        &mut rows,
-                        &byte_maps,
-                        &display_snapshot,
-                        0..3,
-                        &syntax,
-                        &styles,
-                    );
-                }
+            if let Some(buffer) = mm.multi_buffer.read(cx).as_singleton().cloned()
+                && let Some(syntax) = buffer.read(cx).syntax_map().map(|m| m.snapshot().clone())
+            {
+                let theme = cx
+                    .try_global::<theme::Theme>()
+                    .map(|t| t.0.clone())
+                    .unwrap_or_else(stoat::theme::Theme::empty);
+                let styles = stoat::display_map::syntax_theme::SyntaxStyles::from_theme(&theme);
+                render::apply_syntax_overlay(
+                    &mut rows,
+                    &byte_maps,
+                    &display_snapshot,
+                    0..3,
+                    &syntax,
+                    &styles,
+                );
             }
             rows.into_iter()
                 .flat_map(|r| r.runs.into_iter().map(|(_, s)| s.background_color))

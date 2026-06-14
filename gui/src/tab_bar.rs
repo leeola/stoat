@@ -21,7 +21,7 @@ pub struct DraggedTab {
 ///
 /// The returned element is meant to be the chrome row above a pane's
 /// active item; the caller composes it into the pane's own render.
-pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoElement {
+pub fn render_tab_bar(pane: &Pane, cx: &mut Context<'_, Pane>) -> impl IntoElement + use<> {
     let active_index = pane.active_index();
     let pane_id = cx.entity_id();
     let item_count = pane.items().len();

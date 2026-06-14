@@ -107,14 +107,12 @@ fn parse_angle_token(token: &str) -> Result<Keystroke, InputParseError> {
         });
     }
 
-    if modified {
-        if let Some(key) = single_char(rest) {
-            return Ok(Keystroke {
-                modifiers,
-                key: key.to_string(),
-                key_char: None,
-            });
-        }
+    if modified && let Some(key) = single_char(rest) {
+        return Ok(Keystroke {
+            modifiers,
+            key: key.to_string(),
+            key_char: None,
+        });
     }
 
     UnknownTokenSnafu {

@@ -215,7 +215,7 @@ impl SemanticTokensRequest {
                 return Some((
                     Arc::from(Vec::new()),
                     Arc::new(HighlightStyleInterner::default()),
-                ))
+                ));
             },
             Err(err) => {
                 tracing::warn!(

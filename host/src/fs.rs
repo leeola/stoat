@@ -117,18 +117,18 @@ pub trait FsHost: Send + Sync {
         let mut current = workdir.to_path_buf();
         push_dir_ignores(self, &current, &mut stack);
 
-        if let Some(parent) = path.parent() {
-            if let Ok(rel) = parent.strip_prefix(workdir) {
-                for component in rel.components() {
-                    let Component::Normal(c) = component else {
-                        continue;
-                    };
-                    current.push(c);
-                    if path_is_ignored(&defaults, &stack, &current, true) {
-                        return true;
-                    }
-                    push_dir_ignores(self, &current, &mut stack);
+        if let Some(parent) = path.parent()
+            && let Ok(rel) = parent.strip_prefix(workdir)
+        {
+            for component in rel.components() {
+                let Component::Normal(c) = component else {
+                    continue;
+                };
+                current.push(c);
+                if path_is_ignored(&defaults, &stack, &current, true) {
+                    return true;
                 }
+                push_dir_ignores(self, &current, &mut stack);
             }
         }
 

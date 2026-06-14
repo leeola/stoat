@@ -142,10 +142,10 @@ pub fn run() -> Result<(), Whatever> {
                 if crate::commands::client::open_in_running_app(&files, new, session)? {
                     return Ok(());
                 }
-                if let Some(text) = &stdin {
-                    if crate::commands::client::pipe_to_running_app(text, new, session)? {
-                        return Ok(());
-                    }
+                if let Some(text) = &stdin
+                    && crate::commands::client::pipe_to_running_app(text, new, session)?
+                {
+                    return Ok(());
                 }
             }
             crate::commands::gui::run(files, restore, stdin, inputs, timeout)

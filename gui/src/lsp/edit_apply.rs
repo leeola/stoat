@@ -29,15 +29,14 @@ pub fn apply_workspace_edit_to_buffer(
     }
     let mut buffers_touched = 0usize;
     for (uri, text_edits) in by_uri {
-        if &uri == active_uri {
-            if let Some(buffer) = editor
+        if &uri == active_uri
+            && let Some(buffer) = editor
                 .upgrade()
                 .and_then(|e| e.read(cx).multi_buffer().read(cx).as_singleton().cloned())
-            {
-                apply_text_edits(&buffer, text_edits, active_rope, encoding, cx);
-                buffers_touched += 1;
-                continue;
-            }
+        {
+            apply_text_edits(&buffer, text_edits, active_rope, encoding, cx);
+            buffers_touched += 1;
+            continue;
         }
         let path = match uri_to_path(&uri) {
             Some(p) => p,

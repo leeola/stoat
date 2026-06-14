@@ -466,8 +466,9 @@ mod tests {
         touch(&editor, &mut cx);
 
         let block_id = lens_block_id(&display_map, &mut cx, 0);
-        assert!(!manager.update(&mut cx, |m, mcx| m
-            .dispatch_block(CustomBlockId(99_999), mcx)));
+        assert!(!manager.update(&mut cx, |m, mcx| {
+            m.dispatch_block(CustomBlockId(99_999), mcx)
+        }));
         assert!(manager.update(&mut cx, |m, mcx| m.dispatch_block(block_id, mcx)));
         cx.run_until_parked();
 

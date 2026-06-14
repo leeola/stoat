@@ -340,15 +340,15 @@ pub fn create_highlight_endpoints_cached(
     resolver: &impl HighlightAnchorResolver,
     cache: &mut Option<CachedHighlightEndpoints>,
 ) -> Arc<[HighlightEndpoint]> {
-    if let Some(ref cached) = cache {
-        if cached.is_valid(
+    if let &mut Some(ref cached) = cache
+        && cached.is_valid(
             highlights,
             semantic_highlights,
             decoration_highlights,
             range,
-        ) {
-            return cached.endpoints.clone();
-        }
+        )
+    {
+        return cached.endpoints.clone();
     }
     let endpoints = create_highlight_endpoints(
         range,

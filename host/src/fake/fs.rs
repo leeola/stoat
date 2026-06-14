@@ -488,13 +488,13 @@ impl FsHost for FakeFs {
                 return Err(io::Error::new(
                     io::ErrorKind::InvalidInput,
                     "not a directory",
-                ))
+                ));
             },
             None => {
                 return Err(io::Error::new(
                     io::ErrorKind::NotFound,
                     format!("{}: not found", resolved.display()),
-                ))
+                ));
             },
         }
 

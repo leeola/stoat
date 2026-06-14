@@ -71,10 +71,10 @@ pub fn run(
 /// binary exits with a usage error before the gpui main loop is
 /// entered. `None` (the flag absent) passes through unchanged.
 fn validate_timeout(timeout: Option<f64>) -> Result<Option<f64>, Whatever> {
-    if let Some(seconds) = timeout {
-        if !seconds.is_finite() || seconds < 0.0 {
-            whatever!("invalid --timeout value: {seconds}");
-        }
+    if let Some(seconds) = timeout
+        && (!seconds.is_finite() || seconds < 0.0)
+    {
+        whatever!("invalid --timeout value: {seconds}");
     }
     Ok(timeout)
 }

@@ -272,10 +272,10 @@ impl ModalLayer {
             return false;
         }
         let popped = self.active_modals.pop().expect("checked non-empty");
-        if popped.focus_handle.contains_focused(window, cx) {
-            if let Some(previous) = popped.previous_focus_handle {
-                window.focus(&previous);
-            }
+        if popped.focus_handle.contains_focused(window, cx)
+            && let Some(previous) = popped.previous_focus_handle
+        {
+            window.focus(&previous);
         }
         cx.notify();
         true
@@ -294,10 +294,10 @@ impl ModalLayer {
             return false;
         }
         let removed = self.active_modals.remove(idx);
-        if removed.focus_handle.contains_focused(window, cx) {
-            if let Some(previous) = removed.previous_focus_handle {
-                window.focus(&previous);
-            }
+        if removed.focus_handle.contains_focused(window, cx)
+            && let Some(previous) = removed.previous_focus_handle
+        {
+            window.focus(&previous);
         }
         cx.notify();
         true

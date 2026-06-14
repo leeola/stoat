@@ -510,10 +510,9 @@ impl DisplayMap {
             && !self.block_map.is_dirty()
             && !self.wrap_map.is_dirty()
             && companion_wrap_data.is_none()
+            && let Some(ref cached) = self.cached_snapshot
         {
-            if let Some(ref cached) = self.cached_snapshot {
-                return cached.clone();
-            }
+            return cached.clone();
         }
 
         let (wrap_snapshot, wrap_edits) = self.sync_through_wrap();

@@ -20,13 +20,13 @@ pub(super) fn rewrite_commit(
     message: Option<&str>,
     descendants: &[String],
 ) -> Result<RewriteResult, GitApplyError> {
-    if let Some(c) = &state.conflict_at {
-        if c == sha || descendants.iter().any(|d| d == c) {
-            return BackendSnafu {
-                reason: format!("simulated cherry-pick conflict at {c}"),
-            }
-            .fail();
+    if let Some(c) = &state.conflict_at
+        && (c == sha || descendants.iter().any(|d| d == c))
+    {
+        return BackendSnafu {
+            reason: format!("simulated cherry-pick conflict at {c}"),
         }
+        .fail();
     }
     let Some(target) = state.commits.get(sha).cloned() else {
         return BackendSnafu {
@@ -95,10 +95,10 @@ pub(super) fn run_rebase(
     onto: &str,
     todo: &[RebaseTodo],
 ) -> Result<String, RebaseError> {
-    if let Some(c) = &state.conflict_at {
-        if todo.iter().any(|t| &t.sha == c) {
-            return ConflictSnafu { at_sha: c.clone() }.fail();
-        }
+    if let Some(c) = &state.conflict_at
+        && todo.iter().any(|t| &t.sha == c)
+    {
+        return ConflictSnafu { at_sha: c.clone() }.fail();
     }
     if !state.commits.contains_key(onto) && !onto.is_empty() {
         return RebaseBackendSnafu {
@@ -208,38 +208,38 @@ pub(super) fn cherry_pick_tree(
     source_sha: &str,
     onto_sha: &str,
 ) -> Result<CherryPickOutcome, GitApplyError> {
-    if let Some(conflict_sha) = &state.conflict_at {
-        if conflict_sha == source_sha {
-            let source = state.commits.get(source_sha).cloned();
-            let onto = state.commits.get(onto_sha).cloned();
-            let ancestor_tree = source
-                .as_ref()
-                .and_then(|c| c.parent.as_ref())
-                .and_then(|p| state.commits.get(p))
-                .map(|c| c.tree.clone())
-                .unwrap_or_default();
-            // Produce a conflict on every path that differs between
-            // ours and theirs; surface stages from each side.
-            let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
-            let ours_tree = onto.as_ref().map(|c| &c.tree);
-            let theirs_tree = source.as_ref().map(|c| &c.tree);
-            if let Some(t) = ours_tree {
-                paths.extend(t.keys().cloned());
-            }
-            if let Some(t) = theirs_tree {
-                paths.extend(t.keys().cloned());
-            }
-            let files: Vec<ConflictedFile> = paths
-                .into_iter()
-                .map(|p| ConflictedFile {
-                    ancestor: ancestor_tree.get(&p).cloned(),
-                    ours: ours_tree.and_then(|t| t.get(&p).cloned()),
-                    theirs: theirs_tree.and_then(|t| t.get(&p).cloned()),
-                    path: p,
-                })
-                .collect();
-            return Ok(CherryPickOutcome::Conflict { files });
+    if let Some(conflict_sha) = &state.conflict_at
+        && conflict_sha == source_sha
+    {
+        let source = state.commits.get(source_sha).cloned();
+        let onto = state.commits.get(onto_sha).cloned();
+        let ancestor_tree = source
+            .as_ref()
+            .and_then(|c| c.parent.as_ref())
+            .and_then(|p| state.commits.get(p))
+            .map(|c| c.tree.clone())
+            .unwrap_or_default();
+        // Produce a conflict on every path that differs between
+        // ours and theirs; surface stages from each side.
+        let mut paths: BTreeSet<PathBuf> = BTreeSet::new();
+        let ours_tree = onto.as_ref().map(|c| &c.tree);
+        let theirs_tree = source.as_ref().map(|c| &c.tree);
+        if let Some(t) = ours_tree {
+            paths.extend(t.keys().cloned());
         }
+        if let Some(t) = theirs_tree {
+            paths.extend(t.keys().cloned());
+        }
+        let files: Vec<ConflictedFile> = paths
+            .into_iter()
+            .map(|p| ConflictedFile {
+                ancestor: ancestor_tree.get(&p).cloned(),
+                ours: ours_tree.and_then(|t| t.get(&p).cloned()),
+                theirs: theirs_tree.and_then(|t| t.get(&p).cloned()),
+                path: p,
+            })
+            .collect();
+        return Ok(CherryPickOutcome::Conflict { files });
     }
     let Some(source) = state.commits.get(source_sha).cloned() else {
         return BackendSnafu {

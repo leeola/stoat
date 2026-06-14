@@ -21,8 +21,8 @@ use std::{
     path::Path,
     process::Stdio,
     sync::{
-        Arc, Mutex,
         atomic::{AtomicU64, Ordering},
+        Arc, Mutex,
     },
 };
 use stoat_log::TextProtoLog;

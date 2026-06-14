@@ -93,11 +93,11 @@ impl TestScheduler {
         loop {
             self.run_until_parked();
             let next_timer = self.state.lock().timers.first().map(|t| t.expiration);
-            if let Some(exp) = next_timer {
-                if exp <= target {
-                    self.clock.advance(exp - self.clock.now());
-                    continue;
-                }
+            if let Some(exp) = next_timer
+                && exp <= target
+            {
+                self.clock.advance(exp - self.clock.now());
+                continue;
             }
             break;
         }
@@ -133,7 +133,7 @@ impl TestScheduler {
 
     /// Poll `future` to completion, stepping the scheduler between polls.
     /// Panics if the future cannot make progress (deadlock).
-    pub fn block_on<F: std::future::Future>(&self, future: F) -> F::Output {
+    pub fn block_on<F: Future>(&self, future: F) -> F::Output {
         let mut future = std::pin::pin!(future);
         let waker = futures::task::noop_waker();
         let mut cx = Context::from_waker(&waker);

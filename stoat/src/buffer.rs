@@ -860,10 +860,10 @@ impl TextBufferSnapshot {
         if anchor.timestamp > self.version {
             return false;
         }
-        if let Some(id) = anchor.buffer_id {
-            if id != self.buffer_id {
-                return false;
-            }
+        if let Some(id) = anchor.buffer_id
+            && id != self.buffer_id
+        {
+            return false;
         }
         let (fragment, _) = self.find_fragment_for_anchor(anchor);
         fragment.is_some_and(|f| f.visible)

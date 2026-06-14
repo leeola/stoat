@@ -535,11 +535,11 @@ impl VtermGrid {
     /// margin the cursor sits on, scroll the region's rows up by one
     /// instead of growing the buffer.
     fn line_feed(&mut self) {
-        if let Some((top, bottom)) = self.scroll_region {
-            if self.cursor_row >= bottom {
-                self.scroll_region_up(top, bottom);
-                return;
-            }
+        if let Some((top, bottom)) = self.scroll_region
+            && self.cursor_row >= bottom
+        {
+            self.scroll_region_up(top, bottom);
+            return;
         }
         self.cursor_row += 1;
         self.ensure_row(self.cursor_row);

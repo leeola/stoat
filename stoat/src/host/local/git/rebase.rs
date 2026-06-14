@@ -158,10 +158,10 @@ pub(super) fn cherry_pick_tree(
         } else {
             PathBuf::from(dir).join(name)
         };
-        if let Ok(blob) = entry.to_object(repo).and_then(|o| o.peel_to_blob()) {
-            if let Ok(text) = std::str::from_utf8(blob.content()) {
-                out.insert(rel, text.to_string());
-            }
+        if let Ok(blob) = entry.to_object(repo).and_then(|o| o.peel_to_blob())
+            && let Ok(text) = std::str::from_utf8(blob.content())
+        {
+            out.insert(rel, text.to_string());
         }
         git2::TreeWalkResult::Ok
     })

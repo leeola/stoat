@@ -127,13 +127,16 @@ impl FsWatcherDriver {
                 }
                 continue;
             };
-            if let Some(buffer) = weak.upgrade() {
-                buffer.update(cx, |b, cx| b.reload(cx));
-                cx.emit(FsWatcherDriverEvent::ExternalEdit {
-                    path: event.path.clone(),
-                });
-            } else {
-                self.tracked.remove(&event.path);
+            match weak.upgrade() {
+                Some(buffer) => {
+                    buffer.update(cx, |b, cx| b.reload(cx));
+                    cx.emit(FsWatcherDriverEvent::ExternalEdit {
+                        path: event.path.clone(),
+                    });
+                },
+                _ => {
+                    self.tracked.remove(&event.path);
+                },
             }
         }
     }

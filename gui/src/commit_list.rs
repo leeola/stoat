@@ -679,7 +679,7 @@ impl ItemView for CommitListItem {
     }
 }
 
-fn render_summary_strip(summary: Option<&[CommitFileChange]>) -> impl IntoElement {
+fn render_summary_strip(summary: Option<&[CommitFileChange]>) -> impl IntoElement + use<> {
     let mut col = div().flex().flex_col();
     match summary {
         Some(changes) if !changes.is_empty() => {

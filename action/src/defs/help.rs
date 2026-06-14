@@ -99,7 +99,7 @@ impl Action for OpenAbout {
 }
 
 macro_rules! plumbing_action {
-    ($def:ident, $action:ident, $name:expr, $kind:expr, $short:expr, $long:expr) => {
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021) => {
         #[derive(Debug)]
         pub struct $def;
 

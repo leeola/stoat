@@ -386,13 +386,12 @@ impl PaneTree {
     /// Returns whether focus actually changed.
     pub fn focus_direction(&mut self, direction: Direction) -> bool {
         let current_node = self.node_for_pane(self.focus);
-        if let Some(target) = self.find_split_in_direction(current_node, direction) {
-            if let NodeContent::Leaf(pane_id) = self.nodes[target].content {
-                if pane_id != self.focus {
-                    self.focus = pane_id;
-                    return true;
-                }
-            }
+        if let Some(target) = self.find_split_in_direction(current_node, direction)
+            && let NodeContent::Leaf(pane_id) = self.nodes[target].content
+            && pane_id != self.focus
+        {
+            self.focus = pane_id;
+            return true;
         }
         false
     }

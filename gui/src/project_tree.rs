@@ -421,10 +421,10 @@ impl Render for ProjectTree {
             }
             elements.push(el);
 
-            if let Some((Some(after), depth, editor)) = &create_input {
-                if *after == ix {
-                    elements.push(input_row(*depth, editor.clone(), color));
-                }
+            if let Some((Some(after), depth, editor)) = &create_input
+                && *after == ix
+            {
+                elements.push(input_row(*depth, editor.clone(), color));
             }
         }
         div().flex().flex_col().size_full().children(elements)

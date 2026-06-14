@@ -208,10 +208,10 @@ impl TabSnapshot {
                 column = next_column;
                 continue;
             }
-            if let Some(end) = end_col {
-                if column >= end {
-                    break;
-                }
+            if let Some(end) = end_col
+                && column >= end
+            {
+                break;
             }
 
             if ch == '\t' {
@@ -395,8 +395,7 @@ fn advance_display_column(text: &str, column: &mut u32) {
 // A static slice of spaces long enough to cover any tab expansion
 // (up to `MAX_EXPANSION_COLUMN` + tab_size slop). The returned subslice
 // is always a valid UTF-8 slice of ASCII spaces.
-const TAB_SPACES: &str =
-    "                                                                                                                                                                                                                                                                                                                                ";
+const TAB_SPACES: &str = "                                                                                                                                                                                                                                                                                                                                ";
 
 fn tab_spaces_slice(width: u32) -> &'static str {
     let len = (width as usize).min(TAB_SPACES.len());

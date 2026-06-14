@@ -393,10 +393,9 @@ impl FoldMap {
     ) -> (Arc<FoldSnapshot>, Patch<u32>) {
         if inlay_snapshot.inlay_version == self.last_inlay_version
             && self.version == self.last_self_version
+            && let Some(ref cached) = self.cached_snapshot
         {
-            if let Some(ref cached) = self.cached_snapshot {
-                return (Arc::clone(cached), Patch::empty());
-            }
+            return (Arc::clone(cached), Patch::empty());
         }
 
         // Resolve the anchor storage tree to inlay points for this snapshot's
@@ -628,12 +627,12 @@ impl FoldMap {
 
         let mut merged: Vec<stoat_text::patch::Edit<u32>> = Vec::with_capacity(ranges.len());
         for (start, end) in ranges {
-            if let Some(last) = merged.last_mut() {
-                if start <= last.old.end {
-                    last.old.end = last.old.end.max(end);
-                    last.new.end = last.old.end;
-                    continue;
-                }
+            if let Some(last) = merged.last_mut()
+                && start <= last.old.end
+            {
+                last.old.end = last.old.end.max(end);
+                last.new.end = last.old.end;
+                continue;
             }
             merged.push(stoat_text::patch::Edit {
                 old: start..end,
@@ -920,15 +919,15 @@ fn sync_fold_incremental(
         // prefix: an isomorphic run merges into the preceding transforms, and a
         // placeholder (a fold wholly before the edit) is preserved intact rather
         // than re-emitted as an isomorphic gap.
-        if let Some(item) = cursor.item() {
-            if cursor.start().0 + item.summary.input.len == old_start_offset {
-                if item.placeholder.is_some() {
-                    new_transforms.push(item.clone(), ());
-                } else {
-                    push_fold_isomorphic(&mut new_transforms, item.summary.clone());
-                }
-                cursor.next();
+        if let Some(item) = cursor.item()
+            && cursor.start().0 + item.summary.input.len == old_start_offset
+        {
+            if item.placeholder.is_some() {
+                new_transforms.push(item.clone(), ());
+            } else {
+                push_fold_isomorphic(&mut new_transforms, item.summary.clone());
             }
+            cursor.next();
         }
 
         // Record old output rows
@@ -1728,22 +1727,22 @@ impl Iterator for ReversedFoldChars<'_> {
             self.placeholder_iter = None;
         }
 
-        if self.buffer_offset <= self.next_fold_end_offset {
-            if let Some(fold) = self.folds.item() {
-                let start_off = self
-                    .rope
-                    .point_to_offset(self.inlay_snapshot.to_buffer_point(fold.range.start));
-                let placeholder_chars: Vec<char> = fold.placeholder.text.chars().rev().collect();
-                self.folds.prev();
-                self.next_fold_end_offset = self.folds.item().map_or(0, |f| {
-                    self.rope
-                        .point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.end))
-                });
-                self.placeholder_iter = Some(placeholder_chars.into_iter());
-                self.chars = self.rope.reversed_chars_at(start_off);
-                self.buffer_offset = start_off;
-                return self.next();
-            }
+        if self.buffer_offset <= self.next_fold_end_offset
+            && let Some(fold) = self.folds.item()
+        {
+            let start_off = self
+                .rope
+                .point_to_offset(self.inlay_snapshot.to_buffer_point(fold.range.start));
+            let placeholder_chars: Vec<char> = fold.placeholder.text.chars().rev().collect();
+            self.folds.prev();
+            self.next_fold_end_offset = self.folds.item().map_or(0, |f| {
+                self.rope
+                    .point_to_offset(self.inlay_snapshot.to_buffer_point(f.range.end))
+            });
+            self.placeholder_iter = Some(placeholder_chars.into_iter());
+            self.chars = self.rope.reversed_chars_at(start_off);
+            self.buffer_offset = start_off;
+            return self.next();
         }
 
         let ch = self.chars.next()?;

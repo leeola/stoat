@@ -75,8 +75,7 @@ mod tests {
     fn preserves_other_keys_and_trailing_comment() {
         let src =
             "// my config\non init {\n    text_proto_log = true;\n    theme = dark; // active\n}\n";
-        let expected =
-            "// my config\non init {\n    text_proto_log = true;\n    theme = \"solarized\"; // active\n}\n";
+        let expected = "// my config\non init {\n    text_proto_log = true;\n    theme = \"solarized\"; // active\n}\n";
         assert_eq!(set_theme(src, "solarized"), expected);
     }
 
