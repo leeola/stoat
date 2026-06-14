@@ -38,10 +38,23 @@ struct OpenFileParams {
     session: Option<u64>,
 }
 
-/// `open_file` reply: the session the path routed into and the buffer it
-/// opened.
+/// `pipe_buffer` request: the client's working directory (for session routing)
+/// and the text to seed a scratch buffer with. `session` and `new` route the
+/// same way as [`OpenFileParams`].
+#[derive(Deserialize)]
+struct PipeBufferParams {
+    cwd: std::path::PathBuf,
+    text: String,
+    #[serde(default)]
+    new: bool,
+    #[serde(default)]
+    session: Option<u64>,
+}
+
+/// Reply shared by `open_file` and `pipe_buffer`: the session the request
+/// routed into and the buffer it opened or created.
 #[derive(Serialize)]
-struct OpenFileResult {
+struct SessionBufferResult {
     session_id: WorkspaceUid,
     buffer_id: BufferId,
 }
@@ -63,6 +76,7 @@ pub fn spawn_dispatch(cx: &mut App, mut requests: UnboundedReceiver<IncomingRequ
 fn dispatch(app: &mut App, method: &str, params: Option<Value>) -> Result<Value, RpcError> {
     match method {
         "open_file" => open_file(app, params),
+        "pipe_buffer" => pipe_buffer(app, params),
         other => Err(error(
             METHOD_NOT_FOUND,
             format!("method not found: {other}"),
@@ -74,18 +88,44 @@ fn open_file(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
     let params: OpenFileParams = serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|err| error(INVALID_PARAMS, format!("open_file params: {err}")))?;
 
-    let (session_id, buffer_id) = match resolve_target(app, &params)? {
-        Some((uid, workspace)) => {
-            workspace.update(app, |w, cx| {
-                w.open_paths(std::slice::from_ref(&params.path), cx)
-            });
-            (uid, buffer_id_for(&workspace, &params.path, app))
-        },
-        None => open_new_session(app, &params.cwd, &params.path)?,
-    };
+    let (session_id, buffer_id) =
+        match resolve_target(app, &params.cwd, params.new, params.session)? {
+            Some((uid, workspace)) => {
+                workspace.update(app, |w, cx| {
+                    w.open_paths(std::slice::from_ref(&params.path), cx)
+                });
+                (uid, buffer_id_for(&workspace, &params.path, app))
+            },
+            None => open_new_session(app, &params.cwd, &params.path)?,
+        };
 
     let buffer_id = buffer_id.ok_or_else(|| error(INTERNAL_ERROR, "opened buffer has no id"))?;
-    serde_json::to_value(OpenFileResult {
+    encode_session_buffer(session_id, buffer_id)
+}
+
+/// Seed a scratch buffer from `params.text` in the routed session, opening a
+/// fresh window when none matches. Mirrors [`open_file`] but creates a pathless
+/// scratch buffer rather than loading a file.
+fn pipe_buffer(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
+    let params: PipeBufferParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|err| error(INVALID_PARAMS, format!("pipe_buffer params: {err}")))?;
+
+    let (session_id, buffer_id) =
+        match resolve_target(app, &params.cwd, params.new, params.session)? {
+            Some((uid, workspace)) => {
+                let buffer_id =
+                    workspace.update(app, |w, cx| w.open_piped_scratch(&params.text, cx));
+                (uid, Some(buffer_id))
+            },
+            None => open_new_scratch_session(app, &params.cwd, &params.text)?,
+        };
+
+    let buffer_id = buffer_id.ok_or_else(|| error(INTERNAL_ERROR, "scratch buffer has no id"))?;
+    encode_session_buffer(session_id, buffer_id)
+}
+
+fn encode_session_buffer(session_id: WorkspaceUid, buffer_id: BufferId) -> Result<Value, RpcError> {
+    serde_json::to_value(SessionBufferResult {
         session_id,
         buffer_id,
     })
@@ -98,9 +138,11 @@ fn open_file(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
 /// used when one exists.
 fn resolve_target(
     app: &App,
-    params: &OpenFileParams,
+    cwd: &Path,
+    new: bool,
+    session: Option<u64>,
 ) -> Result<Option<(WorkspaceUid, Entity<Workspace>)>, RpcError> {
-    if let Some(id) = params.session {
+    if let Some(id) = session {
         let uid = WorkspaceUid(id);
         let workspace = app
             .global::<AppHost>()
@@ -108,12 +150,12 @@ fn resolve_target(
             .ok_or_else(|| error(INVALID_PARAMS, format!("session {id} is not live")))?;
         return Ok(Some((uid, workspace)));
     }
-    if params.new {
+    if new {
         return Ok(None);
     }
     let host = app.global::<AppHost>();
     Ok(host
-        .resolve_cwd(&params.cwd, app)
+        .resolve_cwd(cwd, app)
         .and_then(|uid| host.session_workspace(uid, app).map(|ws| (uid, ws))))
 }
 
@@ -153,6 +195,50 @@ fn open_new_session(
             let workspace = stoat_app.workspace().clone();
             let uid = workspace.read(cx).uid();
             (uid, buffer_id_for(&workspace, path, cx))
+        })
+        .map_err(|err| error(INTERNAL_ERROR, format!("read new window: {err}")))
+}
+
+/// Open a new window rooted at `cwd` seeded with a scratch buffer holding
+/// `text`, returning the new session's uid and the scratch buffer id. The new
+/// `StoatApp` registers itself with the [`AppHost`], so a later request from the
+/// same cwd reuses it.
+fn open_new_scratch_session(
+    app: &mut App,
+    cwd: &Path,
+    text: &str,
+) -> Result<(WorkspaceUid, Option<BufferId>), RpcError> {
+    let bounds = Bounds::centered(None, size(px(1200.0), px(800.0)), app);
+    let window = app
+        .open_window(
+            WindowOptions {
+                window_bounds: Some(WindowBounds::Windowed(bounds)),
+                titlebar: Some(TitlebarOptions {
+                    title: Some(SharedString::from("Stoat")),
+                    ..Default::default()
+                }),
+                ..Default::default()
+            },
+            {
+                let cwd = cwd.to_path_buf();
+                let text = text.to_string();
+                move |window, cx| {
+                    cx.new(|cx| {
+                        StoatApp::new_at(cwd, vec![], RestoreMode::None, Some(text), window, cx)
+                    })
+                }
+            },
+        )
+        .map_err(|err| error(INTERNAL_ERROR, format!("open window: {err}")))?;
+
+    window
+        .update(app, |stoat_app, _window, cx| {
+            let workspace = stoat_app.workspace().clone();
+            let uid = workspace.read(cx).uid();
+            // A fresh window seeded with `text` holds exactly the one scratch
+            // buffer, so its sole registered id is that scratch.
+            let buffer_id = workspace.read(cx).buffer_registry().read(cx).ids().next();
+            (uid, buffer_id)
         })
         .map_err(|err| error(INTERNAL_ERROR, format!("read new window: {err}")))
 }
@@ -336,5 +422,65 @@ mod tests {
             .update(|app| dispatch(app, "open_file", Some(params)))
             .expect_err("a dead session is rejected");
         assert_eq!(err.code, INVALID_PARAMS);
+    }
+
+    fn scratch_text(cx: &TestAppContext, workspace: &Entity<Workspace>, buffer_id: u64) -> String {
+        workspace.read_with(cx, |w, cx| {
+            w.buffer_registry()
+                .read(cx)
+                .get(BufferId::new(buffer_id))
+                .expect("scratch buffer registered")
+                .read()
+                .expect("buffer poisoned")
+                .rope()
+                .to_string()
+        })
+    }
+
+    #[test]
+    fn pipe_buffer_seeds_a_scratch_in_the_cwd_matched_session() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (workspace, uid) = register_session(&mut cx, "/repo");
+
+        let params = serde_json::json!({ "cwd": "/repo", "text": "piped hi" });
+        let result = cx
+            .update(|app| dispatch(app, "pipe_buffer", Some(params)))
+            .expect("pipe_buffer succeeds");
+
+        assert_eq!(result["session_id"], serde_json::json!(uid.0));
+        let buffer_id = result["buffer_id"]
+            .as_u64()
+            .expect("result carries a buffer id");
+        assert_eq!(scratch_text(&cx, &workspace, buffer_id), "piped hi");
+    }
+
+    #[test]
+    fn pipe_buffer_opens_a_new_window_seeded_with_text_when_unmatched() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+
+        let before = cx.update(|app| app.windows().len());
+        let params = serde_json::json!({ "cwd": "/fresh", "text": "new pipe" });
+        let result = cx
+            .update(|app| dispatch(app, "pipe_buffer", Some(params)))
+            .expect("pipe_buffer opens a new session");
+        let after = cx.update(|app| app.windows().len());
+
+        assert_eq!(after, before + 1, "an unmatched cwd opens a new window");
+        let buffer_id = result["buffer_id"]
+            .as_u64()
+            .expect("result carries a buffer id");
+
+        let new_uid = cx
+            .update(|app| {
+                app.global::<AppHost>()
+                    .resolve_cwd(&PathBuf::from("/fresh"), app)
+            })
+            .expect("the new session registers at its cwd");
+        let new_ws = cx
+            .update(|app| app.global::<AppHost>().session_workspace(new_uid, app))
+            .expect("the new session is live");
+        assert_eq!(scratch_text(&cx, &new_ws, buffer_id), "new pipe");
     }
 }
