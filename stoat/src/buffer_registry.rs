@@ -78,12 +78,22 @@ impl BufferRegistry {
     }
 
     pub fn new_scratch(&mut self) -> (BufferId, SharedBuffer) {
-        self.new_scratch_inner(false)
+        self.new_scratch_inner(false, None)
     }
 
-    fn new_scratch_inner(&mut self, preview: bool) -> (BufferId, SharedBuffer) {
+    /// Allocate a scratch buffer seeded with `text`. Used to surface piped
+    /// stdin (`echo foo | stoat`) as an editable, pathless buffer.
+    pub fn new_scratch_with_text(&mut self, text: &str) -> (BufferId, SharedBuffer) {
+        self.new_scratch_inner(false, Some(text))
+    }
+
+    fn new_scratch_inner(&mut self, preview: bool, text: Option<&str>) -> (BufferId, SharedBuffer) {
         let id = self.allocate_id();
-        let buffer = Arc::new(RwLock::new(TextBuffer::new(id)));
+        let text_buffer = match text {
+            Some(text) => TextBuffer::with_text(id, text),
+            None => TextBuffer::new(id),
+        };
+        let buffer = Arc::new(RwLock::new(text_buffer));
         self.buffers.insert(
             id,
             BufferEntry {

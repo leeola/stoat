@@ -16,6 +16,7 @@ const DEFAULT_CONFIG: &str = include_str!("../../../config.stcfg");
 pub fn run(
     files: Vec<PathBuf>,
     restore: RestoreMode,
+    stdin: Option<String>,
     inputs: Option<String>,
     timeout: Option<f64>,
 ) -> Result<(), Whatever> {
@@ -61,7 +62,7 @@ pub fn run(
         user_snippets: UserSnippetsGlobal(stoat::snippet::load_user_snippets()),
     };
 
-    stoat_gui::run(globals, files, restore, inputs, timeout);
+    stoat_gui::run(globals, files, restore, stdin, inputs, timeout);
     Ok(())
 }
 

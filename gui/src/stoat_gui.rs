@@ -167,6 +167,7 @@ pub fn run(
     globals: Globals,
     files: Vec<std::path::PathBuf>,
     restore: RestoreMode,
+    stdin: Option<String>,
     inputs: Option<Vec<Keystroke>>,
     timeout: Option<f64>,
 ) {
@@ -189,7 +190,7 @@ pub fn run(
                     }),
                     ..Default::default()
                 },
-                move |window, cx| cx.new(|cx| StoatApp::new(files, restore, window, cx)),
+                move |window, cx| cx.new(|cx| StoatApp::new(files, restore, stdin, window, cx)),
             )
             .expect("open root window");
         if let Some(keystrokes) = inputs {

@@ -4147,6 +4147,7 @@ impl Workspace {
                     crate::stoat_app::StoatApp::new(
                         Vec::new(),
                         crate::RestoreMode::None,
+                        None,
                         window,
                         cx,
                     )
@@ -4233,6 +4234,42 @@ impl Workspace {
         pane.update(cx, |p, cx| {
             p.add_item(Box::new(editor), cx);
         });
+    }
+
+    /// Create a scratch buffer seeded with `text` and add a backing editor to
+    /// the focused pane, returning the new buffer's id. Surfaces piped stdin
+    /// (`echo foo | stoat`) as an editable, pathless buffer.
+    pub(crate) fn open_piped_scratch(
+        &mut self,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> BufferId {
+        let weak_workspace = cx.weak_entity();
+        let (buffer_id, shared) = self
+            .buffer_registry
+            .update(cx, |reg, cx| reg.new_scratch_with_text(text, cx));
+        let buffer = cx.new(|_| Buffer::from_shared(shared));
+        let multi_buffer = {
+            let buffer = buffer.clone();
+            cx.new(|cx| MultiBuffer::singleton(buffer, cx))
+        };
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        let display_map = {
+            let buffer = buffer.clone();
+            cx.new(|cx| DisplayMap::new(buffer, executor, cx))
+        };
+        let diff_map = cx.new(|cx| DiffMap::new(buffer, cx));
+        let editor =
+            cx.new(|cx| Editor::new(multi_buffer, display_map, diff_map, EditorMode::full(), cx));
+        editor.update(cx, |ed, _| ed.set_workspace(Some(weak_workspace)));
+
+        let pane_id = self.pane_tree.read(cx).focus();
+        if let Some(pane) = self.pane_tree.read(cx).pane(pane_id).cloned() {
+            pane.update(cx, |p, cx| {
+                p.add_item(Box::new(editor), cx);
+            });
+        }
+        buffer_id
     }
 
     /// Toggle the right-side `DiffHunkPanel`. When the panel is open,
@@ -10398,6 +10435,38 @@ mod tests {
             focused_pane.read_with(vcx, |p, _| p.items().len()),
             1,
             "new pane should contain exactly one scratch editor",
+        );
+    }
+
+    #[test]
+    fn open_piped_scratch_seeds_buffer_with_text() {
+        let mut cx = TestAppContext::single();
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        let pane_tree = ws.read_with(vcx, |w, _| w.pane_tree().clone());
+
+        let buffer_id = ws.update(vcx, |w, cx| w.open_piped_scratch("piped text", cx));
+        vcx.run_until_parked();
+
+        let text = ws.read_with(vcx, |w, cx| {
+            w.buffer_registry()
+                .read(cx)
+                .get(buffer_id)
+                .expect("piped scratch buffer registered")
+                .read()
+                .expect("buffer poisoned")
+                .rope()
+                .to_string()
+        });
+        assert_eq!(text, "piped text");
+
+        let focused_id = pane_tree.read_with(vcx, |t, _| t.focus());
+        let focused_pane = pane_tree
+            .read_with(vcx, |t, _| t.pane(focused_id).cloned())
+            .expect("focused pane registered");
+        assert_eq!(
+            focused_pane.read_with(vcx, |p, _| p.items().len()),
+            1,
+            "the piped scratch editor is added to the focused pane",
         );
     }
 

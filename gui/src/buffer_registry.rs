@@ -44,6 +44,18 @@ impl BufferRegistry {
         result
     }
 
+    /// Allocate a scratch buffer seeded with `text` (e.g. piped stdin).
+    pub fn new_scratch_with_text(
+        &mut self,
+        text: &str,
+        cx: &mut Context<'_, Self>,
+    ) -> (BufferId, SharedBuffer) {
+        let result = self.inner.new_scratch_with_text(text);
+        cx.emit(BufferRegistryEvent::BufferAdded(result.0));
+        cx.notify();
+        result
+    }
+
     /// Open `path`, returning the existing buffer when one is already
     /// registered for that path. Emits [`BufferRegistryEvent::BufferAdded`]
     /// only when a new entry was allocated.

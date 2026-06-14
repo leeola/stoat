@@ -140,7 +140,9 @@ fn open_new_session(
                 let cwd = cwd.to_path_buf();
                 let path = path.to_path_buf();
                 move |window, cx| {
-                    cx.new(|cx| StoatApp::new_at(cwd, vec![path], RestoreMode::None, window, cx))
+                    cx.new(|cx| {
+                        StoatApp::new_at(cwd, vec![path], RestoreMode::None, None, window, cx)
+                    })
                 }
             },
         )

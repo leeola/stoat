@@ -1,6 +1,9 @@
 use clap::{ArgAction, Parser, Subcommand};
 use snafu::Whatever;
-use std::path::PathBuf;
+use std::{
+    io::{self, IsTerminal, Read},
+    path::PathBuf,
+};
 
 const VERSION_INFO: &str = concat!(
     env!("CARGO_PKG_VERSION"),
@@ -108,6 +111,8 @@ pub fn run() -> Result<(), Whatever> {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
         None => {
+            let stdin = read_piped_stdin();
+
             // --inputs/--timeout drive a freshly spawned window, so they bypass
             // the route-into-a-running-app path.
             let drive = inputs.is_some() || timeout.is_some();
@@ -117,8 +122,28 @@ pub fn run() -> Result<(), Whatever> {
             {
                 Ok(())
             } else {
-                crate::commands::gui::run(files, restore, inputs, timeout)
+                crate::commands::gui::run(files, restore, stdin, inputs, timeout)
             }
+        },
+    }
+}
+
+/// Read piped stdin to a string, or `None` when stdin is a terminal or
+/// empty. A non-tty stdin means content was piped in (`echo foo | stoat`),
+/// which seeds a scratch buffer; the `is_terminal` guard mirrors the diff
+/// adapter's check for stdout. A read error is logged and yields `None` so
+/// the editor still launches normally.
+fn read_piped_stdin() -> Option<String> {
+    if io::stdin().is_terminal() {
+        return None;
+    }
+    let mut buf = String::new();
+    match io::stdin().read_to_string(&mut buf) {
+        Ok(0) => None,
+        Ok(_) => Some(buf),
+        Err(err) => {
+            tracing::warn!(?err, "failed to read piped stdin");
+            None
         },
     }
 }

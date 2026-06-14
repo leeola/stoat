@@ -30,11 +30,12 @@ impl StoatApp {
     pub(crate) fn new(
         files: Vec<PathBuf>,
         restore: RestoreMode,
+        scratch: Option<String>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
-        Self::new_at(cwd, files, restore, window, cx)
+        Self::new_at(cwd, files, restore, scratch, window, cx)
     }
 
     /// Like [`Self::new`] but rooted at an explicit `cwd` rather than the
@@ -44,6 +45,7 @@ impl StoatApp {
         cwd: PathBuf,
         files: Vec<PathBuf>,
         restore: RestoreMode,
+        scratch: Option<String>,
         window: &mut Window,
         cx: &mut Context<'_, Self>,
     ) -> Self {
@@ -66,14 +68,15 @@ impl StoatApp {
             false
         };
 
-        if restored {
-            if !files.is_empty() {
-                workspace.update(cx, |w, cx| w.open_paths(&files, cx));
-            }
-        } else if files.is_empty() {
-            Self::open_scratch(&workspace, cx);
-        } else {
+        if !files.is_empty() {
             workspace.update(cx, |w, cx| w.open_paths(&files, cx));
+        } else if !restored && scratch.is_none() {
+            Self::open_scratch(&workspace, cx);
+        }
+        if let Some(text) = &scratch {
+            workspace.update(cx, |w, cx| {
+                w.open_piped_scratch(text, cx);
+            });
         }
 
         let _window_bounds = track_window_bounds(&workspace, window, cx);
@@ -262,8 +265,9 @@ mod tests {
     fn new_constructs_workspace_anchored_to_cwd() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
-        let (app, _vcx) = cx
-            .add_window_view(|window, cx| StoatApp::new(Vec::new(), RestoreMode::None, window, cx));
+        let (app, _vcx) = cx.add_window_view(|window, cx| {
+            StoatApp::new(Vec::new(), RestoreMode::None, None, window, cx)
+        });
         let cwd = std::env::current_dir().expect("current_dir");
         let expected_name: SharedString = cwd
             .file_name()
@@ -282,8 +286,9 @@ mod tests {
     fn new_seeds_focused_pane_with_scratch_editor() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
-        let (app, _vcx) = cx
-            .add_window_view(|window, cx| StoatApp::new(Vec::new(), RestoreMode::None, window, cx));
+        let (app, _vcx) = cx.add_window_view(|window, cx| {
+            StoatApp::new(Vec::new(), RestoreMode::None, None, window, cx)
+        });
 
         app.read_with(&cx, |app, cx| {
             let ws = app.workspace.read(cx);
@@ -299,6 +304,35 @@ mod tests {
     }
 
     #[test]
+    fn new_with_scratch_opens_single_piped_editor() {
+        let mut cx = TestAppContext::single();
+        install_executor_global(&mut cx);
+        let (app, _vcx) = cx.add_window_view(|window, cx| {
+            StoatApp::new(
+                Vec::new(),
+                RestoreMode::None,
+                Some("piped".into()),
+                window,
+                cx,
+            )
+        });
+
+        app.read_with(&cx, |app, cx| {
+            let ws = app.workspace.read(cx);
+            let pane_tree = ws.pane_tree().read(cx);
+            let pane = pane_tree
+                .pane(pane_tree.focus())
+                .expect("focused pane")
+                .read(cx);
+            assert_eq!(
+                pane.len(),
+                1,
+                "piped stdin opens one editor, not an empty default plus the piped one",
+            );
+        });
+    }
+
+    #[test]
     fn app_quit_writes_workspace_state() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
@@ -309,8 +343,9 @@ mod tests {
             cx.set_global(crate::app_host::AppHost::default());
         });
 
-        let (app, _vcx) = cx
-            .add_window_view(|window, cx| StoatApp::new(Vec::new(), RestoreMode::None, window, cx));
+        let (app, _vcx) = cx.add_window_view(|window, cx| {
+            StoatApp::new(Vec::new(), RestoreMode::None, None, window, cx)
+        });
 
         // Quit saves through the process host, as stoat_gui::run wires it.
         cx.update(|cx| {
@@ -353,7 +388,7 @@ mod tests {
         let fs: Arc<dyn stoat::host::FsHost> = Arc::new(stoat::host::FakeFs::new());
         cx.update(|cx| cx.set_global(FsHostGlobal(fs)));
         let (app, _vcx) = cx.add_window_view(|window, cx| {
-            StoatApp::new(Vec::new(), RestoreMode::Continue, window, cx)
+            StoatApp::new(Vec::new(), RestoreMode::Continue, None, window, cx)
         });
 
         app.read_with(&cx, |app, cx| {
