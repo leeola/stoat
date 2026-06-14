@@ -26,10 +26,11 @@ use crate::{
     workspace::Workspace,
 };
 use gpui::{
-    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, FocusHandle, Focusable,
-    Font, FontFeatures, FontStyle, FontWeight, InteractiveElement, IntoElement, Modifiers,
-    MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, ParentElement, Pixels, Point,
-    Render, ScrollDelta, ScrollWheelEvent, SharedString, Size, Styled, Task, WeakEntity, Window,
+    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, ElementInputHandler,
+    FocusHandle, Focusable, Font, FontFeatures, FontStyle, FontWeight, InteractiveElement,
+    IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent,
+    ParentElement, Pixels, Point, Render, ScrollDelta, ScrollWheelEvent, SharedString, Size,
+    Styled, Task, WeakEntity, Window,
 };
 use std::{
     path::PathBuf,
@@ -627,11 +628,34 @@ impl Render for Terminal {
         )
         .absolute()
         .size_full();
+        let editor_input = self
+            .workspace
+            .upgrade()
+            .map(|ws| ws.read(cx).editor_input().clone());
+        let focus_handle = self.focus_handle.clone();
+        // Bind the shared workspace IME sink to the terminal's focus handle so
+        // committed text reaches the focused terminal's PTY. gpui has no IME
+        // target for a focused element without a registered input handler.
+        let input_capture = canvas(
+            move |bounds, _window, _cx| bounds,
+            move |_bounds, prepaint_bounds, window, cx| {
+                if let Some(editor_input) = editor_input {
+                    window.handle_input(
+                        &focus_handle,
+                        ElementInputHandler::new(prepaint_bounds, editor_input),
+                        cx,
+                    );
+                }
+            },
+        )
+        .absolute()
+        .size_full();
         let output_layer = div()
             .relative()
             .flex_grow()
             .w_full()
             .child(grid)
+            .child(input_capture)
             .on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, _window, cx| {
@@ -925,6 +949,27 @@ mod tests {
         assert_eq!(
             program, "/usr/bin/fish",
             "the newly opened terminal takes focus over the existing pane item",
+        );
+    }
+
+    #[test]
+    fn focused_terminal_receives_typed_text_via_ime() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let term = open_terminal(&mut h);
+        term.update_in(h.vcx, |t, window, cx| {
+            let handle = t.focus_handle(cx);
+            window.focus(&handle);
+        });
+        h.vcx.run_until_parked();
+
+        h.vcx.simulate_input("a");
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            h.terminal.sent_bytes(),
+            vec![b"a".to_vec()],
+            "committed IME text reaches the focused terminal's PTY",
         );
     }
 
