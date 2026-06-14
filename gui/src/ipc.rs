@@ -76,6 +76,22 @@ struct ReadBufferResult {
     text: String,
 }
 
+/// `list_sessions` reply: every live session, in registration order.
+#[derive(Serialize)]
+struct ListSessionsResult {
+    sessions: Vec<SessionEntry>,
+}
+
+/// One live session in a [`ListSessionsResult`]: its uid, root directory, and
+/// window and registered-buffer counts.
+#[derive(Serialize)]
+struct SessionEntry {
+    id: WorkspaceUid,
+    root: String,
+    windows: usize,
+    buffers: usize,
+}
+
 /// Drain `requests` on the gpui foreground, answering each by running
 /// [`dispatch`] on the main thread. Returns the foreground task; hold it for
 /// the process lifetime so dispatch keeps running.
@@ -95,6 +111,7 @@ fn dispatch(app: &mut App, method: &str, params: Option<Value>) -> Result<Value,
         "open_file" => open_file(app, params),
         "pipe_buffer" => pipe_buffer(app, params),
         "read_buffer" => read_buffer(app, params),
+        "list_sessions" => list_sessions(app),
         other => Err(error(
             METHOD_NOT_FOUND,
             format!("method not found: {other}"),
@@ -181,6 +198,25 @@ fn read_buffer(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> 
         })?;
 
     serde_json::to_value(ReadBufferResult { text })
+        .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
+}
+
+/// Enumerate every live session for `stoat session list`. Read-only and not
+/// cwd-scoped: it returns the whole registry, not a routed session.
+fn list_sessions(app: &mut App) -> Result<Value, RpcError> {
+    let sessions = app
+        .global::<AppHost>()
+        .session_summaries(app)
+        .into_iter()
+        .map(|summary| SessionEntry {
+            id: summary.uid,
+            root: summary.root.to_string_lossy().into_owned(),
+            windows: summary.windows,
+            buffers: summary.buffers,
+        })
+        .collect();
+
+    serde_json::to_value(ListSessionsResult { sessions })
         .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
 }
 
@@ -580,5 +616,45 @@ mod tests {
             .update(|app| dispatch(app, "read_buffer", Some(params)))
             .expect_err("an unknown buffer id is rejected");
         assert_eq!(err.code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn list_sessions_enumerates_live_sessions_with_counts() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (_ws_a, uid_a) = register_session(&mut cx, "/repo");
+        let (_ws_b, uid_b) = register_session(&mut cx, "/other");
+
+        // Seed one buffer in /repo so the buffer count is exercised.
+        cx.update(|app| {
+            dispatch(
+                app,
+                "pipe_buffer",
+                Some(serde_json::json!({ "cwd": "/repo", "text": "x" })),
+            )
+        })
+        .expect("seed a buffer in /repo");
+
+        let result = cx
+            .update(|app| dispatch(app, "list_sessions", None))
+            .expect("list_sessions succeeds");
+        let sessions = result["sessions"].as_array().expect("sessions array");
+        assert_eq!(sessions.len(), 2);
+
+        let entry = |uid: u64| {
+            sessions
+                .iter()
+                .find(|s| s["id"].as_u64() == Some(uid))
+                .unwrap_or_else(|| panic!("session {uid} present"))
+        };
+        let repo = entry(uid_a.0);
+        assert_eq!(repo["root"], serde_json::json!("/repo"));
+        assert_eq!(repo["windows"], serde_json::json!(1));
+        assert_eq!(repo["buffers"], serde_json::json!(1));
+
+        let other = entry(uid_b.0);
+        assert_eq!(other["root"], serde_json::json!("/other"));
+        assert_eq!(other["windows"], serde_json::json!(1));
+        assert_eq!(other["buffers"], serde_json::json!(0));
     }
 }

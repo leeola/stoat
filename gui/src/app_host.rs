@@ -9,7 +9,10 @@
 
 use crate::workspace::Workspace;
 use gpui::{AnyWindowHandle, App, Entity, Global, Task as ForegroundTask};
-use std::{path::Path, sync::Arc};
+use std::{
+    path::{Path, PathBuf},
+    sync::Arc,
+};
 use stoat::workspace::WorkspaceUid;
 use stoat_agent_claude_code::jsonrpc::{self, IncomingRequest};
 use stoat_scheduler::{Executor, Task};
@@ -23,6 +26,18 @@ use tokio::sync::mpsc;
 struct Session {
     workspace: Entity<Workspace>,
     windows: Vec<AnyWindowHandle>,
+}
+
+/// A read-only snapshot of a live session for the `list_sessions` query.
+///
+/// `buffers` counts registered buffers, which excludes the default launch
+/// scratch (it lives outside the registry), so a fresh session reports zero --
+/// the same set `--buffer` can address.
+pub struct SessionSummary {
+    pub uid: WorkspaceUid,
+    pub root: PathBuf,
+    pub windows: usize,
+    pub buffers: usize,
 }
 
 /// The process-level registry of live sessions.
@@ -145,6 +160,23 @@ impl AppHost {
             .iter()
             .find(|session| session.workspace.read(cx).uid() == uid)
             .map(|session| session.workspace.clone())
+    }
+
+    /// Summarize every live session: uid, root directory, and window and
+    /// registered-buffer counts. Backs the `list_sessions` IPC verb.
+    pub fn session_summaries(&self, cx: &App) -> Vec<SessionSummary> {
+        self.sessions
+            .iter()
+            .map(|session| {
+                let workspace = session.workspace.read(cx);
+                SessionSummary {
+                    uid: workspace.uid(),
+                    root: workspace.git_root().clone(),
+                    windows: session.windows.len(),
+                    buffers: workspace.buffer_registry().read(cx).len(),
+                }
+            })
+            .collect()
     }
 
     /// Bind the process IPC socket and start accepting clients, holding the
