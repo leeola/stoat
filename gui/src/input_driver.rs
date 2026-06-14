@@ -1,5 +1,5 @@
 //! Drive a parsed keystroke sequence into the live workspace for
-//! `stoat gui --inputs`.
+//! `stoat --inputs`.
 //!
 //! After a readiness delay (so the workspace, IME handler, and
 //! active-editor wiring are live), each keystroke is fed on the gpui

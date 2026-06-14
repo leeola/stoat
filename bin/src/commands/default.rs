@@ -34,13 +34,27 @@ pub struct Args {
     /// Open the files in a fresh session/window in the running app instead of
     /// the session enclosing the current directory, spawning the app when none
     /// is running.
-    #[arg(long, conflicts_with_all = ["session", "continue_"])]
+    #[arg(long, conflicts_with_all = ["session", "continue_", "inputs", "timeout"])]
     pub new: bool,
 
     /// Open the files in the live session with this `WorkspaceUid`. Errors when
     /// no app is running or that session is not live.
-    #[arg(long, value_name = "ID", conflicts_with = "continue_")]
+    #[arg(long, value_name = "ID", conflicts_with_all = ["continue_", "inputs", "timeout"])]
     pub session: Option<u64>,
+
+    /// Drive a vim-style keystroke sequence into the window once it is ready,
+    /// e.g. `--inputs ":wq<Enter>"`. Lets a headless run exercise interactive
+    /// features without a keyboard. Spawns a window for this invocation rather
+    /// than routing to a running app.
+    #[arg(long)]
+    pub inputs: Option<String>,
+
+    /// Auto-close the spawned window after `SECONDS` so a run can capture logs
+    /// for an action without a quit keystroke. Fractional values allowed (e.g.
+    /// `1.5`). Spawns a window for this invocation rather than routing to a
+    /// running app.
+    #[arg(long, value_name = "SECONDS")]
+    pub timeout: Option<f64>,
 
     /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
@@ -70,19 +84,6 @@ enum Command {
     /// git supplies; positional args are not accepted in the
     /// default mode.
     Diff(crate::commands::diff::DiffArgs),
-    /// Open the GPUI editor window.
-    Gui {
-        /// Drive a vim-style keystroke sequence into the window once it is
-        /// ready, e.g. `--inputs ":wq<Enter>"`. Lets a headless run exercise
-        /// interactive features without a keyboard.
-        #[arg(long)]
-        inputs: Option<String>,
-        /// Auto-close the window after `SECONDS` so a run can capture logs
-        /// for an action without a quit keystroke. Fractional values
-        /// allowed (e.g. `1.5`).
-        #[arg(long, value_name = "SECONDS")]
-        timeout: Option<f64>,
-    },
 }
 
 pub fn run() -> Result<(), Whatever> {
@@ -92,6 +93,8 @@ pub fn run() -> Result<(), Whatever> {
         continue_,
         new,
         session,
+        inputs,
+        timeout,
         ..
     } = Args::parse();
 
@@ -104,14 +107,17 @@ pub fn run() -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
-        Some(Command::Gui { inputs, timeout }) => {
-            crate::commands::gui::run(files, restore, inputs, timeout)
-        },
         None => {
-            if !continue_ && crate::commands::client::open_in_running_app(&files, new, session)? {
+            // --inputs/--timeout drive a freshly spawned window, so they bypass
+            // the route-into-a-running-app path.
+            let drive = inputs.is_some() || timeout.is_some();
+            if !continue_
+                && !drive
+                && crate::commands::client::open_in_running_app(&files, new, session)?
+            {
                 Ok(())
             } else {
-                crate::commands::gui::run(files, restore, None, None)
+                crate::commands::gui::run(files, restore, inputs, timeout)
             }
         },
     }
@@ -123,21 +129,15 @@ mod tests {
     use clap::Parser;
 
     #[test]
-    fn continue_parses_after_gui_subcommand() {
+    fn continue_parses() {
         let args =
-            Args::try_parse_from(["stoat", "gui", "--continue"]).expect("`gui --continue` parses");
-        assert!(args.continue_);
-    }
-
-    #[test]
-    fn continue_parses_before_gui_subcommand() {
-        let args = Args::try_parse_from(["stoat", "-c", "gui"]).expect("`-c gui` parses");
+            Args::try_parse_from(["stoat", "--continue", "foo.txt"]).expect("--continue parses");
         assert!(args.continue_);
     }
 
     #[test]
     fn resume_flag_removed() {
-        assert!(Args::try_parse_from(["stoat", "gui", "-r"]).is_err());
+        assert!(Args::try_parse_from(["stoat", "-r"]).is_err());
     }
 
     #[test]
@@ -157,5 +157,20 @@ mod tests {
     #[test]
     fn session_conflicts_with_continue() {
         assert!(Args::try_parse_from(["stoat", "--session", "5", "--continue"]).is_err());
+    }
+
+    #[test]
+    fn inputs_and_timeout_parse() {
+        let args =
+            Args::try_parse_from(["stoat", "--inputs", "ifoo<Esc>", "--timeout", "1.5", "x"])
+                .expect("--inputs/--timeout parse");
+        assert_eq!(args.inputs.as_deref(), Some("ifoo<Esc>"));
+        assert_eq!(args.timeout, Some(1.5));
+    }
+
+    #[test]
+    fn drive_flags_conflict_with_selection() {
+        assert!(Args::try_parse_from(["stoat", "--timeout", "2", "--new"]).is_err());
+        assert!(Args::try_parse_from(["stoat", "--inputs", "i<Esc>", "--session", "5"]).is_err());
     }
 }
