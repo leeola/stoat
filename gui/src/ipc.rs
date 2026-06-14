@@ -59,6 +59,23 @@ struct SessionBufferResult {
     buffer_id: BufferId,
 }
 
+/// `read_buffer` request: read buffer `buffer_id`'s text from the session
+/// enclosing `cwd`, or the `session`-targeted one. No window is opened, and an
+/// unmatched directory is an error rather than a fresh session.
+#[derive(Deserialize)]
+struct ReadBufferParams {
+    cwd: std::path::PathBuf,
+    buffer_id: u64,
+    #[serde(default)]
+    session: Option<u64>,
+}
+
+/// `read_buffer` reply: the buffer's full text.
+#[derive(Serialize)]
+struct ReadBufferResult {
+    text: String,
+}
+
 /// Drain `requests` on the gpui foreground, answering each by running
 /// [`dispatch`] on the main thread. Returns the foreground task; hold it for
 /// the process lifetime so dispatch keeps running.
@@ -77,6 +94,7 @@ fn dispatch(app: &mut App, method: &str, params: Option<Value>) -> Result<Value,
     match method {
         "open_file" => open_file(app, params),
         "pipe_buffer" => pipe_buffer(app, params),
+        "read_buffer" => read_buffer(app, params),
         other => Err(error(
             METHOD_NOT_FOUND,
             format!("method not found: {other}"),
@@ -130,6 +148,40 @@ fn encode_session_buffer(session_id: WorkspaceUid, buffer_id: BufferId) -> Resul
         buffer_id,
     })
     .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
+}
+
+/// Read buffer `params.buffer_id`'s text from the routed session. Unlike the
+/// open verbs, an unmatched directory is an error -- there is no buffer to read
+/// without a live session, and reading never opens a window.
+fn read_buffer(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
+    let params: ReadBufferParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|err| error(INVALID_PARAMS, format!("read_buffer params: {err}")))?;
+
+    let workspace = match resolve_target(app, &params.cwd, false, params.session)? {
+        Some((_uid, workspace)) => workspace,
+        None => return Err(error(INVALID_PARAMS, "no live session for this directory")),
+    };
+
+    let registry = workspace.read(app).buffer_registry().clone();
+    let text = registry
+        .read(app)
+        .get(BufferId::new(params.buffer_id))
+        .map(|shared| {
+            shared
+                .read()
+                .expect("buffer lock poisoned")
+                .rope()
+                .to_string()
+        })
+        .ok_or_else(|| {
+            error(
+                INVALID_PARAMS,
+                format!("buffer {} not found", params.buffer_id),
+            )
+        })?;
+
+    serde_json::to_value(ReadBufferResult { text })
+        .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
 }
 
 /// The existing session a request routes into, or `None` when it should open a
@@ -482,5 +534,51 @@ mod tests {
             .update(|app| app.global::<AppHost>().session_workspace(new_uid, app))
             .expect("the new session is live");
         assert_eq!(scratch_text(&cx, &new_ws, buffer_id), "new pipe");
+    }
+
+    #[test]
+    fn read_buffer_returns_the_buffers_text() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (_workspace, _uid) = register_session(&mut cx, "/repo");
+
+        let seed = serde_json::json!({ "cwd": "/repo", "text": "hello out" });
+        let seeded = cx
+            .update(|app| dispatch(app, "pipe_buffer", Some(seed)))
+            .expect("seed a scratch to read back");
+        let buffer_id = seeded["buffer_id"]
+            .as_u64()
+            .expect("seed carries a buffer id");
+
+        let params = serde_json::json!({ "cwd": "/repo", "buffer_id": buffer_id });
+        let result = cx
+            .update(|app| dispatch(app, "read_buffer", Some(params)))
+            .expect("read_buffer succeeds");
+        assert_eq!(result["text"], serde_json::json!("hello out"));
+    }
+
+    #[test]
+    fn read_buffer_errors_when_no_session_matches() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+
+        let params = serde_json::json!({ "cwd": "/nowhere", "buffer_id": 1 });
+        let err = cx
+            .update(|app| dispatch(app, "read_buffer", Some(params)))
+            .expect_err("reading without a live session is rejected");
+        assert_eq!(err.code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn read_buffer_errors_when_buffer_not_found() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (_workspace, _uid) = register_session(&mut cx, "/repo");
+
+        let params = serde_json::json!({ "cwd": "/repo", "buffer_id": 99999 });
+        let err = cx
+            .update(|app| dispatch(app, "read_buffer", Some(params)))
+            .expect_err("an unknown buffer id is rejected");
+        assert_eq!(err.code, INVALID_PARAMS);
     }
 }
