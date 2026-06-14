@@ -847,6 +847,20 @@ mod tests {
             "socket file lingers after the listener drops"
         );
 
+        // Closing the listener does not synchronously tear down its kernel
+        // endpoint: under load a connect can still succeed for a short window,
+        // which bind_unix's liveness probe would misread as a live process.
+        // Wait for the endpoint to start refusing connections so the socket is
+        // genuinely stale before asserting the takeover.
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while std::os::unix::net::UnixStream::connect(&path).is_ok() {
+            assert!(
+                std::time::Instant::now() < deadline,
+                "stale socket never stopped accepting connections",
+            );
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+
         bind_unix(&path).expect("stale socket is replaced");
     }
 
