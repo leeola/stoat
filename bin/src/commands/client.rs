@@ -1,6 +1,6 @@
 //! Thin client: hand files to a running Stoat over the IPC socket.
 
-use snafu::{OptionExt, ResultExt, Whatever};
+use snafu::{whatever, OptionExt, ResultExt, Whatever};
 use std::{
     path::{Path, PathBuf},
     sync::Arc,
@@ -16,7 +16,11 @@ use tokio::net::UnixStream;
 /// listening, so the caller launches one instead. Errors only when a connected
 /// app fails a request, surfacing a half-broken app rather than silently
 /// relaunching over it.
-pub fn open_in_running_app(files: &[PathBuf]) -> Result<bool, Whatever> {
+pub fn open_in_running_app(
+    files: &[PathBuf],
+    new: bool,
+    session: Option<u64>,
+) -> Result<bool, Whatever> {
     if files.is_empty() {
         return Ok(false);
     }
@@ -26,13 +30,24 @@ pub fn open_in_running_app(files: &[PathBuf]) -> Result<bool, Whatever> {
         .enable_all()
         .build()
         .whatever_context("build client runtime")?;
-    runtime.block_on(send_open_file(&socket, &cwd, files))
+    runtime.block_on(send_open_file(&socket, &cwd, files, new, session))
 }
 
-async fn send_open_file(socket: &Path, cwd: &Path, files: &[PathBuf]) -> Result<bool, Whatever> {
+async fn send_open_file(
+    socket: &Path,
+    cwd: &Path,
+    files: &[PathBuf],
+    new: bool,
+    session: Option<u64>,
+) -> Result<bool, Whatever> {
     let stream = match UnixStream::connect(socket).await {
         Ok(stream) => stream,
-        Err(_) => return Ok(false),
+        Err(_) => {
+            if let Some(id) = session {
+                whatever!("--session {id}: no Stoat app is running");
+            }
+            return Ok(false);
+        },
     };
     let cwd_str = cwd
         .to_str()
@@ -44,7 +59,13 @@ async fn send_open_file(socket: &Path, cwd: &Path, files: &[PathBuf]) -> Result<
         let path = absolute
             .to_str()
             .whatever_context("file path is not valid UTF-8")?;
-        let params = serde_json::json!({ "cwd": cwd_str, "path": path });
+        let mut params = serde_json::json!({ "cwd": cwd_str, "path": path });
+        if new {
+            params["new"] = serde_json::Value::Bool(true);
+        }
+        if let Some(id) = session {
+            params["session"] = serde_json::Value::from(id);
+        }
         peer.request("open_file", Some(params))
             .await
             .whatever_context("open_file request failed")?;
@@ -84,7 +105,7 @@ mod tests {
     #[test]
     fn no_files_is_a_no_op() {
         assert!(
-            !open_in_running_app(&[]).expect("empty file list is a no-op"),
+            !open_in_running_app(&[], false, None).expect("empty file list is a no-op"),
             "no files means nothing to route, so the caller launches an app",
         );
     }

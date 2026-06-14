@@ -31,6 +31,17 @@ pub struct Args {
     #[arg(short = 'c', long = "continue", global = true)]
     pub continue_: bool,
 
+    /// Open the files in a fresh session/window in the running app instead of
+    /// the session enclosing the current directory, spawning the app when none
+    /// is running.
+    #[arg(long, conflicts_with_all = ["session", "continue_"])]
+    pub new: bool,
+
+    /// Open the files in the live session with this `WorkspaceUid`. Errors when
+    /// no app is running or that session is not live.
+    #[arg(long, value_name = "ID", conflicts_with = "continue_")]
+    pub session: Option<u64>,
+
     /// Enable the Claude Code / LSP text-protocol transcript log. Overrides
     /// the stcfg `text_proto_log` setting when set.
     #[arg(long, env = "STOAT_TEXT_PROTO_LOG")]
@@ -79,6 +90,8 @@ pub fn run() -> Result<(), Whatever> {
         command,
         files,
         continue_,
+        new,
+        session,
         ..
     } = Args::parse();
 
@@ -95,7 +108,7 @@ pub fn run() -> Result<(), Whatever> {
             crate::commands::gui::run(files, restore, inputs, timeout)
         },
         None => {
-            if !continue_ && crate::commands::client::open_in_running_app(&files)? {
+            if !continue_ && crate::commands::client::open_in_running_app(&files, new, session)? {
                 Ok(())
             } else {
                 crate::commands::gui::run(files, restore, None, None)
@@ -125,5 +138,24 @@ mod tests {
     #[test]
     fn resume_flag_removed() {
         assert!(Args::try_parse_from(["stoat", "gui", "-r"]).is_err());
+    }
+
+    #[test]
+    fn session_parses_a_uid() {
+        let args = Args::try_parse_from(["stoat", "--session", "42", "foo.txt"])
+            .expect("--session parses");
+        assert_eq!(args.session, Some(42));
+        assert!(!args.new);
+    }
+
+    #[test]
+    fn new_conflicts_with_session_and_continue() {
+        assert!(Args::try_parse_from(["stoat", "--new", "--session", "5"]).is_err());
+        assert!(Args::try_parse_from(["stoat", "--new", "--continue"]).is_err());
+    }
+
+    #[test]
+    fn session_conflicts_with_continue() {
+        assert!(Args::try_parse_from(["stoat", "--session", "5", "--continue"]).is_err());
     }
 }
