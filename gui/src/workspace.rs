@@ -836,6 +836,38 @@ impl Workspace {
         }
     }
 
+    /// Open `path` (already absolute) and, when `line` is set, place the
+    /// cursor at the 1-based `line:column` it carried. Mirrors
+    /// [`Self::open_paths`] for the open, then positions the focused
+    /// pane's freshly activated editor; a missing column lands at the
+    /// row start, and out-of-range coordinates clamp to the buffer.
+    pub(crate) fn open_link_path(
+        &mut self,
+        path: PathBuf,
+        line: Option<u32>,
+        column: Option<u32>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        self.open_paths(&[path], cx);
+        let Some(line) = line else {
+            return;
+        };
+        let pane_id = self.pane_tree.read(cx).focus();
+        let editor = self.pane_tree.read(cx).pane(pane_id).and_then(|pane| {
+            pane.read(cx)
+                .active_item()?
+                .to_any_view()
+                .downcast::<Editor>()
+                .ok()
+        });
+        let Some(editor) = editor else {
+            return;
+        };
+        let row = line.saturating_sub(1);
+        let column = column.map(|c| c.saturating_sub(1)).unwrap_or(0);
+        editor.update(cx, |ed, cx| ed.set_cursor_at_buffer_point(row, column, cx));
+    }
+
     /// Rewrite every match of `pattern` with `replacement` across the
     /// buffers behind `paths`, returning `(matches_replaced,
     /// files_changed)`. Each file's buffer is loaded into the registry
@@ -9012,6 +9044,43 @@ mod tests {
         assert!(
             active.is_none(),
             "quit! force-quits the last pane without confirming"
+        );
+    }
+
+    #[test]
+    fn open_link_path_opens_file_and_positions_cursor() {
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/a.rs", b"line one\nline two\nline three");
+        install_globals_with_fs(&mut cx, fs.clone());
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_link_path(PathBuf::from("/tmp/repo/a.rs"), Some(2), Some(4), cx)
+        });
+        vcx.run_until_parked();
+
+        let editor = ws.read_with(vcx, |w, cx| {
+            let pane_id = w.pane_tree().read(cx).focus();
+            w.pane_tree()
+                .read(cx)
+                .pane(pane_id)
+                .expect("focused pane")
+                .read(cx)
+                .active_item()
+                .expect("active item")
+                .to_any_view()
+                .downcast::<Editor>()
+                .expect("editor")
+        });
+        let point = editor.read_with(vcx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            snapshot.point_for_anchor(&ed.selections().newest_anchor().head())
+        });
+        assert_eq!(
+            point,
+            stoat_text::Point::new(1, 3),
+            "line 2 column 4 (1-based) lands at buffer point (1, 3)"
         );
     }
 

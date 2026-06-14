@@ -13,7 +13,7 @@ use crate::{
         compute_autoscroll_y, AutoscrollStrategy, DEFAULT_VERTICAL_SCROLL_MARGIN,
     },
     fold_actions,
-    globals::ExecutorGlobal,
+    globals::{ExecutorGlobal, OpenHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemView},
     multi_buffer::{MultiBuffer, MultiBufferEvent},
     settings::{FontSizeOffset, Settings},
@@ -35,7 +35,7 @@ use stoat::{
     buffer::BufferId,
     display_map::{Block, BlockRowKind, DisplaySnapshot},
     jumplist::JumpList,
-    link,
+    link::{self, LinkTarget},
     multi_buffer::MultiBufferSnapshot,
     review_session::ChunkStatus,
     selection::SelectionsCollection,
@@ -2662,10 +2662,22 @@ impl Editor {
     /// Used by review-chunk navigation; future review handlers that
     /// jump to a buffer row reuse this entry point.
     pub fn set_cursor_at_buffer_row(&mut self, row: u32, cx: &mut Context<'_, Self>) {
+        self.set_cursor_at_buffer_point(row, 0, cx);
+    }
+
+    /// Place a single cursor at buffer `(row, column)`, replacing every
+    /// existing selection. Out-of-range coordinates clamp to the rope's
+    /// last valid point via [`stoat_text::Rope::clip_point`].
+    pub fn set_cursor_at_buffer_point(
+        &mut self,
+        row: u32,
+        column: u32,
+        cx: &mut Context<'_, Self>,
+    ) {
         let snapshot = self.multi_buffer.read(cx).snapshot();
         let clipped = snapshot
             .rope()
-            .clip_point(stoat_text::Point::new(row, 0), Bias::Left);
+            .clip_point(stoat_text::Point::new(row, column), Bias::Left);
         let offset = snapshot.rope().point_to_offset(clipped);
         let anchor = snapshot.anchor_at(offset, Bias::Left);
         let new_id = self
@@ -3286,27 +3298,68 @@ impl Editor {
         cx: &mut Context<'_, Self>,
     ) {
         let range = if modifiers.control || modifiers.platform {
-            self.link_at_position(position, cx)
+            self.link_at_position(position, cx).map(|(range, _)| range)
         } else {
             None
         };
         self.set_hovered_link(range, cx);
     }
 
+    /// Open the link under `position`, if any, returning whether one was
+    /// opened. A [`LinkTarget::Url`] opens through the [`OpenHostGlobal`];
+    /// a [`LinkTarget::Path`] resolves relative to the focused buffer's
+    /// directory and opens through [`crate::workspace::Workspace::open_link_path`],
+    /// which honors any `:line:col`. Detects at the click point directly
+    /// rather than reusing the hover state.
+    fn open_link_at(&self, position: Point<Pixels>, cx: &mut Context<'_, Self>) -> bool {
+        let Some((_, target)) = self.link_at_position(position, cx) else {
+            return false;
+        };
+        match target {
+            LinkTarget::Url(url) => {
+                if let Some(open_host) = cx.try_global::<OpenHostGlobal>().map(|g| g.0.clone()) {
+                    open_host.open_url(&url, cx);
+                }
+            },
+            LinkTarget::Path { path, line, column } => {
+                let resolved = self.resolve_link_path(&path);
+                if let Some(workspace) = self.workspace.as_ref().and_then(WeakEntity::upgrade) {
+                    workspace.update(cx, |w, cx| w.open_link_path(resolved, line, column, cx));
+                }
+            },
+        }
+        true
+    }
+
+    /// Resolve a link path against the focused buffer's own directory.
+    /// Absolute paths pass through; a relative path joins the directory
+    /// of [`Self::file_path`] so it does not resolve against the process
+    /// cwd as [`crate::workspace::Workspace::open_paths`] would.
+    fn resolve_link_path(&self, path: &str) -> std::path::PathBuf {
+        let path = std::path::PathBuf::from(path);
+        if path.is_absolute() {
+            return path;
+        }
+        match self.file_path().and_then(std::path::Path::parent) {
+            Some(dir) => dir.join(path),
+            None => path,
+        }
+    }
+
     /// Resolve pixel `position` to a buffer offset and return the byte
-    /// range of a link covering it, if any.
+    /// range and [`LinkTarget`] of a link covering it, if any.
     fn link_at_position(
         &self,
         position: Point<Pixels>,
         cx: &mut Context<'_, Self>,
-    ) -> Option<Range<usize>> {
+    ) -> Option<(Range<usize>, LinkTarget)> {
         let (row, col) = self.position_to_grid(position)?;
         let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
         let snapshot = self.multi_buffer.read(cx).snapshot();
         let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
         let buffer_point = display_snapshot.display_to_buffer(clipped, Bias::Left)?;
         let offset = snapshot.rope().point_to_offset(buffer_point);
-        link::detect_link(snapshot.rope(), offset).map(|(range, _)| range)
+        link::detect_link(snapshot.rope(), offset)
     }
 
     /// Construct the [`crate::lsp::HoverPopup`] entity that observes
@@ -4835,6 +4888,12 @@ impl Render for Editor {
             root.on_mouse_down(
                 MouseButton::Left,
                 cx.listener(|this, event: &MouseDownEvent, window, cx| {
+                    if (event.modifiers.control || event.modifiers.platform)
+                        && this.open_link_at(event.position, cx)
+                    {
+                        cx.stop_propagation();
+                        return;
+                    }
                     this.dispatch_click_at(event.position, window, cx);
                 }),
             )
@@ -6907,6 +6966,49 @@ mod tests {
         });
 
         assert_eq!(editor.read_with(&cx, |ed, _| ed.hovered_link()), None);
+    }
+
+    fn cursor_point(cx: &TestAppContext, editor: &Entity<Editor>) -> stoat_text::Point {
+        editor.read_with(cx, |ed, cx| {
+            let snapshot = ed.multi_buffer().read(cx).snapshot();
+            snapshot.point_for_anchor(&ed.selections().newest_anchor().head())
+        })
+    }
+
+    #[test]
+    fn set_cursor_at_buffer_point_positions_row_and_column() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "line one\nline two\nline three");
+
+        editor.update(&mut cx, |ed, cx| ed.set_cursor_at_buffer_point(1, 3, cx));
+
+        assert_eq!(cursor_point(&cx, &editor), stoat_text::Point::new(1, 3));
+    }
+
+    #[test]
+    fn resolve_link_path_joins_relative_to_buffer_dir() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_file_path(Some(PathBuf::from("/ws/sub/a.rs")), cx)
+        });
+
+        let resolved = editor.read_with(&cx, |ed, _| ed.resolve_link_path("../lib.rs"));
+
+        assert_eq!(resolved, PathBuf::from("/ws/sub/../lib.rs"));
+    }
+
+    #[test]
+    fn resolve_link_path_keeps_absolute() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "x");
+        editor.update(&mut cx, |ed, cx| {
+            ed.set_file_path(Some(PathBuf::from("/ws/a.rs")), cx)
+        });
+
+        let resolved = editor.read_with(&cx, |ed, _| ed.resolve_link_path("/etc/hosts"));
+
+        assert_eq!(resolved, PathBuf::from("/etc/hosts"));
     }
 
     #[test]
