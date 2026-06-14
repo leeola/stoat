@@ -711,7 +711,8 @@ pub fn dispatch_open_claude_terminal(workspace: &mut Workspace, cx: &mut Context
     let terminal =
         cx.new(|cx| Terminal::with_command(weak_workspace, cwd, "claude".into(), Vec::new(), cx));
     pane.update(cx, |p, cx| {
-        p.add_item(Box::new(terminal), cx);
+        let index = p.add_item(Box::new(terminal), cx);
+        p.activate(index, cx);
     });
 }
 
@@ -732,7 +733,8 @@ pub fn dispatch_open_terminal(workspace: &mut Workspace, cx: &mut Context<'_, Wo
     let weak_workspace = cx.weak_entity();
     let terminal = cx.new(|cx| Terminal::with_command(weak_workspace, cwd, shell, Vec::new(), cx));
     pane.update(cx, |p, cx| {
-        p.add_item(Box::new(terminal), cx);
+        let index = p.add_item(Box::new(terminal), cx);
+        p.activate(index, cx);
     });
 }
 
@@ -889,6 +891,41 @@ mod tests {
         let term = focused_terminal(&mut h).expect("shell terminal is the focused item");
         let program = term.read_with(h.vcx, |t, _| t.program.clone());
         assert_eq!(program, "/bin/sh");
+    }
+
+    #[test]
+    fn open_claude_terminal_activates_over_existing_pane_item() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        open_terminal(&mut h);
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_open_claude_terminal(w, cx);
+        });
+
+        let term = focused_terminal(&mut h).expect("opened claude terminal is the active item");
+        let program = term.read_with(h.vcx, |t, _| t.program.clone());
+        assert_eq!(
+            program, "claude",
+            "the newly opened terminal takes focus over the existing pane item",
+        );
+    }
+
+    #[test]
+    fn open_terminal_activates_over_existing_pane_item() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        h.env.set("SHELL", "/usr/bin/fish");
+        open_terminal(&mut h);
+        h.workspace.update(h.vcx, |w, cx| {
+            dispatch_open_terminal(w, cx);
+        });
+
+        let term = focused_terminal(&mut h).expect("opened shell terminal is the active item");
+        let program = term.read_with(h.vcx, |t, _| t.program.clone());
+        assert_eq!(
+            program, "/usr/bin/fish",
+            "the newly opened terminal takes focus over the existing pane item",
+        );
     }
 
     #[test]

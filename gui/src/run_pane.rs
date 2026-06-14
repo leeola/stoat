@@ -927,7 +927,8 @@ pub fn dispatch_open_run(
     let weak_workspace = cx.weak_entity();
     let run = cx.new(|cx| Run::new(weak_workspace, cwd, window, cx));
     pane.update(cx, |p, cx| {
-        p.add_item(Box::new(run), cx);
+        let index = p.add_item(Box::new(run), cx);
+        p.activate(index, cx);
     });
 }
 
@@ -1297,6 +1298,23 @@ mod tests {
         assert!(
             run.is_some(),
             "OpenRun should add a Run pane to the focused pane"
+        );
+    }
+
+    #[test]
+    fn open_run_activates_over_existing_pane_item() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        let first = open_run(&mut h);
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_run(w, window, cx);
+        });
+
+        let active = focused_run(&mut h).expect("opened run is the active item");
+        assert_ne!(
+            active.entity_id(),
+            first.entity_id(),
+            "the newly opened run takes focus over the existing pane item",
         );
     }
 
