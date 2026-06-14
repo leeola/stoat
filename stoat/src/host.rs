@@ -9,6 +9,8 @@
 //! - Small `Copy` return types for metadata
 
 pub mod agent;
+#[cfg(feature = "builtin-lsp")]
+pub mod builtin_lsp;
 pub mod claude_code;
 pub mod clipboard;
 #[cfg(any(test, feature = "test-support"))]

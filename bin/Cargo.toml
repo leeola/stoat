@@ -24,7 +24,7 @@ workspace = true
 profiling = ["stoat_log/profiling"]
 
 [dependencies]
-stoat = { path = "../stoat" }
+stoat = { path = "../stoat", features = ["builtin-lsp"] }
 stoat_agent_claude_code = { path = "../agent/claude_code" }
 stoat_config = { path = "../config" }
 stoat_gui = { path = "../gui" }

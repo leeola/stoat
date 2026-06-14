@@ -42,6 +42,14 @@ impl LocalLspHost {
 #[async_trait]
 impl LspHost for LocalLspHost {
     async fn launch(&self, language: &Language, _root: &Path) -> io::Result<Box<dyn LspServer>> {
+        // The builtin stcfg server runs in-process; other languages spawn a
+        // configured stdio subprocess. Feature-off, stcfg falls through to the
+        // subprocess lookup like any other language.
+        #[cfg(feature = "builtin-lsp")]
+        if language.name == "stcfg" {
+            return Ok(Box::new(crate::host::builtin_lsp::StcfgLsp::new()));
+        }
+
         let cmd = self.language_servers.get(language.name).ok_or_else(|| {
             io::Error::new(
                 io::ErrorKind::NotFound,

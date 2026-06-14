@@ -9,6 +9,10 @@ workspace = true
 
 [features]
 test-support = []
+# In-process builtin language server for the stcfg config language. Off by
+# default; the editor binary enables it. Other consumers (and `cargo test -p
+# stoat`) are unaffected.
+builtin-lsp = []
 
 [dependencies]
 stoat_action = { path = "../action" }
