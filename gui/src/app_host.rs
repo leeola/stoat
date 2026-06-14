@@ -9,6 +9,8 @@
 
 use crate::workspace::Workspace;
 use gpui::{AnyWindowHandle, App, Entity, Global};
+use stoat_agent_claude_code::jsonrpc;
+use stoat_scheduler::{Executor, Task};
 
 /// A live editor session: one workspace and the windows presenting it.
 ///
@@ -24,6 +26,10 @@ struct Session {
 #[derive(Default)]
 pub struct AppHost {
     sessions: Vec<Session>,
+    /// The IPC accept loop, held so it runs for the process lifetime.
+    /// `None` until [`AppHost::serve`] binds the socket, and when binding
+    /// fails (e.g. another live instance already holds it).
+    _ipc: Option<Task<()>>,
 }
 
 impl Global for AppHost {}
@@ -63,6 +69,28 @@ impl AppHost {
     pub fn save_all(&self, cx: &App) {
         for session in &self.sessions {
             session.workspace.read(cx).save_state_to_default_path(cx);
+        }
+    }
+
+    /// Bind the process IPC socket and start accepting clients, holding the
+    /// accept loop for the host's lifetime.
+    ///
+    /// Binding failures are logged and swallowed rather than aborting
+    /// startup: a live socket held by another Stoat instance, or an
+    /// unresolvable runtime directory, must not stop this window from opening.
+    pub fn serve(&mut self, executor: &Executor) {
+        let path = match stoat_log::app_socket_path() {
+            Ok(path) => path,
+            Err(err) => {
+                tracing::warn!(%err, "resolving the app socket path failed; IPC disabled");
+                return;
+            },
+        };
+        match jsonrpc::serve_unix(&path, executor) {
+            Ok(task) => self._ipc = Some(task),
+            Err(err) => {
+                tracing::warn!(%err, ?path, "binding the app socket failed; IPC disabled")
+            },
         }
     }
 }

@@ -173,6 +173,8 @@ pub fn run(
         tracing::info!("stoat gui starting");
         install_production_globals(cx, globals);
         cx.set_global(app_host::AppHost::default());
+        let executor = cx.global::<ExecutorGlobal>().0.clone();
+        cx.update_global::<app_host::AppHost, _>(|host, _| host.serve(&executor));
         let window_bounds = restored_window_bounds(restore, cx).unwrap_or_else(|| {
             WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(800.0)), cx))
         });
