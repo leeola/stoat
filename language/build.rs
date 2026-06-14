@@ -7,6 +7,7 @@ fn main() {
     compile_grammar("tree-sitter-rust", "tree-sitter-rust", "src", true);
     compile_grammar("tree-sitter-json", "tree-sitter-json", "src", false);
     compile_grammar("tree-sitter-toml", "tree-sitter-toml", "src", true);
+    compile_grammar("tree-sitter-stcfg", "tree-sitter-stcfg", "src", true);
     compile_grammar(
         "tree-sitter-markdown",
         "tree-sitter-markdown",

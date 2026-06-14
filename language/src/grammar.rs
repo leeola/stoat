@@ -5,6 +5,7 @@ unsafe extern "C" {
     fn tree_sitter_rust() -> *const ();
     fn tree_sitter_json() -> *const ();
     fn tree_sitter_toml() -> *const ();
+    fn tree_sitter_stcfg() -> *const ();
     fn tree_sitter_markdown() -> *const ();
     fn tree_sitter_markdown_inline() -> *const ();
 }
@@ -21,6 +22,10 @@ pub fn toml() -> Language {
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_toml) })
 }
 
+pub fn stcfg() -> Language {
+    Language::new(unsafe { LanguageFn::from_raw(tree_sitter_stcfg) })
+}
+
 pub fn markdown() -> Language {
     Language::new(unsafe { LanguageFn::from_raw(tree_sitter_markdown) })
 }
@@ -31,7 +36,7 @@ pub fn markdown_inline() -> Language {
 
 #[cfg(test)]
 mod tests {
-    use super::{json, markdown, markdown_inline, rust, toml};
+    use super::{json, markdown, markdown_inline, rust, stcfg, toml};
     use tree_sitter::Parser;
 
     #[test]
@@ -40,6 +45,23 @@ mod tests {
         p.set_language(&rust()).unwrap();
         let tree = p.parse("fn main() {}", None).unwrap();
         assert_eq!(tree.root_node().kind(), "source_file");
+    }
+
+    #[test]
+    fn loads_stcfg() {
+        let mut p = Parser::new();
+        p.set_language(&stcfg()).unwrap();
+        // Exercises a setting and a key binding; the binding drives the
+        // external scanner that recognizes `Ctrl-w` as a key_part via the
+        // trailing `->`.
+        let tree = p
+            .parse(
+                "on init { theme = default_dark; }\non key { Ctrl-w -> Foo(); }\n",
+                None,
+            )
+            .unwrap();
+        assert_eq!(tree.root_node().kind(), "source_file");
+        assert!(!tree.root_node().has_error());
     }
 
     #[test]
