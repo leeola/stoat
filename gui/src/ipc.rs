@@ -181,7 +181,7 @@ mod tests {
         let uid = workspace.read_with(&cx, |w, _| w.uid());
         cx.update(|app| {
             let workspace = workspace.clone();
-            app.update_global::<AppHost, _>(|host, _| host.add_session(workspace, handle));
+            app.update_global::<AppHost, _>(|host, cx| host.add_session(workspace, handle, cx));
         });
 
         let result = cx

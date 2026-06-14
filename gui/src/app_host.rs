@@ -45,12 +45,38 @@ pub struct AppHost {
 impl Global for AppHost {}
 
 impl AppHost {
-    /// Register a new single-window session for `workspace`.
-    pub fn add_session(&mut self, workspace: Entity<Workspace>, window: AnyWindowHandle) {
+    /// Register a new single-window session for `workspace`, bumping its uid if
+    /// it collides with an already-registered session.
+    pub fn add_session(
+        &mut self,
+        workspace: Entity<Workspace>,
+        window: AnyWindowHandle,
+        cx: &mut App,
+    ) {
+        let current = workspace.read(cx).uid();
+        let unique = self.unique_uid(current, cx);
+        if unique != current {
+            workspace.update(cx, |workspace, _| workspace.set_uid(unique));
+        }
         self.sessions.push(Session {
             workspace,
             windows: vec![window],
         });
+    }
+
+    /// The first uid at or above `uid` not held by a live session, incrementing
+    /// on collision. `WorkspaceUid::now` is a coarse-clock timestamp that can
+    /// repeat across workspaces made in the same instant, so registration walks
+    /// past any duplicate to keep live-session ids unique for id-addressing.
+    fn unique_uid(&self, mut uid: WorkspaceUid, cx: &App) -> WorkspaceUid {
+        while self
+            .sessions
+            .iter()
+            .any(|session| session.workspace.read(cx).uid() == uid)
+        {
+            uid = WorkspaceUid(uid.0.wrapping_add(1));
+        }
+        uid
     }
 
     /// Resolve the live session whose root directory is the nearest ancestor
@@ -219,8 +245,10 @@ mod tests {
         };
 
         let mut host = AppHost::default();
-        host.add_session(ws_a, win_a);
-        host.add_session(ws_b, win_b);
+        cx.update(|app| {
+            host.add_session(ws_a, win_a, app);
+            host.add_session(ws_b, win_b, app);
+        });
         assert_eq!(host.sessions.len(), 2);
         assert!(!FsHost::exists(&*fs, &path_a));
 
@@ -255,8 +283,10 @@ mod tests {
         assert_ne!(uid_repo, uid_sub, "advancing the clock gives distinct uids");
 
         let mut host = AppHost::default();
-        host.add_session(ws_repo, win_repo);
-        host.add_session(ws_sub, win_sub);
+        cx.update(|app| {
+            host.add_session(ws_repo, win_repo, app);
+            host.add_session(ws_sub, win_sub, app);
+        });
 
         let (deep, sibling, exact, outside) = cx.update(|cx| {
             (
@@ -278,13 +308,46 @@ mod tests {
             uid_repo2.0 > uid_repo.0,
             "later workspace has the higher uid"
         );
-        host.add_session(ws_repo2, win_repo2);
+        cx.update(|app| host.add_session(ws_repo2, win_repo2, app));
 
         let tiebreak = cx.update(|cx| host.resolve_cwd(Path::new("/repo/x"), cx));
         assert_eq!(
             tiebreak,
             Some(uid_repo2),
             "highest uid wins among sessions sharing the nearest root",
+        );
+    }
+
+    #[test]
+    fn add_session_bumps_a_colliding_uid() {
+        let mut cx = TestAppContext::single();
+        let (_fs, _scheduler) = install_globals(&mut cx);
+
+        let (ws_a, win_a) = dirty_workspace_window(&mut cx, "a", Path::new("/repo"));
+        let (ws_b, win_b) = dirty_workspace_window(&mut cx, "b", Path::new("/repo"));
+        let uid_a = ws_a.read_with(&cx, |w, _| w.uid());
+        let uid_b = ws_b.read_with(&cx, |w, _| w.uid());
+        assert_eq!(
+            uid_a, uid_b,
+            "the fixed test clock makes both uids identical"
+        );
+
+        let mut host = AppHost::default();
+        cx.update(|app| {
+            host.add_session(ws_a, win_a, app);
+            host.add_session(ws_b, win_b, app);
+        });
+
+        let uids = cx.update(|app| {
+            host.sessions
+                .iter()
+                .map(|session| session.workspace.read(app).uid())
+                .collect::<Vec<_>>()
+        });
+        assert_eq!(uids[0], uid_a, "the first session keeps its uid");
+        assert_ne!(
+            uids[1], uids[0],
+            "the second registration bumped the colliding uid",
         );
     }
 }

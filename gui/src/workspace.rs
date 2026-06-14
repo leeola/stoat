@@ -1065,6 +1065,13 @@ impl Workspace {
         self.uid
     }
 
+    /// Reassign the workspace's session id. The app host calls this to keep
+    /// live-session uids unique when a coarse-clock [`stoat::workspace::WorkspaceUid`]
+    /// collides with an already-registered session.
+    pub(crate) fn set_uid(&mut self, uid: stoat::workspace::WorkspaceUid) {
+        self.uid = uid;
+    }
+
     /// True when the workspace looks freshly opened and unused: no
     /// docks, a single un-split pane, and that pane holding at most one
     /// empty, unsaved scratch editor. The save paths skip persisting a

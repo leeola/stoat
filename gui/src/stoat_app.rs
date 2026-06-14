@@ -160,8 +160,8 @@ fn register_session(
     }
     let handle = window.window_handle();
     let workspace = workspace.clone();
-    cx.update_global::<crate::app_host::AppHost, _>(|host, _| {
-        host.add_session(workspace, handle);
+    cx.update_global::<crate::app_host::AppHost, _>(|host, cx| {
+        host.add_session(workspace, handle, cx);
     });
 }
 
