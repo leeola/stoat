@@ -127,6 +127,7 @@ impl LanguageRegistry {
                 Arc::new(make_rust()),
                 Arc::new(make_json()),
                 Arc::new(make_toml()),
+                Arc::new(make_stcfg()),
                 markdown,
                 markdown_inline,
             ],
@@ -306,6 +307,19 @@ fn make_toml() -> Language {
     )
 }
 
+fn make_stcfg() -> Language {
+    make_language(
+        "stcfg",
+        &["stcfg"],
+        grammar::stcfg(),
+        include_str!("../../vendor/tree-sitter-stcfg/queries/highlights.scm"),
+        AuxQuerySources {
+            comment_tokens: &["#"],
+            ..Default::default()
+        },
+    )
+}
+
 fn make_markdown_with_injections(injections: Vec<LanguageInjection>) -> Language {
     make_language_with_injections(
         "markdown",
@@ -364,6 +378,7 @@ mod tests {
         assert_eq!(reg.for_path(Path::new("a.rs")).unwrap().name, "rust");
         assert_eq!(reg.for_path(Path::new("a.json")).unwrap().name, "json");
         assert_eq!(reg.for_path(Path::new("a.toml")).unwrap().name, "toml");
+        assert_eq!(reg.for_path(Path::new("a.stcfg")).unwrap().name, "stcfg");
         assert_eq!(reg.for_path(Path::new("a.md")).unwrap().name, "markdown");
         assert_eq!(
             reg.for_path(Path::new("a.markdown")).unwrap().name,
@@ -397,8 +412,33 @@ mod tests {
         let names: Vec<&str> = reg.languages().iter().map(|l| l.name).collect();
         assert_eq!(
             names,
-            vec!["rust", "json", "toml", "markdown", "markdown-inline"],
+            vec![
+                "rust",
+                "json",
+                "toml",
+                "stcfg",
+                "markdown",
+                "markdown-inline"
+            ],
         );
+    }
+
+    #[test]
+    fn stcfg_registered_with_highlights() {
+        let reg = LanguageRegistry::standard();
+        let stcfg = reg
+            .for_path(Path::new("conf.stcfg"))
+            .expect("stcfg resolves by extension");
+        assert_eq!(stcfg.name, "stcfg");
+        assert_eq!(stcfg.comment_tokens, &["#"]);
+        // The highlight query compiled against the grammar (the constructor
+        // would have panicked otherwise) and carries the expected scopes.
+        let captures = stcfg.highlight_capture_names();
+        for expected in [
+            "keyword", "string", "comment", "operator", "property", "function",
+        ] {
+            assert!(captures.contains(&expected), "missing capture {expected}");
+        }
     }
 
     #[test]
