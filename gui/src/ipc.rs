@@ -25,11 +25,17 @@ const INVALID_PARAMS: i64 = -32602;
 const INTERNAL_ERROR: i64 = -32603;
 
 /// `open_file` request: the client's working directory (for session routing)
-/// and the absolute path to open.
+/// and the absolute path to open. `session` targets a live session by uid and
+/// `new` forces a fresh window; absent both, the path routes to the session
+/// enclosing `cwd`.
 #[derive(Deserialize)]
 struct OpenFileParams {
     cwd: std::path::PathBuf,
     path: std::path::PathBuf,
+    #[serde(default)]
+    new: bool,
+    #[serde(default)]
+    session: Option<u64>,
 }
 
 /// `open_file` reply: the session the path routed into and the buffer it
@@ -68,13 +74,7 @@ fn open_file(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
     let params: OpenFileParams = serde_json::from_value(params.unwrap_or(Value::Null))
         .map_err(|err| error(INVALID_PARAMS, format!("open_file params: {err}")))?;
 
-    let resolved = {
-        let host = app.global::<AppHost>();
-        host.resolve_cwd(&params.cwd, app)
-            .and_then(|uid| host.session_workspace(uid, app).map(|ws| (uid, ws)))
-    };
-
-    let (session_id, buffer_id) = match resolved {
+    let (session_id, buffer_id) = match resolve_target(app, &params)? {
         Some((uid, workspace)) => {
             workspace.update(app, |w, cx| {
                 w.open_paths(std::slice::from_ref(&params.path), cx)
@@ -90,6 +90,31 @@ fn open_file(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
         buffer_id,
     })
     .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
+}
+
+/// The existing session a request routes into, or `None` when it should open a
+/// fresh window. `session` looks up a live session by uid (erroring if it is
+/// gone), `new` always opens fresh, and otherwise the cwd-enclosing session is
+/// used when one exists.
+fn resolve_target(
+    app: &App,
+    params: &OpenFileParams,
+) -> Result<Option<(WorkspaceUid, Entity<Workspace>)>, RpcError> {
+    if let Some(id) = params.session {
+        let uid = WorkspaceUid(id);
+        let workspace = app
+            .global::<AppHost>()
+            .session_workspace(uid, app)
+            .ok_or_else(|| error(INVALID_PARAMS, format!("session {id} is not live")))?;
+        return Ok(Some((uid, workspace)));
+    }
+    if params.new {
+        return Ok(None);
+    }
+    let host = app.global::<AppHost>();
+    Ok(host
+        .resolve_cwd(&params.cwd, app)
+        .and_then(|uid| host.session_workspace(uid, app).map(|ws| (uid, ws))))
 }
 
 /// Open a new window rooted at `cwd` with `path` loaded, returning the new
@@ -170,6 +195,20 @@ mod tests {
         Some(serde_json::json!({ "cwd": cwd, "path": path }))
     }
 
+    /// Open a window rooted at `root` and register it as a live session,
+    /// returning the workspace and its uid.
+    fn register_session(cx: &mut TestAppContext, root: &str) -> (Entity<Workspace>, WorkspaceUid) {
+        let (workspace, vcx) =
+            cx.add_window_view(|_window, cx| Workspace::new(root.to_string(), root.into(), cx));
+        let handle = vcx.window_handle();
+        let registered = workspace.clone();
+        cx.update(|app| {
+            app.update_global::<AppHost, _>(|host, cx| host.add_session(registered, handle, cx));
+        });
+        let uid = cx.update(|app| workspace.read(app).uid());
+        (workspace, uid)
+    }
+
     #[test]
     fn open_file_routes_into_the_cwd_matched_session() {
         let mut cx = TestAppContext::single();
@@ -231,5 +270,69 @@ mod tests {
             .update(|app| dispatch(app, "no_such_verb", None))
             .expect_err("unknown method rejected");
         assert_eq!(err.code, METHOD_NOT_FOUND);
+    }
+
+    #[test]
+    fn open_file_new_forces_a_fresh_window() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (_workspace, cwd_uid) = register_session(&mut cx, "/repo");
+
+        let before = cx.update(|app| app.windows().len());
+        let params = serde_json::json!({ "cwd": "/repo", "path": "/repo/x.txt", "new": true });
+        let result = cx
+            .update(|app| dispatch(app, "open_file", Some(params)))
+            .expect("open_file --new succeeds");
+        let after = cx.update(|app| app.windows().len());
+
+        assert_eq!(
+            after,
+            before + 1,
+            "--new opens a fresh window despite a matching session",
+        );
+        assert_ne!(
+            result["session_id"],
+            serde_json::json!(cwd_uid.0),
+            "--new routes to a new session, not the cwd-matched one",
+        );
+    }
+
+    #[test]
+    fn open_file_session_routes_to_the_targeted_session() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (workspace, uid) = register_session(&mut cx, "/repo");
+
+        // The cwd does not enclose the session; --session targets it by uid.
+        let params =
+            serde_json::json!({ "cwd": "/other", "path": "/other/y.txt", "session": uid.0 });
+        let result = cx
+            .update(|app| dispatch(app, "open_file", Some(params)))
+            .expect("open_file --session succeeds");
+
+        assert_eq!(
+            result["session_id"],
+            serde_json::json!(uid.0),
+            "routed to the targeted session",
+        );
+        let opened = workspace.read_with(&cx, |w, cx| {
+            w.buffer_registry()
+                .read(cx)
+                .id_for_path(Path::new("/other/y.txt"))
+                .is_some()
+        });
+        assert!(opened, "the path opened in the targeted session");
+    }
+
+    #[test]
+    fn open_file_session_errors_when_not_live() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+
+        let params = serde_json::json!({ "cwd": "/repo", "path": "/repo/x.txt", "session": 404 });
+        let err = cx
+            .update(|app| dispatch(app, "open_file", Some(params)))
+            .expect_err("a dead session is rejected");
+        assert_eq!(err.code, INVALID_PARAMS);
     }
 }
