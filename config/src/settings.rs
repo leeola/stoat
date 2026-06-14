@@ -99,6 +99,12 @@ pub struct Settings {
     /// Editor pane font size in logical pixels. Set via
     /// `editor.font.size = 14;`.
     pub editor_font_size: Option<f32>,
+    /// Monospace font family for the terminal pane. `None` falls back to
+    /// the editor font family. Set via `terminal.font.family = "Fira Code";`.
+    pub terminal_font_family: Option<String>,
+    /// Terminal pane font size in logical pixels. `None` falls back to the
+    /// editor font size. Set via `terminal.font.size = 14;`.
+    pub terminal_font_size: Option<f32>,
     /// Proportional font family for chrome (status bar, tab bar,
     /// modals, dock panels). Set via `ui.font.family = "SF Pro";`.
     pub ui_font_family: Option<String>,
@@ -189,6 +195,8 @@ impl Settings {
             mode_badges,
             editor_font_family: other.editor_font_family.or(self.editor_font_family),
             editor_font_size: other.editor_font_size.or(self.editor_font_size),
+            terminal_font_family: other.terminal_font_family.or(self.terminal_font_family),
+            terminal_font_size: other.terminal_font_size.or(self.terminal_font_size),
             ui_font_family: other.ui_font_family.or(self.ui_font_family),
             ui_font_size: other.ui_font_size.or(self.ui_font_size),
             ui_pane_show_tab_bar: other.ui_pane_show_tab_bar.or(self.ui_pane_show_tab_bar),
@@ -478,6 +486,39 @@ static SETTING_CATALOG: &[SettingDef] = &[
             }
         },
         apply_raw: None,
+    },
+    SettingDef {
+        key: "terminal.font.family",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "Monospace font family for the terminal pane. Falls back to the editor font family.",
+        apply_value: |s, _w, v| {
+            if let Value::String(x) = v {
+                s.terminal_font_family = Some(x.clone());
+            }
+        },
+        apply_raw: Some(|s, _w, raw| {
+            s.terminal_font_family = Some(raw.to_string());
+            true
+        }),
+    },
+    SettingDef {
+        key: "terminal.font.size",
+        kind: ValueKind::Number,
+        allowed: &[],
+        doc: "Terminal pane font size, in logical pixels. Falls back to the editor font size.",
+        apply_value: |s, _w, v| {
+            if let Value::Number(n) = v {
+                s.terminal_font_size = Some(*n as f32);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match raw.parse::<f32>() {
+            Ok(n) => {
+                s.terminal_font_size = Some(n);
+                true
+            },
+            Err(_) => false,
+        }),
     },
     SettingDef {
         key: "ui.font.family",
@@ -976,6 +1017,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1006,6 +1049,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1036,6 +1081,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1075,6 +1122,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1097,6 +1146,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1121,6 +1172,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1148,6 +1201,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1173,6 +1228,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1211,6 +1268,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1241,6 +1300,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1271,6 +1332,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1310,6 +1373,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1335,6 +1400,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1365,6 +1432,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1395,6 +1464,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1422,6 +1493,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1444,6 +1517,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1471,6 +1546,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1493,6 +1570,8 @@ mod tests {
             mode_badges: BTreeMap::new(),
             editor_font_family: None,
             editor_font_size: None,
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1517,6 +1596,8 @@ mod tests {
                 mode_badges: BTreeMap::new(),
                 editor_font_family: None,
                 editor_font_size: None,
+                terminal_font_family: None,
+                terminal_font_size: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1760,6 +1841,8 @@ mod tests {
         let left = Settings {
             editor_font_family: Some("Menlo".into()),
             editor_font_size: Some(13.0),
+            terminal_font_family: None,
+            terminal_font_size: None,
             ui_font_family: Some("SF Pro".into()),
             ui_font_size: Some(14.0),
             ..Settings::default()
@@ -1954,6 +2037,8 @@ mod tests {
                 "mouse.capture",
                 "editor.font.family",
                 "editor.font.size",
+                "terminal.font.family",
+                "terminal.font.size",
                 "ui.font.family",
                 "ui.font.size",
                 "ui.pane.show_tab_bar",
@@ -2030,6 +2115,8 @@ mod tests {
             runtime,
             [
                 "auto_reload_config",
+                "terminal.font.family",
+                "terminal.font.size",
                 "ui.pane.show_tab_bar",
                 "ui.pane.show_breadcrumbs",
                 "ui.editor.show_scrollbar_markers",
@@ -2045,6 +2132,30 @@ mod tests {
         assert!(matches!(
             s.apply_runtime("theme", "dark"),
             Err(SettingsApplyError::UnknownKey { .. })
+        ));
+    }
+
+    #[test]
+    fn from_config_extracts_terminal_font() {
+        let config =
+            parse_ok("on init { terminal.font.family = \"Fira Code\"; terminal.font.size = 13; }");
+        let s = Settings::from_config(&config);
+        assert_eq!(s.terminal_font_family.as_deref(), Some("Fira Code"));
+        assert_eq!(s.terminal_font_size, Some(13.0));
+    }
+
+    #[test]
+    fn apply_runtime_sets_terminal_font_and_rejects_bad_size() {
+        let mut s = Settings::default();
+        s.apply_runtime("terminal.font.family", "Fira Code")
+            .expect("family is runtime-settable");
+        s.apply_runtime("terminal.font.size", "13")
+            .expect("numeric size parses");
+        assert_eq!(s.terminal_font_family.as_deref(), Some("Fira Code"));
+        assert_eq!(s.terminal_font_size, Some(13.0));
+        assert!(matches!(
+            s.apply_runtime("terminal.font.size", "huge"),
+            Err(SettingsApplyError::InvalidValue { .. })
         ));
     }
 }

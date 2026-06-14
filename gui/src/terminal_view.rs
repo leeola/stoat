@@ -18,8 +18,8 @@ use crate::{
     globals::{ClipboardHostGlobal, EnvHostGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     run_pane::{
-        editor_font, mouse, mouse_button_code, render::term_color_to_hsla, scroll_is_up,
-        terminal_cells, GPUI_DEFAULT_LINE_HEIGHT_RATIO,
+        mouse, mouse_button_code, render::term_color_to_hsla, scroll_is_up, terminal_cells,
+        terminal_font, GPUI_DEFAULT_LINE_HEIGHT_RATIO,
     },
     terminal_paint::{self, PaintCell, PaintCursor, PaintScreen},
     theme::ActiveTheme,
@@ -577,7 +577,7 @@ impl ItemView for Terminal {
 
 impl Render for Terminal {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<'_, Self>) -> impl IntoElement {
-        let (font_family, font_size) = editor_font(cx);
+        let (font_family, font_size) = terminal_font(cx);
         let focused = self.is_pane_focused(cx);
         let screen = self.paint_snapshot(focused, cx);
         let paint_font = Font {

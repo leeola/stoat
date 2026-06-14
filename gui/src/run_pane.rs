@@ -911,6 +911,23 @@ pub(crate) fn editor_font(cx: &App) -> (SharedString, f32) {
     )
 }
 
+/// Resolved terminal font family and size. Each of `terminal.font.family` and
+/// `terminal.font.size` falls back independently to the editor font from
+/// [`editor_font`] when unset, so the terminal can opt into a ligature font
+/// without restating the editor's size (or vice versa).
+pub(crate) fn terminal_font(cx: &App) -> (SharedString, f32) {
+    let (editor_family, editor_size) = editor_font(cx);
+    let settings = cx.try_global::<Settings>();
+    let family = settings
+        .and_then(|settings| settings.resolved.terminal_font_family.clone())
+        .map(SharedString::from)
+        .unwrap_or(editor_family);
+    let size = settings
+        .and_then(|settings| settings.resolved.terminal_font_size)
+        .unwrap_or(editor_size);
+    (family, size)
+}
+
 /// Dispatch the [`stoat_action::OpenRun`] action. Creates a fresh
 /// [`Run`] entity anchored at the workspace's git root and adds it
 /// to the focused pane's item list.
@@ -1316,6 +1333,26 @@ mod tests {
             first.entity_id(),
             "the newly opened run takes focus over the existing pane item",
         );
+    }
+
+    #[test]
+    fn terminal_font_uses_terminal_settings_else_editor_fallback() {
+        let cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.set_global(Settings::load_from_source(
+                "on init { terminal.font.family = \"Fira\"; terminal.font.size = 20; }",
+            ));
+            assert_eq!(terminal_font(cx), (SharedString::from("Fira"), 20.0));
+
+            cx.set_global(Settings::load_from_source(
+                "on init { editor.font.family = \"Mono\"; editor.font.size = 18; }",
+            ));
+            assert_eq!(
+                terminal_font(cx),
+                (SharedString::from("Mono"), 18.0),
+                "an unset terminal font falls back to the editor font",
+            );
+        });
     }
 
     #[test]
