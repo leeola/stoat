@@ -163,15 +163,75 @@ theme default_dark {
     chat.throbber        = { fg: special, modifiers: [bold] };
 }
 
+# Editor settings, applied at startup. Every recognized key is listed here.
+# A commented key keeps its compiled-in default; uncomment to override (which
+# also pins the value, so it no longer tracks a future change to the default).
 on init {
+    # Active theme. Resolves against a `theme NAME { ... }` block above.
+    # Default: the compiled-in theme.
     theme = default_dark;
 
+    # Editor pane font size, in logical pixels.
     editor.font.size = 15;
+    # Chrome font size -- status bar, tab bar, modals, dock panels -- in logical pixels.
     ui.font.size = 16;
 
+    # Input mode to enter when a pane item of the given kind becomes active,
+    # keyed by the kind's lowercase name. Default: a built-in mode per kind.
     ui.item_mode.review = "review";
     ui.item_mode.rebase = "rebase";
     ui.item_mode.conflict = "conflict";
+
+    # The keys below are shown at their default value, commented out.
+
+    # Enable the Claude Code / LSP text-protocol transcript log. Default: false.
+    # text_proto_log = false;
+
+    # Re-apply this config automatically when it is saved in the editor. Default: true.
+    # auto_reload_config = true;
+
+    # Placement of a newly-opened Claude chat (OpenClaude):
+    # "pane", "dock-left", or "dock-right". Default: "pane".
+    # claude.default_placement = "pane";
+
+    # Mouse-capture policy at terminal startup. `auto` keeps the parent-multiplexer
+    # guard (capture off when $TMUX or $ZELLIJ is set), `always` forces it on,
+    # `never` disables it. Default: auto.
+    # mouse.capture = auto;
+
+    # Status-line badge label for a mode, keyed by mode name. Overrides the
+    # built-in badge table; useful for user-defined modes. Default: unset.
+    # ui.mode_badge.normal = "NOR";
+
+    # Monospace font family for the editor pane. Default: the compiled-in font.
+    # editor.font.family = "Menlo";
+    # Proportional font family for chrome. Default: the compiled-in font.
+    # ui.font.family = "SF Pro";
+
+    # Show the per-pane tab bar above editor content. Default: true.
+    # ui.pane.show_tab_bar = true;
+    # Show the per-pane breadcrumbs bar above editor content. Default: true.
+    # ui.pane.show_breadcrumbs = true;
+
+    # Paint diagnostic, git-hunk, and search markers on the editor scrollbar. Default: true.
+    # ui.editor.show_scrollbar_markers = true;
+    # Show inline git blame (author and relative age) at the end of each editable line. Default: false.
+    # ui.editor.show_inline_blame = false;
+    # Show indent guides (vertical lines at tab-stop columns). Default: true.
+    # ui.editor.show_indent_guides = true;
+    # Show sticky scroll headers (pin the enclosing container's signature at the top). Default: true.
+    # ui.editor.show_sticky_scroll = true;
+    # Gutter line-number mode: absolute, relative, or hybrid. Default: absolute.
+    # ui.editor.line_numbers = absolute;
+    # Visible-whitespace mode: none, boundary, selection, or all. Default: none.
+    # ui.editor.show_whitespace = none;
+
+    # Per-language LSP server, keyed by language name: the command, its
+    # arguments, and environment variables exported into the child. Default:
+    # unset (no server launched for the language).
+    # lsp.rust.command = "rust-analyzer";
+    # lsp.rust.args = [];
+    # lsp.rust.env.RUST_LOG = "info";
 }
 
 on key {
