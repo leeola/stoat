@@ -3,12 +3,14 @@
 //! A session is a workspace plus the windows showing it. The host owns the set
 //! at process scope -- rather than each window's view tree owning its workspace
 //! solo -- so it persists workspaces as their windows close and on app quit,
-//! and gives later IPC wiring (a socket, a cwd-to-session resolver) one place
-//! to look up live sessions. Stored as a [`Global`]; install it once at startup
+//! binds the app IPC socket, and resolves a client's working directory to the
+//! session enclosing it. Stored as a [`Global`]; install it once at startup
 //! before opening windows.
 
 use crate::workspace::Workspace;
 use gpui::{AnyWindowHandle, App, Entity, Global};
+use std::path::Path;
+use stoat::workspace::WorkspaceUid;
 use stoat_agent_claude_code::jsonrpc;
 use stoat_scheduler::{Executor, Task};
 
@@ -23,6 +25,10 @@ struct Session {
 }
 
 /// The process-level registry of live sessions.
+///
+/// Holds every session keyed by its uid and root directory, and resolves a
+/// client's working directory to the nearest enclosing session (see
+/// [`Self::resolve_cwd`]) -- the routing the IPC verbs build on.
 #[derive(Default)]
 pub struct AppHost {
     sessions: Vec<Session>,
@@ -41,6 +47,34 @@ impl AppHost {
             workspace,
             windows: vec![window],
         });
+    }
+
+    /// Resolve the live session whose root directory is the nearest ancestor
+    /// of `cwd` (cwd itself counts), returning its [`WorkspaceUid`]. `None`
+    /// when no live session is rooted at any ancestor.
+    ///
+    /// This is the live-session counterpart to the on-disk ancestor walk that
+    /// backs `--continue`: a client's working directory routes to the most
+    /// specific session enclosing it. Among sessions sharing the nearest root,
+    /// the highest uid wins, so the result is deterministic even when two
+    /// sessions collide on a coarse-clock [`WorkspaceUid`].
+    // First caller lands with the open_file IPC verb.
+    #[allow(dead_code)]
+    pub fn resolve_cwd(&self, cwd: &Path, cx: &App) -> Option<WorkspaceUid> {
+        for ancestor in cwd.ancestors() {
+            let nearest = self
+                .sessions
+                .iter()
+                .filter_map(|session| {
+                    let workspace = session.workspace.read(cx);
+                    (workspace.git_root().as_path() == ancestor).then(|| workspace.uid())
+                })
+                .max_by_key(|uid| uid.0);
+            if nearest.is_some() {
+                return nearest;
+            }
+        }
+        None
     }
 
     /// Save and drop every session whose windows have all closed, keyed off the
@@ -103,6 +137,7 @@ mod tests {
     use std::{
         path::{Path, PathBuf},
         sync::Arc,
+        time::Duration,
     };
     use stoat::{
         host::{FakeFs, FsHost, FsWatchHost},
@@ -112,18 +147,17 @@ mod tests {
     use stoat_host::NoopFsWatcher;
     use stoat_scheduler::{Executor, TestScheduler};
 
-    fn install_globals(cx: &mut TestAppContext) -> Arc<dyn FsHost> {
+    fn install_globals(cx: &mut TestAppContext) -> (Arc<dyn FsHost>, Arc<TestScheduler>) {
+        let scheduler = Arc::new(TestScheduler::new());
         let fs: Arc<dyn FsHost> = Arc::new(FakeFs::new());
         cx.update(|cx| {
-            cx.set_global(ExecutorGlobal(Executor::new(
-                Arc::new(TestScheduler::new()),
-            )));
+            cx.set_global(ExecutorGlobal(Executor::new(scheduler.clone())));
             cx.set_global(FsWatchHostGlobal(
                 Arc::new(NoopFsWatcher::new()) as Arc<dyn FsWatchHost>
             ));
             cx.set_global(FsHostGlobal(fs.clone()));
         });
-        fs
+        (fs, scheduler)
     }
 
     /// A window whose workspace has had a pane split, so it is no longer fresh
@@ -148,7 +182,7 @@ mod tests {
     #[test]
     fn prune_saves_and_drops_sessions_whose_last_window_closed() {
         let mut cx = TestAppContext::single();
-        let fs = install_globals(&mut cx);
+        let (fs, _scheduler) = install_globals(&mut cx);
         let repo = PathBuf::from("/repo");
 
         let (ws_a, win_a) = dirty_workspace_window(&mut cx, "a", &repo);
@@ -179,6 +213,52 @@ mod tests {
         assert!(
             host.sessions.is_empty(),
             "no open windows leaves no sessions"
+        );
+    }
+
+    #[test]
+    fn resolve_cwd_returns_nearest_ancestor_rooted_session() {
+        let mut cx = TestAppContext::single();
+        let (_fs, scheduler) = install_globals(&mut cx);
+
+        let (ws_repo, win_repo) = dirty_workspace_window(&mut cx, "repo", Path::new("/repo"));
+        scheduler.advance_clock(Duration::from_millis(1));
+        let (ws_sub, win_sub) = dirty_workspace_window(&mut cx, "sub", Path::new("/repo/sub"));
+        let uid_repo = ws_repo.read_with(&cx, |w, _| w.uid());
+        let uid_sub = ws_sub.read_with(&cx, |w, _| w.uid());
+        assert_ne!(uid_repo, uid_sub, "advancing the clock gives distinct uids");
+
+        let mut host = AppHost::default();
+        host.add_session(ws_repo, win_repo);
+        host.add_session(ws_sub, win_sub);
+
+        let (deep, sibling, exact, outside) = cx.update(|cx| {
+            (
+                host.resolve_cwd(Path::new("/repo/sub/deep"), cx),
+                host.resolve_cwd(Path::new("/repo/other"), cx),
+                host.resolve_cwd(Path::new("/repo"), cx),
+                host.resolve_cwd(Path::new("/outside"), cx),
+            )
+        });
+        assert_eq!(deep, Some(uid_sub), "deepest enclosing root wins");
+        assert_eq!(sibling, Some(uid_repo), "falls back to the shallower root");
+        assert_eq!(exact, Some(uid_repo), "exact root");
+        assert_eq!(outside, None, "no session roots at any ancestor");
+
+        scheduler.advance_clock(Duration::from_millis(1));
+        let (ws_repo2, win_repo2) = dirty_workspace_window(&mut cx, "repo2", Path::new("/repo"));
+        let uid_repo2 = ws_repo2.read_with(&cx, |w, _| w.uid());
+        assert!(
+            uid_repo2.0 > uid_repo.0,
+            "later workspace has the higher uid"
+        );
+        host.add_session(ws_repo2, win_repo2);
+
+        let tiebreak = cx.update(|cx| host.resolve_cwd(Path::new("/repo/x"), cx));
+        assert_eq!(
+            tiebreak,
+            Some(uid_repo2),
+            "highest uid wins among sessions sharing the nearest root",
         );
     }
 }
