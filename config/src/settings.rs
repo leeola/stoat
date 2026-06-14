@@ -105,6 +105,9 @@ pub struct Settings {
     /// Terminal pane font size in logical pixels. `None` falls back to the
     /// editor font size. Set via `terminal.font.size = 14;`.
     pub terminal_font_size: Option<f32>,
+    /// Render programming ligatures in the terminal pane. `None` defaults to
+    /// enabled. Set via `terminal.font.ligatures = false;` to disable.
+    pub terminal_font_ligatures: Option<bool>,
     /// Proportional font family for chrome (status bar, tab bar,
     /// modals, dock panels). Set via `ui.font.family = "SF Pro";`.
     pub ui_font_family: Option<String>,
@@ -197,6 +200,9 @@ impl Settings {
             editor_font_size: other.editor_font_size.or(self.editor_font_size),
             terminal_font_family: other.terminal_font_family.or(self.terminal_font_family),
             terminal_font_size: other.terminal_font_size.or(self.terminal_font_size),
+            terminal_font_ligatures: other
+                .terminal_font_ligatures
+                .or(self.terminal_font_ligatures),
             ui_font_family: other.ui_font_family.or(self.ui_font_family),
             ui_font_size: other.ui_font_size.or(self.ui_font_size),
             ui_pane_show_tab_bar: other.ui_pane_show_tab_bar.or(self.ui_pane_show_tab_bar),
@@ -518,6 +524,24 @@ static SETTING_CATALOG: &[SettingDef] = &[
                 true
             },
             Err(_) => false,
+        }),
+    },
+    SettingDef {
+        key: "terminal.font.ligatures",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Render programming ligatures in the terminal pane.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.terminal_font_ligatures = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.terminal_font_ligatures = Some(b);
+                true
+            },
+            None => false,
         }),
     },
     SettingDef {
@@ -1019,6 +1043,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1051,6 +1076,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1083,6 +1109,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1124,6 +1151,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1148,6 +1176,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1174,6 +1203,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1203,6 +1233,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1230,6 +1261,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1270,6 +1302,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1302,6 +1335,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1334,6 +1368,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1375,6 +1410,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1402,6 +1438,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1434,6 +1471,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1466,6 +1504,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1495,6 +1534,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1519,6 +1559,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1548,6 +1589,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1572,6 +1614,7 @@ mod tests {
             editor_font_size: None,
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: None,
             ui_font_size: None,
             ui_pane_show_tab_bar: None,
@@ -1598,6 +1641,7 @@ mod tests {
                 editor_font_size: None,
                 terminal_font_family: None,
                 terminal_font_size: None,
+                terminal_font_ligatures: None,
                 ui_font_family: None,
                 ui_font_size: None,
                 ui_pane_show_tab_bar: None,
@@ -1843,6 +1887,7 @@ mod tests {
             editor_font_size: Some(13.0),
             terminal_font_family: None,
             terminal_font_size: None,
+            terminal_font_ligatures: None,
             ui_font_family: Some("SF Pro".into()),
             ui_font_size: Some(14.0),
             ..Settings::default()
@@ -2039,6 +2084,7 @@ mod tests {
                 "editor.font.size",
                 "terminal.font.family",
                 "terminal.font.size",
+                "terminal.font.ligatures",
                 "ui.font.family",
                 "ui.font.size",
                 "ui.pane.show_tab_bar",
@@ -2117,6 +2163,7 @@ mod tests {
                 "auto_reload_config",
                 "terminal.font.family",
                 "terminal.font.size",
+                "terminal.font.ligatures",
                 "ui.pane.show_tab_bar",
                 "ui.pane.show_breadcrumbs",
                 "ui.editor.show_scrollbar_markers",
@@ -2155,6 +2202,24 @@ mod tests {
         assert_eq!(s.terminal_font_size, Some(13.0));
         assert!(matches!(
             s.apply_runtime("terminal.font.size", "huge"),
+            Err(SettingsApplyError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn terminal_font_ligatures_setting() {
+        let config = parse_ok("on init { terminal.font.ligatures = false; }");
+        assert_eq!(
+            Settings::from_config(&config).terminal_font_ligatures,
+            Some(false)
+        );
+
+        let mut s = Settings::default();
+        s.apply_runtime("terminal.font.ligatures", "true")
+            .expect("bool is runtime-settable");
+        assert_eq!(s.terminal_font_ligatures, Some(true));
+        assert!(matches!(
+            s.apply_runtime("terminal.font.ligatures", "maybe"),
             Err(SettingsApplyError::InvalidValue { .. })
         ));
     }

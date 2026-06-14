@@ -19,7 +19,7 @@ use crate::{
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     run_pane::{
         mouse, mouse_button_code, render::term_color_to_hsla, scroll_is_up, terminal_cells,
-        terminal_font, GPUI_DEFAULT_LINE_HEIGHT_RATIO,
+        terminal_font, terminal_ligatures, GPUI_DEFAULT_LINE_HEIGHT_RATIO,
     },
     terminal_paint::{self, PaintCell, PaintCursor, PaintScreen},
     theme::ActiveTheme,
@@ -580,9 +580,14 @@ impl Render for Terminal {
         let (font_family, font_size) = terminal_font(cx);
         let focused = self.is_pane_focused(cx);
         let screen = self.paint_snapshot(focused, cx);
+        let features = if terminal_ligatures(cx) {
+            FontFeatures::default()
+        } else {
+            FontFeatures::disable_ligatures()
+        };
         let paint_font = Font {
             family: font_family.clone(),
-            features: FontFeatures::default(),
+            features,
             weight: FontWeight::NORMAL,
             style: FontStyle::Normal,
             fallbacks: None,

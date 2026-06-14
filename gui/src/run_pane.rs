@@ -928,6 +928,14 @@ pub(crate) fn terminal_font(cx: &App) -> (SharedString, f32) {
     (family, size)
 }
 
+/// Whether the terminal pane renders programming ligatures. Defaults to on
+/// (`terminal.font.ligatures` unset).
+pub(crate) fn terminal_ligatures(cx: &App) -> bool {
+    cx.try_global::<Settings>()
+        .and_then(|settings| settings.resolved.terminal_font_ligatures)
+        .unwrap_or(true)
+}
+
 /// Dispatch the [`stoat_action::OpenRun`] action. Creates a fresh
 /// [`Run`] entity anchored at the workspace's git root and adds it
 /// to the focused pane's item list.
@@ -1351,6 +1359,23 @@ mod tests {
                 terminal_font(cx),
                 (SharedString::from("Mono"), 18.0),
                 "an unset terminal font falls back to the editor font",
+            );
+        });
+    }
+
+    #[test]
+    fn terminal_ligatures_defaults_on_and_respects_setting() {
+        let cx = TestAppContext::single();
+        cx.update(|cx| {
+            cx.set_global(Settings::default());
+            assert!(terminal_ligatures(cx), "ligatures default on when unset");
+
+            cx.set_global(Settings::load_from_source(
+                "on init { terminal.font.ligatures = false; }",
+            ));
+            assert!(
+                !terminal_ligatures(cx),
+                "the setting disables terminal ligatures",
             );
         });
     }
