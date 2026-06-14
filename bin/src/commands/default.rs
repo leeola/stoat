@@ -265,4 +265,14 @@ mod tests {
     fn session_buffers_requires_an_id() {
         assert!(Args::try_parse_from(["stoat", "session", "buffers"]).is_err());
     }
+
+    #[test]
+    fn session_close_subcommand_parses() {
+        assert!(Args::try_parse_from(["stoat", "session", "close", "42"]).is_ok());
+    }
+
+    #[test]
+    fn session_close_requires_an_id() {
+        assert!(Args::try_parse_from(["stoat", "session", "close"]).is_err());
+    }
 }

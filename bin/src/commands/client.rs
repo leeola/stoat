@@ -263,6 +263,34 @@ async fn send_list_buffers(socket: &Path, session: u64) -> Result<Vec<BufferRowI
     Ok(reply.buffers)
 }
 
+/// Close session `session` in the running app, which persists then drops it.
+///
+/// Errors when no app is running, the session is unknown, or the request
+/// fails. No launch fallback -- there is nothing to close without a live app.
+pub fn close_session_in_app(session: u64) -> Result<(), Whatever> {
+    let socket = stoat_log::app_socket_path().whatever_context("resolve app socket path")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .whatever_context("build client runtime")?;
+    runtime.block_on(send_close_session(&socket, session))
+}
+
+async fn send_close_session(socket: &Path, session: u64) -> Result<(), Whatever> {
+    let stream = match UnixStream::connect(socket).await {
+        Ok(stream) => stream,
+        Err(_) => whatever!("session close: no Stoat app is running"),
+    };
+    let scheduler = Arc::new(TokioScheduler::new(tokio::runtime::Handle::current()));
+    let (peer, _incoming) = JsonRpcPeer::connect_unix(stream, &scheduler.executor());
+
+    let params = serde_json::json!({ "session": session });
+    peer.request("close_session", Some(params))
+        .await
+        .whatever_context("close_session request failed")?;
+    Ok(())
+}
+
 /// Resolve `path` against `cwd`, mirroring the editor's path handling: an
 /// absolute path is used as-is, a relative one is joined onto `cwd`. Symlinks
 /// are not resolved.

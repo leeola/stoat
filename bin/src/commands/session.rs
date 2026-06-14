@@ -11,12 +11,18 @@ pub enum SessionCommand {
         /// The session's WorkspaceUid, as shown by `session list`.
         id: u64,
     },
+    /// Close a live session: persist it, then drop it and its window(s).
+    Close {
+        /// The session's WorkspaceUid, as shown by `session list`.
+        id: u64,
+    },
 }
 
 pub fn run(sub: SessionCommand) -> Result<(), Whatever> {
     match sub {
         SessionCommand::List => list(),
         SessionCommand::Buffers { id } => buffers(id),
+        SessionCommand::Close { id } => close(id),
     }
 }
 
@@ -88,4 +94,10 @@ fn buffers(id: u64) -> Result<(), Whatever> {
 /// The display label for a buffer: its path, or `(scratch)` when it has none.
 fn label(buffer: &BufferRowInfo) -> &str {
     buffer.path.as_deref().unwrap_or("(scratch)")
+}
+
+fn close(id: u64) -> Result<(), Whatever> {
+    client::close_session_in_app(id)?;
+    println!("Closed session {id}.");
+    Ok(())
 }
