@@ -479,7 +479,10 @@ static SETTING_CATALOG: &[SettingDef] = &[
                 s.editor_font_family = Some(x.clone());
             }
         },
-        apply_raw: None,
+        apply_raw: Some(|s, _w, raw| {
+            s.editor_font_family = Some(raw.to_string());
+            true
+        }),
     },
     SettingDef {
         key: "editor.font.size",
@@ -491,7 +494,13 @@ static SETTING_CATALOG: &[SettingDef] = &[
                 s.editor_font_size = Some(*n as f32);
             }
         },
-        apply_raw: None,
+        apply_raw: Some(|s, _w, raw| match raw.parse::<f32>() {
+            Ok(n) => {
+                s.editor_font_size = Some(n);
+                true
+            },
+            Err(_) => false,
+        }),
     },
     SettingDef {
         key: "terminal.font.family",
@@ -554,7 +563,10 @@ static SETTING_CATALOG: &[SettingDef] = &[
                 s.ui_font_family = Some(x.clone());
             }
         },
-        apply_raw: None,
+        apply_raw: Some(|s, _w, raw| {
+            s.ui_font_family = Some(raw.to_string());
+            true
+        }),
     },
     SettingDef {
         key: "ui.font.size",
@@ -566,7 +578,13 @@ static SETTING_CATALOG: &[SettingDef] = &[
                 s.ui_font_size = Some(*n as f32);
             }
         },
-        apply_raw: None,
+        apply_raw: Some(|s, _w, raw| match raw.parse::<f32>() {
+            Ok(n) => {
+                s.ui_font_size = Some(n);
+                true
+            },
+            Err(_) => false,
+        }),
     },
     SettingDef {
         key: "ui.pane.show_tab_bar",
@@ -2161,9 +2179,13 @@ mod tests {
             runtime,
             [
                 "auto_reload_config",
+                "editor.font.family",
+                "editor.font.size",
                 "terminal.font.family",
                 "terminal.font.size",
                 "terminal.font.ligatures",
+                "ui.font.family",
+                "ui.font.size",
                 "ui.pane.show_tab_bar",
                 "ui.pane.show_breadcrumbs",
                 "ui.editor.show_scrollbar_markers",
@@ -2202,6 +2224,27 @@ mod tests {
         assert_eq!(s.terminal_font_size, Some(13.0));
         assert!(matches!(
             s.apply_runtime("terminal.font.size", "huge"),
+            Err(SettingsApplyError::InvalidValue { .. })
+        ));
+    }
+
+    #[test]
+    fn apply_runtime_sets_editor_and_ui_fonts() {
+        let mut s = Settings::default();
+        s.apply_runtime("editor.font.family", "Fira Code")
+            .expect("editor family is runtime-settable");
+        s.apply_runtime("editor.font.size", "15")
+            .expect("editor size parses");
+        s.apply_runtime("ui.font.family", "SF Pro")
+            .expect("ui family is runtime-settable");
+        s.apply_runtime("ui.font.size", "13")
+            .expect("ui size parses");
+        assert_eq!(s.editor_font_family.as_deref(), Some("Fira Code"));
+        assert_eq!(s.editor_font_size, Some(15.0));
+        assert_eq!(s.ui_font_family.as_deref(), Some("SF Pro"));
+        assert_eq!(s.ui_font_size, Some(13.0));
+        assert!(matches!(
+            s.apply_runtime("editor.font.size", "big"),
             Err(SettingsApplyError::InvalidValue { .. })
         ));
     }
