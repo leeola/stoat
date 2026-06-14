@@ -1164,8 +1164,8 @@ impl Workspace {
     /// (headless tests) or [`Self::is_fresh`] is true. IO and path
     /// resolution failures are logged via `tracing::warn!` and
     /// swallowed -- this is invoked from background lifecycle
-    /// triggers (periodic timer, release observer) where there is
-    /// no surface to propagate an error to.
+    /// triggers (periodic timer, the app host's window-close and
+    /// quit saves) where there is no surface to propagate an error to.
     pub fn save_state_to_default_path(&self, cx: &App) {
         if self.is_fresh(cx) {
             return;

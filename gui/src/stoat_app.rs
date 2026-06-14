@@ -9,8 +9,8 @@ use crate::{
     RestoreMode,
 };
 use gpui::{
-    div, AppContext, Context, Entity, FocusHandle, IntoElement, ParentElement, Render,
-    SharedString, Styled, Subscription, Window,
+    div, AppContext, BorrowAppContext, Context, Entity, FocusHandle, IntoElement, ParentElement,
+    Render, SharedString, Styled, Subscription, Window,
 };
 use std::path::{Path, PathBuf};
 use stoat::buffer::BufferId;
@@ -19,17 +19,6 @@ pub(crate) struct StoatApp {
     workspace: Entity<Workspace>,
     #[allow(dead_code)]
     focus_handle: FocusHandle,
-    /// Drops with the app; keeps the workspace's release observer
-    /// registered for as long as the workspace is hosted in this
-    /// view so window close flushes a final save before the
-    /// workspace entity is dropped.
-    _workspace_release: Subscription,
-    /// Drops with the app; saves the workspace on `App::quit` before
-    /// `shutdown()` clears the windows. The release observer above
-    /// does not fire on quit -- this view owns both the workspace
-    /// and that subscription and drops them together -- so the quit
-    /// path needs its own save. The periodic timer remains a backstop.
-    _workspace_quit: Subscription,
     /// Drops with the app; mirrors each root-window move/resize onto the
     /// workspace's cached bounds so the next save persists the current
     /// geometry. The save path has no `Window` to read bounds from, so
@@ -74,12 +63,6 @@ impl StoatApp {
             workspace.update(cx, |w, cx| w.open_paths(&files, cx));
         }
 
-        let _workspace_release =
-            gpui::App::observe_release(cx, &workspace, |ws, cx| ws.save_state_to_default_path(cx));
-        let _workspace_quit = cx.on_app_quit(|app, cx| {
-            app.workspace.read(cx).save_state_to_default_path(cx);
-            async {}
-        });
         let _window_bounds = track_window_bounds(&workspace, window, cx);
         window.on_window_should_close(cx, {
             let workspace = workspace.downgrade();
@@ -89,12 +72,11 @@ impl StoatApp {
                     .unwrap_or(true)
             }
         });
+        register_session(&workspace, window, cx);
 
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
-            _workspace_release,
-            _workspace_quit,
             _window_bounds,
         }
     }
@@ -151,6 +133,25 @@ fn track_window_bounds(
     })
 }
 
+/// Register the window's workspace as a session in the process-level
+/// [`AppHost`](crate::app_host::AppHost). No-op when the host global is absent
+/// (most internal-state tests construct a `StoatApp` without installing it),
+/// mirroring the other `try_global`-guarded globals.
+fn register_session(
+    workspace: &Entity<Workspace>,
+    window: &mut Window,
+    cx: &mut Context<'_, StoatApp>,
+) {
+    if !cx.has_global::<crate::app_host::AppHost>() {
+        return;
+    }
+    let handle = window.window_handle();
+    let workspace = workspace.clone();
+    cx.update_global::<crate::app_host::AppHost, _>(|host, _| {
+        host.add_session(workspace, handle);
+    });
+}
+
 impl StoatApp {
     /// Borrow the hosted workspace entity. The `--inputs` driver reaches
     /// the workspace through this to feed its keystroke sequence, and
@@ -178,12 +179,6 @@ impl StoatApp {
         let workspace = cx.new(|cx| Workspace::new(name, git_root, cx));
         workspace.update(cx, |w, cx| w.apply_state(state, cx));
 
-        let _workspace_release =
-            gpui::App::observe_release(cx, &workspace, |ws, cx| ws.save_state_to_default_path(cx));
-        let _workspace_quit = cx.on_app_quit(|app, cx| {
-            app.workspace.read(cx).save_state_to_default_path(cx);
-            async {}
-        });
         let _window_bounds = track_window_bounds(&workspace, window, cx);
         window.on_window_should_close(cx, {
             let workspace = workspace.downgrade();
@@ -193,12 +188,11 @@ impl StoatApp {
                     .unwrap_or(true)
             }
         });
+        register_session(&workspace, window, cx);
 
         Self {
             workspace,
             focus_handle: cx.focus_handle(),
-            _workspace_release,
-            _workspace_quit,
             _window_bounds,
         }
     }
@@ -292,52 +286,27 @@ mod tests {
     }
 
     #[test]
-    fn release_observer_writes_workspace_state_on_release() {
-        let mut cx = TestAppContext::single();
-        install_executor_global(&mut cx);
-        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
-        let fs_global: Arc<dyn stoat::host::FsHost> = fs.clone();
-        cx.update(|cx| cx.set_global(FsHostGlobal(fs_global.clone())));
-
-        let cwd = std::env::current_dir().expect("current_dir");
-        let workspace = cx.update(|cx| cx.new(|cx| Workspace::new("main", cwd.clone(), cx)));
-        workspace.update(&mut cx, |w, cx| {
-            w.pane_tree().clone().update(cx, |tree, cx| {
-                tree.split(Axis::Vertical, cx);
-            });
-        });
-        let uid = workspace.read_with(&cx, |w, _| w.uid());
-        let expected_path =
-            stoat::workspace::persist::state_path_for(&cwd, uid, &*fs_global).expect("state path");
-
-        let _subscription = cx.update(|cx| {
-            gpui::App::observe_release(cx, &workspace, |ws, cx| {
-                ws.save_state_to_default_path(cx);
-            })
-        });
-
-        assert!(!stoat::host::FsHost::exists(&*fs_global, &expected_path));
-
-        drop(workspace);
-        cx.update(|_| {});
-
-        assert!(
-            stoat::host::FsHost::exists(&*fs_global, &expected_path),
-            "release observer should have saved state at {}",
-            expected_path.display(),
-        );
-    }
-
-    #[test]
     fn app_quit_writes_workspace_state() {
         let mut cx = TestAppContext::single();
         install_executor_global(&mut cx);
         let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
         let fs_global: Arc<dyn stoat::host::FsHost> = fs.clone();
-        cx.update(|cx| cx.set_global(FsHostGlobal(fs_global.clone())));
+        cx.update(|cx| {
+            cx.set_global(FsHostGlobal(fs_global.clone()));
+            cx.set_global(crate::app_host::AppHost::default());
+        });
 
         let (app, _vcx) = cx
             .add_window_view(|window, cx| StoatApp::new(Vec::new(), RestoreMode::None, window, cx));
+
+        // Quit saves through the process host, as stoat_gui::run wires it.
+        cx.update(|cx| {
+            cx.on_app_quit(|cx| {
+                cx.global::<crate::app_host::AppHost>().save_all(cx);
+                async {}
+            })
+            .detach();
+        });
 
         // The initial scratch workspace is fresh and saves nothing, so
         // split a pane to make the quit save produce a state file.

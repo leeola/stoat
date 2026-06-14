@@ -15,6 +15,7 @@
 
 mod about_modal;
 mod actions;
+mod app_host;
 mod breadcrumbs;
 mod buffer;
 mod buffer_picker;
@@ -137,8 +138,8 @@ pub enum RestoreMode {
 }
 pub use gpui::Keystroke;
 use gpui::{
-    px, size, App, AppContext, Application, Bounds, SharedString, TitlebarOptions, WindowBounds,
-    WindowOptions,
+    px, size, App, AppContext, Application, BorrowAppContext, Bounds, SharedString,
+    TitlebarOptions, WindowBounds, WindowOptions,
 };
 pub use input_parse::{parse_input_sequence, InputParseError};
 pub use input_state_machine::{InputStateMachine, Operator};
@@ -171,6 +172,7 @@ pub fn run(
     Application::new().run(move |cx: &mut App| {
         tracing::info!("stoat gui starting");
         install_production_globals(cx, globals);
+        cx.set_global(app_host::AppHost::default());
         let window_bounds = restored_window_bounds(restore, cx).unwrap_or_else(|| {
             WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(800.0)), cx))
         });
@@ -200,9 +202,16 @@ pub fn run(
             .detach();
         }
         cx.on_window_closed(|cx| {
-            if cx.windows().is_empty() {
+            let open = cx.windows();
+            cx.update_global::<app_host::AppHost, _>(|host, cx| host.prune_closed(&open, cx));
+            if open.is_empty() {
                 cx.quit();
             }
+        })
+        .detach();
+        cx.on_app_quit(|cx| {
+            cx.global::<app_host::AppHost>().save_all(cx);
+            async {}
         })
         .detach();
         cx.activate(true);
