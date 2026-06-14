@@ -35,6 +35,7 @@ use stoat::{
     buffer::BufferId,
     display_map::{Block, BlockRowKind, DisplaySnapshot},
     jumplist::JumpList,
+    link,
     multi_buffer::MultiBufferSnapshot,
     review_session::ChunkStatus,
     selection::SelectionsCollection,
@@ -209,6 +210,10 @@ pub struct Editor {
     workspace: Option<WeakEntity<crate::workspace::Workspace>>,
     text_region_bounds: Option<Bounds<Pixels>>,
     hover_position: Option<(u32, u32)>,
+    /// Buffer byte range of the link under the pointer while Ctrl/Cmd
+    /// is held, or `None`. Recomputed on each mouse-move and rendered
+    /// with an underline overlay.
+    hovered_link: Option<Range<usize>>,
     hover_debounce_task: Option<Task<()>>,
     /// Monotonic id for the most recent hover-debounce spawn. The
     /// spawn captures the id before the 50ms timer; the timer body
@@ -590,6 +595,7 @@ impl Editor {
             workspace: None,
             text_region_bounds: None,
             hover_position: None,
+            hovered_link: None,
             hover_debounce_task: None,
             hover_debounce_seq: 0,
             hover_popup: None,
@@ -3252,6 +3258,57 @@ impl Editor {
         cx.notify();
     }
 
+    pub fn hovered_link(&self) -> Option<Range<usize>> {
+        self.hovered_link.clone()
+    }
+
+    /// Store the buffer byte range of the link under the pointer (or
+    /// `None`). Emits [`EditorEvent::Changed`] only when the value
+    /// changes, so the underline repaints on transitions rather than
+    /// every mouse-move.
+    pub fn set_hovered_link(&mut self, range: Option<Range<usize>>, cx: &mut Context<'_, Self>) {
+        if self.hovered_link == range {
+            return;
+        }
+        self.hovered_link = range;
+        cx.emit(EditorEvent::Changed);
+        cx.notify();
+    }
+
+    /// Recompute the hovered link for a pointer at `position`. With
+    /// Ctrl/Cmd held, the link covering the pointer (if any) is stored;
+    /// otherwise the hover clears. Mirrors the terminal's
+    /// modifier-gated hover underline.
+    fn update_hovered_link(
+        &mut self,
+        position: Point<Pixels>,
+        modifiers: gpui::Modifiers,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let range = if modifiers.control || modifiers.platform {
+            self.link_at_position(position, cx)
+        } else {
+            None
+        };
+        self.set_hovered_link(range, cx);
+    }
+
+    /// Resolve pixel `position` to a buffer offset and return the byte
+    /// range of a link covering it, if any.
+    fn link_at_position(
+        &self,
+        position: Point<Pixels>,
+        cx: &mut Context<'_, Self>,
+    ) -> Option<Range<usize>> {
+        let (row, col) = self.position_to_grid(position)?;
+        let display_snapshot = self.display_map.update(cx, |dm, _| dm.snapshot());
+        let snapshot = self.multi_buffer.read(cx).snapshot();
+        let clipped = display_snapshot.clip_point(DisplayPoint::new(row, col), Bias::Left);
+        let buffer_point = display_snapshot.display_to_buffer(clipped, Bias::Left)?;
+        let offset = snapshot.rope().point_to_offset(buffer_point);
+        link::detect_link(snapshot.rope(), offset).map(|(range, _)| range)
+    }
+
     /// Construct the [`crate::lsp::HoverPopup`] entity that observes
     /// this editor's `hover_position` transitions and renders the
     /// floating LSP hover panel. Workspace wiring calls this once
@@ -4248,6 +4305,10 @@ impl Editor {
             );
         }
 
+        if !is_minimap && let Some(link_range) = self.hovered_link.clone() {
+            render::apply_hovered_link_overlay(&mut rows, &byte_maps, link_range);
+        }
+
         if !is_minimap && let Some(labels) = self.pending_goto_word_labels.as_ref() {
             let input = self.pending_goto_word_input.clone();
             let label_color = cx.theme().goto_word_label;
@@ -4778,6 +4839,7 @@ impl Render for Editor {
                 }),
             )
             .on_mouse_move(cx.listener(|this, event: &MouseMoveEvent, window, cx| {
+                this.update_hovered_link(event.position, event.modifiers, cx);
                 if event.dragging() {
                     this.dispatch_drag_select_to(event.position, window, cx);
                 } else {
@@ -6802,6 +6864,49 @@ mod tests {
         cx.run_until_parked();
 
         assert_eq!(drain(&events), Vec::<EditorEvent>::new());
+    }
+
+    #[test]
+    fn set_hovered_link_stores_and_emits_changed() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "see src/x.rs");
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_hovered_link(Some(4..12), cx));
+        cx.run_until_parked();
+
+        assert_eq!(
+            editor.read_with(&cx, |ed, _| ed.hovered_link()),
+            Some(4..12)
+        );
+        assert_eq!(drain(&events), vec![EditorEvent::Changed]);
+    }
+
+    #[test]
+    fn set_hovered_link_idempotent_no_event() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "see src/x.rs");
+        editor.update(&mut cx, |ed, cx| ed.set_hovered_link(Some(4..12), cx));
+        cx.run_until_parked();
+        let (_recorder, events) = Recorder::install(&mut cx, &editor);
+
+        editor.update(&mut cx, |ed, cx| ed.set_hovered_link(Some(4..12), cx));
+        cx.run_until_parked();
+
+        assert_eq!(drain(&events), Vec::<EditorEvent>::new());
+    }
+
+    #[test]
+    fn update_hovered_link_clears_without_modifier() {
+        let mut cx = TestAppContext::single();
+        let (_buffer, editor) = new_editor(&mut cx, "see src/x.rs");
+        editor.update(&mut cx, |ed, cx| ed.set_hovered_link(Some(4..12), cx));
+
+        editor.update(&mut cx, |ed, cx| {
+            ed.update_hovered_link(Point::default(), gpui::Modifiers::default(), cx)
+        });
+
+        assert_eq!(editor.read_with(&cx, |ed, _| ed.hovered_link()), None);
     }
 
     #[test]

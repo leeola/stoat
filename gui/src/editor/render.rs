@@ -549,6 +549,27 @@ pub(crate) fn apply_search_overlay(
     }
 }
 
+/// Overlay the hovered-link underline on `link_range` (buffer byte
+/// offsets) while Ctrl/Cmd is held, matching the terminal's
+/// hovered-link underline. Ranges spanning multiple rows or crossing
+/// the visible window are split per-row and clamped by
+/// [`push_syntax_runs`]. No-op for an empty range.
+pub(crate) fn apply_hovered_link_overlay(
+    rows: &mut [RenderedRow],
+    byte_maps: &[RowByteMap],
+    link_range: Range<usize>,
+) {
+    let style = gpui::HighlightStyle {
+        underline: Some(UnderlineStyle {
+            thickness: px(1.0),
+            color: None,
+            wavy: false,
+        }),
+        ..Default::default()
+    };
+    push_syntax_runs(rows, byte_maps, link_range, style);
+}
+
 /// Overlay tree-sitter syntax-highlight runs on every visible row
 /// in `rows`. Walks the multi-layer [`stoat_language::SyntaxSnapshot`]
 /// for captures whose byte range intersects the visible buffer
@@ -5052,6 +5073,37 @@ mod tests {
             .filter(|(_, s)| s.background_color.is_some())
             .map(|(r, s)| (r.clone(), s.background_color))
             .collect()
+    }
+
+    fn underline_runs(runs: &[(Range<usize>, gpui::HighlightStyle)]) -> Vec<Range<usize>> {
+        runs.iter()
+            .filter(|(_, s)| s.underline.is_some())
+            .map(|(r, _)| r.clone())
+            .collect()
+    }
+
+    #[test]
+    fn hovered_link_overlay_underlines_range() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "see src/x.rs ok");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let maps = build_row_byte_maps(&rows, &snapshot, 0..1);
+
+        apply_hovered_link_overlay(&mut rows, &maps, 4..12);
+
+        assert_eq!(underline_runs(&rows[0].runs), vec![4..12]);
+    }
+
+    #[test]
+    fn hovered_link_overlay_empty_range_is_noop() {
+        let mut cx = TestAppContext::single();
+        let snapshot = test_snapshot(&mut cx, "see src/x.rs ok");
+        let mut rows = build_rendered_rows(&snapshot, 0..1);
+        let maps = build_row_byte_maps(&rows, &snapshot, 0..1);
+
+        apply_hovered_link_overlay(&mut rows, &maps, 0..0);
+
+        assert!(underline_runs(&rows[0].runs).is_empty());
     }
 
     fn search_with_maps(
