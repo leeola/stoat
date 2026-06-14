@@ -218,6 +218,51 @@ async fn send_list_sessions(socket: &Path) -> Result<Vec<SessionInfo>, Whatever>
     Ok(reply.sessions)
 }
 
+/// One buffer as reported by the running app: its id, path (`None` for
+/// scratch), and dirty flag.
+#[derive(Deserialize)]
+pub struct BufferRowInfo {
+    pub id: u64,
+    pub path: Option<String>,
+    pub dirty: bool,
+}
+
+#[derive(Deserialize)]
+struct ListBuffersReply {
+    buffers: Vec<BufferRowInfo>,
+}
+
+/// List the registered buffers of session `session` in the running app.
+///
+/// Errors when no app is running, the session is unknown, or the reply is
+/// malformed. Read-only, with no launch fallback.
+pub fn list_buffers_from_app(session: u64) -> Result<Vec<BufferRowInfo>, Whatever> {
+    let socket = stoat_log::app_socket_path().whatever_context("resolve app socket path")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .whatever_context("build client runtime")?;
+    runtime.block_on(send_list_buffers(&socket, session))
+}
+
+async fn send_list_buffers(socket: &Path, session: u64) -> Result<Vec<BufferRowInfo>, Whatever> {
+    let stream = match UnixStream::connect(socket).await {
+        Ok(stream) => stream,
+        Err(_) => whatever!("session buffers: no Stoat app is running"),
+    };
+    let scheduler = Arc::new(TokioScheduler::new(tokio::runtime::Handle::current()));
+    let (peer, _incoming) = JsonRpcPeer::connect_unix(stream, &scheduler.executor());
+
+    let params = serde_json::json!({ "session": session });
+    let result = peer
+        .request("list_buffers", Some(params))
+        .await
+        .whatever_context("list_buffers request failed")?;
+    let reply: ListBuffersReply =
+        serde_json::from_value(result).whatever_context("decode list_buffers reply")?;
+    Ok(reply.buffers)
+}
+
 /// Resolve `path` against `cwd`, mirroring the editor's path handling: an
 /// absolute path is used as-is, a relative one is joined onto `cwd`. Symlinks
 /// are not resolved.

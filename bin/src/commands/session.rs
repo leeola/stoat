@@ -1,4 +1,4 @@
-use crate::commands::client;
+use crate::commands::client::{self, BufferRowInfo};
 use clap::Subcommand;
 use snafu::Whatever;
 
@@ -6,11 +6,17 @@ use snafu::Whatever;
 pub enum SessionCommand {
     /// List live sessions: id, root directory, and window and buffer counts.
     List,
+    /// List a session's buffers: id, path or scratch label, and dirty flag.
+    Buffers {
+        /// The session's WorkspaceUid, as shown by `session list`.
+        id: u64,
+    },
 }
 
 pub fn run(sub: SessionCommand) -> Result<(), Whatever> {
     match sub {
         SessionCommand::List => list(),
+        SessionCommand::Buffers { id } => buffers(id),
     }
 }
 
@@ -45,4 +51,41 @@ fn list() -> Result<(), Whatever> {
         );
     }
     Ok(())
+}
+
+fn buffers(id: u64) -> Result<(), Whatever> {
+    let buffers = client::list_buffers_from_app(id)?;
+    if buffers.is_empty() {
+        println!("No buffers in session {id}.");
+        return Ok(());
+    }
+
+    let id_width = buffers
+        .iter()
+        .map(|b| b.id.to_string().len())
+        .max()
+        .unwrap_or(0)
+        .max(2);
+    let path_width = buffers
+        .iter()
+        .map(|b| label(b).len())
+        .max()
+        .unwrap_or(0)
+        .max(4);
+
+    println!("{:<id_width$}  {:<path_width$}  DIRTY", "ID", "PATH");
+    for b in &buffers {
+        println!(
+            "{:<id_width$}  {:<path_width$}  {}",
+            b.id,
+            label(b),
+            if b.dirty { "yes" } else { "no" },
+        );
+    }
+    Ok(())
+}
+
+/// The display label for a buffer: its path, or `(scratch)` when it has none.
+fn label(buffer: &BufferRowInfo) -> &str {
+    buffer.path.as_deref().unwrap_or("(scratch)")
 }
