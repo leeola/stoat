@@ -38,3 +38,27 @@ pub fn state_dir() -> io::Result<PathBuf> {
 pub fn workspace_state_dir() -> io::Result<PathBuf> {
     Ok(state_dir()?.join("workspaces"))
 }
+
+/// Returns the path of the singleton app IPC socket that the running Stoat
+/// process binds and thin clients connect to.
+///
+/// Prefers `<XDG_RUNTIME_DIR>/stoat/app.sock` -- the runtime dir is the XDG
+/// home for sockets and is cleared on logout, so a stale socket cannot
+/// outlive the session. Falls back to `<XDG_STATE_HOME>/stoat/app.sock` when
+/// `XDG_RUNTIME_DIR` is unset (common on macOS). The caller is responsible
+/// for creating the parent directory before binding.
+pub fn app_socket_path() -> io::Result<PathBuf> {
+    let base = match runtime_dir() {
+        Some(dir) => dir,
+        None => state_dir()?,
+    };
+    Ok(base.join("app.sock"))
+}
+
+/// Returns `<XDG_RUNTIME_DIR>/stoat/`, or `None` when `XDG_RUNTIME_DIR` is
+/// unset. Unlike the data/state dirs this is intentionally fallible: the
+/// runtime dir does not exist on every platform, and callers fall back to
+/// the state dir.
+fn runtime_dir() -> Option<PathBuf> {
+    Xdg::new().ok()?.runtime_dir().map(|dir| dir.join("stoat"))
+}

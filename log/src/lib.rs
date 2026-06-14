@@ -22,7 +22,7 @@
 pub mod paths;
 pub mod text_proto;
 
-pub use paths::{data_dir, state_dir, workspace_state_dir};
+pub use paths::{app_socket_path, data_dir, state_dir, workspace_state_dir};
 use snafu::{ResultExt, Snafu};
 use std::{fs, io, path::PathBuf};
 pub use text_proto::{log_dir, TextProtoLog};

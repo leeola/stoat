@@ -17,6 +17,8 @@ use serde_json::Value;
 use snafu::{Location, OptionExt, ResultExt, Snafu};
 use std::{
     collections::HashMap,
+    io,
+    path::Path,
     process::Stdio,
     sync::{
         Arc, Mutex,
@@ -26,8 +28,9 @@ use std::{
 use stoat_log::TextProtoLog;
 use stoat_scheduler::{Executor, Task};
 use tokio::{
-    io::{AsyncBufReadExt, AsyncWriteExt, BufReader},
-    process::{Child, ChildStderr, ChildStdin, ChildStdout, Command},
+    io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader},
+    net::{UnixListener, UnixStream},
+    process::{Child, ChildStderr, Command},
     sync::{
         mpsc::{self, UnboundedReceiver, UnboundedSender},
         oneshot,
@@ -80,7 +83,7 @@ pub enum TransportError {
 pub enum SpawnError {
     #[snafu(display("failed to spawn JSON-RPC child process"))]
     Spawn {
-        source: std::io::Error,
+        source: io::Error,
         #[snafu(implicit)]
         location: Location,
     },
@@ -232,15 +235,35 @@ impl JsonRpcPeer {
         let stderr = child.stderr.take().context(StdioSnafu)?;
 
         let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
-        let read_task = executor.spawn(read_stdout(stdout, incoming_tx, rx_log));
+        let read_task = executor.spawn(read_frames(stdout, incoming_tx, rx_log));
         let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
-        let write_task = executor.spawn(write_stdin(stdin, outgoing_rx, tx_log));
+        let write_task = executor.spawn(write_frames(stdin, outgoing_rx, tx_log));
         let stderr_task = executor.spawn(drain_stderr(stderr));
 
         let (mut peer, incoming) = Self::over_lines(incoming_rx, outgoing_tx, executor);
         peer._tasks.extend([read_task, write_task, stderr_task]);
         peer._child = Some(child);
         Ok((peer, incoming))
+    }
+
+    /// Run the JSON-RPC protocol over a connected Unix-domain stream, framing
+    /// each direction as newline-delimited JSON. Inbound lines feed the
+    /// dispatch loop; outbound frames are written with a trailing newline.
+    /// Both stream pumps and the dispatch loop run on `executor`; the stream
+    /// closes when the returned peer drops.
+    ///
+    /// A `UnixStream` is symmetric, so this serves both the connecting client
+    /// and each connection a [`serve_unix`] listener accepts.
+    pub fn connect_unix(stream: UnixStream, executor: &Executor) -> (JsonRpcPeer, Incoming) {
+        let (read_half, write_half) = stream.into_split();
+        let (incoming_tx, incoming_rx) = mpsc::unbounded_channel();
+        let read_task = executor.spawn(read_frames(read_half, incoming_tx, None));
+        let (outgoing_tx, outgoing_rx) = mpsc::unbounded_channel();
+        let write_task = executor.spawn(write_frames(write_half, outgoing_rx, None));
+
+        let (mut peer, incoming) = Self::over_lines(incoming_rx, outgoing_tx, executor);
+        peer._tasks.extend([read_task, write_task]);
+        (peer, incoming)
     }
 
     /// Build a peer over a line-framed transport: `incoming` yields one
@@ -334,6 +357,111 @@ impl Responder {
         })
         .context(EncodeSnafu)?;
         self.outgoing.send(line).map_err(|_| ClosedSnafu.build())
+    }
+}
+
+/// JSON-RPC 2.0 reserved code for an unrecognized method.
+const METHOD_NOT_FOUND: i64 = -32601;
+
+/// Bind a listener at `path`, clearing a stale socket left by a crashed
+/// process so a fresh process can take over the well-known path.
+///
+/// Creates the parent directory if missing. When the path is already bound,
+/// probes it with a blocking connect: a successful connect means a live server
+/// still holds it (returns [`io::ErrorKind::AddrInUse`]), while a refused
+/// connect means the socket is stale and is removed before rebinding. Returns
+/// a std listener so binding needs no async runtime; [`serve_unix`] registers
+/// it with the reactor inside its accept task.
+pub fn bind_unix(path: &Path) -> io::Result<std::os::unix::net::UnixListener> {
+    use std::os::unix::net::{UnixListener as StdUnixListener, UnixStream as StdUnixStream};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    match StdUnixListener::bind(path) {
+        Ok(listener) => Ok(listener),
+        Err(err) if err.kind() == io::ErrorKind::AddrInUse => {
+            if StdUnixStream::connect(path).is_ok() {
+                return Err(io::Error::new(
+                    io::ErrorKind::AddrInUse,
+                    "stoat app socket is already bound by a live process",
+                ));
+            }
+            std::fs::remove_file(path)?;
+            StdUnixListener::bind(path)
+        },
+        Err(err) => Err(err),
+    }
+}
+
+/// Bind the singleton app IPC socket at `path` and accept client connections
+/// on `executor`, returning the task that owns the accept loop.
+///
+/// Every inbound request is answered with a method-not-found error and
+/// notifications are dropped until session verbs are registered -- the
+/// correct reply for a server exposing no methods yet. Binding (and its
+/// stale-socket replacement, see [`bind_unix`]) happens synchronously so a
+/// live-socket conflict surfaces to the caller; the returned task must be held
+/// for the process lifetime, as dropping it stops accepting and releases the
+/// socket.
+pub fn serve_unix(path: &Path, executor: &Executor) -> io::Result<Task<()>> {
+    let listener = bind_unix(path)?;
+    listener.set_nonblocking(true)?;
+
+    let executor = executor.clone();
+    let task = executor.spawn({
+        let executor = executor.clone();
+        async move {
+            let listener = match UnixListener::from_std(listener) {
+                Ok(listener) => listener,
+                Err(err) => {
+                    tracing::error!(%err, "registering app socket with the reactor failed");
+                    return;
+                },
+            };
+            loop {
+                match listener.accept().await {
+                    Ok((stream, _addr)) => {
+                        let (peer, incoming) = JsonRpcPeer::connect_unix(stream, &executor);
+                        executor.spawn(serve_connection(peer, incoming)).detach();
+                    },
+                    Err(err) => {
+                        tracing::warn!(%err, "stoat app socket accept loop stopped");
+                        break;
+                    },
+                }
+            }
+        }
+    });
+    Ok(task)
+}
+
+/// Hold one accepted connection's peer alive and answer every request with a
+/// method-not-found error, draining notifications, until the client
+/// disconnects. Session verbs replace this default handler in a later change.
+async fn serve_connection(_peer: JsonRpcPeer, incoming: Incoming) {
+    let Incoming {
+        mut requests,
+        mut notifications,
+    } = incoming;
+    loop {
+        tokio::select! {
+            Some(request) = requests.recv() => {
+                let message = format!("method not found: {}", request.method);
+                let _ = request.respond(Err(RpcError {
+                    code: METHOD_NOT_FOUND,
+                    message,
+                    data: None,
+                }));
+            },
+            Some(notification) = notifications.recv() => {
+                tracing::debug!(
+                    method = %notification.method,
+                    "app socket notification ignored (no verbs registered)",
+                );
+            },
+            else => break,
+        }
     }
 }
 
@@ -432,12 +560,12 @@ fn parse_frame(line: &str) -> Parsed {
     }
 }
 
-async fn read_stdout(
-    stdout: ChildStdout,
+async fn read_frames<R: AsyncRead + Unpin>(
+    reader: R,
     incoming: UnboundedSender<String>,
     rx_log: Option<Arc<TextProtoLog>>,
 ) {
-    let mut reader = BufReader::new(stdout);
+    let mut reader = BufReader::new(reader);
     let mut line = String::new();
     loop {
         line.clear();
@@ -463,8 +591,8 @@ async fn read_stdout(
     }
 }
 
-async fn write_stdin(
-    mut stdin: ChildStdin,
+async fn write_frames<W: AsyncWrite + Unpin>(
+    mut writer: W,
     mut outgoing: UnboundedReceiver<String>,
     tx_log: Option<Arc<TextProtoLog>>,
 ) {
@@ -472,9 +600,9 @@ async fn write_stdin(
         if let Some(log) = &tx_log {
             log.record(&line);
         }
-        if stdin.write_all(line.as_bytes()).await.is_err()
-            || stdin.write_all(b"\n").await.is_err()
-            || stdin.flush().await.is_err()
+        if writer.write_all(line.as_bytes()).await.is_err()
+            || writer.write_all(b"\n").await.is_err()
+            || writer.flush().await.is_err()
         {
             break;
         }
@@ -645,7 +773,7 @@ mod tests {
 
     #[tokio::test]
     async fn spawn_round_trips_a_frame_through_child_stdio() {
-        if !std::path::Path::new("/bin/sh").exists() {
+        if !Path::new("/bin/sh").exists() {
             eprintln!("skipping: no /bin/sh");
             return;
         }
@@ -670,5 +798,50 @@ mod tests {
         .expect("frame echoed back through child stdio");
         assert_eq!(notif.method, "ping");
         assert_eq!(notif.params, Some(serde_json::json!({ "n": 1 })));
+    }
+
+    #[tokio::test]
+    async fn serve_unix_round_trips_and_answers_method_not_found() {
+        let executor = executor();
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.sock");
+
+        let _server = serve_unix(&path, &executor).expect("bind app socket");
+        let stream = UnixStream::connect(&path).await.expect("client connects");
+        let (client, _client_in) = JsonRpcPeer::connect_unix(stream, &executor);
+
+        let err = client
+            .request("open_file", None)
+            .await
+            .expect_err("server exposes no verbs yet");
+        match err {
+            TransportError::Rpc { error, .. } => assert_eq!(error.code, METHOD_NOT_FOUND),
+            other => panic!("expected Rpc method-not-found, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn bind_unix_replaces_a_stale_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.sock");
+
+        let listener = bind_unix(&path).expect("first bind");
+        drop(listener);
+        assert!(
+            path.exists(),
+            "socket file lingers after the listener drops"
+        );
+
+        bind_unix(&path).expect("stale socket is replaced");
+    }
+
+    #[test]
+    fn bind_unix_rejects_a_live_socket() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("app.sock");
+
+        let _live = bind_unix(&path).expect("first bind");
+        let err = bind_unix(&path).expect_err("a live socket is not replaced");
+        assert_eq!(err.kind(), io::ErrorKind::AddrInUse);
     }
 }
