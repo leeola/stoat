@@ -1,5 +1,6 @@
 //! Thin client: hand files to a running Stoat over the IPC socket.
 
+use serde::Deserialize;
 use snafu::{whatever, OptionExt, ResultExt, Whatever};
 use std::{
     path::{Path, PathBuf},
@@ -170,6 +171,51 @@ async fn send_read_buffer(
         .and_then(serde_json::Value::as_str)
         .whatever_context("read_buffer reply missing text")?;
     Ok(text.to_string())
+}
+
+/// One live session as reported by the running app: its uid, root directory,
+/// and window and registered-buffer counts.
+#[derive(Deserialize)]
+pub struct SessionInfo {
+    pub id: u64,
+    pub root: String,
+    pub windows: usize,
+    pub buffers: usize,
+}
+
+#[derive(Deserialize)]
+struct ListSessionsReply {
+    sessions: Vec<SessionInfo>,
+}
+
+/// List the running app's live sessions over the IPC socket.
+///
+/// Errors when no app is running or the reply is malformed. Read-only, with no
+/// launch fallback -- there is nothing to list without a live app.
+pub fn list_sessions_from_app() -> Result<Vec<SessionInfo>, Whatever> {
+    let socket = stoat_log::app_socket_path().whatever_context("resolve app socket path")?;
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .whatever_context("build client runtime")?;
+    runtime.block_on(send_list_sessions(&socket))
+}
+
+async fn send_list_sessions(socket: &Path) -> Result<Vec<SessionInfo>, Whatever> {
+    let stream = match UnixStream::connect(socket).await {
+        Ok(stream) => stream,
+        Err(_) => whatever!("session list: no Stoat app is running"),
+    };
+    let scheduler = Arc::new(TokioScheduler::new(tokio::runtime::Handle::current()));
+    let (peer, _incoming) = JsonRpcPeer::connect_unix(stream, &scheduler.executor());
+
+    let result = peer
+        .request("list_sessions", None)
+        .await
+        .whatever_context("list_sessions request failed")?;
+    let reply: ListSessionsReply =
+        serde_json::from_value(result).whatever_context("decode list_sessions reply")?;
+    Ok(reply.sessions)
 }
 
 /// Resolve `path` against `cwd`, mirroring the editor's path handling: an

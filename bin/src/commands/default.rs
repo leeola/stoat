@@ -94,6 +94,11 @@ enum Command {
     /// git supplies; positional args are not accepted in the
     /// default mode.
     Diff(crate::commands::diff::DiffArgs),
+    /// Inspect and manage live sessions in the running app.
+    Session {
+        #[command(subcommand)]
+        sub: crate::commands::session::SessionCommand,
+    },
 }
 
 pub fn run() -> Result<(), Whatever> {
@@ -126,6 +131,7 @@ pub fn run() -> Result<(), Whatever> {
     match command {
         Some(Command::Dump { sub }) => crate::commands::dump::run(sub),
         Some(Command::Diff(args)) => crate::commands::diff::run(args),
+        Some(Command::Session { sub }) => crate::commands::session::run(sub),
         None => {
             let stdin = read_piped_stdin();
 
@@ -237,5 +243,16 @@ mod tests {
     fn drive_flags_conflict_with_selection() {
         assert!(Args::try_parse_from(["stoat", "--timeout", "2", "--new"]).is_err());
         assert!(Args::try_parse_from(["stoat", "--inputs", "i<Esc>", "--session", "5"]).is_err());
+    }
+
+    #[test]
+    fn session_list_subcommand_parses() {
+        assert!(Args::try_parse_from(["stoat", "session", "list"]).is_ok());
+    }
+
+    #[test]
+    fn session_requires_a_subcommand() {
+        assert!(Args::try_parse_from(["stoat", "session"]).is_err());
+        assert!(Args::try_parse_from(["stoat", "session", "bogus"]).is_err());
     }
 }
