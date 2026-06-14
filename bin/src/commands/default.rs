@@ -94,7 +94,13 @@ pub fn run() -> Result<(), Whatever> {
         Some(Command::Gui { inputs, timeout }) => {
             crate::commands::gui::run(files, restore, inputs, timeout)
         },
-        None => crate::commands::gui::run(files, restore, None, None),
+        None => {
+            if !continue_ && crate::commands::client::open_in_running_app(&files)? {
+                Ok(())
+            } else {
+                crate::commands::gui::run(files, restore, None, None)
+            }
+        },
     }
 }
 

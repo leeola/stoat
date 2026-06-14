@@ -34,9 +34,10 @@ stoat_scheduler = { path = "../scheduler" }
 blake3 = { workspace = true }
 clap.workspace = true
 etcetera.workspace = true
+serde_json.workspace = true
 snafu.workspace = true
 tracing.workspace = true
-tokio = { workspace = true, features = ["time"] }
+tokio = { workspace = true, features = ["time", "net"] }
 tempfile.workspace = true
 time.workspace = true
 

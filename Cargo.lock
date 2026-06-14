@@ -6430,6 +6430,7 @@ dependencies = [
  "etcetera",
  "git2",
  "insta",
+ "serde_json",
  "snafu",
  "stoat",
  "stoat_agent_claude_code",
