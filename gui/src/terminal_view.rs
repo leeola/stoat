@@ -612,7 +612,7 @@ impl Render for Terminal {
                 });
                 measured
             },
-            move |bounds, cell_size, window, cx| {
+            move |bounds, cell_size, window, _cx| {
                 if let Some(cell) = cell_size {
                     terminal_paint::paint_screen(
                         &screen,
@@ -621,7 +621,6 @@ impl Render for Terminal {
                         &paint_font,
                         px(font_size),
                         window,
-                        cx,
                     );
                 }
             },
