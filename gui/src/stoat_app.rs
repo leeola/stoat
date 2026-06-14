@@ -34,6 +34,19 @@ impl StoatApp {
         cx: &mut Context<'_, Self>,
     ) -> Self {
         let cwd = std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."));
+        Self::new_at(cwd, files, restore, window, cx)
+    }
+
+    /// Like [`Self::new`] but rooted at an explicit `cwd` rather than the
+    /// process working directory. The IPC layer opens a session for a client
+    /// whose working directory differs from the server's through this.
+    pub(crate) fn new_at(
+        cwd: PathBuf,
+        files: Vec<PathBuf>,
+        restore: RestoreMode,
+        window: &mut Window,
+        cx: &mut Context<'_, Self>,
+    ) -> Self {
         let restore_anchor = match restore {
             RestoreMode::None => None,
             RestoreMode::Continue => resume_anchor(&cwd, cx).unwrap_or(None),
