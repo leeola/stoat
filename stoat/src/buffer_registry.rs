@@ -27,6 +27,16 @@ pub struct DirtyBuffer {
     pub path: Option<PathBuf>,
 }
 
+/// One entry surfaced by [`BufferRegistry::buffer_summaries`]: a buffer's id,
+/// path (`None` for scratch), and dirty flag. Unlike [`DirtyBuffer`] this
+/// covers every buffer, so it carries the flag explicitly.
+#[derive(Clone, Debug)]
+pub struct BufferSummary {
+    pub id: BufferId,
+    pub path: Option<PathBuf>,
+    pub dirty: bool,
+}
+
 #[allow(dead_code)]
 struct BufferEntry {
     buffer: SharedBuffer,
@@ -178,6 +188,28 @@ impl BufferRegistry {
             .map(|(id, entry)| DirtyBuffer {
                 id: *id,
                 path: entry.path.clone(),
+            })
+            .collect();
+        out.sort_by(|a, b| match (&a.path, &b.path) {
+            (Some(ap), Some(bp)) => ap.cmp(bp),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.id.cmp(&b.id),
+        });
+        out
+    }
+
+    /// Summarize every buffer for inspection: id, path (`None` for scratch),
+    /// and dirty flag. Ordered path-bound first by path, scratch after by id,
+    /// for a stable listing.
+    pub fn buffer_summaries(&self) -> Vec<BufferSummary> {
+        let mut out: Vec<BufferSummary> = self
+            .buffers
+            .iter()
+            .map(|(id, entry)| BufferSummary {
+                id: *id,
+                path: entry.path.clone(),
+                dirty: entry.buffer.read().expect("buffer poisoned").dirty,
             })
             .collect();
         out.sort_by(|a, b| match (&a.path, &b.path) {

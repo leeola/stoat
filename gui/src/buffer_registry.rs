@@ -2,7 +2,7 @@ use gpui::{Context, EventEmitter};
 use std::path::Path;
 use stoat::{
     buffer::{BufferId, SharedBuffer},
-    buffer_registry::{BufferRegistrySnapshot, DirtyBuffer},
+    buffer_registry::{BufferRegistrySnapshot, BufferSummary, DirtyBuffer},
     BufferRegistry as InnerRegistry,
 };
 
@@ -107,6 +107,12 @@ impl BufferRegistry {
     /// first sorted by path, scratch buffers after sorted by id.
     pub fn dirty_buffers(&self) -> Vec<DirtyBuffer> {
         self.inner.dirty_buffers()
+    }
+
+    /// Every buffer with its id, path (`None` for scratch), and dirty flag,
+    /// in the stable order [`stoat::BufferRegistry::buffer_summaries`] defines.
+    pub fn buffer_summaries(&self) -> Vec<BufferSummary> {
+        self.inner.buffer_summaries()
     }
 
     /// Snapshot every buffer's history for workspace persistence.

@@ -92,6 +92,28 @@ struct SessionEntry {
     buffers: usize,
 }
 
+/// `list_buffers` request: list the registered buffers of the live session
+/// addressed by `session` uid. Errors when that session is not live.
+#[derive(Deserialize)]
+struct ListBuffersParams {
+    session: u64,
+}
+
+/// `list_buffers` reply: every registered buffer in the session.
+#[derive(Serialize)]
+struct ListBuffersResult {
+    buffers: Vec<BufferRow>,
+}
+
+/// One buffer in a [`ListBuffersResult`]: its id, path (`None` for scratch),
+/// and dirty flag.
+#[derive(Serialize)]
+struct BufferRow {
+    id: BufferId,
+    path: Option<String>,
+    dirty: bool,
+}
+
 /// Drain `requests` on the gpui foreground, answering each by running
 /// [`dispatch`] on the main thread. Returns the foreground task; hold it for
 /// the process lifetime so dispatch keeps running.
@@ -112,6 +134,7 @@ fn dispatch(app: &mut App, method: &str, params: Option<Value>) -> Result<Value,
         "pipe_buffer" => pipe_buffer(app, params),
         "read_buffer" => read_buffer(app, params),
         "list_sessions" => list_sessions(app),
+        "list_buffers" => list_buffers(app, params),
         other => Err(error(
             METHOD_NOT_FOUND,
             format!("method not found: {other}"),
@@ -217,6 +240,40 @@ fn list_sessions(app: &mut App) -> Result<Value, RpcError> {
         .collect();
 
     serde_json::to_value(ListSessionsResult { sessions })
+        .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
+}
+
+/// List the buffers of the session addressed by `params.session` uid, for
+/// `stoat session buffers <id>`. Read-only; errors when that session is not
+/// live. The id is taken as given (from `list_sessions`), not resolved by cwd.
+fn list_buffers(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
+    let params: ListBuffersParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|err| error(INVALID_PARAMS, format!("list_buffers params: {err}")))?;
+
+    let uid = WorkspaceUid(params.session);
+    let workspace = app
+        .global::<AppHost>()
+        .session_workspace(uid, app)
+        .ok_or_else(|| {
+            error(
+                INVALID_PARAMS,
+                format!("session {} is not live", params.session),
+            )
+        })?;
+
+    let registry = workspace.read(app).buffer_registry().clone();
+    let buffers = registry
+        .read(app)
+        .buffer_summaries()
+        .into_iter()
+        .map(|summary| BufferRow {
+            id: summary.id,
+            path: summary.path.map(|p| p.to_string_lossy().into_owned()),
+            dirty: summary.dirty,
+        })
+        .collect();
+
+    serde_json::to_value(ListBuffersResult { buffers })
         .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
 }
 
@@ -656,5 +713,50 @@ mod tests {
         assert_eq!(other["root"], serde_json::json!("/other"));
         assert_eq!(other["windows"], serde_json::json!(1));
         assert_eq!(other["buffers"], serde_json::json!(0));
+    }
+
+    #[test]
+    fn list_buffers_lists_a_sessions_buffers() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (workspace, uid) = register_session(&mut cx, "/repo");
+
+        // Seed a scratch and a path-bound buffer (the latter marked dirty).
+        let shared = cx.update(|app| {
+            workspace.update(app, |w, cx| {
+                w.buffer_registry().update(cx, |reg, cx| {
+                    reg.new_scratch(cx);
+                    reg.open(Path::new("/repo/a.rs"), "fn main() {}", cx).1
+                })
+            })
+        });
+        shared.write().expect("buffer poisoned").dirty = true;
+
+        let params = serde_json::json!({ "session": uid.0 });
+        let result = cx
+            .update(|app| dispatch(app, "list_buffers", Some(params)))
+            .expect("list_buffers succeeds");
+        let buffers = result["buffers"].as_array().expect("buffers array");
+        assert_eq!(buffers.len(), 2);
+
+        // Path-bound first (sorted by path), scratch after.
+        assert_eq!(buffers[0]["path"], serde_json::json!("/repo/a.rs"));
+        assert_eq!(buffers[0]["dirty"], serde_json::json!(true));
+        assert!(buffers[0]["id"].is_u64(), "row carries a buffer id");
+
+        assert_eq!(buffers[1]["path"], Value::Null);
+        assert_eq!(buffers[1]["dirty"], serde_json::json!(false));
+    }
+
+    #[test]
+    fn list_buffers_errors_when_session_not_live() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+
+        let params = serde_json::json!({ "session": 404 });
+        let err = cx
+            .update(|app| dispatch(app, "list_buffers", Some(params)))
+            .expect_err("an unknown session is rejected");
+        assert_eq!(err.code, INVALID_PARAMS);
     }
 }
