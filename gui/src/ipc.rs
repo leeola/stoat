@@ -9,8 +9,8 @@
 
 use crate::{app_host::AppHost, stoat_app::StoatApp, RestoreMode, Workspace};
 use gpui::{
-    px, size, App, AppContext, Bounds, Entity, SharedString, Task, TitlebarOptions, WindowBounds,
-    WindowOptions,
+    px, size, App, AppContext, BorrowAppContext, Bounds, Entity, SharedString, Task,
+    TitlebarOptions, WindowBounds, WindowOptions,
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -114,6 +114,19 @@ struct BufferRow {
     dirty: bool,
 }
 
+/// `close_session` request: close the live session addressed by `session` uid,
+/// persisting it first. Errors when that session is not live.
+#[derive(Deserialize)]
+struct CloseSessionParams {
+    session: u64,
+}
+
+/// `close_session` reply: the uid of the closed session.
+#[derive(Serialize)]
+struct CloseSessionResult {
+    session_id: WorkspaceUid,
+}
+
 /// Drain `requests` on the gpui foreground, answering each by running
 /// [`dispatch`] on the main thread. Returns the foreground task; hold it for
 /// the process lifetime so dispatch keeps running.
@@ -135,6 +148,7 @@ fn dispatch(app: &mut App, method: &str, params: Option<Value>) -> Result<Value,
         "read_buffer" => read_buffer(app, params),
         "list_sessions" => list_sessions(app),
         "list_buffers" => list_buffers(app, params),
+        "close_session" => close_session(app, params),
         other => Err(error(
             METHOD_NOT_FOUND,
             format!("method not found: {other}"),
@@ -274,6 +288,35 @@ fn list_buffers(app: &mut App, params: Option<Value>) -> Result<Value, RpcError>
         .collect();
 
     serde_json::to_value(ListBuffersResult { buffers })
+        .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
+}
+
+/// Close the session addressed by `params.session` uid: persist it, drop it
+/// from the registry, then remove its windows. Errors when that session is not
+/// live. The id is taken as given (from `list_sessions`), not resolved by cwd.
+///
+/// [`AppHost::close_session`] returns the windows rather than closing them so
+/// removal runs outside its global lease; they are closed here, once that lease
+/// has ended.
+fn close_session(app: &mut App, params: Option<Value>) -> Result<Value, RpcError> {
+    let params: CloseSessionParams = serde_json::from_value(params.unwrap_or(Value::Null))
+        .map_err(|err| error(INVALID_PARAMS, format!("close_session params: {err}")))?;
+
+    let uid = WorkspaceUid(params.session);
+    let windows = app
+        .update_global::<AppHost, _>(|host, cx| host.close_session(uid, cx))
+        .ok_or_else(|| {
+            error(
+                INVALID_PARAMS,
+                format!("session {} is not live", params.session),
+            )
+        })?;
+
+    for window in windows {
+        let _ = window.update(app, |_view, window, _cx| window.remove_window());
+    }
+
+    serde_json::to_value(CloseSessionResult { session_id: uid })
         .map_err(|err| error(INTERNAL_ERROR, format!("encode result: {err}")))
 }
 
@@ -756,6 +799,42 @@ mod tests {
         let params = serde_json::json!({ "session": 404 });
         let err = cx
             .update(|app| dispatch(app, "list_buffers", Some(params)))
+            .expect_err("an unknown session is rejected");
+        assert_eq!(err.code, INVALID_PARAMS);
+    }
+
+    #[test]
+    fn close_session_drops_only_the_targeted_session() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+        let (_ws_a, uid_a) = register_session(&mut cx, "/repo");
+        let (_ws_b, uid_b) = register_session(&mut cx, "/other");
+
+        let params = serde_json::json!({ "session": uid_a.0 });
+        let result = cx
+            .update(|app| dispatch(app, "close_session", Some(params)))
+            .expect("close_session succeeds");
+        assert_eq!(result["session_id"], serde_json::json!(uid_a.0));
+
+        let (a_live, b_live) = cx.update(|app| {
+            let host = app.global::<AppHost>();
+            (
+                host.session_workspace(uid_a, app).is_some(),
+                host.session_workspace(uid_b, app).is_some(),
+            )
+        });
+        assert!(!a_live, "the closed session is dropped");
+        assert!(b_live, "a sibling session survives");
+    }
+
+    #[test]
+    fn close_session_errors_when_session_not_live() {
+        let mut cx = TestAppContext::single();
+        install_globals(&mut cx);
+
+        let params = serde_json::json!({ "session": 404 });
+        let err = cx
+            .update(|app| dispatch(app, "close_session", Some(params)))
             .expect_err("an unknown session is rejected");
         assert_eq!(err.code, INVALID_PARAMS);
     }

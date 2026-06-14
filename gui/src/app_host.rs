@@ -151,6 +151,30 @@ impl AppHost {
         }
     }
 
+    /// Persist the session with `uid`, drop it from the registry, and return
+    /// its windows for the caller to close. `None` when no live session has
+    /// that uid.
+    ///
+    /// Saving before removal matches the flush [`Self::prune_closed`] performs
+    /// as a session's last window closes, so an explicit close preserves state
+    /// the way an interactive one does.
+    ///
+    /// The windows are returned rather than closed here because closing one
+    /// fires the window-closed observer, which re-enters the [`AppHost`] global
+    /// lease this method runs under -- and a re-lease of a leased global
+    /// panics. The caller closes them once the lease has ended; by then the
+    /// session is already dropped, so the observer's [`Self::prune_closed`]
+    /// sweep skips it and nothing is saved twice.
+    pub fn close_session(&mut self, uid: WorkspaceUid, cx: &App) -> Option<Vec<AnyWindowHandle>> {
+        let index = self
+            .sessions
+            .iter()
+            .position(|session| session.workspace.read(cx).uid() == uid)?;
+        let session = self.sessions.remove(index);
+        session.workspace.read(cx).save_state_to_default_path(cx);
+        Some(session.windows)
+    }
+
     /// The workspace of the live session with `uid`, if any.
     ///
     /// Returns the first match; the cwd resolver collapses a root to a single
@@ -380,6 +404,43 @@ mod tests {
         assert_ne!(
             uids[1], uids[0],
             "the second registration bumped the colliding uid",
+        );
+    }
+
+    #[test]
+    fn close_session_persists_drops_and_returns_its_windows() {
+        let mut cx = TestAppContext::single();
+        let (fs, _scheduler) = install_globals(&mut cx);
+        let repo = PathBuf::from("/repo");
+
+        let (ws_a, win_a) = dirty_workspace_window(&mut cx, "a", &repo);
+        let (ws_b, win_b) = dirty_workspace_window(&mut cx, "b", &repo);
+
+        let mut host = AppHost::default();
+        cx.update(|app| {
+            host.add_session(ws_a.clone(), win_a, app);
+            host.add_session(ws_b, win_b, app);
+        });
+        let uid_a = ws_a.read_with(&cx, |w, _| w.uid());
+        let path_a = state_path_for(&repo, uid_a, &*fs).expect("state path");
+        assert!(!FsHost::exists(&*fs, &path_a));
+
+        let windows = cx
+            .update(|app| host.close_session(uid_a, app))
+            .expect("session a is live");
+        assert!(
+            windows == vec![win_a],
+            "returns the closed session's window"
+        );
+        assert_eq!(host.sessions.len(), 1, "the closed session is dropped");
+        assert!(
+            FsHost::exists(&*fs, &path_a),
+            "closing persists the session state",
+        );
+
+        assert!(
+            cx.update(|app| host.close_session(uid_a, app)).is_none(),
+            "an already-closed session yields None",
         );
     }
 }
