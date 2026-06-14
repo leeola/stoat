@@ -8,11 +8,12 @@
 //! before opening windows.
 
 use crate::workspace::Workspace;
-use gpui::{AnyWindowHandle, App, Entity, Global};
+use gpui::{AnyWindowHandle, App, Entity, Global, Task as ForegroundTask};
 use std::{path::Path, sync::Arc};
 use stoat::workspace::WorkspaceUid;
-use stoat_agent_claude_code::jsonrpc::{self, IncomingRequest, RpcError};
+use stoat_agent_claude_code::jsonrpc::{self, IncomingRequest};
 use stoat_scheduler::{Executor, Task};
+use tokio::sync::mpsc;
 
 /// A live editor session: one workspace and the windows presenting it.
 ///
@@ -36,6 +37,9 @@ pub struct AppHost {
     /// `None` until [`AppHost::serve`] binds the socket, and when binding
     /// fails (e.g. another live instance already holds it).
     _ipc: Option<Task<()>>,
+    /// The foreground task that runs IPC verbs on the main thread, held for
+    /// the process lifetime alongside [`Self::_ipc`].
+    _dispatch: Option<ForegroundTask<()>>,
 }
 
 impl Global for AppHost {}
@@ -106,13 +110,27 @@ impl AppHost {
         }
     }
 
-    /// Bind the process IPC socket and start accepting clients, holding the
-    /// accept loop for the host's lifetime.
+    /// The workspace of the live session with `uid`, if any.
     ///
-    /// Binding failures are logged and swallowed rather than aborting
-    /// startup: a live socket held by another Stoat instance, or an
-    /// unresolvable runtime directory, must not stop this window from opening.
-    pub fn serve(&mut self, executor: &Executor) {
+    /// Returns the first match; the cwd resolver collapses a root to a single
+    /// uid, so this is the session it selected.
+    pub fn session_workspace(&self, uid: WorkspaceUid, cx: &App) -> Option<Entity<Workspace>> {
+        self.sessions
+            .iter()
+            .find(|session| session.workspace.read(cx).uid() == uid)
+            .map(|session| session.workspace.clone())
+    }
+
+    /// Bind the process IPC socket and start accepting clients, holding the
+    /// accept loop and the foreground verb-dispatch task for the host's
+    /// lifetime.
+    ///
+    /// Accepted requests are forwarded to a foreground task (see
+    /// [`crate::ipc::spawn_dispatch`]) that runs each verb on the main thread.
+    /// Binding failures are logged and swallowed rather than aborting startup:
+    /// a live socket held by another Stoat instance, or an unresolvable runtime
+    /// directory, must not stop this window from opening.
+    pub fn serve(&mut self, executor: &Executor, cx: &mut App) {
         let path = match stoat_log::app_socket_path() {
             Ok(path) => path,
             Err(err) => {
@@ -120,16 +138,16 @@ impl AppHost {
                 return;
             },
         };
-        let handler = Arc::new(|request: IncomingRequest| {
-            let message = format!("method not found: {}", request.method);
-            let _ = request.respond(Err(RpcError {
-                code: jsonrpc::METHOD_NOT_FOUND,
-                message,
-                data: None,
-            }));
+        let (request_tx, request_rx) = mpsc::unbounded_channel();
+        let dispatch = crate::ipc::spawn_dispatch(cx, request_rx);
+        let handler = Arc::new(move |request: IncomingRequest| {
+            let _ = request_tx.send(request);
         });
         match jsonrpc::serve_unix(&path, executor, handler) {
-            Ok(task) => self._ipc = Some(task),
+            Ok(accept) => {
+                self._ipc = Some(accept);
+                self._dispatch = Some(dispatch);
+            },
             Err(err) => {
                 tracing::warn!(%err, ?path, "binding the app socket failed; IPC disabled")
             },

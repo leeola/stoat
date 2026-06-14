@@ -51,6 +51,7 @@ mod help;
 mod input_driver;
 mod input_parse;
 mod input_state_machine;
+mod ipc;
 mod item;
 mod jumplist_picker;
 mod key_hint_banner;
@@ -174,7 +175,7 @@ pub fn run(
         install_production_globals(cx, globals);
         cx.set_global(app_host::AppHost::default());
         let executor = cx.global::<ExecutorGlobal>().0.clone();
-        cx.update_global::<app_host::AppHost, _>(|host, _| host.serve(&executor));
+        cx.update_global::<app_host::AppHost, _>(|host, cx| host.serve(&executor, cx));
         let window_bounds = restored_window_bounds(restore, cx).unwrap_or_else(|| {
             WindowBounds::Windowed(Bounds::centered(None, size(px(1200.0), px(800.0)), cx))
         });
