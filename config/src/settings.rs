@@ -218,165 +218,14 @@ impl Settings {
 
     fn apply(&mut self, setting: &Setting) {
         let path: Vec<&str> = setting.path.iter().map(|p| p.node.as_str()).collect();
-        match path.as_slice() {
-            ["text_proto_log"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.text_proto_log = Some(b);
-                }
-            },
-            ["auto_reload_config"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.auto_reload_config = Some(b);
-                }
-            },
-            ["claude", "default_placement"] => {
-                let raw = match &setting.value.node {
-                    Value::String(s) | Value::Ident(s) => Some(s.as_str()),
-                    _ => None,
-                };
-                let placement = match raw {
-                    Some("pane") => Some(ClaudePlacement::Pane),
-                    Some("dock-left") => Some(ClaudePlacement::DockLeft),
-                    Some("dock-right") => Some(ClaudePlacement::DockRight),
-                    _ => None,
-                };
-                if let Some(p) = placement {
-                    self.claude_default_placement = Some(p);
-                }
-            },
-            ["theme"] => {
-                if let Value::Ident(s) | Value::String(s) = &setting.value.node {
-                    self.theme = Some(s.clone());
-                }
-            },
-            ["ui", "mode_badge", name] => {
-                if let Value::String(badge) | Value::Ident(badge) = &setting.value.node {
-                    self.mode_badges.insert((*name).to_string(), badge.clone());
-                }
-            },
-            ["ui", "item_mode", kind] => {
-                if let Value::String(mode) | Value::Ident(mode) = &setting.value.node {
-                    self.item_modes.insert((*kind).to_string(), mode.clone());
-                }
-            },
-            ["mouse", "capture"] => {
-                let raw = match &setting.value.node {
-                    Value::String(s) | Value::Ident(s) => Some(s.as_str()),
-                    _ => None,
-                };
-                let policy = match raw {
-                    Some("auto") => Some(MouseCapturePolicy::Auto),
-                    Some("always") => Some(MouseCapturePolicy::Always),
-                    Some("never") => Some(MouseCapturePolicy::Never),
-                    _ => None,
-                };
-                if let Some(p) = policy {
-                    self.mouse_capture = Some(p);
-                }
-            },
-            ["editor", "font", "family"] => {
-                if let Value::String(s) = &setting.value.node {
-                    self.editor_font_family = Some(s.clone());
-                }
-            },
-            ["editor", "font", "size"] => {
-                if let Value::Number(n) = setting.value.node {
-                    self.editor_font_size = Some(n as f32);
-                }
-            },
-            ["ui", "font", "family"] => {
-                if let Value::String(s) = &setting.value.node {
-                    self.ui_font_family = Some(s.clone());
-                }
-            },
-            ["ui", "font", "size"] => {
-                if let Value::Number(n) = setting.value.node {
-                    self.ui_font_size = Some(n as f32);
-                }
-            },
-            ["ui", "pane", "show_tab_bar"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.ui_pane_show_tab_bar = Some(b);
-                }
-            },
-            ["ui", "pane", "show_breadcrumbs"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.ui_pane_show_breadcrumbs = Some(b);
-                }
-            },
-            ["ui", "editor", "show_scrollbar_markers"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.ui_editor_show_scrollbar_markers = Some(b);
-                }
-            },
-            ["ui", "editor", "show_inline_blame"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.ui_editor_show_inline_blame = Some(b);
-                }
-            },
-            ["ui", "editor", "show_indent_guides"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.ui_editor_show_indent_guides = Some(b);
-                }
-            },
-            ["ui", "editor", "show_sticky_scroll"] => {
-                if let Value::Bool(b) = setting.value.node {
-                    self.ui_editor_show_sticky_scroll = Some(b);
-                }
-            },
-            ["ui", "editor", "line_numbers"] => {
-                let mode = match &setting.value.node {
-                    Value::String(s) | Value::Ident(s) => parse_line_number_mode(s),
-                    _ => None,
-                };
-                if let Some(mode) = mode {
-                    self.ui_editor_line_numbers = Some(mode);
-                }
-            },
-            ["ui", "editor", "show_whitespace"] => {
-                let mode = match &setting.value.node {
-                    Value::String(s) | Value::Ident(s) => parse_show_whitespace(s),
-                    _ => None,
-                };
-                if let Some(mode) = mode {
-                    self.ui_editor_show_whitespace = Some(mode);
-                }
-            },
-            ["lsp", lang, "command"] => {
-                if let Value::String(s) = &setting.value.node {
-                    self.language_servers
-                        .entry((*lang).to_string())
-                        .or_default()
-                        .command = s.clone();
-                }
-            },
-            ["lsp", lang, "args"] => {
-                let Value::Array(items) = &setting.value.node else {
-                    return;
-                };
-                let args: Vec<String> = items
-                    .iter()
-                    .filter_map(|item| match &item.node {
-                        Value::String(s) => Some(s.clone()),
-                        _ => None,
-                    })
-                    .collect();
-                self.language_servers
-                    .entry((*lang).to_string())
-                    .or_default()
-                    .args = args;
-            },
-            ["lsp", lang, "env", key] => {
-                if let Value::String(s) = &setting.value.node {
-                    self.language_servers
-                        .entry((*lang).to_string())
-                        .or_default()
-                        .env
-                        .insert((*key).to_string(), s.clone());
-                }
-            },
-            _ => {},
+        for def in setting_catalog() {
+            if let Some(wildcards) = match_setting_key(def.key, &path) {
+                (def.apply_value)(self, &wildcards, &setting.value.node);
+                return;
+            }
         }
+        // Unknown keys are silently ignored so a config referencing a future
+        // setting on an older binary still parses.
     }
 
     /// Apply a `<path> = <raw>` assignment at runtime, parsing the
@@ -386,122 +235,478 @@ impl Settings {
     /// user typed it.
     pub fn apply_runtime(&mut self, path: &str, raw: &str) -> Result<(), SettingsApplyError> {
         let tokens: Vec<&str> = path.split('.').collect();
-        match tokens.as_slice() {
-            ["auto_reload_config"] => {
-                let b = parse_bool(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "bool",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.auto_reload_config = Some(b);
+        for def in setting_catalog() {
+            let Some(wildcards) = match_setting_key(def.key, &tokens) else {
+                continue;
+            };
+            let Some(apply_raw) = def.apply_raw else {
+                break;
+            };
+            return if apply_raw(self, &wildcards, raw) {
                 Ok(())
-            },
-            ["ui", "pane", "show_tab_bar"] => {
-                let b = parse_bool(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "bool",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_pane_show_tab_bar = Some(b);
-                Ok(())
-            },
-            ["ui", "pane", "show_breadcrumbs"] => {
-                let b = parse_bool(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "bool",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_pane_show_breadcrumbs = Some(b);
-                Ok(())
-            },
-            ["ui", "editor", "show_scrollbar_markers"] => {
-                let b = parse_bool(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "bool",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_editor_show_scrollbar_markers = Some(b);
-                Ok(())
-            },
-            ["ui", "editor", "show_inline_blame"] => {
-                let b = parse_bool(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "bool",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_editor_show_inline_blame = Some(b);
-                Ok(())
-            },
-            ["ui", "editor", "show_indent_guides"] => {
-                let b = parse_bool(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "bool",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_editor_show_indent_guides = Some(b);
-                Ok(())
-            },
-            ["ui", "editor", "show_sticky_scroll"] => {
-                let b = parse_bool(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "bool",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_editor_show_sticky_scroll = Some(b);
-                Ok(())
-            },
-            ["ui", "editor", "line_numbers"] => {
-                let mode = parse_line_number_mode(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "absolute|relative|hybrid",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_editor_line_numbers = Some(mode);
-                Ok(())
-            },
-            ["ui", "editor", "show_whitespace"] => {
-                let mode = parse_show_whitespace(raw).ok_or_else(|| {
-                    InvalidValueSnafu {
-                        key: path.to_string(),
-                        expected: "none|boundary|selection|all",
-                        got: raw.to_string(),
-                    }
-                    .build()
-                })?;
-                self.ui_editor_show_whitespace = Some(mode);
-                Ok(())
-            },
-            _ => UnknownKeySnafu {
-                key: path.to_string(),
-            }
-            .fail(),
+            } else {
+                InvalidValueSnafu {
+                    key: path.to_string(),
+                    expected: def.expected(),
+                    got: raw.to_string(),
+                }
+                .fail()
+            };
+        }
+        UnknownKeySnafu {
+            key: path.to_string(),
+        }
+        .fail()
+    }
+}
+
+/// Value shape a setting key accepts. Drives validation and is exposed to
+/// editor tooling (completion, hover, diagnostics) so the accepted shape is
+/// described in one place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ValueKind {
+    Bool,
+    Number,
+    Str,
+    /// One of a fixed set of identifiers; the variants are [`SettingDef::allowed`].
+    Enum,
+    StringArray,
+}
+
+/// Applies a parsed config value to [`Settings`]. The slice is the concrete
+/// segments a [`SettingDef`] key's `*` wildcards matched, in order.
+type ApplyValueFn = fn(&mut Settings, &[&str], &Value);
+
+/// Applies a raw runtime string to [`Settings`], returning `false` when the
+/// string does not parse. The slice carries the wildcard segments as in
+/// [`ApplyValueFn`].
+type ApplyRawFn = fn(&mut Settings, &[&str], &str) -> bool;
+
+/// One recognized stcfg setting key. The catalog of these is the single
+/// source of truth behind both apply paths and the editor tooling, so the
+/// recognized keys, their value shapes, allowed enum values, and docs cannot
+/// drift from what the parser accepts.
+///
+/// `key` is the dotted path with `*` marking a wildcard segment, e.g.
+/// `ui.mode_badge.*` or `lsp.*.env.*`; the concrete segments a wildcard
+/// matches are passed to the apply functions in order.
+pub struct SettingDef {
+    pub key: &'static str,
+    pub kind: ValueKind,
+    /// Allowed identifiers for [`ValueKind::Enum`] keys, else empty.
+    pub allowed: &'static [&'static str],
+    pub doc: &'static str,
+    /// Apply a parsed config value (the `on init` path). Unrecognized value
+    /// shapes are ignored, matching the parser's forward-compatible stance.
+    apply_value: ApplyValueFn,
+    /// Apply a raw string at runtime (the palette `Set` path). Returns `false`
+    /// when `raw` does not parse. `None` for keys that are not runtime-settable.
+    apply_raw: Option<ApplyRawFn>,
+}
+
+impl SettingDef {
+    /// Human-readable description of the accepted value, for the
+    /// `InvalidValue` error. Enum keys list their variants.
+    fn expected(&self) -> String {
+        match self.kind {
+            ValueKind::Bool => "bool".to_string(),
+            ValueKind::Number => "number".to_string(),
+            ValueKind::Str => "string".to_string(),
+            ValueKind::StringArray => "array of strings".to_string(),
+            ValueKind::Enum => self.allowed.join("|"),
         }
     }
 }
+
+/// The recognized stcfg setting keys. Both [`Settings::apply`] and
+/// [`Settings::apply_runtime`] dispatch through this table, and editor tooling
+/// reads it for completion, hover, and unknown-key diagnostics.
+pub fn setting_catalog() -> &'static [SettingDef] {
+    SETTING_CATALOG
+}
+
+/// Match a catalog key (dotted, with `*` wildcards) against a setting path,
+/// returning the concrete segments captured by the wildcards in order, or
+/// `None` when the key does not apply. The lengths must match exactly.
+fn match_setting_key<'a>(key: &str, path: &[&'a str]) -> Option<Vec<&'a str>> {
+    let segments: Vec<&str> = key.split('.').collect();
+    if segments.len() != path.len() {
+        return None;
+    }
+    let mut wildcards = Vec::new();
+    for (seg, actual) in segments.iter().zip(path.iter()) {
+        if *seg == "*" {
+            wildcards.push(*actual);
+        } else if seg != actual {
+            return None;
+        }
+    }
+    Some(wildcards)
+}
+
+static SETTING_CATALOG: &[SettingDef] = &[
+    SettingDef {
+        key: "text_proto_log",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Enable the Claude Code / LSP text-protocol transcript log.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.text_proto_log = Some(*b);
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "auto_reload_config",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Re-apply the user config automatically when it is saved in the editor.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.auto_reload_config = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.auto_reload_config = Some(b);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "claude.default_placement",
+        kind: ValueKind::Enum,
+        allowed: &["pane", "dock-left", "dock-right"],
+        doc: "Default placement of a newly-opened Claude chat (OpenClaude).",
+        apply_value: |s, _w, v| {
+            let raw = match v {
+                Value::String(x) | Value::Ident(x) => Some(x.as_str()),
+                _ => None,
+            };
+            let placement = match raw {
+                Some("pane") => Some(ClaudePlacement::Pane),
+                Some("dock-left") => Some(ClaudePlacement::DockLeft),
+                Some("dock-right") => Some(ClaudePlacement::DockRight),
+                _ => None,
+            };
+            if let Some(p) = placement {
+                s.claude_default_placement = Some(p);
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "theme",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "Name of the active theme block.",
+        apply_value: |s, _w, v| {
+            if let Value::Ident(x) | Value::String(x) = v {
+                s.theme = Some(x.clone());
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "ui.mode_badge.*",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "Status-line badge label for a mode, keyed by mode name.",
+        apply_value: |s, w, v| {
+            if let Value::String(badge) | Value::Ident(badge) = v {
+                s.mode_badges.insert(w[0].to_string(), badge.clone());
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "ui.item_mode.*",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "Input mode to enter when a pane item of the given kind becomes active.",
+        apply_value: |s, w, v| {
+            if let Value::String(mode) | Value::Ident(mode) = v {
+                s.item_modes.insert(w[0].to_string(), mode.clone());
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "mouse.capture",
+        kind: ValueKind::Enum,
+        allowed: &["auto", "always", "never"],
+        doc: "Mouse-capture policy at terminal startup.",
+        apply_value: |s, _w, v| {
+            let raw = match v {
+                Value::String(x) | Value::Ident(x) => Some(x.as_str()),
+                _ => None,
+            };
+            let policy = match raw {
+                Some("auto") => Some(MouseCapturePolicy::Auto),
+                Some("always") => Some(MouseCapturePolicy::Always),
+                Some("never") => Some(MouseCapturePolicy::Never),
+                _ => None,
+            };
+            if let Some(p) = policy {
+                s.mouse_capture = Some(p);
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "editor.font.family",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "Monospace font family for the editor pane.",
+        apply_value: |s, _w, v| {
+            if let Value::String(x) = v {
+                s.editor_font_family = Some(x.clone());
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "editor.font.size",
+        kind: ValueKind::Number,
+        allowed: &[],
+        doc: "Editor pane font size, in logical pixels.",
+        apply_value: |s, _w, v| {
+            if let Value::Number(n) = v {
+                s.editor_font_size = Some(*n as f32);
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "ui.font.family",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "Proportional font family for chrome (status bar, tab bar, modals, docks).",
+        apply_value: |s, _w, v| {
+            if let Value::String(x) = v {
+                s.ui_font_family = Some(x.clone());
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "ui.font.size",
+        kind: ValueKind::Number,
+        allowed: &[],
+        doc: "Chrome font size, in logical pixels.",
+        apply_value: |s, _w, v| {
+            if let Value::Number(n) = v {
+                s.ui_font_size = Some(*n as f32);
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "ui.pane.show_tab_bar",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Show the per-pane tab bar above editor content.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.ui_pane_show_tab_bar = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.ui_pane_show_tab_bar = Some(b);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "ui.pane.show_breadcrumbs",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Show the per-pane breadcrumbs bar above editor content.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.ui_pane_show_breadcrumbs = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.ui_pane_show_breadcrumbs = Some(b);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "ui.editor.show_scrollbar_markers",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Paint diagnostic, git-hunk, and search markers on the editor scrollbar.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.ui_editor_show_scrollbar_markers = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.ui_editor_show_scrollbar_markers = Some(b);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "ui.editor.show_inline_blame",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Show inline git blame (author and relative age) at the end of each editable line.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.ui_editor_show_inline_blame = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.ui_editor_show_inline_blame = Some(b);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "ui.editor.show_indent_guides",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Show indent guides (vertical lines at tab-stop columns) in the editor.",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.ui_editor_show_indent_guides = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.ui_editor_show_indent_guides = Some(b);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "ui.editor.show_sticky_scroll",
+        kind: ValueKind::Bool,
+        allowed: &[],
+        doc: "Show sticky scroll headers (pin the enclosing container's signature at the top).",
+        apply_value: |s, _w, v| {
+            if let Value::Bool(b) = v {
+                s.ui_editor_show_sticky_scroll = Some(*b);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_bool(raw) {
+            Some(b) => {
+                s.ui_editor_show_sticky_scroll = Some(b);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "ui.editor.line_numbers",
+        kind: ValueKind::Enum,
+        allowed: &["absolute", "relative", "hybrid"],
+        doc: "Gutter line-number display mode.",
+        apply_value: |s, _w, v| {
+            let mode = match v {
+                Value::String(x) | Value::Ident(x) => parse_line_number_mode(x),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                s.ui_editor_line_numbers = Some(mode);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_line_number_mode(raw) {
+            Some(mode) => {
+                s.ui_editor_line_numbers = Some(mode);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "ui.editor.show_whitespace",
+        kind: ValueKind::Enum,
+        allowed: &["none", "boundary", "selection", "all"],
+        doc: "Visible-whitespace rendering mode.",
+        apply_value: |s, _w, v| {
+            let mode = match v {
+                Value::String(x) | Value::Ident(x) => parse_show_whitespace(x),
+                _ => None,
+            };
+            if let Some(mode) = mode {
+                s.ui_editor_show_whitespace = Some(mode);
+            }
+        },
+        apply_raw: Some(|s, _w, raw| match parse_show_whitespace(raw) {
+            Some(mode) => {
+                s.ui_editor_show_whitespace = Some(mode);
+                true
+            },
+            None => false,
+        }),
+    },
+    SettingDef {
+        key: "lsp.*.command",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "LSP server command for a language, keyed by language name.",
+        apply_value: |s, w, v| {
+            if let Value::String(x) = v {
+                s.language_servers
+                    .entry(w[0].to_string())
+                    .or_default()
+                    .command = x.clone();
+            }
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "lsp.*.args",
+        kind: ValueKind::StringArray,
+        allowed: &[],
+        doc: "LSP server arguments for a language, keyed by language name.",
+        apply_value: |s, w, v| {
+            let Value::Array(items) = v else {
+                return;
+            };
+            let args: Vec<String> = items
+                .iter()
+                .filter_map(|item| match &item.node {
+                    Value::String(x) => Some(x.clone()),
+                    _ => None,
+                })
+                .collect();
+            s.language_servers.entry(w[0].to_string()).or_default().args = args;
+        },
+        apply_raw: None,
+    },
+    SettingDef {
+        key: "lsp.*.env.*",
+        kind: ValueKind::Str,
+        allowed: &[],
+        doc: "Environment variable exported into a language's LSP child process.",
+        apply_value: |s, w, v| {
+            if let Value::String(x) = v {
+                s.language_servers
+                    .entry(w[0].to_string())
+                    .or_default()
+                    .env
+                    .insert(w[1].to_string(), x.clone());
+            }
+        },
+        apply_raw: None,
+    },
+];
 
 fn parse_bool(raw: &str) -> Option<bool> {
     match raw.to_ascii_lowercase().as_str() {
@@ -547,7 +752,7 @@ pub enum SettingsApplyError {
     #[snafu(display("setting `{key}` expects {expected}, got `{got}`"))]
     InvalidValue {
         key: String,
-        expected: &'static str,
+        expected: String,
         got: String,
         #[snafu(implicit)]
         location: Location,
@@ -1732,5 +1937,114 @@ mod tests {
                 env: BTreeMap::new(),
             }),
         );
+    }
+
+    #[test]
+    fn catalog_covers_every_recognized_key() {
+        let keys: Vec<&str> = setting_catalog().iter().map(|d| d.key).collect();
+        assert_eq!(
+            keys,
+            [
+                "text_proto_log",
+                "auto_reload_config",
+                "claude.default_placement",
+                "theme",
+                "ui.mode_badge.*",
+                "ui.item_mode.*",
+                "mouse.capture",
+                "editor.font.family",
+                "editor.font.size",
+                "ui.font.family",
+                "ui.font.size",
+                "ui.pane.show_tab_bar",
+                "ui.pane.show_breadcrumbs",
+                "ui.editor.show_scrollbar_markers",
+                "ui.editor.show_inline_blame",
+                "ui.editor.show_indent_guides",
+                "ui.editor.show_sticky_scroll",
+                "ui.editor.line_numbers",
+                "ui.editor.show_whitespace",
+                "lsp.*.command",
+                "lsp.*.args",
+                "lsp.*.env.*",
+            ],
+        );
+    }
+
+    #[test]
+    fn catalog_enum_keys_expose_allowed_values() {
+        let find = |key| {
+            setting_catalog()
+                .iter()
+                .find(|d| d.key == key)
+                .unwrap_or_else(|| panic!("missing {key}"))
+        };
+        assert_eq!(
+            find("ui.editor.line_numbers").allowed,
+            ["absolute", "relative", "hybrid"]
+        );
+        assert_eq!(
+            find("ui.editor.show_whitespace").allowed,
+            ["none", "boundary", "selection", "all"]
+        );
+        assert_eq!(
+            find("claude.default_placement").allowed,
+            ["pane", "dock-left", "dock-right"]
+        );
+        assert_eq!(find("mouse.capture").allowed, ["auto", "always", "never"]);
+        assert!(find("theme").allowed.is_empty());
+        // Every entry carries a doc string for hover/completion.
+        assert!(setting_catalog().iter().all(|d| !d.doc.is_empty()));
+    }
+
+    #[test]
+    fn catalog_applies_wildcard_keys() {
+        let config = parse_ok(
+            "on init {\n  \
+             ui.mode_badge.normal = \"NOR\";\n  \
+             ui.item_mode.editor = \"insert\";\n  \
+             lsp.rust.command = \"rust-analyzer\";\n  \
+             lsp.rust.args = [\"--stdio\"];\n  \
+             lsp.rust.env.RUST_LOG = \"info\";\n}\n",
+        );
+        let s = Settings::from_config(&config);
+        assert_eq!(s.mode_badges.get("normal").map(String::as_str), Some("NOR"));
+        assert_eq!(
+            s.item_modes.get("editor").map(String::as_str),
+            Some("insert")
+        );
+        let rust = s.language_servers.get("rust").expect("rust lsp present");
+        assert_eq!(rust.command, "rust-analyzer");
+        assert_eq!(rust.args, ["--stdio".to_string()]);
+        assert_eq!(rust.env.get("RUST_LOG").map(String::as_str), Some("info"));
+    }
+
+    #[test]
+    fn runtime_settable_keys_are_the_bool_enum_subset() {
+        let runtime: Vec<&str> = setting_catalog()
+            .iter()
+            .filter(|d| d.apply_raw.is_some())
+            .map(|d| d.key)
+            .collect();
+        assert_eq!(
+            runtime,
+            [
+                "auto_reload_config",
+                "ui.pane.show_tab_bar",
+                "ui.pane.show_breadcrumbs",
+                "ui.editor.show_scrollbar_markers",
+                "ui.editor.show_inline_blame",
+                "ui.editor.show_indent_guides",
+                "ui.editor.show_sticky_scroll",
+                "ui.editor.line_numbers",
+                "ui.editor.show_whitespace",
+            ],
+        );
+        // A recognized key with no runtime setter is rejected, not silently set.
+        let mut s = Settings::default();
+        assert!(matches!(
+            s.apply_runtime("theme", "dark"),
+            Err(SettingsApplyError::UnknownKey { .. })
+        ));
     }
 }

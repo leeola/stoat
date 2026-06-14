@@ -11,8 +11,8 @@ pub use ast::{
 pub use error::{format_errors, ParseError};
 use etcetera::{base_strategy::Xdg, BaseStrategy};
 pub use settings::{
-    ClaudePlacement, LanguageServerCommand, LineNumberMode, MouseCapturePolicy, Settings,
-    ShowWhitespace,
+    setting_catalog, ClaudePlacement, LanguageServerCommand, LineNumberMode, MouseCapturePolicy,
+    SettingDef, Settings, ShowWhitespace, ValueKind,
 };
 use std::path::PathBuf;
 pub use writer::set_theme;
