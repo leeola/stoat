@@ -59,6 +59,7 @@ mod keycaps;
 mod keymap_loader;
 mod line_ending_picker;
 mod lsp;
+mod lsp_manager;
 mod lsp_state;
 mod markdown_preview;
 mod modal_layer;
@@ -148,6 +149,7 @@ pub use item::{DeserializeSnafu, ItemError, ItemHandle, ItemView, SaveSnafu};
 pub use keymap_loader::{
     compile_default_keymap, compile_from_settings, compile_from_source, DEFAULT_KEYMAP,
 };
+pub use lsp_manager::LspManager;
 pub use lsp_state::{LspState, LspStateEvent};
 pub use modal_layer::ModalLayer;
 pub use multi_buffer::{MultiBuffer, MultiBufferEvent};
