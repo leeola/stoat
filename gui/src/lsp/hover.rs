@@ -1,7 +1,8 @@
 use crate::{
     editor::{Editor, EditorEvent},
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
     lsp::popup::{popup_container, popup_origin_below},
+    workspace::Workspace,
 };
 use gpui::{
     deferred, div, Context, Entity, IntoElement, ParentElement, Render, SharedString, Styled,
@@ -13,7 +14,7 @@ use lsp_types::{
 };
 use std::{path::Path, str::FromStr, sync::Arc};
 use stoat::{
-    host::{LanguageServerFeature, LspHost},
+    host::{LanguageServerFeature, LspServer},
     lsp::util::byte_offset_to_lsp_pos,
     DisplayPoint,
 };
@@ -110,7 +111,9 @@ impl HoverPopup {
         };
         let request_id = self.bump_request_id();
         let task = cx.spawn(async move |this, cx| {
-            let outcome = request.run().await;
+            let server =
+                super::cached_server(&request.workspace, request.language.clone(), cx).await;
+            let outcome = request.run(server).await;
             let _ = this.update(cx, |popup, cx| {
                 if popup.request_id() != request_id {
                     // A newer hover request superseded this one; the
@@ -175,9 +178,10 @@ fn empty() -> impl IntoElement {
 }
 
 struct HoverRequest {
-    host: Arc<dyn LspHost>,
+    /// Workspace owning the persistent [`crate::LspManager`] cache the hover
+    /// server is resolved from. `None` when the editor is unattached.
+    workspace: Option<WeakEntity<Workspace>>,
     language: Arc<stoat_language::Language>,
-    workspace_root: std::path::PathBuf,
     uri: Uri,
     offset: usize,
     rope: stoat_text::Rope,
@@ -190,7 +194,7 @@ impl HoverRequest {
         col: u32,
         cx: &mut Context<'_, HoverPopup>,
     ) -> Option<Self> {
-        let host = cx.global::<LspHostGlobal>().0.clone();
+        let workspace = editor.read(cx).workspace().cloned();
         let path = editor.read(cx).file_path()?.to_path_buf();
         let language = cx.global::<LanguageRegistry>().0.for_path(&path)?;
         let uri = path_to_uri(&path)?;
@@ -201,31 +205,17 @@ impl HoverRequest {
         let buffer_point = display_snapshot.display_to_buffer(clipped, Bias::Left)?;
         let rope = mb_snapshot.rope().clone();
         let offset = rope.point_to_offset(buffer_point);
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
         Some(Self {
-            host,
+            workspace,
             language,
-            workspace_root,
             uri,
             offset,
             rope,
         })
     }
 
-    async fn run(self) -> Option<Vec<String>> {
-        let server = match self.host.launch(&self.language, &self.workspace_root).await {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(target: "stoat_gui::lsp::hover", ?err, "failed to launch LSP server");
-                return None;
-            },
-        };
-        // `initialize` is best-effort; test fakes accept hover requests
-        // without an explicit handshake.
-        let _ = server.initialize(Some(self.uri.clone())).await;
+    async fn run(self, server: Option<Arc<dyn LspServer>>) -> Option<Vec<String>> {
+        let server = server?;
         if !server.supports_feature(LanguageServerFeature::Hover) {
             return None;
         }
@@ -277,14 +267,22 @@ fn flatten_hover_contents(contents: HoverContents) -> Vec<String> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        globals::ExecutorGlobal, multi_buffer::MultiBuffer,
+        buffer::Buffer,
+        diff_map::DiffMap,
+        display_map::DisplayMap,
+        editor::EditorMode,
+        globals::{ExecutorGlobal, LspHostGlobal},
+        multi_buffer::MultiBuffer,
+        workspace::Workspace,
     };
     use gpui::{AppContext, TestAppContext};
     use std::path::PathBuf;
     use stoat::{
         buffer::BufferId,
-        host::fake::{FakeLsp, FakeLspHost},
+        host::{
+            fake::{FakeLsp, FakeLspHost},
+            LspHost,
+        },
     };
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -300,9 +298,15 @@ mod tests {
         lsp
     }
 
-    fn build_editor(cx: &mut TestAppContext, path: &Path, text: &str) -> Entity<Editor> {
+    fn build_editor(
+        cx: &mut TestAppContext,
+        path: &Path,
+        text: &str,
+    ) -> (Entity<Workspace>, Entity<Editor>) {
         let path = path.to_path_buf();
         cx.update(|cx| {
+            let workspace = cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+            let workspace_handle = workspace.downgrade();
             let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), text));
             let executor = cx.global::<ExecutorGlobal>().0.clone();
             let multi = cx.new({
@@ -317,11 +321,13 @@ mod tests {
                 let buffer = buffer.clone();
                 |cx| DiffMap::new(buffer, cx)
             });
-            cx.new(|cx| {
+            let editor = cx.new(|cx| {
                 let mut ed = Editor::new(multi, display, diff, EditorMode::full(), cx);
+                ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(path), cx);
                 ed
-            })
+            });
+            (workspace, editor)
         })
     }
 
@@ -336,7 +342,7 @@ mod tests {
         });
         lsp.set_hover(path.to_str().unwrap(), 0, 0, "**hello**\nworld");
 
-        let editor = build_editor(&mut cx, &path, "let x = 1;\n");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "let x = 1;\n");
         let popup = cx.update(|cx| {
             let editor_clone = editor.clone();
             cx.new(|cx| HoverPopup::new(editor_clone, cx))
@@ -357,7 +363,7 @@ mod tests {
         let mut cx = TestAppContext::single();
         let _lsp = install_globals(&mut cx);
         let path = PathBuf::from("/tmp/main.rs");
-        let editor = build_editor(&mut cx, &path, "x\n");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "x\n");
         let popup = cx.update(|cx| cx.new(|cx| HoverPopup::new(editor.clone(), cx)));
 
         let first = popup.update(&mut cx, |p, _| p.bump_request_id());
@@ -383,7 +389,7 @@ mod tests {
         });
         lsp.set_hover(path.to_str().unwrap(), 0, 0, "hi");
 
-        let editor = build_editor(&mut cx, &path, "x\n");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "x\n");
         let popup = cx.update(|cx| {
             let editor_clone = editor.clone();
             cx.new(|cx| HoverPopup::new(editor_clone, cx))
