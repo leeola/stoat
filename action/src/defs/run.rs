@@ -55,7 +55,9 @@ define_action!(
     ActionKind::RunSubmit,
     "submit command",
     "Submit the current command line to the shell.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    false
 );
 
 define_action!(
@@ -65,7 +67,9 @@ define_action!(
     ActionKind::RunInterrupt,
     "interrupt command",
     "Send SIGINT to the running shell command.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    false
 );
 
 define_action!(
@@ -75,7 +79,9 @@ define_action!(
     ActionKind::RunHistoryPrev,
     "previous command in history",
     "Replace the run input with the previous entry in command history.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    false
 );
 
 define_action!(
@@ -85,7 +91,9 @@ define_action!(
     ActionKind::RunHistoryNext,
     "next command in history",
     "Replace the run input with the next entry in command history, or clear the input when past the end.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    false
 );
 
 const RUN_PARAMS: &[ParamDef] = &[ParamDef {

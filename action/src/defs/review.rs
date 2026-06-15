@@ -22,7 +22,9 @@ define_action!(
     "If the cursor is on a Moved hunk, navigate to its first recorded source \
      location. For ambiguous moves, JumpToNextMoveSource / JumpToPrevMoveSource \
      cycle among the alternates.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -33,7 +35,9 @@ define_action!(
     "jump to the target of a moved hunk",
     "From the negative (source) side of a Moved hunk, navigate forward to the \
      corresponding target location on the positive side.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -44,7 +48,9 @@ define_action!(
     "cycle to the next source of an ambiguous moved hunk",
     "When a Moved hunk has multiple candidate sources (consolidation from N to \
      1), advance the selection cursor to the next source and jump there.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -55,7 +61,9 @@ define_action!(
     "cycle to the previous source of an ambiguous moved hunk",
     "When a Moved hunk has multiple candidate sources, step the selection cursor \
      to the previous source and jump there.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -67,7 +75,9 @@ define_action!(
     "Report the cardinality and source locations of the Moved hunk under the \
      cursor. Scriptable surface for future automation hooks; a no-op today \
      when the cursor is not on a Moved hunk.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -79,7 +89,9 @@ define_action!(
     "Move the review cursor forward to the next chunk in visit order, \
      scrolling the pane to keep the chunk's header in view. Clamps at the \
      last chunk and emits an end-of-review badge when already there.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -91,7 +103,9 @@ define_action!(
     "Move the review cursor backward to the previous chunk in visit order, \
      scrolling the pane to keep the chunk's header in view. Clamps at the \
      first chunk.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -102,7 +116,9 @@ define_action!(
     "jump to the next commit's first chunk",
     "Move the review cursor to the first chunk of the next commit group in \
      a commit-by-commit branch review. No-op in single-commit reviews.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -113,7 +129,9 @@ define_action!(
     "jump to the previous commit's first chunk",
     "Move the review cursor to the first chunk of the previous commit group \
      in a commit-by-commit branch review. No-op in single-commit reviews.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -124,7 +142,9 @@ define_action!(
     "mark the current chunk as staged",
     "Mark the current review chunk as Staged. Progress footer updates and \
      the chunk's gutter flips to the staged glyph.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -134,7 +154,9 @@ define_action!(
     ActionKind::ReviewUnstageChunk,
     "mark the current chunk as unstaged",
     "Mark the current review chunk as Unstaged.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -145,7 +167,9 @@ define_action!(
     "toggle staged/unstaged for the current chunk",
     "Flip the current chunk between Staged and Unstaged. Chunks in Pending \
      or Skipped flip to Staged on first press.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -157,7 +181,9 @@ define_action!(
     "Mark the current chunk as Skipped: read but not acted on. Used when \
      stepping through commits to pass over changes that don't need a \
      stage/unstage decision.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -170,7 +196,9 @@ define_action!(
      the next chunk. Approval is independent of staged/unstaged so a \
      reviewer can step through changes without committing to a staging \
      decision.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -181,7 +209,9 @@ define_action!(
     "toggle approval of the current chunk",
     "Flip the current chunk's approval flag without moving the review \
      cursor. Independent of staged/unstaged status.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -193,7 +223,9 @@ define_action!(
     "Move the review cursor to the next chunk whose approval flag is \
      false, wrapping from the end of the session back to the start. \
      No-op when every chunk has been approved.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -205,7 +237,9 @@ define_action!(
     "Clear every chunk's approval flag, revert every chunk's status to \
      Pending, and move the review cursor back to the first chunk. Used \
      to start the review over.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -257,7 +291,9 @@ define_action!(
     "Apply the reversed patch of the chunk under the review cursor to the \
      working tree, undoing that change on disk. Acts on files directly, \
      not the git index.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -271,7 +307,9 @@ define_action!(
      last commit, then back to the working tree. Re-extracts hunks from \
      the new source and preserves each chunk's review decision where its \
      content still matches.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -282,7 +320,9 @@ define_action!(
     "toggle review follow mode",
     "Toggle follow mode: while on, an external edit to a reviewed file \
      moves the review cursor to that file's first chunk. Defaults off.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -294,7 +334,9 @@ define_action!(
     "Toggle live mode: while on, a working-tree review absorbs \
      external on-disk changes as they land, upserting each changed \
      file. Defaults off.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -305,7 +347,9 @@ define_action!(
     "rescan the review source",
     "Rebuild the review session from its source, preserving staged/unstaged \
      decisions on chunks whose base content still matches.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -316,7 +360,9 @@ define_action!(
     "apply staged chunks",
     "Apply all staged chunks to the underlying source (git index for the \
      working tree, commit rewrite for past commits). Unimplemented for v1.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -328,7 +374,9 @@ define_action!(
     "Drop the active review session and return the focused pane to a \
      regular editor. Unreviewed chunks are lost; use the palette's \
      `ReviewApplyStaged` first to act on decisions.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    false
 );
 
 define_action!(
@@ -342,7 +390,9 @@ define_action!(
      content. When the reviewed commit is HEAD, amends HEAD directly; \
      otherwise rewrites and cherry-picks descendants. Refuses with an \
      error badge if the working tree is dirty.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 use crate::{Action, ActionDef, ParamDef, ParamKind};
@@ -660,7 +710,9 @@ define_action!(
     ActionKind::ReviewEnterLineSelect,
     "select lines in the current hunk",
     "Enter line-select mode on the chunk under the review cursor, snapshotting its rows with every row selected so individual lines can be staged or unstaged as a group.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    false
 );
 
 define_action!(
@@ -670,7 +722,9 @@ define_action!(
     ActionKind::ReviewLineSelectCancel,
     "cancel line selection",
     "Discard the current line selection and return to review mode without staging anything.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    false
 );
 
 define_action!(
@@ -680,7 +734,9 @@ define_action!(
     ActionKind::ReviewLineSelectToggle,
     "toggle the selected line",
     "Toggle whether the line under the review cursor participates in the next stage or unstage while in line-select mode.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    false
 );
 
 define_action!(
@@ -690,7 +746,9 @@ define_action!(
     ActionKind::ReviewLineSelectAll,
     "select every line",
     "Select every line in the current hunk while in line-select mode.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    false
 );
 
 define_action!(
@@ -700,7 +758,9 @@ define_action!(
     ActionKind::ReviewLineSelectStage,
     "stage the selected lines",
     "Stage the selected lines of the current hunk to the git index, then leave line-select mode.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    false
 );
 
 define_action!(
@@ -710,7 +770,9 @@ define_action!(
     ActionKind::ReviewLineSelectUnstage,
     "unstage the selected lines",
     "Unstage the selected lines of the current hunk from the git index, then leave line-select mode.",
-    ActionPriority::Common
+    ActionPriority::Common,
+    true,
+    false
 );
 
 #[cfg(test)]

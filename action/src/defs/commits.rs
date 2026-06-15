@@ -18,7 +18,9 @@ define_action!(
     ActionKind::CloseCommits,
     "close the commit-list view",
     "Drop the active commit-list state and return to normal mode.",
-    ActionPriority::Normal
+    ActionPriority::Normal,
+    true,
+    false
 );
 
 define_action!(
@@ -30,7 +32,9 @@ define_action!(
     "Move the selection cursor one row down in the commit list. \
      Triggers a lazy page-load when the cursor approaches the tail of \
      the currently loaded window.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -40,7 +44,9 @@ define_action!(
     ActionKind::CommitsPrev,
     "select the previous commit",
     "Move the selection cursor one row up in the commit list.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -50,7 +56,9 @@ define_action!(
     ActionKind::CommitsPageDown,
     "scroll the commit list down a page",
     "Advance the commit-list selection by one viewport height.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -60,7 +68,9 @@ define_action!(
     ActionKind::CommitsPageUp,
     "scroll the commit list up a page",
     "Retreat the commit-list selection by one viewport height.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -70,7 +80,9 @@ define_action!(
     ActionKind::CommitsFirst,
     "jump to HEAD in the commit list",
     "Move the selection to the newest commit (top of the list).",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -81,7 +93,9 @@ define_action!(
     "jump to the oldest loaded commit",
     "Move the selection to the oldest commit currently in the loaded \
      window. Does not force a full walk of history.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -92,7 +106,9 @@ define_action!(
     "rescan the commit list",
     "Discard the loaded commits and preview caches and reload the \
      first page from HEAD. Use after external branch changes.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -106,7 +122,9 @@ define_action!(
      sources); use the separate `ReviewRemoveSelected` action to \
      actually remove staged hunks from the commit. Closing the review \
      returns to commits mode.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -119,5 +137,7 @@ define_action!(
      selected commit as the base: every commit from the selection \
      (exclusive) up to HEAD loads as its own diff, walked oldest to \
      newest. Closing the review returns to commits mode.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );

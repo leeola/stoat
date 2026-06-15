@@ -1502,99 +1502,43 @@ mod tests {
         fn all_scope_shows_contextual_actions_regardless_of_state() {
             let delegate = new_all_scope_delegate();
             let names = matched_names(&delegate);
-            for name in [
-                "AbortRebase",
-                "RewordConfirm",
-                "ConflictApply",
-                "ReviewStageChunk",
-                "CommitsNext",
-                "RunSubmit",
-            ] {
+            for name in ["blame", "GitToggleStageHunk", "GotoDefinition", "Hover"] {
                 assert!(names.contains(&name), "{name} missing in All scope");
             }
         }
 
         #[test]
-        fn active_scope_in_rebase_plan_surfaces_rebase_actions() {
+        fn modal_subactions_stay_hidden_even_when_their_mode_is_active() {
             let availability = Availability {
                 in_rebase_plan: true,
+                in_rebase_exec: true,
+                in_rebase_reword: true,
+                in_conflict: true,
+                review_open: true,
+                commits_open: true,
+                run_focused: true,
                 ..Availability::default()
             };
             let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
             let names = matched_names(&delegate);
             for name in [
                 "AbortRebase",
-                "ExecuteRebase",
-                "SetRebaseOpPick",
-                "SetRebaseOpSquash",
-            ] {
-                assert!(names.contains(&name), "{name} missing when in_rebase_plan");
-            }
-            assert!(!names.contains(&"RewordConfirm"));
-            assert!(!names.contains(&"ConflictApply"));
-        }
-
-        #[test]
-        fn active_scope_in_reword_surfaces_reword_actions() {
-            let availability = Availability {
-                in_rebase_exec: true,
-                in_rebase_reword: true,
-                ..Availability::default()
-            };
-            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
-            let names = matched_names(&delegate);
-            for name in ["RewordConfirm", "RewordAbort", "RebaseContinue"] {
-                assert!(names.contains(&name), "{name} missing in reword");
-            }
-            assert!(!names.contains(&"AbortRebase"));
-        }
-
-        #[test]
-        fn active_scope_in_conflict_surfaces_conflict_actions() {
-            let availability = Availability {
-                in_rebase_exec: true,
-                in_conflict: true,
-                ..Availability::default()
-            };
-            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
-            let names = matched_names(&delegate);
-            for name in [
-                "ConflictTakeOurs",
-                "ConflictTakeTheirs",
+                "RewordConfirm",
                 "ConflictApply",
-                "ConflictAbort",
+                "ReviewStageChunk",
+                "review-close",
+                "CommitsNext",
+                "EnterRebase",
+                "RunSubmit",
             ] {
-                assert!(names.contains(&name), "{name} missing in conflict");
+                assert!(
+                    !names.contains(&name),
+                    "{name} is a hidden modal sub-action and must not surface",
+                );
             }
-            assert!(!names.contains(&"RewordConfirm"));
-        }
-
-        #[test]
-        fn active_scope_review_open_surfaces_review_actions() {
-            let availability = Availability {
-                review_open: true,
-                ..Availability::default()
-            };
-            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
-            let names = matched_names(&delegate);
-            for name in ["ReviewStageChunk", "ReviewApplyStaged", "review-close"] {
-                assert!(names.contains(&name), "{name} missing when review_open");
+            for name in ["review", "commits", "run"] {
+                assert!(names.contains(&name), "{name} opener must stay visible");
             }
-            assert!(!names.contains(&"CommitsNext"));
-        }
-
-        #[test]
-        fn active_scope_commits_open_surfaces_commits_actions() {
-            let availability = Availability {
-                commits_open: true,
-                ..Availability::default()
-            };
-            let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
-            let names = matched_names(&delegate);
-            for name in ["CommitsNext", "CommitsOpenReview", "EnterRebase"] {
-                assert!(names.contains(&name), "{name} missing when commits_open");
-            }
-            assert!(!names.contains(&"ReviewStageChunk"));
         }
 
         #[test]
@@ -1623,24 +1567,24 @@ mod tests {
         #[test]
         fn refilter_in_active_scope_respects_availability() {
             let mut delegate = new_delegate();
-            delegate.refilter("Abort");
+            delegate.refilter("blame");
 
             let names = matched_names(&delegate);
             assert!(
-                !names.contains(&"AbortRebase"),
-                "AbortRebase visible without in_rebase_plan: {names:?}",
+                !names.contains(&"blame"),
+                "blame visible without in_git_repo: {names:?}",
             );
         }
 
         #[test]
         fn refilter_in_all_scope_lists_contextual_matches() {
             let mut delegate = new_all_scope_delegate();
-            delegate.refilter("Abort");
+            delegate.refilter("blame");
 
             let names = matched_names(&delegate);
             assert!(
-                names.contains(&"AbortRebase"),
-                "AbortRebase missing in All scope: {names:?}",
+                names.contains(&"blame"),
+                "blame missing in All scope: {names:?}",
             );
         }
     }
@@ -1699,8 +1643,8 @@ mod tests {
             assert_eq!(scope, PaletteScope::Active);
             let listed = names(&h);
             assert!(
-                !listed.contains(&"AbortRebase"),
-                "Active scope should hide AbortRebase: {listed:?}",
+                !listed.contains(&"blame"),
+                "Active scope should hide blame without in_git_repo: {listed:?}",
             );
         }
 
@@ -1713,8 +1657,8 @@ mod tests {
             assert_eq!(scope, PaletteScope::All);
             let listed = names(&h);
             assert!(
-                listed.contains(&"AbortRebase"),
-                "All scope should list AbortRebase: {listed:?}",
+                listed.contains(&"blame"),
+                "All scope should list blame regardless of in_git_repo: {listed:?}",
             );
         }
 

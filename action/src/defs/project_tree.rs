@@ -7,7 +7,9 @@ define_action!(
     ActionKind::ProjectTreeSelectNext,
     "select the next tree row",
     "Move the project tree selection one visible row down.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -17,7 +19,9 @@ define_action!(
     ActionKind::ProjectTreeSelectPrev,
     "select the previous tree row",
     "Move the project tree selection one visible row up.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -28,7 +32,9 @@ define_action!(
     "collapse the selected directory",
     "Collapse the selected directory if it is expanded. No-op when the \
      selected row is a file or an already-collapsed directory.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -40,7 +46,9 @@ define_action!(
     "Expand the selected directory if it is collapsed, listing its \
      contents inline. No-op when the selected row is a file or an \
      already-expanded directory.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -51,7 +59,9 @@ define_action!(
     "open the selected tree row",
     "Toggle expansion when the selected row is a directory, or open the \
      file in the focused pane when it is a file.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -62,7 +72,9 @@ define_action!(
     "rescan the project tree",
     "Re-read the workspace directory contents from disk, preserving the \
      set of expanded directories.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -73,7 +85,9 @@ define_action!(
     "delete the selected tree entry",
     "Delete the selected project-tree file or directory from disk after \
      confirmation. Directories are removed recursively.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -85,7 +99,9 @@ define_action!(
     "Edit the selected project-tree entry's name inline, pre-filled with \
      its current name. Enter renames the file or directory on disk; \
      Escape cancels.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -97,7 +113,9 @@ define_action!(
     "Open an inline input for a new file in the selected directory, or in \
      the selected entry's parent. Enter creates an empty file on disk; \
      Escape cancels.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 define_action!(
@@ -109,7 +127,9 @@ define_action!(
     "Open an inline input for a new directory in the selected directory, or \
      in the selected entry's parent. Enter creates the directory on disk; \
      Escape cancels.",
-    ActionPriority::Rare
+    ActionPriority::Rare,
+    true,
+    false
 );
 
 #[cfg(test)]
