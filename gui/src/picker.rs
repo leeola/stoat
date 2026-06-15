@@ -413,14 +413,22 @@ impl<D: PickerDelegate> Render for Picker<D> {
         let preview = self.delegate.render_preview(cx);
         let header = self.delegate.render_header(cx);
         let footer = self.delegate.render_footer(cx);
-        let query_row = div()
-            .flex()
-            .items_center()
-            .h(px(36.0))
-            .px(px(10.0))
-            .border_b_1()
-            .border_color(cx.theme().border_inactive)
-            .child(self.query_editor.clone());
+        let query_hint = self.delegate.render_query_hint(cx);
+        let query_row = {
+            let row = div()
+                .flex()
+                .items_center()
+                .h(px(36.0))
+                .px(px(10.0))
+                .border_b_1()
+                .border_color(cx.theme().border_inactive);
+            match query_hint {
+                Some(hint) => row
+                    .child(div().flex_grow().min_w_0().child(self.query_editor.clone()))
+                    .child(div().flex_none().pl_2().child(hint)),
+                None => row.child(self.query_editor.clone()),
+            }
+        };
         match preview {
             None => {
                 let mut column = div()

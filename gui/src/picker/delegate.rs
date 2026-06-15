@@ -112,6 +112,14 @@ pub trait PickerDelegate: Sized + 'static {
         None
     }
 
+    /// Render an optional hint at the trailing edge of the query row,
+    /// e.g. the remaining parameter placeholders for the selected
+    /// command. When `Some`, the picker right-aligns it beside the
+    /// query editor. Default `None` shows no hint.
+    fn render_query_hint(&self, _cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        None
+    }
+
     /// Row indices after which the list paints a horizontal group
     /// divider. Default empty draws no dividers. Indices are match
     /// positions, not display rows.

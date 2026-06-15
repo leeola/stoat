@@ -931,6 +931,28 @@ impl PickerDelegate for CommandPaletteDelegate {
         }
         Some(pane.into_any_element())
     }
+
+    fn render_query_hint(&self, cx: &mut Context<'_, Picker<Self>>) -> Option<AnyElement> {
+        let entry = self.selected_entry()?;
+        let query = self.query_editor_text(cx);
+        let (names, description) = query_hint(entry.def.params(), command_args(&query))?;
+        let placeholders = names
+            .iter()
+            .map(|name| format!("<{name}>"))
+            .collect::<Vec<_>>()
+            .join(" ");
+        Some(
+            div()
+                .flex()
+                .items_center()
+                .gap_2()
+                .text_xs()
+                .text_color(cx.theme().muted_text)
+                .child(SharedString::from(placeholders))
+                .child(SharedString::from(description.to_string()))
+                .into_any_element(),
+        )
+    }
 }
 
 impl CommandPaletteDelegate {
@@ -1052,18 +1074,15 @@ fn command_args(query: &str) -> &str {
     }
 }
 
-/// Parse `args_text` into one [`ParamValue`] per leading parameter of
-/// `params`.
+/// Split `args_text` into one raw token per leading parameter of `params`.
 ///
 /// Every parameter before the last consumes a single whitespace-delimited
 /// token; the last consumes the remainder of the line when it is a
 /// [`ParamKind::String`] (so paths and shell commands with spaces survive),
-/// otherwise a single token. Parsing stops at the first empty slot, leaving
-/// trailing optional parameters for the action factory to default -- a
-/// required parameter left empty surfaces as a build error from the factory,
-/// not here.
-fn parse_inline_args(params: &[ParamDef], args_text: &str) -> Result<Vec<ParamValue>, ParamError> {
-    let mut values = Vec::with_capacity(params.len());
+/// otherwise a single token. Tokenizing stops at the first empty slot, so the
+/// result is at most `params.len()` long and never holds an empty token.
+fn tokenize_args<'a>(params: &[ParamDef], args_text: &'a str) -> Vec<&'a str> {
+    let mut tokens = Vec::with_capacity(params.len());
     let mut rest = args_text.trim_start();
     for (i, param) in params.iter().enumerate() {
         let last = i + 1 == params.len();
@@ -1085,9 +1104,37 @@ fn parse_inline_args(params: &[ParamDef], args_text: &str) -> Result<Vec<ParamVa
         if raw.is_empty() {
             break;
         }
-        values.push(ParamValue::parse(param.kind, raw)?);
+        tokens.push(raw);
     }
-    Ok(values)
+    tokens
+}
+
+/// Parse the leading parameters of `params` from `args_text` into
+/// [`ParamValue`]s.
+///
+/// Tokenizes via [`tokenize_args`], so a trailing parameter left empty is
+/// omitted for the action factory to default -- a required parameter left
+/// empty surfaces as a build error from the factory, not here.
+fn parse_inline_args(params: &[ParamDef], args_text: &str) -> Result<Vec<ParamValue>, ParamError> {
+    tokenize_args(params, args_text)
+        .iter()
+        .zip(params)
+        .map(|(raw, param)| ParamValue::parse(param.kind, raw))
+        .collect()
+}
+
+/// The remaining (unfilled) parameter names and the active parameter's
+/// description for the inline query hint, or `None` when every parameter is
+/// already filled or the command takes none. The active parameter is the
+/// first unfilled one.
+fn query_hint<'a>(params: &'a [ParamDef], args_text: &str) -> Option<(Vec<&'a str>, &'a str)> {
+    let filled = tokenize_args(params, args_text).len();
+    let remaining = params.get(filled..)?;
+    let active = remaining.first()?;
+    Some((
+        remaining.iter().map(|p| p.name).collect(),
+        active.description,
+    ))
 }
 
 /// Open the command palette as a modal picker. Constructed in
@@ -1217,6 +1264,32 @@ mod tests {
             parse_inline_args(&params, "abc"),
             Err(ParamError::ParseFailure { .. }),
         ));
+    }
+
+    #[test]
+    fn query_hint_lists_unfilled_params_with_active_description() {
+        let params = [
+            ParamDef {
+                name: "a",
+                kind: ParamKind::Number,
+                required: true,
+                description: "first",
+            },
+            ParamDef {
+                name: "b",
+                kind: ParamKind::String,
+                required: true,
+                description: "second",
+            },
+        ];
+        assert_eq!(query_hint(&params, ""), Some((vec!["a", "b"], "first")));
+        assert_eq!(query_hint(&params, "42"), Some((vec!["b"], "second")));
+        assert_eq!(query_hint(&params, "42 hello world"), None);
+    }
+
+    #[test]
+    fn query_hint_none_without_params() {
+        assert_eq!(query_hint(&[], "anything"), None);
     }
 
     #[test]
