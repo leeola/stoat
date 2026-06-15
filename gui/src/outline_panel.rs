@@ -11,7 +11,7 @@
 
 use crate::{
     editor::{scroll::autoscroll::AutoscrollStrategy, Editor, EditorEvent},
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
     item::{DeserializeSnafu, ItemError, ItemKind, ItemView},
     theme::ActiveTheme,
     workspace::Workspace,
@@ -25,9 +25,9 @@ use lsp_types::{
     TextDocumentIdentifier, Uri,
 };
 use serde_json::Value;
-use std::{ops::Range, path::Path, str::FromStr, sync::Arc};
+use std::{ops::Range, path::Path, str::FromStr};
 use stoat::{
-    host::{LanguageServerFeature, LspServer, OffsetEncoding},
+    host::{LanguageServerFeature, OffsetEncoding},
     lsp::util::lsp_pos_to_byte_offset,
 };
 use stoat_text::{Bias, Rope, Selection, SelectionGoal};
@@ -116,7 +116,6 @@ impl OutlinePanel {
         let Some(uri) = path_to_uri(&path) else {
             return;
         };
-        let host = cx.global::<LspHostGlobal>().0.clone();
         let rope = editor
             .read(cx)
             .multi_buffer()
@@ -124,24 +123,12 @@ impl OutlinePanel {
             .snapshot()
             .rope()
             .clone();
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
+        let workspace = Some(self.workspace.clone());
 
         cx.spawn(async move |this, cx| {
-            let server = match host.launch(&language, &workspace_root).await {
-                Ok(s) => Arc::<dyn LspServer>::from(s),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "stoat_gui::outline_panel",
-                        ?err,
-                        "failed to launch LSP server for document symbols"
-                    );
-                    return;
-                },
+            let Some(server) = crate::lsp::cached_server(&workspace, language, cx).await else {
+                return;
             };
-            let _ = server.initialize(Some(uri.clone())).await;
             if !server.supports_feature(LanguageServerFeature::DocumentSymbols) {
                 return;
             }
@@ -364,10 +351,13 @@ impl ItemView for OutlinePanel {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal};
+    use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, LspHostGlobal};
     use gpui::{AppContext, TestAppContext, VisualTestContext};
     use lsp_types::{Location, Position, Range as LspRange, SymbolKind};
-    use std::path::{Path, PathBuf};
+    use std::{
+        path::{Path, PathBuf},
+        sync::Arc,
+    };
     use stoat::host::{
         fake::{FakeFs, FakeLsp, FakeLspHost},
         FsWatchHost, LspHost,
