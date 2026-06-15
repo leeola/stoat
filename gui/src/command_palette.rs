@@ -2,11 +2,12 @@
 //!
 //! Lists every [`stoat_action::ActionDef`] whose
 //! [`ActionDef::palette_visible`] returns true, fuzzy-ranks them
-//! against the picker's query, and on confirm either constructs the
-//! action via [`registry::RegistryEntry::create`] and dispatches it
-//! through [`Workspace::dispatch_action`], or transitions into a
-//! [`PalettePhase::CollectArgs`] state that walks the user through
-//! providing each parameter in sequence before dispatch.
+//! against the leading command token of the picker's query, and on
+//! confirm parses any trailing text into the action's parameters via
+//! [`ParamValue::parse`], constructs the action through
+//! [`registry::RegistryEntry::create`], and dispatches it through
+//! [`Workspace::dispatch_action`]. A parse or missing-argument failure
+//! surfaces inline instead of dispatching.
 
 use crate::{
     commit_list::CommitListItem,
@@ -32,7 +33,7 @@ use std::collections::VecDeque;
 use stoat::rebase::RebasePause;
 use stoat_action::{
     registry::{self, RegistryEntry},
-    ActionKind, ParamDef, ParamValue,
+    Action, ActionKind, ParamDef, ParamError, ParamKind, ParamValue,
 };
 
 /// Maximum number of confirmed queries retained for history recall.
@@ -56,12 +57,13 @@ pub struct CommandPaletteDelegate {
     /// Every palette-visible entry, captured at construction time.
     entries: Vec<&'static RegistryEntry>,
     /// Index into [`Self::entries`] plus the matched character
-    /// indices for the active query, ordered for display. Always
-    /// empty while [`Self::phase`] is [`PalettePhase::CollectArgs`].
+    /// indices for the active query, ordered for display.
     matches: Vec<(usize, Vec<u32>)>,
     selected: usize,
     workspace: WeakEntity<Workspace>,
-    phase: PalettePhase,
+    /// Inline argument parse / missing-argument error from the last
+    /// confirm, shown in the preview pane until the query changes.
+    arg_error: Option<String>,
     /// Weak handle to the picker's query editor, captured in
     /// [`Self::on_attach`]. Used to clear the editor text on phase
     /// transitions inside [`Self::confirm`], which cannot reach the
@@ -478,41 +480,6 @@ pub(crate) fn action_is_available(kind: ActionKind, ctx: &Availability) -> bool 
     }
 }
 
-/// Two-step state machine driving the palette's interaction model.
-///
-/// [`Filter`] is the standard fuzzy-filter view. Confirming a
-/// zero-parameter action dispatches it immediately. Confirming a
-/// param-taking action transitions into [`CollectArgs`].
-///
-/// [`CollectArgs`] walks the user through each parameter in
-/// sequence. Each [`Self::confirm`] parses the query text against
-/// the current parameter's [`stoat_action::ParamKind`], either
-/// advancing to the next parameter (clearing the query editor) or
-/// dispatching the action once every parameter has been collected.
-/// A parse failure leaves the phase intact and surfaces the error
-/// next to the prompt.
-enum PalettePhase {
-    Filter,
-    CollectArgs {
-        entry: &'static RegistryEntry,
-        collected: Vec<ParamValue>,
-        current: usize,
-        error: Option<String>,
-    },
-}
-
-/// Snapshot of the phase data needed to drive [`CommandPaletteDelegate::confirm`]
-/// once the borrow on [`CommandPaletteDelegate::phase`] is released. Lifts
-/// the per-arm decision out of the match so the body can mutate the phase
-/// freely without conflicting borrows.
-enum ConfirmStep {
-    Filter,
-    CollectArgs {
-        entry: &'static RegistryEntry,
-        current: usize,
-    },
-}
-
 impl CommandPaletteDelegate {
     pub fn new(workspace: WeakEntity<Workspace>, availability: Availability) -> Self {
         let entries: Vec<&'static RegistryEntry> = registry::all()
@@ -523,7 +490,7 @@ impl CommandPaletteDelegate {
             matches: Vec::new(),
             selected: 0,
             workspace,
-            phase: PalettePhase::Filter,
+            arg_error: None,
             query_editor: None,
             scope: PaletteScope::Active,
             availability,
@@ -571,14 +538,9 @@ impl CommandPaletteDelegate {
         self.entries.get(*idx).copied()
     }
 
-    /// The action the detail pane describes: the selected match in
-    /// [`PalettePhase::Filter`], or the in-flight entry being collected in
-    /// [`PalettePhase::CollectArgs`] (where [`Self::matches`] is empty).
+    /// The action the detail pane describes: the selected match.
     fn detail_target(&self) -> Option<&'static RegistryEntry> {
-        match &self.phase {
-            PalettePhase::Filter => self.selected_entry(),
-            PalettePhase::CollectArgs { entry, .. } => Some(entry),
-        }
+        self.selected_entry()
     }
 
     /// Every chord bound to `name`, resolved through the workspace's
@@ -611,11 +573,6 @@ impl CommandPaletteDelegate {
         singleton.update(cx, |b, cx| b.edit(0..len, text, cx));
     }
 
-    /// Clear the picker query editor's text.
-    fn clear_query_editor(&self, cx: &mut Context<'_, Picker<Self>>) {
-        self.set_query_editor("", cx);
-    }
-
     fn query_editor_text(&self, cx: &Context<'_, Picker<Self>>) -> String {
         let Some(editor) = self.query_editor.as_ref().and_then(WeakEntity::upgrade) else {
             return String::new();
@@ -628,8 +585,9 @@ impl CommandPaletteDelegate {
     }
 
     fn refilter(&mut self, query: &str) {
-        let trimmed = query.trim();
-        if trimmed.is_empty() {
+        self.arg_error = None;
+        let command = query.split_whitespace().next().unwrap_or("");
+        if command.is_empty() {
             self.set_matches_for_empty_query();
             if self.selected >= self.matches.len() {
                 self.selected = self.matches.len().saturating_sub(1);
@@ -646,7 +604,7 @@ impl CommandPaletteDelegate {
                 let aliases = entry.def.aliases().iter().map(|a| a.to_string()).collect();
                 (i, entry.def.name().to_string(), aliases)
             });
-        let ranked = match match_and_rank_aliased(trimmed, items) {
+        let ranked = match match_and_rank_aliased(command, items) {
             Some(r) => r,
             None => {
                 self.set_matches_for_empty_query();
@@ -765,9 +723,6 @@ impl CommandPaletteDelegate {
     /// under way. Returns `true` when an entry was recalled, so the
     /// picker skips its own selection move.
     fn history_navigate_prev(&mut self, cx: &mut Context<'_, Picker<Self>>) -> bool {
-        if !matches!(self.phase, PalettePhase::Filter) {
-            return false;
-        }
         if self.selected != 0 && !self.is_navigating_history() {
             return false;
         }
@@ -786,7 +741,7 @@ impl CommandPaletteDelegate {
     /// newest match. Returns `true` while recall is active so the
     /// picker skips its own selection move.
     fn history_navigate_next(&mut self, cx: &mut Context<'_, Picker<Self>>) -> bool {
-        if !matches!(self.phase, PalettePhase::Filter) || !self.is_navigating_history() {
+        if !self.is_navigating_history() {
             return false;
         }
         let current = self.query_editor_text(cx);
@@ -804,32 +759,20 @@ impl CommandPaletteDelegate {
 
 impl PickerDelegate for CommandPaletteDelegate {
     fn match_count(&self) -> usize {
-        match &self.phase {
-            PalettePhase::Filter => self.matches.len(),
-            PalettePhase::CollectArgs { .. } => 1,
-        }
+        self.matches.len()
     }
 
     fn selected_index(&self) -> usize {
-        match &self.phase {
-            PalettePhase::Filter => self.selected,
-            PalettePhase::CollectArgs { .. } => 0,
-        }
+        self.selected
     }
 
     fn set_selected_index(&mut self, ix: usize, _cx: &mut Context<'_, Picker<Self>>) {
-        if matches!(self.phase, PalettePhase::CollectArgs { .. }) {
-            return;
-        }
         if ix < self.matches.len() {
             self.selected = ix;
         }
     }
 
     fn update_matches(&mut self, query: String, _cx: &mut Context<'_, Picker<Self>>) -> Task<()> {
-        if matches!(self.phase, PalettePhase::CollectArgs { .. }) {
-            return Task::ready(());
-        }
         self.refilter(&query);
         Task::ready(())
     }
@@ -840,89 +783,35 @@ impl PickerDelegate for CommandPaletteDelegate {
         window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) {
-        let step = match &self.phase {
-            PalettePhase::Filter => ConfirmStep::Filter,
-            PalettePhase::CollectArgs { entry, current, .. } => ConfirmStep::CollectArgs {
-                entry,
-                current: *current,
+        let Some(entry) = self.selected_entry() else {
+            return;
+        };
+        let query = self.query_editor_text(cx);
+        let values = match parse_inline_args(entry.def.params(), command_args(&query)) {
+            Ok(values) => values,
+            Err(err) => {
+                self.arg_error = Some(err.to_string());
+                cx.notify();
+                return;
             },
         };
-        match step {
-            ConfirmStep::Filter => {
-                let Some(entry) = self.selected_entry() else {
-                    return;
-                };
-                let query = self.query_editor_text(cx);
-                self.record_query(query, window, cx);
-                if entry.def.params().is_empty() {
-                    dispatch_action(entry, &[], &self.workspace, window, cx);
-                    return;
-                }
-                self.phase = PalettePhase::CollectArgs {
-                    entry,
-                    collected: Vec::new(),
-                    current: 0,
-                    error: None,
-                };
-                self.clear_query_editor(cx);
+        let action = match (entry.create)(&values) {
+            Ok(action) => action,
+            Err(err) => {
+                self.arg_error = Some(err.to_string());
                 cx.notify();
+                return;
             },
-            ConfirmStep::CollectArgs { entry, current } => {
-                let params = entry.def.params();
-                let kind = params[current].kind;
-                let text = self.query_editor_text(cx);
-                match ParamValue::parse(kind, &text) {
-                    Ok(value) => {
-                        let PalettePhase::CollectArgs {
-                            collected, error, ..
-                        } = &mut self.phase
-                        else {
-                            return;
-                        };
-                        collected.push(value);
-                        *error = None;
-                        if collected.len() == params.len() {
-                            let collected = std::mem::take(collected);
-                            self.phase = PalettePhase::Filter;
-                            self.clear_query_editor(cx);
-                            dispatch_action(entry, &collected, &self.workspace, window, cx);
-                        } else {
-                            let next_current = collected.len();
-                            let collected = std::mem::take(collected);
-                            self.phase = PalettePhase::CollectArgs {
-                                entry,
-                                collected,
-                                current: next_current,
-                                error: None,
-                            };
-                            self.clear_query_editor(cx);
-                            cx.notify();
-                        }
-                    },
-                    Err(e) => {
-                        let PalettePhase::CollectArgs { error, .. } = &mut self.phase else {
-                            return;
-                        };
-                        *error = Some(e.to_string());
-                        cx.notify();
-                    },
-                }
-            },
-        }
+        };
+        self.arg_error = None;
+        self.record_query(query, window, cx);
+        dispatch_action(action, &self.workspace, window, cx);
     }
 
     fn dismissed(&mut self, _cx: &mut Context<'_, Picker<Self>>) {}
 
     fn render_match(&self, ix: usize, cx: &mut Context<'_, Picker<Self>>) -> AnyElement {
-        match &self.phase {
-            PalettePhase::Filter => self.render_filter_match(ix, cx),
-            PalettePhase::CollectArgs {
-                entry,
-                current,
-                error,
-                ..
-            } => render_collect_args_prompt(entry, *current, error.as_deref(), cx),
-        }
+        self.render_filter_match(ix, cx)
     }
 
     fn on_attach(&mut self, query_editor: &Entity<Editor>) {
@@ -931,7 +820,7 @@ impl PickerDelegate for CommandPaletteDelegate {
 
     fn handle_action(
         &mut self,
-        action: &dyn stoat_action::Action,
+        action: &dyn Action,
         _window: &mut Window,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> bool {
@@ -951,9 +840,6 @@ impl PickerDelegate for CommandPaletteDelegate {
         ix: usize,
         cx: &mut Context<'_, Picker<Self>>,
     ) -> Option<SharedString> {
-        if !matches!(self.phase, PalettePhase::Filter) {
-            return None;
-        }
         let (entry_idx, _) = self.matches.get(ix)?;
         let name = self.entries.get(*entry_idx)?.def.name();
         let workspace = self.workspace.upgrade()?;
@@ -1031,12 +917,19 @@ impl PickerDelegate for CommandPaletteDelegate {
             )
             .child(chord_rows);
 
-        Some(
-            pane.child(name_line)
-                .child(keybindings)
-                .child(action_help(entry, text_color, muted_color))
-                .into_any_element(),
-        )
+        let mut pane = pane.child(name_line).child(keybindings).child(action_help(
+            entry,
+            text_color,
+            muted_color,
+        ));
+        if let Some(error) = &self.arg_error {
+            pane = pane.child(
+                div()
+                    .text_color(cx.theme().error)
+                    .child(SharedString::from(error.clone())),
+            );
+        }
+        Some(pane.into_any_element())
     }
 }
 
@@ -1121,24 +1014,11 @@ fn param_line(param: &ParamDef) -> String {
 }
 
 fn dispatch_action(
-    entry: &'static RegistryEntry,
-    args: &[ParamValue],
+    action: Box<dyn Action>,
     workspace: &WeakEntity<Workspace>,
     window: &mut Window,
     cx: &mut Context<'_, Picker<CommandPaletteDelegate>>,
 ) {
-    let action = match (entry.create)(args) {
-        Ok(a) => a,
-        Err(err) => {
-            tracing::warn!(
-                target: "stoat_gui::command_palette",
-                action = entry.def.name(),
-                ?err,
-                "command palette could not build action from collected params",
-            );
-            return;
-        },
-    };
     let Some(workspace) = workspace.upgrade() else {
         return;
     };
@@ -1161,41 +1041,53 @@ fn dispatch_action(
     });
 }
 
-fn render_collect_args_prompt(
-    entry: &'static RegistryEntry,
-    current: usize,
-    error: Option<&str>,
-    cx: &mut Context<'_, Picker<CommandPaletteDelegate>>,
-) -> AnyElement {
-    let params = entry.def.params();
-    let total = params.len();
-    let Some(param) = params.get(current) else {
-        return div().into_any_element();
-    };
-    let color = cx.theme().modal_palette;
-    let header = format!(
-        "[{}/{}] {} ({})",
-        current + 1,
-        total,
-        param.name,
-        param.kind,
-    );
-    let description = param.description;
-    let mut block = div()
-        .flex()
-        .flex_col()
-        .px_2()
-        .text_color(color)
-        .child(div().child(SharedString::from(header)))
-        .child(div().child(SharedString::from(description)));
-    if let Some(message) = error {
-        block = block.child(
-            div()
-                .text_color(cx.theme().error)
-                .child(SharedString::from(message.to_string())),
-        );
+/// The argument text following the leading command token of a palette
+/// query -- everything after the first run of whitespace, empty when the
+/// query is a single token. The command token alone is what the action
+/// list matches against.
+fn command_args(query: &str) -> &str {
+    match query.trim_start().split_once(char::is_whitespace) {
+        Some((_command, args)) => args,
+        None => "",
     }
-    block.into_any_element()
+}
+
+/// Parse `args_text` into one [`ParamValue`] per leading parameter of
+/// `params`.
+///
+/// Every parameter before the last consumes a single whitespace-delimited
+/// token; the last consumes the remainder of the line when it is a
+/// [`ParamKind::String`] (so paths and shell commands with spaces survive),
+/// otherwise a single token. Parsing stops at the first empty slot, leaving
+/// trailing optional parameters for the action factory to default -- a
+/// required parameter left empty surfaces as a build error from the factory,
+/// not here.
+fn parse_inline_args(params: &[ParamDef], args_text: &str) -> Result<Vec<ParamValue>, ParamError> {
+    let mut values = Vec::with_capacity(params.len());
+    let mut rest = args_text.trim_start();
+    for (i, param) in params.iter().enumerate() {
+        let last = i + 1 == params.len();
+        let raw = if last && param.kind == ParamKind::String {
+            rest.trim()
+        } else {
+            match rest.split_once(char::is_whitespace) {
+                Some((token, tail)) => {
+                    rest = tail.trim_start();
+                    token
+                },
+                None => {
+                    let token = rest;
+                    rest = "";
+                    token
+                },
+            }
+        };
+        if raw.is_empty() {
+            break;
+        }
+        values.push(ParamValue::parse(param.kind, raw)?);
+    }
+    Ok(values)
 }
 
 /// Open the command palette as a modal picker. Constructed in
@@ -1257,25 +1149,84 @@ mod tests {
     }
 
     #[test]
-    fn detail_target_is_in_flight_entry_in_collect_args() {
-        let mut delegate = new_all_scope_delegate();
-        let selected = delegate.detail_target().expect("a selected match");
-        let other = delegate
-            .entries
-            .iter()
-            .copied()
-            .find(|e| e.def.name() != selected.def.name())
-            .expect("a second entry");
-        delegate.phase = PalettePhase::CollectArgs {
-            entry: other,
-            collected: Vec::new(),
-            current: 0,
-            error: None,
-        };
+    fn command_args_returns_text_after_command_token() {
+        assert_eq!(command_args("cd foo bar"), "foo bar");
+        assert_eq!(command_args("cd"), "");
+        assert_eq!(command_args("   "), "");
+    }
+
+    #[test]
+    fn parse_inline_args_last_string_consumes_remainder() {
+        let params = [ParamDef {
+            name: "path",
+            kind: ParamKind::String,
+            required: true,
+            description: "",
+        }];
         assert_eq!(
-            delegate.detail_target().map(|e| e.def.name()),
-            Some(other.def.name()),
-            "CollectArgs targets the in-flight entry, not the selection",
+            parse_inline_args(&params, "/a b c"),
+            Ok(vec![ParamValue::String("/a b c".into())]),
+        );
+    }
+
+    #[test]
+    fn parse_inline_args_splits_leading_then_keeps_remainder() {
+        let params = [
+            ParamDef {
+                name: "n",
+                kind: ParamKind::Number,
+                required: true,
+                description: "",
+            },
+            ParamDef {
+                name: "msg",
+                kind: ParamKind::String,
+                required: true,
+                description: "",
+            },
+        ];
+        assert_eq!(
+            parse_inline_args(&params, "42 hello world"),
+            Ok(vec![
+                ParamValue::Number(42.0),
+                ParamValue::String("hello world".into()),
+            ]),
+        );
+    }
+
+    #[test]
+    fn parse_inline_args_empty_yields_no_values() {
+        let params = [ParamDef {
+            name: "path",
+            kind: ParamKind::String,
+            required: true,
+            description: "",
+        }];
+        assert_eq!(parse_inline_args(&params, "   "), Ok(Vec::new()));
+    }
+
+    #[test]
+    fn parse_inline_args_propagates_parse_failure() {
+        let params = [ParamDef {
+            name: "n",
+            kind: ParamKind::Number,
+            required: true,
+            description: "",
+        }];
+        assert!(matches!(
+            parse_inline_args(&params, "abc"),
+            Err(ParamError::ParseFailure { .. }),
+        ));
+    }
+
+    #[test]
+    fn refilter_matches_on_command_token_ignoring_args() {
+        let mut delegate = new_all_scope_delegate();
+        delegate.refilter("open /tmp/file.rs");
+        let names = matched_names(&delegate);
+        assert!(
+            names.contains(&"open"),
+            "command token `open` should match despite trailing args, got {names:?}",
         );
     }
 
@@ -1710,7 +1661,6 @@ mod tests {
         use crate::globals::ExecutorGlobal;
         use gpui::{AppContext, TestAppContext, VisualTestContext};
         use std::sync::Arc;
-        use stoat_action::{ActionKind, ParamKind};
         use stoat_scheduler::{Executor, TestScheduler};
 
         fn install_executor_global(cx: &mut TestAppContext) {
@@ -1784,7 +1734,7 @@ mod tests {
         }
 
         #[test]
-        fn confirm_filter_zero_arg_stays_in_filter() {
+        fn confirm_zero_arg_action_sets_no_error() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
             let entry = select_entry_by_name(&mut h, "quit");
@@ -1793,155 +1743,61 @@ mod tests {
                 "quit is expected to be zero-arg",
             );
             confirm(&mut h);
-            let in_filter = h.picker.read_with(h.vcx, |p, _cx| {
-                matches!(p.delegate().phase, PalettePhase::Filter)
-            });
-            assert!(
-                in_filter,
-                "Filter phase must persist after zero-arg confirm"
-            );
+            let error = h
+                .picker
+                .read_with(h.vcx, |p, _cx| p.delegate().arg_error.clone());
+            assert_eq!(error, None, "zero-arg confirm must not set an arg error");
         }
 
         #[test]
-        fn confirm_filter_param_action_enters_collect_args() {
+        fn confirm_inline_arg_parses_and_clears_error() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
+            type_query(&mut h, "open /tmp/example.rs");
             select_entry_by_name(&mut h, "open");
             confirm(&mut h);
-            let snapshot = h
+            let error = h
                 .picker
-                .read_with(h.vcx, |p, _cx| match &p.delegate().phase {
-                    PalettePhase::CollectArgs {
-                        entry,
-                        current,
-                        collected,
-                        error,
-                    } => Some((entry.def.kind(), *current, collected.len(), error.clone())),
-                    PalettePhase::Filter => None,
-                });
+                .read_with(h.vcx, |p, _cx| p.delegate().arg_error.clone());
             assert_eq!(
-                snapshot,
-                Some((ActionKind::OpenFile, 0, 0, None)),
-                "param-taking confirm must transition into CollectArgs",
+                error, None,
+                "a valid inline argument must parse and dispatch without error",
             );
         }
 
         #[test]
-        fn match_count_in_collect_args_returns_one() {
+        fn confirm_missing_required_arg_sets_arg_error() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
+            type_query(&mut h, "open");
             select_entry_by_name(&mut h, "open");
             confirm(&mut h);
-            let count = h
+            let error = h
                 .picker
-                .read_with(h.vcx, |p, _cx| p.delegate().match_count());
-            assert_eq!(count, 1);
-        }
-
-        #[test]
-        fn selected_index_in_collect_args_pinned_to_zero() {
-            let mut cx = TestAppContext::single();
-            let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "open");
-            confirm(&mut h);
-            h.picker.update(h.vcx, |p, cx| {
-                p.delegate_mut().set_selected_index(5, cx);
-            });
-            let ix = h
-                .picker
-                .read_with(h.vcx, |p, _cx| p.delegate().selected_index());
-            assert_eq!(ix, 0);
-        }
-
-        #[test]
-        fn update_matches_in_collect_args_does_not_refilter() {
-            let mut cx = TestAppContext::single();
-            let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "open");
-            confirm(&mut h);
-            type_query(&mut h, "anything goes");
-            let in_collect = h.picker.read_with(h.vcx, |p, _cx| {
-                matches!(p.delegate().phase, PalettePhase::CollectArgs { .. })
-                    && p.delegate().match_count() == 1
-            });
+                .read_with(h.vcx, |p, _cx| p.delegate().arg_error.clone());
             assert!(
-                in_collect,
-                "typing must not pull the delegate out of CollectArgs"
+                error.is_some_and(|e| e.contains("path")),
+                "a missing required `path` must surface inline",
             );
         }
 
         #[test]
-        fn entering_collect_args_clears_query_editor() {
+        fn typing_clears_prior_arg_error() {
             let mut cx = TestAppContext::single();
             let mut h = new_harness(&mut cx);
-            type_query(&mut h, "OpenF");
+            type_query(&mut h, "open");
             select_entry_by_name(&mut h, "open");
             confirm(&mut h);
-            let text = h.picker.read_with(h.vcx, |p, cx| {
-                p.query_editor()
-                    .read(cx)
-                    .multi_buffer()
-                    .read(cx)
-                    .as_singleton()
-                    .expect("singleton")
-                    .read(cx)
-                    .text()
-            });
-            assert_eq!(text, "");
-        }
-
-        #[test]
-        fn collect_args_with_valid_input_resets_to_filter_phase() {
-            let mut cx = TestAppContext::single();
-            let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "open");
-            confirm(&mut h);
-            type_query(&mut h, "/tmp/example.rs");
-            confirm(&mut h);
-            let back_to_filter = h.picker.read_with(h.vcx, |p, _cx| {
-                matches!(p.delegate().phase, PalettePhase::Filter)
-            });
             assert!(
-                back_to_filter,
-                "single-param OpenFile must collect its arg and return to Filter",
+                h.picker
+                    .read_with(h.vcx, |p, _cx| p.delegate().arg_error.is_some()),
+                "precondition: confirm with a missing arg sets the error",
             );
-        }
-
-        #[test]
-        fn collect_args_clears_query_between_steps_when_advancing() {
-            let mut cx = TestAppContext::single();
-            let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "open");
-            confirm(&mut h);
-            type_query(&mut h, "/tmp/a.rs");
-            confirm(&mut h);
-            let text = h.picker.read_with(h.vcx, |p, cx| {
-                p.query_editor()
-                    .read(cx)
-                    .multi_buffer()
-                    .read(cx)
-                    .as_singleton()
-                    .expect("singleton")
-                    .read(cx)
-                    .text()
-            });
-            assert_eq!(text, "");
-        }
-
-        #[test]
-        fn render_collect_args_renders_param_prompt_at_ix_zero() {
-            let mut cx = TestAppContext::single();
-            let mut h = new_harness(&mut cx);
-            select_entry_by_name(&mut h, "open");
-            confirm(&mut h);
-            let entry = h
+            type_query(&mut h, "open /tmp/x.rs");
+            let error = h
                 .picker
-                .read_with(h.vcx, |p, _cx| match &p.delegate().phase {
-                    PalettePhase::CollectArgs { entry, .. } => *entry,
-                    PalettePhase::Filter => panic!("expected CollectArgs"),
-                });
-            assert_eq!(entry.def.params()[0].kind, ParamKind::String);
-            assert_eq!(entry.def.params()[0].name, "path");
+                .read_with(h.vcx, |p, _cx| p.delegate().arg_error.clone());
+            assert_eq!(error, None, "editing the query must clear the inline error");
         }
     }
 
