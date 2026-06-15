@@ -3236,9 +3236,11 @@ impl Workspace {
             ActionKind::OpenLastPicker => self.dispatch_open_last_picker(window, cx),
             ActionKind::OpenRun => crate::run_pane::dispatch_open_run(self, window, cx),
             ActionKind::OpenClaudeTerminal => {
-                crate::terminal_view::dispatch_open_claude_terminal(self, cx)
+                crate::terminal_view::dispatch_open_claude_terminal(self, window, cx)
             },
-            ActionKind::OpenTerminal => crate::terminal_view::dispatch_open_terminal(self, cx),
+            ActionKind::OpenTerminal => {
+                crate::terminal_view::dispatch_open_terminal(self, window, cx)
+            },
             ActionKind::OpenTerminalDock => {
                 crate::run_pane::dispatch_open_terminal_dock(self, window, cx)
             },

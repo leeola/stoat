@@ -727,9 +727,14 @@ impl Focusable for Terminal {
 }
 
 /// Dispatch [`stoat_action::OpenClaudeTerminal`]. Opens a full-screen
-/// terminal running the `claude` CLI in the workspace's git root and adds
-/// it to the focused pane.
-pub fn dispatch_open_claude_terminal(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+/// terminal running the `claude` CLI in the workspace's git root, adds
+/// it to the focused pane, and focuses it so it is type-able without a
+/// click.
+pub fn dispatch_open_claude_terminal(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
     let pane_id = workspace.pane_tree().read(cx).focus();
     let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
         return;
@@ -738,17 +743,24 @@ pub fn dispatch_open_claude_terminal(workspace: &mut Workspace, cx: &mut Context
     let weak_workspace = cx.weak_entity();
     let terminal =
         cx.new(|cx| Terminal::with_command(weak_workspace, cwd, "claude".into(), Vec::new(), cx));
+    let focus_handle = terminal.focus_handle(cx);
     pane.update(cx, |p, cx| {
         let index = p.add_item(Box::new(terminal), cx);
         p.activate(index, cx);
     });
+    window.focus(&focus_handle);
 }
 
 /// Dispatch [`stoat_action::OpenTerminal`]. Opens a full-screen terminal
 /// running the user's shell -- `$SHELL` read through the installed
 /// [`EnvHostGlobal`], falling back to `/bin/sh` when unset -- in the
-/// workspace's git root and adds it to the focused pane.
-pub fn dispatch_open_terminal(workspace: &mut Workspace, cx: &mut Context<'_, Workspace>) {
+/// workspace's git root, adds it to the focused pane, and focuses it so
+/// it is type-able without a click.
+pub fn dispatch_open_terminal(
+    workspace: &mut Workspace,
+    window: &mut Window,
+    cx: &mut Context<'_, Workspace>,
+) {
     let pane_id = workspace.pane_tree().read(cx).focus();
     let Some(pane) = workspace.pane_tree().read(cx).pane(pane_id).cloned() else {
         return;
@@ -760,10 +772,12 @@ pub fn dispatch_open_terminal(workspace: &mut Workspace, cx: &mut Context<'_, Wo
     let cwd = workspace.git_root().clone();
     let weak_workspace = cx.weak_entity();
     let terminal = cx.new(|cx| Terminal::with_command(weak_workspace, cwd, shell, Vec::new(), cx));
+    let focus_handle = terminal.focus_handle(cx);
     pane.update(cx, |p, cx| {
         let index = p.add_item(Box::new(terminal), cx);
         p.activate(index, cx);
     });
+    window.focus(&focus_handle);
 }
 
 #[cfg(test)]
@@ -883,8 +897,8 @@ mod tests {
     fn open_claude_terminal_runs_the_claude_cli() {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);
-        h.workspace.update(h.vcx, |w, cx| {
-            dispatch_open_claude_terminal(w, cx);
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_claude_terminal(w, window, cx);
         });
 
         let term = focused_terminal(&mut h).expect("claude terminal is the focused item");
@@ -898,8 +912,8 @@ mod tests {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);
         h.env.set("SHELL", "/usr/bin/fish");
-        h.workspace.update(h.vcx, |w, cx| {
-            dispatch_open_terminal(w, cx);
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal(w, window, cx);
         });
 
         let term = focused_terminal(&mut h).expect("shell terminal is the focused item");
@@ -912,8 +926,8 @@ mod tests {
     fn open_terminal_falls_back_to_sh_without_shell_env() {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);
-        h.workspace.update(h.vcx, |w, cx| {
-            dispatch_open_terminal(w, cx);
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal(w, window, cx);
         });
 
         let term = focused_terminal(&mut h).expect("shell terminal is the focused item");
@@ -926,8 +940,8 @@ mod tests {
         let mut cx = TestAppContext::single();
         let mut h = new_harness(&mut cx);
         open_terminal(&mut h);
-        h.workspace.update(h.vcx, |w, cx| {
-            dispatch_open_claude_terminal(w, cx);
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_claude_terminal(w, window, cx);
         });
 
         let term = focused_terminal(&mut h).expect("opened claude terminal is the active item");
@@ -944,8 +958,8 @@ mod tests {
         let mut h = new_harness(&mut cx);
         h.env.set("SHELL", "/usr/bin/fish");
         open_terminal(&mut h);
-        h.workspace.update(h.vcx, |w, cx| {
-            dispatch_open_terminal(w, cx);
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal(w, window, cx);
         });
 
         let term = focused_terminal(&mut h).expect("opened shell terminal is the active item");
@@ -974,6 +988,25 @@ mod tests {
             h.terminal.sent_bytes(),
             vec![b"a".to_vec()],
             "committed IME text reaches the focused terminal's PTY",
+        );
+    }
+
+    #[test]
+    fn dispatched_terminal_receives_typed_text_without_a_click() {
+        let mut cx = TestAppContext::single();
+        let h = new_harness(&mut cx);
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal(w, window, cx);
+        });
+        h.vcx.run_until_parked();
+
+        h.vcx.simulate_input("a");
+        h.vcx.run_until_parked();
+
+        assert_eq!(
+            h.terminal.sent_bytes(),
+            vec![b"a".to_vec()],
+            "a dispatched terminal is focused on open, so typed text reaches its PTY without a click",
         );
     }
 
