@@ -1817,10 +1817,10 @@ impl Workspace {
                 },
             }
         }
-        cx.subscribe(&buffer, |this, buffer, event, cx| {
-            if matches!(event, crate::BufferEvent::Saved) {
-                this.reload_config_on_save(&buffer, cx);
-            }
+        cx.subscribe(&buffer, |this, buffer, event, cx| match event {
+            crate::BufferEvent::Saved => this.reload_config_on_save(&buffer, cx),
+            crate::BufferEvent::Edited => this.lsp_did_change(&buffer, cx),
+            _ => {},
         })
         .detach();
         self.fs_watcher_driver.update(cx, |driver, _| {
@@ -1887,6 +1887,47 @@ impl Workspace {
         let root = self.git_root.clone();
         self.lsp_manager.update(cx, |manager, cx| {
             manager.did_open(host, language, root, document, cx);
+        });
+    }
+
+    /// Send `textDocument/didChange` (full text) to the language server when a
+    /// path-bound buffer is edited, keeping a persistent server's document view
+    /// in sync. No-op for scratch buffers, unrecognized languages, or when no
+    /// LSP host or language registry is installed.
+    fn lsp_did_change(&mut self, buffer: &Entity<Buffer>, cx: &mut Context<'_, Self>) {
+        let Some(host) = cx
+            .try_global::<crate::globals::LspHostGlobal>()
+            .map(|global| global.0.clone())
+        else {
+            return;
+        };
+        let (path, text, version) = {
+            let buffer = buffer.read(cx);
+            let Some(path) = buffer.file_path().map(|p| p.to_path_buf()) else {
+                return;
+            };
+            (path, buffer.text(), buffer.version() as i32)
+        };
+        let Some(language) = cx
+            .try_global::<crate::globals::LanguageRegistry>()
+            .and_then(|registry| registry.0.for_path(&path))
+        else {
+            return;
+        };
+        let Some(uri) = path_to_uri(&path) else {
+            return;
+        };
+        let change = lsp_types::DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text,
+            }],
+        };
+        let root = self.git_root.clone();
+        self.lsp_manager.update(cx, |manager, cx| {
+            manager.did_change(host, language, root, change, cx);
         });
     }
 
@@ -13528,6 +13569,46 @@ mod tests {
         let opens = fake.observed_opens();
         assert_eq!(opens.len(), 1, "opening a path buffer sends one did_open");
         assert_eq!(opens[0].text_document.text, "fn main() {}\n");
+    }
+
+    #[test]
+    fn editing_a_path_buffer_sends_did_change_to_the_language_server() {
+        use stoat::host::fake::{FakeLsp, FakeLspHost};
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"fn main() {}\n");
+        install_globals_with_fs(&mut cx, fs);
+        let fake = Arc::new(FakeLsp::new());
+        cx.update(|cx| {
+            cx.set_global(crate::globals::LspHostGlobal(
+                Arc::new(FakeLspHost::new(fake.clone())) as Arc<dyn stoat::host::LspHost>,
+            ));
+            cx.set_global(crate::globals::LanguageRegistry::standard());
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let buffer = ws
+            .update(vcx, |w, cx| {
+                w.active_editor(cx).and_then(|editor| {
+                    editor
+                        .read(cx)
+                        .multi_buffer()
+                        .read(cx)
+                        .as_singleton()
+                        .cloned()
+                })
+            })
+            .expect("active editor's singleton buffer");
+        buffer.update(vcx, |b, cx| b.edit(0..0, "x", cx));
+        vcx.run_until_parked();
+
+        let changes = fake.observed_changes();
+        assert_eq!(changes.len(), 1, "editing the buffer sends one did_change");
+        assert_eq!(changes[0].content_changes[0].text, "xfn main() {}\n");
     }
 
     #[test]

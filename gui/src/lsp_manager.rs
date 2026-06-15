@@ -10,7 +10,7 @@
 //! build on; wiring those callers to the cache is layered on top.
 
 use gpui::{Context, Task};
-use lsp_types::{DidOpenTextDocumentParams, TextDocumentItem, Uri};
+use lsp_types::{DidChangeTextDocumentParams, DidOpenTextDocumentParams, TextDocumentItem, Uri};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -112,6 +112,27 @@ impl LspManager {
         })
         .detach();
     }
+
+    /// Send `textDocument/didChange` for the `(root, language)` server.
+    /// Fire-and-forget; assumes the document was already opened via
+    /// [`Self::did_open`].
+    pub fn did_change(
+        &mut self,
+        host: Arc<dyn LspHost>,
+        language: Arc<Language>,
+        root: PathBuf,
+        change: DidChangeTextDocumentParams,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let root_uri = path_to_uri(&root);
+        let server = self.server(host, language, root, root_uri, cx);
+        cx.spawn(async move |_this, _cx| {
+            if let Some(server) = server.await {
+                let _ = server.did_change(change).await;
+            }
+        })
+        .detach();
+    }
 }
 
 impl Default for LspManager {
@@ -203,5 +224,33 @@ mod tests {
         assert_eq!(opens.len(), 1, "did_open reaches the server once");
         assert_eq!(opens[0].text_document.uri, uri);
         assert_eq!(opens[0].text_document.text, "fn main() {}");
+    }
+
+    #[test]
+    fn did_change_sends_the_update_to_the_server() {
+        let mut cx = TestAppContext::single();
+        let fake = Arc::new(FakeLsp::new());
+        let host: Arc<dyn LspHost> = Arc::new(FakeLspHost::new(fake.clone()));
+        let manager = cx.update(|cx| cx.new(|_| LspManager::new()));
+        let rust = language_for("main.rs");
+        let root = PathBuf::from("/repo");
+        let uri = path_to_uri(Path::new("/repo/main.rs")).expect("uri");
+        let change = DidChangeTextDocumentParams {
+            text_document: lsp_types::VersionedTextDocumentIdentifier { uri, version: 2 },
+            content_changes: vec![lsp_types::TextDocumentContentChangeEvent {
+                range: None,
+                range_length: None,
+                text: "edited".to_string(),
+            }],
+        };
+
+        manager.update(&mut cx, |m, cx| {
+            m.did_change(host, rust, root, change, cx);
+        });
+        cx.run_until_parked();
+
+        let changes = fake.observed_changes();
+        assert_eq!(changes.len(), 1, "did_change reaches the server once");
+        assert_eq!(changes[0].content_changes[0].text, "edited");
     }
 }
