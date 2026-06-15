@@ -10,7 +10,10 @@
 //! build on; wiring those callers to the cache is layered on top.
 
 use gpui::{Context, Task};
-use lsp_types::{DidChangeTextDocumentParams, DidOpenTextDocumentParams, TextDocumentItem, Uri};
+use lsp_types::{
+    DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
+    TextDocumentIdentifier, TextDocumentItem, Uri,
+};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
@@ -129,6 +132,29 @@ impl LspManager {
         cx.spawn(async move |_this, _cx| {
             if let Some(server) = server.await {
                 let _ = server.did_change(change).await;
+            }
+        })
+        .detach();
+    }
+
+    /// Send `textDocument/didClose` for `uri` to the `(root, language)` server.
+    /// Fire-and-forget.
+    pub fn did_close(
+        &mut self,
+        host: Arc<dyn LspHost>,
+        language: Arc<Language>,
+        root: PathBuf,
+        uri: Uri,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let root_uri = path_to_uri(&root);
+        let server = self.server(host, language, root, root_uri, cx);
+        cx.spawn(async move |_this, _cx| {
+            if let Some(server) = server.await {
+                let params = DidCloseTextDocumentParams {
+                    text_document: TextDocumentIdentifier { uri },
+                };
+                let _ = server.did_close(params).await;
             }
         })
         .detach();
@@ -252,5 +278,25 @@ mod tests {
         let changes = fake.observed_changes();
         assert_eq!(changes.len(), 1, "did_change reaches the server once");
         assert_eq!(changes[0].content_changes[0].text, "edited");
+    }
+
+    #[test]
+    fn did_close_sends_the_close_to_the_server() {
+        let mut cx = TestAppContext::single();
+        let fake = Arc::new(FakeLsp::new());
+        let host: Arc<dyn LspHost> = Arc::new(FakeLspHost::new(fake.clone()));
+        let manager = cx.update(|cx| cx.new(|_| LspManager::new()));
+        let rust = language_for("main.rs");
+        let root = PathBuf::from("/repo");
+        let uri = path_to_uri(Path::new("/repo/main.rs")).expect("uri");
+
+        manager.update(&mut cx, |m, cx| {
+            m.did_close(host, rust, root, uri.clone(), cx);
+        });
+        cx.run_until_parked();
+
+        let closes = fake.observed_closes();
+        assert_eq!(closes.len(), 1, "did_close reaches the server once");
+        assert_eq!(closes[0].text_document.uri, uri);
     }
 }

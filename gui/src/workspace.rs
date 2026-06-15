@@ -1931,6 +1931,31 @@ impl Workspace {
         });
     }
 
+    /// Send `textDocument/didClose` to the language server when the last editor
+    /// for a path-bound buffer is closed. No-op for unrecognized languages or
+    /// when no LSP host or language registry is installed.
+    fn lsp_did_close(&mut self, path: &Path, cx: &mut Context<'_, Self>) {
+        let Some(host) = cx
+            .try_global::<crate::globals::LspHostGlobal>()
+            .map(|global| global.0.clone())
+        else {
+            return;
+        };
+        let Some(language) = cx
+            .try_global::<crate::globals::LanguageRegistry>()
+            .and_then(|registry| registry.0.for_path(path))
+        else {
+            return;
+        };
+        let Some(uri) = path_to_uri(path) else {
+            return;
+        };
+        let root = self.git_root.clone();
+        self.lsp_manager.update(cx, |manager, cx| {
+            manager.did_close(host, language, root, uri, cx);
+        });
+    }
+
     /// Re-bind [`Workspace::_active_editor_subscription`] to the focused
     /// pane's active editor (if any). Each [`EditorEvent::Changed`]
     /// notifies the workspace so the window-title formatter picks up
@@ -2002,6 +2027,7 @@ impl Workspace {
         if self.path_is_open_in_any_pane(path, cx) {
             return;
         }
+        self.lsp_did_close(path, cx);
         let Some(id) = self.buffer_registry.read(cx).id_for_path(path) else {
             return;
         };
@@ -13609,6 +13635,33 @@ mod tests {
         let changes = fake.observed_changes();
         assert_eq!(changes.len(), 1, "editing the buffer sends one did_change");
         assert_eq!(changes[0].content_changes[0].text, "xfn main() {}\n");
+    }
+
+    #[test]
+    fn closing_a_path_buffer_sends_did_close_to_the_language_server() {
+        use stoat::host::fake::{FakeLsp, FakeLspHost};
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"fn main() {}\n");
+        install_globals_with_fs(&mut cx, fs);
+        let fake = Arc::new(FakeLsp::new());
+        cx.update(|cx| {
+            cx.set_global(crate::globals::LspHostGlobal(
+                Arc::new(FakeLspHost::new(fake.clone())) as Arc<dyn stoat::host::LspHost>,
+            ));
+            cx.set_global(crate::globals::LanguageRegistry::standard());
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        dispatch(&ws, vcx, stoat_action::CloseBuffer);
+        vcx.run_until_parked();
+
+        let closes = fake.observed_closes();
+        assert_eq!(closes.len(), 1, "closing a path buffer sends one did_close");
     }
 
     #[test]

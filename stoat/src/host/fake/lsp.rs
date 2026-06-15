@@ -204,6 +204,7 @@ struct FakeLspState {
     observed_replies: Vec<(NumberOrString, Result<Value, LspResponseError>)>,
     observed_opens: Vec<DidOpenTextDocumentParams>,
     observed_changes: Vec<DidChangeTextDocumentParams>,
+    observed_closes: Vec<DidCloseTextDocumentParams>,
     prepare_renames: BTreeMap<LspKey, PrepareRenameResponse>,
     renames: BTreeMap<LspKey, WorkspaceEdit>,
     open_documents: BTreeMap<Uri, String>,
@@ -275,6 +276,7 @@ impl FakeLsp {
                 observed_replies: Vec::new(),
                 observed_opens: Vec::new(),
                 observed_changes: Vec::new(),
+                observed_closes: Vec::new(),
                 prepare_renames: BTreeMap::new(),
                 renames: BTreeMap::new(),
                 open_documents: BTreeMap::new(),
@@ -643,6 +645,12 @@ impl FakeLsp {
     /// quiet window with the latest text and a monotonic version.
     pub fn observed_changes(&self) -> Vec<DidChangeTextDocumentParams> {
         self.state.lock().unwrap().observed_changes.clone()
+    }
+
+    /// Snapshot of every [`DidCloseTextDocumentParams`] received via
+    /// [`LspServer::did_close`] in call order.
+    pub fn observed_closes(&self) -> Vec<DidCloseTextDocumentParams> {
+        self.state.lock().unwrap().observed_closes.clone()
     }
 
     /// Snapshot of every [`DidChangeWatchedFilesParams`] received
@@ -1429,11 +1437,9 @@ impl LspServer for FakeLsp {
     }
 
     async fn did_close(&self, params: DidCloseTextDocumentParams) -> io::Result<()> {
-        self.state
-            .lock()
-            .unwrap()
-            .open_documents
-            .remove(&params.text_document.uri);
+        let mut state = self.state.lock().unwrap();
+        state.open_documents.remove(&params.text_document.uri);
+        state.observed_closes.push(params);
         Ok(())
     }
 
