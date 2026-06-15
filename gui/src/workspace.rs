@@ -314,6 +314,9 @@ impl Workspace {
         let lsp_state = cx.new(|_| LspState::new());
         let lsp_manager = cx.new(|_| LspManager::new());
         let diagnostics = cx.new(|_| DiagnosticSet::new());
+        lsp_manager.update(cx, |manager, _| {
+            manager.set_diagnostics(diagnostics.downgrade())
+        });
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
         let key_hint_banner = cx.new(|cx| KeyHintBanner::new(input_state_machine.clone(), cx));
         let workspace_label = cx.new(|_| WorkspaceLabel::new(name.clone()));
@@ -13606,6 +13609,42 @@ mod tests {
         let opens = fake.observed_opens();
         assert_eq!(opens.len(), 1, "opening a path buffer sends one did_open");
         assert_eq!(opens[0].text_document.text, "fn main() {}\n");
+    }
+
+    #[test]
+    fn server_pushed_diagnostics_reach_the_workspace_set() {
+        use stoat::host::fake::{FakeLsp, FakeLspHost};
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"fn main() {}\n");
+        install_globals_with_fs(&mut cx, fs);
+        let fake = Arc::new(FakeLsp::new());
+        fake.add_error("/tmp/repo/foo.rs", 0, 0, 2, "boom");
+        cx.update(|cx| {
+            cx.set_global(crate::globals::LspHostGlobal(
+                Arc::new(FakeLspHost::new(fake.clone())) as Arc<dyn stoat::host::LspHost>,
+            ));
+            cx.set_global(crate::globals::LanguageRegistry::standard());
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let diagnostics = ws.read_with(vcx, |w, cx| {
+            w.diagnostics()
+                .read(cx)
+                .get(&PathBuf::from("/tmp/repo/foo.rs"))
+                .to_vec()
+        });
+        assert_eq!(
+            diagnostics.len(),
+            1,
+            "a server-pushed diagnostic reaches the workspace diagnostic set",
+        );
+        assert_eq!(diagnostics[0].message, "boom");
     }
 
     #[test]

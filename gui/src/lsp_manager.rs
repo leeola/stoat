@@ -9,8 +9,9 @@
 //! This is the foundation the request sites and buffer-lifecycle document sync
 //! build on; wiring those callers to the cache is layered on top.
 
+use crate::{diagnostics::DiagnosticSet, lsp::edit_apply};
 use futures::{future::Shared, FutureExt};
-use gpui::{Context, Task};
+use gpui::{AsyncApp, Context, Task, WeakEntity};
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
     TextDocumentIdentifier, TextDocumentItem, Uri,
@@ -21,7 +22,7 @@ use std::{
     str::FromStr,
     sync::Arc,
 };
-use stoat::host::{LspHost, LspServer};
+use stoat::host::{LspHost, LspNotification, LspServer};
 use stoat_language::Language;
 
 /// `file://` URI for an absolute path, or `None` when the path is not valid
@@ -51,6 +52,17 @@ pub struct LspManager {
     /// key rather than one per request. The launch task removes its entry and
     /// promotes the server into [`Self::servers`] once it resolves.
     in_flight: HashMap<(PathBuf, &'static str), SharedLaunch>,
+
+    /// Sink for server-pushed diagnostics, set by the owning workspace via
+    /// [`Self::set_diagnostics`]. `None` until wired, in which case launched
+    /// servers' diagnostics are dropped.
+    diagnostics: Option<WeakEntity<DiagnosticSet>>,
+
+    /// One notification-poll task per launched server, keyed like
+    /// [`Self::servers`]. Each forwards `textDocument/publishDiagnostics`
+    /// into [`Self::diagnostics`]; dropping the task (when the manager is
+    /// dropped) cancels the loop.
+    pollers: HashMap<(PathBuf, &'static str), Task<()>>,
 }
 
 impl LspManager {
@@ -58,7 +70,16 @@ impl LspManager {
         Self {
             servers: HashMap::new(),
             in_flight: HashMap::new(),
+            diagnostics: None,
+            pollers: HashMap::new(),
         }
+    }
+
+    /// Route every launched server's pushed diagnostics into `diagnostics`.
+    /// Call once after construction; servers launched before this is set
+    /// drop their diagnostics.
+    pub fn set_diagnostics(&mut self, diagnostics: WeakEntity<DiagnosticSet>) {
+        self.diagnostics = Some(diagnostics);
     }
 
     /// The already-launched server for `(root, language)`, if one is cached.
@@ -99,9 +120,12 @@ impl LspManager {
                 let key = key.clone();
                 async move |this, cx| {
                     let server = launch_and_initialize(host, language, &key.0, root_uri).await;
-                    this.update(cx, |manager, _| {
+                    this.update(cx, |manager, cx| {
                         manager.in_flight.remove(&key);
-                        server.map(|server| manager.servers.entry(key).or_insert(server).clone())
+                        let server = server?;
+                        let cached = manager.servers.entry(key.clone()).or_insert(server).clone();
+                        manager.spawn_diagnostics_poller(key, cached.clone(), cx);
+                        Some(cached)
                     })
                     .ok()
                     .flatten()
@@ -111,6 +135,22 @@ impl LspManager {
 
         self.in_flight.insert(key, launch.clone());
         cx.spawn(async move |_, _| launch.await)
+    }
+
+    /// Start forwarding `server`'s pushed diagnostics into the configured
+    /// sink, keyed under `key` so the poll task is cancelled when the manager
+    /// drops. No-op when no diagnostics sink is set.
+    fn spawn_diagnostics_poller(
+        &mut self,
+        key: (PathBuf, &'static str),
+        server: Arc<dyn LspServer>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let Some(diagnostics) = self.diagnostics.clone() else {
+            return;
+        };
+        let poller = cx.spawn(async move |_, cx| poll_diagnostics(server, diagnostics, cx).await);
+        self.pollers.insert(key, poller);
     }
 
     /// Send `textDocument/didOpen` for `document` to the `(root, language)`
@@ -200,6 +240,35 @@ async fn launch_and_initialize(
     let server: Arc<dyn LspServer> = Arc::from(boxed);
     server.initialize(root_uri).await.ok()?;
     Some(server)
+}
+
+/// Forward `server`'s pushed `textDocument/publishDiagnostics` into
+/// `diagnostics`, keyed by document path, until the server's notification
+/// channel closes or the sink entity is dropped.
+async fn poll_diagnostics(
+    server: Arc<dyn LspServer>,
+    diagnostics: WeakEntity<DiagnosticSet>,
+    cx: &mut AsyncApp,
+) {
+    while let Some(notification) = server.recv_notification().await {
+        let LspNotification::Diagnostics {
+            uri,
+            diagnostics: diags,
+            ..
+        } = notification
+        else {
+            continue;
+        };
+        let Some(path) = edit_apply::uri_to_path(&uri) else {
+            continue;
+        };
+        if diagnostics
+            .update(cx, |set, cx| set.replace_for_path(path, diags, cx))
+            .is_err()
+        {
+            break;
+        }
+    }
 }
 
 #[cfg(test)]
