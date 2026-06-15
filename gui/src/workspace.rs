@@ -17,6 +17,7 @@ use crate::{
     item::ItemHandle,
     key_hint_banner::KeyHintBanner,
     keymap_loader::{compile_default_keymap, compile_from_settings},
+    lsp_manager::{path_to_uri, LspManager},
     lsp_state::LspState,
     modal_layer::{ModalLayer, ModalView},
     multi_buffer::MultiBuffer,
@@ -134,6 +135,7 @@ pub struct Workspace {
     input_state_machine: Entity<InputStateMachine>,
     editor_input: Entity<EditorInput>,
     lsp_state: Entity<LspState>,
+    lsp_manager: Entity<LspManager>,
     diagnostics: Entity<DiagnosticSet>,
     workspace_label: Entity<WorkspaceLabel>,
     active_file_label: Entity<ActiveFileLabel>,
@@ -310,6 +312,7 @@ impl Workspace {
             .collect();
 
         let lsp_state = cx.new(|_| LspState::new());
+        let lsp_manager = cx.new(|_| LspManager::new());
         let diagnostics = cx.new(|_| DiagnosticSet::new());
         let mode_badge = cx.new(|cx| ModeBadge::new(input_state_machine.clone(), cx));
         let key_hint_banner = cx.new(|cx| KeyHintBanner::new(input_state_machine.clone(), cx));
@@ -332,10 +335,11 @@ impl Workspace {
         let fs_watcher_driver = cx.new(FsWatcherDriver::new);
         let buffer_registry_subscription = cx.subscribe(
             &buffer_registry,
-            |workspace, _, event: &BufferRegistryEvent, cx| {
-                if let BufferRegistryEvent::BufferRemoved(id) = event {
+            |workspace, _, event: &BufferRegistryEvent, cx| match event {
+                BufferRegistryEvent::BufferAdded(id) => workspace.lsp_did_open(*id, cx),
+                BufferRegistryEvent::BufferRemoved(id) => {
                     workspace.release_buffer_watch(*id, cx);
-                }
+                },
             },
         );
         let fs_watcher_subscription = cx.subscribe(
@@ -421,6 +425,7 @@ impl Workspace {
             input_state_machine,
             editor_input,
             lsp_state,
+            lsp_manager,
             diagnostics,
             workspace_label,
             active_file_label,
@@ -1836,6 +1841,52 @@ impl Workspace {
         }
         self.fs_watcher_driver.update(cx, |driver, _| {
             driver.untrack(&path);
+        });
+    }
+
+    /// Send `textDocument/didOpen` to the language server for a freshly opened
+    /// path-bound buffer, so a persistent server has the document to answer
+    /// completion and hover against. No-op for scratch buffers, unrecognized
+    /// languages, or when no LSP host or language registry is installed.
+    fn lsp_did_open(&mut self, buffer_id: BufferId, cx: &mut Context<'_, Self>) {
+        let Some(host) = cx
+            .try_global::<crate::globals::LspHostGlobal>()
+            .map(|global| global.0.clone())
+        else {
+            return;
+        };
+        let opened = {
+            let registry = self.buffer_registry.read(cx);
+            let Some(path) = registry.path_for(buffer_id).map(|p| p.to_path_buf()) else {
+                return;
+            };
+            let Some(shared) = registry.get(buffer_id) else {
+                return;
+            };
+            let Ok(buffer) = shared.read() else {
+                return;
+            };
+            (path, buffer.rope().to_string(), buffer.version() as i32)
+        };
+        let (path, text, version) = opened;
+        let Some(language) = cx
+            .try_global::<crate::globals::LanguageRegistry>()
+            .and_then(|registry| registry.0.for_path(&path))
+        else {
+            return;
+        };
+        let Some(uri) = path_to_uri(&path) else {
+            return;
+        };
+        let document = lsp_types::TextDocumentItem {
+            uri,
+            language_id: language.name.to_string(),
+            version,
+            text,
+        };
+        let root = self.git_root.clone();
+        self.lsp_manager.update(cx, |manager, cx| {
+            manager.did_open(host, language, root, document, cx);
         });
     }
 
@@ -13451,6 +13502,32 @@ mod tests {
             assert_eq!(pane.len(), 1);
             assert!(pane.active_item().is_some());
         });
+    }
+
+    #[test]
+    fn opening_a_path_buffer_sends_did_open_to_the_language_server() {
+        use stoat::host::fake::{FakeLsp, FakeLspHost};
+        let mut cx = TestAppContext::single();
+        let fs: Arc<stoat::host::FakeFs> = Arc::new(stoat::host::FakeFs::new());
+        fs.insert_file("/tmp/repo/foo.rs", b"fn main() {}\n");
+        install_globals_with_fs(&mut cx, fs);
+        let fake = Arc::new(FakeLsp::new());
+        cx.update(|cx| {
+            cx.set_global(crate::globals::LspHostGlobal(
+                Arc::new(FakeLspHost::new(fake.clone())) as Arc<dyn stoat::host::LspHost>,
+            ));
+            cx.set_global(crate::globals::LanguageRegistry::standard());
+        });
+        let (ws, vcx) = new_workspace_in_window(&mut cx, "main", "/tmp/repo");
+
+        ws.update(vcx, |w, cx| {
+            w.open_paths(&[PathBuf::from("/tmp/repo/foo.rs")], cx)
+        });
+        vcx.run_until_parked();
+
+        let opens = fake.observed_opens();
+        assert_eq!(opens.len(), 1, "opening a path buffer sends one did_open");
+        assert_eq!(opens[0].text_document.text, "fn main() {}\n");
     }
 
     #[test]

@@ -10,14 +10,21 @@
 //! build on; wiring those callers to the cache is layered on top.
 
 use gpui::{Context, Task};
-use lsp_types::Uri;
+use lsp_types::{DidOpenTextDocumentParams, TextDocumentItem, Uri};
 use std::{
     collections::HashMap,
     path::{Path, PathBuf},
+    str::FromStr,
     sync::Arc,
 };
 use stoat::host::{LspHost, LspServer};
 use stoat_language::Language;
+
+/// `file://` URI for an absolute path, or `None` when the path is not valid
+/// UTF-8.
+pub(crate) fn path_to_uri(path: &Path) -> Option<Uri> {
+    Uri::from_str(&format!("file://{}", path.to_str()?)).ok()
+}
 
 /// Caches one initialized [`LspServer`] per `(workspace_root, language)`.
 ///
@@ -80,6 +87,30 @@ impl LspManager {
                 .ok()?;
             Some(cached)
         })
+    }
+
+    /// Send `textDocument/didOpen` for `document` to the `(root, language)`
+    /// server, launching and initializing it first if needed. Fire-and-forget:
+    /// the notification is dropped if the server cannot be reached.
+    pub fn did_open(
+        &mut self,
+        host: Arc<dyn LspHost>,
+        language: Arc<Language>,
+        root: PathBuf,
+        document: TextDocumentItem,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let root_uri = path_to_uri(&root);
+        let server = self.server(host, language, root, root_uri, cx);
+        cx.spawn(async move |_this, _cx| {
+            if let Some(server) = server.await {
+                let params = DidOpenTextDocumentParams {
+                    text_document: document,
+                };
+                let _ = server.did_open(params).await;
+            }
+        })
+        .detach();
     }
 }
 
@@ -145,5 +176,32 @@ mod tests {
             !Arc::ptr_eq(&rust_server, &json_server),
             "a different language launches its own server",
         );
+    }
+
+    #[test]
+    fn did_open_sends_the_document_to_the_server() {
+        let mut cx = TestAppContext::single();
+        let fake = Arc::new(FakeLsp::new());
+        let host: Arc<dyn LspHost> = Arc::new(FakeLspHost::new(fake.clone()));
+        let manager = cx.update(|cx| cx.new(|_| LspManager::new()));
+        let rust = language_for("main.rs");
+        let root = PathBuf::from("/repo");
+        let uri = path_to_uri(Path::new("/repo/main.rs")).expect("uri");
+        let document = TextDocumentItem {
+            uri: uri.clone(),
+            language_id: "rust".to_string(),
+            version: 0,
+            text: "fn main() {}".to_string(),
+        };
+
+        manager.update(&mut cx, |m, cx| {
+            m.did_open(host, rust, root, document, cx);
+        });
+        cx.run_until_parked();
+
+        let opens = fake.observed_opens();
+        assert_eq!(opens.len(), 1, "did_open reaches the server once");
+        assert_eq!(opens[0].text_document.uri, uri);
+        assert_eq!(opens[0].text_document.text, "fn main() {}");
     }
 }
