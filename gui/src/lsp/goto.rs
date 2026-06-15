@@ -6,7 +6,7 @@ use lsp_types::{
 };
 use std::{path::PathBuf, slice, str::FromStr};
 use stoat::{
-    host::{LanguageServerFeature, LspServer, OffsetEncoding},
+    host::{LanguageServerFeature, OffsetEncoding},
     lsp::util::{byte_offset_to_lsp_pos, lsp_pos_to_byte_offset},
 };
 use stoat_text::Bias;
@@ -50,10 +50,6 @@ impl LspGotoKind {
 /// language registry has no entry for the path, or the server does
 /// not advertise the matching feature. Errors and empty responses
 /// are logged via tracing and swallowed -- the cursor stays put.
-///
-/// FIXME: launches a fresh language server per request (same caveat
-/// as the popups); the per-language LSP server cache will fix every
-/// LSP callsite at once.
 pub fn spawn_goto(
     workspace: &mut Workspace,
     kind: LspGotoKind,
@@ -80,7 +76,6 @@ pub fn spawn_goto(
     let Some(language) = registry.for_path(&path) else {
         return;
     };
-    let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
     let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
     let rope = mb_snapshot.rope().clone();
     let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
@@ -90,28 +85,16 @@ pub fn spawn_goto(
     let Some(source_uri) = path_to_file_uri(&path) else {
         return;
     };
-    let workspace_root = path
-        .parent()
-        .map(std::path::Path::to_path_buf)
-        .unwrap_or_else(|| path.clone());
+    let server = workspace.lsp_server(language, cx);
 
     let weak_workspace = cx.weak_entity();
     let weak_editor = editor.downgrade();
     let source_path = path.clone();
     let request_id = workspace.bump_lsp_goto_request_id();
     cx.spawn_in(window, async move |_, cx| {
-        let server = match host.launch(&language, &workspace_root).await {
-            Ok(s) => std::sync::Arc::<dyn LspServer>::from(s),
-            Err(err) => {
-                tracing::warn!(
-                    target: "stoat_gui::lsp::goto",
-                    ?err,
-                    "failed to launch LSP server for goto"
-                );
-                return;
-            },
+        let Some(server) = server.await else {
+            return;
         };
-        let _ = server.initialize(Some(source_uri.clone())).await;
         if !server.supports_feature(kind.feature()) {
             return;
         }
