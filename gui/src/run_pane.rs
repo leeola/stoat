@@ -24,14 +24,15 @@ pub(crate) mod render;
 use crate::{
     dock::DockSide,
     editor::Editor,
-    globals::{ExecutorGlobal, OpenHostGlobal, TerminalHostGlobal},
+    globals::{EnvHostGlobal, ExecutorGlobal, OpenHostGlobal, TerminalHostGlobal},
     item::{DeserializeSnafu, ItemError, ItemHandle, ItemKind, ItemView},
     settings::Settings,
+    terminal_view::Terminal,
     theme::{ActiveTheme, DEFAULT_EDITOR_FONT_FAMILY},
     workspace::Workspace,
 };
 use gpui::{
-    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, Entity,
+    canvas, div, font, point, px, size, App, AppContext, Bounds, Context, Entity, Focusable,
     InteractiveElement, IntoElement, Modifiers, MouseButton, MouseDownEvent, MouseMoveEvent,
     MouseUpEvent, ParentElement, Pixels, Point, Render, ScrollDelta, ScrollHandle,
     ScrollWheelEvent, SharedString, Size, StatefulInteractiveElement, Styled, Task, WeakEntity,
@@ -980,10 +981,13 @@ pub fn dispatch_run(
     run.update(cx, |r, cx| r.submit_command(command, cx));
 }
 
-/// Dispatch the [`stoat_action::OpenTerminalDock`] action. Opens a
-/// [`Run`] pane as a bottom dock anchored at the workspace's git
-/// root. When a run dock already exists, toggles its visibility
-/// instead of spawning a second one.
+/// Dispatch the [`stoat_action::OpenTerminalDock`] action. Opens an
+/// interactive [`Terminal`] running the user's shell -- `$SHELL` read
+/// through the installed [`EnvHostGlobal`], falling back to `/bin/sh`
+/// when unset -- as a bottom dock anchored at the workspace's git root,
+/// focused so it is type-able without a click. When a terminal dock
+/// already exists, toggles its visibility instead of spawning a second
+/// one.
 pub fn dispatch_open_terminal_dock(
     workspace: &mut Workspace,
     window: &mut Window,
@@ -992,16 +996,22 @@ pub fn dispatch_open_terminal_dock(
     let existing = workspace
         .docks()
         .iter()
-        .find(|dock| dock.read(cx).item().item_kind(cx) == ItemKind::Run)
+        .find(|dock| dock.read(cx).item().item_kind(cx) == ItemKind::Terminal)
         .cloned();
     if let Some(dock) = existing {
         dock.update(cx, |d, cx| d.toggle_open(cx));
         return;
     }
+    let shell = cx
+        .try_global::<EnvHostGlobal>()
+        .and_then(|env| env.0.var("SHELL"))
+        .unwrap_or_else(|| "/bin/sh".to_string());
     let cwd = workspace.git_root().clone();
     let weak_workspace = cx.weak_entity();
-    let run = cx.new(|cx| Run::new(weak_workspace, cwd, window, cx));
-    workspace.add_dock(Box::new(run), DockSide::Bottom, 240, cx);
+    let terminal = cx.new(|cx| Terminal::with_command(weak_workspace, cwd, shell, Vec::new(), cx));
+    let focus_handle = terminal.focus_handle(cx);
+    workspace.add_dock(Box::new(terminal), DockSide::Bottom, 240, cx);
+    window.focus(&focus_handle);
 }
 
 /// Dispatch the [`stoat_action::RunSubmit`] action. Finds the focused
@@ -1158,6 +1168,26 @@ mod tests {
             dispatch_open_terminal_dock(w, window, cx);
         });
         assert_eq!(dock_states(&mut h), vec![(DockSide::Bottom, 240)]);
+    }
+
+    #[test]
+    fn open_terminal_dock_hosts_an_interactive_terminal() {
+        let mut cx = TestAppContext::single();
+        let h = new_harness(&mut cx);
+
+        h.workspace.update_in(h.vcx, |w, window, cx| {
+            dispatch_open_terminal_dock(w, window, cx);
+        });
+
+        h.workspace.read_with(h.vcx, |w, cx| {
+            let docks = w.docks();
+            assert_eq!(docks.len(), 1, "opens a single bottom dock");
+            assert_eq!(
+                docks[0].read(cx).item().item_kind(cx),
+                ItemKind::Terminal,
+                "the dock hosts an interactive terminal, not a Run command-block pane",
+            );
+        });
     }
 
     fn type_into_input(run: &Entity<Run>, h: &mut Harness<'_>, text: &str) {
