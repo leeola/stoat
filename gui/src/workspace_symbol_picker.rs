@@ -8,7 +8,7 @@
 use crate::{
     buffer::Buffer,
     editor::Editor,
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
     picker::{Picker, PickerDelegate, PickerSecondary},
     theme::ActiveTheme,
     workspace::Workspace,
@@ -26,7 +26,7 @@ use std::{
     sync::Arc,
 };
 use stoat::{
-    host::{LanguageServerFeature, LspHost, LspServer, OffsetEncoding},
+    host::{LanguageServerFeature, LspServer, OffsetEncoding},
     lsp::util::lsp_pos_to_byte_offset,
 };
 use stoat_language::Language;
@@ -44,9 +44,7 @@ pub struct WorkspaceSymbolEntry {
 
 pub struct WorkspaceSymbolPickerDelegate {
     workspace: WeakEntity<Workspace>,
-    host: Arc<dyn LspHost>,
     language: Arc<Language>,
-    workspace_root: PathBuf,
     entries: Vec<WorkspaceSymbolEntry>,
     /// Offset encoding from the most-recent successful response.
     /// Defaults to UTF-16 (the LSP spec default) until the first
@@ -56,17 +54,10 @@ pub struct WorkspaceSymbolPickerDelegate {
 }
 
 impl WorkspaceSymbolPickerDelegate {
-    pub fn new(
-        workspace: WeakEntity<Workspace>,
-        host: Arc<dyn LspHost>,
-        language: Arc<Language>,
-        workspace_root: PathBuf,
-    ) -> Self {
+    pub fn new(workspace: WeakEntity<Workspace>, language: Arc<Language>) -> Self {
         Self {
             workspace,
-            host,
             language,
-            workspace_root,
             entries: Vec::new(),
             encoding: OffsetEncoding::Utf16,
             selected: 0,
@@ -102,11 +93,11 @@ impl PickerDelegate for WorkspaceSymbolPickerDelegate {
             return Task::ready(());
         }
         let query = trimmed.to_string();
-        let host = self.host.clone();
+        let workspace = self.workspace.clone();
         let language = self.language.clone();
-        let workspace_root = self.workspace_root.clone();
         cx.spawn(async move |this, cx| {
-            let outcome = run_workspace_symbol(host, language, workspace_root, query).await;
+            let server = crate::lsp::cached_server(&Some(workspace), language, cx).await;
+            let outcome = run_workspace_symbol(server, query).await;
             let Some((entries, encoding)) = outcome else {
                 return;
             };
@@ -177,23 +168,10 @@ impl PickerDelegate for WorkspaceSymbolPickerDelegate {
 }
 
 async fn run_workspace_symbol(
-    host: Arc<dyn LspHost>,
-    language: Arc<Language>,
-    workspace_root: PathBuf,
+    server: Option<Arc<dyn LspServer>>,
     query: String,
 ) -> Option<(Vec<WorkspaceSymbolEntry>, OffsetEncoding)> {
-    let server = match host.launch(&language, &workspace_root).await {
-        Ok(s) => Arc::<dyn LspServer>::from(s),
-        Err(err) => {
-            tracing::warn!(
-                target: "stoat_gui::workspace_symbol_picker",
-                ?err,
-                "failed to launch LSP server for workspace symbols"
-            );
-            return None;
-        },
-    };
-    let _ = server.initialize(None).await;
+    let server = server?;
     if !server.supports_feature(LanguageServerFeature::WorkspaceSymbols) {
         return None;
     }
@@ -281,15 +259,12 @@ pub fn open_workspace_symbol_picker(
     let Some(language) = registry.for_path(&path) else {
         return;
     };
-    let host = cx.global::<LspHostGlobal>().0.clone();
-    let workspace_root = workspace.git_root().clone();
     let weak_workspace = cx.weak_entity();
     workspace.toggle_modal::<Picker<WorkspaceSymbolPickerDelegate>, _>(
         window,
         cx,
         move |window, cx| {
-            let delegate =
-                WorkspaceSymbolPickerDelegate::new(weak_workspace, host, language, workspace_root);
+            let delegate = WorkspaceSymbolPickerDelegate::new(weak_workspace, language);
             Picker::new(delegate, window, cx)
         },
     );
@@ -354,13 +329,13 @@ fn uri_to_path(uri: &Uri) -> Option<PathBuf> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal};
+    use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, LspHostGlobal};
     use gpui::{TestAppContext, VisualTestContext};
     use lsp_types::{Location, Range, SymbolKind};
     use std::str::FromStr;
     use stoat::host::{
         fake::{FakeFs, FakeLsp, FakeLspHost},
-        FsWatchHost,
+        FsWatchHost, LspHost,
     };
     use stoat_host::NoopFsWatcher;
     use stoat_scheduler::{Executor, TestScheduler};
@@ -477,11 +452,9 @@ mod tests {
     fn new_delegate() -> WorkspaceSymbolPickerDelegate {
         WorkspaceSymbolPickerDelegate::new(
             WeakEntity::new_invalid(),
-            Arc::new(FakeLspHost::new(Arc::new(FakeLsp::new()))) as Arc<dyn LspHost>,
             stoat_language::LanguageRegistry::standard()
                 .find_by_name("rust")
                 .expect("rust language registered"),
-            PathBuf::from("/repo"),
         )
     }
 
