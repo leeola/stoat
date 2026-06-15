@@ -6755,7 +6755,6 @@ impl Workspace {
         let Some(language) = registry.for_path(&path) else {
             return;
         };
-        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
         let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
         let rope = mb_snapshot.rope().clone();
         let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
@@ -6767,24 +6766,12 @@ impl Workspace {
         }) else {
             return;
         };
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
+        let server = self.lsp_server(language, cx);
         let weak_workspace = cx.weak_entity();
         cx.spawn_in(window, async move |_, cx| {
-            let server = match host.launch(&language, &workspace_root).await {
-                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "stoat_gui::lsp::references",
-                        ?err,
-                        "failed to launch LSP server for references"
-                    );
-                    return;
-                },
+            let Some(server) = server.await else {
+                return;
             };
-            let _ = server.initialize(Some(uri.clone())).await;
             if !server.supports_feature(stoat::host::LanguageServerFeature::GotoReference) {
                 return;
             }
@@ -6859,7 +6846,6 @@ impl Workspace {
         let Some(language) = registry.for_path(&path) else {
             return;
         };
-        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
         let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
         let rope = mb_snapshot.rope().clone();
         let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
@@ -6871,25 +6857,13 @@ impl Workspace {
         }) else {
             return;
         };
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
+        let server = self.lsp_server(language, cx);
         let weak_editor = editor.downgrade();
         let weak_workspace = cx.weak_entity();
         cx.spawn_in(window, async move |_, cx| {
-            let server = match host.launch(&language, &workspace_root).await {
-                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "stoat_gui::lsp::rename",
-                        ?err,
-                        "failed to launch LSP server for rename"
-                    );
-                    return;
-                },
+            let Some(server) = server.await else {
+                return;
             };
-            let _ = server.initialize(Some(uri.clone())).await;
             if !server.supports_feature(stoat::host::LanguageServerFeature::RenameSymbol) {
                 return;
             }
@@ -6941,8 +6915,8 @@ impl Workspace {
     }
 
     /// Open the LSP code action picker for the active editor's
-    /// selection range. Spawns a fresh LSP server through
-    /// `LspHostGlobal::launch`, fetches `textDocument/codeAction`,
+    /// selection range. Resolves the workspace's persistent LSP
+    /// server, fetches `textDocument/codeAction`,
     /// translates the response into picker entries, and shows the
     /// modal. No-op when no editor is active, the buffer has no
     /// file path, or no language is registered for that path.
@@ -6958,7 +6932,6 @@ impl Workspace {
         let Some(language) = registry.for_path(&path) else {
             return;
         };
-        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
         let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
         let rope = mb_snapshot.rope().clone();
         let Some(primary) = editor.read(cx).selections().all_anchors().first().cloned() else {
@@ -6976,25 +6949,13 @@ impl Workspace {
         }) else {
             return;
         };
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
+        let server = self.lsp_server(language, cx);
         let weak_editor = editor.downgrade();
         let weak_workspace = cx.weak_entity();
         cx.spawn_in(window, async move |_, cx| {
-            let server = match host.launch(&language, &workspace_root).await {
-                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "stoat_gui::lsp::format",
-                        ?err,
-                        "failed to launch LSP server for format",
-                    );
-                    return;
-                },
+            let Some(server) = server.await else {
+                return;
             };
-            let _ = server.initialize(Some(uri.clone())).await;
             if !server.supports_feature(stoat::host::LanguageServerFeature::Format) {
                 return;
             }
@@ -7053,7 +7014,6 @@ impl Workspace {
         let Some(language) = registry.for_path(&path) else {
             return;
         };
-        let host = cx.global::<crate::globals::LspHostGlobal>().0.clone();
         let executor = cx.global::<ExecutorGlobal>().0.clone();
         let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
         let rope = mb_snapshot.rope().clone();
@@ -7072,25 +7032,13 @@ impl Workspace {
         }) else {
             return;
         };
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
+        let server = self.lsp_server(language, cx);
         let weak_editor = editor.downgrade();
         let weak_workspace = cx.weak_entity();
         cx.spawn_in(window, async move |_, cx| {
-            let server = match host.launch(&language, &workspace_root).await {
-                Ok(s) => Arc::<dyn stoat::host::LspServer>::from(s),
-                Err(err) => {
-                    tracing::warn!(
-                        target: "stoat_gui::lsp::code_action",
-                        ?err,
-                        "failed to launch LSP server for code action"
-                    );
-                    return;
-                },
+            let Some(server) = server.await else {
+                return;
             };
-            let _ = server.initialize(Some(uri.clone())).await;
             if !server.supports_feature(stoat::host::LanguageServerFeature::CodeAction) {
                 return;
             }
