@@ -1,7 +1,8 @@
 use crate::{
     editor::{Editor, EditorEvent},
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
     theme::Theme as ThemeGlobal,
+    workspace::Workspace,
 };
 use gpui::{Context, Entity, Subscription, Task, WeakEntity};
 use lsp_types::{
@@ -15,7 +16,7 @@ use stoat::{
         highlights::{HighlightStyleId, HighlightStyleInterner, SemanticTokenHighlight},
         syntax_theme::SyntaxStyles,
     },
-    host::{LanguageServerFeature, LspHost},
+    host::{LanguageServerFeature, LspServer},
     lsp::util::lsp_pos_to_byte_offset,
     theme::Theme,
 };
@@ -32,13 +33,8 @@ use stoat_text::Bias;
 /// the moment a new request is in flight so a stale palette doesn't
 /// linger across edits.
 ///
-/// Each request launches a fresh language server through the global
-/// [`LspHostGlobal`] factory. Mirrors the per-request shape used by
-/// the inlay-hint manager; both share the same per-language cache
-/// follow-up.
-///
-/// FIXME: route through a per-language `LspServer` cache instead of
-/// launching a new child process per request.
+/// Each request resolves the workspace's persistent, document-synced
+/// server from the [`crate::LspManager`] cache.
 ///
 /// FIXME: modifier-bitset styling deferred. LSP token modifiers
 /// (declaration / readonly / static / ...) are dropped today; only
@@ -96,7 +92,9 @@ impl SemanticTokensManager {
         self.last_signature = Some(request.signature.clone());
         let signature = request.signature.clone();
         let task = cx.spawn(async move |this, cx| {
-            let outcome = request.run().await;
+            let server =
+                super::cached_server(&request.workspace, request.language.clone(), cx).await;
+            let outcome = request.run(server).await;
             let _ = this.update(cx, |this, cx| {
                 if this.last_signature.as_ref() != Some(&signature) {
                     return;
@@ -131,9 +129,8 @@ impl SemanticTokensManager {
 }
 
 struct SemanticTokensRequest {
-    host: Arc<dyn LspHost>,
+    workspace: Option<WeakEntity<Workspace>>,
     language: Arc<stoat_language::Language>,
-    workspace_root: std::path::PathBuf,
     uri: Uri,
     rope: stoat_text::Rope,
     buffer_snapshot: stoat::multi_buffer::MultiBufferSnapshot,
@@ -144,7 +141,7 @@ struct SemanticTokensRequest {
 impl SemanticTokensRequest {
     fn build(editor: &Entity<Editor>, cx: &mut Context<'_, SemanticTokensManager>) -> Option<Self> {
         let path = editor.read(cx).file_path()?.to_path_buf();
-        let host = cx.try_global::<LspHostGlobal>()?.0.clone();
+        let workspace = editor.read(cx).workspace().cloned();
         let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
         let uri = path_to_uri(&path)?;
 
@@ -165,15 +162,9 @@ impl SemanticTokensRequest {
             .map(|t| t.0.clone())
             .unwrap_or_else(Theme::empty);
 
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
-
         Some(Self {
-            host,
+            workspace,
             language,
-            workspace_root,
             uri: uri.clone(),
             rope,
             buffer_snapshot,
@@ -186,19 +177,11 @@ impl SemanticTokensRequest {
         })
     }
 
-    async fn run(self) -> Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)> {
-        let server = match self.host.launch(&self.language, &self.workspace_root).await {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(
-                    target: "stoat_gui::lsp::semantic_tokens",
-                    ?err,
-                    "failed to launch LSP server"
-                );
-                return None;
-            },
-        };
-        let _ = server.initialize(Some(self.uri.clone())).await;
+    async fn run(
+        self,
+        server: Option<Arc<dyn LspServer>>,
+    ) -> Option<(Arc<[SemanticTokenHighlight]>, Arc<HighlightStyleInterner>)> {
+        let server = server?;
         if !server.supports_feature(LanguageServerFeature::SemanticTokens) {
             return None;
         }
@@ -338,15 +321,23 @@ fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        globals::ExecutorGlobal, multi_buffer::MultiBuffer,
+        buffer::Buffer,
+        diff_map::DiffMap,
+        display_map::DisplayMap,
+        editor::EditorMode,
+        globals::{ExecutorGlobal, LspHostGlobal},
+        multi_buffer::MultiBuffer,
+        workspace::Workspace,
     };
     use gpui::{AppContext, TestAppContext};
     use lsp_types::{
         SemanticTokens, SemanticTokensFullOptions, SemanticTokensOptions, ServerCapabilities,
     };
     use std::path::PathBuf;
-    use stoat::host::fake::{FakeLsp, FakeLspHost};
+    use stoat::host::{
+        fake::{FakeLsp, FakeLspHost},
+        LspHost,
+    };
     use stoat_scheduler::{Executor, TestScheduler};
 
     fn install_globals(cx: &mut TestAppContext) -> Arc<FakeLsp> {
@@ -365,9 +356,15 @@ mod tests {
         lsp
     }
 
-    fn build_editor(cx: &mut TestAppContext, path: &Path, text: &str) -> Entity<Editor> {
+    fn build_editor(
+        cx: &mut TestAppContext,
+        path: &Path,
+        text: &str,
+    ) -> (Entity<Workspace>, Entity<Editor>) {
         let path = path.to_path_buf();
         cx.update(|cx| {
+            let workspace = cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+            let workspace_handle = workspace.downgrade();
             let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), text));
             let executor = cx.global::<ExecutorGlobal>().0.clone();
             let multi = cx.new({
@@ -382,11 +379,13 @@ mod tests {
                 let buffer = buffer.clone();
                 |cx| DiffMap::new(buffer, cx)
             });
-            cx.new(|cx| {
+            let editor = cx.new(|cx| {
                 let mut ed = Editor::new(multi, display, diff, EditorMode::full(), cx);
+                ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(path), cx);
                 ed
-            })
+            });
+            (workspace, editor)
         })
     }
 
@@ -450,7 +449,7 @@ mod tests {
             }),
         );
 
-        let editor = build_editor(&mut cx, &path, "foo bar");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "foo bar");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let _manager = cx.update(|cx| {
             let editor_clone = editor.clone();
@@ -483,7 +482,7 @@ mod tests {
             }),
         );
 
-        let editor = build_editor(&mut cx, &path, "foo bar");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "foo bar");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let _manager = cx.update(|cx| {
             let editor_clone = editor.clone();
@@ -515,7 +514,7 @@ mod tests {
             }),
         );
 
-        let editor = build_editor(&mut cx, &path, "foo bar");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "foo bar");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let _manager = cx.update(|cx| {
             let editor_clone = editor.clone();
@@ -551,7 +550,7 @@ mod tests {
             }),
         );
 
-        let editor = build_editor(&mut cx, &path, "foo bar\nab cd");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "foo bar\nab cd");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let _manager = cx.update(|cx| {
             let editor_clone = editor.clone();
