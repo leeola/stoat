@@ -1,14 +1,15 @@
 use crate::{
     display_map::DisplayMap,
     editor::{Editor, EditorEvent},
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
+    workspace::Workspace,
 };
 use gpui::{Context, Entity, Subscription, Task, WeakEntity};
 use lsp_types::{InlayHintLabel, InlayHintParams, TextDocumentIdentifier, Uri};
 use std::{path::Path, str::FromStr, sync::Arc};
 use stoat::{
     display_map::{InlayId, InlayKind},
-    host::{LanguageServerFeature, LspHost},
+    host::{LanguageServerFeature, LspServer},
     lsp::util::{byte_range_to_lsp_range, lsp_pos_to_byte_offset},
     DisplayPoint,
 };
@@ -29,14 +30,8 @@ const DEFAULT_VIEWPORT_ROWS: u32 = 80;
 /// tracks the live [`InlayId`] set so each subsequent splice removes
 /// the prior inlays before inserting new ones.
 ///
-/// Each request launches a fresh language server through the global
-/// [`LspHostGlobal`] factory. This is wasteful in production -- the
-/// per-language LSP server should be cached -- but matches the
-/// shape used by [`crate::lsp::HoverPopup`] and
-/// [`crate::lsp::CompletionPopup`].
-///
-/// FIXME: route through a per-language `LspServer` cache instead of
-/// launching a new child process per request.
+/// Each request resolves the workspace's persistent, document-synced
+/// server from the [`crate::LspManager`] cache.
 pub struct InlayHintsManager {
     editor: WeakEntity<Editor>,
     current_ids: Vec<InlayId>,
@@ -89,7 +84,9 @@ impl InlayHintsManager {
         self.last_signature = Some(request.signature.clone());
         let signature = request.signature.clone();
         let task = cx.spawn(async move |this, cx| {
-            let outcome = request.run().await;
+            let server =
+                super::cached_server(&request.workspace, request.language.clone(), cx).await;
+            let outcome = request.run(server).await;
             let _ = this.update(cx, |this, cx| {
                 if this.last_signature.as_ref() != Some(&signature) {
                     return;
@@ -120,9 +117,8 @@ impl InlayHintsManager {
 }
 
 struct InlayHintsRequest {
-    host: Arc<dyn LspHost>,
+    workspace: Option<WeakEntity<Workspace>>,
     language: Arc<stoat_language::Language>,
-    workspace_root: std::path::PathBuf,
     uri: Uri,
     rope: stoat_text::Rope,
     buffer_snapshot: stoat::multi_buffer::MultiBufferSnapshot,
@@ -133,7 +129,7 @@ struct InlayHintsRequest {
 impl InlayHintsRequest {
     fn build(editor: &Entity<Editor>, cx: &mut Context<'_, InlayHintsManager>) -> Option<Self> {
         let path = editor.read(cx).file_path()?.to_path_buf();
-        let host = cx.try_global::<LspHostGlobal>()?.0.clone();
+        let workspace = editor.read(cx).workspace().cloned();
         let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
         let uri = path_to_uri(&path)?;
         let display_map = editor.read(cx).display_map().clone();
@@ -157,15 +153,9 @@ impl InlayHintsRequest {
         };
         let range_bytes = start_offset..end_offset;
 
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
-
         Some(Self {
-            host,
+            workspace,
             language,
-            workspace_root,
             uri: uri.clone(),
             rope,
             buffer_snapshot,
@@ -179,15 +169,11 @@ impl InlayHintsRequest {
         })
     }
 
-    async fn run(self) -> Option<Vec<(stoat_text::Anchor, String, InlayKind)>> {
-        let server = match self.host.launch(&self.language, &self.workspace_root).await {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(target: "stoat_gui::lsp::inlay_hints", ?err, "failed to launch LSP server");
-                return None;
-            },
-        };
-        let _ = server.initialize(Some(self.uri.clone())).await;
+    async fn run(
+        self,
+        server: Option<Arc<dyn LspServer>>,
+    ) -> Option<Vec<(stoat_text::Anchor, String, InlayKind)>> {
+        let server = server?;
         if !server.supports_feature(LanguageServerFeature::InlayHints) {
             return Some(Vec::new());
         }
@@ -282,15 +268,23 @@ fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        globals::ExecutorGlobal, multi_buffer::MultiBuffer,
+        buffer::Buffer,
+        diff_map::DiffMap,
+        display_map::DisplayMap,
+        editor::EditorMode,
+        globals::{ExecutorGlobal, LspHostGlobal},
+        multi_buffer::MultiBuffer,
+        workspace::Workspace,
     };
     use gpui::{AppContext, TestAppContext};
     use lsp_types::{InlayHintKind, Position, ServerCapabilities};
     use std::path::PathBuf;
     use stoat::{
         buffer::BufferId,
-        host::fake::{FakeLsp, FakeLspHost},
+        host::{
+            fake::{FakeLsp, FakeLspHost},
+            LspHost,
+        },
     };
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -306,9 +300,15 @@ mod tests {
         lsp
     }
 
-    fn build_editor(cx: &mut TestAppContext, path: &Path, text: &str) -> Entity<Editor> {
+    fn build_editor(
+        cx: &mut TestAppContext,
+        path: &Path,
+        text: &str,
+    ) -> (Entity<Workspace>, Entity<Editor>) {
         let path = path.to_path_buf();
         cx.update(|cx| {
+            let workspace = cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+            let workspace_handle = workspace.downgrade();
             let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), text));
             let executor = cx.global::<ExecutorGlobal>().0.clone();
             let multi = cx.new({
@@ -323,11 +323,13 @@ mod tests {
                 let buffer = buffer.clone();
                 |cx| DiffMap::new(buffer, cx)
             });
-            cx.new(|cx| {
+            let editor = cx.new(|cx| {
                 let mut ed = Editor::new(multi, display, diff, EditorMode::full(), cx);
+                ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(path), cx);
                 ed
-            })
+            });
+            (workspace, editor)
         })
     }
 
@@ -367,7 +369,7 @@ mod tests {
             vec![make_hint(0, 5, ": str", InlayHintKind::TYPE)],
         );
 
-        let editor = build_editor(&mut cx, &path, "hello world");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "hello world");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
 
         let manager = cx.update(|cx| {
@@ -400,7 +402,7 @@ mod tests {
             vec![make_hint(0, 5, ": str", InlayHintKind::TYPE)],
         );
 
-        let editor = build_editor(&mut cx, &path, "hello world");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "hello world");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let manager = cx.update(|cx| {
             let editor_clone = editor.clone();
@@ -446,7 +448,7 @@ mod tests {
             vec![make_hint(0, 5, ": str", InlayHintKind::TYPE)],
         );
 
-        let editor = build_editor(&mut cx, &path, "hello world");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "hello world");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let _manager = cx.update(|cx| {
             let editor_clone = editor.clone();
