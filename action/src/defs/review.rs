@@ -9,6 +9,7 @@ define_action!(
     "Open the first modified or staged file with a structural diff against HEAD.",
     ActionPriority::Common,
     true,
+    true,
     &["r"]
 );
 

@@ -789,6 +789,7 @@ define_action!(
     "Write the focused buffer's rope text to its backing file via FsHost, clear the buffer's dirty flag, and notify the LSP server via did_save. No-op for scratch buffers (no path).",
     ActionPriority::Common,
     true,
+    true,
     &["w"]
 );
 
@@ -800,6 +801,7 @@ define_action!(
     "close the focused buffer",
     "Drop the focused buffer from the workspace's BufferRegistry and notify the LSP server via did_close. Editor panes that displayed the closed buffer are rebound to fresh scratch buffers so the pane layout stays coherent. Refuses to close when the buffer is dirty; save first.",
     ActionPriority::Common,
+    true,
     true,
     &["bc"]
 );
@@ -1282,6 +1284,7 @@ define_action!(
     "goto line number from count",
     "Jump to the start of the line numbered by the pending count prefix (1-indexed); falls back to the last line when no count is pending. Counts beyond the buffer length clamp to the last visible row.",
     ActionPriority::Rare,
+    true,
     true,
     &["g"]
 );

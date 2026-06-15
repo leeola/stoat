@@ -90,10 +90,24 @@ macro_rules! define_action {
             $long,
             $priority,
             $hint_visible,
+            true
+        );
+    };
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, $hint_visible:expr_2021, $palette_visible:expr_2021) => {
+        $crate::action::define_action!(
+            $def,
+            $action,
+            $name,
+            $kind,
+            $short,
+            $long,
+            $priority,
+            $hint_visible,
+            $palette_visible,
             &[]
         );
     };
-    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, $hint_visible:expr_2021, $aliases:expr_2021) => {
+    ($def:ident, $action:ident, $name:expr_2021, $kind:expr_2021, $short:expr_2021, $long:expr_2021, $priority:expr_2021, $hint_visible:expr_2021, $palette_visible:expr_2021, $aliases:expr_2021) => {
         #[derive(Debug)]
         pub struct $def;
 
@@ -120,6 +134,10 @@ macro_rules! define_action {
 
             fn priority(&self) -> $crate::ActionPriority {
                 $priority
+            }
+
+            fn palette_visible(&self) -> bool {
+                $palette_visible
             }
 
             fn hint_visible(&self) -> bool {

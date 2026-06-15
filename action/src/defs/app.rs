@@ -9,6 +9,7 @@ define_action!(
     "Close the focused pane. Exit the application when closing the last remaining pane.",
     ActionPriority::Common,
     true,
+    true,
     &["q"]
 );
 
@@ -20,6 +21,7 @@ define_action!(
     "close pane or exit, discarding unsaved changes",
     "Close the focused pane. Exit immediately when closing the last remaining pane, discarding any unsaved buffers without confirmation. See also quit, which confirms before discarding on the last pane.",
     ActionPriority::Common,
+    true,
     true,
     &["q!"]
 );
@@ -33,6 +35,7 @@ define_action!(
     "Write the focused buffer to disk, then close the focused pane. Exit when closing the last remaining pane, confirming first if other buffers have unsaved changes. A path-less scratch buffer clears its dirty flag without writing.",
     ActionPriority::Common,
     true,
+    true,
     &["wq", "x"]
 );
 
@@ -45,6 +48,7 @@ define_action!(
     "Rebuild the settings and theme from the bundled default layered with the user config on disk. Discards session-only runtime overrides such as :set and tab-bar. A user config that fails to parse is rejected with a warning, leaving the current settings in place.",
     ActionPriority::Common,
     true,
+    true,
     &["config-reload"]
 );
 
@@ -56,6 +60,7 @@ define_action!(
     "exit stoat, closing all panes",
     "Exit the application immediately, closing every pane and viewport. See also quit, which closes the current pane and only exits when it is the last.",
     ActionPriority::Common,
+    true,
     true,
     &["qa"]
 );

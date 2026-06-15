@@ -72,6 +72,7 @@ define_action!(
     "Open the user config at $XDG_CONFIG_HOME/stoat/config.stcfg in the focused pane, creating its parent directory if absent so a first save succeeds. A not-yet-existing config opens as an empty buffer.",
     ActionPriority::Common,
     true,
+    true,
     &["config-open"]
 );
 

@@ -9,6 +9,7 @@ define_action!(
     "Split the focused pane vertically, creating a new pane to the right.",
     ActionPriority::Common,
     true,
+    true,
     &["vs"]
 );
 define_action!(
@@ -19,6 +20,7 @@ define_action!(
     "split pane down",
     "Split the focused pane horizontally, creating a new pane below.",
     ActionPriority::Common,
+    true,
     true,
     &["hs"]
 );
@@ -103,6 +105,7 @@ define_action!(
     "Close the focused pane. Refuses if it is the last remaining pane.",
     ActionPriority::Normal,
     true,
+    true,
     &["wclose"]
 );
 define_action!(
@@ -113,6 +116,7 @@ define_action!(
     "close other panes",
     "Close every split pane except the focused one. No-op when the focused pane is the only one.",
     ActionPriority::Normal,
+    true,
     true,
     &["wonly"]
 );

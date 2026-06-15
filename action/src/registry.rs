@@ -892,6 +892,7 @@ mod tests {
         "",
         crate::ActionPriority::Normal,
         true,
+        true,
         &["at", "atest"]
     );
     define_action!(
@@ -903,7 +904,19 @@ mod tests {
         "",
         crate::ActionPriority::Normal,
         true,
+        true,
         &["at"]
+    );
+    define_action!(
+        PaletteHiddenDef,
+        PaletteHidden,
+        "palette-hidden",
+        crate::ActionKind::Quit,
+        "",
+        "",
+        crate::ActionPriority::Normal,
+        true,
+        false
     );
 
     #[test]
@@ -912,6 +925,15 @@ mod tests {
         assert!(
             DismissModal::DEF.aliases().is_empty(),
             "default is no aliases"
+        );
+    }
+
+    #[test]
+    fn macro_threads_palette_visible() {
+        assert!(!PaletteHidden::DEF.palette_visible());
+        assert!(
+            DismissModal::DEF.palette_visible(),
+            "default is palette-visible"
         );
     }
 
