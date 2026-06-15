@@ -1,8 +1,9 @@
 use crate::{
     editor::{Editor, EditorEvent},
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
     lsp::popup::{popup_container, popup_origin_below},
     theme::ActiveTheme,
+    workspace::Workspace,
 };
 use gpui::{
     deferred, div, point, Bounds, Context, Entity, FontWeight, HighlightStyle, IntoElement,
@@ -15,7 +16,7 @@ use lsp_types::{
 };
 use std::{ops::Range, path::Path, str::FromStr, sync::Arc};
 use stoat::{
-    host::{LanguageServerFeature, LspHost},
+    host::{LanguageServerFeature, LspServer},
     lsp::util::byte_offset_to_lsp_pos,
 };
 use stoat_text::{Anchor, Bias};
@@ -37,12 +38,8 @@ use stoat_text::{Anchor, Bias};
 /// layer needs no syntactic gating; the cursor sitting between a call's
 /// parentheses is what produces signatures.
 ///
-/// Each request launches a fresh language server through the global
-/// [`LspHostGlobal`] factory, matching the shape used by
-/// [`crate::lsp::HoverPopup`] and [`crate::lsp::InlayHintsManager`].
-///
-/// FIXME: route signature help through a per-language `LspServer` cache
-/// instead of launching a new child process per request.
+/// Each request resolves the workspace's persistent, document-synced
+/// server from the [`crate::LspManager`] cache.
 pub struct SignatureHelpManager {
     editor: WeakEntity<Editor>,
     anchored_at: Option<Anchor>,
@@ -139,7 +136,9 @@ impl SignatureHelpManager {
         };
         let request_id = self.bump_request_id();
         let task = cx.spawn(async move |this, cx| {
-            let outcome = request.run().await;
+            let server =
+                super::cached_server(&request.workspace, request.language.clone(), cx).await;
+            let outcome = request.run(server).await;
             let _ = this.update(cx, |manager, cx| {
                 if manager.request_id() != request_id {
                     // A newer request superseded this one; the stale
@@ -329,9 +328,8 @@ fn signature_popup_origin(
 }
 
 struct SignatureHelpRequest {
-    host: Arc<dyn LspHost>,
+    workspace: Option<WeakEntity<Workspace>>,
     language: Arc<stoat_language::Language>,
-    workspace_root: std::path::PathBuf,
     uri: Uri,
     offset: usize,
     rope: stoat_text::Rope,
@@ -344,7 +342,7 @@ impl SignatureHelpRequest {
         cx: &mut Context<'_, SignatureHelpManager>,
     ) -> Option<Self> {
         let path = editor.read(cx).file_path()?.to_path_buf();
-        let host = cx.try_global::<LspHostGlobal>()?.0.clone();
+        let workspace = editor.read(cx).workspace().cloned();
         let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
         let uri = path_to_uri(&path)?;
         let rope = editor
@@ -354,31 +352,17 @@ impl SignatureHelpRequest {
             .snapshot()
             .rope()
             .clone();
-        let workspace_root = path
-            .parent()
-            .map(Path::to_path_buf)
-            .unwrap_or_else(|| path.clone());
         Some(Self {
-            host,
+            workspace,
             language,
-            workspace_root,
             uri,
             offset,
             rope,
         })
     }
 
-    async fn run(self) -> Option<SignatureHelp> {
-        let server = match self.host.launch(&self.language, &self.workspace_root).await {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(target: "stoat_gui::lsp::signature_help", ?err, "failed to launch LSP server");
-                return None;
-            },
-        };
-        // `initialize` is best-effort; test fakes accept requests
-        // without an explicit handshake.
-        let _ = server.initialize(Some(self.uri.clone())).await;
+    async fn run(self, server: Option<Arc<dyn LspServer>>) -> Option<SignatureHelp> {
+        let server = server?;
         if !server.supports_feature(LanguageServerFeature::SignatureHelp) {
             return None;
         }
@@ -411,8 +395,13 @@ fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        globals::ExecutorGlobal, multi_buffer::MultiBuffer, workspace::Workspace,
+        buffer::Buffer,
+        diff_map::DiffMap,
+        display_map::DisplayMap,
+        editor::EditorMode,
+        globals::{ExecutorGlobal, LspHostGlobal},
+        multi_buffer::MultiBuffer,
+        workspace::Workspace,
     };
     use gpui::{px, size, AppContext, TestAppContext};
     use lsp_types::{
@@ -421,7 +410,10 @@ mod tests {
     use std::path::PathBuf;
     use stoat::{
         buffer::BufferId,
-        host::fake::{FakeLsp, FakeLspHost},
+        host::{
+            fake::{FakeLsp, FakeLspHost},
+            LspHost,
+        },
     };
     use stoat_scheduler::{Executor, TestScheduler};
 
