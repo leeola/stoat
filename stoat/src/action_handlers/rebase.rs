@@ -232,13 +232,14 @@ pub(super) fn drive_rebase(stoat: &mut Stoat) -> UpdateEffect {
                                     active.pause = Some(RebasePause::Edit {
                                         cherry_picked_commit: new_sha.clone(),
                                     });
-                                    if let Some(mut session) =
-                                        scan_commit(stoat, &workdir, &new_sha)
-                                    {
-                                        session.origin = ReviewOrigin::FromRebaseEdit;
-                                        install_review_session(stoat, session);
-                                    } else {
-                                        stoat.mode = "review".into();
+                                    match scan_commit(stoat, &workdir, &new_sha) {
+                                        Some(mut session) => {
+                                            session.origin = ReviewOrigin::FromRebaseEdit;
+                                            install_review_session(stoat, session);
+                                        },
+                                        _ => {
+                                            stoat.mode = "review".into();
+                                        },
                                     }
                                     return UpdateEffect::Redraw;
                                 },

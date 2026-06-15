@@ -317,10 +317,9 @@ impl FoldMap {
     ) -> (Arc<FoldSnapshot>, Patch<u32>) {
         if inlay_snapshot.inlay_version == self.last_inlay_version
             && self.version == self.last_self_version
+            && let Some(ref cached) = self.cached_snapshot
         {
-            if let Some(ref cached) = self.cached_snapshot {
-                return (Arc::clone(cached), Patch::empty());
-            }
+            return (Arc::clone(cached), Patch::empty());
         }
 
         let buffer = inlay_snapshot.buffer_snapshot();
@@ -747,13 +746,12 @@ fn sync_fold_incremental(
         new_transforms.append(cursor.slice(&InputOffset(old_start_offset), Bias::Left), ());
 
         // If cursor item ends exactly at edit start, merge it with prefix
-        if let Some(item) = cursor.item() {
-            if item.placeholder.is_none()
-                && cursor.start().0 + item.summary.input.len == old_start_offset
-            {
-                push_fold_isomorphic(&mut new_transforms, item.summary.clone());
-                cursor.next();
-            }
+        if let Some(item) = cursor.item()
+            && item.placeholder.is_none()
+            && cursor.start().0 + item.summary.input.len == old_start_offset
+        {
+            push_fold_isomorphic(&mut new_transforms, item.summary.clone());
+            cursor.next();
         }
 
         // Record old output rows

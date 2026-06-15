@@ -113,23 +113,22 @@ pub(super) fn close_buffer(stoat: &mut Stoat) -> UpdateEffect {
         .expect("lsp version mutex")
         .remove(&buffer_id);
 
-    if let Some(path) = path {
-        if let Some(path_str) = path.to_str() {
-            if let Ok(uri) = lsp_types::Uri::from_str(&format!("file://{path_str}")) {
-                let params = DidCloseTextDocumentParams {
-                    text_document: TextDocumentIdentifier { uri },
-                };
-                let lsp = stoat.lsp_host.clone();
-                stoat
-                    .executor
-                    .spawn(async move {
-                        if let Err(err) = lsp.did_close(params).await {
-                            tracing::warn!(target: "stoat::lsp", ?err, "did_close notification failed");
-                        }
-                    })
-                    .detach();
-            }
-        }
+    if let Some(path) = path
+        && let Some(path_str) = path.to_str()
+        && let Ok(uri) = lsp_types::Uri::from_str(&format!("file://{path_str}"))
+    {
+        let params = DidCloseTextDocumentParams {
+            text_document: TextDocumentIdentifier { uri },
+        };
+        let lsp = stoat.lsp_host.clone();
+        stoat
+            .executor
+            .spawn(async move {
+                if let Err(err) = lsp.did_close(params).await {
+                    tracing::warn!(target: "stoat::lsp", ?err, "did_close notification failed");
+                }
+            })
+            .detach();
     }
     UpdateEffect::Redraw
 }
@@ -164,10 +163,10 @@ pub(crate) fn open_file_in_pane(
     let (buffer_id, buffer) = {
         let ws = stoat.active_workspace_mut();
         let (buffer_id, buffer) = ws.buffers.open(&absolute, &content);
-        if let Some(lang) = lang {
-            if ws.buffers.language_for(buffer_id).is_none() {
-                ws.buffers.set_language(buffer_id, lang);
-            }
+        if let Some(lang) = lang
+            && ws.buffers.language_for(buffer_id).is_none()
+        {
+            ws.buffers.set_language(buffer_id, lang);
         }
         (buffer_id, buffer)
     };
@@ -175,14 +174,13 @@ pub(crate) fn open_file_in_pane(
     super::lsp::notify_buffer_opened(stoat, buffer_id, &absolute, &content);
 
     let ws = stoat.active_workspace_mut();
-    if let View::Editor(eid) = ws.panes.pane(target).view {
-        if ws
+    if let View::Editor(eid) = ws.panes.pane(target).view
+        && ws
             .editors
             .get(eid)
             .is_some_and(|e| e.buffer_id == buffer_id)
-        {
-            return Some(buffer_id);
-        }
+    {
+        return Some(buffer_id);
     }
 
     let new_editor_id = ws

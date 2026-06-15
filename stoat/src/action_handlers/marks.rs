@@ -67,10 +67,10 @@ fn set_mark_at_cursor(stoat: &mut Stoat, ch: char) -> UpdateEffect {
 }
 
 fn goto_stored_mark(stoat: &mut Stoat, request: MarkRequest, ch: char) -> UpdateEffect {
-    if ch.is_uppercase() {
-        if let Some((path, offset)) = stoat.global_marks.get(&ch).cloned() {
-            return goto_global(stoat, request, path, offset);
-        }
+    if ch.is_uppercase()
+        && let Some((path, offset)) = stoat.global_marks.get(&ch).cloned()
+    {
+        return goto_global(stoat, request, path, offset);
     }
 
     let Some(buffer_id) = focused_editor_mut(stoat).map(|e| e.buffer_id) else {

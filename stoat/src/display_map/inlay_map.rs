@@ -206,10 +206,9 @@ impl InlayMap {
     ) -> (Arc<InlaySnapshot>, Patch<u32>) {
         if buffer_snapshot.version() == self.last_buffer_version
             && self.version == self.last_self_version
+            && let Some(ref cached) = self.cached_snapshot
         {
-            if let Some(ref cached) = self.cached_snapshot {
-                return (Arc::clone(cached), Patch::empty());
-            }
+            return (Arc::clone(cached), Patch::empty());
         }
 
         let inlay_count = self.inlays.len();
@@ -339,7 +338,7 @@ impl InlayMap {
         let affected: Vec<(usize, Anchor)> = needs_resolve
             .iter()
             .enumerate()
-            .filter(|(_, &needs)| needs)
+            .filter(|&(_, &needs)| needs)
             .map(|(i, _)| (i, self.inlays[i].position))
             .collect();
 
@@ -515,11 +514,11 @@ fn sync_incremental(
         new_transforms.append(cursor.slice(&InputOffset(edit.old.start), Bias::Left), ());
 
         // If cursor item ends exactly at edit start, merge it with prefix
-        if let Some(Transform::Isomorphic(summary)) = cursor.item() {
-            if cursor.start().0 + summary.len == edit.old.start {
-                push_isomorphic(&mut new_transforms, summary.clone());
-                cursor.next();
-            }
+        if let Some(Transform::Isomorphic(summary)) = cursor.item()
+            && cursor.start().0 + summary.len == edit.old.start
+        {
+            push_isomorphic(&mut new_transforms, summary.clone());
+            cursor.next();
         }
 
         // Record old output rows
@@ -687,10 +686,10 @@ impl InlaySnapshot {
             if pos.row > row {
                 break;
             }
-            if let Transform::Inlay(ref inlay) = transform {
-                if inlay.position.row == row {
-                    extra += inlay.text.len() as u32;
-                }
+            if let Transform::Inlay(inlay) = transform
+                && inlay.position.row == row
+            {
+                extra += inlay.text.len() as u32;
             }
             cursor.next();
         }

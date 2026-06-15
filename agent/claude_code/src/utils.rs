@@ -7,7 +7,7 @@
 
 use futures::Stream;
 use std::{pin::Pin, task::Context};
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender, unbounded_channel};
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 use tokio_stream::wrappers::UnboundedReceiverStream;
 
 /// Push-to-stream bridge. `push` appends an item; `end` closes the

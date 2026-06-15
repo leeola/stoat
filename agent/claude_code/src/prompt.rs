@@ -165,12 +165,10 @@ mod tests {
         }]);
         let content = raw["content"].as_array().unwrap();
         assert_eq!(content.len(), 2);
-        assert!(
-            content[1]["text"]
-                .as_str()
-                .unwrap()
-                .contains("<context ref=\"file:///tmp/a\">body</context>")
-        );
+        assert!(content[1]["text"]
+            .as_str()
+            .unwrap()
+            .contains("<context ref=\"file:///tmp/a\">body</context>"));
     }
 
     #[test]

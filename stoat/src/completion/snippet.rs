@@ -91,15 +91,15 @@ pub(crate) fn parse(input: &str) -> Snippet {
             i += 1;
             continue;
         }
-        if b == b'$' {
-            if let Some((element, consumed)) = try_parse_dollar(input, i) {
-                if !text.is_empty() {
-                    elements.push(Element::Text(std::mem::take(&mut text)));
-                }
-                elements.push(element);
-                i += consumed;
-                continue;
+        if b == b'$'
+            && let Some((element, consumed)) = try_parse_dollar(input, i)
+        {
+            if !text.is_empty() {
+                elements.push(Element::Text(std::mem::take(&mut text)));
             }
+            elements.push(element);
+            i += consumed;
+            continue;
         }
         if let Some(ch) = input[i..].chars().next() {
             text.push(ch);

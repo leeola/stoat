@@ -169,16 +169,16 @@ fn write_unified_line<W: Write>(
         write!(p.out, "{ch}")?;
         col += 1;
     }
-    if let Some(prov) = move_provenance {
-        if col + 2 < max_cols {
-            p.set(base)?;
-            write!(p.out, "  ")?;
-            p.set(CellStyle::Moved)?;
-            let chip = format!("<- {}:{}", prov.rel_path, prov.line + 1);
-            let available = max_cols - col - 2;
-            for ch in chip.chars().take(available) {
-                write!(p.out, "{ch}")?;
-            }
+    if let Some(prov) = move_provenance
+        && col + 2 < max_cols
+    {
+        p.set(base)?;
+        write!(p.out, "  ")?;
+        p.set(CellStyle::Moved)?;
+        let chip = format!("<- {}:{}", prov.rel_path, prov.line + 1);
+        let available = max_cols - col - 2;
+        for ch in chip.chars().take(available) {
+            write!(p.out, "{ch}")?;
         }
     }
     p.reset()?;

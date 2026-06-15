@@ -447,15 +447,15 @@ impl MultiBuffer {
         }
 
         // Last excerpt shouldn't have trailing newline
-        if let Some(last) = self.excerpt_tree.last() {
-            if last.has_trailing_newline {
-                self.excerpt_tree.update_last(
-                    |entry| {
-                        entry.has_trailing_newline = false;
-                    },
-                    (),
-                );
-            }
+        if let Some(last) = self.excerpt_tree.last()
+            && last.has_trailing_newline
+        {
+            self.excerpt_tree.update_last(
+                |entry| {
+                    entry.has_trailing_newline = false;
+                },
+                (),
+            );
         }
 
         self.singleton = false;
@@ -481,10 +481,10 @@ impl MultiBuffer {
             }
         }
 
-        if let Some(last) = new_tree.last() {
-            if last.has_trailing_newline {
-                new_tree.update_last(|entry| entry.has_trailing_newline = false, cx);
-            }
+        if let Some(last) = new_tree.last()
+            && last.has_trailing_newline
+        {
+            new_tree.update_last(|entry| entry.has_trailing_newline = false, cx);
         }
 
         self.excerpt_tree = new_tree;

@@ -461,10 +461,9 @@ impl DisplayMap {
             && self.fold_map.version_unchanged()
             && self.inlay_map.version_unchanged()
             && companion_wrap_data.is_none()
+            && let Some(ref cached) = self.cached_snapshot
         {
-            if let Some(ref cached) = self.cached_snapshot {
-                return cached.clone();
-            }
+            return cached.clone();
         }
 
         let (wrap_snapshot, wrap_edits) = self.sync_through_wrap();

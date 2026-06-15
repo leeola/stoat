@@ -434,14 +434,14 @@ fn format_tool_header(name: &str, input_json: &str) -> String {
         _ => {},
     }
 
-    if let Some(o) = obj {
-        if let Some((k, v)) = o.iter().next() {
-            let vs = match v {
-                serde_json::Value::String(s) => truncate(s, 60),
-                other => truncate(&other.to_string(), 60),
-            };
-            return format!("{name}({k}={vs})");
-        }
+    if let Some(o) = obj
+        && let Some((k, v)) = o.iter().next()
+    {
+        let vs = match v {
+            serde_json::Value::String(s) => truncate(s, 60),
+            other => truncate(&other.to_string(), 60),
+        };
+        return format!("{name}({k}={vs})");
     }
     format!("{name}(...)")
 }

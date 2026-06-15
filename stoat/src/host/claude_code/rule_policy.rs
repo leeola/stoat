@@ -103,13 +103,13 @@ impl PermissionCallback for RuleBasedPolicy {
     ) -> PermissionResult {
         let target = extract_primary_input(tool_name, input_json);
 
-        if let Some(compiled) = self.rules.get(tool_name) {
-            if any_match(&compiled.always_deny, &target) {
-                return PermissionResult::Deny {
-                    message: format!("denied by always_deny rule on {tool_name}"),
-                    interrupt: false,
-                };
-            }
+        if let Some(compiled) = self.rules.get(tool_name)
+            && any_match(&compiled.always_deny, &target)
+        {
+            return PermissionResult::Deny {
+                message: format!("denied by always_deny rule on {tool_name}"),
+                interrupt: false,
+            };
         }
 
         {
@@ -120,10 +120,10 @@ impl PermissionCallback for RuleBasedPolicy {
             {
                 return PermissionResult::allow();
             }
-            if let Some(patterns) = runtime.runtime_allow.get(tool_name) {
-                if any_match(patterns, &target) {
-                    return PermissionResult::allow();
-                }
+            if let Some(patterns) = runtime.runtime_allow.get(tool_name)
+                && any_match(patterns, &target)
+            {
+                return PermissionResult::allow();
             }
         }
 

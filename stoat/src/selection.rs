@@ -47,10 +47,11 @@ impl SelectionsCollection {
             .binary_search_by(|s| snapshot.resolve_anchor(&s.start).cmp(&new_offset))
             .unwrap_or_else(|p| p);
 
-        if let Some(existing) = self.disjoint.get(pos) {
-            if existing.is_empty() && snapshot.resolve_anchor(&existing.start) == new_offset {
-                return;
-            }
+        if let Some(existing) = self.disjoint.get(pos)
+            && existing.is_empty()
+            && snapshot.resolve_anchor(&existing.start) == new_offset
+        {
+            return;
         }
 
         let id = self.next_selection_id;

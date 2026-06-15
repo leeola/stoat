@@ -169,10 +169,10 @@ impl Drop for TextProtoLog {
         if let Ok(mut guard) = self.sender.lock() {
             guard.take();
         }
-        if let Ok(mut guard) = self.thread.lock() {
-            if let Some(handle) = guard.take() {
-                let _ = handle.join();
-            }
+        if let Ok(mut guard) = self.thread.lock()
+            && let Some(handle) = guard.take()
+        {
+            let _ = handle.join();
         }
     }
 }
@@ -196,10 +196,8 @@ fn writer_loop(
                 }
             },
             WriterMessage::Flush(ack) => {
-                if !disabled {
-                    if let Err(e) = writer.flush() {
-                        tracing::warn!("text_proto_log flush failed: {e}");
-                    }
+                if !disabled && let Err(e) = writer.flush() {
+                    tracing::warn!("text_proto_log flush failed: {e}");
                 }
                 let _ = ack.send(());
             },

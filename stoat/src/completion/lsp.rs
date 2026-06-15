@@ -131,7 +131,7 @@ mod tests {
         }
     }
 
-    fn run<F: std::future::Future<Output = T>, T>(future: F) -> T {
+    fn run<F: Future<Output = T>, T>(future: F) -> T {
         TestScheduler::new().block_on(future)
     }
 

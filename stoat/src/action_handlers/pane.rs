@@ -63,15 +63,15 @@ pub(super) fn split_pane(stoat: &mut Stoat, axis: Axis) -> UpdateEffect {
     let executor = stoat.executor.clone();
     let ws = stoat.active_workspace_mut();
     let new_pane_id = ws.panes.split(axis);
-    if let View::Editor(old_editor_id) = ws.panes.pane(new_pane_id).view {
-        if let Some(old_editor) = ws.editors.get(old_editor_id) {
-            let buffer_id = old_editor.buffer_id;
-            if let Some(buffer) = ws.buffers.get(buffer_id) {
-                let new_editor_id = ws
-                    .editors
-                    .insert(EditorState::new(buffer_id, buffer, executor));
-                ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
-            }
+    if let View::Editor(old_editor_id) = ws.panes.pane(new_pane_id).view
+        && let Some(old_editor) = ws.editors.get(old_editor_id)
+    {
+        let buffer_id = old_editor.buffer_id;
+        if let Some(buffer) = ws.buffers.get(buffer_id) {
+            let new_editor_id = ws
+                .editors
+                .insert(EditorState::new(buffer_id, buffer, executor));
+            ws.panes.pane_mut(new_pane_id).view = View::Editor(new_editor_id);
         }
     }
     UpdateEffect::Redraw

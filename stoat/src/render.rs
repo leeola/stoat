@@ -208,15 +208,13 @@ pub(crate) fn frame(stoat: &mut Stoat, buf: &mut Buffer) {
                     )),
                     _ => None,
                 });
-            if let Some((sha, orig, editor_id)) = reword_ctx {
-                if let Some(editor) = ws.editors.get_mut(editor_id) {
-                    reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
-                }
+            if let Some((sha, orig, editor_id)) = reword_ctx
+                && let Some(editor) = ws.editors.get_mut(editor_id)
+            {
+                reword::render_reword(pane, is_focused, editor, &sha, &orig, frame, buf);
             }
-        } else if conflict_mode {
-            if let Some(active) = ws.rebase_active.as_ref() {
-                conflict::render_conflict(pane, is_focused, active, frame, buf);
-            }
+        } else if conflict_mode && let Some(active) = ws.rebase_active.as_ref() {
+            conflict::render_conflict(pane, is_focused, active, frame, buf);
         }
     }
 

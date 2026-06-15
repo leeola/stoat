@@ -753,14 +753,13 @@ impl TestHarness {
                 }
 
                 for action in *actions {
-                    if action.name == "SetMode" {
-                        if let Some(target_mode) = action.args.first().and_then(arg_as_str) {
-                            if visited.insert(target_mode.clone()) {
-                                let mut new_path = path.clone();
-                                new_path.push(key.to_key_token());
-                                queue.push_back((target_mode, new_path));
-                            }
-                        }
+                    if action.name == "SetMode"
+                        && let Some(target_mode) = action.args.first().and_then(arg_as_str)
+                        && visited.insert(target_mode.clone())
+                    {
+                        let mut new_path = path.clone();
+                        new_path.push(key.to_key_token());
+                        queue.push_back((target_mode, new_path));
                     }
                 }
             }

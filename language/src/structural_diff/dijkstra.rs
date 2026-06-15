@@ -104,24 +104,21 @@ pub fn shortest_path(
             return SearchOutcome::Found(reconstruct_path(&state, &vertex));
         }
         expansions += 1;
-        if expansions & (CANCEL_POLL_INTERVAL - 1) == 0 {
-            if let Some(flag) = cancel {
-                if flag.load(Ordering::Relaxed) {
-                    return SearchOutcome::ExceededGraphLimit;
-                }
-            }
+        if expansions & (CANCEL_POLL_INTERVAL - 1) == 0
+            && let Some(flag) = cancel
+            && flag.load(Ordering::Relaxed)
+        {
+            return SearchOutcome::ExceededGraphLimit;
         }
         // Stale heap entry from a later, better-distance push? Skip.
         let vertex_signature = vertex.deep_parents_hash();
-        if let Some(bucket) = state.get(vertex.as_ref()) {
-            if let Some(variant) = bucket
+        if let Some(bucket) = state.get(vertex.as_ref())
+            && let Some(variant) = bucket
                 .iter()
                 .find(|v| v.parents_signature == vertex_signature)
-            {
-                if variant.distance < distance {
-                    continue;
-                }
-            }
+            && variant.distance < distance
+        {
+            continue;
         }
 
         for (edge, next) in neighbours(lhs_arena, rhs_arena, vertex.as_ref()) {

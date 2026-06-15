@@ -157,18 +157,19 @@ async fn reader_task(
                     line_buf.push_str(segment.trim_end_matches('\r'));
                 }
 
-                if line_buf.starts_with("__STOAT_") && line_buf.contains("__") {
-                    if let Some(status) = parse_sentinel_line(&line_buf) {
-                        let _ = tx
-                            .send(PtyNotification::CommandDone {
-                                run_id,
-                                exit_status: Some(status),
-                            })
-                            .await;
-                        line_buf.clear();
-                        output_start = end + 1;
-                        continue;
-                    }
+                if line_buf.starts_with("__STOAT_")
+                    && line_buf.contains("__")
+                    && let Some(status) = parse_sentinel_line(&line_buf)
+                {
+                    let _ = tx
+                        .send(PtyNotification::CommandDone {
+                            run_id,
+                            exit_status: Some(status),
+                        })
+                        .await;
+                    line_buf.clear();
+                    output_start = end + 1;
+                    continue;
                 }
 
                 line_buf.clear();

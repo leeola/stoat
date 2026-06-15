@@ -348,17 +348,17 @@ pub fn pop_all_parents(
                 let mut new_lhs_delims = lhs_delims.clone();
                 let mut new_rhs_delims = rhs_delims.clone();
                 let mut popped_anything = false;
-                if lhs.is_none() {
-                    if let Some(parent) = new_lhs_delims.pop() {
-                        lhs = lhs_arena.get(parent).next_sibling();
-                        popped_anything = true;
-                    }
+                if lhs.is_none()
+                    && let Some(parent) = new_lhs_delims.pop()
+                {
+                    lhs = lhs_arena.get(parent).next_sibling();
+                    popped_anything = true;
                 }
-                if rhs.is_none() {
-                    if let Some(parent) = new_rhs_delims.pop() {
-                        rhs = rhs_arena.get(parent).next_sibling();
-                        popped_anything = true;
-                    }
+                if rhs.is_none()
+                    && let Some(parent) = new_rhs_delims.pop()
+                {
+                    rhs = rhs_arena.get(parent).next_sibling();
+                    popped_anything = true;
                 }
                 if !popped_anything {
                     break;
@@ -425,29 +425,29 @@ pub fn neighbours(
 
             // Case 2: both sides are lists of the same kind. Enter
             // their children together via PopBoth.
-            if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) = (lhs_node, rhs_node) {
-                if lhs_list.kind == rhs_list.kind {
-                    let edge = Edge::EnterUnchangedDelimiter {
-                        depth_difference: 0,
-                    };
-                    let parents = vertex
-                        .parents
-                        .push(EnteredDelimiter::PopBoth(lhs_id, rhs_id));
-                    let lhs_first = lhs_list.children.first().copied();
-                    let rhs_first = rhs_list.children.first().copied();
-                    let (lhs_after, rhs_after, parents_after) =
-                        pop_all_parents(lhs_arena, rhs_arena, lhs_first, rhs_first, parents);
-                    out.push((
-                        edge,
-                        Vertex {
-                            lhs_syntax: lhs_after,
-                            rhs_syntax: rhs_after,
-                            parents: parents_after,
-                        },
-                    ));
-                    // Fall through so the search can also try the
-                    // novel-delimiter alternatives.
-                }
+            if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) = (lhs_node, rhs_node)
+                && lhs_list.kind == rhs_list.kind
+            {
+                let edge = Edge::EnterUnchangedDelimiter {
+                    depth_difference: 0,
+                };
+                let parents = vertex
+                    .parents
+                    .push(EnteredDelimiter::PopBoth(lhs_id, rhs_id));
+                let lhs_first = lhs_list.children.first().copied();
+                let rhs_first = rhs_list.children.first().copied();
+                let (lhs_after, rhs_after, parents_after) =
+                    pop_all_parents(lhs_arena, rhs_arena, lhs_first, rhs_first, parents);
+                out.push((
+                    edge,
+                    Vertex {
+                        lhs_syntax: lhs_after,
+                        rhs_syntax: rhs_after,
+                        parents: parents_after,
+                    },
+                ));
+                // Fall through so the search can also try the
+                // novel-delimiter alternatives.
             }
 
             // Case 2b: comment- or string-kind atoms with similar

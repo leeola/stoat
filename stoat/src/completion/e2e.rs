@@ -91,8 +91,8 @@ fn focused_buffer_len(h: &mut TestHarness) -> usize {
     };
     let buffer_id = ws.editors.get(editor_id).unwrap().buffer_id;
     let buffer = ws.buffers.get(buffer_id).unwrap();
-    let len = buffer.read().unwrap().rope().len();
-    len
+
+    buffer.read().unwrap().rope().len()
 }
 
 #[test]

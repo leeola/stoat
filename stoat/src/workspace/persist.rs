@@ -311,10 +311,10 @@ impl Workspace {
 
 fn remap_editor_views_in_panes(panes: &mut PaneTree, remap: &HashMap<EditorId, EditorId>) {
     for id in panes.split_pane_ids() {
-        if let View::Editor(old) = panes.pane(id).view {
-            if let Some(&new) = remap.get(&old) {
-                panes.pane_mut(id).view = View::Editor(new);
-            }
+        if let View::Editor(old) = panes.pane(id).view
+            && let Some(&new) = remap.get(&old)
+        {
+            panes.pane_mut(id).view = View::Editor(new);
         }
     }
 }
@@ -324,10 +324,10 @@ fn remap_editor_views_in_docks(
     remap: &HashMap<EditorId, EditorId>,
 ) {
     for dock in docks.values_mut() {
-        if let View::Editor(old) = dock.view {
-            if let Some(&new) = remap.get(&old) {
-                dock.view = View::Editor(new);
-            }
+        if let View::Editor(old) = dock.view
+            && let Some(&new) = remap.get(&old)
+        {
+            dock.view = View::Editor(new);
         }
     }
 }

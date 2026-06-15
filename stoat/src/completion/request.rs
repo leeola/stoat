@@ -146,12 +146,11 @@ pub(crate) fn trigger(stoat: &mut Stoat) {
         None => return,
     };
 
-    if let Some(popup) = &stoat.pending_completion {
-        if snapshot.cursor_offset < popup.prefix_range.start
-            || snapshot.cursor_offset > popup.prefix_range.end
-        {
-            stoat.pending_completion = None;
-        }
+    if let Some(popup) = &stoat.pending_completion
+        && (snapshot.cursor_offset < popup.prefix_range.start
+            || snapshot.cursor_offset > popup.prefix_range.end)
+    {
+        stoat.pending_completion = None;
     }
 
     let signature = (snapshot.buffer_id, snapshot.buffer_version);

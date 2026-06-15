@@ -110,36 +110,36 @@ pub(crate) fn render_editor_with_overlay(
 
     let buffer_snapshot = snapshot.buffer_snapshot();
 
-    if let Some(query) = search_query.filter(|q| !q.is_empty()) {
-        if let Ok(regex) = crate::action_handlers::search::compile_search_regex(query) {
-            let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
-            let rope = buffer_snapshot.rope();
-            let text = rope.to_string();
-            for m in regex.find_iter(&text) {
-                let match_start = m.start();
-                let match_end = m.end();
-                if match_end == match_start {
-                    continue;
-                }
-                let mut offset = match_start;
-                let mut chars = rope.chars_at(offset);
-                while offset < match_end {
-                    let Some(ch) = chars.next() else {
-                        break;
-                    };
-                    if ch != '\n' {
-                        let point = rope.offset_to_point(offset);
-                        let display = snapshot.buffer_to_display(point);
-                        if display.row >= editor.scroll_row && display.row < end_row {
-                            let y = inner.y + (display.row - editor.scroll_row) as u16;
-                            let x = inner.x + display.column as u16;
-                            if x < right && y < bottom {
-                                buf[(x, y)].set_style(match_style);
-                            }
+    if let Some(query) = search_query.filter(|q| !q.is_empty())
+        && let Ok(regex) = crate::action_handlers::search::compile_search_regex(query)
+    {
+        let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
+        let rope = buffer_snapshot.rope();
+        let text = rope.to_string();
+        for m in regex.find_iter(&text) {
+            let match_start = m.start();
+            let match_end = m.end();
+            if match_end == match_start {
+                continue;
+            }
+            let mut offset = match_start;
+            let mut chars = rope.chars_at(offset);
+            while offset < match_end {
+                let Some(ch) = chars.next() else {
+                    break;
+                };
+                if ch != '\n' {
+                    let point = rope.offset_to_point(offset);
+                    let display = snapshot.buffer_to_display(point);
+                    if display.row >= editor.scroll_row && display.row < end_row {
+                        let y = inner.y + (display.row - editor.scroll_row) as u16;
+                        let x = inner.x + display.column as u16;
+                        if x < right && y < bottom {
+                            buf[(x, y)].set_style(match_style);
                         }
                     }
-                    offset += ch.len_utf8();
                 }
+                offset += ch.len_utf8();
             }
         }
     }

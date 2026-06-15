@@ -10,12 +10,12 @@
 //! schema drift in the Claude CLI never silently drops data.
 
 use crate::{
-    ClaudeCode,
     messages::{
         AssistantMessage, MessageContent, SdkMessage, SystemSubtype, UserContent, UserContentBlock,
         UserMessage,
     },
-    tools::{ToolUseSnapshot, tool_info_from_tool_use, tool_update_from_tool_result},
+    tools::{tool_info_from_tool_use, tool_update_from_tool_result, ToolUseSnapshot},
+    ClaudeCode,
 };
 use async_trait::async_trait;
 use std::{

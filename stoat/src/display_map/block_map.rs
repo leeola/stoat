@@ -479,10 +479,10 @@ impl<'a> Iterator for BlockChunks<'a> {
 
             if is_block {
                 let mut line = String::new();
-                if let Some(transform) = cursor.item() {
-                    if let Some(ref block) = transform.block {
-                        block.write_line(&mut line, rows_into_transform);
-                    }
+                if let Some(transform) = cursor.item()
+                    && let Some(ref block) = transform.block
+                {
+                    block.write_line(&mut line, rows_into_transform);
                 }
                 self.current_row += 1;
                 if self.current_row < self.end_row {
@@ -618,53 +618,53 @@ impl BlockMap {
 
         // Pull in companion edits: when the companion changes, we need to
         // recompute spacer blocks in the affected region.
-        if let Some(ref cv) = companion_view {
-            if !cv.companion_wrap_edits.is_empty() {
-                let our_buffer = wrap_snapshot
-                    .tab_snapshot()
-                    .fold_snapshot()
-                    .inlay_snapshot()
-                    .buffer_snapshot();
-                let their_buffer = cv
-                    .companion_wrap_snapshot
-                    .tab_snapshot()
-                    .fold_snapshot()
-                    .inlay_snapshot()
-                    .buffer_snapshot();
+        if let Some(ref cv) = companion_view
+            && !cv.companion_wrap_edits.is_empty()
+        {
+            let our_buffer = wrap_snapshot
+                .tab_snapshot()
+                .fold_snapshot()
+                .inlay_snapshot()
+                .buffer_snapshot();
+            let their_buffer = cv
+                .companion_wrap_snapshot
+                .tab_snapshot()
+                .fold_snapshot()
+                .inlay_snapshot()
+                .buffer_snapshot();
 
-                let mut merged = Patch::empty();
-                for edit in cv.companion_wrap_edits.edits() {
-                    let companion_row =
-                        wrap_row_to_buffer_row(edit.new.start, cv.companion_wrap_snapshot);
-                    let our_range = cv.companion.convert_point_from_companion(
-                        cv.display_map_id,
-                        our_buffer,
-                        their_buffer,
-                        Point::new(companion_row, 0),
-                    );
-                    let our_wrap_start =
-                        buffer_row_to_wrap_row(our_range.start.row, &wrap_snapshot);
-                    let our_wrap_end = buffer_row_to_wrap_row(our_range.end.row, &wrap_snapshot)
-                        .max(our_wrap_start + 1);
-                    merged.push(stoat_text::patch::Edit {
-                        old: our_wrap_start..our_wrap_end,
-                        new: our_wrap_start..our_wrap_end,
-                    });
-                }
-                if !merged.is_empty() {
-                    edits = edits.compose(merged.into_inner());
-                }
+            let mut merged = Patch::empty();
+            for edit in cv.companion_wrap_edits.edits() {
+                let companion_row =
+                    wrap_row_to_buffer_row(edit.new.start, cv.companion_wrap_snapshot);
+                let our_range = cv.companion.convert_point_from_companion(
+                    cv.display_map_id,
+                    our_buffer,
+                    their_buffer,
+                    Point::new(companion_row, 0),
+                );
+                let our_wrap_start = buffer_row_to_wrap_row(our_range.start.row, &wrap_snapshot);
+                let our_wrap_end = buffer_row_to_wrap_row(our_range.end.row, &wrap_snapshot)
+                    .max(our_wrap_start + 1);
+                merged.push(stoat_text::patch::Edit {
+                    old: our_wrap_start..our_wrap_end,
+                    new: our_wrap_start..our_wrap_end,
+                });
+            }
+            if !merged.is_empty() {
+                edits = edits.compose(merged.into_inner());
             }
         }
 
-        if edits.is_empty() && !self.blocks_dirty {
-            if let Some(ref transforms) = self.transforms {
-                return BlockSnapshot {
-                    wrap_snapshot,
-                    transforms: transforms.clone(),
-                    total_rows: self.total_rows,
-                };
-            }
+        if edits.is_empty()
+            && !self.blocks_dirty
+            && let Some(ref transforms) = self.transforms
+        {
+            return BlockSnapshot {
+                wrap_snapshot,
+                transforms: transforms.clone(),
+                total_rows: self.total_rows,
+            };
         }
 
         let wrap_line_count = wrap_snapshot.line_count();
@@ -840,21 +840,21 @@ impl BlockMap {
                 delta = new_delta;
             }
 
-            if delta > 0 {
-                if let Some(last_edit) = patch.patch.edits().last() {
-                    let spacer_id = SpacerId(
-                        self.next_spacer_id
-                            .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
-                    );
-                    spacers.push((
-                        BlockPlacement::Below(last_edit.new.end.row),
-                        Block::Spacer {
-                            id: spacer_id,
-                            height: delta as u32,
-                            is_below: true,
-                        },
-                    ));
-                }
+            if delta > 0
+                && let Some(last_edit) = patch.patch.edits().last()
+            {
+                let spacer_id = SpacerId(
+                    self.next_spacer_id
+                        .fetch_add(1, std::sync::atomic::Ordering::Relaxed),
+                );
+                spacers.push((
+                    BlockPlacement::Below(last_edit.new.end.row),
+                    Block::Spacer {
+                        id: spacer_id,
+                        height: delta as u32,
+                        is_below: true,
+                    },
+                ));
             }
         }
         spacers
@@ -918,10 +918,10 @@ impl BlockSnapshot {
         let Dimensions(input_start, output_start, _) = cursor.start();
         let rows_into_transform = point.row.saturating_sub(output_start.0);
 
-        if let Some(transform) = cursor.item() {
-            if transform.block.is_some() {
-                return None;
-            }
+        if let Some(transform) = cursor.item()
+            && transform.block.is_some()
+        {
+            return None;
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
@@ -955,13 +955,13 @@ impl BlockSnapshot {
         let Dimensions(input_start, output_start, _) = cursor.start();
         let rows_into_transform = block_row.saturating_sub(output_start.0);
 
-        if let Some(transform) = cursor.item() {
-            if let Some(ref block) = transform.block {
-                return BlockRowKind::Block {
-                    block,
-                    line_index: rows_into_transform,
-                };
-            }
+        if let Some(transform) = cursor.item()
+            && let Some(ref block) = transform.block
+        {
+            return BlockRowKind::Block {
+                block,
+                line_index: rows_into_transform,
+            };
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
@@ -1033,10 +1033,10 @@ impl BlockSnapshot {
         let Dimensions(input_start, output_start, _) = cursor.start();
         let rows_into_transform = block_row.saturating_sub(output_start.0);
 
-        if let Some(transform) = cursor.item() {
-            if let Some(ref block) = transform.block {
-                return block.line_len(rows_into_transform);
-            }
+        if let Some(transform) = cursor.item()
+            && let Some(ref block) = transform.block
+        {
+            return block.line_len(rows_into_transform);
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
@@ -1102,11 +1102,11 @@ impl BlockSnapshot {
         let Dimensions(input_start, output_start, _) = cursor.start();
         let rows_into_transform = block_row.saturating_sub(output_start.0);
 
-        if let Some(transform) = cursor.item() {
-            if let Some(ref block) = transform.block {
-                block.write_line(buf, rows_into_transform);
-                return;
-            }
+        if let Some(transform) = cursor.item()
+            && let Some(ref block) = transform.block
+        {
+            block.write_line(buf, rows_into_transform);
+            return;
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
@@ -1189,10 +1189,10 @@ impl BlockSnapshot {
         let Dimensions(input_start, output_start, _) = cursor.start();
         let rows_into_transform = block_row.saturating_sub(output_start.0);
 
-        if let Some(transform) = cursor.item() {
-            if transform.block.is_some() {
-                return 0;
-            }
+        if let Some(transform) = cursor.item()
+            && transform.block.is_some()
+        {
+            return 0;
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
@@ -1213,10 +1213,10 @@ impl BlockSnapshot {
         let Dimensions(input_start, output_start, _) = cursor.start();
         let rows_into_transform = block_row.saturating_sub(output_start.0);
 
-        if let Some(transform) = cursor.item() {
-            if transform.block.is_some() {
-                return false;
-            }
+        if let Some(transform) = cursor.item()
+            && transform.block.is_some()
+        {
+            return false;
         }
 
         let wrap_row = input_start.0 + rows_into_transform;
@@ -1367,17 +1367,17 @@ fn sync_incremental(
         }
 
         // Handle isomorphic prefix if edit starts within a transform
-        if let Some(item) = cursor.item() {
-            if item.block.is_none() {
-                let transform_rows_before_edit = edit.old.start - cursor.start().0;
-                if transform_rows_before_edit > 0 {
-                    push_isomorphic(
-                        &mut new_transforms,
-                        transform_rows_before_edit,
-                        cursor.start().0,
-                        wrap_snapshot,
-                    );
-                }
+        if let Some(item) = cursor.item()
+            && item.block.is_none()
+        {
+            let transform_rows_before_edit = edit.old.start - cursor.start().0;
+            if transform_rows_before_edit > 0 {
+                push_isomorphic(
+                    &mut new_transforms,
+                    transform_rows_before_edit,
+                    cursor.start().0,
+                    wrap_snapshot,
+                );
             }
         }
 

@@ -226,10 +226,10 @@ impl DiffMap {
         cursor.seek(&target, Bias::Right);
         cursor.prev();
         // Check if the hunk before the target overlaps
-        if let Some(hunk) = cursor.item() {
-            if hunk.buffer_line_range.end > line_range.start {
-                result.push(hunk);
-            }
+        if let Some(hunk) = cursor.item()
+            && hunk.buffer_line_range.end > line_range.start
+        {
+            result.push(hunk);
         }
         cursor.next();
         while let Some(hunk) = cursor.item() {

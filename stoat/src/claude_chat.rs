@@ -113,13 +113,13 @@ pub(crate) fn tool_card_status(chat: &ClaudeChatState, tool_id: &str) -> ToolCar
         return ToolCardStatus::Cancelled;
     }
     for msg in &chat.messages {
-        if let ChatMessageContent::ToolResult { id, status, .. } = &msg.content {
-            if id == tool_id {
-                return match status {
-                    ToolCallStatus::Failed => ToolCardStatus::Failed,
-                    _ => ToolCardStatus::Done,
-                };
-            }
+        if let ChatMessageContent::ToolResult { id, status, .. } = &msg.content
+            && id == tool_id
+        {
+            return match status {
+                ToolCallStatus::Failed => ToolCardStatus::Failed,
+                _ => ToolCardStatus::Done,
+            };
         }
     }
     ToolCardStatus::Running

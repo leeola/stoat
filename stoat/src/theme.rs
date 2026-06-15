@@ -92,10 +92,10 @@ impl Theme {
             if let Some(&c) = bg.get(&scope) {
                 style = style.bg(c);
             }
-            if let Some(&m) = mods.get(&scope) {
-                if !m.is_empty() {
-                    style = style.add_modifier(m);
-                }
+            if let Some(&m) = mods.get(&scope)
+                && !m.is_empty()
+            {
+                style = style.add_modifier(m);
             }
             styles.insert(scope, style);
         }

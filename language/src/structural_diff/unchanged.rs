@@ -222,19 +222,18 @@ fn pair_children(
         // for the structural-diff search to resolve.
         if let (Syntax::List(lhs_list), Syntax::List(rhs_list)) =
             (lhs_arena.get(lhs_id), rhs_arena.get(rhs_id))
+            && lhs_list.kind == rhs_list.kind
         {
-            if lhs_list.kind == rhs_list.kind {
-                let lhs_grand = lhs_list.children.clone();
-                let rhs_grand = rhs_list.children.clone();
-                pair_children(
-                    lhs_arena,
-                    rhs_arena,
-                    &lhs_grand,
-                    &rhs_grand,
-                    lhs_changes,
-                    rhs_changes,
-                );
-            }
+            let lhs_grand = lhs_list.children.clone();
+            let rhs_grand = rhs_list.children.clone();
+            pair_children(
+                lhs_arena,
+                rhs_arena,
+                &lhs_grand,
+                &rhs_grand,
+                lhs_changes,
+                rhs_changes,
+            );
         }
     }
 }

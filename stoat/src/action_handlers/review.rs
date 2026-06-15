@@ -41,10 +41,10 @@ pub(super) fn review_remove_selected(stoat: &mut Stoat) -> UpdateEffect {
         let mut groups: std::collections::HashMap<usize, Vec<&crate::review_session::ReviewChunk>> =
             std::collections::HashMap::new();
         for id in &session.order {
-            if let Some(chunk) = session.chunks.get(id) {
-                if chunk.status == ChunkStatus::Staged {
-                    groups.entry(chunk.file_index).or_default().push(chunk);
-                }
+            if let Some(chunk) = session.chunks.get(id)
+                && chunk.status == ChunkStatus::Staged
+            {
+                groups.entry(chunk.file_index).or_default().push(chunk);
             }
         }
         let tree_snapshot: Vec<(usize, String, Arc<String>, Arc<String>)> = session
@@ -161,14 +161,17 @@ fn reopen_review_on_commit(stoat: &mut Stoat, workdir: &Path, sha: &str) {
         .as_ref()
         .map(|s| s.origin)
         .unwrap_or_default();
-    if let Some(mut session) = scan_commit(stoat, workdir, sha) {
-        session.origin = origin;
-        install_review_session(stoat, session);
-    } else {
-        // Rewritten commit has no diffs vs. parent. Drop the review;
-        // `close_review` routes back to commits mode if that's where the
-        // user launched from.
-        close_review(stoat);
+    match scan_commit(stoat, workdir, sha) {
+        Some(mut session) => {
+            session.origin = origin;
+            install_review_session(stoat, session);
+        },
+        _ => {
+            // Rewritten commit has no diffs vs. parent. Drop the review;
+            // `close_review` routes back to commits mode if that's where the
+            // user launched from.
+            close_review(stoat);
+        },
     }
 }
 
@@ -367,10 +370,10 @@ fn sync_review_view_and_scroll(
     if let Some(session) = ws.review.as_ref() {
         view.refresh_from_session(session);
     }
-    if let Some(chunk_id) = scroll_to_chunk {
-        if let Some(row) = view.row_of_chunk(chunk_id) {
-            editor.scroll_row = row.saturating_sub(3);
-        }
+    if let Some(chunk_id) = scroll_to_chunk
+        && let Some(row) = view.row_of_chunk(chunk_id)
+    {
+        editor.scroll_row = row.saturating_sub(3);
     }
 }
 
@@ -536,10 +539,10 @@ pub(super) fn review_refresh(stoat: &mut Stoat) -> UpdateEffect {
 
     let ids: Vec<_> = new_session.order.clone();
     for id in ids {
-        if let Some(ident) = new_session.identity_key(id) {
-            if let Some(status) = carried.get(&ident).copied() {
-                new_session.set_status(id, status);
-            }
+        if let Some(ident) = new_session.identity_key(id)
+            && let Some(status) = carried.get(&ident).copied()
+        {
+            new_session.set_status(id, status);
         }
     }
 

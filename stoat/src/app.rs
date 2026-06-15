@@ -1356,14 +1356,14 @@ impl Stoat {
                         "clipboard write failed"
                     );
                 }
-                if crate::host::osc52_should_emit(env_host.as_ref()) {
-                    if let Err(err) = clipboard_host.osc52_emit(&text) {
-                        tracing::warn!(
-                            target: "stoat::app",
-                            error = %err,
-                            "OSC 52 emit failed"
-                        );
-                    }
+                if crate::host::osc52_should_emit(env_host.as_ref())
+                    && let Err(err) = clipboard_host.osc52_emit(&text)
+                {
+                    tracing::warn!(
+                        target: "stoat::app",
+                        error = %err,
+                        "OSC 52 emit failed"
+                    );
                 }
                 false
             },
@@ -1384,7 +1384,8 @@ impl Stoat {
     fn handle_editor_pane_mouse(&mut self, kind: MouseEventKind, col: u16, row: u16) -> bool {
         let target = {
             let ws = self.active_workspace();
-            let area = match ws.focus {
+
+            match ws.focus {
                 FocusTarget::SplitPane(pane_id) => {
                     let pane = ws.panes.pane(pane_id);
                     if let View::Editor(id) = pane.view {
@@ -1400,8 +1401,7 @@ impl Stoat {
                         None
                     }
                 }),
-            };
-            area
+            }
         };
         let Some((editor_id, area)) = target else {
             return false;
@@ -1493,14 +1493,14 @@ impl Stoat {
                         "clipboard write failed"
                     );
                 }
-                if crate::host::osc52_should_emit(env_host.as_ref()) {
-                    if let Err(err) = clipboard_host.osc52_emit(&text) {
-                        tracing::warn!(
-                            target: "stoat::app",
-                            error = %err,
-                            "OSC 52 emit failed"
-                        );
-                    }
+                if crate::host::osc52_should_emit(env_host.as_ref())
+                    && let Err(err) = clipboard_host.osc52_emit(&text)
+                {
+                    tracing::warn!(
+                        target: "stoat::app",
+                        error = %err,
+                        "OSC 52 emit failed"
+                    );
                 }
                 false
             },
@@ -1663,23 +1663,22 @@ impl Stoat {
             return self.dispatch_global_search_key(key);
         }
 
-        if self.mode == "insert"
+        if (self.mode == "insert"
             || self.mode == "reword_insert"
             || self.mode == "prompt"
-            || self.mode == "run"
+            || self.mode == "run")
+            && let Some(effect) = self.handle_insert_key(key)
         {
-            if let Some(effect) = self.handle_insert_key(key) {
-                // If help is open, keep its filtered list in sync after every
-                // text mutation in the prompt input.
-                if self.help.is_some() {
-                    let active_idx = self.active_workspace;
-                    let workspaces = &mut self.workspaces;
-                    if let Some(help) = self.help.as_mut() {
-                        help.sync_filter(&workspaces[active_idx]);
-                    }
+            // If help is open, keep its filtered list in sync after every
+            // text mutation in the prompt input.
+            if self.help.is_some() {
+                let active_idx = self.active_workspace;
+                let workspaces = &mut self.workspaces;
+                if let Some(help) = self.help.as_mut() {
+                    help.sync_filter(&workspaces[active_idx]);
                 }
-                return effect;
             }
+            return effect;
         }
 
         if (self.mode == "normal" || self.mode == "select")
@@ -1702,22 +1701,22 @@ impl Stoat {
                     },
                     _ => {},
                 }
-                if let Some(digit) = ch.to_digit(10) {
-                    if (1..=9).contains(&digit) {
-                        let viewport_top = self
-                            .pending_code_action_picker
-                            .as_ref()
-                            .map(|p| {
-                                crate::render::symbol_picker::viewport_top_for_picker(
-                                    p.selected_idx,
-                                    p.entries.len(),
-                                )
-                            })
-                            .unwrap_or(0);
-                        let index = viewport_top + (digit as usize - 1);
-                        action_handlers::lsp::pick_code_action(self, index);
-                        return UpdateEffect::Redraw;
-                    }
+                if let Some(digit) = ch.to_digit(10)
+                    && (1..=9).contains(&digit)
+                {
+                    let viewport_top = self
+                        .pending_code_action_picker
+                        .as_ref()
+                        .map(|p| {
+                            crate::render::symbol_picker::viewport_top_for_picker(
+                                p.selected_idx,
+                                p.entries.len(),
+                            )
+                        })
+                        .unwrap_or(0);
+                    let index = viewport_top + (digit as usize - 1);
+                    action_handlers::lsp::pick_code_action(self, index);
+                    return UpdateEffect::Redraw;
                 }
             }
             if matches!(key.code, KeyCode::Enter) {
@@ -1758,22 +1757,22 @@ impl Stoat {
                     },
                     _ => {},
                 }
-                if let Some(digit) = ch.to_digit(10) {
-                    if (1..=9).contains(&digit) {
-                        let viewport_top = self
-                            .pending_symbol_picker
-                            .as_ref()
-                            .map(|p| {
-                                crate::render::symbol_picker::viewport_top_for_picker(
-                                    p.selected_idx,
-                                    p.entries.len(),
-                                )
-                            })
-                            .unwrap_or(0);
-                        let index = viewport_top + (digit as usize - 1);
-                        action_handlers::lsp::pick_symbol(self, index);
-                        return UpdateEffect::Redraw;
-                    }
+                if let Some(digit) = ch.to_digit(10)
+                    && (1..=9).contains(&digit)
+                {
+                    let viewport_top = self
+                        .pending_symbol_picker
+                        .as_ref()
+                        .map(|p| {
+                            crate::render::symbol_picker::viewport_top_for_picker(
+                                p.selected_idx,
+                                p.entries.len(),
+                            )
+                        })
+                        .unwrap_or(0);
+                    let index = viewport_top + (digit as usize - 1);
+                    action_handlers::lsp::pick_symbol(self, index);
+                    return UpdateEffect::Redraw;
                 }
             }
             if matches!(key.code, KeyCode::Enter) {
@@ -1812,22 +1811,22 @@ impl Stoat {
                     },
                     _ => {},
                 }
-                if let Some(digit) = ch.to_digit(10) {
-                    if (1..=9).contains(&digit) {
-                        let viewport_top = self
-                            .pending_workspace_symbol_picker
-                            .as_ref()
-                            .map(|p| {
-                                crate::render::symbol_picker::viewport_top_for_picker(
-                                    p.selected_idx,
-                                    p.entries.len(),
-                                )
-                            })
-                            .unwrap_or(0);
-                        let index = viewport_top + (digit as usize - 1);
-                        action_handlers::lsp::pick_workspace_symbol(self, index);
-                        return UpdateEffect::Redraw;
-                    }
+                if let Some(digit) = ch.to_digit(10)
+                    && (1..=9).contains(&digit)
+                {
+                    let viewport_top = self
+                        .pending_workspace_symbol_picker
+                        .as_ref()
+                        .map(|p| {
+                            crate::render::symbol_picker::viewport_top_for_picker(
+                                p.selected_idx,
+                                p.entries.len(),
+                            )
+                        })
+                        .unwrap_or(0);
+                    let index = viewport_top + (digit as usize - 1);
+                    action_handlers::lsp::pick_workspace_symbol(self, index);
+                    return UpdateEffect::Redraw;
                 }
             }
             if matches!(key.code, KeyCode::Enter) {
@@ -1957,32 +1956,33 @@ impl Stoat {
         }
 
         let count_active_mode = self.mode == "normal" || self.mode == "select";
-        if count_active_mode && self.pending_count.is_some() && key.modifiers.is_empty() {
-            if let KeyCode::Char(ch) = key.code {
-                if ch.is_ascii_digit() {
-                    let digit = ch.to_digit(10).expect("ascii digit");
-                    let new_count = self
-                        .pending_count
-                        .unwrap_or(0)
-                        .saturating_mul(10)
-                        .saturating_add(digit);
-                    self.pending_count = Some(new_count);
-                    return UpdateEffect::Redraw;
-                }
-            }
+        if count_active_mode
+            && self.pending_count.is_some()
+            && key.modifiers.is_empty()
+            && let KeyCode::Char(ch) = key.code
+            && ch.is_ascii_digit()
+        {
+            let digit = ch.to_digit(10).expect("ascii digit");
+            let new_count = self
+                .pending_count
+                .unwrap_or(0)
+                .saturating_mul(10)
+                .saturating_add(digit);
+            self.pending_count = Some(new_count);
+            return UpdateEffect::Redraw;
         }
 
         let state = StoatKeymapState::from_stoat(self);
         let actions = self.keymap.lookup(&state, &key).map(|a| a.to_vec());
         let Some(actions) = actions else {
-            if count_active_mode {
-                if let KeyCode::Char(ch) = key.code {
-                    if ch.is_ascii_digit() && key.modifiers.is_empty() {
-                        let digit = ch.to_digit(10).expect("ascii digit");
-                        self.pending_count = Some(digit);
-                        return UpdateEffect::Redraw;
-                    }
-                }
+            if count_active_mode
+                && let KeyCode::Char(ch) = key.code
+                && ch.is_ascii_digit()
+                && key.modifiers.is_empty()
+            {
+                let digit = ch.to_digit(10).expect("ascii digit");
+                self.pending_count = Some(digit);
+                return UpdateEffect::Redraw;
             }
             return UpdateEffect::None;
         };
@@ -2073,10 +2073,10 @@ impl Stoat {
             return Some((finder.input.editor_id, finder.input.buffer_id));
         }
 
-        if let Some(palette) = &self.command_palette {
-            if let Some(input) = palette.focused_input() {
-                return Some((input.editor_id, input.buffer_id));
-            }
+        if let Some(palette) = &self.command_palette
+            && let Some(input) = palette.focused_input()
+        {
+            return Some((input.editor_id, input.buffer_id));
         }
 
         if let Some(help) = &self.help {
@@ -2170,14 +2170,11 @@ impl Stoat {
 
         if self.pending_insert_register {
             self.pending_insert_register = false;
-            if let KeyCode::Char(ch) = key.code {
-                if let Some(register) = action_handlers::yank::register_for_char(ch) {
-                    if let Some(content) =
-                        action_handlers::yank::read_register_content(self, register)
-                    {
-                        self.editor_insert(editor_id, buffer_id, &content);
-                    }
-                }
+            if let KeyCode::Char(ch) = key.code
+                && let Some(register) = action_handlers::yank::register_for_char(ch)
+                && let Some(content) = action_handlers::yank::read_register_content(self, register)
+            {
+                self.editor_insert(editor_id, buffer_id, &content);
             }
             return Some(UpdateEffect::Redraw);
         }
@@ -2298,12 +2295,12 @@ impl Stoat {
     pub(crate) fn transition_mode(&mut self, next: String) {
         let was_insert = is_insert_run_mode(&self.mode);
         let now_insert = is_insert_run_mode(&next);
-        if was_insert && !now_insert {
-            if let Some(run) = self.current_insert_run.take() {
-                if !run.is_empty() {
-                    self.last_insert_text = Some(run);
-                }
-            }
+        if was_insert
+            && !now_insert
+            && let Some(run) = self.current_insert_run.take()
+            && !run.is_empty()
+        {
+            self.last_insert_text = Some(run);
         }
         if !was_insert && now_insert {
             self.current_insert_run = Some(String::new());
@@ -2312,10 +2309,10 @@ impl Stoat {
     }
 
     pub(crate) fn editor_insert(&mut self, editor_id: EditorId, buffer_id: BufferId, text: &str) {
-        if !text.is_empty() {
-            if let Some(run) = self.current_insert_run.as_mut() {
-                run.push_str(text);
-            }
+        if !text.is_empty()
+            && let Some(run) = self.current_insert_run.as_mut()
+        {
+            run.push_str(text);
         }
         let ws = self.active_workspace_mut();
         let editor = match ws.editors.get_mut(editor_id) {
@@ -3101,15 +3098,15 @@ impl Stoat {
                     None => return UpdateEffect::Redraw,
                 };
                 let git_root = self.active_workspace().git_root.clone();
-                if let Some(repo) = self.git_host.discover(&git_root) {
-                    if let Err(err) = repo.restore_tree(&sha) {
-                        tracing::warn!(
-                            target: "stoat::claude",
-                            ?err,
-                            sha,
-                            "checkpoint restore failed"
-                        );
-                    }
+                if let Some(repo) = self.git_host.discover(&git_root)
+                    && let Err(err) = repo.restore_tree(&sha)
+                {
+                    tracing::warn!(
+                        target: "stoat::claude",
+                        ?err,
+                        sha,
+                        "checkpoint restore failed"
+                    );
                 }
                 UpdateEffect::Redraw
             },

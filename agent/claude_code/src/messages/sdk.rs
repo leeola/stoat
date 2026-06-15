@@ -6,11 +6,11 @@
 //! the `messages` root for a flat public API.
 
 use crate::messages::{
-    ResultSubtype,
     content::{AssistantMessage, UserMessage},
     control::{CanUseToolRequest, HookCallbackRequest},
     result::{ModelUsage, StopReason, Usage},
     system::{ApiKeySource, McpServer, PermissionMode, SystemSubtype},
+    ResultSubtype,
 };
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;

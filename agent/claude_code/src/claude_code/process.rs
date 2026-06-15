@@ -935,16 +935,12 @@ mod tests {
             1,
             "args: {args:?}"
         );
-        assert!(
-            index_of(&args, "--output-format")
-                .map(|i| args.get(i + 1) == Some(&"stream-json".to_string()))
-                .unwrap_or(false)
-        );
-        assert!(
-            index_of(&args, "--input-format")
-                .map(|i| args.get(i + 1) == Some(&"stream-json".to_string()))
-                .unwrap_or(false)
-        );
+        assert!(index_of(&args, "--output-format")
+            .map(|i| args.get(i + 1) == Some(&"stream-json".to_string()))
+            .unwrap_or(false));
+        assert!(index_of(&args, "--input-format")
+            .map(|i| args.get(i + 1) == Some(&"stream-json".to_string()))
+            .unwrap_or(false));
         assert!(args.contains(&"--verbose".to_string()));
         assert!(args.contains(&"--session-id".to_string()));
         assert!(args.contains(&"sess-1".to_string()));

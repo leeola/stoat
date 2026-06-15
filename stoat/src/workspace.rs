@@ -233,10 +233,10 @@ impl Workspace {
         for (_, pane) in self.panes.split_panes() {
             match pane.view {
                 View::Editor(editor_id) => {
-                    if let Some(editor) = self.editors.get(editor_id) {
-                        if !visible.contains(&editor.buffer_id) {
-                            visible.push(editor.buffer_id);
-                        }
+                    if let Some(editor) = self.editors.get(editor_id)
+                        && !visible.contains(&editor.buffer_id)
+                    {
+                        visible.push(editor.buffer_id);
                     }
                 },
                 View::Label(_) | View::Run(_) | View::Claude(_) => {},

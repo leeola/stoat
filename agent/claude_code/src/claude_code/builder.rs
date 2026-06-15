@@ -1,8 +1,8 @@
 use crate::{
     claude_code::{
-        ClaudeCode, SessionConfig,
-        control::{DispatcherDeps, run_dispatcher},
+        control::{run_dispatcher, DispatcherDeps},
         process::{ProcessBuilder as ProcessBuilderInner, SessionError, SessionIdMissingSnafu},
+        ClaudeCode, SessionConfig,
     },
     messages::{PermissionMode, SettingSource},
 };

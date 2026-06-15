@@ -1112,12 +1112,12 @@ fn slice_chunk_to_window<'a>(
             col = next_col;
             continue;
         }
-        if let Some(end) = state.target_end {
-            if col >= end {
-                byte_end = byte_idx;
-                state.done = true;
-                break;
-            }
+        if let Some(end) = state.target_end
+            && col >= end
+        {
+            byte_end = byte_idx;
+            state.done = true;
+            break;
         }
         if byte_start.is_none() {
             byte_start = Some(byte_idx);

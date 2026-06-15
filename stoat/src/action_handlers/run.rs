@@ -63,12 +63,13 @@ pub(super) fn run_submit(stoat: &mut Stoat) -> UpdateEffect {
     if let Some(handle) = &mut run_state.shell_handle {
         let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
         handle.send_command(&text, &sentinel);
-    } else if let Ok(handle) = crate::run::spawn_shell(&executor, &run_state.cwd, width, pty_tx, id)
-    {
-        let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
-        run_state.shell_handle = Some(handle);
-        if let Some(h) = &mut run_state.shell_handle {
-            h.send_command(&text, &sentinel);
+    } else {
+        if let Ok(handle) = crate::run::spawn_shell(&executor, &run_state.cwd, width, pty_tx, id) {
+            let sentinel = format!("__STOAT_{}__", run_state.blocks.len());
+            run_state.shell_handle = Some(handle);
+            if let Some(h) = &mut run_state.shell_handle {
+                h.send_command(&text, &sentinel);
+            }
         }
     }
 

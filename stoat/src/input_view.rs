@@ -80,17 +80,17 @@ impl InputView {
         let editor_state = EditorState::new(buffer_id, shared_buffer, executor);
         let editor_id = ws.editors.insert(editor_state);
 
-        if !seed.is_empty() {
-            if let Some(editor) = ws.editors.get_mut(editor_id) {
-                let snapshot = editor.display_map.snapshot();
-                let buf_snap = snapshot.buffer_snapshot();
-                let anchor = buf_snap.anchor_at(seed.len(), Bias::Right);
-                editor.selections.transform(buf_snap, |s| {
-                    let mut new = s.clone();
-                    new.collapse_to(anchor, SelectionGoal::None);
-                    new
-                });
-            }
+        if !seed.is_empty()
+            && let Some(editor) = ws.editors.get_mut(editor_id)
+        {
+            let snapshot = editor.display_map.snapshot();
+            let buf_snap = snapshot.buffer_snapshot();
+            let anchor = buf_snap.anchor_at(seed.len(), Bias::Right);
+            editor.selections.transform(buf_snap, |s| {
+                let mut new = s.clone();
+                new.collapse_to(anchor, SelectionGoal::None);
+                new
+            });
         }
 
         Self {
@@ -382,15 +382,15 @@ fn render_input_status(
     let label_text = format!(" {label} ");
     write_str(buf, area.x, area.y, &label_text, mode_label_style);
 
-    if let Some(editor) = editors.get_mut(editor_id) {
-        if let Some((row, col)) = crate::render::editor::editor_cursor_position(editor) {
-            let pos_text = format!(" {row}:{col} ");
-            let pos_len = pos_text.chars().count() as u16;
-            let right_edge = area.x + area.width;
-            if pos_len <= area.width {
-                let start = right_edge - pos_len;
-                write_str(buf, start, area.y, &pos_text, bar_style);
-            }
+    if let Some(editor) = editors.get_mut(editor_id)
+        && let Some((row, col)) = crate::render::editor::editor_cursor_position(editor)
+    {
+        let pos_text = format!(" {row}:{col} ");
+        let pos_len = pos_text.chars().count() as u16;
+        let right_edge = area.x + area.width;
+        if pos_len <= area.width {
+            let start = right_edge - pos_len;
+            write_str(buf, start, area.y, &pos_text, bar_style);
         }
     }
 }

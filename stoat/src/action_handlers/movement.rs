@@ -2439,10 +2439,10 @@ pub(super) fn match_brackets(stoat: &mut Stoat) -> UpdateEffect {
         .syntax_map(buffer_id)
         .and_then(|sm| sm.snapshot().iter_layers().next().map(|l| l.tree.clone()));
 
-    if let Some(ref tree) = tree_opt {
-        if is_in_string_or_comment(tree, head_offset) {
-            return UpdateEffect::None;
-        }
+    if let Some(ref tree) = tree_opt
+        && is_in_string_or_comment(tree, head_offset)
+    {
+        return UpdateEffect::None;
     }
 
     let editor = ws.editors.get_mut(editor_id).expect("editor still exists");

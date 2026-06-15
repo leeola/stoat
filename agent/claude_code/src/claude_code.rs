@@ -17,7 +17,7 @@ use std::{
 };
 use stoat::host::AgentMessage;
 use stoat_scheduler::Executor;
-use tokio::sync::{Mutex as TokioMutex, mpsc};
+use tokio::sync::{mpsc, Mutex as TokioMutex};
 use tracing::info;
 
 #[derive(Debug, Snafu)]

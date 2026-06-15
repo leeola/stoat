@@ -17,10 +17,10 @@ pub(crate) fn render_workspace_symbol(stoat: &mut Stoat, buf: &mut Buffer) {
         render_input(stoat, buf);
         return;
     }
-    if let Some(picker) = stoat.pending_workspace_symbol_picker.as_ref() {
-        if !picker.entries.is_empty() {
-            render_picker(stoat, buf);
-        }
+    if let Some(picker) = stoat.pending_workspace_symbol_picker.as_ref()
+        && !picker.entries.is_empty()
+    {
+        render_picker(stoat, buf);
     }
 }
 
