@@ -22,6 +22,7 @@ test-support = [
 [dependencies]
 crossterm.workspace = true
 etcetera.workspace = true
+futures = { workspace = true, features = ["std"] }
 gpui.workspace = true
 insta = { version = "1", features = ["json"], optional = true }
 lru = "0.16"

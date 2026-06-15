@@ -9,6 +9,7 @@
 //! This is the foundation the request sites and buffer-lifecycle document sync
 //! build on; wiring those callers to the cache is layered on top.
 
+use futures::{future::Shared, FutureExt};
 use gpui::{Context, Task};
 use lsp_types::{
     DidChangeTextDocumentParams, DidCloseTextDocumentParams, DidOpenTextDocumentParams,
@@ -29,6 +30,10 @@ pub(crate) fn path_to_uri(path: &Path) -> Option<Uri> {
     Uri::from_str(&format!("file://{}", path.to_str()?)).ok()
 }
 
+/// An in-progress server launch, shared so every concurrent caller awaiting one
+/// key resolves from a single launch. See [`LspManager::in_flight`].
+type SharedLaunch = Shared<Task<Option<Arc<dyn LspServer>>>>;
+
 /// Caches one initialized [`LspServer`] per `(workspace_root, language)`.
 ///
 /// [`Self::server`] returns the cached handle, or launches and `initialize`s a
@@ -38,12 +43,21 @@ pub(crate) fn path_to_uri(path: &Path) -> Option<Uri> {
 /// a process that has never seen the buffer for every request.
 pub struct LspManager {
     servers: HashMap<(PathBuf, &'static str), Arc<dyn LspServer>>,
+
+    /// Launches in progress, keyed like [`Self::servers`].
+    ///
+    /// While a server is launching, its key maps to a shared future that
+    /// every concurrent caller awaits, so the host launches one server per
+    /// key rather than one per request. The launch task removes its entry and
+    /// promotes the server into [`Self::servers`] once it resolves.
+    in_flight: HashMap<(PathBuf, &'static str), SharedLaunch>,
 }
 
 impl LspManager {
     pub fn new() -> Self {
         Self {
             servers: HashMap::new(),
+            in_flight: HashMap::new(),
         }
     }
 
@@ -58,6 +72,9 @@ impl LspManager {
     /// or a freshly launched one, `initialize`d once with `root_uri` and cached
     /// before it resolves. Resolves to `None` when launch or initialization
     /// fails.
+    ///
+    /// Concurrent first requests for one key share a single launch rather than
+    /// each starting their own server.
     pub fn server(
         &mut self,
         host: Arc<dyn LspHost>,
@@ -66,30 +83,34 @@ impl LspManager {
         root_uri: Option<Uri>,
         cx: &mut Context<'_, Self>,
     ) -> Task<Option<Arc<dyn LspServer>>> {
-        let name = language.name;
-        if let Some(server) = self.servers.get(&(root.clone(), name)) {
-            let server = server.clone();
-            return Task::ready(Some(server));
+        let key = (root, language.name);
+
+        if let Some(server) = self.servers.get(&key) {
+            return Task::ready(Some(server.clone()));
         }
-        cx.spawn(async move |this, cx| {
-            let boxed = host.launch(&language, &root).await.ok()?;
-            let server: Arc<dyn LspServer> = Arc::from(boxed);
-            server.initialize(root_uri).await.ok()?;
-            // FIXME: two concurrent first requests for the same key both launch
-            // a server. `or_insert` keeps the cache to a single entry (the
-            // loser's server drops), so this is wasteful, not incorrect; dedup
-            // the in-flight launch with a shared future.
-            let cached = this
-                .update(cx, |manager, _| {
-                    manager
-                        .servers
-                        .entry((root, name))
-                        .or_insert(server)
-                        .clone()
-                })
-                .ok()?;
-            Some(cached)
-        })
+
+        if let Some(in_flight) = self.in_flight.get(&key) {
+            let in_flight = in_flight.clone();
+            return cx.spawn(async move |_, _| in_flight.await);
+        }
+
+        let launch = cx
+            .spawn({
+                let key = key.clone();
+                async move |this, cx| {
+                    let server = launch_and_initialize(host, language, &key.0, root_uri).await;
+                    this.update(cx, |manager, _| {
+                        manager.in_flight.remove(&key);
+                        server.map(|server| manager.servers.entry(key).or_insert(server).clone())
+                    })
+                    .ok()
+                    .flatten()
+                }
+            })
+            .shared();
+
+        self.in_flight.insert(key, launch.clone());
+        cx.spawn(async move |_, _| launch.await)
     }
 
     /// Send `textDocument/didOpen` for `document` to the `(root, language)`
@@ -167,6 +188,20 @@ impl Default for LspManager {
     }
 }
 
+/// Launch `language`'s server under `root` and run the one-time `initialize`
+/// handshake with `root_uri`. `None` if either step fails.
+async fn launch_and_initialize(
+    host: Arc<dyn LspHost>,
+    language: Arc<Language>,
+    root: &Path,
+    root_uri: Option<Uri>,
+) -> Option<Arc<dyn LspServer>> {
+    let boxed = host.launch(&language, root).await.ok()?;
+    let server: Arc<dyn LspServer> = Arc::from(boxed);
+    server.initialize(root_uri).await.ok()?;
+    Some(server)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -222,6 +257,33 @@ mod tests {
         assert!(
             !Arc::ptr_eq(&rust_server, &json_server),
             "a different language launches its own server",
+        );
+    }
+
+    #[test]
+    fn concurrent_first_requests_launch_one_server() {
+        let mut cx = TestAppContext::single();
+        let fake = Arc::new(FakeLsp::new());
+        let host: Arc<dyn LspHost> = Arc::new(FakeLspHost::new(fake.clone()));
+        let manager = cx.update(|cx| cx.new(|_| LspManager::new()));
+        let rust = language_for("main.rs");
+        let root = PathBuf::from("/repo");
+
+        let (_first, _second) = manager.update(&mut cx, |m, cx| {
+            let first = m.server(host.clone(), rust.clone(), root.clone(), None, cx);
+            let second = m.server(host.clone(), rust.clone(), root.clone(), None, cx);
+            (first, second)
+        });
+        cx.run_until_parked();
+
+        assert_eq!(
+            fake.launch_count(),
+            1,
+            "concurrent first requests for one key share a single launch",
+        );
+        assert!(
+            manager.read_with(&cx, |m, _| m.cached(&root, &rust).is_some()),
+            "the deduped launch still populates the cache",
         );
     }
 

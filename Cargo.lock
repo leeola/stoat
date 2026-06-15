@@ -6463,6 +6463,7 @@ version = "0.1.0"
 dependencies = [
  "crossterm",
  "etcetera",
+ "futures",
  "gpui",
  "insta",
  "lru",

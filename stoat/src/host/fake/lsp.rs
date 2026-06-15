@@ -216,6 +216,7 @@ struct FakeLspState {
     pending_queue: BTreeMap<&'static str, VecDeque<PendingEntry>>,
     initialized: bool,
     shut_down: bool,
+    launches: usize,
 }
 
 /// Type-erased `(Params, oneshot::Sender<Result>)` tuple stored
@@ -288,6 +289,7 @@ impl FakeLsp {
                 pending_queue: BTreeMap::new(),
                 initialized: false,
                 shut_down: false,
+                launches: 0,
             }),
             notif_tx,
             notif_rx: TokioMutex::new(notif_rx),
@@ -1350,6 +1352,17 @@ impl FakeLsp {
             .open_documents
             .contains_key(&file_uri(path))
     }
+
+    /// Number of times [`FakeLspHost::launch`] has handed out a session over
+    /// this shared state. Tests assert that concurrent first requests for one
+    /// `(root, language)` key dedupe onto a single launch.
+    pub fn launch_count(&self) -> usize {
+        self.state.lock().unwrap().launches
+    }
+
+    fn record_launch(&self) {
+        self.state.lock().unwrap().launches += 1;
+    }
 }
 
 impl Default for FakeLsp {
@@ -2118,6 +2131,7 @@ impl FakeLspHost {
 #[async_trait]
 impl LspHost for FakeLspHost {
     async fn launch(&self, _language: &Language, _root: &Path) -> io::Result<Box<dyn LspServer>> {
+        self.server.record_launch();
         Ok(Box::new(ArcLspSession(self.server.clone())))
     }
 }
