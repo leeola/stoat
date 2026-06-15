@@ -494,6 +494,23 @@ async fn install_session(
             break;
         }
     }
+
+    // The shell exited or the session errored. Remove the dead terminal
+    // from its pane, holding a strong ref across the removal so the pane
+    // dropping its item does not free the entity while it is borrowed.
+    let Some(terminal) = this.upgrade() else {
+        return;
+    };
+    let Some(workspace) = terminal
+        .update(cx, |term, _| term.workspace.clone())
+        .ok()
+        .and_then(|workspace| workspace.upgrade())
+    else {
+        return;
+    };
+    let _ = workspace.update(cx, |workspace, cx| {
+        workspace.remove_closed_terminal(&terminal, cx);
+    });
 }
 
 /// Write raw bytes to the session off the foreground thread. Mouse
@@ -1007,6 +1024,21 @@ mod tests {
             h.terminal.sent_bytes(),
             vec![b"a".to_vec()],
             "a dispatched terminal is focused on open, so typed text reaches its PTY without a click",
+        );
+    }
+
+    #[test]
+    fn terminal_pane_item_closes_when_its_shell_exits() {
+        let mut cx = TestAppContext::single();
+        let mut h = new_harness(&mut cx);
+        open_terminal(&mut h);
+
+        h.terminal.finish(0);
+        h.vcx.run_until_parked();
+
+        assert!(
+            focused_terminal(&mut h).is_none(),
+            "the terminal's pane item is removed when its shell exits",
         );
     }
 

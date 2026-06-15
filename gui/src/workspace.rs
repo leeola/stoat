@@ -6447,6 +6447,44 @@ impl Workspace {
         }
     }
 
+    /// Remove the pane item backed by `terminal` from whichever pane
+    /// hosts it. Called when the terminal's shell exits so the dead
+    /// emulator screen does not linger as a frozen tab. No-op when the
+    /// terminal is not hosted by any pane.
+    pub(crate) fn remove_closed_terminal(
+        &mut self,
+        terminal: &Entity<crate::terminal_view::Terminal>,
+        cx: &mut Context<'_, Self>,
+    ) {
+        let pane = {
+            let tree = self.pane_tree.read(cx);
+            tree.split_pane_ids().into_iter().find_map(|id| {
+                let pane = tree.pane(id)?;
+                let hosts = pane.read(cx).items().iter().any(|item| {
+                    item.to_any_view()
+                        .downcast::<crate::terminal_view::Terminal>()
+                        .ok()
+                        .is_some_and(|hosted| hosted == *terminal)
+                });
+                hosts.then(|| pane.clone())
+            })
+        };
+        let Some(pane) = pane else {
+            return;
+        };
+        pane.update(cx, |pane, cx| {
+            let idx = pane.items().iter().position(|item| {
+                item.to_any_view()
+                    .downcast::<crate::terminal_view::Terminal>()
+                    .ok()
+                    .is_some_and(|hosted| hosted == *terminal)
+            });
+            if let Some(idx) = idx {
+                pane.remove_item(idx, cx);
+            }
+        });
+    }
+
     /// Workdirs of every open review item whose session has `live` on
     /// and a working-tree source: the directories that should be
     /// live-watched right now.
