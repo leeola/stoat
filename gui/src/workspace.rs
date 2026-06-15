@@ -1956,6 +1956,29 @@ impl Workspace {
         });
     }
 
+    /// Resolve the persistent, document-synced language server for `language`
+    /// from the [`LspManager`] cache, launching and initializing one rooted at
+    /// this workspace once if needed. Resolves to `None` when no LSP host is
+    /// installed. Request handlers (completion, hover) use this instead of
+    /// launching a fresh server per request.
+    pub(crate) fn lsp_server(
+        &mut self,
+        language: Arc<stoat_language::Language>,
+        cx: &mut Context<'_, Self>,
+    ) -> Task<Option<Arc<dyn stoat::host::LspServer>>> {
+        let Some(host) = cx
+            .try_global::<crate::globals::LspHostGlobal>()
+            .map(|global| global.0.clone())
+        else {
+            return Task::ready(None);
+        };
+        let root = self.git_root.clone();
+        let root_uri = path_to_uri(&root);
+        self.lsp_manager.update(cx, |manager, cx| {
+            manager.server(host, language, root, root_uri, cx)
+        })
+    }
+
     /// Re-bind [`Workspace::_active_editor_subscription`] to the focused
     /// pane's active editor (if any). Each [`EditorEvent::Changed`]
     /// notifies the workspace so the window-title formatter picks up

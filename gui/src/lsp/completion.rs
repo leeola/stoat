@@ -1,8 +1,9 @@
 use crate::{
     editor::{Editor, EditorEvent},
     elevation::StyledExt,
-    globals::{FsHostGlobal, LanguageRegistry, LspHostGlobal, UserSnippetsGlobal},
+    globals::{FsHostGlobal, LanguageRegistry, UserSnippetsGlobal},
     theme::ActiveTheme,
+    workspace::Workspace,
 };
 use gpui::{
     deferred, div, point, Bounds, Context, Entity, IntoElement, ParentElement, Pixels, Point,
@@ -16,7 +17,7 @@ use lsp_types::{
 use std::{ops::Range, path::Path, str::FromStr, sync::Arc};
 use stoat::{
     completion::{self, CompletionContext, CompletionItem},
-    host::{FsHost, LanguageServerFeature, LspHost},
+    host::{FsHost, LanguageServerFeature, LspServer},
     lsp::util::{byte_offset_to_lsp_pos, lsp_range_to_byte_range},
     snippet::UserSnippet,
 };
@@ -218,7 +219,9 @@ impl CompletionPopup {
         let prefix_range = request.prefix_range.clone();
         let request_id = self.bump_request_id();
         let task = cx.spawn(async move |this, cx| {
-            let entries = request.run().await;
+            let server =
+                super::cached_server(&request.workspace, request.language.clone(), cx).await;
+            let entries = request.run(server).await;
             let _ = this.update(cx, |popup, cx| {
                 if popup.request_id() != request_id {
                     // A newer completion request superseded this one;
@@ -322,7 +325,10 @@ fn is_in_insert_mode(editor: &Entity<Editor>, cx: &Context<'_, CompletionPopup>)
 }
 
 struct CompletionRequest {
-    host: Arc<dyn LspHost>,
+    /// Workspace owning the persistent [`crate::LspManager`] cache the LSP
+    /// source resolves its server from. `None` when the editor is unattached,
+    /// which disables LSP completion (local sources still run).
+    workspace: Option<WeakEntity<Workspace>>,
     /// Filesystem host for the path source, captured at construction
     /// because the async [`Self::run`] has no `cx`. `None` disables
     /// path completion when no host is installed.
@@ -342,7 +348,7 @@ struct CompletionRequest {
 
 impl CompletionRequest {
     fn build(editor: &Entity<Editor>, cx: &mut Context<'_, CompletionPopup>) -> Option<Self> {
-        let host = cx.global::<LspHostGlobal>().0.clone();
+        let workspace = editor.read(cx).workspace().cloned();
         let fs_host = cx.try_global::<FsHostGlobal>().map(|g| g.0.clone());
         let path = editor.read(cx).file_path()?.to_path_buf();
         let language = cx.global::<LanguageRegistry>().0.for_path(&path)?;
@@ -366,7 +372,7 @@ impl CompletionRequest {
             .map(Path::to_path_buf)
             .unwrap_or_else(|| path.clone());
         Some(Self {
-            host,
+            workspace,
             fs_host,
             language,
             workspace_root,
@@ -379,11 +385,11 @@ impl CompletionRequest {
         })
     }
 
-    async fn run(mut self) -> Vec<CompletionEntry> {
+    async fn run(mut self, server: Option<Arc<dyn LspServer>>) -> Vec<CompletionEntry> {
         let snippet_entries = std::mem::take(&mut self.snippet_entries);
         let (path_entries, word_entries) = self.local_source_entries();
         let mut entries = path_entries;
-        entries.extend(self.lsp_entries().await);
+        entries.extend(self.lsp_entries(server).await);
         entries.extend(snippet_entries);
         entries.extend(word_entries);
         entries
@@ -427,15 +433,10 @@ impl CompletionRequest {
         )
     }
 
-    async fn lsp_entries(self) -> Vec<CompletionEntry> {
-        let server = match self.host.launch(&self.language, &self.workspace_root).await {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(target: "stoat_gui::lsp::completion", ?err, "failed to launch LSP server");
-                return Vec::new();
-            },
+    async fn lsp_entries(self, server: Option<Arc<dyn LspServer>>) -> Vec<CompletionEntry> {
+        let Some(server) = server else {
+            return Vec::new();
         };
-        let _ = server.initialize(Some(self.uri.clone())).await;
         if !server.supports_feature(LanguageServerFeature::Completion) {
             return Vec::new();
         }
@@ -595,15 +596,24 @@ fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        globals::ExecutorGlobal, input_state_machine::InputStateMachine, keymap_loader,
-        multi_buffer::MultiBuffer, workspace::Workspace,
+        buffer::Buffer,
+        diff_map::DiffMap,
+        display_map::DisplayMap,
+        editor::EditorMode,
+        globals::{ExecutorGlobal, LspHostGlobal},
+        input_state_machine::InputStateMachine,
+        keymap_loader,
+        multi_buffer::MultiBuffer,
+        workspace::Workspace,
     };
     use gpui::{AppContext, TestAppContext};
     use std::{collections::HashMap, path::PathBuf};
     use stoat::{
         buffer::BufferId,
-        host::fake::{FakeLsp, FakeLspHost},
+        host::{
+            fake::{FakeLsp, FakeLspHost},
+            LspHost,
+        },
     };
     use stoat_scheduler::{Executor, TestScheduler};
 
