@@ -1,13 +1,14 @@
 use crate::{
     editor::{Editor, EditorEvent},
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
+    workspace::Workspace,
 };
 use gpui::{Context, Entity, Subscription, Task, WeakEntity};
 use lsp_types::{CodeLensParams, Command, ExecuteCommandParams, TextDocumentIdentifier, Uri};
 use std::{collections::HashMap, path::Path, str::FromStr, sync::Arc};
 use stoat::{
     display_map::{BlockPlacement, BlockProperties, BlockStyle, CustomBlockId},
-    host::LspHost,
+    host::LspServer,
 };
 use stoat_language::Language;
 
@@ -22,11 +23,8 @@ use stoat_language::Language;
 /// lens set is materialized as blocks; the display map clips to the
 /// viewport, so off-screen blocks cost nothing to paint.
 ///
-/// Each request launches a fresh language server through the global
-/// [`LspHostGlobal`] factory, matching [`crate::lsp::InlayHintsManager`].
-///
-/// FIXME: route through a per-language `LspServer` cache instead of
-/// launching a new child process per request.
+/// Each request resolves the workspace's persistent, document-synced
+/// server from the [`crate::LspManager`] cache.
 pub struct CodeLensManager {
     editor: WeakEntity<Editor>,
     current_block_ids: Vec<CustomBlockId>,
@@ -75,23 +73,17 @@ impl CodeLensManager {
             return false;
         };
         let Some(LspTarget {
-            host,
+            workspace,
             language,
-            workspace_root,
-            uri,
+            ..
         }) = lsp_target(&editor, cx)
         else {
             return false;
         };
-        cx.spawn(async move |_, _| {
-            let server = match host.launch(&language, &workspace_root).await {
-                Ok(s) => s,
-                Err(err) => {
-                    tracing::warn!(target: "stoat_gui::lsp::code_lens", ?err, "failed to launch LSP server");
-                    return;
-                },
+        cx.spawn(async move |_, cx| {
+            let Some(server) = crate::lsp::cached_server(&workspace, language, cx).await else {
+                return;
             };
-            let _ = server.initialize(Some(uri)).await;
             let params = ExecuteCommandParams {
                 command: command.command,
                 arguments: command.arguments.unwrap_or_default(),
@@ -121,7 +113,9 @@ impl CodeLensManager {
         self.last_signature = Some(request.signature.clone());
         let signature = request.signature.clone();
         let task = cx.spawn(async move |this, cx| {
-            let outcome = request.run().await;
+            let server =
+                crate::lsp::cached_server(&request.workspace, request.language.clone(), cx).await;
+            let outcome = request.run(server).await;
             let _ = this.update(cx, |this, cx| {
                 if this.last_signature.as_ref() != Some(&signature) {
                     return;
@@ -165,9 +159,8 @@ impl CodeLensManager {
 }
 
 struct CodeLensRequest {
-    host: Arc<dyn LspHost>,
+    workspace: Option<WeakEntity<Workspace>>,
     language: Arc<Language>,
-    workspace_root: std::path::PathBuf,
     uri: Uri,
     max_buffer_row: u32,
     signature: RequestSignature,
@@ -176,9 +169,8 @@ struct CodeLensRequest {
 impl CodeLensRequest {
     fn build(editor: &Entity<Editor>, cx: &mut Context<'_, CodeLensManager>) -> Option<Self> {
         let LspTarget {
-            host,
+            workspace,
             language,
-            workspace_root,
             uri,
         } = lsp_target(editor, cx)?;
         let buffer_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
@@ -186,9 +178,8 @@ impl CodeLensRequest {
         let buffer_version = buffer_snapshot.version();
 
         Some(Self {
-            host,
+            workspace,
             language,
-            workspace_root,
             uri: uri.clone(),
             max_buffer_row,
             signature: RequestSignature {
@@ -198,15 +189,8 @@ impl CodeLensRequest {
         })
     }
 
-    async fn run(self) -> Option<Vec<(u32, String, Command)>> {
-        let server = match self.host.launch(&self.language, &self.workspace_root).await {
-            Ok(s) => s,
-            Err(err) => {
-                tracing::warn!(target: "stoat_gui::lsp::code_lens", ?err, "failed to launch LSP server");
-                return None;
-            },
-        };
-        let _ = server.initialize(Some(self.uri.clone())).await;
+    async fn run(self, server: Option<Arc<dyn LspServer>>) -> Option<Vec<(u32, String, Command)>> {
+        let server = server?;
         if server.capabilities().code_lens_provider.is_none() {
             return Some(Vec::new());
         }
@@ -249,28 +233,22 @@ impl CodeLensRequest {
     }
 }
 
-/// LSP launch coordinates for an editor's buffer, resolved from the
-/// installed globals. Shared by request building and command dispatch.
+/// Coordinates for resolving an editor buffer's cached LSP server.
+/// Shared by request building and command dispatch.
 struct LspTarget {
-    host: Arc<dyn LspHost>,
+    workspace: Option<WeakEntity<Workspace>>,
     language: Arc<Language>,
-    workspace_root: std::path::PathBuf,
     uri: Uri,
 }
 
 fn lsp_target(editor: &Entity<Editor>, cx: &mut Context<'_, CodeLensManager>) -> Option<LspTarget> {
     let path = editor.read(cx).file_path()?.to_path_buf();
-    let host = cx.try_global::<LspHostGlobal>()?.0.clone();
+    let workspace = editor.read(cx).workspace().cloned();
     let language = cx.try_global::<LanguageRegistry>()?.0.for_path(&path)?;
     let uri = path_to_uri(&path)?;
-    let workspace_root = path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| path.clone());
     Some(LspTarget {
-        host,
+        workspace,
         language,
-        workspace_root,
         uri,
     })
 }
@@ -284,15 +262,23 @@ fn path_to_uri(path: &Path) -> Option<Uri> {
 mod tests {
     use super::*;
     use crate::{
-        buffer::Buffer, diff_map::DiffMap, display_map::DisplayMap, editor::EditorMode,
-        globals::ExecutorGlobal, multi_buffer::MultiBuffer,
+        buffer::Buffer,
+        diff_map::DiffMap,
+        display_map::DisplayMap,
+        editor::EditorMode,
+        globals::{ExecutorGlobal, LspHostGlobal},
+        multi_buffer::MultiBuffer,
+        workspace::Workspace,
     };
     use gpui::{AppContext, TestAppContext};
     use lsp_types::{CodeLens, CodeLensOptions, Command, Position, Range, ServerCapabilities};
     use std::path::PathBuf;
     use stoat::{
         buffer::BufferId,
-        host::fake::{FakeLsp, FakeLspHost},
+        host::{
+            fake::{FakeLsp, FakeLspHost},
+            LspHost,
+        },
     };
     use stoat_scheduler::{Executor, TestScheduler};
 
@@ -308,9 +294,15 @@ mod tests {
         lsp
     }
 
-    fn build_editor(cx: &mut TestAppContext, path: &Path, text: &str) -> Entity<Editor> {
+    fn build_editor(
+        cx: &mut TestAppContext,
+        path: &Path,
+        text: &str,
+    ) -> (Entity<Workspace>, Entity<Editor>) {
         let path = path.to_path_buf();
         cx.update(|cx| {
+            let workspace = cx.new(|cx| Workspace::new("main", PathBuf::from("/tmp/repo"), cx));
+            let workspace_handle = workspace.downgrade();
             let buffer = cx.new(|_| Buffer::with_text(BufferId::new(0), text));
             let executor = cx.global::<ExecutorGlobal>().0.clone();
             let multi = cx.new({
@@ -325,11 +317,13 @@ mod tests {
                 let buffer = buffer.clone();
                 |cx| DiffMap::new(buffer, cx)
             });
-            cx.new(|cx| {
+            let editor = cx.new(|cx| {
                 let mut ed = Editor::new(multi, display, diff, EditorMode::full(), cx);
+                ed.set_workspace(Some(workspace_handle));
                 ed.set_file_path(Some(path), cx);
                 ed
-            })
+            });
+            (workspace, editor)
         })
     }
 
@@ -373,7 +367,7 @@ mod tests {
             vec![lens(0, "Run test"), lens(1, "Debug")],
         );
 
-        let editor = build_editor(&mut cx, &path, "fn a() {}\nfn b() {}");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "fn a() {}\nfn b() {}");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let manager = cx.update(|cx| {
             let editor = editor.clone();
@@ -398,7 +392,7 @@ mod tests {
         let path = PathBuf::from("/tmp/clear.rs");
         lsp.set_code_lenses(path.to_str().unwrap(), vec![lens(0, "Run test")]);
 
-        let editor = build_editor(&mut cx, &path, "fn a() {}");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "fn a() {}");
         let manager = cx.update(|cx| {
             let editor = editor.clone();
             cx.new(|cx| CodeLensManager::new(editor, cx))
@@ -424,7 +418,7 @@ mod tests {
         let path = PathBuf::from("/tmp/no_caps.rs");
         lsp.set_code_lenses(path.to_str().unwrap(), vec![lens(0, "Run test")]);
 
-        let editor = build_editor(&mut cx, &path, "fn a() {}");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "fn a() {}");
         let manager = cx.update(|cx| {
             let editor = editor.clone();
             cx.new(|cx| CodeLensManager::new(editor, cx))
@@ -457,7 +451,7 @@ mod tests {
         let path = PathBuf::from("/tmp/dispatch.rs");
         lsp.set_code_lenses(path.to_str().unwrap(), vec![lens(0, "Run test")]);
 
-        let editor = build_editor(&mut cx, &path, "fn a() {}");
+        let (_workspace, editor) = build_editor(&mut cx, &path, "fn a() {}");
         let display_map = editor.read_with(&cx, |ed, _| ed.display_map().clone());
         let manager = cx.update(|cx| {
             let editor = editor.clone();
