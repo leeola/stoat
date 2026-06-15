@@ -10,7 +10,7 @@
 use crate::{
     buffer::Buffer,
     editor::Editor,
-    globals::{LanguageRegistry, LspHostGlobal},
+    globals::LanguageRegistry,
     picker::{match_highlight_runs, rank_matches, Picker, PickerDelegate, PickerSecondary},
     theme::ActiveTheme,
     workspace::Workspace,
@@ -26,10 +26,9 @@ use lsp_types::{
 use std::{
     path::{Path, PathBuf},
     str::FromStr,
-    sync::Arc,
 };
 use stoat::{
-    host::{LanguageServerFeature, LspServer, OffsetEncoding},
+    host::{LanguageServerFeature, OffsetEncoding},
     lsp::util::lsp_pos_to_byte_offset,
 };
 use stoat_text::{Bias, Rope, Selection, SelectionGoal};
@@ -265,32 +264,19 @@ pub fn open_symbol_picker(
     let Some(language) = registry.for_path(&path) else {
         return;
     };
-    let host = cx.global::<LspHostGlobal>().0.clone();
     let mb_snapshot = editor.read(cx).multi_buffer().read(cx).snapshot();
     let rope = mb_snapshot.rope().clone();
     let Some(uri) = path_to_uri(&path) else {
         return;
     };
-    let workspace_root = path
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_else(|| path.clone());
+    let server = workspace.lsp_server(language, cx);
 
     let weak_workspace = cx.weak_entity();
     let path_for_task = path.clone();
     cx.spawn_in(window, async move |_, cx| {
-        let server = match host.launch(&language, &workspace_root).await {
-            Ok(s) => Arc::<dyn LspServer>::from(s),
-            Err(err) => {
-                tracing::warn!(
-                    target: "stoat_gui::symbol_picker",
-                    ?err,
-                    "failed to launch LSP server for document symbols"
-                );
-                return;
-            },
+        let Some(server) = server.await else {
+            return;
         };
-        let _ = server.initialize(Some(uri.clone())).await;
         if !server.supports_feature(LanguageServerFeature::DocumentSymbols) {
             return;
         }
@@ -393,9 +379,10 @@ fn path_to_uri(path: &Path) -> Option<Uri> {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal};
+    use crate::globals::{ExecutorGlobal, FsHostGlobal, FsWatchHostGlobal, LspHostGlobal};
     use gpui::{TestAppContext, VisualTestContext};
     use lsp_types::{Location, Position, Range, SymbolKind};
+    use std::sync::Arc;
     use stoat::host::{
         fake::{FakeFs, FakeLsp, FakeLspHost},
         FsWatchHost, LspHost,
