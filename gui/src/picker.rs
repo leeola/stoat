@@ -439,7 +439,7 @@ impl<D: PickerDelegate> Render for Picker<D> {
                 column.into_any_element()
             },
             Some(preview) => {
-                let mut left = div().flex().flex_col().w_2_5().min_w_0().child(query_row);
+                let mut left = div().flex().flex_col().w_2_5().min_w_0();
                 if let Some(header) = header {
                     left = left.child(header);
                 }
@@ -447,13 +447,20 @@ impl<D: PickerDelegate> Render for Picker<D> {
                 if let Some(footer) = footer {
                     left = left.child(footer);
                 }
-                div()
+                let body = div()
                     .flex()
                     .flex_row()
+                    .flex_grow()
+                    .min_h_0()
+                    .child(left)
+                    .child(div().flex_grow().min_w_0().child(preview));
+                div()
+                    .flex()
+                    .flex_col()
                     .size_full()
                     .track_focus(&self.focus_handle)
-                    .child(left)
-                    .child(div().flex_grow().min_w_0().child(preview))
+                    .child(query_row)
+                    .child(body)
                     .into_any_element()
             },
         }
