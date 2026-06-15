@@ -1434,8 +1434,14 @@ mod tests {
             };
             let delegate = CommandPaletteDelegate::new(WeakEntity::new_invalid(), availability);
             let names = matched_names(&delegate);
-            for name in ["MoveDown", "SelectAll", "Undo", "write"] {
+            for name in ["write", "buffer-close", "comments", "minimap"] {
                 assert!(names.contains(&name), "{name} missing when editor_focused");
+            }
+            for name in ["MoveDown", "SelectAll", "Undo"] {
+                assert!(
+                    !names.contains(&name),
+                    "{name} is a hidden editor primitive and must not surface",
+                );
             }
             assert!(!names.contains(&"RunSubmit"));
         }
