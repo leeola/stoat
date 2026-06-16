@@ -8,6 +8,7 @@
 //!
 //! [`Cell`]: stoatty_term::grid::Cell
 
+use crate::render::{CELL_HEIGHT, CELL_WIDTH};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::Grid;
 use wgpu::{
@@ -17,13 +18,6 @@ use wgpu::{
     Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor,
     ShaderSource, ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
 };
-
-/// Cell size in physical pixels used to lay out the grid.
-///
-/// A fixed placeholder until the glyph-atlas pass derives real metrics from
-/// the font; the background pass only needs a consistent cell rectangle.
-const CELL_WIDTH: f32 = 9.0;
-const CELL_HEIGHT: f32 = 18.0;
 
 /// Instance buffer capacity, in cells, allocated up front. Grows by doubling
 /// when a grid exceeds it; 2048 covers a default 24x80 grid without reallocating.

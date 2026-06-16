@@ -5,7 +5,7 @@
 //! app supplies via the raw-window-handle traits, so this crate never links
 //! the windowing library; the app owns the window and hands its handle in.
 
-use crate::render::background::BackgroundPass;
+use crate::render::{background::BackgroundPass, text::TextPass};
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use stoatty_term::grid::Grid;
@@ -37,6 +37,7 @@ pub struct GpuContext {
     queue: Queue,
     config: SurfaceConfiguration,
     background: BackgroundPass,
+    text: TextPass,
 }
 
 impl GpuContext {
@@ -69,7 +70,18 @@ impl GpuContext {
             executor::block_on(adapter.request_device(&DeviceDescriptor::default()))
                 .expect("request wgpu device");
 
-        let format = surface.get_capabilities(&adapter).formats[0];
+        // A non-sRGB surface: the text pass encodes its gamma-correct composite
+        // to sRGB in the shader, and the background pass writes already-encoded
+        // colors, so the surface must store written values verbatim rather than
+        // re-encoding them.
+        let caps = surface.get_capabilities(&adapter);
+        let format = caps
+            .formats
+            .iter()
+            .copied()
+            .find(|format| !format.is_srgb())
+            .unwrap_or(caps.formats[0]);
+
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
             format,
@@ -83,6 +95,7 @@ impl GpuContext {
         surface.configure(&device, &config);
 
         let background = BackgroundPass::new(&device, format);
+        let text = TextPass::new(&device, format);
 
         GpuContext {
             surface,
@@ -90,6 +103,7 @@ impl GpuContext {
             queue,
             config,
             background,
+            text,
         }
     }
 
@@ -107,8 +121,8 @@ impl GpuContext {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Draw a frame: clear to [`BACKGROUND`], then fill each cell of `grid`
-    /// with its background color via the instanced background pass.
+    /// Draw a frame: clear to [`BACKGROUND`], fill each cell of `grid` with its
+    /// background color, then composite each cell's glyph over it.
     ///
     /// Skips the frame when the surface is transiently unavailable (timed
     /// out, occluded, or a validation error already raised elsewhere) and
@@ -130,12 +144,11 @@ impl GpuContext {
 
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
 
-        self.background.prepare(
-            &self.device,
-            &self.queue,
-            grid,
-            [self.config.width as f32, self.config.height as f32],
-        );
+        let resolution = [self.config.width as f32, self.config.height as f32];
+        self.background
+            .prepare(&self.device, &self.queue, grid, resolution);
+        self.text
+            .prepare(&self.device, &self.queue, grid, resolution);
 
         let mut encoder = self
             .device
@@ -160,6 +173,7 @@ impl GpuContext {
             });
 
             self.background.draw(&mut render_pass);
+            self.text.draw(&mut render_pass);
         }
 
         self.queue.submit([encoder.finish()]);
