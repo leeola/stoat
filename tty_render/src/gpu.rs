@@ -24,12 +24,18 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
-/// Solid color cleared behind the cell grid each frame. A dark slate, distinct
-/// from an uninitialized black window so a successful clear is visible.
+/// Solid color cleared behind the cell grid each frame.
+///
+/// Must equal the terminal's default cell background, which is black.
+/// [`Renderer::grid_size`] floors the pixel size to whole cells and the grid
+/// anchors at the top-left, so a remainder of up to one cell on the right and
+/// bottom edges is never covered by a cell quad and shows this clear color.
+/// Matching the default background keeps that gutter indistinguishable from the
+/// grid rather than reading as a frame around it.
 const BACKGROUND: Color = Color {
-    r: 0.08,
-    g: 0.09,
-    b: 0.12,
+    r: 0.0,
+    g: 0.0,
+    b: 0.0,
     a: 1.0,
 };
 
