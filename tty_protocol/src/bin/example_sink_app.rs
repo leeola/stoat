@@ -167,9 +167,9 @@ fn render_popover(out: &mut Vec<u8>) {
         left: 12,
         width: 16,
         height: 4,
-        fill: [30, 30, 60],
-        border: [200, 200, 255],
-        content_fg: [220, 220, 255],
+        fill: [20, 22, 34],
+        border: [120, 170, 255],
+        content_fg: [236, 239, 245],
         content: "hover popover".to_owned(),
     }));
 }
