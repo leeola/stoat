@@ -6,6 +6,7 @@
 
 use std::sync::Arc;
 use stoatty_render::gpu::GpuContext;
+use stoatty_term::grid::Grid;
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -34,6 +35,7 @@ struct App {
 struct State {
     window: Arc<Window>,
     gpu: GpuContext,
+    grid: Grid,
 }
 
 impl ApplicationHandler for App {
@@ -51,8 +53,12 @@ impl ApplicationHandler for App {
         let size = window.inner_size();
         let gpu = GpuContext::new(window.clone(), size.width.max(1), size.height.max(1));
 
+        // Fixed default size until the terminal core drives grid dimensions
+        // from the PTY.
+        let grid = Grid::new(24, 80);
+
         window.request_redraw();
-        self.state = Some(State { window, gpu });
+        self.state = Some(State { window, gpu, grid });
     }
 
     fn window_event(&mut self, event_loop: &ActiveEventLoop, _id: WindowId, event: WindowEvent) {
@@ -66,7 +72,7 @@ impl ApplicationHandler for App {
                 state.gpu.resize(size.width, size.height);
                 state.window.request_redraw();
             },
-            WindowEvent::RedrawRequested => state.gpu.render(),
+            WindowEvent::RedrawRequested => state.gpu.render(&state.grid),
             _ => {},
         }
     }

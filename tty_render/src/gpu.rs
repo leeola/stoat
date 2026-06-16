@@ -5,8 +5,10 @@
 //! app supplies via the raw-window-handle traits, so this crate never links
 //! the windowing library; the app owns the window and hands its handle in.
 
+use crate::render::background::BackgroundPass;
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
+use stoatty_term::grid::Grid;
 use wgpu::{
     Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
     DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
@@ -34,6 +36,7 @@ pub struct GpuContext {
     device: Device,
     queue: Queue,
     config: SurfaceConfiguration,
+    background: BackgroundPass,
 }
 
 impl GpuContext {
@@ -79,11 +82,14 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
+        let background = BackgroundPass::new(&device, format);
+
         GpuContext {
             surface,
             device,
             queue,
             config,
+            background,
         }
     }
 
@@ -101,13 +107,14 @@ impl GpuContext {
         self.surface.configure(&self.device, &self.config);
     }
 
-    /// Acquire the next surface texture and clear it to [`BACKGROUND`].
+    /// Draw a frame: clear to [`BACKGROUND`], then fill each cell of `grid`
+    /// with its background color via the instanced background pass.
     ///
     /// Skips the frame when the surface is transiently unavailable (timed
     /// out, occluded, or a validation error already raised elsewhere) and
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
-    pub fn render(&mut self) {
+    pub fn render(&mut self, grid: &Grid) {
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -122,26 +129,38 @@ impl GpuContext {
         };
 
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
+
+        self.background.prepare(
+            &self.device,
+            &self.queue,
+            grid,
+            [self.config.width as f32, self.config.height as f32],
+        );
+
         let mut encoder = self
             .device
             .create_command_encoder(&CommandEncoderDescriptor::default());
 
-        encoder.begin_render_pass(&RenderPassDescriptor {
-            label: Some("clear"),
-            color_attachments: &[Some(RenderPassColorAttachment {
-                view: &view,
-                depth_slice: None,
-                resolve_target: None,
-                ops: Operations {
-                    load: LoadOp::Clear(BACKGROUND),
-                    store: StoreOp::Store,
-                },
-            })],
-            depth_stencil_attachment: None,
-            timestamp_writes: None,
-            occlusion_query_set: None,
-            multiview_mask: None,
-        });
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("frame"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view: &view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(BACKGROUND),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            self.background.draw(&mut render_pass);
+        }
 
         self.queue.submit([encoder.finish()]);
         frame.present();

@@ -8,4 +8,4 @@
 
 pub mod gpu;
 pub mod atlas {}
-pub mod render {}
+pub mod render;
