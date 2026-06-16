@@ -4,6 +4,10 @@
 //! Windowing-toolkit-agnostic. The surface is created from any handle the
 //! app supplies via the raw-window-handle traits, so this crate never links
 //! the windowing library; the app owns the window and hands its handle in.
+//!
+//! [`Renderer`] is the surface-free render core: it builds the grid passes and
+//! draws into any texture view, so a frame can target an off-screen texture as
+//! well as the window surface that [`GpuContext`] wraps.
 
 use crate::render::{
     background::BackgroundPass, decoration::DecorationPass, overlay::OverlayPass, text::TextPass,
@@ -16,12 +20,12 @@ use wgpu::{
     Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
     DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
     PresentMode, Queue, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions,
-    StoreOp, Surface, SurfaceConfiguration, TextureUsages, TextureViewDescriptor,
+    StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureView,
+    TextureViewDescriptor,
 };
 
-/// Solid color the surface is cleared to each frame until the cell-grid
-/// passes land. A dark slate, distinct from an uninitialized black window so
-/// a successful clear is visible.
+/// Solid color cleared behind the cell grid each frame. A dark slate, distinct
+/// from an uninitialized black window so a successful clear is visible.
 const BACKGROUND: Color = Color {
     r: 0.08,
     g: 0.09,
@@ -29,7 +33,104 @@ const BACKGROUND: Color = Color {
     a: 1.0,
 };
 
-/// The GPU swapchain plus the device and queue that feed it.
+/// The grid render passes and the target size, independent of any window.
+///
+/// [`Self::render_into`] draws a frame into any texture view, so the same render
+/// path serves the window surface (via [`GpuContext`]) and an off-screen
+/// texture. It does not own the device or queue; the caller passes them in,
+/// which lets a test keep them to poll for completion.
+pub struct Renderer {
+    background: BackgroundPass,
+    decoration: DecorationPass,
+    text: TextPass,
+    overlay: OverlayPass,
+    width: u32,
+    height: u32,
+}
+
+impl Renderer {
+    /// Build the grid passes for `format` at `width`x`height` physical pixels.
+    pub fn new(device: &Device, format: TextureFormat, width: u32, height: u32) -> Renderer {
+        Renderer {
+            background: BackgroundPass::new(device, format),
+            decoration: DecorationPass::new(device, format),
+            text: TextPass::new(device, format),
+            overlay: OverlayPass::new(device, format),
+            width,
+            height,
+        }
+    }
+
+    /// The (rows, cols) cell grid that fills the target at the current size.
+    ///
+    /// Divides the pixel size by the fixed cell metrics, flooring with a
+    /// one-cell minimum so a sliver still yields a usable grid.
+    pub fn grid_size(&self) -> (usize, usize) {
+        let rows = (self.height as f32 / CELL_HEIGHT).floor().max(1.0) as usize;
+        let cols = (self.width as f32 / CELL_WIDTH).floor().max(1.0) as usize;
+        (rows, cols)
+    }
+
+    /// Draw a frame for `grid` into `view`: clear to [`BACKGROUND`], fill each
+    /// cell background, composite glyphs and decorations, tint the cursor cell,
+    /// then draw overlays and their content on top.
+    ///
+    /// `cursor` is the cursor's position in fractional cell coordinates, or
+    /// `None` when it is hidden. Submits the frame but does not present or poll;
+    /// the caller drives whichever it needs.
+    pub fn render_into(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        view: &TextureView,
+        grid: &Grid,
+        cursor: Option<[f32; 2]>,
+    ) {
+        let resolution = [self.width as f32, self.height as f32];
+        self.background
+            .prepare(device, queue, grid, resolution, cursor);
+        self.decoration.prepare(device, queue, grid, resolution);
+        self.text.prepare(device, queue, grid, resolution);
+        self.overlay.prepare(device, queue, grid, resolution);
+
+        let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
+
+        {
+            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
+                label: Some("frame"),
+                color_attachments: &[Some(RenderPassColorAttachment {
+                    view,
+                    depth_slice: None,
+                    resolve_target: None,
+                    ops: Operations {
+                        load: LoadOp::Clear(BACKGROUND),
+                        store: StoreOp::Store,
+                    },
+                })],
+                depth_stencil_attachment: None,
+                timestamp_writes: None,
+                occlusion_query_set: None,
+                multiview_mask: None,
+            });
+
+            self.background.draw(&mut render_pass);
+            self.decoration.draw(&mut render_pass);
+            self.text.draw(&mut render_pass);
+            self.background.draw_cursor(&mut render_pass);
+            self.overlay.draw(&mut render_pass);
+            self.text.draw_overlay_text(&mut render_pass);
+        }
+
+        queue.submit([encoder.finish()]);
+    }
+
+    fn set_size(&mut self, width: u32, height: u32) {
+        self.width = width;
+        self.height = height;
+    }
+}
+
+/// The GPU swapchain wrapping a [`Renderer`] for an on-screen window.
 ///
 /// Holds the surface configuration so [`Self::resize`] and the surface-loss
 /// recovery in [`Self::render`] can re-`configure` without re-querying
@@ -39,10 +140,7 @@ pub struct GpuContext {
     device: Device,
     queue: Queue,
     config: SurfaceConfiguration,
-    background: BackgroundPass,
-    decoration: DecorationPass,
-    text: TextPass,
-    overlay: OverlayPass,
+    renderer: Renderer,
 }
 
 impl GpuContext {
@@ -99,20 +197,14 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
-        let background = BackgroundPass::new(&device, format);
-        let decoration = DecorationPass::new(&device, format);
-        let text = TextPass::new(&device, format);
-        let overlay = OverlayPass::new(&device, format);
+        let renderer = Renderer::new(&device, format, width, height);
 
         GpuContext {
             surface,
             device,
             queue,
             config,
-            background,
-            decoration,
-            text,
-            overlay,
+            renderer,
         }
     }
 
@@ -128,24 +220,19 @@ impl GpuContext {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+        self.renderer.set_size(width, height);
     }
 
     /// The (rows, cols) cell grid that fills the current surface.
     ///
-    /// Divides the surface's physical pixel size by the fixed cell metrics,
-    /// flooring with a one-cell minimum so a sliver of a window still yields a
-    /// usable grid. The app sizes the terminal and PTY to this so the shell's
-    /// view matches what the renderer draws.
+    /// The app sizes the terminal and PTY to this so the shell's view matches
+    /// what the renderer draws.
     pub fn grid_size(&self) -> (usize, usize) {
-        let rows = (self.config.height as f32 / CELL_HEIGHT).floor().max(1.0) as usize;
-        let cols = (self.config.width as f32 / CELL_WIDTH).floor().max(1.0) as usize;
-        (rows, cols)
+        self.renderer.grid_size()
     }
 
-    /// Draw a frame: clear to [`BACKGROUND`], fill each cell of `grid` with its
-    /// background color, composite each cell's glyph over it, then tint the
-    /// cursor cell. `cursor` is the cursor's position in fractional cell
-    /// coordinates, or `None` when it is hidden.
+    /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
+    /// position in fractional cell coordinates, or `None` when it is hidden.
     ///
     /// Skips the frame when the surface is transiently unavailable (timed
     /// out, occluded, or a validation error already raised elsewhere) and
@@ -166,48 +253,26 @@ impl GpuContext {
         };
 
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
-
-        let resolution = [self.config.width as f32, self.config.height as f32];
-        self.background
-            .prepare(&self.device, &self.queue, grid, resolution, cursor);
-        self.decoration
-            .prepare(&self.device, &self.queue, grid, resolution);
-        self.text
-            .prepare(&self.device, &self.queue, grid, resolution);
-        self.overlay
-            .prepare(&self.device, &self.queue, grid, resolution);
-
-        let mut encoder = self
-            .device
-            .create_command_encoder(&CommandEncoderDescriptor::default());
-
-        {
-            let mut render_pass = encoder.begin_render_pass(&RenderPassDescriptor {
-                label: Some("frame"),
-                color_attachments: &[Some(RenderPassColorAttachment {
-                    view: &view,
-                    depth_slice: None,
-                    resolve_target: None,
-                    ops: Operations {
-                        load: LoadOp::Clear(BACKGROUND),
-                        store: StoreOp::Store,
-                    },
-                })],
-                depth_stencil_attachment: None,
-                timestamp_writes: None,
-                occlusion_query_set: None,
-                multiview_mask: None,
-            });
-
-            self.background.draw(&mut render_pass);
-            self.decoration.draw(&mut render_pass);
-            self.text.draw(&mut render_pass);
-            self.background.draw_cursor(&mut render_pass);
-            self.overlay.draw(&mut render_pass);
-            self.text.draw_overlay_text(&mut render_pass);
-        }
-
-        self.queue.submit([encoder.finish()]);
+        self.renderer
+            .render_into(&self.device, &self.queue, &view, grid, cursor);
         frame.present();
     }
+}
+
+/// Request a wgpu adapter and device with no surface, for off-screen rendering.
+///
+/// `None` when no adapter is available, so a GPU-less caller (such as a test in
+/// headless CI) can skip rather than fail. Uses the same power preference and
+/// device descriptor as [`GpuContext::new`].
+pub fn headless_device() -> Option<(Device, Queue)> {
+    let instance = Instance::new(InstanceDescriptor::new_without_display_handle());
+
+    let adapter = executor::block_on(instance.request_adapter(&RequestAdapterOptions {
+        power_preference: PowerPreference::HighPerformance,
+        compatible_surface: None,
+        force_fallback_adapter: false,
+    }))
+    .ok()?;
+
+    executor::block_on(adapter.request_device(&DeviceDescriptor::default())).ok()
 }
