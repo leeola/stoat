@@ -1,13 +1,16 @@
-//! Instanced cell-edge border pass.
+//! Instanced cell border pass.
 //!
-//! Draws each cell border edge as a renderer primitive: one quad per present
-//! edge, the fragment painting a line along that edge in the border color and
-//! weight. Borders are decoration over the cell backgrounds, so the pass
-//! alpha-blends and runs after the background fill.
+//! Draws each cell's borders as a renderer primitive: one quad per bordered
+//! cell, the fragment painting a line along every present edge in that edge's
+//! color and weight. Holding a cell's four edges in one instance lets a
+//! [`BorderStyle::Rounded`] corner arc the join where two adjacent edges meet,
+//! which a per-edge instance could not coordinate. Borders are decoration over
+//! the cell backgrounds, so the pass alpha-blends and runs after the background
+//! fill.
 
 use crate::render::{CELL_HEIGHT, CELL_WIDTH};
 use bytemuck::{Pod, Zeroable};
-use stoatty_term::grid::{Border, BorderStyle, Grid, Rgb};
+use stoatty_term::grid::{Border, BorderStyle, Borders, Grid, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
     BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor,
@@ -16,29 +19,41 @@ use wgpu::{
     ShaderSource, ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
 };
 
-/// Instance buffer capacity, in edges, allocated up front. Grows by doubling
+/// Instance buffer capacity, in cells, allocated up front. Grows by doubling
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 256;
 
-/// Edge selector packed into each instance, matching the shader's constants.
-const EDGE_TOP: u32 = 0;
-const EDGE_RIGHT: u32 = 1;
-const EDGE_BOTTOM: u32 = 2;
-const EDGE_LEFT: u32 = 3;
+/// Edge-presence bits packed into [`BorderInstance::edges`], matching the
+/// shader's constants.
+const EDGE_TOP_BIT: u32 = 1;
+const EDGE_RIGHT_BIT: u32 = 2;
+const EDGE_BOTTOM_BIT: u32 = 4;
+const EDGE_LEFT_BIT: u32 = 8;
 
-/// Border weight packed into each instance, matching the shader's constants.
+/// Per-edge style codes packed into [`BorderInstance::styles`], matching the
+/// shader's constants.
 const STYLE_LIGHT: u32 = 0;
 const STYLE_HEAVY: u32 = 1;
 const STYLE_DOUBLE: u32 = 2;
+const STYLE_ROUNDED: u32 = 3;
 
-/// Per-edge instance: the cell, which edge, its color, and its weight.
+/// Per-cell instance: the cell, each edge's color, a presence bitmask, and the
+/// four per-edge style codes.
+///
+/// `edges` is an OR of the `EDGE_*_BIT` flags. `styles` packs one 8-bit style
+/// code per edge: top in the low byte, then right, bottom, and left. Absent
+/// edges leave their color and style byte zeroed; the bitmask is the source of
+/// truth for which edges to draw.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct BorderInstance {
     cell: [f32; 2],
-    color: [f32; 3],
-    edge: u32,
-    style: u32,
+    top_color: [f32; 3],
+    right_color: [f32; 3],
+    bottom_color: [f32; 3],
+    left_color: [f32; 3],
+    edges: u32,
+    styles: u32,
 }
 
 /// Uniform shared by every instance: the screen resolution and cell size the
@@ -101,8 +116,11 @@ impl DecorationPass {
                     attributes: &vertex_attr_array![
                         0 => Float32x2,
                         1 => Float32x3,
-                        2 => Uint32,
-                        3 => Uint32,
+                        2 => Float32x3,
+                        3 => Float32x3,
+                        4 => Float32x3,
+                        5 => Uint32,
+                        6 => Uint32,
                     ],
                 }],
             },
@@ -200,39 +218,60 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
     })
 }
 
-/// One instance per present border edge across the grid, in row-major order.
+/// One instance per bordered cell across the grid, in row-major order.
 fn build_border_instances(grid: &Grid) -> Vec<BorderInstance> {
     let mut instances = Vec::new();
 
     for row in 0..grid.rows() {
         for col in 0..grid.cols() {
             let borders = grid.get(row, col).borders;
-            let cell = [col as f32, row as f32];
-
-            push_edge(&mut instances, cell, EDGE_TOP, borders.top);
-            push_edge(&mut instances, cell, EDGE_RIGHT, borders.right);
-            push_edge(&mut instances, cell, EDGE_BOTTOM, borders.bottom);
-            push_edge(&mut instances, cell, EDGE_LEFT, borders.left);
+            if let Some(instance) = cell_instance([col as f32, row as f32], borders) {
+                instances.push(instance);
+            }
         }
     }
 
     instances
 }
 
-fn push_edge(
-    instances: &mut Vec<BorderInstance>,
-    cell: [f32; 2],
-    edge: u32,
-    border: Option<Border>,
-) {
-    if let Some(border) = border {
-        instances.push(BorderInstance {
-            cell,
-            color: rgb_f32(border.color),
-            edge,
-            style: style_flag(border.style),
-        });
+/// Pack a cell's borders into one instance, or `None` when no edge is set.
+fn cell_instance(cell: [f32; 2], borders: Borders) -> Option<BorderInstance> {
+    if borders == Borders::default() {
+        return None;
     }
+
+    let mut edges = 0;
+    let mut styles = 0;
+    if let Some(border) = borders.top {
+        edges |= EDGE_TOP_BIT;
+        styles |= style_flag(border.style);
+    }
+    if let Some(border) = borders.right {
+        edges |= EDGE_RIGHT_BIT;
+        styles |= style_flag(border.style) << 8;
+    }
+    if let Some(border) = borders.bottom {
+        edges |= EDGE_BOTTOM_BIT;
+        styles |= style_flag(border.style) << 16;
+    }
+    if let Some(border) = borders.left {
+        edges |= EDGE_LEFT_BIT;
+        styles |= style_flag(border.style) << 24;
+    }
+
+    Some(BorderInstance {
+        cell,
+        top_color: edge_color(borders.top),
+        right_color: edge_color(borders.right),
+        bottom_color: edge_color(borders.bottom),
+        left_color: edge_color(borders.left),
+        edges,
+        styles,
+    })
+}
+
+fn edge_color(border: Option<Border>) -> [f32; 3] {
+    border.map_or([0.0; 3], |border| rgb_f32(border.color))
 }
 
 fn style_flag(style: BorderStyle) -> u32 {
@@ -240,6 +279,7 @@ fn style_flag(style: BorderStyle) -> u32 {
         BorderStyle::Light => STYLE_LIGHT,
         BorderStyle::Heavy => STYLE_HEAVY,
         BorderStyle::Double => STYLE_DOUBLE,
+        BorderStyle::Rounded => STYLE_ROUNDED,
     }
 }
 
@@ -253,7 +293,10 @@ fn rgb_f32(color: Rgb) -> [f32; 3] {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_border_instances, EDGE_BOTTOM, EDGE_TOP, STYLE_HEAVY};
+    use super::{
+        build_border_instances, EDGE_BOTTOM_BIT, EDGE_LEFT_BIT, EDGE_TOP_BIT, STYLE_HEAVY,
+        STYLE_LIGHT, STYLE_ROUNDED,
+    };
     use stoatty_term::grid::{Border, BorderStyle, Grid, Rgb};
     use wgpu::naga::{
         front::wgsl,
@@ -270,25 +313,54 @@ mod tests {
     }
 
     #[test]
-    fn border_instances_cover_present_edges_only() {
+    fn cell_instance_packs_present_edges() {
         let mut grid = Grid::new(1, 2);
-        grid.get_mut(0, 1).borders.top = Some(Border {
+        let cell = grid.get_mut(0, 1);
+        cell.borders.top = Some(Border {
             style: BorderStyle::Heavy,
             color: Rgb::new(255, 0, 0),
         });
-        grid.get_mut(0, 1).borders.bottom = Some(Border {
+        cell.borders.bottom = Some(Border {
             style: BorderStyle::Light,
             color: Rgb::new(0, 255, 0),
         });
 
         let instances = build_border_instances(&grid);
 
-        assert_eq!(instances.len(), 2);
-        assert_eq!(instances[0].cell, [1.0, 0.0]);
-        assert_eq!(instances[0].edge, EDGE_TOP);
-        assert_eq!(instances[0].style, STYLE_HEAVY);
-        assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
-        assert_eq!(instances[1].edge, EDGE_BOTTOM);
-        assert_eq!(instances[1].color, [0.0, 1.0, 0.0]);
+        assert_eq!(instances.len(), 1, "one instance per bordered cell");
+        let instance = instances[0];
+        assert_eq!(instance.cell, [1.0, 0.0]);
+        assert_eq!(instance.edges, EDGE_TOP_BIT | EDGE_BOTTOM_BIT);
+        assert_eq!(instance.styles & 0xff, STYLE_HEAVY, "top style in low byte");
+        assert_eq!(
+            (instance.styles >> 16) & 0xff,
+            STYLE_LIGHT,
+            "bottom style in third byte"
+        );
+        assert_eq!(instance.top_color, [1.0, 0.0, 0.0]);
+        assert_eq!(instance.bottom_color, [0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn rounded_corner_packs_rounded_style_per_edge() {
+        let mut grid = Grid::new(1, 1);
+        let teal = Rgb::new(10, 20, 30);
+        let cell = grid.get_mut(0, 0);
+        cell.borders.top = Some(Border {
+            style: BorderStyle::Rounded,
+            color: teal,
+        });
+        cell.borders.left = Some(Border {
+            style: BorderStyle::Rounded,
+            color: teal,
+        });
+
+        let instances = build_border_instances(&grid);
+
+        assert_eq!(instances.len(), 1);
+        let instance = instances[0];
+        assert_eq!(instance.edges, EDGE_TOP_BIT | EDGE_LEFT_BIT);
+        assert_eq!(instance.styles & 0xff, STYLE_ROUNDED, "top style");
+        assert_eq!((instance.styles >> 24) & 0xff, STYLE_ROUNDED, "left style");
     }
 }

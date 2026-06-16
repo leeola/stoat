@@ -133,15 +133,18 @@ pub struct Border {
     pub color: Rgb,
 }
 
-/// How thick or doubled a cell-edge border is drawn.
+/// How a cell-edge border is drawn, as renderer primitives rather than glyphs.
 ///
-/// Mirrors the box-drawing line weights, drawn as renderer primitives rather
-/// than glyphs.
+/// [`BorderStyle::Light`], [`BorderStyle::Heavy`], and [`BorderStyle::Double`]
+/// mirror the box-drawing line weights. [`BorderStyle::Rounded`] is a light line
+/// whose corners arc where two adjacent edges of a cell meet, so a framed region
+/// reads as a panel with rounded corners.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BorderStyle {
     Light,
     Heavy,
     Double,
+    Rounded,
 }
 
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
