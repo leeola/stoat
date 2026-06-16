@@ -280,6 +280,10 @@ fn apply_resource_op(
 }
 
 #[cfg(test)]
+// The `HashMap<Uri, _>` keys come from `lsp_types::WorkspaceEdit::changes` and
+// are built then consumed without mutation, so `mutable_key_type` is a false
+// positive here.
+#[allow(clippy::mutable_key_type)]
 mod tests {
     use super::*;
     use crate::{host::FsHost, test_harness::TestHarness};

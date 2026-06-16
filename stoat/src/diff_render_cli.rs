@@ -72,7 +72,7 @@ pub fn detect_color_enabled(no_color_flag: bool) -> bool {
     if std::env::var_os("NO_COLOR").is_some() {
         return false;
     }
-    if std::env::var_os("TERM").map_or(false, |t| t == "dumb") {
+    if std::env::var_os("TERM").is_some_and(|t| t == "dumb") {
         return false;
     }
     true
