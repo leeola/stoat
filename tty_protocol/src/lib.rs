@@ -6,5 +6,5 @@
 //! so a program needs only this crate to emit stoatty bytes, and the
 //! frames degrade to ignorable escape sequences in any other terminal.
 
-pub mod frame {}
-pub mod command {}
+pub mod command;
+pub mod frame;
