@@ -6,4 +6,5 @@
 //! keeping the renderer and terminal-core crates pure.
 
 pub mod app;
+pub mod config;
 pub mod pty;

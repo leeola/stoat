@@ -1,0 +1,8 @@
+# Default stoatty configuration.
+#
+# Copy this file to <XDG_CONFIG_HOME>/stoatty/config.toml (usually
+# ~/.config/stoatty/config.toml) and edit it to override these defaults. Fields
+# left out there keep the values below.
+
+# Font size in pixels the renderer rasterizes glyphs at.
+font_size = 30
