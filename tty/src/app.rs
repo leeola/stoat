@@ -17,19 +17,27 @@ use winit::{
     window::{Window, WindowId},
 };
 
-/// Open the stoatty window, spawn the shell, and run the event loop until the
-/// window closes or the shell exits.
+/// Open the stoatty window running the user's default shell.
+///
+/// Blocks the calling thread for the lifetime of the window. See
+/// [`run_with_shell`] for the behavior and for running a specific command.
+pub fn run() {
+    run_with_shell(pty::default_shell());
+}
+
+/// Open the stoatty window running `shell` as the PTY command, and run the
+/// event loop until the window closes or that command exits.
 ///
 /// Blocks the calling thread for the lifetime of the window. The loop is
 /// idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
 /// output arrives or the window is resized, not on a continuous timer.
-pub fn run() {
+pub fn run_with_shell(shell: String) {
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(event_loop.create_proxy());
+    let mut app = App::new(event_loop.create_proxy(), shell);
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -45,12 +53,17 @@ enum PtyEvent {
 
 struct App {
     proxy: EventLoopProxy<PtyEvent>,
+    shell: String,
     state: Option<State>,
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<PtyEvent>) -> App {
-        App { proxy, state: None }
+    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String) -> App {
+        App {
+            proxy,
+            shell,
+            state: None,
+        }
     }
 }
 
@@ -83,18 +96,13 @@ impl ApplicationHandler<PtyEvent> for App {
 
         let pty = {
             let proxy = self.proxy.clone();
-            Pty::spawn(
-                &pty::default_shell(),
-                rows as u16,
-                cols as u16,
-                move |output| {
-                    let event = match output {
-                        PtyOutput::Data(bytes) => PtyEvent::Output(bytes),
-                        PtyOutput::Eof => PtyEvent::Exited,
-                    };
-                    let _ = proxy.send_event(event);
-                },
-            )
+            Pty::spawn(&self.shell, rows as u16, cols as u16, move |output| {
+                let event = match output {
+                    PtyOutput::Data(bytes) => PtyEvent::Output(bytes),
+                    PtyOutput::Eof => PtyEvent::Exited,
+                };
+                let _ = proxy.send_event(event);
+            })
             .expect("spawn shell over pty")
         };
 
