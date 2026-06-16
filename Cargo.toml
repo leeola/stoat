@@ -12,6 +12,10 @@ members = [
   "log",
   "text",
   "viewport",
+  "tty_protocol",
+  "tty_term",
+  "tty_render",
+  "tty",
 ]
 
 [workspace.package]
@@ -73,6 +77,10 @@ arboard = "3"
 base64 = "0.22"
 regex = "1"
 brush-parser = "0.4"
+wgpu = "29"
+bytemuck = { version = "1.25", features = ["derive"] }
+raw-window-handle = "0.6"
+winit = "0.30"
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
