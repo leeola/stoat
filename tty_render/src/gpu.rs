@@ -6,7 +6,8 @@
 //! the windowing library; the app owns the window and hands its handle in.
 
 use crate::render::{
-    background::BackgroundPass, decoration::DecorationPass, text::TextPass, CELL_HEIGHT, CELL_WIDTH,
+    background::BackgroundPass, decoration::DecorationPass, overlay::OverlayPass, text::TextPass,
+    CELL_HEIGHT, CELL_WIDTH,
 };
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -41,6 +42,7 @@ pub struct GpuContext {
     background: BackgroundPass,
     decoration: DecorationPass,
     text: TextPass,
+    overlay: OverlayPass,
 }
 
 impl GpuContext {
@@ -100,6 +102,7 @@ impl GpuContext {
         let background = BackgroundPass::new(&device, format);
         let decoration = DecorationPass::new(&device, format);
         let text = TextPass::new(&device, format);
+        let overlay = OverlayPass::new(&device, format);
 
         GpuContext {
             surface,
@@ -109,6 +112,7 @@ impl GpuContext {
             background,
             decoration,
             text,
+            overlay,
         }
     }
 
@@ -170,6 +174,8 @@ impl GpuContext {
             .prepare(&self.device, &self.queue, grid, resolution);
         self.text
             .prepare(&self.device, &self.queue, grid, resolution);
+        self.overlay
+            .prepare(&self.device, &self.queue, grid, resolution);
 
         let mut encoder = self
             .device
@@ -197,6 +203,7 @@ impl GpuContext {
             self.decoration.draw(&mut render_pass);
             self.text.draw(&mut render_pass);
             self.background.draw_cursor(&mut render_pass);
+            self.overlay.draw(&mut render_pass);
         }
 
         self.queue.submit([encoder.finish()]);

@@ -2,6 +2,7 @@
 
 pub mod background;
 pub mod decoration;
+pub mod overlay;
 pub mod text;
 
 /// Cell size in physical pixels used to lay out the grid.

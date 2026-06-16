@@ -17,6 +17,7 @@ pub struct Grid {
     cells: Vec<Cell>,
     rows: usize,
     cols: usize,
+    overlays: Vec<Overlay>,
 }
 
 impl Grid {
@@ -26,6 +27,7 @@ impl Grid {
             cells: vec![Cell::default(); rows * cols],
             rows,
             cols,
+            overlays: Vec::new(),
         }
     }
 
@@ -62,6 +64,21 @@ impl Grid {
         self.cols = cols;
         self.cells.clear();
         self.cells.resize(rows * cols, Cell::default());
+        self.overlays.clear();
+    }
+
+    /// The floating overlay regions drawn above the cells, in draw order.
+    pub fn overlays(&self) -> &[Overlay] {
+        &self.overlays
+    }
+
+    /// Replace the floating overlay regions.
+    ///
+    /// Overlays are grid-level rather than per-cell, so the projection that
+    /// rewrites cells leaves them untouched; the caller sets the full list each
+    /// frame it changes.
+    pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
+        self.overlays = overlays;
     }
 
     /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
@@ -201,6 +218,23 @@ pub enum Scale {
     Covered,
 }
 
+/// A floating rectangular region drawn above the cells.
+///
+/// A popover or completion menu composites over the grid with its own z-order
+/// rather than living in the cell model. It is anchored at a cell and sized in
+/// cells, but is not part of the character grid: it floats above it, occluding
+/// whatever cells it covers. The region is a [`Self::fill`] box with a
+/// [`Self::border`] outline; text inside it is not part of this type.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Overlay {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+    pub fill: Rgb,
+    pub border: Rgb,
+}
+
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
 /// underline.
 ///
@@ -277,7 +311,7 @@ impl BitOrAssign for Flags {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Flags, Grid, Rgb, Scale};
+    use super::{Cell, Flags, Grid, Overlay, Rgb, Scale};
 
     #[test]
     fn grid_writes_are_addressable() {
@@ -343,5 +377,24 @@ mod tests {
             Scale::Single,
             "off-block cell untouched"
         );
+    }
+
+    #[test]
+    fn overlays_round_trip_and_clear_on_resize() {
+        let mut grid = Grid::new(2, 2);
+        let overlay = Overlay {
+            top: 1,
+            left: 0,
+            width: 3,
+            height: 2,
+            fill: Rgb::new(10, 20, 30),
+            border: Rgb::new(40, 50, 60),
+        };
+        grid.set_overlays(vec![overlay]);
+
+        assert_eq!(grid.overlays(), [overlay]);
+
+        grid.resize(3, 3);
+        assert!(grid.overlays().is_empty(), "resize clears overlays");
     }
 }
