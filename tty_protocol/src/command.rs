@@ -35,12 +35,17 @@ pub struct BorderCommand {
     pub color: [u8; 3],
 }
 
-/// The weight a border edge is drawn at.
+/// How a border edge is drawn.
+///
+/// [`BorderStyle::Light`], [`BorderStyle::Heavy`], and [`BorderStyle::Double`]
+/// select the line weight. [`BorderStyle::Rounded`] is a light line whose
+/// corners arc where two adjacent edges of the region meet.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum BorderStyle {
     Light,
     Heavy,
     Double,
+    Rounded,
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -98,6 +103,7 @@ fn decode_style(code: u8) -> Option<BorderStyle> {
         0 => Some(BorderStyle::Light),
         1 => Some(BorderStyle::Heavy),
         2 => Some(BorderStyle::Double),
+        3 => Some(BorderStyle::Rounded),
         _ => None,
     }
 }
@@ -107,6 +113,7 @@ fn style_code(style: BorderStyle) -> u8 {
         BorderStyle::Light => 0,
         BorderStyle::Heavy => 1,
         BorderStyle::Double => 2,
+        BorderStyle::Rounded => 3,
     }
 }
 
@@ -123,6 +130,23 @@ mod tests {
             height: 6,
             style: BorderStyle::Heavy,
             color: [255, 0, 255],
+        };
+
+        assert_eq!(
+            decode(&encode_border(&command)),
+            Some(Command::Border(command))
+        );
+    }
+
+    #[test]
+    fn rounded_style_round_trips() {
+        let command = BorderCommand {
+            top: 0,
+            left: 0,
+            width: 4,
+            height: 3,
+            style: BorderStyle::Rounded,
+            color: [1, 2, 3],
         };
 
         assert_eq!(

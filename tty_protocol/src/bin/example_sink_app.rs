@@ -30,6 +30,7 @@ fn main() {
     render_panel(&mut out, 2, 4);
     render_underlines(&mut out, 8, 4);
     render_border(&mut out);
+    render_rounded_border(&mut out);
 
     // Leave the cursor below the demo in the default style.
     cup(&mut out, 10, 1);
@@ -116,6 +117,19 @@ fn render_border(out: &mut Vec<u8>) {
         height: 6,
         style: command::BorderStyle::Heavy,
         color: [255, 0, 255],
+    }));
+}
+
+/// Frame a second region below the heavy one with a Rounded border, so the
+/// renderer draws arced corners next to the square ones.
+fn render_rounded_border(out: &mut Vec<u8>) {
+    out.extend_from_slice(&command::encode_border(&command::BorderCommand {
+        top: 8,
+        left: 40,
+        width: 24,
+        height: 4,
+        style: command::BorderStyle::Rounded,
+        color: [0, 255, 255],
     }));
 }
 

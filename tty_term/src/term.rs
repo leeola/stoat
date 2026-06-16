@@ -477,6 +477,7 @@ fn grid_border_style(style: command::BorderStyle) -> BorderStyle {
         command::BorderStyle::Light => BorderStyle::Light,
         command::BorderStyle::Heavy => BorderStyle::Heavy,
         command::BorderStyle::Double => BorderStyle::Double,
+        command::BorderStyle::Rounded => BorderStyle::Rounded,
     }
 }
 
@@ -766,5 +767,30 @@ mod tests {
         assert_eq!(grid.get(1, 2).borders.bottom, edge);
         assert_eq!(grid.get(1, 2).borders.right, edge);
         assert_eq!(grid.get(1, 1).borders.top, None);
+    }
+
+    #[test]
+    fn rounded_border_command_maps_to_rounded_style() {
+        let frame = encode_border(&BorderCommand {
+            top: 0,
+            left: 0,
+            width: 2,
+            height: 2,
+            style: ProtoBorderStyle::Rounded,
+            color: [1, 2, 3],
+        });
+
+        let mut terminal = Terminal::new(2, 2);
+        let mut grid = Grid::new(2, 2);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.get(0, 0).borders.top,
+            Some(Border {
+                style: BorderStyle::Rounded,
+                color: Rgb::new(1, 2, 3),
+            })
+        );
     }
 }
