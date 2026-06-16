@@ -6,7 +6,9 @@
 //! each cell's terminal-palette color to concrete channels and touches only the
 //! lines the terminal reports as damaged.
 
-use crate::grid::{Border, BorderStyle, Borders, Cell, Flags, Grid, Rgb, Scale, UnderlineStyle};
+use crate::grid::{
+    Border, BorderStyle, Borders, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle,
+};
 use alacritty_terminal::{
     event::VoidListener,
     grid::Dimensions,
@@ -19,7 +21,7 @@ use alacritty_terminal::{
     Term,
 };
 use std::mem;
-use stoatty_protocol::command::{self, BorderCommand, Command, ScaleCommand};
+use stoatty_protocol::command::{self, BorderCommand, Command, PopoverCommand, ScaleCommand};
 
 const PALETTE_LEN: usize = 256;
 const DEFAULT_FG: Rgb = Rgb::new(0xcc, 0xcc, 0xcc);
@@ -48,6 +50,10 @@ pub struct Terminal {
     /// [`Self::project`]. Like borders, they persist across the per-frame VT
     /// projection that resets each cell's scale.
     scales: Vec<ScaleCommand>,
+    /// Popover regions set by `Gstoatty;popover` frames, applied to the grid's
+    /// overlay list by [`Self::project`]. They float above the cells, so they
+    /// are grid-level overlays rather than cell attributes.
+    popovers: Vec<PopoverCommand>,
 }
 
 /// Where the cursor sits and how it is drawn, as of the last [`Terminal::project`].
@@ -88,6 +94,7 @@ impl Terminal {
             apc: ApcScanner::default(),
             borders: Vec::new(),
             scales: Vec::new(),
+            popovers: Vec::new(),
         }
     }
 
@@ -119,6 +126,7 @@ impl Terminal {
         match command {
             Command::Border(border) => self.borders.push(border),
             Command::Scale(scale) => self.scales.push(scale),
+            Command::Popover(popover) => self.popovers.push(popover),
         }
     }
 
@@ -168,6 +176,7 @@ impl Terminal {
 
         apply_borders(grid, &self.borders);
         apply_scales(grid, &self.scales);
+        apply_popovers(grid, &self.popovers);
 
         self.term.reset_damage();
         cursor
@@ -503,6 +512,27 @@ fn apply_scales(grid: &mut Grid, commands: &[ScaleCommand]) {
     }
 }
 
+/// Replace the grid's overlay list with each stored popover command's region.
+///
+/// Overlays are grid-level rather than per-cell, so the full list is set each
+/// projection rather than stamped per cell. The region is clamped or clipped by
+/// the renderer, so out-of-grid anchors need no guard here.
+fn apply_popovers(grid: &mut Grid, commands: &[PopoverCommand]) {
+    let overlays = commands.iter().map(popover_overlay).collect();
+    grid.set_overlays(overlays);
+}
+
+fn popover_overlay(command: &PopoverCommand) -> Overlay {
+    Overlay {
+        top: command.top,
+        left: command.left,
+        width: command.width,
+        height: command.height,
+        fill: Rgb::new(command.fill[0], command.fill[1], command.fill[2]),
+        border: Rgb::new(command.border[0], command.border[1], command.border[2]),
+    }
+}
+
 fn project_cursor(cursor: RenderableCursor, offset: i32) -> Cursor {
     Cursor {
         row: (cursor.point.line.0 + offset).max(0) as usize,
@@ -579,9 +609,12 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
-    use crate::grid::{Border, BorderStyle, Cell, Flags, Grid, Rgb, Scale, UnderlineStyle};
+    use crate::grid::{
+        Border, BorderStyle, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle,
+    };
     use stoatty_protocol::command::{
-        encode_border, encode_scale, BorderCommand, BorderStyle as ProtoBorderStyle, ScaleCommand,
+        encode_border, encode_popover, encode_scale, BorderCommand,
+        BorderStyle as ProtoBorderStyle, PopoverCommand, ScaleCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -833,5 +866,34 @@ mod tests {
         assert_eq!(grid.get(0, 1).scale, Scale::Covered);
         assert_eq!(grid.get(1, 0).scale, Scale::Covered);
         assert_eq!(grid.get(1, 1).scale, Scale::Covered);
+    }
+
+    #[test]
+    fn popover_apc_frame_sets_a_grid_overlay() {
+        let frame = encode_popover(&PopoverCommand {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            fill: [10, 20, 30],
+            border: [40, 50, 60],
+        });
+
+        let mut terminal = Terminal::new(8, 8);
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.overlays(),
+            [Overlay {
+                top: 1,
+                left: 2,
+                width: 4,
+                height: 3,
+                fill: Rgb::new(10, 20, 30),
+                border: Rgb::new(40, 50, 60),
+            }]
+        );
     }
 }
