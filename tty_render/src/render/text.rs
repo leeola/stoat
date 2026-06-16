@@ -144,7 +144,10 @@ impl TextPass {
             label: Some("text globals"),
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
-                visibility: ShaderStages::VERTEX,
+                // The underline pipeline shares this layout and reads
+                // globals.cell_size in its fragment to place the underline, so
+                // globals must be visible to the fragment stage.
+                visibility: ShaderStages::VERTEX_FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,

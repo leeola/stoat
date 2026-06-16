@@ -87,7 +87,9 @@ impl DecorationPass {
             label: Some("decoration globals"),
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
-                visibility: ShaderStages::VERTEX,
+                // The fragment reads globals.cell_size for the rounded-corner
+                // radius and edge distance, so it must be visible there too.
+                visibility: ShaderStages::VERTEX_FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
