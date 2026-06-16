@@ -8,6 +8,7 @@
 use std::{
     io::{self, Write},
     thread,
+    time::Duration,
 };
 
 // Box-drawing glyphs, written as escapes so the source stays ASCII.
@@ -36,10 +37,22 @@ fn main() {
     stdout.write_all(&out).expect("write to stdout");
     stdout.flush().expect("flush stdout");
 
-    // Hold so the shell does not exit and close the window. The window owns this
-    // process's lifetime and kills it on close.
-    loop {
-        thread::park();
+    move_cursor_forever(&mut stdout);
+}
+
+/// Walk the cursor around the panel with plain CUP, pausing between moves so the
+/// renderer's easing animation is visible. Never returns, holding the shell open
+/// until the window closes and kills this process.
+fn move_cursor_forever(stdout: &mut io::Stdout) {
+    let path = [(3u16, 6u16), (3, 30), (9, 30), (9, 6)];
+
+    for (row, col) in path.iter().cycle() {
+        let mut step = Vec::new();
+        cup(&mut step, *row, *col);
+        stdout.write_all(&step).expect("write cursor move");
+        stdout.flush().expect("flush cursor move");
+
+        thread::sleep(Duration::from_millis(1200));
     }
 }
 
