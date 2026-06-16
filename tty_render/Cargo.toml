@@ -13,3 +13,7 @@ wgpu.workspace = true
 bytemuck.workspace = true
 raw-window-handle.workspace = true
 futures = { workspace = true, features = ["executor"] }
+cosmic-text.workspace = true
+swash.workspace = true
+etagere.workspace = true
+lru.workspace = true

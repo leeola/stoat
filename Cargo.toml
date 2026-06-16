@@ -81,6 +81,10 @@ wgpu = "29"
 bytemuck = { version = "1.25", features = ["derive"] }
 raw-window-handle = "0.6"
 winit = "0.30"
+cosmic-text = "0.18"
+swash = "0.2.7"
+etagere = "0.3"
+lru = { version = "0.16", default-features = false }
 
 # Enable a small amount of optimization in the dev profile.
 [profile.dev]
