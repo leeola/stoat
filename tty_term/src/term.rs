@@ -6,7 +6,7 @@
 //! each cell's terminal-palette color to concrete channels and touches only the
 //! lines the terminal reports as damaged.
 
-use crate::grid::{Cell, Flags, Grid, Rgb};
+use crate::grid::{Cell, Flags, Grid, Rgb, UnderlineStyle};
 use alacritty_terminal::{
     event::VoidListener,
     grid::Dimensions,
@@ -314,11 +314,19 @@ impl Dimensions for GridSize {
 }
 
 fn project_cell(cell: &TermCell, overrides: &Colors, palette: &[Rgb; PALETTE_LEN]) -> Cell {
+    let fg = resolve(cell.fg, overrides, palette);
+    let underline_color = match cell.underline_color() {
+        Some(color) => resolve(color, overrides, palette),
+        None => fg,
+    };
+
     Cell {
         ch: cell.c,
-        fg: resolve(cell.fg, overrides, palette),
+        fg,
         bg: resolve(cell.bg, overrides, palette),
         flags: map_flags(cell.flags),
+        underline: map_underline(cell.flags),
+        underline_color,
     }
 }
 
@@ -354,10 +362,10 @@ fn indexed(index: usize, overrides: &Colors, palette: &[Rgb; PALETTE_LEN]) -> Rg
     }
 }
 
-/// Map the terminal's cell flags to the base attributes stoatty's grid carries.
+/// Map the terminal's cell flags to the boolean attributes stoatty's grid
+/// carries.
 ///
-/// Every underline variant (straight, double, curly, dotted, dashed) collapses
-/// to the single [`Flags::UNDERLINE`]; distinguishing them is a later item.
+/// Underline is not among them; it is mapped separately by [`map_underline`].
 /// `INVERSE` and `DIM` stay flags rather than being baked into the colors, so
 /// the renderer applies them at draw time.
 fn map_flags(flags: TermFlags) -> Flags {
@@ -372,9 +380,6 @@ fn map_flags(flags: TermFlags) -> Flags {
     if flags.contains(TermFlags::DIM) {
         mapped |= Flags::DIM;
     }
-    if flags.intersects(TermFlags::ALL_UNDERLINES) {
-        mapped |= Flags::UNDERLINE;
-    }
     if flags.contains(TermFlags::INVERSE) {
         mapped |= Flags::INVERSE;
     }
@@ -386,6 +391,26 @@ fn map_flags(flags: TermFlags) -> Flags {
     }
 
     mapped
+}
+
+/// Map the terminal's underline flags to a stoatty [`UnderlineStyle`].
+///
+/// A cell carries at most one underline flag, so the most specific match wins;
+/// a plain `UNDERLINE` is the straight fallback.
+fn map_underline(flags: TermFlags) -> UnderlineStyle {
+    if flags.contains(TermFlags::DOUBLE_UNDERLINE) {
+        UnderlineStyle::Double
+    } else if flags.contains(TermFlags::UNDERCURL) {
+        UnderlineStyle::Curly
+    } else if flags.contains(TermFlags::DOTTED_UNDERLINE) {
+        UnderlineStyle::Dotted
+    } else if flags.contains(TermFlags::DASHED_UNDERLINE) {
+        UnderlineStyle::Dashed
+    } else if flags.contains(TermFlags::UNDERLINE) {
+        UnderlineStyle::Straight
+    } else {
+        UnderlineStyle::None
+    }
 }
 
 fn project_cursor(cursor: RenderableCursor, offset: i32) -> Cursor {
@@ -464,7 +489,7 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
-    use crate::grid::{Cell, Flags, Grid, Rgb};
+    use crate::grid::{Cell, Flags, Grid, Rgb, UnderlineStyle};
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
         let mut terminal = Terminal::new(rows, cols);
@@ -502,6 +527,16 @@ mod tests {
         assert_eq!(cell.ch, 'X');
         assert_eq!(cell.fg, Rgb::new(0xcd, 0x00, 0x00));
         assert!(cell.flags.contains(Flags::BOLD));
+    }
+
+    #[test]
+    fn projects_underline_style_and_color() {
+        let (grid, _) = project(1, 3, b"\x1b[4:3;58:2::0:255:0mU");
+        let cell = grid.get(0, 0);
+
+        assert_eq!(cell.ch, 'U');
+        assert_eq!(cell.underline, UnderlineStyle::Curly);
+        assert_eq!(cell.underline_color, Rgb::new(0, 255, 0));
     }
 
     #[test]

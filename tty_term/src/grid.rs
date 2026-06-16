@@ -82,14 +82,20 @@ impl Grid {
 /// A single grid cell: one character and how to render it.
 ///
 /// The base attribute set every cell carries. stoatty-specific per-cell
-/// attributes (border edges, glyph scale, popover anchors) and underline
-/// styling are added by later feature items.
+/// attributes (border edges, glyph scale, popover anchors) are added by later
+/// feature items.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub ch: char,
     pub fg: Rgb,
     pub bg: Rgb,
     pub flags: Flags,
+    pub underline: UnderlineStyle,
+    /// Color the underline is drawn in, independent of [`Self::fg`].
+    ///
+    /// Defaults to the foreground when the program does not set one (SGR 58),
+    /// so an underline with no explicit color matches the text.
+    pub underline_color: Rgb,
 }
 
 impl Default for Cell {
@@ -99,8 +105,25 @@ impl Default for Cell {
             fg: Rgb::new(0xcc, 0xcc, 0xcc),
             bg: Rgb::new(0x00, 0x00, 0x00),
             flags: Flags::empty(),
+            underline: UnderlineStyle::None,
+            underline_color: Rgb::new(0xcc, 0xcc, 0xcc),
         }
     }
+}
+
+/// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
+/// underline.
+///
+/// Mirrors the standard VT underline styles (SGR `4:1`-`4:5`); the renderer
+/// draws each as a distinct shape rather than a glyph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnderlineStyle {
+    None,
+    Straight,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
 }
 
 /// A fully-resolved 24-bit color.
@@ -121,11 +144,11 @@ impl Rgb {
     }
 }
 
-/// The text-rendering attributes a cell carries simultaneously.
+/// The boolean text-rendering attributes a cell carries simultaneously.
 ///
-/// A compact bitset rather than a struct of bools so a [`Cell`] stays small
-/// and `Copy`. Holds the base SGR attributes only; underline styles (curly,
-/// dotted, and the like) and stoatty decoration are layered on by later items.
+/// A compact bitset rather than a struct of bools so a [`Cell`] stays small and
+/// `Copy`. Underline is not here: it is a styled, separately-colored decoration,
+/// so it rides on [`Cell::underline`] and [`Cell::underline_color`] instead.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Flags(u8);
 
@@ -133,10 +156,9 @@ impl Flags {
     pub const BOLD: Flags = Flags(0b0000_0001);
     pub const ITALIC: Flags = Flags(0b0000_0010);
     pub const DIM: Flags = Flags(0b0000_0100);
-    pub const UNDERLINE: Flags = Flags(0b0000_1000);
-    pub const INVERSE: Flags = Flags(0b0001_0000);
-    pub const HIDDEN: Flags = Flags(0b0010_0000);
-    pub const STRIKEOUT: Flags = Flags(0b0100_0000);
+    pub const INVERSE: Flags = Flags(0b0000_1000);
+    pub const HIDDEN: Flags = Flags(0b0001_0000);
+    pub const STRIKEOUT: Flags = Flags(0b0010_0000);
 
     /// The empty set, carrying no attributes.
     pub const fn empty() -> Flags {
