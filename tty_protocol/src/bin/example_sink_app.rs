@@ -10,6 +10,7 @@ use std::{
     thread,
     time::Duration,
 };
+use stoatty_protocol::command;
 
 // Box-drawing glyphs, written as escapes so the source stays ASCII.
 const TOP_LEFT: &str = "\u{250c}";
@@ -28,6 +29,7 @@ fn main() {
 
     render_panel(&mut out, 2, 4);
     render_underlines(&mut out, 8, 4);
+    render_border(&mut out);
 
     // Leave the cursor below the demo in the default style.
     cup(&mut out, 10, 1);
@@ -99,6 +101,22 @@ fn render_underlines(out: &mut Vec<u8>, top: u16, left: u16) {
     out.extend_from_slice(b"\x1b[58:2::0:200:255m");
     out.extend_from_slice(b"\x1b[4:1mstraight \x1b[4:2mdouble \x1b[4:3mcurly ");
     out.extend_from_slice(b"\x1b[4:4mdotted \x1b[4:5mdashed\x1b[0m");
+}
+
+/// Frame a region beside the panel with a renderer-native heavy magenta border
+/// via the Gstoatty;border APC frame.
+///
+/// The region is in absolute 0-based grid coordinates; another terminal
+/// consumes the APC string and ignores it.
+fn render_border(out: &mut Vec<u8>) {
+    out.extend_from_slice(&command::encode_border(&command::BorderCommand {
+        top: 1,
+        left: 40,
+        width: 24,
+        height: 6,
+        style: command::BorderStyle::Heavy,
+        color: [255, 0, 255],
+    }));
 }
 
 /// Write a horizontal border row spanning [`INNER`] between two corner glyphs.
