@@ -31,6 +31,7 @@ fn main() {
     render_underlines(&mut out, 8, 4);
     render_border(&mut out);
     render_rounded_border(&mut out);
+    render_scaled_heading(&mut out);
 
     // Leave the cursor below the demo in the default style.
     cup(&mut out, 10, 1);
@@ -131,6 +132,29 @@ fn render_rounded_border(out: &mut Vec<u8>) {
         style: command::BorderStyle::Rounded,
         color: [0, 255, 255],
     }));
+}
+
+/// Write a short word and scale each letter to 2x with Gstoatty;scale frames, so
+/// the renderer draws a double-size heading beside the normal-size text.
+///
+/// The letters sit two grid columns apart because each 2x glyph owns a 2x2
+/// block; the columns between are left blank for the blocks to cover.
+fn render_scaled_heading(out: &mut Vec<u8>) {
+    let row = 13u16;
+    let letters = [(b'B', 4u16), (b'I', 6), (b'G', 8)];
+
+    for (glyph, col) in letters {
+        cup(out, row + 1, col + 1);
+        out.push(glyph);
+    }
+
+    for (_, col) in letters {
+        out.extend_from_slice(&command::encode_scale(&command::ScaleCommand {
+            top: row,
+            left: col,
+            scale: 2,
+        }));
+    }
 }
 
 /// Write a horizontal border row spanning [`INNER`] between two corner glyphs.
