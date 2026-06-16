@@ -5,5 +5,5 @@
 //! IO lives here -- the window, the reader thread, the event loop --
 //! keeping the renderer and terminal-core crates pure.
 
-pub mod app {}
+pub mod app;
 pub mod pty {}

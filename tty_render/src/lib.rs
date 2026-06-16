@@ -6,6 +6,6 @@
 //! for surface creation, so this crate never depends on the windowing
 //! library.
 
-pub mod gpu {}
+pub mod gpu;
 pub mod atlas {}
 pub mod render {}
