@@ -10,7 +10,7 @@
 
 struct Globals {
     resolution: vec2<f32>,
-    pad: vec2<f32>,
+    cell_size: vec2<f32>,
 }
 
 @group(0) @binding(0)
@@ -130,4 +130,88 @@ fn fs_main(in: VsOut) -> @location(0) vec4<f32> {
     let a = correct_coverage(coverage, fg_lin, bg_lin);
     let blended = mix(bg_lin, fg_lin, a);
     return vec4<f32>(linear_to_srgb(blended), 1.0);
+}
+
+// Decorated-underline pass. One instance per underlined cell draws a quad over
+// the whole cell; the fragment paints only the underline shape and leaves the
+// rest transparent, so it alpha-blends over the glyphs and background already
+// drawn underneath.
+
+const STYLE_STRAIGHT: u32 = 0u;
+const STYLE_DOUBLE: u32 = 1u;
+const STYLE_CURLY: u32 = 2u;
+const STYLE_DOTTED: u32 = 3u;
+const STYLE_DASHED: u32 = 4u;
+
+const TAU: f32 = 6.2831853;
+
+struct UnderlineVsOut {
+    @builtin(position) clip: vec4<f32>,
+    @location(0) local: vec2<f32>,
+    @location(1) @interpolate(flat) color: vec3<f32>,
+    @location(2) @interpolate(flat) style: u32,
+}
+
+@vertex
+fn vs_underline(
+    @builtin(vertex_index) vertex_index: u32,
+    @location(0) cell_pos: vec2<f32>,
+    @location(1) color: vec3<f32>,
+    @location(2) style: u32,
+) -> UnderlineVsOut {
+    var corners = array<vec2<f32>, 6>(
+        vec2<f32>(0.0, 0.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(0.0, 1.0),
+        vec2<f32>(1.0, 0.0),
+        vec2<f32>(1.0, 1.0)
+    );
+    let corner = corners[vertex_index];
+
+    let pixel = cell_pos + corner * globals.cell_size;
+    let ndc = vec2<f32>(
+        pixel.x / globals.resolution.x * 2.0 - 1.0,
+        1.0 - pixel.y / globals.resolution.y * 2.0
+    );
+
+    var out: UnderlineVsOut;
+    out.clip = vec4<f32>(ndc, 0.0, 1.0);
+    out.local = corner;
+    out.color = color;
+    out.style = style;
+    return out;
+}
+
+// Coverage of a 1px-antialiased horizontal line `half` thick, centered on `y`.
+fn hline(pixel_y: f32, center: f32, half: f32) -> f32 {
+    return clamp(half - abs(pixel_y - center) + 0.5, 0.0, 1.0);
+}
+
+fn underline_coverage(style: u32, pos: vec2<f32>, cell: vec2<f32>) -> f32 {
+    let base = cell.y * 0.87;
+
+    if style == STYLE_DOUBLE {
+        return max(hline(pos.y, base - 1.5, 0.5), hline(pos.y, base + 1.5, 0.5));
+    }
+    if style == STYLE_CURLY {
+        let center = base + 1.3 * sin(pos.x / cell.x * TAU);
+        return hline(pos.y, center, 0.6);
+    }
+    if style == STYLE_DOTTED {
+        let on = select(0.0, 1.0, fract(pos.x / 2.0) < 0.5);
+        return hline(pos.y, base, 0.75) * on;
+    }
+    if style == STYLE_DASHED {
+        let on = select(0.0, 1.0, fract(pos.x / 4.0) < 0.6);
+        return hline(pos.y, base, 0.75) * on;
+    }
+    return hline(pos.y, base, 0.75);
+}
+
+@fragment
+fn fs_underline(in: UnderlineVsOut) -> @location(0) vec4<f32> {
+    let pos = in.local * globals.cell_size;
+    let coverage = underline_coverage(in.style, pos, globals.cell_size);
+    return vec4<f32>(in.color, coverage);
 }

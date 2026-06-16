@@ -17,13 +17,13 @@ use cosmic_text::{
     Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache,
 };
 use std::collections::HashMap;
-use stoatty_term::grid::{Grid, Rgb};
+use stoatty_term::grid::{Grid, Rgb, UnderlineStyle};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
     Buffer, BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites,
     Device, FragmentState, PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline,
-    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor,
+    RenderPipelineDescriptor, Sampler, SamplerBindingType, SamplerDescriptor, ShaderModule,
     ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType,
     TextureView, TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
 };
@@ -41,6 +41,14 @@ const INITIAL_CAPACITY: usize = 2048;
 /// Atlas selector packed into each instance, matching the shader's constants.
 const KIND_MASK: u32 = 0;
 const KIND_COLOR: u32 = 1;
+
+/// Underline style packed into each decoration instance, matching the shader's
+/// constants.
+const STYLE_STRAIGHT: u32 = 0;
+const STYLE_DOUBLE: u32 = 1;
+const STYLE_CURLY: u32 = 2;
+const STYLE_DOTTED: u32 = 3;
+const STYLE_DASHED: u32 = 4;
 
 /// Per-glyph instance: where to draw it, where to sample it, and how to color it.
 #[repr(C)]
@@ -60,13 +68,28 @@ struct TextInstance {
     kind: u32,
 }
 
+/// Per-underlined-cell decoration instance.
+///
+/// One quad per underlined cell, covering the whole cell; the fragment paints
+/// only the underline shape selected by `style`.
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable)]
+struct UnderlineInstance {
+    /// Top-left of the cell in physical pixels.
+    cell_pos: [f32; 2],
+    /// Underline color, normalized sRGB.
+    color: [f32; 3],
+    /// Underline shape: one of the `STYLE_*` constants.
+    style: u32,
+}
+
 /// Uniform shared by every instance: the surface resolution the vertex shader
-/// maps pixel coordinates through.
+/// maps pixel coordinates through, and the cell box the underline pass draws in.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct TextGlobals {
     resolution: [f32; 2],
-    pad: [f32; 2],
+    cell_size: [f32; 2],
 }
 
 /// The instanced glyph pipeline together with the font system, glyph atlas, and
@@ -85,6 +108,10 @@ pub struct TextPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    underline_pipeline: RenderPipeline,
+    underline_instances: Buffer,
+    underline_capacity: usize,
+    underline_count: u32,
     atlas: GlyphAtlas,
     font_system: FontSystem,
     swash_cache: SwashCache,
@@ -181,6 +208,8 @@ impl TextPass {
             cache: None,
         });
 
+        let underline_pipeline = build_underline_pipeline(device, &shader, &globals_layout, format);
+
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("text globals"),
             size: size_of::<TextGlobals>() as u64,
@@ -210,7 +239,16 @@ impl TextPass {
             atlas.color_view(),
         );
 
-        let instances = alloc_instances(device, INITIAL_CAPACITY);
+        let instances = alloc_instances(
+            device,
+            "text instances",
+            instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
+        let underline_instances = alloc_instances(
+            device,
+            "underline instances",
+            instance_bytes::<UnderlineInstance>(INITIAL_CAPACITY),
+        );
 
         TextPass {
             pipeline,
@@ -222,6 +260,10 @@ impl TextPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            underline_pipeline,
+            underline_instances,
+            underline_capacity: INITIAL_CAPACITY,
+            underline_count: 0,
             atlas,
             font_system,
             swash_cache,
@@ -240,9 +282,13 @@ impl TextPass {
     pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
         let globals = TextGlobals {
             resolution,
-            pad: [0.0, 0.0],
+            cell_size: [CELL_WIDTH, CELL_HEIGHT],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+
+        // Underlines are built first, before the glyph path can return early on
+        // an all-blank grid: an underlined space has no glyph but still draws.
+        self.prepare_underlines(device, queue, grid);
 
         self.atlas.begin_frame();
         let pending = self.rasterize_visible(device, queue, grid);
@@ -275,7 +321,11 @@ impl TextPass {
 
         if instances.len() > self.capacity {
             self.capacity = instances.len().next_power_of_two();
-            self.instances = alloc_instances(device, self.capacity);
+            self.instances = alloc_instances(
+                device,
+                "text instances",
+                instance_bytes::<TextInstance>(self.capacity),
+            );
         }
         queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
 
@@ -288,21 +338,53 @@ impl TextPass {
         );
     }
 
-    /// Record the glyph draw into `render_pass`.
+    /// Build and upload the frame's underline-decoration instances for `grid`.
     ///
-    /// A no-op until [`Self::prepare`] has run with a grid that has visible
-    /// glyphs. Must run after the background pass in the same render pass: each
-    /// quad composites over the cell background already painted underneath.
-    pub fn draw(&self, render_pass: &mut RenderPass<'_>) {
-        if self.count == 0 {
+    /// Independent of the glyph path: it runs over every cell (spaces included,
+    /// since a blank cell can still be underlined) and reallocates only when the
+    /// underlined-cell count outgrows the current capacity.
+    fn prepare_underlines(&mut self, device: &Device, queue: &Queue, grid: &Grid) {
+        let instances = build_underline_instances(grid);
+        self.underline_count = instances.len() as u32;
+        if instances.is_empty() {
             return;
         }
 
-        render_pass.set_pipeline(&self.pipeline);
-        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
-        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
-        render_pass.set_vertex_buffer(0, self.instances.slice(..));
-        render_pass.draw(0..6, 0..self.count);
+        if instances.len() > self.underline_capacity {
+            self.underline_capacity = instances.len().next_power_of_two();
+            self.underline_instances = alloc_instances(
+                device,
+                "underline instances",
+                instance_bytes::<UnderlineInstance>(self.underline_capacity),
+            );
+        }
+        queue.write_buffer(
+            &self.underline_instances,
+            0,
+            bytemuck::cast_slice(&instances),
+        );
+    }
+
+    /// Record the glyph draw, then the underline draw, into `render_pass`.
+    ///
+    /// A no-op until [`Self::prepare`] has run. Must run after the background
+    /// pass in the same render pass: each glyph quad composites over the cell
+    /// background painted underneath, and underlines alpha-blend over the glyphs.
+    pub fn draw(&self, render_pass: &mut RenderPass<'_>) {
+        if self.count > 0 {
+            render_pass.set_pipeline(&self.pipeline);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.instances.slice(..));
+            render_pass.draw(0..6, 0..self.count);
+        }
+
+        if self.underline_count > 0 {
+            render_pass.set_pipeline(&self.underline_pipeline);
+            render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+            render_pass.set_vertex_buffer(0, self.underline_instances.slice(..));
+            render_pass.draw(0..6, 0..self.underline_count);
+        }
     }
 
     /// Phase one: shape and rasterize every visible cell glyph, returning their
@@ -391,12 +473,67 @@ fn texture_entry(binding: u32) -> BindGroupLayoutEntry {
     }
 }
 
-fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
+fn alloc_instances(device: &Device, label: &str, bytes: u64) -> Buffer {
     device.create_buffer(&BufferDescriptor {
-        label: Some("text instances"),
-        size: (capacity * size_of::<TextInstance>()) as u64,
+        label: Some(label),
+        size: bytes,
         usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+fn instance_bytes<T>(capacity: usize) -> u64 {
+    (capacity * size_of::<T>()) as u64
+}
+
+/// Build the underline decoration pipeline sharing `shader` with the glyph pass.
+///
+/// Binds only the globals (it does not sample the atlas) and alpha-blends so the
+/// painted underline shape composites over the glyphs already drawn.
+fn build_underline_pipeline(
+    device: &Device,
+    shader: &ShaderModule,
+    globals_layout: &BindGroupLayout,
+    format: TextureFormat,
+) -> RenderPipeline {
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("underline"),
+        bind_group_layouts: &[Some(globals_layout)],
+        immediate_size: 0,
+    });
+
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("underline"),
+        layout: Some(&layout),
+        vertex: VertexState {
+            module: shader,
+            entry_point: Some("vs_underline"),
+            compilation_options: Default::default(),
+            buffers: &[VertexBufferLayout {
+                array_stride: size_of::<UnderlineInstance>() as u64,
+                step_mode: VertexStepMode::Instance,
+                attributes: &vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x3,
+                    2 => Uint32,
+                ],
+            }],
+        },
+        fragment: Some(FragmentState {
+            module: shader,
+            entry_point: Some("fs_underline"),
+            compilation_options: Default::default(),
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
     })
 }
 
@@ -496,10 +633,48 @@ fn kind_flag(kind: AtlasKind) -> u32 {
     }
 }
 
+/// One decoration instance per underlined cell, in row-major order.
+fn build_underline_instances(grid: &Grid) -> Vec<UnderlineInstance> {
+    let mut instances = Vec::new();
+
+    for row in 0..grid.rows() {
+        for col in 0..grid.cols() {
+            let cell = grid.get(row, col);
+            let Some(style) = underline_style_flag(cell.underline) else {
+                continue;
+            };
+            instances.push(UnderlineInstance {
+                cell_pos: [col as f32 * CELL_WIDTH, row as f32 * CELL_HEIGHT],
+                color: rgb_f32(cell.underline_color),
+                style,
+            });
+        }
+    }
+
+    instances
+}
+
+/// The shader style constant for `style`, or `None` for an un-underlined cell.
+fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
+    match style {
+        UnderlineStyle::None => None,
+        UnderlineStyle::Straight => Some(STYLE_STRAIGHT),
+        UnderlineStyle::Double => Some(STYLE_DOUBLE),
+        UnderlineStyle::Curly => Some(STYLE_CURLY),
+        UnderlineStyle::Dotted => Some(STYLE_DOTTED),
+        UnderlineStyle::Dashed => Some(STYLE_DASHED),
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::glyph_origin;
+    use super::{build_underline_instances, glyph_origin, STYLE_DOTTED};
     use crate::render::{CELL_HEIGHT, CELL_WIDTH};
+    use stoatty_term::grid::{Grid, Rgb, UnderlineStyle};
+    use wgpu::naga::{
+        front::wgsl,
+        valid::{Capabilities, ValidationFlags, Validator},
+    };
 
     #[test]
     fn glyph_origin_offsets_from_cell_pen_and_baseline() {
@@ -513,5 +688,28 @@ mod tests {
 
         let origin = glyph_origin(0, 0, [-2, -3], baseline);
         assert_eq!(origin, [-2.0, baseline + 3.0]);
+    }
+
+    #[test]
+    fn underline_instances_cover_styled_cells_only() {
+        let mut grid = Grid::new(1, 3);
+        grid.get_mut(0, 1).underline = UnderlineStyle::Dotted;
+        grid.get_mut(0, 1).underline_color = Rgb::new(255, 0, 0);
+
+        let instances = build_underline_instances(&grid);
+
+        assert_eq!(instances.len(), 1);
+        assert_eq!(instances[0].cell_pos, [CELL_WIDTH, 0.0]);
+        assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
+        assert_eq!(instances[0].style, STYLE_DOTTED);
+    }
+
+    #[test]
+    fn shader_is_valid_wgsl() {
+        let module =
+            wgsl::parse_str(include_str!("../shaders/text.wgsl")).expect("parse text.wgsl");
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("validate text.wgsl");
     }
 }
