@@ -10,13 +10,14 @@ use crate::frame::{self, Frame};
 
 /// A decoded stoatty command.
 ///
-/// Feature sub-codes (scaled text, popovers) add their variants here as those
-/// items land. The enum is intentionally exhaustive: adding a variant forces
-/// every matcher, including the terminal's apply seam, to handle it rather than
-/// silently dropping the new command.
+/// Feature sub-codes (popovers) add their variants here as those items land. The
+/// enum is intentionally exhaustive: adding a variant forces every matcher,
+/// including the terminal's apply seam, to handle it rather than silently
+/// dropping the new command.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Command {
     Border(BorderCommand),
+    Scale(ScaleCommand),
 }
 
 /// Frame a rectangular cell region with a border.
@@ -48,6 +49,20 @@ pub enum BorderStyle {
     Rounded,
 }
 
+/// Draw the glyph at a cell `scale` times the cell size.
+///
+/// The cell at (`top`, `left`) in absolute grid coordinates becomes the
+/// top-left of a `scale` by `scale` block the glyph is drawn over; the terminal
+/// claims the rest of the block so neighbors do not draw into it. The glyph
+/// itself is whatever the VT stream wrote at that cell, so scale is an attribute
+/// applied to existing text rather than carrying its own glyph.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScaleCommand {
+    pub top: u16,
+    pub left: u16,
+    pub scale: u8,
+}
+
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
 ///
 /// `None` covers both a malformed frame and a well-formed one whose
@@ -74,6 +89,19 @@ pub fn encode_border(command: &BorderCommand) -> Vec<u8> {
     })
 }
 
+/// Encode a [`ScaleCommand`] as a full `Gstoatty;scale` frame for an emitter.
+pub fn encode_scale(command: &ScaleCommand) -> Vec<u8> {
+    let mut arg = Vec::with_capacity(5);
+    arg.extend_from_slice(&command.top.to_be_bytes());
+    arg.extend_from_slice(&command.left.to_be_bytes());
+    arg.push(command.scale);
+
+    frame::encode(&Frame {
+        sub: "scale".to_owned(),
+        args: vec![arg],
+    })
+}
+
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
@@ -81,6 +109,7 @@ pub fn encode_border(command: &BorderCommand) -> Vec<u8> {
 fn dispatch(frame: &Frame) -> Option<Command> {
     match frame.sub.as_str() {
         "border" => decode_border(&frame.args).map(Command::Border),
+        "scale" => decode_scale(&frame.args).map(Command::Scale),
         _ => None,
     }
 }
@@ -95,6 +124,16 @@ fn decode_border(args: &[Vec<u8>]) -> Option<BorderCommand> {
         height: u16::from_be_bytes([arg[6], arg[7]]),
         style: decode_style(arg[8])?,
         color: [arg[9], arg[10], arg[11]],
+    })
+}
+
+fn decode_scale(args: &[Vec<u8>]) -> Option<ScaleCommand> {
+    let arg: &[u8; 5] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(ScaleCommand {
+        top: u16::from_be_bytes([arg[0], arg[1]]),
+        left: u16::from_be_bytes([arg[2], arg[3]]),
+        scale: arg[4],
     })
 }
 
@@ -119,7 +158,9 @@ fn style_code(style: BorderStyle) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{decode, encode_border, BorderCommand, BorderStyle, Command};
+    use super::{
+        decode, encode_border, encode_scale, BorderCommand, BorderStyle, Command, ScaleCommand,
+    };
 
     #[test]
     fn border_round_trips() {
@@ -159,6 +200,26 @@ mod tests {
     fn rejects_wrong_length_border_payload() {
         // The single arg here decodes to 3 bytes, not the 12 a border needs.
         assert!(decode(b"Gstoatty;border;YWJj").is_none());
+    }
+
+    #[test]
+    fn scale_round_trips() {
+        let command = ScaleCommand {
+            top: 13,
+            left: 4,
+            scale: 2,
+        };
+
+        assert_eq!(
+            decode(&encode_scale(&command)),
+            Some(Command::Scale(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_scale_payload() {
+        // The single arg here decodes to 3 bytes, not the 5 a scale needs.
+        assert!(decode(b"Gstoatty;scale;YWJj").is_none());
     }
 
     #[test]

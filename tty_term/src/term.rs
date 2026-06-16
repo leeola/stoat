@@ -19,7 +19,7 @@ use alacritty_terminal::{
     Term,
 };
 use std::mem;
-use stoatty_protocol::command::{self, BorderCommand, Command};
+use stoatty_protocol::command::{self, BorderCommand, Command, ScaleCommand};
 
 const PALETTE_LEN: usize = 256;
 const DEFAULT_FG: Rgb = Rgb::new(0xcc, 0xcc, 0xcc);
@@ -44,6 +44,10 @@ pub struct Terminal {
     /// [`Self::project`]. They persist until cleared, since the VT projection
     /// resets each cell's borders every frame.
     borders: Vec<BorderCommand>,
+    /// Scale commands set by `Gstoatty;scale` frames, applied to the grid by
+    /// [`Self::project`]. Like borders, they persist across the per-frame VT
+    /// projection that resets each cell's scale.
+    scales: Vec<ScaleCommand>,
 }
 
 /// Where the cursor sits and how it is drawn, as of the last [`Terminal::project`].
@@ -83,6 +87,7 @@ impl Terminal {
             palette: default_palette(),
             apc: ApcScanner::default(),
             borders: Vec::new(),
+            scales: Vec::new(),
         }
     }
 
@@ -113,6 +118,7 @@ impl Terminal {
     fn apply_command(&mut self, command: Command) {
         match command {
             Command::Border(border) => self.borders.push(border),
+            Command::Scale(scale) => self.scales.push(scale),
         }
     }
 
@@ -161,6 +167,7 @@ impl Terminal {
         let cursor = project_cursor(content.cursor, offset);
 
         apply_borders(grid, &self.borders);
+        apply_scales(grid, &self.scales);
 
         self.term.reset_damage();
         cursor
@@ -482,6 +489,20 @@ fn grid_border_style(style: command::BorderStyle) -> BorderStyle {
     }
 }
 
+/// Claim each stored scale command's block on `grid`.
+///
+/// Runs each projection because the cell projection resets every cell to
+/// [`Scale::Single`]. An origin outside the grid is skipped, since wire
+/// coordinates are untrusted and may point past the screen.
+fn apply_scales(grid: &mut Grid, commands: &[ScaleCommand]) {
+    for command in commands {
+        let (row, col) = (command.top as usize, command.left as usize);
+        if row < grid.rows() && col < grid.cols() {
+            grid.place_scaled(row, col, command.scale);
+        }
+    }
+}
+
 fn project_cursor(cursor: RenderableCursor, offset: i32) -> Cursor {
     Cursor {
         row: (cursor.point.line.0 + offset).max(0) as usize,
@@ -558,9 +579,9 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
-    use crate::grid::{Border, BorderStyle, Cell, Flags, Grid, Rgb, UnderlineStyle};
+    use crate::grid::{Border, BorderStyle, Cell, Flags, Grid, Rgb, Scale, UnderlineStyle};
     use stoatty_protocol::command::{
-        encode_border, BorderCommand, BorderStyle as ProtoBorderStyle,
+        encode_border, encode_scale, BorderCommand, BorderStyle as ProtoBorderStyle, ScaleCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -793,5 +814,24 @@ mod tests {
                 color: Rgb::new(1, 2, 3),
             })
         );
+    }
+
+    #[test]
+    fn scale_apc_frame_claims_the_block() {
+        let frame = encode_scale(&ScaleCommand {
+            top: 0,
+            left: 0,
+            scale: 2,
+        });
+
+        let mut terminal = Terminal::new(2, 2);
+        let mut grid = Grid::new(2, 2);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.get(0, 0).scale, Scale::Origin(2));
+        assert_eq!(grid.get(0, 1).scale, Scale::Covered);
+        assert_eq!(grid.get(1, 0).scale, Scale::Covered);
+        assert_eq!(grid.get(1, 1).scale, Scale::Covered);
     }
 }
