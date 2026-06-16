@@ -26,9 +26,10 @@ fn main() {
     out.extend_from_slice(b"\x1b[2J");
 
     render_panel(&mut out, 2, 4);
+    render_underlines(&mut out, 8, 4);
 
-    // Leave the cursor below the panel in the default style.
-    cup(&mut out, 8, 1);
+    // Leave the cursor below the demo in the default style.
+    cup(&mut out, 10, 1);
     out.extend_from_slice(b"\x1b[0m");
 
     let mut stdout = io::stdout();
@@ -74,6 +75,17 @@ fn render_panel(out: &mut Vec<u8>, top: u16, left: u16) {
 
     cup(out, top + 1 + lines.len() as u16, left);
     border(out, BOTTOM_LEFT, BOTTOM_RIGHT);
+}
+
+/// Draw one labeled word per underline style at (`top`, `left`).
+///
+/// All five share a cyan underline color set with SGR 58, then each word selects
+/// its style with SGR `4:1`-`4:5` (straight, double, curly, dotted, dashed).
+fn render_underlines(out: &mut Vec<u8>, top: u16, left: u16) {
+    cup(out, top, left);
+    out.extend_from_slice(b"\x1b[58:2::0:200:255m");
+    out.extend_from_slice(b"\x1b[4:1mstraight \x1b[4:2mdouble \x1b[4:3mcurly ");
+    out.extend_from_slice(b"\x1b[4:4mdotted \x1b[4:5mdashed\x1b[0m");
 }
 
 /// Write a horizontal border row spanning [`INNER`] between two corner glyphs.
