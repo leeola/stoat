@@ -23,7 +23,16 @@ use wgpu::{
 /// when a frame exceeds it.
 const INITIAL_CAPACITY: usize = 16;
 
-/// Per-overlay instance: the anchor cell, the size in cells, and the two colors.
+/// Drop-shadow blur radius in physical pixels: the distance over which the
+/// shadow's alpha fades to zero past the shadow rectangle.
+const SHADOW_MARGIN: f32 = 16.0;
+
+/// Drop-shadow displacement in physical pixels, down and to the right, so an
+/// overlay reads as floating above the grid rather than pasted onto it.
+const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
+
+/// Per-overlay instance: the anchor cell, the size in cells, the two colors,
+/// and the drop-shadow displacement and blur radius.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct OverlayInstance {
@@ -31,6 +40,8 @@ struct OverlayInstance {
     size: [f32; 2],
     fill: [f32; 3],
     border: [f32; 3],
+    shadow_offset: [f32; 2],
+    shadow_margin: f32,
 }
 
 /// Uniform shared by every instance: the surface resolution and cell size the
@@ -95,6 +106,8 @@ impl OverlayPass {
                         1 => Float32x2,
                         2 => Float32x3,
                         3 => Float32x3,
+                        4 => Float32x2,
+                        5 => Float32,
                     ],
                 }],
             },
@@ -202,6 +215,8 @@ fn build_overlay_instances(overlays: &[Overlay]) -> Vec<OverlayInstance> {
             size: [overlay.width as f32, overlay.height as f32],
             fill: rgb_f32(overlay.fill),
             border: rgb_f32(overlay.border),
+            shadow_offset: SHADOW_OFFSET,
+            shadow_margin: SHADOW_MARGIN,
         })
         .collect()
 }
@@ -252,5 +267,7 @@ mod tests {
         assert_eq!(instances[0].size, [8.0, 4.0]);
         assert_eq!(instances[0].fill, [1.0, 0.0, 0.0]);
         assert_eq!(instances[0].border, [0.0, 1.0, 0.0]);
+        assert_eq!(instances[0].shadow_offset, super::SHADOW_OFFSET);
+        assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN);
     }
 }
