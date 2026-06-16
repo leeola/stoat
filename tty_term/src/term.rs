@@ -85,6 +85,14 @@ impl Terminal {
         self.parser.advance(&mut self.term, bytes);
     }
 
+    /// Resize the terminal to `rows` by `cols`.
+    ///
+    /// The next [`Self::project`] finds its grid no longer matches and repaints
+    /// it wholesale at the new size, so the grid follows without a separate call.
+    pub fn resize(&mut self, rows: usize, cols: usize) {
+        self.term.resize(GridSize { rows, cols });
+    }
+
     /// Copy the parsed screen onto `grid` and return the cursor.
     ///
     /// Only lines the terminal reports as damaged since the previous call are
@@ -435,5 +443,20 @@ mod tests {
 
         assert_eq!((grid.rows(), grid.cols()), (2, 6));
         assert_eq!(grid.get(0, 0).ch, 'h');
+    }
+
+    #[test]
+    fn resize_propagates_to_grid_on_next_project() {
+        let mut terminal = Terminal::new(2, 4);
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(b"hi");
+        terminal.project(&mut grid);
+        assert_eq!((grid.rows(), grid.cols()), (2, 4));
+
+        terminal.resize(5, 10);
+        terminal.project(&mut grid);
+
+        assert_eq!((grid.rows(), grid.cols()), (5, 10));
     }
 }

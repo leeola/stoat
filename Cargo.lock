@@ -4065,6 +4065,7 @@ dependencies = [
 name = "stoatty"
 version = "0.1.0"
 dependencies = [
+ "portable-pty",
  "stoatty_protocol",
  "stoatty_render",
  "stoatty_term",

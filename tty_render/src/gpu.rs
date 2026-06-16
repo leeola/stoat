@@ -5,7 +5,7 @@
 //! app supplies via the raw-window-handle traits, so this crate never links
 //! the windowing library; the app owns the window and hands its handle in.
 
-use crate::render::{background::BackgroundPass, text::TextPass};
+use crate::render::{background::BackgroundPass, text::TextPass, CELL_HEIGHT, CELL_WIDTH};
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use stoatty_term::grid::Grid;
@@ -119,6 +119,18 @@ impl GpuContext {
         self.config.width = width;
         self.config.height = height;
         self.surface.configure(&self.device, &self.config);
+    }
+
+    /// The (rows, cols) cell grid that fills the current surface.
+    ///
+    /// Divides the surface's physical pixel size by the fixed cell metrics,
+    /// flooring with a one-cell minimum so a sliver of a window still yields a
+    /// usable grid. The app sizes the terminal and PTY to this so the shell's
+    /// view matches what the renderer draws.
+    pub fn grid_size(&self) -> (usize, usize) {
+        let rows = (self.config.height as f32 / CELL_HEIGHT).floor().max(1.0) as usize;
+        let cols = (self.config.width as f32 / CELL_WIDTH).floor().max(1.0) as usize;
+        (rows, cols)
     }
 
     /// Draw a frame: clear to [`BACKGROUND`], fill each cell of `grid` with its

@@ -12,3 +12,4 @@ stoatty_protocol = { path = "../tty_protocol" }
 stoatty_term = { path = "../tty_term" }
 stoatty_render = { path = "../tty_render" }
 winit.workspace = true
+portable-pty.workspace = true
