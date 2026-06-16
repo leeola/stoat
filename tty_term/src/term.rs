@@ -18,6 +18,8 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor, Processor},
     Term,
 };
+use std::mem;
+use stoatty_protocol::command::{self, Command};
 
 const PALETTE_LEN: usize = 256;
 const DEFAULT_FG: Rgb = Rgb::new(0xcc, 0xcc, 0xcc);
@@ -37,6 +39,7 @@ pub struct Terminal {
     term: Term<VoidListener>,
     parser: Processor,
     palette: [Rgb; PALETTE_LEN],
+    apc: ApcScanner,
 }
 
 /// Where the cursor sits and how it is drawn, as of the last [`Terminal::project`].
@@ -74,6 +77,7 @@ impl Terminal {
             term,
             parser: Processor::new(),
             palette: default_palette(),
+            apc: ApcScanner::default(),
         }
     }
 
@@ -81,8 +85,28 @@ impl Terminal {
     ///
     /// Bytes need not be escape-sequence aligned; the parser retains a partial
     /// sequence across calls.
+    ///
+    /// Each stoatty `Gstoatty` APC frame in the stream is decoded and applied
+    /// before the bytes reach the parser. The bytes are still fed to the parser
+    /// verbatim: alacritty consumes the APC string and ignores it, so feeding it
+    /// is harmless and avoids the desync that removing bytes would risk.
     pub fn advance(&mut self, bytes: &[u8]) {
+        for payload in self.apc.scan(bytes) {
+            if let Some(command) = command::decode(&payload) {
+                self.apply_command(command);
+            }
+        }
+
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// Apply a decoded stoatty command to the terminal.
+    ///
+    /// This is the seam every feature sub-code hooks into. [`Command`] has no
+    /// variants yet, so the match is empty and this never runs. Each feature
+    /// item adds its variant and the arm that applies it to the grid state.
+    fn apply_command(&mut self, command: Command) {
+        match command {}
     }
 
     /// Resize the terminal to `rows` by `cols`.
@@ -153,6 +177,100 @@ impl Terminal {
                 }
                 Dirty::Partial(rows_dirty)
             },
+        }
+    }
+}
+
+const ESC: u8 = 0x1b;
+/// Byte after `ESC` that opens an APC string (`ESC _`).
+const APC_INTRODUCER: u8 = b'_';
+/// Byte after `ESC` that closes a string control (`ESC \`, the ST).
+const STRING_TERMINATOR: u8 = b'\\';
+/// Bell, accepted as an alternate string terminator.
+const BEL: u8 = 0x07;
+
+/// Cap on a buffered APC payload, bounding memory against an APC string that
+/// never terminates. Stoatty frames are far smaller, so an overrun is discarded.
+const MAX_APC_BYTES: usize = 64 * 1024;
+
+/// Extracts APC string payloads from a VT byte stream as they complete.
+///
+/// `alacritty_terminal` consumes APC strings without surfacing them, so the
+/// driver watches the bytes itself: this tracks the `ESC _ ... ESC \` (or
+/// `BEL`) framing across [`Terminal::advance`] calls and yields each completed
+/// payload, the bytes between the introducer and the terminator. Recognizing a
+/// stoatty frame among the payloads is the decoder's job, not this scanner's.
+#[derive(Default)]
+struct ApcScanner {
+    state: ApcState,
+    payload: Vec<u8>,
+}
+
+#[derive(Clone, Copy, Default)]
+enum ApcState {
+    #[default]
+    Ground,
+    Escape,
+    Apc,
+    ApcEscape,
+}
+
+impl ApcScanner {
+    /// Feed `bytes`, returning every APC payload that completes within them.
+    ///
+    /// A payload split across calls is retained until its terminator arrives.
+    fn scan(&mut self, bytes: &[u8]) -> Vec<Vec<u8>> {
+        let mut payloads = Vec::new();
+
+        for &byte in bytes {
+            match self.state {
+                ApcState::Ground => {
+                    if byte == ESC {
+                        self.state = ApcState::Escape;
+                    }
+                },
+                ApcState::Escape => {
+                    self.state = match byte {
+                        APC_INTRODUCER => {
+                            self.payload.clear();
+                            ApcState::Apc
+                        },
+                        ESC => ApcState::Escape,
+                        _ => ApcState::Ground,
+                    };
+                },
+                ApcState::Apc => match byte {
+                    ESC => self.state = ApcState::ApcEscape,
+                    BEL => {
+                        payloads.push(mem::take(&mut self.payload));
+                        self.state = ApcState::Ground;
+                    },
+                    _ => self.push(byte),
+                },
+                ApcState::ApcEscape => match byte {
+                    STRING_TERMINATOR => {
+                        payloads.push(mem::take(&mut self.payload));
+                        self.state = ApcState::Ground;
+                    },
+                    ESC => self.state = ApcState::ApcEscape,
+                    _ => {
+                        self.payload.clear();
+                        self.state = ApcState::Ground;
+                    },
+                },
+            }
+        }
+
+        payloads
+    }
+
+    /// Buffer one payload byte, abandoning the frame if it overruns the cap.
+    fn push(&mut self, byte: u8) {
+        if self.payload.len() < MAX_APC_BYTES {
+            self.payload.push(byte);
+        } else {
+            self.payload.clear();
+            self.state = ApcState::Ground;
         }
     }
 }
@@ -345,7 +463,7 @@ fn cube_channel(level: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cursor, CursorShape, Terminal};
+    use super::{ApcScanner, Cursor, CursorShape, Terminal};
     use crate::grid::{Cell, Flags, Grid, Rgb};
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -458,5 +576,63 @@ mod tests {
         terminal.project(&mut grid);
 
         assert_eq!((grid.rows(), grid.cols()), (5, 10));
+    }
+
+    #[test]
+    fn scans_single_apc_frame() {
+        let mut scanner = ApcScanner::default();
+
+        assert_eq!(
+            scanner.scan(b"\x1b_Gstoatty;border\x1b\\"),
+            vec![b"Gstoatty;border".to_vec()]
+        );
+    }
+
+    #[test]
+    fn scans_frame_split_across_calls() {
+        let mut scanner = ApcScanner::default();
+
+        assert!(scanner.scan(b"\x1b_Gstoat").is_empty());
+        assert_eq!(scanner.scan(b"ty;x\x1b\\"), vec![b"Gstoatty;x".to_vec()]);
+    }
+
+    #[test]
+    fn scans_bel_terminated_frame() {
+        let mut scanner = ApcScanner::default();
+
+        assert_eq!(scanner.scan(b"\x1b_foo\x07"), vec![b"foo".to_vec()]);
+    }
+
+    #[test]
+    fn scans_frame_between_text() {
+        let mut scanner = ApcScanner::default();
+
+        assert_eq!(scanner.scan(b"a\x1b_foo\x1b\\b"), vec![b"foo".to_vec()]);
+    }
+
+    #[test]
+    fn scans_two_frames_in_one_chunk() {
+        let mut scanner = ApcScanner::default();
+
+        assert_eq!(
+            scanner.scan(b"\x1b_a\x1b\\\x1b_b\x1b\\"),
+            vec![b"a".to_vec(), b"b".to_vec()]
+        );
+    }
+
+    #[test]
+    fn csi_and_plain_text_yield_no_frames() {
+        let mut scanner = ApcScanner::default();
+
+        assert!(scanner.scan(b"hello\x1b[31mworld").is_empty());
+    }
+
+    #[test]
+    fn apc_frame_is_not_rendered_as_text() {
+        let (grid, _) = project(1, 8, b"\x1b_Gstoatty;border\x1b\\hi");
+
+        assert_eq!(grid.get(0, 0).ch, 'h');
+        assert_eq!(grid.get(0, 1).ch, 'i');
+        assert_eq!(*grid.get(0, 2), Cell::default());
     }
 }

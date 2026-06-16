@@ -12,8 +12,9 @@ use crate::frame::{self, Frame};
 ///
 /// Feature sub-codes (borders, scaled text, popovers) add their variants here
 /// as those items land. Until the first does, no sub-command is recognized, so
-/// every well-formed frame is ignored.
-#[non_exhaustive]
+/// every well-formed frame is ignored. The enum is intentionally exhaustive:
+/// adding a variant forces every matcher, including the terminal's apply seam,
+/// to handle it rather than silently dropping the new command.
 #[derive(Debug)]
 pub enum Command {}
 
