@@ -17,7 +17,7 @@ use cosmic_text::{
     Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache,
 };
 use std::collections::HashMap;
-use stoatty_term::grid::{Grid, Rgb, UnderlineStyle};
+use stoatty_term::grid::{Cell, Grid, Rgb, Scale, UnderlineStyle};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
@@ -115,7 +115,7 @@ pub struct TextPass {
     atlas: GlyphAtlas,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    shape_cache: HashMap<char, Option<CacheKey>>,
+    shape_cache: HashMap<(char, u8), Option<CacheKey>>,
     baseline: f32,
 }
 
@@ -305,7 +305,12 @@ impl TextPass {
                 continue;
             };
             instances.push(TextInstance {
-                pos: glyph_origin(glyph.col, glyph.row, info.placement, self.baseline),
+                pos: glyph_origin(
+                    glyph.col,
+                    glyph.row,
+                    info.placement,
+                    self.baseline * glyph.scale as f32,
+                ),
                 dim: [info.size[0] as f32, info.size[1] as f32],
                 uv: info.uv,
                 fg: rgb_f32(glyph.fg),
@@ -404,11 +409,11 @@ impl TextPass {
         for row in 0..grid.rows() {
             for col in 0..grid.cols() {
                 let cell = grid.get(row, col);
-                if cell.ch == ' ' {
+                let Some(scale) = cell_glyph_scale(cell) else {
                     continue;
-                }
+                };
 
-                let Some(key) = self.glyph_key(cell.ch) else {
+                let Some(key) = self.glyph_key(cell.ch, scale) else {
                     continue;
                 };
 
@@ -429,6 +434,7 @@ impl TextPass {
                         key,
                         fg: cell.fg,
                         bg: cell.bg,
+                        scale,
                     });
                 }
             }
@@ -437,15 +443,16 @@ impl TextPass {
         pending
     }
 
-    /// The cached glyph cache key for `ch`, shaping it on first use. `None` for
-    /// a character that produces no glyph.
-    fn glyph_key(&mut self, ch: char) -> Option<CacheKey> {
-        if let Some(key) = self.shape_cache.get(&ch) {
+    /// The cached glyph cache key for `ch` at `scale`, shaping it on first use.
+    /// `None` for a character that produces no glyph. The key is distinct per
+    /// scale, so the atlas rasterizes each scale of a character separately.
+    fn glyph_key(&mut self, ch: char, scale: u8) -> Option<CacheKey> {
+        if let Some(key) = self.shape_cache.get(&(ch, scale)) {
             return *key;
         }
 
-        let key = shape_char(&mut self.font_system, ch);
-        self.shape_cache.insert(ch, key);
+        let key = shape_char(&mut self.font_system, ch, scale);
+        self.shape_cache.insert((ch, scale), key);
         key
     }
 }
@@ -458,6 +465,8 @@ struct PendingGlyph {
     key: CacheKey,
     fg: Rgb,
     bg: Rgb,
+    /// Integer multiple of the cell size this glyph is rasterized and drawn at.
+    scale: u8,
 }
 
 fn texture_entry(binding: u32) -> BindGroupLayoutEntry {
@@ -564,11 +573,18 @@ fn create_atlas_bind_group(
     })
 }
 
-/// Shape `ch` on its own and return its glyph cache key, or `None` if it
-/// produces no glyph. One character maps to one cell, so each is shaped
-/// independently rather than through proportional line layout.
-fn shape_char(font_system: &mut FontSystem, ch: char) -> Option<CacheKey> {
-    let mut buffer = CosmicBuffer::new(font_system, Metrics::new(FONT_SIZE, CELL_HEIGHT));
+/// Shape `ch` on its own at `scale` times the cell size and return its glyph
+/// cache key, or `None` if it produces no glyph.
+///
+/// One character maps to one cell, so each is shaped independently rather than
+/// through proportional line layout. The cache key encodes the rasterization
+/// size, so each scale of a character keys a distinct atlas entry.
+fn shape_char(font_system: &mut FontSystem, ch: char, scale: u8) -> Option<CacheKey> {
+    let size = scale as f32;
+    let mut buffer = CosmicBuffer::new(
+        font_system,
+        Metrics::new(FONT_SIZE * size, CELL_HEIGHT * size),
+    );
     let mut encoded = [0u8; 4];
     let text = ch.encode_utf8(&mut encoded);
     buffer.set_text(
@@ -633,6 +649,22 @@ fn kind_flag(kind: AtlasKind) -> u32 {
     }
 }
 
+/// The integer scale to rasterize a cell's glyph at, or `None` to draw no glyph.
+///
+/// A blank cell and a [`Scale::Covered`] cell (inside a scaled glyph's block but
+/// not its origin) draw nothing; every other cell draws at its own scale, with
+/// [`Scale::Single`] meaning the normal cell size.
+fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
+    if cell.ch == ' ' {
+        return None;
+    }
+    match cell.scale {
+        Scale::Single => Some(1),
+        Scale::Origin(scale) => Some(scale),
+        Scale::Covered => None,
+    }
+}
+
 /// One decoration instance per underlined cell, in row-major order.
 fn build_underline_instances(grid: &Grid) -> Vec<UnderlineInstance> {
     let mut instances = Vec::new();
@@ -668,9 +700,9 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_underline_instances, glyph_origin, STYLE_DOTTED};
+    use super::{build_underline_instances, cell_glyph_scale, glyph_origin, STYLE_DOTTED};
     use crate::render::{CELL_HEIGHT, CELL_WIDTH};
-    use stoatty_term::grid::{Grid, Rgb, UnderlineStyle};
+    use stoatty_term::grid::{Cell, Grid, Rgb, Scale, UnderlineStyle};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -702,6 +734,24 @@ mod tests {
         assert_eq!(instances[0].cell_pos, [CELL_WIDTH, 0.0]);
         assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
         assert_eq!(instances[0].style, STYLE_DOTTED);
+    }
+
+    #[test]
+    fn cell_glyph_scale_skips_blank_and_covered() {
+        let glyph = |scale| Cell {
+            ch: 'a',
+            scale,
+            ..Cell::default()
+        };
+
+        assert_eq!(cell_glyph_scale(&glyph(Scale::Single)), Some(1));
+        assert_eq!(cell_glyph_scale(&glyph(Scale::Origin(2))), Some(2));
+        assert_eq!(
+            cell_glyph_scale(&glyph(Scale::Covered)),
+            None,
+            "covered cell draws no glyph"
+        );
+        assert_eq!(cell_glyph_scale(&Cell::default()), None, "blank cell");
     }
 
     #[test]

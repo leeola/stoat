@@ -64,6 +64,38 @@ impl Grid {
         self.cells.resize(rows * cols, Cell::default());
     }
 
+    /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
+    /// `col`) scaled by `scale`.
+    ///
+    /// The origin cell becomes [`Scale::Origin`] and the rest of the block
+    /// [`Scale::Covered`]. Cells of the block past the grid edge are skipped, so
+    /// a glyph near the boundary claims only what fits. A `scale` below 2 just
+    /// marks the origin [`Scale::Single`], since there is no block to claim.
+    ///
+    /// Only the scale roles are set; the caller writes the origin cell's glyph
+    /// and colors separately.
+    pub fn place_scaled(&mut self, row: usize, col: usize, scale: u8) {
+        if scale < 2 {
+            self.get_mut(row, col).scale = Scale::Single;
+            return;
+        }
+
+        let span = scale as usize;
+        for delta_row in 0..span {
+            for delta_col in 0..span {
+                let (r, c) = (row + delta_row, col + delta_col);
+                if r >= self.rows || c >= self.cols {
+                    continue;
+                }
+                self.get_mut(r, c).scale = if delta_row == 0 && delta_col == 0 {
+                    Scale::Origin(scale)
+                } else {
+                    Scale::Covered
+                };
+            }
+        }
+    }
+
     /// Map a (`row`, `col`) coordinate to its row-major index.
     ///
     /// Bounds-checks both axes so an out-of-range column cannot silently
@@ -82,8 +114,7 @@ impl Grid {
 /// A single grid cell: one character and how to render it.
 ///
 /// The base attribute set every cell carries. stoatty-specific per-cell
-/// attributes (border edges, glyph scale, popover anchors) are added by later
-/// feature items.
+/// attributes (border edges, popover anchors) are added by later feature items.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub struct Cell {
     pub ch: char,
@@ -97,6 +128,11 @@ pub struct Cell {
     /// so an underline with no explicit color matches the text.
     pub underline_color: Rgb,
     pub borders: Borders,
+    /// This cell's role in a scaled glyph block.
+    ///
+    /// [`Scale::Single`] for an ordinary 1x1 cell; the other variants mark the
+    /// origin and covered cells of a glyph drawn larger than one cell.
+    pub scale: Scale,
 }
 
 impl Default for Cell {
@@ -109,6 +145,7 @@ impl Default for Cell {
             underline: UnderlineStyle::None,
             underline_color: Rgb::new(0xcc, 0xcc, 0xcc),
             borders: Borders::default(),
+            scale: Scale::Single,
         }
     }
 }
@@ -145,6 +182,23 @@ pub enum BorderStyle {
     Heavy,
     Double,
     Rounded,
+}
+
+/// A cell's role in a scaled glyph block.
+///
+/// A glyph drawn at `n` times the cell size owns an `n` by `n` block of cells.
+/// Its top-left cell is [`Scale::Origin`] and carries the glyph; the rest of the
+/// block is [`Scale::Covered`] and draws no glyph of its own, so the scaled
+/// glyph owns the block without a neighbor drawing into it. Every other cell is
+/// [`Scale::Single`].
+///
+/// See also [`Grid::place_scaled`], which stamps a block.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub enum Scale {
+    #[default]
+    Single,
+    Origin(u8),
+    Covered,
 }
 
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
@@ -223,7 +277,7 @@ impl BitOrAssign for Flags {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Flags, Grid, Rgb};
+    use super::{Cell, Flags, Grid, Rgb, Scale};
 
     #[test]
     fn grid_writes_are_addressable() {
@@ -264,5 +318,30 @@ mod tests {
     fn out_of_bounds_access_panics() {
         let grid = Grid::new(2, 2);
         let _ = grid.get(2, 0);
+    }
+
+    #[test]
+    fn place_scaled_claims_the_block() {
+        let mut grid = Grid::new(3, 3);
+        grid.place_scaled(0, 0, 2);
+
+        assert_eq!(grid.get(0, 0).scale, Scale::Origin(2));
+        assert_eq!(grid.get(0, 1).scale, Scale::Covered);
+        assert_eq!(grid.get(1, 0).scale, Scale::Covered);
+        assert_eq!(grid.get(1, 1).scale, Scale::Covered);
+        assert_eq!(grid.get(2, 2).scale, Scale::Single, "outside the block");
+    }
+
+    #[test]
+    fn place_scaled_clamps_at_grid_edge() {
+        let mut grid = Grid::new(2, 2);
+        grid.place_scaled(1, 1, 2);
+
+        assert_eq!(grid.get(1, 1).scale, Scale::Origin(2));
+        assert_eq!(
+            grid.get(0, 0).scale,
+            Scale::Single,
+            "off-block cell untouched"
+        );
     }
 }

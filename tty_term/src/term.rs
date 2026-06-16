@@ -6,7 +6,7 @@
 //! each cell's terminal-palette color to concrete channels and touches only the
 //! lines the terminal reports as damaged.
 
-use crate::grid::{Border, BorderStyle, Borders, Cell, Flags, Grid, Rgb, UnderlineStyle};
+use crate::grid::{Border, BorderStyle, Borders, Cell, Flags, Grid, Rgb, Scale, UnderlineStyle};
 use alacritty_terminal::{
     event::VoidListener,
     grid::Dimensions,
@@ -337,9 +337,10 @@ fn project_cell(cell: &TermCell, overrides: &Colors, palette: &[Rgb; PALETTE_LEN
         flags: map_flags(cell.flags),
         underline: map_underline(cell.flags),
         underline_color,
-        // Borders are set by the stoatty APC, not the VT stream, so a projected
-        // cell carries none.
+        // Borders and scale come from the stoatty APC, not the VT stream, so a
+        // projected cell carries neither.
         borders: Borders::default(),
+        scale: Scale::Single,
     }
 }
 
