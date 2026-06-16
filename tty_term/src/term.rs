@@ -6,7 +6,7 @@
 //! each cell's terminal-palette color to concrete channels and touches only the
 //! lines the terminal reports as damaged.
 
-use crate::grid::{Borders, Cell, Flags, Grid, Rgb, UnderlineStyle};
+use crate::grid::{Border, BorderStyle, Borders, Cell, Flags, Grid, Rgb, UnderlineStyle};
 use alacritty_terminal::{
     event::VoidListener,
     grid::Dimensions,
@@ -19,7 +19,7 @@ use alacritty_terminal::{
     Term,
 };
 use std::mem;
-use stoatty_protocol::command::{self, Command};
+use stoatty_protocol::command::{self, BorderCommand, Command};
 
 const PALETTE_LEN: usize = 256;
 const DEFAULT_FG: Rgb = Rgb::new(0xcc, 0xcc, 0xcc);
@@ -40,6 +40,10 @@ pub struct Terminal {
     parser: Processor,
     palette: [Rgb; PALETTE_LEN],
     apc: ApcScanner,
+    /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
+    /// [`Self::project`]. They persist until cleared, since the VT projection
+    /// resets each cell's borders every frame.
+    borders: Vec<BorderCommand>,
 }
 
 /// Where the cursor sits and how it is drawn, as of the last [`Terminal::project`].
@@ -78,6 +82,7 @@ impl Terminal {
             parser: Processor::new(),
             palette: default_palette(),
             apc: ApcScanner::default(),
+            borders: Vec::new(),
         }
     }
 
@@ -102,11 +107,13 @@ impl Terminal {
 
     /// Apply a decoded stoatty command to the terminal.
     ///
-    /// This is the seam every feature sub-code hooks into. [`Command`] has no
-    /// variants yet, so the match is empty and this never runs. Each feature
-    /// item adds its variant and the arm that applies it to the grid state.
+    /// The seam every feature sub-code hooks into. A border command is recorded
+    /// and stamped onto the grid by [`Self::project`], since it persists across
+    /// frames while the VT projection rewrites cells.
     fn apply_command(&mut self, command: Command) {
-        match command {}
+        match command {
+            Command::Border(border) => self.borders.push(border),
+        }
     }
 
     /// Resize the terminal to `rows` by `cols`.
@@ -152,6 +159,9 @@ impl Terminal {
         }
 
         let cursor = project_cursor(content.cursor, offset);
+
+        apply_borders(grid, &self.borders);
+
         self.term.reset_damage();
         cursor
     }
@@ -416,6 +426,60 @@ fn map_underline(flags: TermFlags) -> UnderlineStyle {
     }
 }
 
+/// Stamp every stored border region's perimeter edges onto `grid`.
+///
+/// Runs each projection because the cell projection resets borders to none;
+/// edges outside the grid are skipped so a region may extend past it.
+fn apply_borders(grid: &mut Grid, commands: &[BorderCommand]) {
+    for command in commands {
+        frame_region(grid, command);
+    }
+}
+
+fn frame_region(grid: &mut Grid, command: &BorderCommand) {
+    if command.width == 0 || command.height == 0 {
+        return;
+    }
+
+    let border = Border {
+        style: grid_border_style(command.style),
+        color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+    };
+
+    let rows = grid.rows();
+    let cols = grid.cols();
+    let top = command.top as usize;
+    let left = command.left as usize;
+    let bottom = top + command.height as usize - 1;
+    let right = left + command.width as usize - 1;
+
+    for col in left..=right.min(cols.saturating_sub(1)) {
+        if top < rows {
+            grid.get_mut(top, col).borders.top = Some(border);
+        }
+        if bottom < rows {
+            grid.get_mut(bottom, col).borders.bottom = Some(border);
+        }
+    }
+
+    for row in top..=bottom.min(rows.saturating_sub(1)) {
+        if left < cols {
+            grid.get_mut(row, left).borders.left = Some(border);
+        }
+        if right < cols {
+            grid.get_mut(row, right).borders.right = Some(border);
+        }
+    }
+}
+
+fn grid_border_style(style: command::BorderStyle) -> BorderStyle {
+    match style {
+        command::BorderStyle::Light => BorderStyle::Light,
+        command::BorderStyle::Heavy => BorderStyle::Heavy,
+        command::BorderStyle::Double => BorderStyle::Double,
+    }
+}
+
 fn project_cursor(cursor: RenderableCursor, offset: i32) -> Cursor {
     Cursor {
         row: (cursor.point.line.0 + offset).max(0) as usize,
@@ -492,7 +556,10 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
-    use crate::grid::{Cell, Flags, Grid, Rgb, UnderlineStyle};
+    use crate::grid::{Border, BorderStyle, Cell, Flags, Grid, Rgb, UnderlineStyle};
+    use stoatty_protocol::command::{
+        encode_border, BorderCommand, BorderStyle as ProtoBorderStyle,
+    };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
         let mut terminal = Terminal::new(rows, cols);
@@ -672,5 +739,32 @@ mod tests {
         assert_eq!(grid.get(0, 0).ch, 'h');
         assert_eq!(grid.get(0, 1).ch, 'i');
         assert_eq!(*grid.get(0, 2), Cell::default());
+    }
+
+    #[test]
+    fn border_apc_frame_frames_the_region() {
+        let frame = encode_border(&BorderCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        });
+
+        let mut terminal = Terminal::new(2, 3);
+        let mut grid = Grid::new(2, 3);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        let edge = Some(Border {
+            style: BorderStyle::Light,
+            color: Rgb::new(255, 0, 0),
+        });
+        assert_eq!(grid.get(0, 0).borders.top, edge);
+        assert_eq!(grid.get(0, 0).borders.left, edge);
+        assert_eq!(grid.get(1, 2).borders.bottom, edge);
+        assert_eq!(grid.get(1, 2).borders.right, edge);
+        assert_eq!(grid.get(1, 1).borders.top, None);
     }
 }
