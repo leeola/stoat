@@ -32,6 +32,7 @@ fn main() {
     render_border(&mut out);
     render_rounded_border(&mut out);
     render_scaled_heading(&mut out);
+    render_popover(&mut out);
 
     // Leave the cursor below the demo in the default style.
     cup(&mut out, 10, 1);
@@ -155,6 +156,20 @@ fn render_scaled_heading(out: &mut Vec<u8>) {
             scale: 2,
         }));
     }
+}
+
+/// Reveal a floating popover over the panel via a Gstoatty;popover frame,
+/// simulating a hover. It composites above the cells with its own z-order,
+/// occluding whatever it covers.
+fn render_popover(out: &mut Vec<u8>) {
+    out.extend_from_slice(&command::encode_popover(&command::PopoverCommand {
+        top: 3,
+        left: 12,
+        width: 16,
+        height: 4,
+        fill: [30, 30, 60],
+        border: [200, 200, 255],
+    }));
 }
 
 /// Write a horizontal border row spanning [`INNER`] between two corner glyphs.
