@@ -76,6 +76,9 @@ struct State {
     terminal: Terminal,
     grid: Grid,
     pty: Pty,
+    /// The cursor's animated position in fractional cell coordinates, eased
+    /// toward the terminal's actual cursor cell each frame.
+    cursor_anim: [f32; 2],
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -116,6 +119,7 @@ impl ApplicationHandler<PtyEvent> for App {
             terminal,
             grid,
             pty,
+            cursor_anim: [0.0, 0.0],
         });
     }
 
@@ -151,7 +155,25 @@ impl ApplicationHandler<PtyEvent> for App {
             },
             WindowEvent::RedrawRequested => {
                 let cursor = state.terminal.project(&mut state.grid);
-                state.gpu.render(&state.grid, cursor_position(cursor));
+
+                let animating = match cursor_position(cursor) {
+                    Some(target) => {
+                        let (next, settled) = ease(state.cursor_anim, target);
+                        state.cursor_anim = next;
+                        state.gpu.render(&state.grid, Some(next));
+                        !settled
+                    },
+                    None => {
+                        state.gpu.render(&state.grid, None);
+                        false
+                    },
+                };
+
+                // Keep the vsync-paced loop running while the cursor eases; when
+                // it settles the loop idles until the next PTY output or resize.
+                if animating {
+                    state.window.request_redraw();
+                }
             },
             _ => {},
         }
@@ -164,5 +186,40 @@ fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
         None
     } else {
         Some([cursor.col as f32, cursor.row as f32])
+    }
+}
+
+/// Step the animated cursor toward `target`, returning the new position and
+/// whether it has reached the target.
+///
+/// Each frame closes a fixed fraction of the remaining distance, the
+/// exponential ease-out that reads as smooth cursor motion. Within a small
+/// epsilon it snaps onto the target so the animation terminates.
+fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
+    const FACTOR: f32 = 0.35;
+    const EPSILON: f32 = 0.01;
+
+    let dx = target[0] - current[0];
+    let dy = target[1] - current[1];
+    if dx.abs() < EPSILON && dy.abs() < EPSILON {
+        return (target, true);
+    }
+
+    ([current[0] + dx * FACTOR, current[1] + dy * FACTOR], false)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ease;
+
+    #[test]
+    fn ease_steps_toward_then_settles() {
+        let (next, settled) = ease([0.0, 0.0], [4.0, 0.0]);
+        assert!(next[0] > 0.0 && next[0] < 4.0);
+        assert!(!settled);
+
+        let (next, settled) = ease([3.999, 2.0], [4.0, 2.0]);
+        assert_eq!(next, [4.0, 2.0]);
+        assert!(settled);
     }
 }
