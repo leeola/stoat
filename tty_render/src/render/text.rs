@@ -32,7 +32,7 @@ use wgpu::{
 ///
 /// A fixed placeholder paired with the cell metrics until both are derived from
 /// the font.
-const FONT_SIZE: f32 = 15.0;
+const FONT_SIZE: f32 = 30.0;
 
 /// Instance buffer capacity, in glyphs, allocated up front. Grows by doubling
 /// when a frame exceeds it.
