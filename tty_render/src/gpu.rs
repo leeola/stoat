@@ -204,6 +204,7 @@ impl GpuContext {
             self.text.draw(&mut render_pass);
             self.background.draw_cursor(&mut render_pass);
             self.overlay.draw(&mut render_pass);
+            self.text.draw_overlay_text(&mut render_pass);
         }
 
         self.queue.submit([encoder.finish()]);

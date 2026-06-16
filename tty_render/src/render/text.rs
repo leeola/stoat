@@ -17,7 +17,7 @@ use cosmic_text::{
     Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache,
 };
 use std::collections::HashMap;
-use stoatty_term::grid::{Cell, Grid, Rgb, Scale, UnderlineStyle};
+use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
@@ -108,6 +108,9 @@ pub struct TextPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    overlay_instances: Buffer,
+    overlay_capacity: usize,
+    overlay_count: u32,
     underline_pipeline: RenderPipeline,
     underline_instances: Buffer,
     underline_capacity: usize,
@@ -244,6 +247,11 @@ impl TextPass {
             "text instances",
             instance_bytes::<TextInstance>(INITIAL_CAPACITY),
         );
+        let overlay_instances = alloc_instances(
+            device,
+            "overlay text instances",
+            instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
         let underline_instances = alloc_instances(
             device,
             "underline instances",
@@ -260,6 +268,9 @@ impl TextPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            overlay_instances,
+            overlay_capacity: INITIAL_CAPACITY,
+            overlay_count: 0,
             underline_pipeline,
             underline_instances,
             underline_capacity: INITIAL_CAPACITY,
@@ -291,8 +302,52 @@ impl TextPass {
         self.prepare_underlines(device, queue, grid);
 
         self.atlas.begin_frame();
-        let pending = self.rasterize_visible(device, queue, grid);
+        let grid_pending = self.rasterize_visible(device, queue, grid);
+        let overlay_pending = self.rasterize_overlays(device, queue, grid);
 
+        let grid_instances = self.build_text_instances(device, queue, grid_pending);
+        let overlay_instances = self.build_text_instances(device, queue, overlay_pending);
+
+        self.count = grid_instances.len() as u32;
+        self.overlay_count = overlay_instances.len() as u32;
+        if grid_instances.is_empty() && overlay_instances.is_empty() {
+            return;
+        }
+
+        upload_instances(
+            device,
+            queue,
+            &grid_instances,
+            &mut self.instances,
+            &mut self.capacity,
+            "text instances",
+        );
+        upload_instances(
+            device,
+            queue,
+            &overlay_instances,
+            &mut self.overlay_instances,
+            &mut self.overlay_capacity,
+            "overlay text instances",
+        );
+
+        self.atlas_bind_group = create_atlas_bind_group(
+            device,
+            &self.atlas_layout,
+            &self.sampler,
+            self.atlas.mask_view(),
+            self.atlas.color_view(),
+        );
+    }
+
+    /// Build the glyph instances for `pending`, reading each glyph's final atlas
+    /// sub-rect. Shared by the grid and overlay-content glyph paths.
+    fn build_text_instances(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        pending: Vec<PendingGlyph>,
+    ) -> Vec<TextInstance> {
         let mut instances = Vec::with_capacity(pending.len());
         for glyph in pending {
             let Some(info) = self.atlas.get_or_insert(
@@ -318,29 +373,7 @@ impl TextPass {
                 kind: kind_flag(info.kind),
             });
         }
-
-        self.count = instances.len() as u32;
-        if instances.is_empty() {
-            return;
-        }
-
-        if instances.len() > self.capacity {
-            self.capacity = instances.len().next_power_of_two();
-            self.instances = alloc_instances(
-                device,
-                "text instances",
-                instance_bytes::<TextInstance>(self.capacity),
-            );
-        }
-        queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&instances));
-
-        self.atlas_bind_group = create_atlas_bind_group(
-            device,
-            &self.atlas_layout,
-            &self.sampler,
-            self.atlas.mask_view(),
-            self.atlas.color_view(),
-        );
+        instances
     }
 
     /// Build and upload the frame's underline-decoration instances for `grid`.
@@ -392,6 +425,22 @@ impl TextPass {
         }
     }
 
+    /// Record the popover-content glyph draw into `render_pass`.
+    ///
+    /// A no-op when no overlay carries content. Run after the overlay box so the
+    /// content sits inside it, on top of the fill.
+    pub fn draw_overlay_text(&self, render_pass: &mut RenderPass<'_>) {
+        if self.overlay_count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.overlay_instances.slice(..));
+        render_pass.draw(0..6, 0..self.overlay_count);
+    }
+
     /// Phase one: shape and rasterize every visible cell glyph, returning their
     /// placements.
     ///
@@ -435,6 +484,56 @@ impl TextPass {
                         fg: cell.fg,
                         bg: cell.bg,
                         scale,
+                    });
+                }
+            }
+        }
+
+        pending
+    }
+
+    /// Shape and rasterize each overlay's content glyphs, returning their
+    /// placements.
+    ///
+    /// Each char takes one cell from the overlay's top-left, clipped to the box
+    /// width and the grid. The glyph color is the overlay's content color and it
+    /// composites over the overlay fill.
+    fn rasterize_overlays(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+    ) -> Vec<PendingGlyph> {
+        let mut pending = Vec::new();
+
+        for overlay in grid.overlays() {
+            for (col, row, ch) in overlay_content_cells(overlay) {
+                if row >= grid.rows() || col >= grid.cols() || ch == ' ' {
+                    continue;
+                }
+
+                let Some(key) = self.glyph_key(ch, 1) else {
+                    continue;
+                };
+
+                if self
+                    .atlas
+                    .get_or_insert(
+                        device,
+                        queue,
+                        &mut self.font_system,
+                        &mut self.swash_cache,
+                        key,
+                    )
+                    .is_some()
+                {
+                    pending.push(PendingGlyph {
+                        row,
+                        col,
+                        key,
+                        fg: overlay.content_fg,
+                        bg: overlay.fill,
+                        scale: 1,
                     });
                 }
             }
@@ -493,6 +592,27 @@ fn alloc_instances(device: &Device, label: &str, bytes: u64) -> Buffer {
 
 fn instance_bytes<T>(capacity: usize) -> u64 {
     (capacity * size_of::<T>()) as u64
+}
+
+/// Upload `instances` into `buffer`, growing it (and `capacity`) when the count
+/// outgrows it. A no-op for an empty set, leaving the prior buffer in place.
+fn upload_instances(
+    device: &Device,
+    queue: &Queue,
+    instances: &[TextInstance],
+    buffer: &mut Buffer,
+    capacity: &mut usize,
+    label: &str,
+) {
+    if instances.is_empty() {
+        return;
+    }
+
+    if instances.len() > *capacity {
+        *capacity = instances.len().next_power_of_two();
+        *buffer = alloc_instances(device, label, instance_bytes::<TextInstance>(*capacity));
+    }
+    queue.write_buffer(buffer, 0, bytemuck::cast_slice(instances));
 }
 
 /// Build the underline decoration pipeline sharing `shader` with the glyph pass.
@@ -665,6 +785,22 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
     }
 }
 
+/// The `(col, row, char)` cells an overlay's content occupies.
+///
+/// One char per cell along the overlay's top row from its left edge, clipped to
+/// the box width so content longer than the box is cut rather than spilling past
+/// it.
+fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
+    let row = overlay.top as usize;
+    overlay
+        .content
+        .chars()
+        .take(overlay.width as usize)
+        .enumerate()
+        .map(|(i, ch)| (overlay.left as usize + i, row, ch))
+        .collect()
+}
+
 /// One decoration instance per underlined cell, in row-major order.
 fn build_underline_instances(grid: &Grid) -> Vec<UnderlineInstance> {
     let mut instances = Vec::new();
@@ -700,9 +836,12 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 
 #[cfg(test)]
 mod tests {
-    use super::{build_underline_instances, cell_glyph_scale, glyph_origin, STYLE_DOTTED};
+    use super::{
+        build_underline_instances, cell_glyph_scale, glyph_origin, overlay_content_cells,
+        STYLE_DOTTED,
+    };
     use crate::render::{CELL_HEIGHT, CELL_WIDTH};
-    use stoatty_term::grid::{Cell, Grid, Rgb, Scale, UnderlineStyle};
+    use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
     use wgpu::naga::{
         front::wgsl,
         valid::{Capabilities, ValidationFlags, Validator},
@@ -752,6 +891,25 @@ mod tests {
             "covered cell draws no glyph"
         );
         assert_eq!(cell_glyph_scale(&Cell::default()), None, "blank cell");
+    }
+
+    #[test]
+    fn overlay_content_cells_clip_to_box_width() {
+        let overlay = Overlay {
+            top: 2,
+            left: 5,
+            width: 3,
+            height: 1,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            content: "Hello".to_owned(),
+        };
+
+        assert_eq!(
+            overlay_content_cells(&overlay),
+            [(5, 2, 'H'), (6, 2, 'e'), (7, 2, 'l')]
+        );
     }
 
     #[test]
