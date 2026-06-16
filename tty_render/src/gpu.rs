@@ -77,9 +77,9 @@ impl Renderer {
         (rows, cols)
     }
 
-    /// Draw a frame for `grid` into `view`: clear to [`BACKGROUND`], fill each
-    /// cell background, composite glyphs and decorations, tint the cursor cell,
-    /// then draw overlays and their content on top.
+    /// Draw a frame for `grid` into `view`: clear to the default background,
+    /// fill each cell background, composite glyphs and decorations, tint the
+    /// cursor cell, then draw overlays and their content on top.
     ///
     /// `cursor` is the cursor's position in fractional cell coordinates, or
     /// `None` when it is hidden. Submits the frame but does not present or poll;
