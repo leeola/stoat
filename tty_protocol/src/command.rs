@@ -13,7 +13,7 @@ use crate::frame::{self, Frame};
 /// The enum is intentionally exhaustive: adding a variant forces every matcher,
 /// including the terminal's apply seam, to handle it rather than silently
 /// dropping the new command.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub enum Command {
     Border(BorderCommand),
     Scale(ScaleCommand),
@@ -66,10 +66,12 @@ pub struct ScaleCommand {
 /// Draw a floating popover region above the grid.
 ///
 /// A `width` by `height` cell box anchored at (`top`, `left`) in absolute grid
-/// coordinates, filled with `fill` and outlined with `border`. The region
-/// floats above the cells with its own z-order; it carries no text of its own,
-/// so it is the box, not its contents.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// coordinates, filled with `fill` and outlined with `border`. The region floats
+/// above the cells with its own z-order.
+///
+/// `content` is a line of text drawn inside the box in `content_fg`, one char
+/// per cell from the box's top-left, clipped to the box width.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct PopoverCommand {
     pub top: u16,
     pub left: u16,
@@ -77,6 +79,8 @@ pub struct PopoverCommand {
     pub height: u16,
     pub fill: [u8; 3],
     pub border: [u8; 3],
+    pub content_fg: [u8; 3],
+    pub content: String,
 }
 
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
@@ -119,18 +123,22 @@ pub fn encode_scale(command: &ScaleCommand) -> Vec<u8> {
 }
 
 /// Encode a [`PopoverCommand`] as a full `Gstoatty;popover` frame for an emitter.
+///
+/// The region and colors ride in a fixed 17-byte first argument; the variable
+/// content text is a second argument.
 pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
-    let mut arg = Vec::with_capacity(14);
-    arg.extend_from_slice(&command.top.to_be_bytes());
-    arg.extend_from_slice(&command.left.to_be_bytes());
-    arg.extend_from_slice(&command.width.to_be_bytes());
-    arg.extend_from_slice(&command.height.to_be_bytes());
-    arg.extend_from_slice(&command.fill);
-    arg.extend_from_slice(&command.border);
+    let mut region = Vec::with_capacity(17);
+    region.extend_from_slice(&command.top.to_be_bytes());
+    region.extend_from_slice(&command.left.to_be_bytes());
+    region.extend_from_slice(&command.width.to_be_bytes());
+    region.extend_from_slice(&command.height.to_be_bytes());
+    region.extend_from_slice(&command.fill);
+    region.extend_from_slice(&command.border);
+    region.extend_from_slice(&command.content_fg);
 
     frame::encode(&Frame {
         sub: "popover".to_owned(),
-        args: vec![arg],
+        args: vec![region, command.content.as_bytes().to_vec()],
     })
 }
 
@@ -171,15 +179,18 @@ fn decode_scale(args: &[Vec<u8>]) -> Option<ScaleCommand> {
 }
 
 fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
-    let arg: &[u8; 14] = args.first()?.as_slice().try_into().ok()?;
+    let region: &[u8; 17] = args.first()?.as_slice().try_into().ok()?;
+    let content = std::str::from_utf8(args.get(1)?).ok()?.to_owned();
 
     Some(PopoverCommand {
-        top: u16::from_be_bytes([arg[0], arg[1]]),
-        left: u16::from_be_bytes([arg[2], arg[3]]),
-        width: u16::from_be_bytes([arg[4], arg[5]]),
-        height: u16::from_be_bytes([arg[6], arg[7]]),
-        fill: [arg[8], arg[9], arg[10]],
-        border: [arg[11], arg[12], arg[13]],
+        top: u16::from_be_bytes([region[0], region[1]]),
+        left: u16::from_be_bytes([region[2], region[3]]),
+        width: u16::from_be_bytes([region[4], region[5]]),
+        height: u16::from_be_bytes([region[6], region[7]]),
+        fill: [region[8], region[9], region[10]],
+        border: [region[11], region[12], region[13]],
+        content_fg: [region[14], region[15], region[16]],
+        content,
     })
 }
 
@@ -278,6 +289,8 @@ mod tests {
             height: 4,
             fill: [30, 30, 60],
             border: [200, 200, 255],
+            content_fg: [255, 255, 255],
+            content: "items".to_owned(),
         };
 
         assert_eq!(
@@ -288,7 +301,8 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_popover_payload() {
-        // The single arg here decodes to 3 bytes, not the 14 a popover needs.
+        // The first arg here decodes to 3 bytes, not the 17 a popover region
+        // needs, and the content arg is absent.
         assert!(decode(b"Gstoatty;popover;YWJj").is_none());
     }
 

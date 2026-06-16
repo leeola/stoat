@@ -224,8 +224,12 @@ pub enum Scale {
 /// rather than living in the cell model. It is anchored at a cell and sized in
 /// cells, but is not part of the character grid: it floats above it, occluding
 /// whatever cells it covers. The region is a [`Self::fill`] box with a
-/// [`Self::border`] outline; text inside it is not part of this type.
-#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+/// [`Self::border`] outline.
+///
+/// [`Self::content`] is a line of text drawn inside the box in
+/// [`Self::content_fg`], one char per cell from the box's top-left, clipped to
+/// the box width.
+#[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Overlay {
     pub top: u16,
     pub left: u16,
@@ -233,6 +237,8 @@ pub struct Overlay {
     pub height: u16,
     pub fill: Rgb,
     pub border: Rgb,
+    pub content_fg: Rgb,
+    pub content: String,
 }
 
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
@@ -389,8 +395,10 @@ mod tests {
             height: 2,
             fill: Rgb::new(10, 20, 30),
             border: Rgb::new(40, 50, 60),
+            content_fg: Rgb::new(70, 80, 90),
+            content: "hi".to_owned(),
         };
-        grid.set_overlays(vec![overlay]);
+        grid.set_overlays(vec![overlay.clone()]);
 
         assert_eq!(grid.overlays(), [overlay]);
 

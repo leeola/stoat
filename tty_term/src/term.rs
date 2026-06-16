@@ -530,6 +530,12 @@ fn popover_overlay(command: &PopoverCommand) -> Overlay {
         height: command.height,
         fill: Rgb::new(command.fill[0], command.fill[1], command.fill[2]),
         border: Rgb::new(command.border[0], command.border[1], command.border[2]),
+        content_fg: Rgb::new(
+            command.content_fg[0],
+            command.content_fg[1],
+            command.content_fg[2],
+        ),
+        content: command.content.clone(),
     }
 }
 
@@ -877,6 +883,8 @@ mod tests {
             height: 3,
             fill: [10, 20, 30],
             border: [40, 50, 60],
+            content_fg: [70, 80, 90],
+            content: "ok".to_owned(),
         });
 
         let mut terminal = Terminal::new(8, 8);
@@ -893,6 +901,8 @@ mod tests {
                 height: 3,
                 fill: Rgb::new(10, 20, 30),
                 border: Rgb::new(40, 50, 60),
+                content_fg: Rgb::new(70, 80, 90),
+                content: "ok".to_owned(),
             }]
         );
     }

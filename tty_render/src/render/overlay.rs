@@ -241,6 +241,8 @@ mod tests {
             height: 4,
             fill: Rgb::new(255, 0, 0),
             border: Rgb::new(0, 255, 0),
+            content_fg: Rgb::new(0, 0, 255),
+            content: "x".to_owned(),
         }];
 
         let instances = build_overlay_instances(&overlays);
