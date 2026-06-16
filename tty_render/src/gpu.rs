@@ -134,13 +134,15 @@ impl GpuContext {
     }
 
     /// Draw a frame: clear to [`BACKGROUND`], fill each cell of `grid` with its
-    /// background color, then composite each cell's glyph over it.
+    /// background color, composite each cell's glyph over it, then tint the
+    /// cursor cell. `cursor` is the cursor's position in fractional cell
+    /// coordinates, or `None` when it is hidden.
     ///
     /// Skips the frame when the surface is transiently unavailable (timed
     /// out, occluded, or a validation error already raised elsewhere) and
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
-    pub fn render(&mut self, grid: &Grid) {
+    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>) {
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -158,7 +160,7 @@ impl GpuContext {
 
         let resolution = [self.config.width as f32, self.config.height as f32];
         self.background
-            .prepare(&self.device, &self.queue, grid, resolution);
+            .prepare(&self.device, &self.queue, grid, resolution, cursor);
         self.text
             .prepare(&self.device, &self.queue, grid, resolution);
 
@@ -186,6 +188,7 @@ impl GpuContext {
 
             self.background.draw(&mut render_pass);
             self.text.draw(&mut render_pass);
+            self.background.draw_cursor(&mut render_pass);
         }
 
         self.queue.submit([encoder.finish()]);

@@ -9,7 +9,10 @@
 use crate::pty::{self, Pty, PtyOutput};
 use std::sync::Arc;
 use stoatty_render::gpu::GpuContext;
-use stoatty_term::{grid::Grid, term::Terminal};
+use stoatty_term::{
+    grid::Grid,
+    term::{Cursor, CursorShape, Terminal},
+};
 use winit::{
     application::ApplicationHandler,
     event::WindowEvent,
@@ -147,10 +150,19 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                state.terminal.project(&mut state.grid);
-                state.gpu.render(&state.grid);
+                let cursor = state.terminal.project(&mut state.grid);
+                state.gpu.render(&state.grid, cursor_position(cursor));
             },
             _ => {},
         }
+    }
+}
+
+/// The cursor's cell position for the renderer, or `None` when it is hidden.
+fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
+    if cursor.shape == CursorShape::Hidden {
+        None
+    } else {
+        Some([cursor.col as f32, cursor.row as f32])
     }
 }

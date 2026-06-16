@@ -12,11 +12,12 @@ use crate::render::{CELL_HEIGHT, CELL_WIDTH};
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::Grid;
 use wgpu::{
-    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayoutDescriptor,
-    BindGroupLayoutEntry, BindingType, BlendState, Buffer, BufferBindingType, BufferDescriptor,
-    BufferUsages, ColorTargetState, ColorWrites, Device, FragmentState, PipelineLayoutDescriptor,
-    Queue, RenderPass, RenderPipeline, RenderPipelineDescriptor, ShaderModuleDescriptor,
-    ShaderSource, ShaderStages, TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
+    vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
+    BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
+    BufferBindingType, BufferDescriptor, BufferUsages, ColorTargetState, ColorWrites, Device,
+    FragmentState, PipelineLayoutDescriptor, Queue, RenderPass, RenderPipeline,
+    RenderPipelineDescriptor, ShaderModule, ShaderModuleDescriptor, ShaderSource, ShaderStages,
+    TextureFormat, VertexBufferLayout, VertexState, VertexStepMode,
 };
 
 /// Instance buffer capacity, in cells, allocated up front. Grows by doubling
@@ -31,16 +32,20 @@ struct BgInstance {
     color: [f32; 3],
 }
 
-/// Uniform shared by every instance: the screen resolution and cell size the
-/// vertex shader maps cell coordinates through.
+/// Uniform shared by the cell and cursor pipelines: the screen resolution and
+/// cell size that map cell coordinates to clip space, plus the cursor's eased
+/// position in (fractional) cell coordinates.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
+    cursor_pos: [f32; 2],
+    pad: [f32; 2],
 }
 
-/// The instanced background-fill pipeline and its per-frame buffers.
+/// The instanced background-fill pipeline and its per-frame buffers, plus a
+/// single-quad cursor pipeline sharing the same globals uniform.
 pub struct BackgroundPass {
     pipeline: RenderPipeline,
     globals: Buffer,
@@ -48,6 +53,8 @@ pub struct BackgroundPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    cursor_pipeline: RenderPipeline,
+    cursor_visible: bool,
 }
 
 impl BackgroundPass {
@@ -108,6 +115,8 @@ impl BackgroundPass {
             cache: None,
         });
 
+        let cursor_pipeline = build_cursor_pipeline(device, &shader, &bind_group_layout, format);
+
         let globals = device.create_buffer(&BufferDescriptor {
             label: Some("background globals"),
             size: size_of::<Globals>() as u64,
@@ -133,19 +142,33 @@ impl BackgroundPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            cursor_pipeline,
+            cursor_visible: false,
         }
     }
 
     /// Upload the frame's uniform and per-cell instances for `grid`.
     ///
-    /// `resolution` is the surface size in physical pixels. Reallocates the
-    /// instance buffer only when the grid outgrows the current capacity.
-    pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
+    /// `resolution` is the surface size in physical pixels. `cursor` is the
+    /// cursor's eased position in fractional cell coordinates, or `None` when
+    /// the cursor is hidden. Reallocates the instance buffer only when the grid
+    /// outgrows the current capacity.
+    pub fn prepare(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        resolution: [f32; 2],
+        cursor: Option<[f32; 2]>,
+    ) {
         let globals = Globals {
             resolution,
             cell_size: [CELL_WIDTH, CELL_HEIGHT],
+            cursor_pos: cursor.unwrap_or([0.0, 0.0]),
+            pad: [0.0, 0.0],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
+        self.cursor_visible = cursor.is_some();
 
         let instances = build_instances(grid);
         self.count = instances.len() as u32;
@@ -173,6 +196,20 @@ impl BackgroundPass {
         render_pass.set_vertex_buffer(0, self.instances.slice(..));
         render_pass.draw(0..6, 0..self.count);
     }
+
+    /// Record the cursor-block draw into `render_pass`.
+    ///
+    /// A no-op when the cursor is hidden. Draw it after the glyph pass so the
+    /// translucent block tints the cell and its glyph as it slides.
+    pub fn draw_cursor(&self, render_pass: &mut RenderPass<'_>) {
+        if !self.cursor_visible {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.cursor_pipeline);
+        render_pass.set_bind_group(0, &self.bind_group, &[]);
+        render_pass.draw(0..6, 0..1);
+    }
 }
 
 fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
@@ -181,6 +218,49 @@ fn alloc_instances(device: &Device, capacity: usize) -> Buffer {
         size: (capacity * size_of::<BgInstance>()) as u64,
         usage: BufferUsages::VERTEX | BufferUsages::COPY_DST,
         mapped_at_creation: false,
+    })
+}
+
+/// Build the cursor pipeline sharing `globals_layout` with the cell pass.
+///
+/// It has no vertex buffer: the single quad reads the cursor position from the
+/// globals uniform, and alpha blends so the block tints whatever it covers.
+fn build_cursor_pipeline(
+    device: &Device,
+    shader: &ShaderModule,
+    globals_layout: &BindGroupLayout,
+    format: TextureFormat,
+) -> RenderPipeline {
+    let layout = device.create_pipeline_layout(&PipelineLayoutDescriptor {
+        label: Some("cursor"),
+        bind_group_layouts: &[Some(globals_layout)],
+        immediate_size: 0,
+    });
+
+    device.create_render_pipeline(&RenderPipelineDescriptor {
+        label: Some("cursor"),
+        layout: Some(&layout),
+        vertex: VertexState {
+            module: shader,
+            entry_point: Some("vs_cursor"),
+            compilation_options: Default::default(),
+            buffers: &[],
+        },
+        fragment: Some(FragmentState {
+            module: shader,
+            entry_point: Some("fs_cursor"),
+            compilation_options: Default::default(),
+            targets: &[Some(ColorTargetState {
+                format,
+                blend: Some(BlendState::ALPHA_BLENDING),
+                write_mask: ColorWrites::ALL,
+            })],
+        }),
+        primitive: Default::default(),
+        depth_stencil: None,
+        multisample: Default::default(),
+        multiview_mask: None,
+        cache: None,
     })
 }
 
@@ -208,6 +288,18 @@ fn build_instances(grid: &Grid) -> Vec<BgInstance> {
 mod tests {
     use super::build_instances;
     use stoatty_term::grid::{Grid, Rgb};
+    use wgpu::naga::{
+        front::wgsl,
+        valid::{Capabilities, ValidationFlags, Validator},
+    };
+
+    #[test]
+    fn shader_is_valid_wgsl() {
+        let module = wgsl::parse_str(include_str!("../shaders/bg.wgsl")).expect("parse bg.wgsl");
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("validate bg.wgsl");
+    }
 
     #[test]
     fn instances_cover_every_cell_with_normalized_bg() {
