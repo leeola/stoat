@@ -96,6 +96,7 @@ pub struct Cell {
     /// Defaults to the foreground when the program does not set one (SGR 58),
     /// so an underline with no explicit color matches the text.
     pub underline_color: Rgb,
+    pub borders: Borders,
 }
 
 impl Default for Cell {
@@ -107,8 +108,40 @@ impl Default for Cell {
             flags: Flags::empty(),
             underline: UnderlineStyle::None,
             underline_color: Rgb::new(0xcc, 0xcc, 0xcc),
+            borders: Borders::default(),
         }
     }
+}
+
+/// The renderer-native border on each of a cell's four edges.
+///
+/// Each edge is independently present or absent. The renderer draws a line
+/// along every present edge, so a region framed by setting the perimeter cells'
+/// outer edges reads as a panel border without any box-drawing glyphs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
+pub struct Borders {
+    pub top: Option<Border>,
+    pub right: Option<Border>,
+    pub bottom: Option<Border>,
+    pub left: Option<Border>,
+}
+
+/// A border drawn along one cell edge.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Border {
+    pub style: BorderStyle,
+    pub color: Rgb,
+}
+
+/// How thick or doubled a cell-edge border is drawn.
+///
+/// Mirrors the box-drawing line weights, drawn as renderer primitives rather
+/// than glyphs.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BorderStyle {
+    Light,
+    Heavy,
+    Double,
 }
 
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no

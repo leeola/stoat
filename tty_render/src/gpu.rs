@@ -5,7 +5,9 @@
 //! app supplies via the raw-window-handle traits, so this crate never links
 //! the windowing library; the app owns the window and hands its handle in.
 
-use crate::render::{background::BackgroundPass, text::TextPass, CELL_HEIGHT, CELL_WIDTH};
+use crate::render::{
+    background::BackgroundPass, decoration::DecorationPass, text::TextPass, CELL_HEIGHT, CELL_WIDTH,
+};
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use stoatty_term::grid::Grid;
@@ -37,6 +39,7 @@ pub struct GpuContext {
     queue: Queue,
     config: SurfaceConfiguration,
     background: BackgroundPass,
+    decoration: DecorationPass,
     text: TextPass,
 }
 
@@ -95,6 +98,7 @@ impl GpuContext {
         surface.configure(&device, &config);
 
         let background = BackgroundPass::new(&device, format);
+        let decoration = DecorationPass::new(&device, format);
         let text = TextPass::new(&device, format);
 
         GpuContext {
@@ -103,6 +107,7 @@ impl GpuContext {
             queue,
             config,
             background,
+            decoration,
             text,
         }
     }
@@ -161,6 +166,8 @@ impl GpuContext {
         let resolution = [self.config.width as f32, self.config.height as f32];
         self.background
             .prepare(&self.device, &self.queue, grid, resolution, cursor);
+        self.decoration
+            .prepare(&self.device, &self.queue, grid, resolution);
         self.text
             .prepare(&self.device, &self.queue, grid, resolution);
 
@@ -187,6 +194,7 @@ impl GpuContext {
             });
 
             self.background.draw(&mut render_pass);
+            self.decoration.draw(&mut render_pass);
             self.text.draw(&mut render_pass);
             self.background.draw_cursor(&mut render_pass);
         }
