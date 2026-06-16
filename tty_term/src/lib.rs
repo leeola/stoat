@@ -5,5 +5,5 @@
 //! commands. No IO lives here, so the model stays testable; the app
 //! crate feeds it bytes.
 
-pub mod grid {}
+pub mod grid;
 pub mod term {}
