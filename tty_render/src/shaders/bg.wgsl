@@ -7,6 +7,7 @@ struct Globals {
     cell_size: vec2<f32>,
     cursor_pos: vec2<f32>,
     pad: vec2<f32>,
+    cursor_color: vec4<f32>,
 }
 
 @group(0) @binding(0)
@@ -81,5 +82,5 @@ fn vs_cursor(@builtin(vertex_index) vertex_index: u32) -> CursorVsOut {
 
 @fragment
 fn fs_cursor() -> @location(0) vec4<f32> {
-    return vec4<f32>(0.85, 0.85, 0.85, 0.55);
+    return globals.cursor_color;
 }

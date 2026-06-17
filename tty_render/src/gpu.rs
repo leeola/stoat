@@ -15,28 +15,13 @@ use crate::render::{
 };
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
-use stoatty_term::grid::Grid;
+use stoatty_term::grid::{Grid, Rgb};
 use wgpu::{
     Color, CommandEncoderDescriptor, CompositeAlphaMode, CurrentSurfaceTexture, Device,
     DeviceDescriptor, Instance, InstanceDescriptor, LoadOp, Operations, PowerPreference,
     PresentMode, Queue, RenderPassColorAttachment, RenderPassDescriptor, RequestAdapterOptions,
     StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
-};
-
-/// Solid color cleared behind the cell grid each frame.
-///
-/// Must equal the terminal's default cell background, which is black.
-/// [`Renderer::grid_size`] floors the pixel size to whole cells and the grid
-/// anchors at the top-left, so a remainder of up to one cell on the right and
-/// bottom edges is never covered by a cell quad and shows this clear color.
-/// Matching the default background keeps that gutter indistinguishable from the
-/// grid rather than reading as a frame around it.
-const BACKGROUND: Color = Color {
-    r: 0.0,
-    g: 0.0,
-    b: 0.0,
-    a: 1.0,
 };
 
 /// The grid render passes and the target size, independent of any window.
@@ -52,11 +37,27 @@ pub struct Renderer {
     overlay: OverlayPass,
     width: u32,
     height: u32,
+    /// Color cleared behind the grid each frame. Must equal the terminal's
+    /// default cell background so the floored-grid gutter (the up-to-one-cell
+    /// remainder on the right and bottom edges that no cell quad covers) stays
+    /// indistinguishable from the grid.
+    clear_color: Color,
+    /// Cursor block color. The cursor pass applies its own blend alpha, so this
+    /// is the opaque RGB only.
+    cursor_color: Rgb,
 }
 
 impl Renderer {
-    /// Build the grid passes for `format` at `width`x`height` physical pixels.
-    pub fn new(device: &Device, format: TextureFormat, width: u32, height: u32) -> Renderer {
+    /// Build the grid passes for `format` at `width`x`height` physical pixels,
+    /// clearing to `background` and drawing the cursor block in `cursor`.
+    pub fn new(
+        device: &Device,
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+        background: Rgb,
+        cursor: Rgb,
+    ) -> Renderer {
         Renderer {
             background: BackgroundPass::new(device, format),
             decoration: DecorationPass::new(device, format),
@@ -64,6 +65,8 @@ impl Renderer {
             overlay: OverlayPass::new(device, format),
             width,
             height,
+            clear_color: rgb_to_color(background),
+            cursor_color: cursor,
         }
     }
 
@@ -94,7 +97,7 @@ impl Renderer {
     ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background
-            .prepare(device, queue, grid, resolution, cursor);
+            .prepare(device, queue, grid, resolution, cursor, self.cursor_color);
         self.decoration.prepare(device, queue, grid, resolution);
         self.text.prepare(device, queue, grid, resolution);
         self.overlay.prepare(device, queue, grid, resolution);
@@ -109,7 +112,7 @@ impl Renderer {
                     depth_slice: None,
                     resolve_target: None,
                     ops: Operations {
-                        load: LoadOp::Clear(BACKGROUND),
+                        load: LoadOp::Clear(self.clear_color),
                         store: StoreOp::Store,
                     },
                 })],
@@ -151,7 +154,8 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// Build the context for `window`, sized to `width`x`height` physical
-    /// pixels.
+    /// pixels, clearing to `background` and drawing the cursor block in
+    /// `cursor`.
     ///
     /// `window` is anything carrying window and display handles; the surface
     /// takes ownership of it, so it must outlive the context (pass an
@@ -159,7 +163,7 @@ impl GpuContext {
     ///
     /// Panics if no GPU adapter is available, device creation fails, or the
     /// surface cannot be created. All three are unrecoverable at startup.
-    pub fn new<W>(window: W, width: u32, height: u32) -> GpuContext
+    pub fn new<W>(window: W, width: u32, height: u32, background: Rgb, cursor: Rgb) -> GpuContext
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
@@ -203,7 +207,7 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
-        let renderer = Renderer::new(&device, format, width, height);
+        let renderer = Renderer::new(&device, format, width, height, background, cursor);
 
         GpuContext {
             surface,
@@ -262,6 +266,17 @@ impl GpuContext {
         self.renderer
             .render_into(&self.device, &self.queue, &view, grid, cursor);
         frame.present();
+    }
+}
+
+/// Convert an [`Rgb`] to a wgpu [`Color`], normalizing each channel to 0..1
+/// with an opaque alpha.
+fn rgb_to_color(rgb: Rgb) -> Color {
+    Color {
+        r: rgb.r as f64 / 255.0,
+        g: rgb.g as f64 / 255.0,
+        b: rgb.b as f64 / 255.0,
+        a: 1.0,
     }
 }
 

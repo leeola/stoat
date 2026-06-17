@@ -40,7 +40,14 @@ fn builds_passes_and_draws_a_frame_off_screen() {
     });
     let view = target.create_view(&TextureViewDescriptor::default());
 
-    let mut renderer = Renderer::new(&device, format, width, height);
+    let mut renderer = Renderer::new(
+        &device,
+        format,
+        width,
+        height,
+        Rgb::new(0, 0, 0),
+        Rgb::new(217, 217, 217),
+    );
 
     // Populate the grid so every pass draws something: a glyph, a rounded
     // border, and an overlay with content. The cursor exercises the cursor pass.

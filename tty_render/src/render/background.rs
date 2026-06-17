@@ -10,7 +10,7 @@
 
 use crate::render::{CELL_HEIGHT, CELL_WIDTH};
 use bytemuck::{Pod, Zeroable};
-use stoatty_term::grid::Grid;
+use stoatty_term::grid::{Grid, Rgb};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingType, BlendState, Buffer,
@@ -24,6 +24,10 @@ use wgpu::{
 /// when a grid exceeds it; 2048 covers a default 24x80 grid without reallocating.
 const INITIAL_CAPACITY: usize = 2048;
 
+/// Cursor block blend alpha. The cursor's RGB is the theme's cursor color; this
+/// translucency is renderer policy so the block tints the cell beneath it.
+const CURSOR_ALPHA: f32 = 0.55;
+
 /// Per-cell instance: grid coordinate and normalized background color.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
@@ -34,7 +38,9 @@ struct BgInstance {
 
 /// Uniform shared by the cell and cursor pipelines: the screen resolution and
 /// cell size that map cell coordinates to clip space, plus the cursor's eased
-/// position in (fractional) cell coordinates.
+/// position in (fractional) cell coordinates and its color.
+///
+/// `pad` aligns `cursor_color` to a 16-byte offset for the uniform layout.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
@@ -42,6 +48,7 @@ struct Globals {
     cell_size: [f32; 2],
     cursor_pos: [f32; 2],
     pad: [f32; 2],
+    cursor_color: [f32; 4],
 }
 
 /// The instanced background-fill pipeline and its per-frame buffers, plus a
@@ -69,7 +76,7 @@ impl BackgroundPass {
             label: Some("background globals"),
             entries: &[BindGroupLayoutEntry {
                 binding: 0,
-                visibility: ShaderStages::VERTEX,
+                visibility: ShaderStages::VERTEX | ShaderStages::FRAGMENT,
                 ty: BindingType::Buffer {
                     ty: BufferBindingType::Uniform,
                     has_dynamic_offset: false,
@@ -151,8 +158,10 @@ impl BackgroundPass {
     ///
     /// `resolution` is the surface size in physical pixels. `cursor` is the
     /// cursor's eased position in fractional cell coordinates, or `None` when
-    /// the cursor is hidden. Reallocates the instance buffer only when the grid
-    /// outgrows the current capacity.
+    /// the cursor is hidden. `cursor_color` is the cursor block's RGB.
+    ///
+    /// Reallocates the instance buffer only when the grid outgrows the current
+    /// capacity.
     pub fn prepare(
         &mut self,
         device: &Device,
@@ -160,12 +169,19 @@ impl BackgroundPass {
         grid: &Grid,
         resolution: [f32; 2],
         cursor: Option<[f32; 2]>,
+        cursor_color: Rgb,
     ) {
         let globals = Globals {
             resolution,
             cell_size: [CELL_WIDTH, CELL_HEIGHT],
             cursor_pos: cursor.unwrap_or([0.0, 0.0]),
             pad: [0.0, 0.0],
+            cursor_color: [
+                cursor_color.r as f32 / 255.0,
+                cursor_color.g as f32 / 255.0,
+                cursor_color.b as f32 / 255.0,
+                CURSOR_ALPHA,
+            ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
         self.cursor_visible = cursor.is_some();

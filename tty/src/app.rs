@@ -102,7 +102,13 @@ impl ApplicationHandler<PtyEvent> for App {
         );
 
         let size = window.inner_size();
-        let gpu = GpuContext::new(window.clone(), size.width.max(1), size.height.max(1));
+        let gpu = GpuContext::new(
+            window.clone(),
+            size.width.max(1),
+            size.height.max(1),
+            self.theme.background,
+            self.theme.cursor,
+        );
 
         let (rows, cols) = gpu.grid_size();
         let grid = Grid::new(rows, cols);
