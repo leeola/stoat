@@ -498,9 +498,9 @@ impl TextPass {
     /// Shape and rasterize each overlay's content glyphs, returning their
     /// placements.
     ///
-    /// Each char takes one cell from the overlay's top-left, clipped to the box
-    /// width and the grid. The glyph color is the overlay's content color and it
-    /// composites over the overlay fill.
+    /// Each char takes one cell, laid out line by line down from the overlay's
+    /// top-left and clipped to the box and the grid. The glyph color is the
+    /// overlay's content color and it composites over the overlay fill.
     fn rasterize_overlays(
         &mut self,
         device: &Device,
@@ -790,17 +790,27 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
 
 /// The `(col, row, char)` cells an overlay's content occupies.
 ///
-/// One char per cell along the overlay's top row from its left edge, clipped to
-/// the box width so content longer than the box is cut rather than spilling past
-/// it.
+/// Content is laid out line by line down the box from its top-left: each
+/// `\n`-separated line fills one row, its characters running rightward from the
+/// left edge. Lines are clipped to the box width and the list to the box height,
+/// so content larger than the box is cut rather than spilling past it.
 fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
-    let row = overlay.top as usize;
+    let left = overlay.left as usize;
+    let top = overlay.top as usize;
+    let width = overlay.width as usize;
+    let height = overlay.height as usize;
+
     overlay
         .content
-        .chars()
-        .take(overlay.width as usize)
+        .lines()
+        .take(height)
         .enumerate()
-        .map(|(i, ch)| (overlay.left as usize + i, row, ch))
+        .flat_map(|(row, line)| {
+            line.chars()
+                .take(width)
+                .enumerate()
+                .map(move |(col, ch)| (left + col, top + row, ch))
+        })
         .collect()
 }
 
@@ -912,6 +922,31 @@ mod tests {
         assert_eq!(
             overlay_content_cells(&overlay),
             [(5, 2, 'H'), (6, 2, 'e'), (7, 2, 'l')]
+        );
+    }
+
+    #[test]
+    fn overlay_content_cells_lay_out_lines_clipped_to_box() {
+        let overlay = Overlay {
+            top: 2,
+            left: 5,
+            width: 3,
+            height: 2,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            content: "abcd\nef\nXY".to_owned(),
+        };
+
+        assert_eq!(
+            overlay_content_cells(&overlay),
+            [
+                (5, 2, 'a'),
+                (6, 2, 'b'),
+                (7, 2, 'c'),
+                (5, 3, 'e'),
+                (6, 3, 'f'),
+            ]
         );
     }
 

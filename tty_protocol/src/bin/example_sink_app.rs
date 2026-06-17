@@ -170,7 +170,15 @@ fn render_popover(out: &mut Vec<u8>) {
         fill: [20, 22, 34],
         border: [120, 170, 255],
         content_fg: [236, 239, 245],
-        content: "hover popover".to_owned(),
+        content: [
+            "render_overlay",
+            "render_border",
+            "render_shadow",
+            "render_text",
+            "render_grid",
+            "render_scale",
+        ]
+        .join("\n"),
     }));
 }
 
