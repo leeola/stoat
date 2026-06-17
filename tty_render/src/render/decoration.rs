@@ -182,6 +182,11 @@ impl DecorationPass {
         }
     }
 
+    /// Replace the cell metrics so the next frame lays out cells at the new size.
+    pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
+        self.metrics = metrics;
+    }
+
     /// Upload the frame's uniform and one instance per bordered cell edge.
     ///
     /// `resolution` is the surface size in physical pixels. `grid_scroll` shifts

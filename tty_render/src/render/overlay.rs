@@ -158,6 +158,11 @@ impl OverlayPass {
         }
     }
 
+    /// Replace the cell metrics so the next frame lays out cells at the new size.
+    pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
+        self.metrics = metrics;
+    }
+
     /// Upload the frame's uniform and one instance per grid overlay.
     ///
     /// `resolution` is the surface size in physical pixels. Reallocates the

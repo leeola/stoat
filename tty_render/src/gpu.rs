@@ -89,12 +89,25 @@ impl Renderer {
 
     /// The (rows, cols) cell grid that fills the target at the current size.
     ///
-    /// Divides the pixel size by the fixed cell metrics, flooring with a
-    /// one-cell minimum so a sliver still yields a usable grid.
+    /// Divides the pixel size by the cell metrics, flooring with a one-cell
+    /// minimum so a sliver still yields a usable grid.
     pub fn grid_size(&self) -> (usize, usize) {
-        let rows = (self.height as f32 / self.metrics.height).floor().max(1.0) as usize;
-        let cols = (self.width as f32 / self.metrics.width).floor().max(1.0) as usize;
-        (rows, cols)
+        grid_dims(self.width, self.height, self.metrics)
+    }
+
+    /// Re-derive every pass's cell metrics from `font_size`, so the next frame
+    /// lays out and rasterizes the grid at the new size.
+    ///
+    /// The surface is untouched: only the cell rectangle changes, so a later
+    /// [`Self::grid_size`] yields fewer cells for a larger font and more for a
+    /// smaller one at the same pixel size.
+    pub fn set_font_size(&mut self, font_size: u32) {
+        let metrics = CellMetrics::from_font_size(font_size);
+        self.metrics = metrics;
+        self.background.set_metrics(metrics);
+        self.decoration.set_metrics(metrics);
+        self.text.set_metrics(metrics);
+        self.overlay.set_metrics(metrics);
     }
 
     /// Draw a frame for `grid` into `view`: clear to the default background,
@@ -280,6 +293,14 @@ impl GpuContext {
         self.renderer.grid_size()
     }
 
+    /// Re-derive the renderer's cell metrics from `font_size` for live resizing.
+    ///
+    /// The surface is left as-is, so the caller must re-read [`Self::grid_size`]
+    /// and resize the terminal and PTY to match.
+    pub fn set_font_size(&mut self, font_size: u32) {
+        self.renderer.set_font_size(font_size);
+    }
+
     /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
     /// position in fractional cell coordinates, or `None` when it is hidden.
     /// `scroll` carries the eased popover and grid scroll offsets.
@@ -309,6 +330,17 @@ impl GpuContext {
     }
 }
 
+/// The (rows, cols) that fill `width`x`height` physical pixels at `metrics`.
+///
+/// Floors each axis with a one-cell minimum so a sub-cell sliver still yields a
+/// usable grid. A larger font (bigger cell) yields fewer cells for the same
+/// pixel size.
+fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> (usize, usize) {
+    let rows = (height as f32 / metrics.height).floor().max(1.0) as usize;
+    let cols = (width as f32 / metrics.width).floor().max(1.0) as usize;
+    (rows, cols)
+}
+
 /// Convert an [`Rgb`] to a wgpu [`Color`], normalizing each channel to 0..1
 /// with an opaque alpha.
 fn rgb_to_color(rgb: Rgb) -> Color {
@@ -336,4 +368,18 @@ pub fn headless_device() -> Option<(Device, Queue)> {
     .ok()?;
 
     executor::block_on(adapter.request_device(&DeviceDescriptor::default())).ok()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::grid_dims;
+    use crate::render::CellMetrics;
+
+    #[test]
+    fn grid_dims_shrink_as_font_grows() {
+        let dims = |font| grid_dims(800, 600, CellMetrics::from_font_size(font));
+        assert_eq!(dims(15), (33, 88));
+        assert_eq!(dims(30), (16, 44));
+        assert_eq!(dims(60), (8, 22));
+    }
 }

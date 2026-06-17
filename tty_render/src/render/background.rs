@@ -171,6 +171,11 @@ impl BackgroundPass {
         }
     }
 
+    /// Replace the cell metrics so the next frame lays out cells at the new size.
+    pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
+        self.metrics = metrics;
+    }
+
     /// Upload the frame's uniform and per-cell instances for `grid`.
     ///
     /// `resolution` is the surface size in physical pixels. `cursor` carries the

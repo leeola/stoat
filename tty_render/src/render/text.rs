@@ -287,6 +287,18 @@ impl TextPass {
         }
     }
 
+    /// Re-derive the text pass for `metrics` so the next frame shapes and
+    /// rasterizes glyphs at the new size.
+    ///
+    /// Re-probes the baseline at the new size and clears the shape cache, whose
+    /// keys encode the old rasterization size and would otherwise keep glyphs at
+    /// the old size.
+    pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
+        self.metrics = metrics;
+        self.baseline = probe_baseline(&mut self.font_system, metrics);
+        self.shape_cache.clear();
+    }
+
     /// Shape, rasterize, and upload the frame's glyph instances for `grid`.
     ///
     /// `resolution` is the surface size in physical pixels. `popover_scroll`
