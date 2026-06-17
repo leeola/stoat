@@ -8,7 +8,7 @@
 //! the cell backgrounds, so the pass alpha-blends and runs after the background
 //! fill.
 
-use crate::render::{CELL_HEIGHT, CELL_WIDTH};
+use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Border, BorderStyle, Borders, Grid, Rgb};
 use wgpu::{
@@ -78,11 +78,16 @@ pub struct DecorationPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    metrics: CellMetrics,
 }
 
 impl DecorationPass {
     /// Build the pipeline targeting `format`, with an empty instance buffer.
-    pub fn new(device: &Device, format: TextureFormat) -> DecorationPass {
+    pub(crate) fn new(
+        device: &Device,
+        format: TextureFormat,
+        metrics: CellMetrics,
+    ) -> DecorationPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("decoration"),
             source: ShaderSource::Wgsl(include_str!("../shaders/decoration.wgsl").into()),
@@ -173,6 +178,7 @@ impl DecorationPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            metrics,
         }
     }
 
@@ -192,8 +198,8 @@ impl DecorationPass {
     ) {
         let globals = Globals {
             resolution,
-            cell_size: [CELL_WIDTH, CELL_HEIGHT],
-            scroll_y: grid_scroll * CELL_HEIGHT,
+            cell_size: [self.metrics.width, self.metrics.height],
+            scroll_y: grid_scroll * self.metrics.height,
             pad: [0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));

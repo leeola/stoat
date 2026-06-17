@@ -45,6 +45,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         format,
         width,
         height,
+        30,
         Rgb::new(0, 0, 0),
         Rgb::new(217, 217, 217),
     );

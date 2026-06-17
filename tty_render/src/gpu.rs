@@ -14,7 +14,7 @@ use crate::render::{
     decoration::DecorationPass,
     overlay::OverlayPass,
     text::TextPass,
-    CELL_HEIGHT, CELL_WIDTH,
+    CellMetrics,
 };
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
@@ -49,6 +49,7 @@ pub struct Renderer {
     overlay: OverlayPass,
     width: u32,
     height: u32,
+    metrics: CellMetrics,
     /// Color cleared behind the grid each frame. Must equal the terminal's
     /// default cell background so the floored-grid gutter (the up-to-one-cell
     /// remainder on the right and bottom edges that no cell quad covers) stays
@@ -61,22 +62,26 @@ pub struct Renderer {
 
 impl Renderer {
     /// Build the grid passes for `format` at `width`x`height` physical pixels,
-    /// clearing to `background` and drawing the cursor block in `cursor`.
+    /// with cells sized from `font_size`, clearing to `background` and drawing
+    /// the cursor block in `cursor`.
     pub fn new(
         device: &Device,
         format: TextureFormat,
         width: u32,
         height: u32,
+        font_size: u32,
         background: Rgb,
         cursor: Rgb,
     ) -> Renderer {
+        let metrics = CellMetrics::from_font_size(font_size);
         Renderer {
-            background: BackgroundPass::new(device, format),
-            decoration: DecorationPass::new(device, format),
-            text: TextPass::new(device, format),
-            overlay: OverlayPass::new(device, format),
+            background: BackgroundPass::new(device, format, metrics),
+            decoration: DecorationPass::new(device, format, metrics),
+            text: TextPass::new(device, format, metrics),
+            overlay: OverlayPass::new(device, format, metrics),
             width,
             height,
+            metrics,
             clear_color: rgb_to_color(background),
             cursor_color: cursor,
         }
@@ -87,8 +92,8 @@ impl Renderer {
     /// Divides the pixel size by the fixed cell metrics, flooring with a
     /// one-cell minimum so a sliver still yields a usable grid.
     pub fn grid_size(&self) -> (usize, usize) {
-        let rows = (self.height as f32 / CELL_HEIGHT).floor().max(1.0) as usize;
-        let cols = (self.width as f32 / CELL_WIDTH).floor().max(1.0) as usize;
+        let rows = (self.height as f32 / self.metrics.height).floor().max(1.0) as usize;
+        let cols = (self.width as f32 / self.metrics.width).floor().max(1.0) as usize;
         (rows, cols)
     }
 
@@ -179,8 +184,8 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// Build the context for `window`, sized to `width`x`height` physical
-    /// pixels, clearing to `background` and drawing the cursor block in
-    /// `cursor`.
+    /// pixels with cells derived from `font_size`, clearing to `background` and
+    /// drawing the cursor block in `cursor`.
     ///
     /// `window` is anything carrying window and display handles; the surface
     /// takes ownership of it, so it must outlive the context (pass an
@@ -188,7 +193,14 @@ impl GpuContext {
     ///
     /// Panics if no GPU adapter is available, device creation fails, or the
     /// surface cannot be created. All three are unrecoverable at startup.
-    pub fn new<W>(window: W, width: u32, height: u32, background: Rgb, cursor: Rgb) -> GpuContext
+    pub fn new<W>(
+        window: W,
+        width: u32,
+        height: u32,
+        font_size: u32,
+        background: Rgb,
+        cursor: Rgb,
+    ) -> GpuContext
     where
         W: HasWindowHandle + HasDisplayHandle + Send + Sync + 'static,
     {
@@ -232,7 +244,9 @@ impl GpuContext {
         };
         surface.configure(&device, &config);
 
-        let renderer = Renderer::new(&device, format, width, height, background, cursor);
+        let renderer = Renderer::new(
+            &device, format, width, height, font_size, background, cursor,
+        );
 
         GpuContext {
             surface,

@@ -8,7 +8,7 @@
 //! This is the compositing layer for popovers and completion menus; the region
 //! is the box itself, with any text inside it drawn separately.
 
-use crate::render::{CELL_HEIGHT, CELL_WIDTH};
+use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Grid, Overlay, Rgb};
 use wgpu::{
@@ -61,11 +61,12 @@ pub struct OverlayPass {
     instances: Buffer,
     capacity: usize,
     count: u32,
+    metrics: CellMetrics,
 }
 
 impl OverlayPass {
     /// Build the pipeline targeting `format`, with an empty instance buffer.
-    pub fn new(device: &Device, format: TextureFormat) -> OverlayPass {
+    pub(crate) fn new(device: &Device, format: TextureFormat, metrics: CellMetrics) -> OverlayPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("overlay"),
             source: ShaderSource::Wgsl(include_str!("../shaders/overlay.wgsl").into()),
@@ -153,6 +154,7 @@ impl OverlayPass {
             instances,
             capacity: INITIAL_CAPACITY,
             count: 0,
+            metrics,
         }
     }
 
@@ -164,7 +166,7 @@ impl OverlayPass {
     pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
         let globals = Globals {
             resolution,
-            cell_size: [CELL_WIDTH, CELL_HEIGHT],
+            cell_size: [self.metrics.width, self.metrics.height],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 

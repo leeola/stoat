@@ -10,7 +10,7 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas},
-    render::{CELL_HEIGHT, CELL_WIDTH},
+    render::CellMetrics,
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -27,12 +27,6 @@ use wgpu::{
     ShaderModuleDescriptor, ShaderSource, ShaderStages, TextureFormat, TextureSampleType,
     TextureView, TextureViewDimension, VertexBufferLayout, VertexState, VertexStepMode,
 };
-
-/// Font size in physical pixels glyphs are rasterized at.
-///
-/// A fixed placeholder paired with the cell metrics until both are derived from
-/// the font.
-const FONT_SIZE: f32 = 30.0;
 
 /// Instance buffer capacity, in glyphs, allocated up front. Grows by doubling
 /// when a frame exceeds it.
@@ -124,6 +118,7 @@ pub struct TextPass {
     swash_cache: SwashCache,
     shape_cache: HashMap<(char, u8), Option<CacheKey>>,
     baseline: f32,
+    metrics: CellMetrics,
 }
 
 impl TextPass {
@@ -133,9 +128,9 @@ impl TextPass {
     /// glyph atlas, so this is the heavy part of renderer startup. `format` must
     /// be the non-sRGB surface format the text pass composites into; the shader
     /// does its own sRGB encoding.
-    pub fn new(device: &Device, format: TextureFormat) -> TextPass {
+    pub(crate) fn new(device: &Device, format: TextureFormat, metrics: CellMetrics) -> TextPass {
         let mut font_system = FontSystem::new();
-        let baseline = probe_baseline(&mut font_system);
+        let baseline = probe_baseline(&mut font_system, metrics);
         let swash_cache = SwashCache::new();
         let atlas = GlyphAtlas::new(device);
 
@@ -288,6 +283,7 @@ impl TextPass {
             swash_cache,
             shape_cache: HashMap::new(),
             baseline,
+            metrics,
         }
     }
 
@@ -316,7 +312,7 @@ impl TextPass {
     ) {
         let globals = TextGlobals {
             resolution,
-            cell_size: [CELL_WIDTH, CELL_HEIGHT],
+            cell_size: [self.metrics.width, self.metrics.height],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 
@@ -331,16 +327,16 @@ impl TextPass {
         let mut grid_instances = self.build_text_instances(device, queue, grid_pending);
         let mut overlay_instances = self.build_text_instances(device, queue, overlay_pending);
 
-        let grid_scroll_px = grid_scroll * CELL_HEIGHT;
+        let grid_scroll_px = grid_scroll * self.metrics.height;
         for instance in &mut grid_instances {
             instance.pos[1] += grid_scroll_px;
         }
 
-        let popover_scroll_px = popover_scroll * CELL_HEIGHT;
+        let popover_scroll_px = popover_scroll * self.metrics.height;
         for instance in &mut overlay_instances {
             instance.pos[1] -= popover_scroll_px;
         }
-        self.overlay_scissor = overlay_scissor(grid.overlays(), resolution);
+        self.overlay_scissor = overlay_scissor(grid.overlays(), resolution, self.metrics);
 
         self.count = grid_instances.len() as u32;
         self.overlay_count = overlay_instances.len() as u32;
@@ -399,6 +395,7 @@ impl TextPass {
                     glyph.row,
                     info.placement,
                     self.baseline * glyph.scale as f32,
+                    self.metrics,
                 ),
                 dim: [info.size[0] as f32, info.size[1] as f32],
                 uv: info.uv,
@@ -423,9 +420,9 @@ impl TextPass {
         grid: &Grid,
         grid_scroll: f32,
     ) {
-        let mut instances = build_underline_instances(grid);
+        let mut instances = build_underline_instances(grid, self.metrics);
 
-        let grid_scroll_px = grid_scroll * CELL_HEIGHT;
+        let grid_scroll_px = grid_scroll * self.metrics.height;
         for instance in &mut instances {
             instance.cell_pos[1] += grid_scroll_px;
         }
@@ -603,7 +600,7 @@ impl TextPass {
             return *key;
         }
 
-        let key = shape_char(&mut self.font_system, ch, scale);
+        let key = shape_char(&mut self.font_system, ch, scale, self.metrics);
         self.shape_cache.insert((ch, scale), key);
         key
     }
@@ -752,11 +749,16 @@ fn create_atlas_bind_group(
 /// One character maps to one cell, so each is shaped independently rather than
 /// through proportional line layout. The cache key encodes the rasterization
 /// size, so each scale of a character keys a distinct atlas entry.
-fn shape_char(font_system: &mut FontSystem, ch: char, scale: u8) -> Option<CacheKey> {
+fn shape_char(
+    font_system: &mut FontSystem,
+    ch: char,
+    scale: u8,
+    metrics: CellMetrics,
+) -> Option<CacheKey> {
     let size = scale as f32;
     let mut buffer = CosmicBuffer::new(
         font_system,
-        Metrics::new(FONT_SIZE * size, CELL_HEIGHT * size),
+        Metrics::new(metrics.font_size * size, metrics.height * size),
     );
     let mut encoded = [0u8; 4];
     let text = ch.encode_utf8(&mut encoded);
@@ -776,8 +778,9 @@ fn shape_char(font_system: &mut FontSystem, ch: char, scale: u8) -> Option<Cache
 
 /// Baseline offset from a cell's top, in physical pixels, measured once from the
 /// font so glyphs sit on a consistent baseline within their cell.
-fn probe_baseline(font_system: &mut FontSystem) -> f32 {
-    let mut buffer = CosmicBuffer::new(font_system, Metrics::new(FONT_SIZE, CELL_HEIGHT));
+fn probe_baseline(font_system: &mut FontSystem, metrics: CellMetrics) -> f32 {
+    let mut buffer =
+        CosmicBuffer::new(font_system, Metrics::new(metrics.font_size, metrics.height));
     buffer.set_text(
         font_system,
         "M",
@@ -790,7 +793,7 @@ fn probe_baseline(font_system: &mut FontSystem) -> f32 {
         .layout_runs()
         .next()
         .map(|run| run.line_y)
-        .unwrap_or(CELL_HEIGHT * 0.8)
+        .unwrap_or(metrics.height * 0.8)
 }
 
 /// Screen position of a glyph bitmap's top-left in physical pixels.
@@ -798,9 +801,15 @@ fn probe_baseline(font_system: &mut FontSystem) -> f32 {
 /// The pen sits at the cell's left edge on the row baseline; `placement` is the
 /// swash bitmap offset from that pen (`left` rightward, `top` upward from the
 /// baseline).
-fn glyph_origin(col: usize, row: usize, placement: [i32; 2], baseline: f32) -> [f32; 2] {
-    let pen_x = col as f32 * CELL_WIDTH;
-    let baseline_y = row as f32 * CELL_HEIGHT + baseline;
+fn glyph_origin(
+    col: usize,
+    row: usize,
+    placement: [i32; 2],
+    baseline: f32,
+    metrics: CellMetrics,
+) -> [f32; 2] {
+    let pen_x = col as f32 * metrics.width;
+    let baseline_y = row as f32 * metrics.height + baseline;
     [
         pen_x + placement[0] as f32,
         baseline_y - placement[1] as f32,
@@ -869,7 +878,11 @@ fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
 /// popover's scrolled content to its box. Multiple overlays fall back to the
 /// unclipped batched draw. The rect is clamped to the surface, which a scissor
 /// rect requires.
-fn overlay_scissor(overlays: &[Overlay], resolution: [f32; 2]) -> Option<[u32; 4]> {
+fn overlay_scissor(
+    overlays: &[Overlay],
+    resolution: [f32; 2],
+    metrics: CellMetrics,
+) -> Option<[u32; 4]> {
     let [overlay] = overlays else {
         return None;
     };
@@ -877,16 +890,16 @@ fn overlay_scissor(overlays: &[Overlay], resolution: [f32; 2]) -> Option<[u32; 4
     let res_w = resolution[0] as u32;
     let res_h = resolution[1] as u32;
 
-    let x = ((overlay.left as f32 * CELL_WIDTH) as u32).min(res_w);
-    let y = ((overlay.top as f32 * CELL_HEIGHT) as u32).min(res_h);
-    let w = ((overlay.width as f32 * CELL_WIDTH) as u32).min(res_w - x);
-    let h = ((overlay.height as f32 * CELL_HEIGHT) as u32).min(res_h - y);
+    let x = ((overlay.left as f32 * metrics.width) as u32).min(res_w);
+    let y = ((overlay.top as f32 * metrics.height) as u32).min(res_h);
+    let w = ((overlay.width as f32 * metrics.width) as u32).min(res_w - x);
+    let h = ((overlay.height as f32 * metrics.height) as u32).min(res_h - y);
 
     (w > 0 && h > 0).then_some([x, y, w, h])
 }
 
 /// One decoration instance per underlined cell, in row-major order.
-fn build_underline_instances(grid: &Grid) -> Vec<UnderlineInstance> {
+fn build_underline_instances(grid: &Grid, metrics: CellMetrics) -> Vec<UnderlineInstance> {
     let mut instances = Vec::new();
 
     for row in 0..grid.rows() {
@@ -896,7 +909,7 @@ fn build_underline_instances(grid: &Grid) -> Vec<UnderlineInstance> {
                 continue;
             };
             instances.push(UnderlineInstance {
-                cell_pos: [col as f32 * CELL_WIDTH, row as f32 * CELL_HEIGHT],
+                cell_pos: [col as f32 * metrics.width, row as f32 * metrics.height],
                 color: rgb_f32(cell.underline_color),
                 style,
             });
@@ -924,7 +937,7 @@ mod tests {
         build_underline_instances, cell_glyph_scale, glyph_origin, overlay_content_cells,
         STYLE_DOTTED,
     };
-    use crate::render::{CELL_HEIGHT, CELL_WIDTH};
+    use crate::render::CellMetrics;
     use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
     use wgpu::naga::{
         front::wgsl,
@@ -933,15 +946,19 @@ mod tests {
 
     #[test]
     fn glyph_origin_offsets_from_cell_pen_and_baseline() {
+        let metrics = CellMetrics::from_font_size(30);
         let baseline = 14.0;
 
-        let origin = glyph_origin(3, 2, [1, 10], baseline);
+        let origin = glyph_origin(3, 2, [1, 10], baseline, metrics);
         assert_eq!(
             origin,
-            [3.0 * CELL_WIDTH + 1.0, 2.0 * CELL_HEIGHT + baseline - 10.0]
+            [
+                3.0 * metrics.width + 1.0,
+                2.0 * metrics.height + baseline - 10.0
+            ]
         );
 
-        let origin = glyph_origin(0, 0, [-2, -3], baseline);
+        let origin = glyph_origin(0, 0, [-2, -3], baseline, metrics);
         assert_eq!(origin, [-2.0, baseline + 3.0]);
     }
 
@@ -951,10 +968,11 @@ mod tests {
         grid.get_mut(0, 1).underline = UnderlineStyle::Dotted;
         grid.get_mut(0, 1).underline_color = Rgb::new(255, 0, 0);
 
-        let instances = build_underline_instances(&grid);
+        let metrics = CellMetrics::from_font_size(30);
+        let instances = build_underline_instances(&grid, metrics);
 
         assert_eq!(instances.len(), 1);
-        assert_eq!(instances[0].cell_pos, [CELL_WIDTH, 0.0]);
+        assert_eq!(instances[0].cell_pos, [metrics.width, 0.0]);
         assert_eq!(instances[0].color, [1.0, 0.0, 0.0]);
         assert_eq!(instances[0].style, STYLE_DOTTED);
     }

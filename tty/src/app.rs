@@ -39,14 +39,15 @@ pub fn run() {
 /// idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
 /// output arrives or the window is resized, not on a continuous timer.
 pub fn run_with_shell(shell: String) {
-    let theme = config::load().expect("load config").resolve_theme();
+    let config = config::load().expect("load config");
+    let theme = config.resolve_theme();
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(event_loop.create_proxy(), shell, theme);
+    let mut app = App::new(event_loop.create_proxy(), shell, theme, config.font_size);
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -64,15 +65,17 @@ struct App {
     proxy: EventLoopProxy<PtyEvent>,
     shell: String,
     theme: Theme,
+    font_size: u32,
     state: Option<State>,
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String, theme: Theme) -> App {
+    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String, theme: Theme, font_size: u32) -> App {
         App {
             proxy,
             shell,
             theme,
+            font_size,
             state: None,
         }
     }
@@ -115,6 +118,7 @@ impl ApplicationHandler<PtyEvent> for App {
             window.clone(),
             size.width.max(1),
             size.height.max(1),
+            self.font_size,
             self.theme.background,
             self.theme.cursor,
         );

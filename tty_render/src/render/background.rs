@@ -8,7 +8,7 @@
 //!
 //! [`Cell`]: stoatty_term::grid::Cell
 
-use crate::render::{CELL_HEIGHT, CELL_WIDTH};
+use crate::render::CellMetrics;
 use bytemuck::{Pod, Zeroable};
 use stoatty_term::grid::{Grid, Rgb};
 use wgpu::{
@@ -73,11 +73,16 @@ pub struct BackgroundPass {
     count: u32,
     cursor_pipeline: RenderPipeline,
     cursor_visible: bool,
+    metrics: CellMetrics,
 }
 
 impl BackgroundPass {
     /// Build the pipeline targeting `format`, with an empty instance buffer.
-    pub fn new(device: &Device, format: TextureFormat) -> BackgroundPass {
+    pub(crate) fn new(
+        device: &Device,
+        format: TextureFormat,
+        metrics: CellMetrics,
+    ) -> BackgroundPass {
         let shader = device.create_shader_module(ShaderModuleDescriptor {
             label: Some("background"),
             source: ShaderSource::Wgsl(include_str!("../shaders/bg.wgsl").into()),
@@ -162,6 +167,7 @@ impl BackgroundPass {
             count: 0,
             cursor_pipeline,
             cursor_visible: false,
+            metrics,
         }
     }
 
@@ -184,9 +190,9 @@ impl BackgroundPass {
     ) {
         let globals = Globals {
             resolution,
-            cell_size: [CELL_WIDTH, CELL_HEIGHT],
+            cell_size: [self.metrics.width, self.metrics.height],
             cursor_pos: cursor.pos.unwrap_or([0.0, 0.0]),
-            scroll_y: grid_scroll * CELL_HEIGHT,
+            scroll_y: grid_scroll * self.metrics.height,
             pad: 0.0,
             cursor_color: [
                 cursor.color.r as f32 / 255.0,
