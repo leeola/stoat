@@ -334,14 +334,14 @@ fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
 ///
 /// `platform_mod_held` is whether the platform zoom modifier (Cmd on macOS,
 /// Ctrl elsewhere) is held; the caller resolves which physical modifier that
-/// is. With it held, `+` steps up by one and `-` steps down by one.
+/// is. With it held, `=` steps up by one and `-` steps down by one.
 fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
     if !platform_mod_held {
         return None;
     }
 
     match key {
-        Key::Character(s) if s.as_str() == "+" => Some(1),
+        Key::Character(s) if s.as_str() == "=" => Some(1),
         Key::Character(s) if s.as_str() == "-" => Some(-1),
         _ => None,
     }
@@ -480,10 +480,10 @@ mod tests {
 
     #[test]
     fn font_step_maps_the_platform_zoom_combo() {
-        assert_eq!(font_step(true, &Key::Character("+".into())), Some(1));
+        assert_eq!(font_step(true, &Key::Character("=".into())), Some(1));
         assert_eq!(font_step(true, &Key::Character("-".into())), Some(-1));
         assert_eq!(
-            font_step(false, &Key::Character("+".into())),
+            font_step(false, &Key::Character("=".into())),
             None,
             "no platform modifier held"
         );
@@ -491,6 +491,11 @@ mod tests {
             font_step(true, &Key::Character("a".into())),
             None,
             "unrelated key"
+        );
+        assert_eq!(
+            font_step(true, &Key::Character("+".into())),
+            None,
+            "shifted plus no longer zooms"
         );
     }
 
