@@ -293,9 +293,12 @@ impl TextPass {
 
     /// Shape, rasterize, and upload the frame's glyph instances for `grid`.
     ///
-    /// `resolution` is the surface size in physical pixels. `scroll` shifts the
-    /// overlay (popover) content up by that many rows, clipped to the box by the
-    /// scissor [`Self::draw_overlay_text`] applies.
+    /// `resolution` is the surface size in physical pixels. `popover_scroll`
+    /// shifts the overlay (popover) content up by that many rows, clipped to the
+    /// box by the scissor [`Self::draw_overlay_text`] applies. `grid_scroll`
+    /// offsets the grid glyphs and underlines down by that many rows, the same
+    /// offset the background and decoration passes apply, so the grid scrolls as
+    /// one; the screen-anchored overlay content is left unmoved.
     ///
     /// Runs in two phases: every visible glyph is rasterized first (which may
     /// grow the atlas), then each glyph's atlas sub-rect is read once the atlas
@@ -308,7 +311,8 @@ impl TextPass {
         queue: &Queue,
         grid: &Grid,
         resolution: [f32; 2],
-        scroll: f32,
+        popover_scroll: f32,
+        grid_scroll: f32,
     ) {
         let globals = TextGlobals {
             resolution,
@@ -318,18 +322,23 @@ impl TextPass {
 
         // Underlines are built first, before the glyph path can return early on
         // an all-blank grid: an underlined space has no glyph but still draws.
-        self.prepare_underlines(device, queue, grid);
+        self.prepare_underlines(device, queue, grid, grid_scroll);
 
         self.atlas.begin_frame();
         let grid_pending = self.rasterize_visible(device, queue, grid);
         let overlay_pending = self.rasterize_overlays(device, queue, grid);
 
-        let grid_instances = self.build_text_instances(device, queue, grid_pending);
+        let mut grid_instances = self.build_text_instances(device, queue, grid_pending);
         let mut overlay_instances = self.build_text_instances(device, queue, overlay_pending);
 
-        let scroll_px = scroll * CELL_HEIGHT;
+        let grid_scroll_px = grid_scroll * CELL_HEIGHT;
+        for instance in &mut grid_instances {
+            instance.pos[1] += grid_scroll_px;
+        }
+
+        let popover_scroll_px = popover_scroll * CELL_HEIGHT;
         for instance in &mut overlay_instances {
-            instance.pos[1] -= scroll_px;
+            instance.pos[1] -= popover_scroll_px;
         }
         self.overlay_scissor = overlay_scissor(grid.overlays(), resolution);
 
@@ -401,13 +410,26 @@ impl TextPass {
         instances
     }
 
-    /// Build and upload the frame's underline-decoration instances for `grid`.
+    /// Build and upload the frame's underline-decoration instances for `grid`,
+    /// offset down by `grid_scroll` rows so they scroll with the grid.
     ///
     /// Independent of the glyph path: it runs over every cell (spaces included,
     /// since a blank cell can still be underlined) and reallocates only when the
     /// underlined-cell count outgrows the current capacity.
-    fn prepare_underlines(&mut self, device: &Device, queue: &Queue, grid: &Grid) {
-        let instances = build_underline_instances(grid);
+    fn prepare_underlines(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        grid_scroll: f32,
+    ) {
+        let mut instances = build_underline_instances(grid);
+
+        let grid_scroll_px = grid_scroll * CELL_HEIGHT;
+        for instance in &mut instances {
+            instance.cell_pos[1] += grid_scroll_px;
+        }
+
         self.underline_count = instances.len() as u32;
         if instances.is_empty() {
             return;

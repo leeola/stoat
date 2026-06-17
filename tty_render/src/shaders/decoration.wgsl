@@ -7,6 +7,10 @@
 struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
+    scroll_y: f32,
+    pad0: f32,
+    pad1: f32,
+    pad2: f32,
 }
 
 @group(0) @binding(0)
@@ -54,7 +58,7 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let pixel = (cell_pos + corner) * globals.cell_size;
+    let pixel = (cell_pos + corner) * globals.cell_size + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0

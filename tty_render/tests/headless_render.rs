@@ -7,7 +7,7 @@
 //! `create_render_pipeline`. This test reaches that path and the draw path,
 //! skipping when no GPU adapter is present so GPU-less CI stays green.
 
-use stoatty_render::gpu::{headless_device, Renderer};
+use stoatty_render::gpu::{headless_device, Renderer, Scroll};
 use stoatty_term::grid::{Border, BorderStyle, Grid, Overlay, Rgb};
 use wgpu::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
@@ -73,5 +73,15 @@ fn builds_passes_and_draws_a_frame_off_screen() {
     // submitting the draw (render_into) triggers wgpu's default uncaptured-error
     // panic, failing this test. Both are synchronous, so reaching the end without
     // a panic is the assertion.
-    renderer.render_into(&device, &queue, &view, &grid, Some([0.0, 0.0]), 0.0);
+    renderer.render_into(
+        &device,
+        &queue,
+        &view,
+        &grid,
+        Some([0.0, 0.0]),
+        Scroll {
+            popover: 0.0,
+            grid: 0.0,
+        },
+    );
 }

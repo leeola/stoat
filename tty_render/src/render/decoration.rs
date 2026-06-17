@@ -57,12 +57,17 @@ struct BorderInstance {
 }
 
 /// Uniform shared by every instance: the screen resolution and cell size the
-/// vertex shader maps cell coordinates through.
+/// vertex shader maps cell coordinates through, plus the grid's eased vertical
+/// scroll offset in pixels.
+///
+/// `pad` rounds the uniform up to a 16-byte multiple.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
+    scroll_y: f32,
+    pad: [f32; 3],
 }
 
 /// The instanced cell-edge border pipeline and its per-frame buffers.
@@ -173,12 +178,23 @@ impl DecorationPass {
 
     /// Upload the frame's uniform and one instance per bordered cell edge.
     ///
-    /// `resolution` is the surface size in physical pixels. Reallocates the
-    /// instance buffer only when the edge count outgrows the current capacity.
-    pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
+    /// `resolution` is the surface size in physical pixels. `grid_scroll` shifts
+    /// the borders up by that many rows with the rest of the grid. Reallocates
+    /// the instance buffer only when the edge count outgrows the current
+    /// capacity.
+    pub fn prepare(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        resolution: [f32; 2],
+        grid_scroll: f32,
+    ) {
         let globals = Globals {
             resolution,
             cell_size: [CELL_WIDTH, CELL_HEIGHT],
+            scroll_y: grid_scroll * CELL_HEIGHT,
+            pad: [0.0, 0.0, 0.0],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
 

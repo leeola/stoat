@@ -37,8 +37,9 @@ struct BgInstance {
 }
 
 /// Uniform shared by the cell and cursor pipelines: the screen resolution and
-/// cell size that map cell coordinates to clip space, plus the cursor's eased
-/// position in (fractional) cell coordinates and its color.
+/// cell size that map cell coordinates to clip space, the cursor's eased
+/// position in (fractional) cell coordinates and its color, and the grid's eased
+/// vertical scroll offset in pixels.
 ///
 /// `pad` aligns `cursor_color` to a 16-byte offset for the uniform layout.
 #[repr(C)]
@@ -47,8 +48,18 @@ struct Globals {
     resolution: [f32; 2],
     cell_size: [f32; 2],
     cursor_pos: [f32; 2],
-    pad: [f32; 2],
+    scroll_y: f32,
+    pad: f32,
     cursor_color: [f32; 4],
+}
+
+/// The cursor block's eased position and color for the frame.
+#[derive(Clone, Copy)]
+pub struct CursorState {
+    /// Fractional cell position, or `None` when the cursor is hidden.
+    pub pos: Option<[f32; 2]>,
+    /// Block color. The pass applies its own blend alpha.
+    pub color: Rgb,
 }
 
 /// The instanced background-fill pipeline and its per-frame buffers, plus a
@@ -156,9 +167,9 @@ impl BackgroundPass {
 
     /// Upload the frame's uniform and per-cell instances for `grid`.
     ///
-    /// `resolution` is the surface size in physical pixels. `cursor` is the
-    /// cursor's eased position in fractional cell coordinates, or `None` when
-    /// the cursor is hidden. `cursor_color` is the cursor block's RGB.
+    /// `resolution` is the surface size in physical pixels. `cursor` carries the
+    /// cursor block's eased position and color. `grid_scroll` shifts the whole
+    /// grid up by that many rows.
     ///
     /// Reallocates the instance buffer only when the grid outgrows the current
     /// capacity.
@@ -168,23 +179,24 @@ impl BackgroundPass {
         queue: &Queue,
         grid: &Grid,
         resolution: [f32; 2],
-        cursor: Option<[f32; 2]>,
-        cursor_color: Rgb,
+        cursor: CursorState,
+        grid_scroll: f32,
     ) {
         let globals = Globals {
             resolution,
             cell_size: [CELL_WIDTH, CELL_HEIGHT],
-            cursor_pos: cursor.unwrap_or([0.0, 0.0]),
-            pad: [0.0, 0.0],
+            cursor_pos: cursor.pos.unwrap_or([0.0, 0.0]),
+            scroll_y: grid_scroll * CELL_HEIGHT,
+            pad: 0.0,
             cursor_color: [
-                cursor_color.r as f32 / 255.0,
-                cursor_color.g as f32 / 255.0,
-                cursor_color.b as f32 / 255.0,
+                cursor.color.r as f32 / 255.0,
+                cursor.color.g as f32 / 255.0,
+                cursor.color.b as f32 / 255.0,
                 CURSOR_ALPHA,
             ],
         };
         queue.write_buffer(&self.globals, 0, bytemuck::bytes_of(&globals));
-        self.cursor_visible = cursor.is_some();
+        self.cursor_visible = cursor.pos.is_some();
 
         let instances = build_instances(grid);
         self.count = instances.len() as u32;

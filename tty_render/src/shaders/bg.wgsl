@@ -6,7 +6,8 @@ struct Globals {
     resolution: vec2<f32>,
     cell_size: vec2<f32>,
     cursor_pos: vec2<f32>,
-    pad: vec2<f32>,
+    scroll_y: f32,
+    pad: f32,
     cursor_color: vec4<f32>,
 }
 
@@ -33,7 +34,8 @@ fn vs_main(
         vec2<f32>(1.0, 1.0)
     );
 
-    let pixel = (cell + corners[vertex_index]) * globals.cell_size;
+    let pixel = (cell + corners[vertex_index]) * globals.cell_size
+        + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0
@@ -69,7 +71,8 @@ fn vs_cursor(@builtin(vertex_index) vertex_index: u32) -> CursorVsOut {
         vec2<f32>(1.0, 1.0)
     );
 
-    let pixel = (globals.cursor_pos + corners[vertex_index]) * globals.cell_size;
+    let pixel = (globals.cursor_pos + corners[vertex_index]) * globals.cell_size
+        + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
         1.0 - pixel.y / globals.resolution.y * 2.0

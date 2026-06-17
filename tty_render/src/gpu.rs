@@ -10,7 +10,10 @@
 //! well as the window surface that [`GpuContext`] wraps.
 
 use crate::render::{
-    background::BackgroundPass, decoration::DecorationPass, overlay::OverlayPass, text::TextPass,
+    background::{BackgroundPass, CursorState},
+    decoration::DecorationPass,
+    overlay::OverlayPass,
+    text::TextPass,
     CELL_HEIGHT, CELL_WIDTH,
 };
 use futures::executor;
@@ -23,6 +26,15 @@ use wgpu::{
     StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
 };
+
+/// The eased vertical scroll offsets a frame applies, in rows.
+#[derive(Clone, Copy)]
+pub struct Scroll {
+    /// Popover content scroll within its box.
+    pub popover: f32,
+    /// Whole-grid scroll.
+    pub grid: f32,
+}
 
 /// The grid render passes and the target size, independent of any window.
 ///
@@ -85,9 +97,9 @@ impl Renderer {
     /// cursor cell, then draw overlays and their content on top.
     ///
     /// `cursor` is the cursor's position in fractional cell coordinates, or
-    /// `None` when it is hidden. `scroll` shifts popover content up by that many
-    /// rows. Submits the frame but does not present or poll; the caller drives
-    /// whichever it needs.
+    /// `None` when it is hidden. `scroll` carries the eased popover and grid
+    /// scroll offsets. Submits the frame but does not present or poll; the caller
+    /// drives whichever it needs.
     pub fn render_into(
         &mut self,
         device: &Device,
@@ -95,13 +107,24 @@ impl Renderer {
         view: &TextureView,
         grid: &Grid,
         cursor: Option<[f32; 2]>,
-        scroll: f32,
+        scroll: Scroll,
     ) {
         let resolution = [self.width as f32, self.height as f32];
-        self.background
-            .prepare(device, queue, grid, resolution, cursor, self.cursor_color);
-        self.decoration.prepare(device, queue, grid, resolution);
-        self.text.prepare(device, queue, grid, resolution, scroll);
+        self.background.prepare(
+            device,
+            queue,
+            grid,
+            resolution,
+            CursorState {
+                pos: cursor,
+                color: self.cursor_color,
+            },
+            scroll.grid,
+        );
+        self.decoration
+            .prepare(device, queue, grid, resolution, scroll.grid);
+        self.text
+            .prepare(device, queue, grid, resolution, scroll.popover, scroll.grid);
         self.overlay.prepare(device, queue, grid, resolution);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
@@ -245,13 +268,13 @@ impl GpuContext {
 
     /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
     /// position in fractional cell coordinates, or `None` when it is hidden.
-    /// `scroll` shifts popover content up by that many rows.
+    /// `scroll` carries the eased popover and grid scroll offsets.
     ///
     /// Skips the frame when the surface is transiently unavailable (timed
     /// out, occluded, or a validation error already raised elsewhere) and
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
-    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>, scroll: f32) {
+    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>, scroll: Scroll) {
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame

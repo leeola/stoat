@@ -11,7 +11,7 @@ use crate::{
     pty::{self, Pty, PtyOutput},
 };
 use std::sync::Arc;
-use stoatty_render::gpu::GpuContext;
+use stoatty_render::gpu::{GpuContext, Scroll};
 use stoatty_term::{
     grid::Grid,
     term::{Cursor, CursorShape, Terminal},
@@ -199,13 +199,25 @@ impl ApplicationHandler<PtyEvent> for App {
                     Some(target) => {
                         let (next, settled) = ease(state.cursor_anim, target);
                         state.cursor_anim = next;
-                        state
-                            .gpu
-                            .render(&state.grid, Some(next), state.popover_scroll);
+                        state.gpu.render(
+                            &state.grid,
+                            Some(next),
+                            Scroll {
+                                popover: state.popover_scroll,
+                                grid: 0.0,
+                            },
+                        );
                         !settled
                     },
                     None => {
-                        state.gpu.render(&state.grid, None, state.popover_scroll);
+                        state.gpu.render(
+                            &state.grid,
+                            None,
+                            Scroll {
+                                popover: state.popover_scroll,
+                                grid: 0.0,
+                            },
+                        );
                         false
                     },
                 };
