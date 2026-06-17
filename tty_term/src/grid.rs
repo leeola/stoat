@@ -20,6 +20,7 @@ pub struct Grid {
     overlays: Vec<Overlay>,
     scroll_region: Option<ScrollRegion>,
     icons: Vec<Icon>,
+    text_runs: Vec<TextRun>,
 }
 
 impl Grid {
@@ -32,6 +33,7 @@ impl Grid {
             overlays: Vec::new(),
             scroll_region: None,
             icons: Vec::new(),
+            text_runs: Vec::new(),
         }
     }
 
@@ -71,6 +73,7 @@ impl Grid {
         self.overlays.clear();
         self.scroll_region = None;
         self.icons.clear();
+        self.text_runs.clear();
     }
 
     /// The floating overlay regions drawn above the cells, in draw order.
@@ -113,6 +116,19 @@ impl Grid {
     /// untouched; the caller sets the full list each frame it changes.
     pub fn set_icons(&mut self, icons: Vec<Icon>) {
         self.icons = icons;
+    }
+
+    /// The off-grid text runs drawn above the cells, in draw order.
+    pub fn text_runs(&self) -> &[TextRun] {
+        &self.text_runs
+    }
+
+    /// Replace the off-grid text runs.
+    ///
+    /// Grid-level like the overlays, so the per-cell projection leaves them
+    /// untouched; the caller sets the full list each frame it changes.
+    pub fn set_text_runs(&mut self, text_runs: Vec<TextRun>) {
+        self.text_runs = text_runs;
     }
 
     /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
@@ -338,6 +354,25 @@ pub enum IconKind {
     Info,
 }
 
+/// A run of text drawn off the cell grid at a fractional scale.
+///
+/// Like an [`Overlay`] it is grid-level, not a cell attribute: the renderer
+/// draws it above the cells so a non-cell component (a gutter line number) can
+/// render smaller than the grid yet line up with full-size rows. [`Self::col`]
+/// and [`Self::row`] are the anchor in sixteenths of a cell (16 = one cell), so
+/// the run can sit at a fractional position; [`Self::scale`] is the glyph size
+/// in 256ths of the cell size (256 = grid size). The run advances one scaled
+/// cell width per character and is vertically centered within the target row.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TextRun {
+    pub col: i16,
+    pub row: i16,
+    pub scale: u16,
+    pub color: Rgb,
+    pub bg: Rgb,
+    pub text: String,
+}
+
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
 /// underline.
 ///
@@ -414,7 +449,7 @@ impl BitOrAssign for Flags {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale, ScrollRegion};
+    use super::{Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale, ScrollRegion, TextRun};
 
     #[test]
     fn grid_writes_are_addressable() {
@@ -543,6 +578,25 @@ mod tests {
 
         grid.resize(2, 2);
         assert!(grid.icons().is_empty(), "resize clears the icons");
+    }
+
+    #[test]
+    fn text_runs_round_trip_and_clear_on_resize() {
+        let mut grid = Grid::new(4, 4);
+        let run = TextRun {
+            col: 0,
+            row: 32,
+            scale: 192,
+            color: Rgb::new(150, 160, 170),
+            bg: Rgb::new(24, 26, 32),
+            text: "42".to_owned(),
+        };
+        grid.set_text_runs(vec![run.clone()]);
+
+        assert_eq!(grid.text_runs(), [run]);
+
+        grid.resize(2, 2);
+        assert!(grid.text_runs().is_empty(), "resize clears the text runs");
     }
 
     #[test]

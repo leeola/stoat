@@ -116,6 +116,9 @@ pub struct TextPass {
     /// the region's scrolled content is clipped to its rectangle. `None` when no
     /// scroll region is declared.
     region_scissor: Option<[u32; 4]>,
+    text_run_instances: Buffer,
+    text_run_capacity: usize,
+    text_run_count: u32,
     underline_pipeline: RenderPipeline,
     underline_instances: Buffer,
     underline_capacity: usize,
@@ -123,7 +126,9 @@ pub struct TextPass {
     atlas: GlyphAtlas,
     font_system: FontSystem,
     swash_cache: SwashCache,
-    shape_cache: HashMap<(char, u8), Option<CacheKey>>,
+    /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
+    /// alongside the integer cell scales.
+    shape_cache: HashMap<(char, u32), Option<CacheKey>>,
     baseline: f32,
     metrics: CellMetrics,
 }
@@ -266,6 +271,11 @@ impl TextPass {
             "scroll region text instances",
             instance_bytes::<TextInstance>(INITIAL_CAPACITY),
         );
+        let text_run_instances = alloc_instances(
+            device,
+            "text run instances",
+            instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
         let underline_instances = alloc_instances(
             device,
             "underline instances",
@@ -290,6 +300,9 @@ impl TextPass {
             region_capacity: INITIAL_CAPACITY,
             region_count: 0,
             region_scissor: None,
+            text_run_instances,
+            text_run_capacity: INITIAL_CAPACITY,
+            text_run_count: 0,
             underline_pipeline,
             underline_instances,
             underline_capacity: INITIAL_CAPACITY,
@@ -422,10 +435,18 @@ impl TextPass {
             });
         }
 
+        // Off-grid text runs are screen-anchored: no grid or region scroll
+        // offset is applied, so they sit at their declared position.
+        let text_run_instances = self.build_text_run_instances(device, queue, grid);
+
         self.count = plain_instances.len() as u32;
         self.region_count = region_instances.len() as u32;
         self.overlay_count = overlay_instances.len() as u32;
-        if plain_instances.is_empty() && region_instances.is_empty() && overlay_instances.is_empty()
+        self.text_run_count = text_run_instances.len() as u32;
+        if plain_instances.is_empty()
+            && region_instances.is_empty()
+            && overlay_instances.is_empty()
+            && text_run_instances.is_empty()
         {
             return;
         }
@@ -453,6 +474,14 @@ impl TextPass {
             &mut self.overlay_instances,
             &mut self.overlay_capacity,
             "overlay text instances",
+        );
+        upload_instances(
+            device,
+            queue,
+            &text_run_instances,
+            &mut self.text_run_instances,
+            &mut self.text_run_capacity,
+            "text run instances",
         );
 
         self.atlas_bind_group = create_atlas_bind_group(
@@ -488,7 +517,7 @@ impl TextPass {
                     glyph.col,
                     glyph.row,
                     info.placement,
-                    self.baseline * glyph.scale as f32,
+                    self.baseline * glyph.scale,
                     self.metrics,
                 ),
                 dim: [info.size[0] as f32, info.size[1] as f32],
@@ -497,6 +526,65 @@ impl TextPass {
                 bg: rgb_f32(glyph.bg),
                 kind: kind_flag(info.kind),
             });
+        }
+        instances
+    }
+
+    /// Build the glyph instances for the grid's off-grid text runs.
+    ///
+    /// Each run is shaped at its fractional scale and laid out by
+    /// [`text_run_origin`]: screen-anchored (no grid scroll), advancing one
+    /// scaled cell width per glyph, vertically centered in its row. A
+    /// non-positive scale draws nothing.
+    fn build_text_run_instances(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+    ) -> Vec<TextInstance> {
+        let mut instances = Vec::new();
+        for run in grid.text_runs() {
+            let scale = f32::from(run.scale) / 256.0;
+            if scale <= 0.0 {
+                continue;
+            }
+            let col = f32::from(run.col) / 16.0;
+            let row = f32::from(run.row) / 16.0;
+
+            for (index, ch) in run.text.chars().enumerate() {
+                if ch == ' ' {
+                    continue;
+                }
+                let Some(key) = self.glyph_key(ch, scale) else {
+                    continue;
+                };
+                let Some(info) = self.atlas.get_or_insert(
+                    device,
+                    queue,
+                    &mut self.font_system,
+                    &mut self.swash_cache,
+                    key,
+                ) else {
+                    continue;
+                };
+
+                instances.push(TextInstance {
+                    pos: text_run_origin(
+                        col,
+                        row,
+                        index,
+                        scale,
+                        info.placement,
+                        self.baseline,
+                        self.metrics,
+                    ),
+                    dim: [info.size[0] as f32, info.size[1] as f32],
+                    uv: info.uv,
+                    fg: rgb_f32(run.color),
+                    bg: rgb_f32(run.bg),
+                    kind: kind_flag(info.kind),
+                });
+            }
         }
         instances
     }
@@ -561,6 +649,23 @@ impl TextPass {
             render_pass.set_vertex_buffer(0, self.underline_instances.slice(..));
             render_pass.draw(0..6, 0..self.underline_count);
         }
+    }
+
+    /// Record the off-grid text-run glyph draw into `render_pass`.
+    ///
+    /// Reuses the glyph pipeline and atlas. The runs are screen-anchored, so no
+    /// scissor is set; run it after the grid text so the runs sit on top. A
+    /// no-op when no text run is present.
+    pub fn draw_text_runs(&self, render_pass: &mut RenderPass<'_>) {
+        if self.text_run_count == 0 {
+            return;
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.text_run_instances.slice(..));
+        render_pass.draw(0..6, 0..self.text_run_count);
     }
 
     /// Record the scroll-region glyph draw into `render_pass`, scissored to the
@@ -635,6 +740,7 @@ impl TextPass {
                 let Some(scale) = cell_glyph_scale(cell) else {
                     continue;
                 };
+                let scale = f32::from(scale);
 
                 let Some(key) = self.glyph_key(cell.ch, scale) else {
                     continue;
@@ -691,7 +797,7 @@ impl TextPass {
                     continue;
                 }
 
-                let Some(key) = self.glyph_key(ch, scale) else {
+                let Some(key) = self.glyph_key(ch, f32::from(scale)) else {
                     continue;
                 };
 
@@ -712,7 +818,7 @@ impl TextPass {
                         key,
                         fg: overlay.content_fg,
                         bg: overlay.fill,
-                        scale,
+                        scale: f32::from(scale),
                     });
                 }
             }
@@ -726,13 +832,14 @@ impl TextPass {
     /// The cached glyph cache key for `ch` at `scale`, shaping it on first use.
     /// `None` for a character that produces no glyph. The key is distinct per
     /// scale, so the atlas rasterizes each scale of a character separately.
-    fn glyph_key(&mut self, ch: char, scale: u8) -> Option<CacheKey> {
-        if let Some(key) = self.shape_cache.get(&(ch, scale)) {
+    fn glyph_key(&mut self, ch: char, scale: f32) -> Option<CacheKey> {
+        let cache_key = (ch, scale.to_bits());
+        if let Some(key) = self.shape_cache.get(&cache_key) {
             return *key;
         }
 
         let key = shape_char(&mut self.font_system, ch, scale, self.metrics);
-        self.shape_cache.insert((ch, scale), key);
+        self.shape_cache.insert(cache_key, key);
         key
     }
 }
@@ -745,8 +852,9 @@ struct PendingGlyph {
     key: CacheKey,
     fg: Rgb,
     bg: Rgb,
-    /// Integer multiple of the cell size this glyph is rasterized and drawn at.
-    scale: u8,
+    /// Multiple of the cell size this glyph is rasterized and drawn at. Integer
+    /// for cell and overlay glyphs; the text-run path uses fractional scales.
+    scale: f32,
 }
 
 /// One overlay's scissored slice of the shared overlay-content instance buffer.
@@ -894,10 +1002,10 @@ fn create_atlas_bind_group(
 fn shape_char(
     font_system: &mut FontSystem,
     ch: char,
-    scale: u8,
+    scale: f32,
     metrics: CellMetrics,
 ) -> Option<CacheKey> {
-    let size = scale as f32;
+    let size = scale;
     let mut buffer = CosmicBuffer::new(
         font_system,
         Metrics::new(metrics.font_size * size, metrics.height * size),
@@ -952,6 +1060,32 @@ fn glyph_origin(
 ) -> [f32; 2] {
     let pen_x = col as f32 * metrics.width;
     let baseline_y = row as f32 * metrics.height + baseline;
+    [
+        pen_x + placement[0] as f32,
+        baseline_y - placement[1] as f32,
+    ]
+}
+
+/// Screen position of glyph `index` in a fractional, vertically-centered text
+/// run, in physical pixels.
+///
+/// The run anchors at fractional cell (`col`, `row`) and advances one scaled
+/// cell width per glyph. Its scaled line is centered within the target row's
+/// height, so a run smaller than the grid sits aligned with full-size rows.
+/// `baseline` is the unscaled cell baseline; the run scales it. At `scale ==
+/// 1.0`, glyph 0 lands exactly where [`glyph_origin`] places the same cell.
+fn text_run_origin(
+    col: f32,
+    row: f32,
+    index: usize,
+    scale: f32,
+    placement: [i32; 2],
+    baseline: f32,
+    metrics: CellMetrics,
+) -> [f32; 2] {
+    let pen_x = (col + index as f32 * scale) * metrics.width;
+    let centered_top = row * metrics.height + (metrics.height - metrics.height * scale) / 2.0;
+    let baseline_y = centered_top + baseline * scale;
     [
         pen_x + placement[0] as f32,
         baseline_y - placement[1] as f32,
@@ -1081,7 +1215,7 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_origin,
-        overlay_content_cells, STYLE_DOTTED,
+        overlay_content_cells, text_run_origin, STYLE_DOTTED,
     };
     use crate::render::CellMetrics;
     use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
@@ -1106,6 +1240,37 @@ mod tests {
 
         let origin = glyph_origin(0, 0, [-2, -3], baseline, metrics);
         assert_eq!(origin, [-2.0, baseline + 3.0]);
+    }
+
+    #[test]
+    fn text_run_origin_matches_glyph_origin_at_unit_scale() {
+        let metrics = CellMetrics::from_font_size(30);
+        let baseline = 14.0;
+
+        // The first glyph of a unit-scale run lands exactly on the cell grid, so
+        // a run at scale 1 is indistinguishable from cell text.
+        assert_eq!(
+            text_run_origin(3.0, 2.0, 0, 1.0, [1, 10], baseline, metrics),
+            glyph_origin(3, 2, [1, 10], baseline, metrics)
+        );
+    }
+
+    #[test]
+    fn text_run_origin_scales_advance_and_centers_in_row() {
+        let metrics = CellMetrics::from_font_size(30);
+        let baseline = 14.0;
+
+        let origin = text_run_origin(0.0, 0.0, 2, 0.5, [0, 0], baseline, metrics);
+
+        // Two half-scale glyphs advance one cell, and the shorter line is
+        // centered within the full row's height above its scaled baseline.
+        assert_eq!(
+            origin,
+            [
+                metrics.width,
+                (metrics.height - metrics.height * 0.5) / 2.0 + baseline * 0.5
+            ]
+        );
     }
 
     #[test]

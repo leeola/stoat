@@ -169,6 +169,9 @@ impl Renderer {
             // The region draw leaves its scissor set, so restore the full
             // surface before the cursor and overlay draws that follow.
             render_pass.set_scissor_rect(0, 0, self.width, self.height);
+            // Off-grid text runs sit above the grid text but below floating
+            // popovers and icons, like a gutter beneath a tooltip.
+            self.text.draw_text_runs(&mut render_pass);
             self.background.draw_cursor(&mut render_pass);
             self.overlay.draw(&mut render_pass);
             self.text.draw_overlay_text(&mut render_pass);

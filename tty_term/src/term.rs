@@ -9,7 +9,7 @@
 use crate::{
     grid::{
         Border, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
-        ScrollRegion, UnderlineStyle,
+        ScrollRegion, TextRun, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -27,6 +27,7 @@ use alacritty_terminal::{
 use std::mem;
 use stoatty_protocol::command::{
     self, BorderCommand, Command, IconCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+    TextRunCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -69,6 +70,10 @@ pub struct Terminal {
     /// list by [`Self::project`]. Like popovers they accumulate and are
     /// grid-level rather than cell attributes.
     icons: Vec<IconCommand>,
+    /// Text runs set by `Gstoatty;text_run` frames, applied to the grid's
+    /// text-run list by [`Self::project`]. Off-grid components, accumulated and
+    /// grid-level like the icons.
+    text_runs: Vec<TextRunCommand>,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
@@ -118,6 +123,7 @@ impl Terminal {
             popovers: Vec::new(),
             scroll_region: None,
             icons: Vec::new(),
+            text_runs: Vec::new(),
             last_history: 0,
         }
     }
@@ -153,6 +159,7 @@ impl Terminal {
             Command::Popover(popover) => self.popovers.push(popover),
             Command::ScrollRegion(region) => self.scroll_region = Some(region),
             Command::Icon(icon) => self.icons.push(icon),
+            Command::TextRun(text_run) => self.text_runs.push(text_run),
         }
     }
 
@@ -212,6 +219,7 @@ impl Terminal {
         apply_popovers(grid, &self.popovers);
         apply_scroll_region(grid, self.scroll_region);
         apply_icons(grid, &self.icons);
+        apply_text_runs(grid, &self.text_runs);
 
         let history = self.term.history_size();
         let scrolled = history.saturating_sub(self.last_history);
@@ -613,6 +621,26 @@ fn grid_icon_kind(kind: command::IconKind) -> IconKind {
     }
 }
 
+/// Replace the grid's text-run list with each stored text-run command's run.
+///
+/// Grid-level like the overlays, so the full list is set each projection rather
+/// than stamped per cell. The renderer clamps an out-of-grid anchor, so wire
+/// coordinates need no guard here.
+fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand]) {
+    let text_runs = commands
+        .iter()
+        .map(|command| TextRun {
+            col: command.col,
+            row: command.row,
+            scale: command.scale,
+            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+            bg: Rgb::new(command.bg[0], command.bg[1], command.bg[2]),
+            text: command.text.clone(),
+        })
+        .collect();
+    grid.set_text_runs(text_runs);
+}
+
 fn popover_overlay(command: &PopoverCommand) -> Overlay {
     Overlay {
         top: command.top,
@@ -691,14 +719,15 @@ mod tests {
     use crate::{
         grid::{
             Border, BorderStyle, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
-            ScrollRegion, UnderlineStyle,
+            ScrollRegion, TextRun, UnderlineStyle,
         },
         theme::Theme,
     };
     use stoatty_protocol::command::{
         encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
-        BorderCommand, BorderStyle as ProtoBorderStyle, IconCommand, IconKind as ProtoIconKind,
-        PopoverCommand, ScaleCommand, ScrollRegionCommand,
+        encode_text_run, BorderCommand, BorderStyle as ProtoBorderStyle, IconCommand,
+        IconKind as ProtoIconKind, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+        TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -1090,6 +1119,35 @@ mod tests {
                 kind: IconKind::Warning,
                 color: Rgb::new(255, 200, 0),
                 size: 2,
+            }]
+        );
+    }
+
+    #[test]
+    fn text_run_apc_frame_sets_a_grid_text_run() {
+        let frame = encode_text_run(&TextRunCommand {
+            col: -8,
+            row: 48,
+            scale: 192,
+            color: [150, 160, 170],
+            bg: [24, 26, 32],
+            text: "42".to_owned(),
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.text_runs(),
+            [TextRun {
+                col: -8,
+                row: 48,
+                scale: 192,
+                color: Rgb::new(150, 160, 170),
+                bg: Rgb::new(24, 26, 32),
+                text: "42".to_owned(),
             }]
         );
     }

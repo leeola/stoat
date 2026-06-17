@@ -8,7 +8,9 @@
 //! skipping when no GPU adapter is present so GPU-less CI stays green.
 
 use stoatty_render::gpu::{headless_device, Renderer, Scroll};
-use stoatty_term::grid::{Border, BorderStyle, Grid, Icon, IconKind, Overlay, Rgb, ScrollRegion};
+use stoatty_term::grid::{
+    Border, BorderStyle, Grid, Icon, IconKind, Overlay, Rgb, ScrollRegion, TextRun,
+};
 use wgpu::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     TextureViewDescriptor,
@@ -124,6 +126,17 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             size: 2,
         },
     ]);
+
+    // A fractional, vertically-centered text run, so the text-run glyph stream
+    // shapes at a sub-cell scale and draws against the real device.
+    grid.set_text_runs(vec![TextRun {
+        col: 0,
+        row: 48,
+        scale: 192,
+        color: Rgb::new(150, 160, 170),
+        bg: Rgb::new(0, 0, 0),
+        text: "127".to_owned(),
+    }]);
 
     // A validation error in pipeline creation (Renderer::new) or in encoding and
     // submitting the draw (render_into) triggers wgpu's default uncaptured-error

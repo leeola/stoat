@@ -20,6 +20,7 @@ pub enum Command {
     Popover(PopoverCommand),
     ScrollRegion(ScrollRegionCommand),
     Icon(IconCommand),
+    TextRun(TextRunCommand),
 }
 
 /// Frame a rectangular cell region with a border.
@@ -132,6 +133,29 @@ pub enum IconKind {
     Info,
 }
 
+/// Draw a run of text at a fractional scale, vertically centered on a cell row.
+///
+/// A non-cell component primitive: the run is drawn off the cell grid, so it can
+/// be smaller than the grid (a gutter line number) yet still line up with
+/// full-size rows. `col` and `row` are the anchor in **sixteenths of a cell**
+/// (16 = one cell), so the run can sit at a fractional position; `scale` is the
+/// glyph size in **256ths of the cell size** (256 = grid size), so it can be
+/// fractional. The run advances one scaled cell width per character and is
+/// vertically centered within the target row.
+///
+/// `bg` is the background the run composites over: the renderer paints each
+/// glyph's box opaquely, so for the run to blend cleanly `bg` must match the
+/// color already beneath it (a gutter passes the editor's background).
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct TextRunCommand {
+    pub col: i16,
+    pub row: i16,
+    pub scale: u16,
+    pub color: [u8; 3],
+    pub bg: [u8; 3],
+    pub text: String,
+}
+
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
 ///
 /// `None` covers both a malformed frame and a well-formed one whose
@@ -225,6 +249,25 @@ pub fn encode_icon(command: &IconCommand) -> Vec<u8> {
     })
 }
 
+/// Encode a [`TextRunCommand`] as a full `Gstoatty;text_run` frame for an
+/// emitter.
+///
+/// The position, scale, color, and background ride in a fixed 12-byte first
+/// argument; the variable run text is a second argument.
+pub fn encode_text_run(command: &TextRunCommand) -> Vec<u8> {
+    let mut head = Vec::with_capacity(12);
+    head.extend_from_slice(&command.col.to_be_bytes());
+    head.extend_from_slice(&command.row.to_be_bytes());
+    head.extend_from_slice(&command.scale.to_be_bytes());
+    head.extend_from_slice(&command.color);
+    head.extend_from_slice(&command.bg);
+
+    frame::encode(&Frame {
+        sub: "text_run".to_owned(),
+        args: vec![head, command.text.as_bytes().to_vec()],
+    })
+}
+
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
@@ -236,6 +279,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "popover" => decode_popover(&frame.args).map(Command::Popover),
         "scroll_region" => decode_scroll_region(&frame.args).map(Command::ScrollRegion),
         "icon" => decode_icon(&frame.args).map(Command::Icon),
+        "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
         _ => None,
     }
 }
@@ -308,6 +352,20 @@ fn decode_icon(args: &[Vec<u8>]) -> Option<IconCommand> {
     })
 }
 
+fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
+    let head: &[u8; 12] = args.first()?.as_slice().try_into().ok()?;
+    let text = std::str::from_utf8(args.get(1)?).ok()?.to_owned();
+
+    Some(TextRunCommand {
+        col: i16::from_be_bytes([head[0], head[1]]),
+        row: i16::from_be_bytes([head[2], head[3]]),
+        scale: u16::from_be_bytes([head[4], head[5]]),
+        color: [head[6], head[7], head[8]],
+        bg: [head[9], head[10], head[11]],
+        text,
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -348,8 +406,8 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
-        BorderCommand, BorderStyle, Command, IconCommand, IconKind, PopoverCommand, ScaleCommand,
-        ScrollRegionCommand,
+        encode_text_run, BorderCommand, BorderStyle, Command, IconCommand, IconKind,
+        PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -479,6 +537,29 @@ mod tests {
     fn rejects_wrong_length_icon_payload() {
         // The single arg here decodes to 3 bytes, not the 9 an icon needs.
         assert!(decode(b"Gstoatty;icon;YWJj").is_none());
+    }
+
+    #[test]
+    fn text_run_round_trips() {
+        let command = TextRunCommand {
+            col: -6,
+            row: 80,
+            scale: 192,
+            color: [180, 190, 200],
+            bg: [24, 26, 32],
+            text: "127".to_owned(),
+        };
+
+        assert_eq!(
+            decode(&encode_text_run(&command)),
+            Some(Command::TextRun(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_text_run_payload() {
+        // The first arg here decodes to 3 bytes, not the 9 a text run needs.
+        assert!(decode(b"Gstoatty;text_run;YWJj").is_none());
     }
 
     #[test]
