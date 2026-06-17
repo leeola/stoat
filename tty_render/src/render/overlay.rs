@@ -31,8 +31,13 @@ const SHADOW_MARGIN: f32 = 16.0;
 /// overlay reads as floating above the grid rather than pasted onto it.
 const SHADOW_OFFSET: [f32; 2] = [5.0, 7.0];
 
-/// Per-overlay instance: the anchor cell, the size in cells, the two colors,
-/// and the drop-shadow displacement and blur radius.
+/// Corner radius in physical pixels for the rounded box, so a popover reads like
+/// an IDE tooltip rather than a sharp block. The shader clamps it to the box's
+/// half-extent, so a small box rounds proportionally.
+const CORNER_RADIUS: f32 = 6.0;
+
+/// Per-overlay instance: the anchor cell, the size in cells, the two colors, the
+/// drop-shadow displacement and blur radius, and the corner radius.
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct OverlayInstance {
@@ -42,6 +47,7 @@ struct OverlayInstance {
     border: [f32; 3],
     shadow_offset: [f32; 2],
     shadow_margin: f32,
+    corner_radius: f32,
 }
 
 /// Uniform shared by every instance: the surface resolution and cell size the
@@ -109,6 +115,7 @@ impl OverlayPass {
                         3 => Float32x3,
                         4 => Float32x2,
                         5 => Float32,
+                        6 => Float32,
                     ],
                 }],
             },
@@ -224,6 +231,7 @@ fn build_overlay_instances(overlays: &[Overlay]) -> Vec<OverlayInstance> {
             border: rgb_f32(overlay.border),
             shadow_offset: SHADOW_OFFSET,
             shadow_margin: SHADOW_MARGIN,
+            corner_radius: CORNER_RADIUS,
         })
         .collect()
 }
@@ -277,5 +285,6 @@ mod tests {
         assert_eq!(instances[0].border, [0.0, 1.0, 0.0]);
         assert_eq!(instances[0].shadow_offset, super::SHADOW_OFFSET);
         assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN);
+        assert_eq!(instances[0].corner_radius, super::CORNER_RADIUS);
     }
 }
