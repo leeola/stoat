@@ -87,6 +87,12 @@ struct State {
     /// The cursor's animated position in fractional cell coordinates, eased
     /// toward the terminal's actual cursor cell each frame.
     cursor_anim: [f32; 2],
+    /// The popover content's eased vertical scroll offset, in rows. Ping-pongs
+    /// between the top and the overflow bottom while a popover overflows its box.
+    popover_scroll: f32,
+    /// Ping-pong direction: true while the scroll eases down toward the overflow
+    /// bottom, false while easing back up to the top.
+    popover_scroll_down: bool,
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -134,6 +140,8 @@ impl ApplicationHandler<PtyEvent> for App {
             grid,
             pty,
             cursor_anim: [0.0, 0.0],
+            popover_scroll: 0.0,
+            popover_scroll_down: true,
         });
     }
 
@@ -170,22 +178,42 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::RedrawRequested => {
                 let cursor = state.terminal.project(&mut state.grid);
 
-                let animating = match cursor_position(cursor) {
-                    Some(target) => {
-                        let (next, settled) = ease(state.cursor_anim, target);
-                        state.cursor_anim = next;
-                        state.gpu.render(&state.grid, Some(next), 0.0);
-                        !settled
+                let scrolling = match popover_overflow(&state.grid) {
+                    Some(max) => {
+                        let (next, down) = step_popover_scroll(
+                            state.popover_scroll,
+                            state.popover_scroll_down,
+                            max,
+                        );
+                        state.popover_scroll = next;
+                        state.popover_scroll_down = down;
+                        true
                     },
                     None => {
-                        state.gpu.render(&state.grid, None, 0.0);
+                        state.popover_scroll = 0.0;
                         false
                     },
                 };
 
-                // Keep the vsync-paced loop running while the cursor eases; when
-                // it settles the loop idles until the next PTY output or resize.
-                if animating {
+                let cursor_easing = match cursor_position(cursor) {
+                    Some(target) => {
+                        let (next, settled) = ease(state.cursor_anim, target);
+                        state.cursor_anim = next;
+                        state
+                            .gpu
+                            .render(&state.grid, Some(next), state.popover_scroll);
+                        !settled
+                    },
+                    None => {
+                        state.gpu.render(&state.grid, None, state.popover_scroll);
+                        false
+                    },
+                };
+
+                // Keep the vsync-paced loop running while the cursor eases or a
+                // popover scrolls; when both settle the loop idles until the next
+                // PTY output or resize.
+                if cursor_easing || scrolling {
                     state.window.request_redraw();
                 }
             },
@@ -222,9 +250,37 @@ fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
     ([current[0] + dx * FACTOR, current[1] + dy * FACTOR], false)
 }
 
+/// The single popover's overflow height in rows, or `None` when there is not
+/// exactly one popover or it fits its box.
+///
+/// This is how far the content can scroll: the line count beyond the box height.
+fn popover_overflow(grid: &Grid) -> Option<f32> {
+    let [overlay] = grid.overlays() else {
+        return None;
+    };
+
+    let lines = overlay.content.lines().count();
+    let height = overlay.height as usize;
+    (lines > height).then(|| (lines - height) as f32)
+}
+
+/// Advance the ping-pong popover scroll one frame toward its current end,
+/// reversing direction when it settles.
+///
+/// `down` eases the offset toward `max` (the overflow bottom); once settled it
+/// flips, easing back toward the top, so the content glides up and down while
+/// the popover is visible.
+fn step_popover_scroll(scroll: f32, down: bool, max: f32) -> (f32, bool) {
+    let target = if down { max } else { 0.0 };
+    let (next, settled) = ease([scroll, 0.0], [target, 0.0]);
+    let down = if settled { !down } else { down };
+    (next[0], down)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::ease;
+    use super::{ease, popover_overflow, step_popover_scroll};
+    use stoatty_term::grid::{Grid, Overlay, Rgb};
 
     #[test]
     fn ease_steps_toward_then_settles() {
@@ -235,5 +291,50 @@ mod tests {
         let (next, settled) = ease([3.999, 2.0], [4.0, 2.0]);
         assert_eq!(next, [4.0, 2.0]);
         assert!(settled);
+    }
+
+    fn popover(height: u16, content: &str) -> Overlay {
+        Overlay {
+            top: 0,
+            left: 0,
+            width: 4,
+            height,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(0, 0, 0),
+            content: content.to_owned(),
+        }
+    }
+
+    #[test]
+    fn popover_overflow_reports_rows_past_the_box() {
+        let mut grid = Grid::new(10, 10);
+
+        grid.set_overlays(vec![popover(2, "a\nb\nc\nd")]);
+        assert_eq!(popover_overflow(&grid), Some(2.0));
+
+        grid.set_overlays(vec![popover(4, "a\nb")]);
+        assert_eq!(popover_overflow(&grid), None, "fits the box");
+
+        grid.set_overlays(vec![popover(2, "x"), popover(2, "y")]);
+        assert_eq!(popover_overflow(&grid), None, "not a single popover");
+
+        grid.set_overlays(vec![]);
+        assert_eq!(popover_overflow(&grid), None, "no popover");
+    }
+
+    #[test]
+    fn popover_scroll_ping_pongs_between_ends() {
+        let (next, down) = step_popover_scroll(0.0, true, 2.0);
+        assert!(next > 0.0 && next < 2.0, "eases down from the top");
+        assert!(down);
+
+        let (next, down) = step_popover_scroll(1.999, true, 2.0);
+        assert_eq!(next, 2.0, "snaps onto the bottom");
+        assert!(!down, "reverses at the bottom");
+
+        let (next, down) = step_popover_scroll(0.001, false, 2.0);
+        assert_eq!(next, 0.0, "snaps onto the top");
+        assert!(down, "reverses at the top");
     }
 }
