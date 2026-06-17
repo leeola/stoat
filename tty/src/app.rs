@@ -372,11 +372,13 @@ fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
 /// A popover's content overflow height in rows, or `None` when its content fits
 /// its box.
 ///
-/// This is how far the content can scroll: the line count beyond the box height.
+/// This is how far the content can scroll. Content draws one line per `scale`
+/// rows, so it occupies `lines * scale` rows; the overflow is that height beyond
+/// the box, in rows, which the scroll offset is also measured in.
 fn popover_overflow(overlay: &Overlay) -> Option<f32> {
-    let lines = overlay.content.lines().count();
+    let content_rows = overlay.content.lines().count() * overlay.scale.max(1) as usize;
     let height = overlay.height as usize;
-    (lines > height).then(|| (lines - height) as f32)
+    (content_rows > height).then(|| (content_rows - height) as f32)
 }
 
 /// Advance the ping-pong popover scroll one frame toward its current end,
@@ -436,7 +438,7 @@ mod tests {
         assert!(settled);
     }
 
-    fn popover(height: u16, content: &str) -> Overlay {
+    fn popover(height: u16, scale: u8, content: &str) -> Overlay {
         Overlay {
             top: 0,
             left: 0,
@@ -445,7 +447,7 @@ mod tests {
             fill: Rgb::new(0, 0, 0),
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(0, 0, 0),
-            scale: 1,
+            scale,
             offset: [0, 0],
             content: content.to_owned(),
         }
@@ -454,15 +456,35 @@ mod tests {
     #[test]
     fn popover_overflow_reports_rows_past_the_box() {
         assert_eq!(
-            popover_overflow(&popover(2, "a\nb\nc\nd")),
+            popover_overflow(&popover(2, 1, "a\nb\nc\nd")),
             Some(2.0),
             "two lines past the box"
         );
-        assert_eq!(popover_overflow(&popover(4, "a\nb")), None, "fits the box");
         assert_eq!(
-            popover_overflow(&popover(2, "a\nb")),
+            popover_overflow(&popover(4, 1, "a\nb")),
+            None,
+            "fits the box"
+        );
+        assert_eq!(
+            popover_overflow(&popover(2, 1, "a\nb")),
             None,
             "exactly fills the box"
+        );
+    }
+
+    #[test]
+    fn popover_overflow_accounts_for_content_scale() {
+        // At scale 2 each line is two rows tall, so three lines span six rows
+        // and overflow a four-row box by two even though the line count fits it.
+        assert_eq!(
+            popover_overflow(&popover(4, 2, "a\nb\nc")),
+            Some(2.0),
+            "scaled content overflows the box"
+        );
+        assert_eq!(
+            popover_overflow(&popover(6, 2, "a\nb\nc")),
+            None,
+            "scaled content exactly fills the box"
         );
     }
 
