@@ -380,6 +380,7 @@ impl TextPass {
                 region.left,
                 region.width,
                 region.height,
+                [0.0, 0.0],
                 resolution,
                 self.metrics,
             )
@@ -395,9 +396,13 @@ impl TextPass {
             let start = overlay_instances.len() as u32;
             let mut group_instances = self.build_text_instances(device, queue, group);
 
+            // The sub-cell pixel offset shifts the content with the box, and the
+            // scroll offset slides it within the box.
+            let anchor = [overlay.offset[0] as f32, overlay.offset[1] as f32];
             let scroll_px = scroll.popovers.get(index).copied().unwrap_or(0.0) * metrics.height;
             for instance in &mut group_instances {
-                instance.pos[1] -= scroll_px;
+                instance.pos[0] += anchor[0];
+                instance.pos[1] += anchor[1] - scroll_px;
             }
 
             let count = group_instances.len() as u32;
@@ -410,6 +415,7 @@ impl TextPass {
                     overlay.left,
                     overlay.width,
                     overlay.height,
+                    anchor,
                     resolution,
                     metrics,
                 ),
@@ -1023,14 +1029,15 @@ fn cell_rect_scissor(
     left: u16,
     width: u16,
     height: u16,
+    offset: [f32; 2],
     resolution: [f32; 2],
     metrics: CellMetrics,
 ) -> Option<[u32; 4]> {
     let res_w = resolution[0] as u32;
     let res_h = resolution[1] as u32;
 
-    let x = ((left as f32 * metrics.width) as u32).min(res_w);
-    let y = ((top as f32 * metrics.height) as u32).min(res_h);
+    let x = ((left as f32 * metrics.width + offset[0]).max(0.0) as u32).min(res_w);
+    let y = ((top as f32 * metrics.height + offset[1]).max(0.0) as u32).min(res_h);
     let w = ((width as f32 * metrics.width) as u32).min(res_w - x);
     let h = ((height as f32 * metrics.height) as u32).min(res_h - y);
 
@@ -1145,6 +1152,7 @@ mod tests {
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(255, 255, 255),
             scale: 1,
+            offset: [0, 0],
             content: "Hello".to_owned(),
         };
 
@@ -1165,6 +1173,7 @@ mod tests {
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(255, 255, 255),
             scale: 2,
+            offset: [0, 0],
             content: "abcd\nef".to_owned(),
         };
 
@@ -1193,6 +1202,7 @@ mod tests {
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(255, 255, 255),
             scale: 1,
+            offset: [0, 0],
             content: "abcd\nef\nXY".to_owned(),
         };
 
@@ -1218,7 +1228,7 @@ mod tests {
         let resolution = [metrics.width * 10.0, metrics.height * 5.0];
 
         assert_eq!(
-            cell_rect_scissor(1, 2, 3, 2, resolution, metrics),
+            cell_rect_scissor(1, 2, 3, 2, [0.0, 0.0], resolution, metrics),
             Some([
                 (2.0 * metrics.width) as u32,
                 metrics.height as u32,
@@ -1228,12 +1238,23 @@ mod tests {
             "a rectangle inside the surface maps cells to pixels directly"
         );
 
-        let [x, y, w, h] = cell_rect_scissor(4, 8, 6, 4, resolution, metrics).unwrap();
+        assert_eq!(
+            cell_rect_scissor(1, 2, 3, 2, [4.0, -metrics.height], resolution, metrics),
+            Some([
+                (2.0 * metrics.width) as u32 + 4,
+                0,
+                (3.0 * metrics.width) as u32,
+                (2.0 * metrics.height) as u32,
+            ]),
+            "the offset shifts the rect and clamps a negative origin to zero"
+        );
+
+        let [x, y, w, h] = cell_rect_scissor(4, 8, 6, 4, [0.0, 0.0], resolution, metrics).unwrap();
         assert_eq!(x + w, resolution[0] as u32, "width clamps to the surface");
         assert_eq!(y + h, resolution[1] as u32, "height clamps to the surface");
 
         assert_eq!(
-            cell_rect_scissor(5, 0, 2, 2, resolution, metrics),
+            cell_rect_scissor(5, 0, 2, 2, [0.0, 0.0], resolution, metrics),
             None,
             "an anchor at the bottom edge has no area"
         );

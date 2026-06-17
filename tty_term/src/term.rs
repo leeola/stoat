@@ -627,6 +627,7 @@ fn popover_overlay(command: &PopoverCommand) -> Overlay {
             command.content_fg[2],
         ),
         scale: command.scale,
+        offset: command.offset,
         content: command.content.clone(),
     }
 }
@@ -1040,6 +1041,7 @@ mod tests {
             border: [40, 50, 60],
             content_fg: [70, 80, 90],
             scale: 2,
+            offset: [4, -2],
             content: "ok".to_owned(),
         });
 
@@ -1059,6 +1061,7 @@ mod tests {
                 border: Rgb::new(40, 50, 60),
                 content_fg: Rgb::new(70, 80, 90),
                 scale: 2,
+                offset: [4, -2],
                 content: "ok".to_owned(),
             }]
         );

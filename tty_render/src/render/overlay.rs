@@ -48,6 +48,7 @@ struct OverlayInstance {
     shadow_offset: [f32; 2],
     shadow_margin: f32,
     corner_radius: f32,
+    anchor_offset: [f32; 2],
 }
 
 /// Uniform shared by every instance: the surface resolution and cell size the
@@ -116,6 +117,7 @@ impl OverlayPass {
                         4 => Float32x2,
                         5 => Float32,
                         6 => Float32,
+                        7 => Float32x2,
                     ],
                 }],
             },
@@ -232,6 +234,7 @@ fn build_overlay_instances(overlays: &[Overlay]) -> Vec<OverlayInstance> {
             shadow_offset: SHADOW_OFFSET,
             shadow_margin: SHADOW_MARGIN,
             corner_radius: CORNER_RADIUS,
+            anchor_offset: [overlay.offset[0] as f32, overlay.offset[1] as f32],
         })
         .collect()
 }
@@ -273,6 +276,7 @@ mod tests {
             border: Rgb::new(0, 255, 0),
             content_fg: Rgb::new(0, 0, 255),
             scale: 1,
+            offset: [-4, 6],
             content: "x".to_owned(),
         }];
 
@@ -286,5 +290,6 @@ mod tests {
         assert_eq!(instances[0].shadow_offset, super::SHADOW_OFFSET);
         assert_eq!(instances[0].shadow_margin, super::SHADOW_MARGIN);
         assert_eq!(instances[0].corner_radius, super::CORNER_RADIUS);
+        assert_eq!(instances[0].anchor_offset, [-4.0, 6.0]);
     }
 }

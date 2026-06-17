@@ -41,6 +41,7 @@ fn vs_main(
     @location(4) shadow_offset: vec2<f32>,
     @location(5) shadow_margin: f32,
     @location(6) corner_radius: f32,
+    @location(7) anchor_offset: vec2<f32>,
 ) -> VsOut {
     var corners = array<vec2<f32>, 6>(
         vec2<f32>(0.0, 0.0),
@@ -52,7 +53,7 @@ fn vs_main(
     );
     let corner = corners[vertex_index];
 
-    let box_min_px = cell_pos * globals.cell_size;
+    let box_min_px = cell_pos * globals.cell_size + anchor_offset;
     let box_size_px = size * globals.cell_size;
 
     // Expand the quad so the offset, blurred shadow is fully contained on every

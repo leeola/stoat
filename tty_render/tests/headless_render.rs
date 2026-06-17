@@ -72,6 +72,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             border: Rgb::new(200, 200, 255),
             content_fg: Rgb::new(255, 255, 255),
             scale: 2,
+            offset: [0, 0],
             content: "ok".to_owned(),
         },
         Overlay {
@@ -83,6 +84,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
             border: Rgb::new(255, 200, 200),
             content_fg: Rgb::new(255, 255, 255),
             scale: 1,
+            offset: [3, -5],
             content: "aa\nbb\ncc\ndd".to_owned(),
         },
     ]);

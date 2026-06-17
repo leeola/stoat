@@ -276,6 +276,10 @@ pub struct Overlay {
     /// popover can render larger or smaller than the grid. The box itself stays
     /// at the cell size; only the content scales.
     pub scale: u8,
+    /// Signed `[x, y]` pixel offset from the anchor cell, so the popover can sit
+    /// at a sub-cell position. The box, its shadow, its content, and the content
+    /// clip all shift by this offset.
+    pub offset: [i16; 2],
     pub content: String,
 }
 
@@ -490,6 +494,7 @@ mod tests {
             border: Rgb::new(40, 50, 60),
             content_fg: Rgb::new(70, 80, 90),
             scale: 1,
+            offset: [0, 0],
             content: "hi".to_owned(),
         };
         grid.set_overlays(vec![overlay.clone()]);

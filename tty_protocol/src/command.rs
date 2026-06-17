@@ -86,6 +86,10 @@ pub struct PopoverCommand {
     /// tooltip can render larger or smaller than the grid. A scale of 1 matches
     /// the grid metrics.
     pub scale: u8,
+    /// Signed `[x, y]` pixel offset from the anchor cell, so a tooltip can sit
+    /// exactly under a span rather than snapping to the cell grid. The box, its
+    /// shadow, its content, and the content clip all shift by this offset.
+    pub offset: [i16; 2],
     pub content: String,
 }
 
@@ -172,7 +176,7 @@ pub fn encode_scale(command: &ScaleCommand) -> Vec<u8> {
 /// The region, colors, and scale ride in a fixed 18-byte first argument; the
 /// variable content text is a second argument.
 pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
-    let mut region = Vec::with_capacity(18);
+    let mut region = Vec::with_capacity(22);
     region.extend_from_slice(&command.top.to_be_bytes());
     region.extend_from_slice(&command.left.to_be_bytes());
     region.extend_from_slice(&command.width.to_be_bytes());
@@ -181,6 +185,8 @@ pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
     region.extend_from_slice(&command.border);
     region.extend_from_slice(&command.content_fg);
     region.push(command.scale);
+    region.extend_from_slice(&command.offset[0].to_be_bytes());
+    region.extend_from_slice(&command.offset[1].to_be_bytes());
 
     frame::encode(&Frame {
         sub: "popover".to_owned(),
@@ -258,7 +264,7 @@ fn decode_scale(args: &[Vec<u8>]) -> Option<ScaleCommand> {
 }
 
 fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
-    let region: &[u8; 18] = args.first()?.as_slice().try_into().ok()?;
+    let region: &[u8; 22] = args.first()?.as_slice().try_into().ok()?;
     let content = std::str::from_utf8(args.get(1)?).ok()?.to_owned();
 
     Some(PopoverCommand {
@@ -270,6 +276,10 @@ fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
         border: [region[11], region[12], region[13]],
         content_fg: [region[14], region[15], region[16]],
         scale: region[17],
+        offset: [
+            i16::from_be_bytes([region[18], region[19]]),
+            i16::from_be_bytes([region[20], region[21]]),
+        ],
         content,
     })
 }
@@ -413,6 +423,7 @@ mod tests {
             border: [200, 200, 255],
             content_fg: [255, 255, 255],
             scale: 2,
+            offset: [-3, 5],
             content: "items".to_owned(),
         };
 
@@ -424,7 +435,7 @@ mod tests {
 
     #[test]
     fn rejects_wrong_length_popover_payload() {
-        // The first arg here decodes to 3 bytes, not the 18 a popover region
+        // The first arg here decodes to 3 bytes, not the 22 a popover region
         // needs, and the content arg is absent.
         assert!(decode(b"Gstoatty;popover;YWJj").is_none());
     }

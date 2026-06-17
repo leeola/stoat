@@ -443,6 +443,7 @@ mod tests {
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(0, 0, 0),
             scale: 1,
+            offset: [0, 0],
             content: content.to_owned(),
         }
     }
