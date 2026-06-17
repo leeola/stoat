@@ -182,6 +182,16 @@ pub fn load() -> Result<Config, ConfigError> {
     settle(DEFAULT_CONFIG, read_user_config()?.as_deref())
 }
 
+/// The embedded default configuration, with no user overrides applied.
+///
+/// The fallback when [`load`] fails. It carries the shipped defaults, a font
+/// size of 30 and the `zed` theme, rather than zeroed fields, so a window opened
+/// after a bad user config still renders with the intended look. The embedded
+/// default ships with the binary and is trusted, so a malformed one panics.
+pub fn embedded_default() -> Config {
+    settle(DEFAULT_CONFIG, None).expect("embedded default config settles")
+}
+
 /// The user config path, `<XDG_CONFIG_HOME>/stoatty/config.toml`, or `None`
 /// when the XDG base directories cannot be resolved.
 fn user_config_path() -> Option<PathBuf> {
@@ -250,12 +260,19 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_tables, settle, DEFAULT_CONFIG};
+    use super::{embedded_default, merge_tables, settle, DEFAULT_CONFIG};
     use stoatty_term::grid::Rgb;
 
     #[test]
     fn embedded_default_sets_the_doubled_font_size() {
         assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().font_size, 30);
+    }
+
+    #[test]
+    fn embedded_default_carries_the_shipped_config() {
+        let config = embedded_default();
+        assert_eq!(config.font_size, 30);
+        assert_eq!(config.theme, "zed");
     }
 
     #[test]

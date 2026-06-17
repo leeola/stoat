@@ -44,7 +44,10 @@ pub fn run() {
 /// idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
 /// output arrives or the window is resized, not on a continuous timer.
 pub fn run_with_shell(shell: String) {
-    let config = config::load().expect("load config");
+    let config = config::load().unwrap_or_else(|error| {
+        eprintln!("stoatty: could not load config, using built-in defaults: {error}");
+        config::embedded_default()
+    });
     let theme = config.resolve_theme();
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
