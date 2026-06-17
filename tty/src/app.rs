@@ -19,10 +19,15 @@ use stoatty_term::{
 };
 use winit::{
     application::ApplicationHandler,
-    event::WindowEvent,
+    event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
+    keyboard::{Key, ModifiersState},
     window::{Window, WindowId},
 };
+
+/// Smallest font size the live zoom allows, so cells never collapse to an
+/// unreadable size.
+const FONT_SIZE_FLOOR: u32 = 6;
 
 /// Open the stoatty window running the user's default shell.
 ///
@@ -87,6 +92,12 @@ struct State {
     terminal: Terminal,
     grid: Grid,
     pty: Pty,
+    /// The live font size in pixels, seeded from the config and stepped by the
+    /// platform zoom combo. Drives the renderer's cell metrics on each change.
+    font_size: u32,
+    /// The most recent modifier state, tracked from `ModifiersChanged` so a key
+    /// press can tell whether the platform zoom modifier is held.
+    modifiers: ModifiersState,
     /// The cursor's animated position in fractional cell coordinates, eased
     /// toward the terminal's actual cursor cell each frame.
     cursor_anim: [f32; 2],
@@ -146,6 +157,8 @@ impl ApplicationHandler<PtyEvent> for App {
             terminal,
             grid,
             pty,
+            font_size: self.font_size,
+            modifiers: ModifiersState::empty(),
             cursor_anim: [0.0, 0.0],
             popover_scroll: 0.0,
             popover_scroll_down: true,
@@ -241,6 +254,36 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.window.request_redraw();
                 }
             },
+            WindowEvent::ModifiersChanged(modifiers) => {
+                state.modifiers = modifiers.state();
+            },
+            WindowEvent::KeyboardInput { event, .. } => {
+                if event.state != ElementState::Pressed {
+                    return;
+                }
+
+                let platform_mod_held = if cfg!(target_os = "macos") {
+                    state.modifiers.super_key()
+                } else {
+                    state.modifiers.control_key()
+                };
+
+                let Some(delta) = font_step(platform_mod_held, &event.logical_key) else {
+                    return;
+                };
+
+                let font_size = (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
+                state.font_size = font_size;
+                state.gpu.set_font_size(font_size);
+
+                // The surface is unchanged, so skip `gpu.resize`; only the cell
+                // metrics moved, so re-read the grid size and resize the rest.
+                let (rows, cols) = state.gpu.grid_size();
+                state.terminal.resize(rows, cols);
+                let _ = state.pty.resize(rows as u16, cols as u16);
+
+                state.window.request_redraw();
+            },
             _ => {},
         }
     }
@@ -252,6 +295,24 @@ fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
         None
     } else {
         Some([cursor.col as f32, cursor.row as f32])
+    }
+}
+
+/// The font-size step a key press maps to, or `None` when it is not the
+/// platform zoom combo.
+///
+/// `platform_mod_held` is whether the platform zoom modifier (Cmd on macOS,
+/// Ctrl elsewhere) is held; the caller resolves which physical modifier that
+/// is. With it held, `+` steps up by one and `-` steps down by one.
+fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
+    if !platform_mod_held {
+        return None;
+    }
+
+    match key {
+        Key::Character(s) if s.as_str() == "+" => Some(1),
+        Key::Character(s) if s.as_str() == "-" => Some(-1),
+        _ => None,
     }
 }
 
@@ -314,8 +375,9 @@ fn step_grid_scroll(scroll: f32, delta: usize) -> (f32, bool) {
 
 #[cfg(test)]
 mod tests {
-    use super::{ease, popover_overflow, step_grid_scroll, step_popover_scroll};
+    use super::{ease, font_step, popover_overflow, step_grid_scroll, step_popover_scroll};
     use stoatty_term::grid::{Grid, Overlay, Rgb};
+    use winit::keyboard::Key;
 
     #[test]
     fn ease_steps_toward_then_settles() {
@@ -371,6 +433,22 @@ mod tests {
         let (next, down) = step_popover_scroll(0.001, false, 2.0);
         assert_eq!(next, 0.0, "snaps onto the top");
         assert!(down, "reverses at the top");
+    }
+
+    #[test]
+    fn font_step_maps_the_platform_zoom_combo() {
+        assert_eq!(font_step(true, &Key::Character("+".into())), Some(1));
+        assert_eq!(font_step(true, &Key::Character("-".into())), Some(-1));
+        assert_eq!(
+            font_step(false, &Key::Character("+".into())),
+            None,
+            "no platform modifier held"
+        );
+        assert_eq!(
+            font_step(true, &Key::Character("a".into())),
+            None,
+            "unrelated key"
+        );
     }
 
     #[test]
