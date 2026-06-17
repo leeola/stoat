@@ -55,6 +55,9 @@ pub struct Terminal {
     /// overlay list by [`Self::project`]. They float above the cells, so they
     /// are grid-level overlays rather than cell attributes.
     popovers: Vec<PopoverCommand>,
+    /// Scrollback line count at the previous [`Self::project`], so the next one
+    /// can report how many rows the content scrolled since.
+    last_history: usize,
 }
 
 /// Where the cursor sits and how it is drawn, as of the last [`Terminal::project`].
@@ -99,6 +102,7 @@ impl Terminal {
             borders: Vec::new(),
             scales: Vec::new(),
             popovers: Vec::new(),
+            last_history: 0,
         }
     }
 
@@ -142,13 +146,19 @@ impl Terminal {
         self.term.resize(GridSize { rows, cols });
     }
 
-    /// Copy the parsed screen onto `grid` and return the cursor.
+    /// Copy the parsed screen onto `grid` and return the cursor and the number
+    /// of rows the content scrolled since the previous call.
     ///
     /// Only lines the terminal reports as damaged since the previous call are
     /// rewritten, so an unchanged line keeps whatever the prior projection left
     /// in `grid`. When `grid`'s dimensions do not match the terminal it is first
     /// resized, which clears it, and every line is treated as damaged.
-    pub fn project(&mut self, grid: &mut Grid) -> Cursor {
+    ///
+    /// The scroll delta is the growth in scrollback since the previous call: the
+    /// rows live output pushed off the top. It is the renderer's signal to ease
+    /// vertical scrolling. User scrollback is not counted, and it saturates to
+    /// zero once the scrollback history fills.
+    pub fn project(&mut self, grid: &mut Grid) -> (Cursor, usize) {
         let rows = self.term.screen_lines();
         let cols = self.term.columns();
 
@@ -183,8 +193,12 @@ impl Terminal {
         apply_scales(grid, &self.scales);
         apply_popovers(grid, &self.popovers);
 
+        let history = self.term.history_size();
+        let scrolled = history.saturating_sub(self.last_history);
+        self.last_history = history;
+
         self.term.reset_damage();
-        cursor
+        (cursor, scrolled)
     }
 
     /// Resolve which rows [`Self::project`] must rewrite this frame.
@@ -624,7 +638,7 @@ mod tests {
         let mut grid = Grid::new(rows, cols);
 
         terminal.advance(bytes);
-        let cursor = terminal.project(&mut grid);
+        let (cursor, _scroll) = terminal.project(&mut grid);
 
         (grid, cursor)
     }
@@ -724,6 +738,21 @@ mod tests {
                 shape: CursorShape::Block
             }
         );
+    }
+
+    #[test]
+    fn project_reports_rows_scrolled() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        // Four lines into a two-row screen push the top two off into history.
+        terminal.advance(b"a\r\nb\r\nc\r\nd");
+        let (_, scrolled) = terminal.project(&mut grid);
+        assert_eq!(scrolled, 2, "rows scrolled into history");
+
+        // A projection with no new output reports no scroll.
+        let (_, scrolled) = terminal.project(&mut grid);
+        assert_eq!(scrolled, 0, "no further scroll");
     }
 
     #[test]

@@ -176,7 +176,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let cursor = state.terminal.project(&mut state.grid);
+                let (cursor, _scroll) = state.terminal.project(&mut state.grid);
 
                 let scrolling = match popover_overflow(&state.grid) {
                     Some(max) => {
