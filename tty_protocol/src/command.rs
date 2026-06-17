@@ -23,6 +23,9 @@ pub enum Command {
     TextRun(TextRunCommand),
     Bar(BarCommand),
     LineLayout(LineLayoutCommand),
+    /// Clear all accumulated stoatty decoration state, so the program can redraw
+    /// its scene from scratch. Carries no payload.
+    Reset,
 }
 
 /// Frame a rectangular cell region with a border.
@@ -335,6 +338,17 @@ pub fn encode_line_layout(command: &LineLayoutCommand) -> Vec<u8> {
     })
 }
 
+/// Encode a [`Command::Reset`] as a full `Gstoatty;reset` frame for an emitter.
+///
+/// The frame carries no arguments; receiving it clears all accumulated stoatty
+/// decoration state so the program can redraw its scene from scratch.
+pub fn encode_reset() -> Vec<u8> {
+    frame::encode(&Frame {
+        sub: "reset".to_owned(),
+        args: vec![],
+    })
+}
+
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
@@ -349,6 +363,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
         "bar" => decode_bar(&frame.args).map(Command::Bar),
         "line_layout" => decode_line_layout(&frame.args).map(Command::LineLayout),
+        "reset" => Some(Command::Reset),
         _ => None,
     }
 }
@@ -500,9 +515,9 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 mod tests {
     use super::{
         decode, encode_bar, encode_border, encode_icon, encode_line_layout, encode_popover,
-        encode_scale, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
-        BorderStyle, Command, IconCommand, IconKind, LineLayoutCommand, PopoverCommand,
-        ScaleCommand, ScrollRegionCommand, TextRunCommand,
+        encode_reset, encode_scale, encode_scroll_region, encode_text_run, BarCommand,
+        BorderCommand, BorderStyle, Command, IconCommand, IconKind, LineLayoutCommand,
+        PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -692,6 +707,11 @@ mod tests {
     fn rejects_odd_length_line_layout_payload() {
         // The single arg here decodes to 3 bytes, not a whole number of u16s.
         assert!(decode(b"Gstoatty;line_layout;YWJj").is_none());
+    }
+
+    #[test]
+    fn reset_round_trips() {
+        assert_eq!(decode(&encode_reset()), Some(Command::Reset));
     }
 
     #[test]

@@ -50,8 +50,8 @@ pub struct Terminal {
     palette: [Rgb; PALETTE_LEN],
     apc: ApcScanner,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
-    /// [`Self::project`]. They persist until cleared, since the VT projection
-    /// resets each cell's borders every frame.
+    /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
+    /// them, since the VT projection resets each cell's borders every frame.
     borders: Vec<BorderCommand>,
     /// Scale commands set by `Gstoatty;scale` frames, applied to the grid by
     /// [`Self::project`]. Like borders, they persist across the per-frame VT
@@ -172,7 +172,25 @@ impl Terminal {
             Command::TextRun(text_run) => self.text_runs.push(text_run),
             Command::Bar(bar) => self.bars.push(bar),
             Command::LineLayout(layout) => self.line_layout = Some(layout),
+            Command::Reset => self.clear_decorations(),
         }
+    }
+
+    /// Clear all accumulated stoatty decoration state.
+    ///
+    /// A `Gstoatty;reset` frame lands here. Without it the per-frame decoration
+    /// lists only grow, since the VT projection re-stamps them every frame, so a
+    /// program that redraws a frame at a new position would leave the old one
+    /// behind. Resetting lets a program redraw its decoration scene from scratch.
+    fn clear_decorations(&mut self) {
+        self.borders.clear();
+        self.scales.clear();
+        self.popovers.clear();
+        self.icons.clear();
+        self.text_runs.clear();
+        self.bars.clear();
+        self.scroll_region = None;
+        self.line_layout = None;
     }
 
     /// Resize the terminal to `rows` by `cols`.
@@ -785,8 +803,8 @@ mod tests {
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_bar, encode_border, encode_icon, encode_line_layout, encode_popover, encode_scale,
-        encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
+        encode_bar, encode_border, encode_icon, encode_line_layout, encode_popover, encode_reset,
+        encode_scale, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
         BorderStyle as ProtoBorderStyle, IconCommand, IconKind as ProtoIconKind, LineLayoutCommand,
         PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
     };
@@ -1042,6 +1060,27 @@ mod tests {
         assert_eq!(grid.get(1, 2).borders.bottom, edge);
         assert_eq!(grid.get(1, 2).borders.right, edge);
         assert_eq!(grid.get(1, 1).borders.top, None);
+    }
+
+    #[test]
+    fn reset_clears_accumulated_borders() {
+        let border = encode_border(&BorderCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        });
+
+        let mut terminal = Terminal::new(2, 3, Theme::default());
+        let mut grid = Grid::new(2, 3);
+        terminal.advance(&border);
+        terminal.advance(&encode_reset());
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.get(0, 0).borders.top, None);
+        assert_eq!(grid.get(0, 0).borders.left, None);
     }
 
     #[test]
