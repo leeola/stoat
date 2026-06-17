@@ -8,7 +8,7 @@
 
 use crate::{
     grid::{
-        Border, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
+        Bar, Border, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
         ScrollRegion, TextRun, UnderlineStyle,
     },
     theme::Theme,
@@ -26,8 +26,8 @@ use alacritty_terminal::{
 };
 use std::mem;
 use stoatty_protocol::command::{
-    self, BorderCommand, Command, IconCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
-    TextRunCommand,
+    self, BarCommand, BorderCommand, Command, IconCommand, PopoverCommand, ScaleCommand,
+    ScrollRegionCommand, TextRunCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -74,6 +74,10 @@ pub struct Terminal {
     /// text-run list by [`Self::project`]. Off-grid components, accumulated and
     /// grid-level like the icons.
     text_runs: Vec<TextRunCommand>,
+    /// Color bars set by `Gstoatty;bar` frames, applied to the grid's bar list
+    /// by [`Self::project`]. Off-grid components, accumulated and grid-level
+    /// like the icons.
+    bars: Vec<BarCommand>,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
@@ -124,6 +128,7 @@ impl Terminal {
             scroll_region: None,
             icons: Vec::new(),
             text_runs: Vec::new(),
+            bars: Vec::new(),
             last_history: 0,
         }
     }
@@ -160,6 +165,7 @@ impl Terminal {
             Command::ScrollRegion(region) => self.scroll_region = Some(region),
             Command::Icon(icon) => self.icons.push(icon),
             Command::TextRun(text_run) => self.text_runs.push(text_run),
+            Command::Bar(bar) => self.bars.push(bar),
         }
     }
 
@@ -220,6 +226,7 @@ impl Terminal {
         apply_scroll_region(grid, self.scroll_region);
         apply_icons(grid, &self.icons);
         apply_text_runs(grid, &self.text_runs);
+        apply_bars(grid, &self.bars);
 
         let history = self.term.history_size();
         let scrolled = history.saturating_sub(self.last_history);
@@ -641,6 +648,24 @@ fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand]) {
     grid.set_text_runs(text_runs);
 }
 
+/// Replace the grid's bar list with each stored bar command's rectangle.
+///
+/// Grid-level like the overlays, so the full list is set each projection rather
+/// than stamped per cell.
+fn apply_bars(grid: &mut Grid, commands: &[BarCommand]) {
+    let bars = commands
+        .iter()
+        .map(|command| Bar {
+            x: command.x,
+            y: command.y,
+            width: command.width,
+            height: command.height,
+            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+        })
+        .collect();
+    grid.set_bars(bars);
+}
+
 fn popover_overlay(command: &PopoverCommand) -> Overlay {
     Overlay {
         top: command.top,
@@ -718,14 +743,14 @@ mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
     use crate::{
         grid::{
-            Border, BorderStyle, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
+            Bar, Border, BorderStyle, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
             ScrollRegion, TextRun, UnderlineStyle,
         },
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
-        encode_text_run, BorderCommand, BorderStyle as ProtoBorderStyle, IconCommand,
+        encode_bar, encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
+        encode_text_run, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, IconCommand,
         IconKind as ProtoIconKind, PopoverCommand, ScaleCommand, ScrollRegionCommand,
         TextRunCommand,
     };
@@ -1148,6 +1173,33 @@ mod tests {
                 color: Rgb::new(150, 160, 170),
                 bg: Rgb::new(24, 26, 32),
                 text: "42".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn bar_apc_frame_sets_a_grid_bar() {
+        let frame = encode_bar(&BarCommand {
+            x: -4,
+            y: 32,
+            width: 3,
+            height: 16,
+            color: [220, 50, 47],
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.bars(),
+            [Bar {
+                x: -4,
+                y: 32,
+                width: 3,
+                height: 16,
+                color: Rgb::new(220, 50, 47),
             }]
         );
     }

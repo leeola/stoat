@@ -9,7 +9,7 @@
 
 use stoatty_render::gpu::{headless_device, Renderer, Scroll};
 use stoatty_term::grid::{
-    Border, BorderStyle, Grid, Icon, IconKind, Overlay, Rgb, ScrollRegion, TextRun,
+    Bar, Border, BorderStyle, Grid, Icon, IconKind, Overlay, Rgb, ScrollRegion, TextRun,
 };
 use wgpu::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
@@ -137,6 +137,25 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         bg: Rgb::new(0, 0, 0),
         text: "127".to_owned(),
     }]);
+
+    // Two sub-cell color bars, so the bar pass fills thin rectangles at a
+    // cell-fraction position and size against the real device.
+    grid.set_bars(vec![
+        Bar {
+            x: 0,
+            y: 80,
+            width: 3,
+            height: 16,
+            color: Rgb::new(220, 50, 47),
+        },
+        Bar {
+            x: 30,
+            y: 0,
+            width: 1,
+            height: 96,
+            color: Rgb::new(88, 88, 88),
+        },
+    ]);
 
     // A validation error in pipeline creation (Renderer::new) or in encoding and
     // submitting the draw (render_into) triggers wgpu's default uncaptured-error

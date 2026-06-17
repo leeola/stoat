@@ -21,6 +21,7 @@ pub enum Command {
     ScrollRegion(ScrollRegionCommand),
     Icon(IconCommand),
     TextRun(TextRunCommand),
+    Bar(BarCommand),
 }
 
 /// Frame a rectangular cell region with a border.
@@ -156,6 +157,23 @@ pub struct TextRunCommand {
     pub text: String,
 }
 
+/// Fill a thin rectangle off the cell grid in a solid color.
+///
+/// A non-cell component primitive: a gutter packs several variable-width status
+/// or git bars and a hairline separator into a fraction of a cell. All four of
+/// [`Self::x`], [`Self::y`], [`Self::width`], and [`Self::height`] are in
+/// **sixteenths of a cell** (16 = one cell), x and width along the cell width, y
+/// and height along the cell height, so a bar can be a fraction of a cell wide
+/// and track live font zoom.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct BarCommand {
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    pub color: [u8; 3],
+}
+
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
 ///
 /// `None` covers both a malformed frame and a well-formed one whose
@@ -268,6 +286,23 @@ pub fn encode_text_run(command: &TextRunCommand) -> Vec<u8> {
     })
 }
 
+/// Encode a [`BarCommand`] as a full `Gstoatty;bar` frame for an emitter.
+///
+/// The position, size, and color ride in a single fixed 11-byte argument.
+pub fn encode_bar(command: &BarCommand) -> Vec<u8> {
+    let mut arg = Vec::with_capacity(11);
+    arg.extend_from_slice(&command.x.to_be_bytes());
+    arg.extend_from_slice(&command.y.to_be_bytes());
+    arg.extend_from_slice(&command.width.to_be_bytes());
+    arg.extend_from_slice(&command.height.to_be_bytes());
+    arg.extend_from_slice(&command.color);
+
+    frame::encode(&Frame {
+        sub: "bar".to_owned(),
+        args: vec![arg],
+    })
+}
+
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
@@ -280,6 +315,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "scroll_region" => decode_scroll_region(&frame.args).map(Command::ScrollRegion),
         "icon" => decode_icon(&frame.args).map(Command::Icon),
         "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
+        "bar" => decode_bar(&frame.args).map(Command::Bar),
         _ => None,
     }
 }
@@ -366,6 +402,18 @@ fn decode_text_run(args: &[Vec<u8>]) -> Option<TextRunCommand> {
     })
 }
 
+fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
+    let arg: &[u8; 11] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(BarCommand {
+        x: i16::from_be_bytes([arg[0], arg[1]]),
+        y: i16::from_be_bytes([arg[2], arg[3]]),
+        width: u16::from_be_bytes([arg[4], arg[5]]),
+        height: u16::from_be_bytes([arg[6], arg[7]]),
+        color: [arg[8], arg[9], arg[10]],
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -405,9 +453,9 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
-        encode_text_run, BorderCommand, BorderStyle, Command, IconCommand, IconKind,
-        PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+        decode, encode_bar, encode_border, encode_icon, encode_popover, encode_scale,
+        encode_scroll_region, encode_text_run, BarCommand, BorderCommand, BorderStyle, Command,
+        IconCommand, IconKind, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -560,6 +608,25 @@ mod tests {
     fn rejects_wrong_length_text_run_payload() {
         // The first arg here decodes to 3 bytes, not the 9 a text run needs.
         assert!(decode(b"Gstoatty;text_run;YWJj").is_none());
+    }
+
+    #[test]
+    fn bar_round_trips() {
+        let command = BarCommand {
+            x: -4,
+            y: 32,
+            width: 3,
+            height: 16,
+            color: [220, 50, 47],
+        };
+
+        assert_eq!(decode(&encode_bar(&command)), Some(Command::Bar(command)));
+    }
+
+    #[test]
+    fn rejects_wrong_length_bar_payload() {
+        // The single arg here decodes to 3 bytes, not the 11 a bar needs.
+        assert!(decode(b"Gstoatty;bar;YWJj").is_none());
     }
 
     #[test]

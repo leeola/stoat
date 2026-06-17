@@ -1,6 +1,7 @@
 //! The grid render passes that draw [`stoatty_term`]'s cells.
 
 pub mod background;
+pub mod bar;
 pub mod decoration;
 pub mod icon;
 pub mod overlay;

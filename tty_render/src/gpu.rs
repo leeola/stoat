@@ -12,6 +12,7 @@
 pub use crate::render::Scroll;
 use crate::render::{
     background::{BackgroundPass, CursorState},
+    bar::BarPass,
     decoration::DecorationPass,
     icon::IconPass,
     overlay::OverlayPass,
@@ -41,6 +42,7 @@ pub struct Renderer {
     text: TextPass,
     overlay: OverlayPass,
     icon: IconPass,
+    bar: BarPass,
     width: u32,
     height: u32,
     metrics: CellMetrics,
@@ -74,6 +76,7 @@ impl Renderer {
             text: TextPass::new(device, format, metrics),
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
+            bar: BarPass::new(device, format, metrics),
             width,
             height,
             metrics,
@@ -104,6 +107,7 @@ impl Renderer {
         self.text.set_metrics(metrics);
         self.overlay.set_metrics(metrics);
         self.icon.set_metrics(metrics);
+        self.bar.set_metrics(metrics);
     }
 
     /// Draw a frame for `grid` into `view`: clear to the default background,
@@ -141,6 +145,7 @@ impl Renderer {
         self.text.prepare(device, queue, grid, resolution, scroll);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon.prepare(device, queue, grid.icons(), resolution);
+        self.bar.prepare(device, queue, grid.bars(), resolution);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
@@ -169,8 +174,10 @@ impl Renderer {
             // The region draw leaves its scissor set, so restore the full
             // surface before the cursor and overlay draws that follow.
             render_pass.set_scissor_rect(0, 0, self.width, self.height);
-            // Off-grid text runs sit above the grid text but below floating
-            // popovers and icons, like a gutter beneath a tooltip.
+            // Off-grid color bars and text runs sit above the grid text but
+            // below floating popovers and icons, like a gutter beneath a
+            // tooltip; the bars fill behind the runs.
+            self.bar.draw(&mut render_pass);
             self.text.draw_text_runs(&mut render_pass);
             self.background.draw_cursor(&mut render_pass);
             self.overlay.draw(&mut render_pass);

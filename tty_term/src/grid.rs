@@ -21,6 +21,7 @@ pub struct Grid {
     scroll_region: Option<ScrollRegion>,
     icons: Vec<Icon>,
     text_runs: Vec<TextRun>,
+    bars: Vec<Bar>,
 }
 
 impl Grid {
@@ -34,6 +35,7 @@ impl Grid {
             scroll_region: None,
             icons: Vec::new(),
             text_runs: Vec::new(),
+            bars: Vec::new(),
         }
     }
 
@@ -74,6 +76,7 @@ impl Grid {
         self.scroll_region = None;
         self.icons.clear();
         self.text_runs.clear();
+        self.bars.clear();
     }
 
     /// The floating overlay regions drawn above the cells, in draw order.
@@ -129,6 +132,19 @@ impl Grid {
     /// untouched; the caller sets the full list each frame it changes.
     pub fn set_text_runs(&mut self, text_runs: Vec<TextRun>) {
         self.text_runs = text_runs;
+    }
+
+    /// The off-grid color bars drawn above the cells, in draw order.
+    pub fn bars(&self) -> &[Bar] {
+        &self.bars
+    }
+
+    /// Replace the off-grid color bars.
+    ///
+    /// Grid-level like the overlays, so the per-cell projection leaves them
+    /// untouched; the caller sets the full list each frame it changes.
+    pub fn set_bars(&mut self, bars: Vec<Bar>) {
+        self.bars = bars;
     }
 
     /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
@@ -373,6 +389,23 @@ pub struct TextRun {
     pub text: String,
 }
 
+/// A thin rectangle filled off the cell grid in a solid color.
+///
+/// Like an [`Overlay`] it is grid-level, not a cell attribute: a non-cell
+/// component (a gutter) packs several variable-width status bars and a hairline
+/// separator into a fraction of a cell. [`Self::x`] and [`Self::width`] run
+/// along the cell width, [`Self::y`] and [`Self::height`] along the cell height,
+/// all in sixteenths of a cell (16 = one cell), so a bar can be a fraction of a
+/// cell wide.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Bar {
+    pub x: i16,
+    pub y: i16,
+    pub width: u16,
+    pub height: u16,
+    pub color: Rgb,
+}
+
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
 /// underline.
 ///
@@ -449,7 +482,9 @@ impl BitOrAssign for Flags {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale, ScrollRegion, TextRun};
+    use super::{
+        Bar, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale, ScrollRegion, TextRun,
+    };
 
     #[test]
     fn grid_writes_are_addressable() {
@@ -597,6 +632,24 @@ mod tests {
 
         grid.resize(2, 2);
         assert!(grid.text_runs().is_empty(), "resize clears the text runs");
+    }
+
+    #[test]
+    fn bars_round_trip_and_clear_on_resize() {
+        let mut grid = Grid::new(4, 4);
+        let bar = Bar {
+            x: 0,
+            y: 16,
+            width: 3,
+            height: 16,
+            color: Rgb::new(220, 50, 47),
+        };
+        grid.set_bars(vec![bar]);
+
+        assert_eq!(grid.bars(), [bar]);
+
+        grid.resize(2, 2);
+        assert!(grid.bars().is_empty(), "resize clears the bars");
     }
 
     #[test]
