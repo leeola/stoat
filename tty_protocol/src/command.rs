@@ -19,6 +19,7 @@ pub enum Command {
     Scale(ScaleCommand),
     Popover(PopoverCommand),
     ScrollRegion(ScrollRegionCommand),
+    Icon(IconCommand),
 }
 
 /// Frame a rectangular cell region with a border.
@@ -104,6 +105,29 @@ pub struct ScrollRegionCommand {
     pub offset: u16,
 }
 
+/// Composite a fixed renderer-drawn status icon at a grid cell.
+///
+/// The icon is a signed-distance shape, not a glyph or image: the terminal draws
+/// the [`IconKind`] silhouette in `color` over a `size` by `size` cell block
+/// anchored at (`top`, `left`) in absolute grid coordinates. Carrying the kind
+/// rather than a codepoint keeps the icon set fixed and crisp at any size.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct IconCommand {
+    pub top: u16,
+    pub left: u16,
+    pub kind: IconKind,
+    pub color: [u8; 3],
+    pub size: u8,
+}
+
+/// Which status icon [`IconCommand`] draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IconKind {
+    Error,
+    Warning,
+    Info,
+}
+
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
 ///
 /// `None` covers both a malformed frame and a well-formed one whose
@@ -180,6 +204,21 @@ pub fn encode_scroll_region(command: &ScrollRegionCommand) -> Vec<u8> {
     })
 }
 
+/// Encode an [`IconCommand`] as a full `Gstoatty;icon` frame for an emitter.
+pub fn encode_icon(command: &IconCommand) -> Vec<u8> {
+    let mut arg = Vec::with_capacity(9);
+    arg.extend_from_slice(&command.top.to_be_bytes());
+    arg.extend_from_slice(&command.left.to_be_bytes());
+    arg.push(icon_kind_code(command.kind));
+    arg.extend_from_slice(&command.color);
+    arg.push(command.size);
+
+    frame::encode(&Frame {
+        sub: "icon".to_owned(),
+        args: vec![arg],
+    })
+}
+
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
@@ -190,6 +229,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "scale" => decode_scale(&frame.args).map(Command::Scale),
         "popover" => decode_popover(&frame.args).map(Command::Popover),
         "scroll_region" => decode_scroll_region(&frame.args).map(Command::ScrollRegion),
+        "icon" => decode_icon(&frame.args).map(Command::Icon),
         _ => None,
     }
 }
@@ -246,6 +286,18 @@ fn decode_scroll_region(args: &[Vec<u8>]) -> Option<ScrollRegionCommand> {
     })
 }
 
+fn decode_icon(args: &[Vec<u8>]) -> Option<IconCommand> {
+    let arg: &[u8; 9] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(IconCommand {
+        top: u16::from_be_bytes([arg[0], arg[1]]),
+        left: u16::from_be_bytes([arg[2], arg[3]]),
+        kind: decode_icon_kind(arg[4])?,
+        color: [arg[5], arg[6], arg[7]],
+        size: arg[8],
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -265,11 +317,29 @@ fn style_code(style: BorderStyle) -> u8 {
     }
 }
 
+fn decode_icon_kind(code: u8) -> Option<IconKind> {
+    match code {
+        0 => Some(IconKind::Error),
+        1 => Some(IconKind::Warning),
+        2 => Some(IconKind::Info),
+        _ => None,
+    }
+}
+
+fn icon_kind_code(kind: IconKind) -> u8 {
+    match kind {
+        IconKind::Error => 0,
+        IconKind::Warning => 1,
+        IconKind::Info => 2,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode_border, encode_popover, encode_scale, encode_scroll_region, BorderCommand,
-        BorderStyle, Command, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+        decode, encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
+        BorderCommand, BorderStyle, Command, IconCommand, IconKind, PopoverCommand, ScaleCommand,
+        ScrollRegionCommand,
     };
 
     #[test]
@@ -379,6 +449,25 @@ mod tests {
     fn rejects_wrong_length_scroll_region_payload() {
         // The single arg here decodes to 3 bytes, not the 10 a scroll region needs.
         assert!(decode(b"Gstoatty;scroll_region;YWJj").is_none());
+    }
+
+    #[test]
+    fn icon_round_trips() {
+        let command = IconCommand {
+            top: 4,
+            left: 1,
+            kind: IconKind::Warning,
+            color: [255, 200, 0],
+            size: 2,
+        };
+
+        assert_eq!(decode(&encode_icon(&command)), Some(Command::Icon(command)));
+    }
+
+    #[test]
+    fn rejects_wrong_length_icon_payload() {
+        // The single arg here decodes to 3 bytes, not the 9 an icon needs.
+        assert!(decode(b"Gstoatty;icon;YWJj").is_none());
     }
 
     #[test]

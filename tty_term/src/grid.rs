@@ -19,6 +19,7 @@ pub struct Grid {
     cols: usize,
     overlays: Vec<Overlay>,
     scroll_region: Option<ScrollRegion>,
+    icons: Vec<Icon>,
 }
 
 impl Grid {
@@ -30,6 +31,7 @@ impl Grid {
             cols,
             overlays: Vec::new(),
             scroll_region: None,
+            icons: Vec::new(),
         }
     }
 
@@ -68,6 +70,7 @@ impl Grid {
         self.cells.resize(rows * cols, Cell::default());
         self.overlays.clear();
         self.scroll_region = None;
+        self.icons.clear();
     }
 
     /// The floating overlay regions drawn above the cells, in draw order.
@@ -97,6 +100,19 @@ impl Grid {
     /// rather than accumulating.
     pub fn set_scroll_region(&mut self, region: Option<ScrollRegion>) {
         self.scroll_region = region;
+    }
+
+    /// The status icons drawn above the cells, in draw order.
+    pub fn icons(&self) -> &[Icon] {
+        &self.icons
+    }
+
+    /// Replace the status icons.
+    ///
+    /// Grid-level like the overlays, so the per-cell projection leaves them
+    /// untouched; the caller sets the full list each frame it changes.
+    pub fn set_icons(&mut self, icons: Vec<Icon>) {
+        self.icons = icons;
     }
 
     /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
@@ -295,6 +311,29 @@ impl ScrollRegion {
     }
 }
 
+/// A fixed renderer-drawn status icon composited above the cells.
+///
+/// Like an [`Overlay`], it is grid-level rather than a cell attribute: the
+/// renderer draws the [`IconKind`] silhouette in [`Self::color`] as a
+/// signed-distance shape over a [`Self::size`]-by-[`Self::size`] cell block
+/// anchored at (`top`, `left`), rather than from a font or image.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Icon {
+    pub top: u16,
+    pub left: u16,
+    pub kind: IconKind,
+    pub color: Rgb,
+    pub size: u8,
+}
+
+/// Which status icon an [`Icon`] draws.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum IconKind {
+    Error,
+    Warning,
+    Info,
+}
+
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
 /// underline.
 ///
@@ -371,7 +410,7 @@ impl BitOrAssign for Flags {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion};
+    use super::{Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale, ScrollRegion};
 
     #[test]
     fn grid_writes_are_addressable() {
@@ -481,6 +520,24 @@ mod tests {
             None,
             "resize clears the scroll region"
         );
+    }
+
+    #[test]
+    fn icons_round_trip_and_clear_on_resize() {
+        let mut grid = Grid::new(4, 4);
+        let icon = Icon {
+            top: 2,
+            left: 0,
+            kind: IconKind::Error,
+            color: Rgb::new(220, 50, 47),
+            size: 1,
+        };
+        grid.set_icons(vec![icon]);
+
+        assert_eq!(grid.icons(), [icon]);
+
+        grid.resize(2, 2);
+        assert!(grid.icons().is_empty(), "resize clears the icons");
     }
 
     #[test]

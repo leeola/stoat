@@ -13,6 +13,7 @@ pub use crate::render::Scroll;
 use crate::render::{
     background::{BackgroundPass, CursorState},
     decoration::DecorationPass,
+    icon::IconPass,
     overlay::OverlayPass,
     text::TextPass,
     CellMetrics,
@@ -39,6 +40,7 @@ pub struct Renderer {
     decoration: DecorationPass,
     text: TextPass,
     overlay: OverlayPass,
+    icon: IconPass,
     width: u32,
     height: u32,
     metrics: CellMetrics,
@@ -71,6 +73,7 @@ impl Renderer {
             decoration: DecorationPass::new(device, format, metrics),
             text: TextPass::new(device, format, metrics),
             overlay: OverlayPass::new(device, format, metrics),
+            icon: IconPass::new(device, format, metrics),
             width,
             height,
             metrics,
@@ -100,6 +103,7 @@ impl Renderer {
         self.decoration.set_metrics(metrics);
         self.text.set_metrics(metrics);
         self.overlay.set_metrics(metrics);
+        self.icon.set_metrics(metrics);
     }
 
     /// Draw a frame for `grid` into `view`: clear to the default background,
@@ -136,6 +140,7 @@ impl Renderer {
             .prepare(device, queue, grid, resolution, scroll.grid);
         self.text.prepare(device, queue, grid, resolution, scroll);
         self.overlay.prepare(device, queue, grid, resolution);
+        self.icon.prepare(device, queue, grid.icons(), resolution);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
 
@@ -167,6 +172,10 @@ impl Renderer {
             self.background.draw_cursor(&mut render_pass);
             self.overlay.draw(&mut render_pass);
             self.text.draw_overlay_text(&mut render_pass);
+            // The overlay-content draw leaves its scissor set, so restore the
+            // full surface before the icons draw on top of the overlays.
+            render_pass.set_scissor_rect(0, 0, self.width, self.height);
+            self.icon.draw(&mut render_pass);
         }
 
         queue.submit([encoder.finish()]);

@@ -8,7 +8,7 @@
 //! skipping when no GPU adapter is present so GPU-less CI stays green.
 
 use stoatty_render::gpu::{headless_device, Renderer, Scroll};
-use stoatty_term::grid::{Border, BorderStyle, Grid, Overlay, Rgb, ScrollRegion};
+use stoatty_term::grid::{Border, BorderStyle, Grid, Icon, IconKind, Overlay, Rgb, ScrollRegion};
 use wgpu::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     TextureViewDescriptor,
@@ -97,6 +97,31 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         height: 2,
         offset: 1,
     }));
+
+    // One icon of each kind, so the SDF icon pass draws all three silhouettes.
+    grid.set_icons(vec![
+        Icon {
+            top: 5,
+            left: 0,
+            kind: IconKind::Error,
+            color: Rgb::new(220, 50, 47),
+            size: 1,
+        },
+        Icon {
+            top: 5,
+            left: 2,
+            kind: IconKind::Warning,
+            color: Rgb::new(255, 200, 0),
+            size: 1,
+        },
+        Icon {
+            top: 5,
+            left: 4,
+            kind: IconKind::Info,
+            color: Rgb::new(38, 139, 210),
+            size: 2,
+        },
+    ]);
 
     // A validation error in pipeline creation (Renderer::new) or in encoding and
     // submitting the draw (render_into) triggers wgpu's default uncaptured-error

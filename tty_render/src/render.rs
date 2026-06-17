@@ -2,6 +2,7 @@
 
 pub mod background;
 pub mod decoration;
+pub mod icon;
 pub mod overlay;
 pub mod text;
 

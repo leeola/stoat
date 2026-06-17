@@ -8,8 +8,8 @@
 
 use crate::{
     grid::{
-        Border, BorderStyle, Borders, Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion,
-        UnderlineStyle,
+        Border, BorderStyle, Borders, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
+        ScrollRegion, UnderlineStyle,
     },
     theme::Theme,
 };
@@ -26,7 +26,7 @@ use alacritty_terminal::{
 };
 use std::mem;
 use stoatty_protocol::command::{
-    self, BorderCommand, Command, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+    self, BorderCommand, Command, IconCommand, PopoverCommand, ScaleCommand, ScrollRegionCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -65,6 +65,10 @@ pub struct Terminal {
     /// accumulate: a region's scroll offset updates over time, so the latest
     /// frame replaces the prior one.
     scroll_region: Option<ScrollRegionCommand>,
+    /// Status icons set by `Gstoatty;icon` frames, applied to the grid's icon
+    /// list by [`Self::project`]. Like popovers they accumulate and are
+    /// grid-level rather than cell attributes.
+    icons: Vec<IconCommand>,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
@@ -113,6 +117,7 @@ impl Terminal {
             scales: Vec::new(),
             popovers: Vec::new(),
             scroll_region: None,
+            icons: Vec::new(),
             last_history: 0,
         }
     }
@@ -147,6 +152,7 @@ impl Terminal {
             Command::Scale(scale) => self.scales.push(scale),
             Command::Popover(popover) => self.popovers.push(popover),
             Command::ScrollRegion(region) => self.scroll_region = Some(region),
+            Command::Icon(icon) => self.icons.push(icon),
         }
     }
 
@@ -205,6 +211,7 @@ impl Terminal {
         apply_scales(grid, &self.scales);
         apply_popovers(grid, &self.popovers);
         apply_scroll_region(grid, self.scroll_region);
+        apply_icons(grid, &self.icons);
 
         let history = self.term.history_size();
         let scrolled = history.saturating_sub(self.last_history);
@@ -579,6 +586,33 @@ fn apply_scroll_region(grid: &mut Grid, command: Option<ScrollRegionCommand>) {
     }));
 }
 
+/// Replace the grid's icon list with each stored icon command's icon.
+///
+/// Grid-level like the overlays, so the full list is set each projection rather
+/// than stamped per cell. The renderer clamps an out-of-grid anchor, so wire
+/// coordinates need no guard here.
+fn apply_icons(grid: &mut Grid, commands: &[IconCommand]) {
+    let icons = commands
+        .iter()
+        .map(|command| Icon {
+            top: command.top,
+            left: command.left,
+            kind: grid_icon_kind(command.kind),
+            color: Rgb::new(command.color[0], command.color[1], command.color[2]),
+            size: command.size,
+        })
+        .collect();
+    grid.set_icons(icons);
+}
+
+fn grid_icon_kind(kind: command::IconKind) -> IconKind {
+    match kind {
+        command::IconKind::Error => IconKind::Error,
+        command::IconKind::Warning => IconKind::Warning,
+        command::IconKind::Info => IconKind::Info,
+    }
+}
+
 fn popover_overlay(command: &PopoverCommand) -> Overlay {
     Overlay {
         top: command.top,
@@ -655,14 +689,15 @@ mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
     use crate::{
         grid::{
-            Border, BorderStyle, Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion,
-            UnderlineStyle,
+            Border, BorderStyle, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
+            ScrollRegion, UnderlineStyle,
         },
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_border, encode_popover, encode_scale, encode_scroll_region, BorderCommand,
-        BorderStyle as ProtoBorderStyle, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+        encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
+        BorderCommand, BorderStyle as ProtoBorderStyle, IconCommand, IconKind as ProtoIconKind,
+        PopoverCommand, ScaleCommand, ScrollRegionCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -1025,6 +1060,33 @@ mod tests {
                 content_fg: Rgb::new(70, 80, 90),
                 scale: 2,
                 content: "ok".to_owned(),
+            }]
+        );
+    }
+
+    #[test]
+    fn icon_apc_frame_sets_a_grid_icon() {
+        let frame = encode_icon(&IconCommand {
+            top: 4,
+            left: 1,
+            kind: ProtoIconKind::Warning,
+            color: [255, 200, 0],
+            size: 2,
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.icons(),
+            [Icon {
+                top: 4,
+                left: 1,
+                kind: IconKind::Warning,
+                color: Rgb::new(255, 200, 0),
+                size: 2,
             }]
         );
     }
