@@ -87,19 +87,17 @@ fn read_user_config() -> Result<Option<String>, ConfigError> {
 /// Overlay `user`'s set fields onto the `default` TOML and deserialize the
 /// result into a [`Config`].
 ///
-/// Both are parsed as tables and the user's top-level keys replace the
-/// default's, so an absent user field keeps the default. The default ships with
-/// the binary and is trusted, so a malformed default panics; a malformed user
-/// table is an error.
+/// The two are parsed as tables and deep-merged: a key that is a table in both
+/// is merged field by field, any other user value replaces the default's, and an
+/// absent user key keeps the default. The default ships with the binary and is
+/// trusted, so a malformed default panics; a malformed user table is an error.
 fn settle(default: &str, user: Option<&str>) -> Result<Config, ConfigError> {
     let mut table: toml::Table =
         toml::from_str(default).expect("embedded default config is valid TOML");
 
     if let Some(user) = user {
         let user: toml::Table = toml::from_str(user).context(ParseSnafu)?;
-        for (key, value) in user {
-            table.insert(key, value);
-        }
+        merge_tables(&mut table, user);
     }
 
     toml::Value::Table(table)
@@ -107,9 +105,32 @@ fn settle(default: &str, user: Option<&str>) -> Result<Config, ConfigError> {
         .context(DeserializeSnafu)
 }
 
+/// Recursively overlay `overlay` onto `base`.
+///
+/// A key that is a table on both sides is merged field by field, so a user
+/// table augments the default rather than replacing it wholesale. Any other
+/// value, including a table replacing a non-table or vice versa, takes the
+/// overlay's value.
+fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
+    for (key, value) in overlay {
+        match value {
+            toml::Value::Table(sub) => {
+                if let Some(toml::Value::Table(base_sub)) = base.get_mut(&key) {
+                    merge_tables(base_sub, sub);
+                } else {
+                    base.insert(key, toml::Value::Table(sub));
+                }
+            },
+            other => {
+                base.insert(key, other);
+            },
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{settle, Config, DEFAULT_CONFIG};
+    use super::{merge_tables, settle, Config, DEFAULT_CONFIG};
 
     #[test]
     fn embedded_default_sets_the_doubled_font_size() {
@@ -134,5 +155,21 @@ mod tests {
     #[test]
     fn malformed_user_config_is_an_error() {
         assert!(settle("font_size = 30", Some("font_size =")).is_err());
+    }
+
+    #[test]
+    fn nested_table_overlay_merges_field_by_field() {
+        let mut base: toml::Table =
+            toml::from_str("[themes.zed]\nbg = \"black\"\nfg = \"white\"\n").unwrap();
+        let overlay: toml::Table =
+            toml::from_str("[themes.zed]\nbg = \"navy\"\n[themes.mine]\nbg = \"red\"\n").unwrap();
+
+        merge_tables(&mut base, overlay);
+
+        let expected: toml::Table = toml::from_str(
+            "[themes.zed]\nbg = \"navy\"\nfg = \"white\"\n[themes.mine]\nbg = \"red\"\n",
+        )
+        .unwrap();
+        assert_eq!(base, expected);
     }
 }
