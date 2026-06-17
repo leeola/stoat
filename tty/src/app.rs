@@ -12,6 +12,7 @@ use stoatty_render::gpu::GpuContext;
 use stoatty_term::{
     grid::Grid,
     term::{Cursor, CursorShape, Terminal},
+    theme::Theme,
 };
 use winit::{
     application::ApplicationHandler,
@@ -98,7 +99,7 @@ impl ApplicationHandler<PtyEvent> for App {
 
         let (rows, cols) = gpu.grid_size();
         let grid = Grid::new(rows, cols);
-        let terminal = Terminal::new(rows, cols);
+        let terminal = Terminal::new(rows, cols, Theme::default());
 
         let pty = {
             let proxy = self.proxy.clone();

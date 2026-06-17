@@ -6,8 +6,9 @@
 //! each cell's terminal-palette color to concrete channels and touches only the
 //! lines the terminal reports as damaged.
 
-use crate::grid::{
-    Border, BorderStyle, Borders, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle,
+use crate::{
+    grid::{Border, BorderStyle, Borders, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+    theme::Theme,
 };
 use alacritty_terminal::{
     event::VoidListener,
@@ -24,8 +25,6 @@ use std::mem;
 use stoatty_protocol::command::{self, BorderCommand, Command, PopoverCommand, ScaleCommand};
 
 const PALETTE_LEN: usize = 256;
-const DEFAULT_FG: Rgb = Rgb::new(0xcc, 0xcc, 0xcc);
-const DEFAULT_BG: Rgb = Rgb::new(0x00, 0x00, 0x00);
 
 /// A live terminal driven by a VT byte stream.
 ///
@@ -34,12 +33,14 @@ const DEFAULT_BG: Rgb = Rgb::new(0x00, 0x00, 0x00);
 /// in via [`Self::advance`], then calls [`Self::project`] to refresh the render
 /// grid.
 ///
-/// Carries a default 256-color palette so [`Self::project`] can resolve a cell's
-/// indexed or named color to concrete channels. A color the program overrode
-/// (via OSC) takes precedence over the default.
+/// Resolves a cell's indexed or named color against its [`Theme`] and the
+/// 256-color palette derived from it. A color the program overrode (via OSC)
+/// takes precedence over the theme.
 pub struct Terminal {
     term: Term<VoidListener>,
     parser: Processor,
+    /// Color set the projection resolves named and default colors against.
+    theme: Theme,
     palette: [Rgb; PALETTE_LEN],
     apc: ApcScanner,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
@@ -83,14 +84,17 @@ pub enum CursorShape {
 }
 
 impl Terminal {
-    /// Create a `rows` by `cols` terminal with an empty screen and default palette.
-    pub fn new(rows: usize, cols: usize) -> Terminal {
+    /// Create a `rows` by `cols` terminal with an empty screen, resolving colors
+    /// against `theme`.
+    pub fn new(rows: usize, cols: usize, theme: Theme) -> Terminal {
         let term = Term::new(Config::default(), &GridSize { rows, cols }, VoidListener);
+        let palette = default_palette(&theme);
 
         Terminal {
             term,
             parser: Processor::new(),
-            palette: default_palette(),
+            theme,
+            palette,
             apc: ApcScanner::default(),
             borders: Vec::new(),
             scales: Vec::new(),
@@ -169,7 +173,8 @@ impl Terminal {
                 continue;
             }
 
-            *grid.get_mut(row, col) = project_cell(indexed.cell, content.colors, &self.palette);
+            *grid.get_mut(row, col) =
+                project_cell(indexed.cell, content.colors, &self.theme, &self.palette);
         }
 
         let cursor = project_cursor(content.cursor, offset);
@@ -339,17 +344,22 @@ impl Dimensions for GridSize {
     }
 }
 
-fn project_cell(cell: &TermCell, overrides: &Colors, palette: &[Rgb; PALETTE_LEN]) -> Cell {
-    let fg = resolve(cell.fg, overrides, palette);
+fn project_cell(
+    cell: &TermCell,
+    overrides: &Colors,
+    theme: &Theme,
+    palette: &[Rgb; PALETTE_LEN],
+) -> Cell {
+    let fg = resolve(cell.fg, overrides, theme, palette);
     let underline_color = match cell.underline_color() {
-        Some(color) => resolve(color, overrides, palette),
+        Some(color) => resolve(color, overrides, theme, palette),
         None => fg,
     };
 
     Cell {
         ch: cell.c,
         fg,
-        bg: resolve(cell.bg, overrides, palette),
+        bg: resolve(cell.bg, overrides, theme, palette),
         flags: map_flags(cell.flags),
         underline: map_underline(cell.flags),
         underline_color,
@@ -364,24 +374,29 @@ fn project_cell(cell: &TermCell, overrides: &Colors, palette: &[Rgb; PALETTE_LEN
 ///
 /// A program-set `overrides` entry wins over the default palette for the same
 /// slot, mirroring how a VT terminal lets OSC redefine palette colors.
-fn resolve(color: Color, overrides: &Colors, palette: &[Rgb; PALETTE_LEN]) -> Rgb {
+fn resolve(color: Color, overrides: &Colors, theme: &Theme, palette: &[Rgb; PALETTE_LEN]) -> Rgb {
     match color {
         Color::Spec(rgb) => Rgb::new(rgb.r, rgb.g, rgb.b),
         Color::Indexed(index) => indexed(index as usize, overrides, palette),
-        Color::Named(named) => named_color(named, overrides, palette),
+        Color::Named(named) => named_color(named, overrides, theme, palette),
     }
 }
 
-fn named_color(named: NamedColor, overrides: &Colors, palette: &[Rgb; PALETTE_LEN]) -> Rgb {
+fn named_color(
+    named: NamedColor,
+    overrides: &Colors,
+    theme: &Theme,
+    palette: &[Rgb; PALETTE_LEN],
+) -> Rgb {
     if let Some(rgb) = overrides[named as usize] {
         return Rgb::new(rgb.r, rgb.g, rgb.b);
     }
 
     match named {
-        NamedColor::Background => DEFAULT_BG,
-        NamedColor::Foreground | NamedColor::BrightForeground => DEFAULT_FG,
+        NamedColor::Background => theme.background,
+        NamedColor::Foreground | NamedColor::BrightForeground => theme.foreground,
         ansi if (ansi as usize) < PALETTE_LEN => palette[ansi as usize],
-        _ => DEFAULT_FG,
+        _ => theme.foreground,
     }
 }
 
@@ -557,33 +572,13 @@ fn map_shape(shape: TermCursorShape) -> CursorShape {
     }
 }
 
-/// The 16 standard ANSI colors (xterm defaults), palette indices 0..16.
-const ANSI_16: [Rgb; 16] = [
-    Rgb::new(0x00, 0x00, 0x00),
-    Rgb::new(0xcd, 0x00, 0x00),
-    Rgb::new(0x00, 0xcd, 0x00),
-    Rgb::new(0xcd, 0xcd, 0x00),
-    Rgb::new(0x00, 0x00, 0xee),
-    Rgb::new(0xcd, 0x00, 0xcd),
-    Rgb::new(0x00, 0xcd, 0xcd),
-    Rgb::new(0xe5, 0xe5, 0xe5),
-    Rgb::new(0x7f, 0x7f, 0x7f),
-    Rgb::new(0xff, 0x00, 0x00),
-    Rgb::new(0x00, 0xff, 0x00),
-    Rgb::new(0xff, 0xff, 0x00),
-    Rgb::new(0x5c, 0x5c, 0xff),
-    Rgb::new(0xff, 0x00, 0xff),
-    Rgb::new(0x00, 0xff, 0xff),
-    Rgb::new(0xff, 0xff, 0xff),
-];
-
-/// Build the default 256-color xterm palette.
+/// Build the 256-color palette for `theme`.
 ///
-/// Indices 0..16 are the ANSI colors, 16..232 the 6x6x6 color cube, and
+/// Indices 0..16 are the theme's ANSI colors, 16..232 the 6x6x6 color cube, and
 /// 232..256 the 24-step grayscale ramp.
-fn default_palette() -> [Rgb; PALETTE_LEN] {
-    let mut palette = [DEFAULT_BG; PALETTE_LEN];
-    palette[..16].copy_from_slice(&ANSI_16);
+fn default_palette(theme: &Theme) -> [Rgb; PALETTE_LEN] {
+    let mut palette = [theme.background; PALETTE_LEN];
+    palette[..16].copy_from_slice(&theme.ansi);
 
     let mut index = 16;
     for r in 0..6u8 {
@@ -615,8 +610,9 @@ fn cube_channel(level: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
-    use crate::grid::{
-        Border, BorderStyle, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle,
+    use crate::{
+        grid::{Border, BorderStyle, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+        theme::Theme,
     };
     use stoatty_protocol::command::{
         encode_border, encode_popover, encode_scale, BorderCommand,
@@ -624,7 +620,7 @@ mod tests {
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
-        let mut terminal = Terminal::new(rows, cols);
+        let mut terminal = Terminal::new(rows, cols, Theme::default());
         let mut grid = Grid::new(rows, cols);
 
         terminal.advance(bytes);
@@ -686,6 +682,37 @@ mod tests {
     }
 
     #[test]
+    fn project_resolves_colors_against_theme() {
+        let theme = Theme {
+            foreground: Rgb::new(4, 5, 6),
+            background: Rgb::new(1, 2, 3),
+            cursor: Rgb::new(7, 8, 9),
+            ansi: [Rgb::new(10, 11, 12); 16],
+        };
+        let mut terminal = Terminal::new(1, 4, theme);
+        let mut grid = Grid::new(1, 4);
+
+        terminal.advance(b"a\x1b[31mb");
+        terminal.project(&mut grid);
+
+        assert_eq!(
+            grid.get(0, 0).fg,
+            Rgb::new(4, 5, 6),
+            "default fg from theme"
+        );
+        assert_eq!(
+            grid.get(0, 0).bg,
+            Rgb::new(1, 2, 3),
+            "default bg from theme"
+        );
+        assert_eq!(
+            grid.get(0, 1).fg,
+            Rgb::new(10, 11, 12),
+            "ANSI red from theme palette"
+        );
+    }
+
+    #[test]
     fn projects_cursor_position() {
         let (_, cursor) = project(3, 5, b"\x1b[2;3H");
 
@@ -701,7 +728,7 @@ mod tests {
 
     #[test]
     fn project_skips_undamaged_rows() {
-        let mut terminal = Terminal::new(3, 4);
+        let mut terminal = Terminal::new(3, 4, Theme::default());
         let mut grid = Grid::new(3, 4);
 
         terminal.advance(b"AB\r\nCD");
@@ -720,7 +747,7 @@ mod tests {
 
     #[test]
     fn project_resizes_grid_to_terminal() {
-        let mut terminal = Terminal::new(2, 6);
+        let mut terminal = Terminal::new(2, 6, Theme::default());
         let mut grid = Grid::new(1, 1);
 
         terminal.advance(b"hello");
@@ -732,7 +759,7 @@ mod tests {
 
     #[test]
     fn resize_propagates_to_grid_on_next_project() {
-        let mut terminal = Terminal::new(2, 4);
+        let mut terminal = Terminal::new(2, 4, Theme::default());
         let mut grid = Grid::new(2, 4);
 
         terminal.advance(b"hi");
@@ -814,7 +841,7 @@ mod tests {
             color: [255, 0, 0],
         });
 
-        let mut terminal = Terminal::new(2, 3);
+        let mut terminal = Terminal::new(2, 3, Theme::default());
         let mut grid = Grid::new(2, 3);
         terminal.advance(&frame);
         terminal.project(&mut grid);
@@ -841,7 +868,7 @@ mod tests {
             color: [1, 2, 3],
         });
 
-        let mut terminal = Terminal::new(2, 2);
+        let mut terminal = Terminal::new(2, 2, Theme::default());
         let mut grid = Grid::new(2, 2);
         terminal.advance(&frame);
         terminal.project(&mut grid);
@@ -863,7 +890,7 @@ mod tests {
             scale: 2,
         });
 
-        let mut terminal = Terminal::new(2, 2);
+        let mut terminal = Terminal::new(2, 2, Theme::default());
         let mut grid = Grid::new(2, 2);
         terminal.advance(&frame);
         terminal.project(&mut grid);
@@ -887,7 +914,7 @@ mod tests {
             content: "ok".to_owned(),
         });
 
-        let mut terminal = Terminal::new(8, 8);
+        let mut terminal = Terminal::new(8, 8, Theme::default());
         let mut grid = Grid::new(8, 8);
         terminal.advance(&frame);
         terminal.project(&mut grid);
