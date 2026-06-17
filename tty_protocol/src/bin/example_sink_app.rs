@@ -42,22 +42,24 @@ fn main() {
     stdout.write_all(&out).expect("write to stdout");
     stdout.flush().expect("flush stdout");
 
-    move_cursor_forever(&mut stdout);
+    scroll_text_forever(&mut stdout);
 }
 
-/// Walk the cursor around the panel with plain CUP, pausing between moves so the
-/// renderer's easing animation is visible. Never returns, holding the shell open
-/// until the window closes and kills this process.
-fn move_cursor_forever(stdout: &mut io::Stdout) {
-    let path = [(3u16, 6u16), (3, 30), (9, 30), (9, 6)];
+/// Emit a fresh line every few hundred ms so the screen fills and then scrolls,
+/// driving the renderer's eased grid scroll while the cursor rides the end of
+/// the growing text. Never returns, holding the shell open until the window
+/// closes and kills this process.
+fn scroll_text_forever(stdout: &mut io::Stdout) {
+    let mut line = 0u64;
+    loop {
+        line += 1;
 
-    for (row, col) in path.iter().cycle() {
         let mut step = Vec::new();
-        cup(&mut step, *row, *col);
-        stdout.write_all(&step).expect("write cursor move");
-        stdout.flush().expect("flush cursor move");
+        step.extend_from_slice(format!("scrolling line {line}\r\n").as_bytes());
+        stdout.write_all(&step).expect("write scroll line");
+        stdout.flush().expect("flush scroll line");
 
-        thread::sleep(Duration::from_millis(1200));
+        thread::sleep(Duration::from_millis(400));
     }
 }
 
