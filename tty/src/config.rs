@@ -6,9 +6,10 @@
 //! fields it sets.
 
 use etcetera::{base_strategy::Xdg, BaseStrategy};
-use serde::Deserialize;
+use serde::{de::Error as _, Deserialize, Deserializer};
 use snafu::{ResultExt, Snafu};
-use std::{io, path::PathBuf};
+use std::{collections::BTreeMap, io, path::PathBuf};
+use stoatty_term::{grid::Rgb, theme::Theme};
 
 /// The default configuration, embedded from the repo root so a built binary
 /// carries it without the source tree.
@@ -23,6 +24,125 @@ pub struct Config {
     /// Font size in pixels the renderer rasterizes glyphs at.
     #[serde(default)]
     pub font_size: u32,
+
+    /// Name of the [`themes`](Self::themes) entry colors resolve against.
+    #[serde(default)]
+    pub theme: String,
+
+    /// Named color themes, keyed by the name [`theme`](Self::theme) selects.
+    #[serde(default)]
+    pub themes: BTreeMap<String, ThemeColors>,
+}
+
+impl Config {
+    /// The selected theme resolved into a [`Theme`].
+    ///
+    /// Starts from [`Theme::default`] and overlays the colors the selected
+    /// `[themes.<name>]` entry sets, so an unset color keeps the built-in
+    /// default and an unknown selector name yields the default theme.
+    pub fn resolve_theme(&self) -> Theme {
+        let mut theme = Theme::default();
+
+        let Some(colors) = self.themes.get(&self.theme) else {
+            return theme;
+        };
+
+        if let Some(HexColor(rgb)) = colors.foreground {
+            theme.foreground = rgb;
+        }
+        if let Some(HexColor(rgb)) = colors.background {
+            theme.background = rgb;
+        }
+        if let Some(HexColor(rgb)) = colors.cursor {
+            theme.cursor = rgb;
+        }
+
+        let ansi = [
+            colors.black,
+            colors.red,
+            colors.green,
+            colors.yellow,
+            colors.blue,
+            colors.magenta,
+            colors.cyan,
+            colors.white,
+            colors.bright_black,
+            colors.bright_red,
+            colors.bright_green,
+            colors.bright_yellow,
+            colors.bright_blue,
+            colors.bright_magenta,
+            colors.bright_cyan,
+            colors.bright_white,
+        ];
+        for (slot, over) in theme.ansi.iter_mut().zip(ansi) {
+            if let Some(HexColor(rgb)) = over {
+                *slot = rgb;
+            }
+        }
+
+        theme
+    }
+}
+
+/// A named theme's colors as written in the config.
+///
+/// Each color is an optional `#rrggbb` hex string; an absent one keeps the
+/// corresponding [`Theme`] default when [`Config::resolve_theme`] overlays it.
+/// The 16 ANSI names map to palette indices 0-7 (normal) and 8-15 (bright).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ThemeColors {
+    pub foreground: Option<HexColor>,
+    pub background: Option<HexColor>,
+    pub cursor: Option<HexColor>,
+    pub black: Option<HexColor>,
+    pub red: Option<HexColor>,
+    pub green: Option<HexColor>,
+    pub yellow: Option<HexColor>,
+    pub blue: Option<HexColor>,
+    pub magenta: Option<HexColor>,
+    pub cyan: Option<HexColor>,
+    pub white: Option<HexColor>,
+    pub bright_black: Option<HexColor>,
+    pub bright_red: Option<HexColor>,
+    pub bright_green: Option<HexColor>,
+    pub bright_yellow: Option<HexColor>,
+    pub bright_blue: Option<HexColor>,
+    pub bright_magenta: Option<HexColor>,
+    pub bright_cyan: Option<HexColor>,
+    pub bright_white: Option<HexColor>,
+}
+
+/// An `#rrggbb` color from the config, parsed to an [`Rgb`] on deserialize.
+///
+/// A string that is not a six-digit hex color with a leading `#` is a
+/// deserialize error rather than a silently dropped value.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HexColor(pub Rgb);
+
+impl<'de> Deserialize<'de> for HexColor {
+    fn deserialize<D>(deserializer: D) -> Result<HexColor, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        let raw = String::deserialize(deserializer)?;
+        parse_hex(&raw)
+            .map(HexColor)
+            .ok_or_else(|| D::Error::custom(format!("invalid hex color: {raw}")))
+    }
+}
+
+/// Parse a `#rrggbb` hex color, or `None` if it is malformed.
+fn parse_hex(raw: &str) -> Option<Rgb> {
+    let digits = raw.strip_prefix('#')?;
+    if digits.len() != 6 {
+        return None;
+    }
+
+    let r = u8::from_str_radix(&digits[0..2], 16).ok()?;
+    let g = u8::from_str_radix(&digits[2..4], 16).ok()?;
+    let b = u8::from_str_radix(&digits[4..6], 16).ok()?;
+    Some(Rgb::new(r, g, b))
 }
 
 /// An error loading the stoatty configuration.
@@ -130,26 +250,24 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 
 #[cfg(test)]
 mod tests {
-    use super::{merge_tables, settle, Config, DEFAULT_CONFIG};
+    use super::{merge_tables, settle, DEFAULT_CONFIG};
+    use stoatty_term::grid::Rgb;
 
     #[test]
     fn embedded_default_sets_the_doubled_font_size() {
-        assert_eq!(
-            settle(DEFAULT_CONFIG, None).unwrap(),
-            Config { font_size: 30 }
-        );
+        assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().font_size, 30);
     }
 
     #[test]
     fn user_file_overrides_set_fields() {
         let config = settle("font_size = 30", Some("font_size = 18")).unwrap();
-        assert_eq!(config, Config { font_size: 18 });
+        assert_eq!(config.font_size, 18);
     }
 
     #[test]
     fn absent_user_field_keeps_the_default() {
         let config = settle("font_size = 30", Some("# no overrides here\n")).unwrap();
-        assert_eq!(config, Config { font_size: 30 });
+        assert_eq!(config.font_size, 30);
     }
 
     #[test]
@@ -171,5 +289,42 @@ mod tests {
         )
         .unwrap();
         assert_eq!(base, expected);
+    }
+
+    #[test]
+    fn zed_theme_resolves_to_one_dark_colors() {
+        let theme = settle(DEFAULT_CONFIG, None).unwrap().resolve_theme();
+
+        assert_eq!(theme.background, Rgb::new(0x28, 0x2c, 0x34));
+        assert_eq!(theme.foreground, Rgb::new(0xab, 0xb2, 0xbf));
+        assert_eq!(theme.cursor, Rgb::new(0x74, 0xad, 0xe8));
+        assert_eq!(theme.ansi[1], Rgb::new(0xe0, 0x6c, 0x75), "ansi red");
+        assert_eq!(
+            theme.ansi[15],
+            Rgb::new(0xfa, 0xfa, 0xfa),
+            "ansi bright white"
+        );
+    }
+
+    #[test]
+    fn user_override_replaces_one_theme_field() {
+        let config = settle(
+            DEFAULT_CONFIG,
+            Some("[themes.zed]\nbackground = \"#000000\"\n"),
+        )
+        .unwrap();
+        let theme = config.resolve_theme();
+
+        assert_eq!(theme.background, Rgb::new(0, 0, 0), "overridden field");
+        assert_eq!(theme.foreground, Rgb::new(0xab, 0xb2, 0xbf), "sibling kept");
+    }
+
+    #[test]
+    fn malformed_theme_hex_is_an_error() {
+        assert!(settle(
+            DEFAULT_CONFIG,
+            Some("[themes.zed]\nbackground = \"nope\"\n")
+        )
+        .is_err());
     }
 }

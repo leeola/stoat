@@ -6,3 +6,29 @@
 
 # Font size in pixels the renderer rasterizes glyphs at.
 font_size = 30
+
+# Name of the [themes.<name>] entry the terminal resolves colors against.
+theme = "zed"
+
+# Zed's One Dark terminal palette. Colors are #rrggbb hex strings; an omitted
+# field keeps the built-in default for that slot.
+[themes.zed]
+background = "#282c34"
+foreground = "#abb2bf"
+cursor = "#74ade8"
+black = "#282c34"
+red = "#e06c75"
+green = "#98c379"
+yellow = "#e5c07b"
+blue = "#61afef"
+magenta = "#c678dd"
+cyan = "#56b6c2"
+white = "#abb2bf"
+bright_black = "#636d83"
+bright_red = "#ea858b"
+bright_green = "#aad581"
+bright_yellow = "#ffd885"
+bright_blue = "#85c1ff"
+bright_magenta = "#d398eb"
+bright_cyan = "#6ed5de"
+bright_white = "#fafafa"
