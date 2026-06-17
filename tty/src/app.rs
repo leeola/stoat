@@ -6,7 +6,10 @@
 //! window lives here and [`stoatty_render`] receives only its handle, keeping
 //! the renderer toolkit-agnostic.
 
-use crate::pty::{self, Pty, PtyOutput};
+use crate::{
+    config,
+    pty::{self, Pty, PtyOutput},
+};
 use std::sync::Arc;
 use stoatty_render::gpu::GpuContext;
 use stoatty_term::{
@@ -36,12 +39,14 @@ pub fn run() {
 /// idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
 /// output arrives or the window is resized, not on a continuous timer.
 pub fn run_with_shell(shell: String) {
+    let theme = config::load().expect("load config").resolve_theme();
+
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
         .build()
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(event_loop.create_proxy(), shell);
+    let mut app = App::new(event_loop.create_proxy(), shell, theme);
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -58,14 +63,16 @@ enum PtyEvent {
 struct App {
     proxy: EventLoopProxy<PtyEvent>,
     shell: String,
+    theme: Theme,
     state: Option<State>,
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String) -> App {
+    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String, theme: Theme) -> App {
         App {
             proxy,
             shell,
+            theme,
             state: None,
         }
     }
@@ -99,7 +106,7 @@ impl ApplicationHandler<PtyEvent> for App {
 
         let (rows, cols) = gpu.grid_size();
         let grid = Grid::new(rows, cols);
-        let terminal = Terminal::new(rows, cols, Theme::default());
+        let terminal = Terminal::new(rows, cols, self.theme);
 
         let pty = {
             let proxy = self.proxy.clone();
