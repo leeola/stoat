@@ -111,6 +111,10 @@ pub struct TextPass {
     overlay_instances: Buffer,
     overlay_capacity: usize,
     overlay_count: u32,
+    /// Box pixel rect `[x, y, w, h]` the overlay-content draw scissors to, so
+    /// scrolled content is clipped to the popover. `None` unless exactly one
+    /// overlay is present.
+    overlay_scissor: Option<[u32; 4]>,
     underline_pipeline: RenderPipeline,
     underline_instances: Buffer,
     underline_capacity: usize,
@@ -274,6 +278,7 @@ impl TextPass {
             overlay_instances,
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
+            overlay_scissor: None,
             underline_pipeline,
             underline_instances,
             underline_capacity: INITIAL_CAPACITY,
@@ -288,12 +293,23 @@ impl TextPass {
 
     /// Shape, rasterize, and upload the frame's glyph instances for `grid`.
     ///
-    /// `resolution` is the surface size in physical pixels. Runs in two phases:
-    /// every visible glyph is rasterized first (which may grow the atlas), then
-    /// each glyph's atlas sub-rect is read once the atlas has reached its final
-    /// size, so normalized coordinates stay valid. Reallocates the instance
-    /// buffer only when the glyph count outgrows the current capacity.
-    pub fn prepare(&mut self, device: &Device, queue: &Queue, grid: &Grid, resolution: [f32; 2]) {
+    /// `resolution` is the surface size in physical pixels. `scroll` shifts the
+    /// overlay (popover) content up by that many rows, clipped to the box by the
+    /// scissor [`Self::draw_overlay_text`] applies.
+    ///
+    /// Runs in two phases: every visible glyph is rasterized first (which may
+    /// grow the atlas), then each glyph's atlas sub-rect is read once the atlas
+    /// has reached its final size, so normalized coordinates stay valid.
+    /// Reallocates the instance buffer only when the glyph count outgrows the
+    /// current capacity.
+    pub fn prepare(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        resolution: [f32; 2],
+        scroll: f32,
+    ) {
         let globals = TextGlobals {
             resolution,
             cell_size: [CELL_WIDTH, CELL_HEIGHT],
@@ -309,7 +325,13 @@ impl TextPass {
         let overlay_pending = self.rasterize_overlays(device, queue, grid);
 
         let grid_instances = self.build_text_instances(device, queue, grid_pending);
-        let overlay_instances = self.build_text_instances(device, queue, overlay_pending);
+        let mut overlay_instances = self.build_text_instances(device, queue, overlay_pending);
+
+        let scroll_px = scroll * CELL_HEIGHT;
+        for instance in &mut overlay_instances {
+            instance.pos[1] -= scroll_px;
+        }
+        self.overlay_scissor = overlay_scissor(grid.overlays(), resolution);
 
         self.count = grid_instances.len() as u32;
         self.overlay_count = overlay_instances.len() as u32;
@@ -428,13 +450,19 @@ impl TextPass {
         }
     }
 
-    /// Record the popover-content glyph draw into `render_pass`.
+    /// Record the popover-content glyph draw into `render_pass`, scissored to the
+    /// popover box so scrolled content is clipped to it.
     ///
     /// A no-op when no overlay carries content. Run after the overlay box so the
-    /// content sits inside it, on top of the fill.
+    /// content sits inside it, on top of the fill. Must be the pass's last draw,
+    /// since it leaves the scissor rect set.
     pub fn draw_overlay_text(&self, render_pass: &mut RenderPass<'_>) {
         if self.overlay_count == 0 {
             return;
+        }
+
+        if let Some([x, y, w, h]) = self.overlay_scissor {
+            render_pass.set_scissor_rect(x, y, w, h);
         }
 
         render_pass.set_pipeline(&self.pipeline);
@@ -792,18 +820,17 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
 ///
 /// Content is laid out line by line down the box from its top-left: each
 /// `\n`-separated line fills one row, its characters running rightward from the
-/// left edge. Lines are clipped to the box width and the list to the box height,
-/// so content larger than the box is cut rather than spilling past it.
+/// left edge, clipped to the box width. Every line is emitted, including those
+/// past the box height, so they can scroll into view; the overlay-text draw
+/// scissors to the box to clip the vertical overflow.
 fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
     let left = overlay.left as usize;
     let top = overlay.top as usize;
     let width = overlay.width as usize;
-    let height = overlay.height as usize;
 
     overlay
         .content
         .lines()
-        .take(height)
         .enumerate()
         .flat_map(|(row, line)| {
             line.chars()
@@ -812,6 +839,28 @@ fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
                 .map(move |(col, ch)| (left + col, top + row, ch))
         })
         .collect()
+}
+
+/// The box pixel rect `[x, y, w, h]` to scissor the overlay-content draw to.
+///
+/// `Some` only when exactly one overlay is present, so the scissor clips that
+/// popover's scrolled content to its box. Multiple overlays fall back to the
+/// unclipped batched draw. The rect is clamped to the surface, which a scissor
+/// rect requires.
+fn overlay_scissor(overlays: &[Overlay], resolution: [f32; 2]) -> Option<[u32; 4]> {
+    let [overlay] = overlays else {
+        return None;
+    };
+
+    let res_w = resolution[0] as u32;
+    let res_h = resolution[1] as u32;
+
+    let x = ((overlay.left as f32 * CELL_WIDTH) as u32).min(res_w);
+    let y = ((overlay.top as f32 * CELL_HEIGHT) as u32).min(res_h);
+    let w = ((overlay.width as f32 * CELL_WIDTH) as u32).min(res_w - x);
+    let h = ((overlay.height as f32 * CELL_HEIGHT) as u32).min(res_h - y);
+
+    (w > 0 && h > 0).then_some([x, y, w, h])
 }
 
 /// One decoration instance per underlined cell, in row-major order.
@@ -926,7 +975,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_content_cells_lay_out_lines_clipped_to_box() {
+    fn overlay_content_cells_emit_all_lines_clipped_to_width() {
         let overlay = Overlay {
             top: 2,
             left: 5,
@@ -938,6 +987,8 @@ mod tests {
             content: "abcd\nef\nXY".to_owned(),
         };
 
+        // Every line is emitted and width-clipped. The box height no longer
+        // drops the third line, since the scissor now clips vertical overflow.
         assert_eq!(
             overlay_content_cells(&overlay),
             [
@@ -946,6 +997,8 @@ mod tests {
                 (7, 2, 'c'),
                 (5, 3, 'e'),
                 (6, 3, 'f'),
+                (5, 4, 'X'),
+                (6, 4, 'Y'),
             ]
         );
     }

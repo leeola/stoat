@@ -85,8 +85,9 @@ impl Renderer {
     /// cursor cell, then draw overlays and their content on top.
     ///
     /// `cursor` is the cursor's position in fractional cell coordinates, or
-    /// `None` when it is hidden. Submits the frame but does not present or poll;
-    /// the caller drives whichever it needs.
+    /// `None` when it is hidden. `scroll` shifts popover content up by that many
+    /// rows. Submits the frame but does not present or poll; the caller drives
+    /// whichever it needs.
     pub fn render_into(
         &mut self,
         device: &Device,
@@ -94,12 +95,13 @@ impl Renderer {
         view: &TextureView,
         grid: &Grid,
         cursor: Option<[f32; 2]>,
+        scroll: f32,
     ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background
             .prepare(device, queue, grid, resolution, cursor, self.cursor_color);
         self.decoration.prepare(device, queue, grid, resolution);
-        self.text.prepare(device, queue, grid, resolution);
+        self.text.prepare(device, queue, grid, resolution, scroll);
         self.overlay.prepare(device, queue, grid, resolution);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
@@ -243,12 +245,13 @@ impl GpuContext {
 
     /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
     /// position in fractional cell coordinates, or `None` when it is hidden.
+    /// `scroll` shifts popover content up by that many rows.
     ///
     /// Skips the frame when the surface is transiently unavailable (timed
     /// out, occluded, or a validation error already raised elsewhere) and
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
-    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>) {
+    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>, scroll: f32) {
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
@@ -264,7 +267,7 @@ impl GpuContext {
 
         let view = frame.texture.create_view(&TextureViewDescriptor::default());
         self.renderer
-            .render_into(&self.device, &self.queue, &view, grid, cursor);
+            .render_into(&self.device, &self.queue, &view, grid, cursor, scroll);
         frame.present();
     }
 }

@@ -174,11 +174,11 @@ impl ApplicationHandler<PtyEvent> for App {
                     Some(target) => {
                         let (next, settled) = ease(state.cursor_anim, target);
                         state.cursor_anim = next;
-                        state.gpu.render(&state.grid, Some(next));
+                        state.gpu.render(&state.grid, Some(next), 0.0);
                         !settled
                     },
                     None => {
-                        state.gpu.render(&state.grid, None);
+                        state.gpu.render(&state.grid, None, 0.0);
                         false
                     },
                 };

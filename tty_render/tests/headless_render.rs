@@ -73,5 +73,5 @@ fn builds_passes_and_draws_a_frame_off_screen() {
     // submitting the draw (render_into) triggers wgpu's default uncaptured-error
     // panic, failing this test. Both are synchronous, so reaching the end without
     // a panic is the assertion.
-    renderer.render_into(&device, &queue, &view, &grid, Some([0.0, 0.0]));
+    renderer.render_into(&device, &queue, &view, &grid, Some([0.0, 0.0]), 0.0);
 }
