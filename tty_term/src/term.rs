@@ -7,7 +7,10 @@
 //! lines the terminal reports as damaged.
 
 use crate::{
-    grid::{Border, BorderStyle, Borders, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+    grid::{
+        Border, BorderStyle, Borders, Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion,
+        UnderlineStyle,
+    },
     theme::Theme,
 };
 use alacritty_terminal::{
@@ -22,7 +25,9 @@ use alacritty_terminal::{
     Term,
 };
 use std::mem;
-use stoatty_protocol::command::{self, BorderCommand, Command, PopoverCommand, ScaleCommand};
+use stoatty_protocol::command::{
+    self, BorderCommand, Command, PopoverCommand, ScaleCommand, ScrollRegionCommand,
+};
 
 const PALETTE_LEN: usize = 256;
 
@@ -55,6 +60,11 @@ pub struct Terminal {
     /// overlay list by [`Self::project`]. They float above the cells, so they
     /// are grid-level overlays rather than cell attributes.
     popovers: Vec<PopoverCommand>,
+    /// The scrollable region set by `Gstoatty;scroll_region` frames, applied to
+    /// the grid by [`Self::project`]. Unlike the other commands it does not
+    /// accumulate: a region's scroll offset updates over time, so the latest
+    /// frame replaces the prior one.
+    scroll_region: Option<ScrollRegionCommand>,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
@@ -102,6 +112,7 @@ impl Terminal {
             borders: Vec::new(),
             scales: Vec::new(),
             popovers: Vec::new(),
+            scroll_region: None,
             last_history: 0,
         }
     }
@@ -135,6 +146,7 @@ impl Terminal {
             Command::Border(border) => self.borders.push(border),
             Command::Scale(scale) => self.scales.push(scale),
             Command::Popover(popover) => self.popovers.push(popover),
+            Command::ScrollRegion(region) => self.scroll_region = Some(region),
         }
     }
 
@@ -192,6 +204,7 @@ impl Terminal {
         apply_borders(grid, &self.borders);
         apply_scales(grid, &self.scales);
         apply_popovers(grid, &self.popovers);
+        apply_scroll_region(grid, self.scroll_region);
 
         let history = self.term.history_size();
         let scrolled = history.saturating_sub(self.last_history);
@@ -551,6 +564,21 @@ fn apply_popovers(grid: &mut Grid, commands: &[PopoverCommand]) {
     grid.set_overlays(overlays);
 }
 
+/// Set the grid's scrollable region from the stored command, or clear it.
+///
+/// Runs each projection like the other command appliers, since the grid's
+/// scroll region is set rather than derived from cells. The renderer clamps or
+/// clips an out-of-grid rectangle, so wire coordinates need no guard here.
+fn apply_scroll_region(grid: &mut Grid, command: Option<ScrollRegionCommand>) {
+    grid.set_scroll_region(command.map(|command| ScrollRegion {
+        top: command.top,
+        left: command.left,
+        width: command.width,
+        height: command.height,
+        offset: command.offset,
+    }));
+}
+
 fn popover_overlay(command: &PopoverCommand) -> Overlay {
     Overlay {
         top: command.top,
@@ -625,12 +653,15 @@ fn cube_channel(level: u8) -> u8 {
 mod tests {
     use super::{ApcScanner, Cursor, CursorShape, Terminal};
     use crate::{
-        grid::{Border, BorderStyle, Cell, Flags, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+        grid::{
+            Border, BorderStyle, Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion,
+            UnderlineStyle,
+        },
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_border, encode_popover, encode_scale, BorderCommand,
-        BorderStyle as ProtoBorderStyle, PopoverCommand, ScaleCommand,
+        encode_border, encode_popover, encode_scale, encode_scroll_region, BorderCommand,
+        BorderStyle as ProtoBorderStyle, PopoverCommand, ScaleCommand, ScrollRegionCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -928,6 +959,38 @@ mod tests {
         assert_eq!(grid.get(0, 1).scale, Scale::Covered);
         assert_eq!(grid.get(1, 0).scale, Scale::Covered);
         assert_eq!(grid.get(1, 1).scale, Scale::Covered);
+    }
+
+    #[test]
+    fn scroll_region_apc_frame_sets_and_replaces_the_region() {
+        let region = |offset| ScrollRegion {
+            top: 1,
+            left: 2,
+            width: 4,
+            height: 3,
+            offset,
+        };
+        let frame = |offset| {
+            encode_scroll_region(&ScrollRegionCommand {
+                top: 1,
+                left: 2,
+                width: 4,
+                height: 3,
+                offset,
+            })
+        };
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+
+        terminal.advance(&frame(5));
+        terminal.project(&mut grid);
+        assert_eq!(grid.scroll_region(), Some(region(5)));
+
+        // A later frame replaces the offset rather than adding a second region.
+        terminal.advance(&frame(9));
+        terminal.project(&mut grid);
+        assert_eq!(grid.scroll_region(), Some(region(9)));
     }
 
     #[test]

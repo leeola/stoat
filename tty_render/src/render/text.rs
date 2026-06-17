@@ -10,7 +10,7 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas},
-    render::CellMetrics,
+    render::{CellMetrics, Scroll},
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -109,6 +109,13 @@ pub struct TextPass {
     /// scrolled content is clipped to the popover. `None` unless exactly one
     /// overlay is present.
     overlay_scissor: Option<[u32; 4]>,
+    region_instances: Buffer,
+    region_capacity: usize,
+    region_count: u32,
+    /// Pixel rect `[x, y, w, h]` the scroll-region glyph draw scissors to, so
+    /// the region's scrolled content is clipped to its rectangle. `None` when no
+    /// scroll region is declared.
+    region_scissor: Option<[u32; 4]>,
     underline_pipeline: RenderPipeline,
     underline_instances: Buffer,
     underline_capacity: usize,
@@ -254,6 +261,11 @@ impl TextPass {
             "overlay text instances",
             instance_bytes::<TextInstance>(INITIAL_CAPACITY),
         );
+        let region_instances = alloc_instances(
+            device,
+            "scroll region text instances",
+            instance_bytes::<TextInstance>(INITIAL_CAPACITY),
+        );
         let underline_instances = alloc_instances(
             device,
             "underline instances",
@@ -274,6 +286,10 @@ impl TextPass {
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
             overlay_scissor: None,
+            region_instances,
+            region_capacity: INITIAL_CAPACITY,
+            region_count: 0,
+            region_scissor: None,
             underline_pipeline,
             underline_instances,
             underline_capacity: INITIAL_CAPACITY,
@@ -301,12 +317,16 @@ impl TextPass {
 
     /// Shape, rasterize, and upload the frame's glyph instances for `grid`.
     ///
-    /// `resolution` is the surface size in physical pixels. `popover_scroll`
+    /// `resolution` is the surface size in physical pixels. `scroll.popover`
     /// shifts the overlay (popover) content up by that many rows, clipped to the
-    /// box by the scissor [`Self::draw_overlay_text`] applies. `grid_scroll`
-    /// offsets the grid glyphs and underlines down by that many rows, the same
-    /// offset the background and decoration passes apply, so the grid scrolls as
-    /// one; the screen-anchored overlay content is left unmoved.
+    /// box by the scissor [`Self::draw_overlay_text`] applies.
+    ///
+    /// `scroll.grid` offsets the glyphs and underlines down by that many rows,
+    /// the same offset the background and decoration passes apply, so the grid
+    /// scrolls as one; the screen-anchored overlay content is left unmoved. The
+    /// cells inside the grid's scroll region are excluded and instead offset by
+    /// `scroll.region`, clipped to the region by the scissor
+    /// [`Self::draw_region_text`] applies, so the region scrolls independently.
     ///
     /// Runs in two phases: every visible glyph is rasterized first (which may
     /// grow the atlas), then each glyph's atlas sub-rect is read once the atlas
@@ -319,8 +339,7 @@ impl TextPass {
         queue: &Queue,
         grid: &Grid,
         resolution: [f32; 2],
-        popover_scroll: f32,
-        grid_scroll: f32,
+        scroll: Scroll,
     ) {
         let globals = TextGlobals {
             resolution,
@@ -330,39 +349,70 @@ impl TextPass {
 
         // Underlines are built first, before the glyph path can return early on
         // an all-blank grid: an underlined space has no glyph but still draws.
-        self.prepare_underlines(device, queue, grid, grid_scroll);
+        self.prepare_underlines(device, queue, grid, scroll.grid);
 
         self.atlas.begin_frame();
         let grid_pending = self.rasterize_visible(device, queue, grid);
         let overlay_pending = self.rasterize_overlays(device, queue, grid);
 
-        let mut grid_instances = self.build_text_instances(device, queue, grid_pending);
+        let region = grid.scroll_region();
+        let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) = grid_pending
+            .into_iter()
+            .partition(|glyph| region.is_some_and(|region| region.contains(glyph.row, glyph.col)));
+
+        let mut plain_instances = self.build_text_instances(device, queue, plain_pending);
+        let mut region_instances = self.build_text_instances(device, queue, region_pending);
         let mut overlay_instances = self.build_text_instances(device, queue, overlay_pending);
 
-        let grid_scroll_px = grid_scroll * self.metrics.height;
-        for instance in &mut grid_instances {
+        let grid_scroll_px = scroll.grid * self.metrics.height;
+        for instance in &mut plain_instances {
             instance.pos[1] += grid_scroll_px;
         }
 
-        let popover_scroll_px = popover_scroll * self.metrics.height;
+        let region_scroll_px = scroll.region * self.metrics.height;
+        for instance in &mut region_instances {
+            instance.pos[1] += region_scroll_px;
+        }
+        self.region_scissor = region.and_then(|region| {
+            cell_rect_scissor(
+                region.top,
+                region.left,
+                region.width,
+                region.height,
+                resolution,
+                self.metrics,
+            )
+        });
+
+        let popover_scroll_px = scroll.popover * self.metrics.height;
         for instance in &mut overlay_instances {
             instance.pos[1] -= popover_scroll_px;
         }
         self.overlay_scissor = overlay_scissor(grid.overlays(), resolution, self.metrics);
 
-        self.count = grid_instances.len() as u32;
+        self.count = plain_instances.len() as u32;
+        self.region_count = region_instances.len() as u32;
         self.overlay_count = overlay_instances.len() as u32;
-        if grid_instances.is_empty() && overlay_instances.is_empty() {
+        if plain_instances.is_empty() && region_instances.is_empty() && overlay_instances.is_empty()
+        {
             return;
         }
 
         upload_instances(
             device,
             queue,
-            &grid_instances,
+            &plain_instances,
             &mut self.instances,
             &mut self.capacity,
             "text instances",
+        );
+        upload_instances(
+            device,
+            queue,
+            &region_instances,
+            &mut self.region_instances,
+            &mut self.region_capacity,
+            "scroll region text instances",
         );
         upload_instances(
             device,
@@ -479,6 +529,28 @@ impl TextPass {
             render_pass.set_vertex_buffer(0, self.underline_instances.slice(..));
             render_pass.draw(0..6, 0..self.underline_count);
         }
+    }
+
+    /// Record the scroll-region glyph draw into `render_pass`, scissored to the
+    /// region so its scrolled content is clipped to the rectangle.
+    ///
+    /// A no-op when no scroll region is present. Leaves the scissor rect set, so
+    /// the caller must restore the full surface before any later full-screen
+    /// draw.
+    pub fn draw_region_text(&self, render_pass: &mut RenderPass<'_>) {
+        if self.region_count == 0 {
+            return;
+        }
+
+        if let Some([x, y, w, h]) = self.region_scissor {
+            render_pass.set_scissor_rect(x, y, w, h);
+        }
+
+        render_pass.set_pipeline(&self.pipeline);
+        render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
+        render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+        render_pass.set_vertex_buffer(0, self.region_instances.slice(..));
+        render_pass.draw(0..6, 0..self.region_count);
     }
 
     /// Record the popover-content glyph draw into `render_pass`, scissored to the
@@ -888,8 +960,7 @@ fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
 ///
 /// `Some` only when exactly one overlay is present, so the scissor clips that
 /// popover's scrolled content to its box. Multiple overlays fall back to the
-/// unclipped batched draw. The rect is clamped to the surface, which a scissor
-/// rect requires.
+/// unclipped batched draw.
 fn overlay_scissor(
     overlays: &[Overlay],
     resolution: [f32; 2],
@@ -899,13 +970,37 @@ fn overlay_scissor(
         return None;
     };
 
+    cell_rect_scissor(
+        overlay.top,
+        overlay.left,
+        overlay.width,
+        overlay.height,
+        resolution,
+        metrics,
+    )
+}
+
+/// The pixel rect `[x, y, w, h]` to scissor a draw to a `width` by `height` cell
+/// rectangle anchored at (`top`, `left`).
+///
+/// The rect is clamped to the surface, which a scissor rect requires. `None`
+/// when the clamped rectangle has no area, which a zero-size scissor would
+/// reject.
+fn cell_rect_scissor(
+    top: u16,
+    left: u16,
+    width: u16,
+    height: u16,
+    resolution: [f32; 2],
+    metrics: CellMetrics,
+) -> Option<[u32; 4]> {
     let res_w = resolution[0] as u32;
     let res_h = resolution[1] as u32;
 
-    let x = ((overlay.left as f32 * metrics.width) as u32).min(res_w);
-    let y = ((overlay.top as f32 * metrics.height) as u32).min(res_h);
-    let w = ((overlay.width as f32 * metrics.width) as u32).min(res_w - x);
-    let h = ((overlay.height as f32 * metrics.height) as u32).min(res_h - y);
+    let x = ((left as f32 * metrics.width) as u32).min(res_w);
+    let y = ((top as f32 * metrics.height) as u32).min(res_h);
+    let w = ((width as f32 * metrics.width) as u32).min(res_w - x);
+    let h = ((height as f32 * metrics.height) as u32).min(res_h - y);
 
     (w > 0 && h > 0).then_some([x, y, w, h])
 }
@@ -946,8 +1041,8 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_underline_instances, cell_glyph_scale, glyph_origin, overlay_content_cells,
-        STYLE_DOTTED,
+        build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_origin,
+        overlay_content_cells, STYLE_DOTTED,
     };
     use crate::render::CellMetrics;
     use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
@@ -1052,6 +1147,33 @@ mod tests {
                 (5, 4, 'X'),
                 (6, 4, 'Y'),
             ]
+        );
+    }
+
+    #[test]
+    fn cell_rect_scissor_clamps_to_surface() {
+        let metrics = CellMetrics::from_font_size(30);
+        let resolution = [metrics.width * 10.0, metrics.height * 5.0];
+
+        assert_eq!(
+            cell_rect_scissor(1, 2, 3, 2, resolution, metrics),
+            Some([
+                (2.0 * metrics.width) as u32,
+                metrics.height as u32,
+                (3.0 * metrics.width) as u32,
+                (2.0 * metrics.height) as u32,
+            ]),
+            "a rectangle inside the surface maps cells to pixels directly"
+        );
+
+        let [x, y, w, h] = cell_rect_scissor(4, 8, 6, 4, resolution, metrics).unwrap();
+        assert_eq!(x + w, resolution[0] as u32, "width clamps to the surface");
+        assert_eq!(y + h, resolution[1] as u32, "height clamps to the surface");
+
+        assert_eq!(
+            cell_rect_scissor(5, 0, 2, 2, resolution, metrics),
+            None,
+            "an anchor at the bottom edge has no area"
         );
     }
 

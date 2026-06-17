@@ -9,6 +9,7 @@
 //! draws into any texture view, so a frame can target an off-screen texture as
 //! well as the window surface that [`GpuContext`] wraps.
 
+pub use crate::render::Scroll;
 use crate::render::{
     background::{BackgroundPass, CursorState},
     decoration::DecorationPass,
@@ -26,15 +27,6 @@ use wgpu::{
     StoreOp, Surface, SurfaceConfiguration, TextureFormat, TextureUsages, TextureView,
     TextureViewDescriptor,
 };
-
-/// The eased vertical scroll offsets a frame applies, in rows.
-#[derive(Clone, Copy)]
-pub struct Scroll {
-    /// Popover content scroll within its box.
-    pub popover: f32,
-    /// Whole-grid scroll.
-    pub grid: f32,
-}
 
 /// The grid render passes and the target size, independent of any window.
 ///
@@ -141,8 +133,7 @@ impl Renderer {
         );
         self.decoration
             .prepare(device, queue, grid, resolution, scroll.grid);
-        self.text
-            .prepare(device, queue, grid, resolution, scroll.popover, scroll.grid);
+        self.text.prepare(device, queue, grid, resolution, scroll);
         self.overlay.prepare(device, queue, grid, resolution);
 
         let mut encoder = device.create_command_encoder(&CommandEncoderDescriptor::default());
@@ -168,6 +159,10 @@ impl Renderer {
             self.background.draw(&mut render_pass);
             self.decoration.draw(&mut render_pass);
             self.text.draw(&mut render_pass);
+            self.text.draw_region_text(&mut render_pass);
+            // The region draw leaves its scissor set, so restore the full
+            // surface before the cursor and overlay draws that follow.
+            render_pass.set_scissor_rect(0, 0, self.width, self.height);
             self.background.draw_cursor(&mut render_pass);
             self.overlay.draw(&mut render_pass);
             self.text.draw_overlay_text(&mut render_pass);

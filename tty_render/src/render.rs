@@ -5,6 +5,18 @@ pub mod decoration;
 pub mod overlay;
 pub mod text;
 
+/// The eased vertical scroll offsets a frame applies, in rows.
+#[derive(Clone, Copy)]
+pub struct Scroll {
+    /// Popover content scroll within its box.
+    pub popover: f32,
+    /// Whole-grid scroll, applied to every cell outside a scroll region.
+    pub grid: f32,
+    /// Scroll-region content scroll, applied to the cells inside the grid's
+    /// scroll region instead of [`Self::grid`].
+    pub region: f32,
+}
+
 /// Cell layout metrics in physical pixels, derived from the configured font size.
 ///
 /// The grid passes need one consistent cell rectangle, and the background and

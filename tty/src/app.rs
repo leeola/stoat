@@ -110,6 +110,13 @@ struct State {
     /// The grid's eased vertical scroll offset, in rows. Seeded by the term's
     /// per-frame scroll delta and eased toward zero so content glides into place.
     grid_scroll: f32,
+    /// The scroll region's eased vertical offset, in rows. Seeded by the change
+    /// in the region's declared offset and eased toward zero, so the region's
+    /// content glides when the program scrolls it.
+    region_scroll: f32,
+    /// The scroll region's declared offset at the previous frame, so the next
+    /// one can seed the ease with the change since.
+    last_region_offset: f32,
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -163,6 +170,8 @@ impl ApplicationHandler<PtyEvent> for App {
             popover_scroll: 0.0,
             popover_scroll_down: true,
             grid_scroll: 0.0,
+            region_scroll: 0.0,
+            last_region_offset: 0.0,
         });
     }
 
@@ -220,6 +229,20 @@ impl ApplicationHandler<PtyEvent> for App {
                     step_grid_scroll(state.grid_scroll, scroll_delta);
                 state.grid_scroll = grid_scroll;
 
+                let (region_scroll, region_scrolling) = match state.grid.scroll_region() {
+                    Some(region) => {
+                        let offset = region.offset as f32;
+                        let delta = offset - state.last_region_offset;
+                        state.last_region_offset = offset;
+                        step_region_scroll(state.region_scroll, delta)
+                    },
+                    None => {
+                        state.last_region_offset = 0.0;
+                        (0.0, false)
+                    },
+                };
+                state.region_scroll = region_scroll;
+
                 let cursor_easing = match cursor_position(cursor) {
                     Some(target) => {
                         let (next, settled) = ease(state.cursor_anim, target);
@@ -230,6 +253,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             Scroll {
                                 popover: state.popover_scroll,
                                 grid: state.grid_scroll,
+                                region: state.region_scroll,
                             },
                         );
                         !settled
@@ -241,6 +265,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             Scroll {
                                 popover: state.popover_scroll,
                                 grid: state.grid_scroll,
+                                region: state.region_scroll,
                             },
                         );
                         false
@@ -248,9 +273,9 @@ impl ApplicationHandler<PtyEvent> for App {
                 };
 
                 // Keep the vsync-paced loop running while the cursor eases, a
-                // popover scrolls, or the grid scrolls. When all settle the loop
-                // idles until the next PTY output or resize.
-                if cursor_easing || popover_scrolling || grid_scrolling {
+                // popover scrolls, or the grid or a region scrolls. When all
+                // settle the loop idles until the next PTY output or resize.
+                if cursor_easing || popover_scrolling || grid_scrolling || region_scrolling {
                     state.window.request_redraw();
                 }
             },
@@ -373,9 +398,25 @@ fn step_grid_scroll(scroll: f32, delta: usize) -> (f32, bool) {
     (next[0], !settled)
 }
 
+/// Advance the scroll region's eased vertical offset one frame.
+///
+/// `delta` is the change in the region's declared scroll offset since the last
+/// frame, signed: positive when the program scrolled the region's content down,
+/// negative when up. It seeds the offset, which then eases toward zero so the
+/// region's content glides into place. Returns the new offset and whether it is
+/// still easing.
+fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
+    let seeded = scroll + delta;
+    let (next, settled) = ease([seeded, 0.0], [0.0, 0.0]);
+    (next[0], !settled)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ease, font_step, popover_overflow, step_grid_scroll, step_popover_scroll};
+    use super::{
+        ease, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
+        step_region_scroll,
+    };
     use stoatty_term::grid::{Grid, Overlay, Rgb};
     use winit::keyboard::Key;
 
@@ -460,6 +501,24 @@ mod tests {
 
         // No new delta, within the snap epsilon: settles at zero.
         let (next, easing) = step_grid_scroll(0.005, 0);
+        assert_eq!(next, 0.0, "snaps onto zero");
+        assert!(!easing);
+    }
+
+    #[test]
+    fn region_scroll_eases_a_signed_delta_to_zero() {
+        // A positive delta (content scrolled down) seeds and eases toward zero.
+        let (next, easing) = step_region_scroll(0.0, 3.0);
+        assert!(next > 0.0 && next < 3.0, "eases from the positive seed");
+        assert!(easing);
+
+        // A negative delta (content scrolled up) eases up from below zero.
+        let (next, easing) = step_region_scroll(0.0, -3.0);
+        assert!(next < 0.0 && next > -3.0, "eases from the negative seed");
+        assert!(easing);
+
+        // No new delta, within the snap epsilon: settles at zero.
+        let (next, easing) = step_region_scroll(0.005, 0.0);
         assert_eq!(next, 0.0, "snaps onto zero");
         assert!(!easing);
     }

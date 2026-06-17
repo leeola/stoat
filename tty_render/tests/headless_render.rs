@@ -8,7 +8,7 @@
 //! skipping when no GPU adapter is present so GPU-less CI stays green.
 
 use stoatty_render::gpu::{headless_device, Renderer, Scroll};
-use stoatty_term::grid::{Border, BorderStyle, Grid, Overlay, Rgb};
+use stoatty_term::grid::{Border, BorderStyle, Grid, Overlay, Rgb, ScrollRegion};
 use wgpu::{
     Extent3d, TextureDescriptor, TextureDimension, TextureFormat, TextureUsages,
     TextureViewDescriptor,
@@ -70,6 +70,17 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         content: "ok".to_owned(),
     }]);
 
+    // A scroll region with a glyph inside it, scrolled by a non-zero offset, so
+    // the scissored region-text draw runs against the real device too.
+    grid.get_mut(0, cols - 1).ch = 'B';
+    grid.set_scroll_region(Some(ScrollRegion {
+        top: 0,
+        left: cols as u16 - 2,
+        width: 2,
+        height: 2,
+        offset: 1,
+    }));
+
     // A validation error in pipeline creation (Renderer::new) or in encoding and
     // submitting the draw (render_into) triggers wgpu's default uncaptured-error
     // panic, failing this test. Both are synchronous, so reaching the end without
@@ -83,6 +94,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         Scroll {
             popover: 0.0,
             grid: 0.0,
+            region: 1.5,
         },
     );
 }

@@ -18,6 +18,7 @@ pub enum Command {
     Border(BorderCommand),
     Scale(ScaleCommand),
     Popover(PopoverCommand),
+    ScrollRegion(ScrollRegionCommand),
 }
 
 /// Frame a rectangular cell region with a border.
@@ -83,6 +84,22 @@ pub struct PopoverCommand {
     pub content: String,
 }
 
+/// Declare a scrollable sub-rectangle of the grid.
+///
+/// The region is `width` by `height` cells with its top-left at (`top`, `left`)
+/// in absolute grid coordinates. `offset` is its current scroll position in
+/// rows: the renderer eases the region's content as `offset` changes between
+/// frames, so the program reports an absolute position and the terminal owns the
+/// animation. The rest of the grid scrolls independently of the region.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScrollRegionCommand {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+    pub offset: u16,
+}
+
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
 ///
 /// `None` covers both a malformed frame and a well-formed one whose
@@ -142,6 +159,22 @@ pub fn encode_popover(command: &PopoverCommand) -> Vec<u8> {
     })
 }
 
+/// Encode a [`ScrollRegionCommand`] as a full `Gstoatty;scroll_region` frame for
+/// an emitter.
+pub fn encode_scroll_region(command: &ScrollRegionCommand) -> Vec<u8> {
+    let mut arg = Vec::with_capacity(10);
+    arg.extend_from_slice(&command.top.to_be_bytes());
+    arg.extend_from_slice(&command.left.to_be_bytes());
+    arg.extend_from_slice(&command.width.to_be_bytes());
+    arg.extend_from_slice(&command.height.to_be_bytes());
+    arg.extend_from_slice(&command.offset.to_be_bytes());
+
+    frame::encode(&Frame {
+        sub: "scroll_region".to_owned(),
+        args: vec![arg],
+    })
+}
+
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
@@ -151,6 +184,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "border" => decode_border(&frame.args).map(Command::Border),
         "scale" => decode_scale(&frame.args).map(Command::Scale),
         "popover" => decode_popover(&frame.args).map(Command::Popover),
+        "scroll_region" => decode_scroll_region(&frame.args).map(Command::ScrollRegion),
         _ => None,
     }
 }
@@ -194,6 +228,18 @@ fn decode_popover(args: &[Vec<u8>]) -> Option<PopoverCommand> {
     })
 }
 
+fn decode_scroll_region(args: &[Vec<u8>]) -> Option<ScrollRegionCommand> {
+    let arg: &[u8; 10] = args.first()?.as_slice().try_into().ok()?;
+
+    Some(ScrollRegionCommand {
+        top: u16::from_be_bytes([arg[0], arg[1]]),
+        left: u16::from_be_bytes([arg[2], arg[3]]),
+        width: u16::from_be_bytes([arg[4], arg[5]]),
+        height: u16::from_be_bytes([arg[6], arg[7]]),
+        offset: u16::from_be_bytes([arg[8], arg[9]]),
+    })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -216,8 +262,8 @@ fn style_code(style: BorderStyle) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode_border, encode_popover, encode_scale, BorderCommand, BorderStyle, Command,
-        PopoverCommand, ScaleCommand,
+        decode, encode_border, encode_popover, encode_scale, encode_scroll_region, BorderCommand,
+        BorderStyle, Command, PopoverCommand, ScaleCommand, ScrollRegionCommand,
     };
 
     #[test]
@@ -304,6 +350,28 @@ mod tests {
         // The first arg here decodes to 3 bytes, not the 17 a popover region
         // needs, and the content arg is absent.
         assert!(decode(b"Gstoatty;popover;YWJj").is_none());
+    }
+
+    #[test]
+    fn scroll_region_round_trips() {
+        let command = ScrollRegionCommand {
+            top: 1,
+            left: 60,
+            width: 40,
+            height: 30,
+            offset: 12,
+        };
+
+        assert_eq!(
+            decode(&encode_scroll_region(&command)),
+            Some(Command::ScrollRegion(command))
+        );
+    }
+
+    #[test]
+    fn rejects_wrong_length_scroll_region_payload() {
+        // The single arg here decodes to 3 bytes, not the 10 a scroll region needs.
+        assert!(decode(b"Gstoatty;scroll_region;YWJj").is_none());
     }
 
     #[test]

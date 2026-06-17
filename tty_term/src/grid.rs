@@ -18,6 +18,7 @@ pub struct Grid {
     rows: usize,
     cols: usize,
     overlays: Vec<Overlay>,
+    scroll_region: Option<ScrollRegion>,
 }
 
 impl Grid {
@@ -28,6 +29,7 @@ impl Grid {
             rows,
             cols,
             overlays: Vec::new(),
+            scroll_region: None,
         }
     }
 
@@ -65,6 +67,7 @@ impl Grid {
         self.cells.clear();
         self.cells.resize(rows * cols, Cell::default());
         self.overlays.clear();
+        self.scroll_region = None;
     }
 
     /// The floating overlay regions drawn above the cells, in draw order.
@@ -79,6 +82,21 @@ impl Grid {
     /// frame it changes.
     pub fn set_overlays(&mut self, overlays: Vec<Overlay>) {
         self.overlays = overlays;
+    }
+
+    /// The scrollable sub-rectangle, or `None` when no region is declared.
+    pub fn scroll_region(&self) -> Option<ScrollRegion> {
+        self.scroll_region
+    }
+
+    /// Replace the scrollable sub-rectangle.
+    ///
+    /// Grid-level like the overlays, so the per-cell projection leaves it
+    /// untouched; the caller sets it each frame it changes. A region's scroll
+    /// offset updates over time, so the latest value replaces the prior one
+    /// rather than accumulating.
+    pub fn set_scroll_region(&mut self, region: Option<ScrollRegion>) {
+        self.scroll_region = region;
     }
 
     /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
@@ -241,6 +259,38 @@ pub struct Overlay {
     pub content: String,
 }
 
+/// A scrollable sub-rectangle of the grid.
+///
+/// The cells inside the `width` by `height` rectangle anchored at (`top`,
+/// `left`) scroll on their own [`Self::offset`] while the rest of the grid stays
+/// fixed. The region carries no content of its own: it scopes the scroll of the
+/// grid cells it covers, the renderer shifting those cells by the eased offset
+/// and clipping them to the rectangle.
+///
+/// [`Self::offset`] is the region's scroll position in rows. It is an absolute
+/// position rather than a delta, so a change between frames is what the renderer
+/// animates.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct ScrollRegion {
+    pub top: u16,
+    pub left: u16,
+    pub width: u16,
+    pub height: u16,
+    pub offset: u16,
+}
+
+impl ScrollRegion {
+    /// Whether the cell at (`row`, `col`) falls within the region's rectangle.
+    pub fn contains(&self, row: usize, col: usize) -> bool {
+        let top = self.top as usize;
+        let left = self.left as usize;
+        row >= top
+            && row < top + self.height as usize
+            && col >= left
+            && col < left + self.width as usize
+    }
+}
+
 /// How a cell's underline is decorated, or [`UnderlineStyle::None`] for no
 /// underline.
 ///
@@ -317,7 +367,7 @@ impl BitOrAssign for Flags {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cell, Flags, Grid, Overlay, Rgb, Scale};
+    use super::{Cell, Flags, Grid, Overlay, Rgb, Scale, ScrollRegion};
 
     #[test]
     fn grid_writes_are_addressable() {
@@ -404,5 +454,45 @@ mod tests {
 
         grid.resize(3, 3);
         assert!(grid.overlays().is_empty(), "resize clears overlays");
+    }
+
+    #[test]
+    fn scroll_region_round_trips_and_clears_on_resize() {
+        let mut grid = Grid::new(4, 4);
+        let region = ScrollRegion {
+            top: 1,
+            left: 2,
+            width: 2,
+            height: 2,
+            offset: 5,
+        };
+        grid.set_scroll_region(Some(region));
+
+        assert_eq!(grid.scroll_region(), Some(region));
+
+        grid.resize(2, 2);
+        assert_eq!(
+            grid.scroll_region(),
+            None,
+            "resize clears the scroll region"
+        );
+    }
+
+    #[test]
+    fn scroll_region_contains_its_rectangle_only() {
+        let region = ScrollRegion {
+            top: 1,
+            left: 2,
+            width: 2,
+            height: 3,
+            offset: 0,
+        };
+
+        assert!(region.contains(1, 2), "top-left corner");
+        assert!(region.contains(3, 3), "bottom-right corner");
+        assert!(!region.contains(0, 2), "row above");
+        assert!(!region.contains(4, 2), "row below");
+        assert!(!region.contains(1, 1), "column left");
+        assert!(!region.contains(1, 4), "column right");
     }
 }
