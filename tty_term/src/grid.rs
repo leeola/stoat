@@ -245,8 +245,8 @@ pub enum Scale {
 /// [`Self::border`] outline.
 ///
 /// [`Self::content`] is a line of text drawn inside the box in
-/// [`Self::content_fg`], one char per cell from the box's top-left, clipped to
-/// the box width.
+/// [`Self::content_fg`], drawn at [`Self::scale`] times the cell size from the
+/// box's top-left, clipped to the box.
 #[derive(Clone, PartialEq, Eq, Debug)]
 pub struct Overlay {
     pub top: u16,
@@ -256,6 +256,10 @@ pub struct Overlay {
     pub fill: Rgb,
     pub border: Rgb,
     pub content_fg: Rgb,
+    /// Integer multiple of the cell size the content text is drawn at, so a
+    /// popover can render larger or smaller than the grid. The box itself stays
+    /// at the cell size; only the content scales.
+    pub scale: u8,
     pub content: String,
 }
 
@@ -446,6 +450,7 @@ mod tests {
             fill: Rgb::new(10, 20, 30),
             border: Rgb::new(40, 50, 60),
             content_fg: Rgb::new(70, 80, 90),
+            scale: 1,
             content: "hi".to_owned(),
         };
         grid.set_overlays(vec![overlay.clone()]);

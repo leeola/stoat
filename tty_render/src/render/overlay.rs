@@ -264,6 +264,7 @@ mod tests {
             fill: Rgb::new(255, 0, 0),
             border: Rgb::new(0, 255, 0),
             content_fg: Rgb::new(0, 0, 255),
+            scale: 1,
             content: "x".to_owned(),
         }];
 

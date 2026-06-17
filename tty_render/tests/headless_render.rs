@@ -67,6 +67,7 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         fill: Rgb::new(20, 20, 40),
         border: Rgb::new(200, 200, 255),
         content_fg: Rgb::new(255, 255, 255),
+        scale: 2,
         content: "ok".to_owned(),
     }]);
 

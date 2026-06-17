@@ -262,6 +262,7 @@ fn render_popover(out: &mut Vec<u8>) {
         fill: [20, 22, 34],
         border: [120, 170, 255],
         content_fg: [236, 239, 245],
+        scale: 1,
         content: [
             "render_overlay",
             "render_border",

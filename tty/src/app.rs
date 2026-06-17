@@ -440,6 +440,7 @@ mod tests {
             fill: Rgb::new(0, 0, 0),
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(0, 0, 0),
+            scale: 1,
             content: content.to_owned(),
         }
     }

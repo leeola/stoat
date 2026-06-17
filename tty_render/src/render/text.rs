@@ -629,9 +629,9 @@ impl TextPass {
     /// Shape and rasterize each overlay's content glyphs, returning their
     /// placements.
     ///
-    /// Each char takes one cell, laid out line by line down from the overlay's
-    /// top-left and clipped to the box and the grid. The glyph color is the
-    /// overlay's content color and it composites over the overlay fill.
+    /// Content is laid out line by line down from the overlay's top-left at the
+    /// overlay's scale and clipped to the box and the grid. The glyph color is
+    /// the overlay's content color and it composites over the overlay fill.
     fn rasterize_overlays(
         &mut self,
         device: &Device,
@@ -641,12 +641,14 @@ impl TextPass {
         let mut pending = Vec::new();
 
         for overlay in grid.overlays() {
-            for (col, row, ch) in overlay_content_cells(overlay) {
+            let scale = overlay.scale.max(1);
+
+            for (col, row, ch) in overlay_content_cells(overlay, scale as usize) {
                 if row >= grid.rows() || col >= grid.cols() || ch == ' ' {
                     continue;
                 }
 
-                let Some(key) = self.glyph_key(ch, 1) else {
+                let Some(key) = self.glyph_key(ch, scale) else {
                     continue;
                 };
 
@@ -667,7 +669,7 @@ impl TextPass {
                         key,
                         fg: overlay.content_fg,
                         bg: overlay.fill,
-                        scale: 1,
+                        scale,
                     });
                 }
             }
@@ -931,17 +933,21 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
     }
 }
 
-/// The `(col, row, char)` cells an overlay's content occupies.
+/// The `(col, row, char)` cells an overlay's content occupies, laid out at
+/// `scale` times the cell size.
 ///
 /// Content is laid out line by line down the box from its top-left: each
-/// `\n`-separated line fills one row, its characters running rightward from the
-/// left edge, clipped to the box width. Every line is emitted, including those
-/// past the box height, so they can scroll into view; the overlay-text draw
-/// scissors to the box to clip the vertical overflow.
-fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
+/// `\n`-separated line starts a new row, its characters running rightward from
+/// the left edge. Each glyph occupies a `scale` by `scale` cell block, so chars
+/// advance `scale` columns and lines advance `scale` rows, and a line fits
+/// `width / scale` chars before the box clips it. Every line is emitted,
+/// including those past the box height, so they can scroll into view; the
+/// overlay-text draw scissors to the box to clip the vertical overflow. `scale`
+/// must be at least 1.
+fn overlay_content_cells(overlay: &Overlay, scale: usize) -> Vec<(usize, usize, char)> {
     let left = overlay.left as usize;
     let top = overlay.top as usize;
-    let width = overlay.width as usize;
+    let cols = overlay.width as usize / scale;
 
     overlay
         .content
@@ -949,9 +955,9 @@ fn overlay_content_cells(overlay: &Overlay) -> Vec<(usize, usize, char)> {
         .enumerate()
         .flat_map(|(row, line)| {
             line.chars()
-                .take(width)
+                .take(cols)
                 .enumerate()
-                .map(move |(col, ch)| (left + col, top + row, ch))
+                .map(move |(col, ch)| (left + col * scale, top + row * scale, ch))
         })
         .collect()
 }
@@ -1112,12 +1118,41 @@ mod tests {
             fill: Rgb::new(0, 0, 0),
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
             content: "Hello".to_owned(),
         };
 
         assert_eq!(
-            overlay_content_cells(&overlay),
+            overlay_content_cells(&overlay, 1),
             [(5, 2, 'H'), (6, 2, 'e'), (7, 2, 'l')]
+        );
+    }
+
+    #[test]
+    fn overlay_content_cells_space_and_clip_by_scale() {
+        let overlay = Overlay {
+            top: 2,
+            left: 4,
+            width: 6,
+            height: 4,
+            fill: Rgb::new(0, 0, 0),
+            border: Rgb::new(0, 0, 0),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 2,
+            content: "abcd\nef".to_owned(),
+        };
+
+        // At scale 2 each glyph owns a 2x2 block: chars advance two columns,
+        // lines advance two rows, and the 6-cell-wide box fits three chars.
+        assert_eq!(
+            overlay_content_cells(&overlay, 2),
+            [
+                (4, 2, 'a'),
+                (6, 2, 'b'),
+                (8, 2, 'c'),
+                (4, 4, 'e'),
+                (6, 4, 'f')
+            ]
         );
     }
 
@@ -1131,13 +1166,14 @@ mod tests {
             fill: Rgb::new(0, 0, 0),
             border: Rgb::new(0, 0, 0),
             content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
             content: "abcd\nef\nXY".to_owned(),
         };
 
         // Every line is emitted and width-clipped. The box height no longer
         // drops the third line, since the scissor now clips vertical overflow.
         assert_eq!(
-            overlay_content_cells(&overlay),
+            overlay_content_cells(&overlay, 1),
             [
                 (5, 2, 'a'),
                 (6, 2, 'b'),
