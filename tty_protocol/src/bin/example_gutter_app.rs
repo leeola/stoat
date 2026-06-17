@@ -49,8 +49,8 @@ const NUMBER_RIGHT_EDGE: i16 = 30;
 /// X of the diagnostic-severity bar (the gutter's left edge), in sixteenths.
 const DIAG_BAR_X: i16 = 0;
 
-/// X of the git-status bar (just right of the numbers), in sixteenths.
-const GIT_BAR_X: i16 = 31;
+/// X of the git-status bar (just right of the diagnostic bar), in sixteenths.
+const GIT_BAR_X: i16 = 5;
 
 /// X of the hairline separator (the gutter's right edge), in sixteenths.
 const SEPARATOR_X: i16 = 37;
