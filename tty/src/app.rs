@@ -93,6 +93,9 @@ struct State {
     /// Ping-pong direction: true while the scroll eases down toward the overflow
     /// bottom, false while easing back up to the top.
     popover_scroll_down: bool,
+    /// The grid's eased vertical scroll offset, in rows. Seeded by the term's
+    /// per-frame scroll delta and eased toward zero so content glides into place.
+    grid_scroll: f32,
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -142,6 +145,7 @@ impl ApplicationHandler<PtyEvent> for App {
             cursor_anim: [0.0, 0.0],
             popover_scroll: 0.0,
             popover_scroll_down: true,
+            grid_scroll: 0.0,
         });
     }
 
@@ -176,9 +180,9 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, _scroll) = state.terminal.project(&mut state.grid);
+                let (cursor, scroll_delta) = state.terminal.project(&mut state.grid);
 
-                let scrolling = match popover_overflow(&state.grid) {
+                let popover_scrolling = match popover_overflow(&state.grid) {
                     Some(max) => {
                         let (next, down) = step_popover_scroll(
                             state.popover_scroll,
@@ -195,6 +199,10 @@ impl ApplicationHandler<PtyEvent> for App {
                     },
                 };
 
+                let (grid_scroll, grid_scrolling) =
+                    step_grid_scroll(state.grid_scroll, scroll_delta);
+                state.grid_scroll = grid_scroll;
+
                 let cursor_easing = match cursor_position(cursor) {
                     Some(target) => {
                         let (next, settled) = ease(state.cursor_anim, target);
@@ -204,7 +212,7 @@ impl ApplicationHandler<PtyEvent> for App {
                             Some(next),
                             Scroll {
                                 popover: state.popover_scroll,
-                                grid: 0.0,
+                                grid: state.grid_scroll,
                             },
                         );
                         !settled
@@ -215,17 +223,17 @@ impl ApplicationHandler<PtyEvent> for App {
                             None,
                             Scroll {
                                 popover: state.popover_scroll,
-                                grid: 0.0,
+                                grid: state.grid_scroll,
                             },
                         );
                         false
                     },
                 };
 
-                // Keep the vsync-paced loop running while the cursor eases or a
-                // popover scrolls; when both settle the loop idles until the next
-                // PTY output or resize.
-                if cursor_easing || scrolling {
+                // Keep the vsync-paced loop running while the cursor eases, a
+                // popover scrolls, or the grid scrolls. When all settle the loop
+                // idles until the next PTY output or resize.
+                if cursor_easing || popover_scrolling || grid_scrolling {
                     state.window.request_redraw();
                 }
             },
@@ -289,9 +297,20 @@ fn step_popover_scroll(scroll: f32, down: bool, max: f32) -> (f32, bool) {
     (next[0], down)
 }
 
+/// Advance the grid's eased vertical scroll one frame.
+///
+/// The new `delta` (rows the content scrolled up) is added to the offset, so the
+/// content starts that many rows lower, then the offset eases toward zero so it
+/// glides up into place. Returns the new offset and whether it is still easing.
+fn step_grid_scroll(scroll: f32, delta: usize) -> (f32, bool) {
+    let seeded = scroll + delta as f32;
+    let (next, settled) = ease([seeded, 0.0], [0.0, 0.0]);
+    (next[0], !settled)
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{ease, popover_overflow, step_popover_scroll};
+    use super::{ease, popover_overflow, step_grid_scroll, step_popover_scroll};
     use stoatty_term::grid::{Grid, Overlay, Rgb};
 
     #[test]
@@ -348,5 +367,18 @@ mod tests {
         let (next, down) = step_popover_scroll(0.001, false, 2.0);
         assert_eq!(next, 0.0, "snaps onto the top");
         assert!(down, "reverses at the top");
+    }
+
+    #[test]
+    fn grid_scroll_eases_a_delta_to_zero() {
+        // A new delta seeds the offset and starts easing down toward zero.
+        let (next, easing) = step_grid_scroll(0.0, 3);
+        assert!(next > 0.0 && next < 3.0, "eases from the seed");
+        assert!(easing);
+
+        // No new delta, within the snap epsilon: settles at zero.
+        let (next, easing) = step_grid_scroll(0.005, 0);
+        assert_eq!(next, 0.0, "snaps onto zero");
+        assert!(!easing);
     }
 }
