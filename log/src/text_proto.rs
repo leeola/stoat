@@ -308,6 +308,12 @@ mod tests {
             let log = TextProtoLog::create_at(&path).unwrap();
             for i in 0..10_000 {
                 log.record(&format!("{{\"n\":{i}}}"));
+                // Flush on a cadence below the channel capacity so the bounded
+                // queue never fills and drops a record while the writer thread
+                // is descheduled under parallel-test load.
+                if (i + 1) % (CHANNEL_CAPACITY / 2) == 0 {
+                    log.flush();
+                }
             }
             log.flush();
             assert_eq!(
