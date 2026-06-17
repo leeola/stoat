@@ -52,6 +52,7 @@ fn main() {
     render_border(&mut out);
     render_rounded_border(&mut out);
     render_scaled_heading(&mut out);
+    render_mixed_size_text(&mut out);
     render_popover(&mut out);
 
     // Leave the cursor below the demo in the default style.
@@ -212,6 +213,41 @@ fn render_scaled_heading(out: &mut Vec<u8>) {
             scale: 2,
         }));
     }
+}
+
+/// Write a line of normal-size text wrapping a 2x inner run via Gstoatty;scale
+/// frames, so one region shows normal text around a larger phrase.
+///
+/// The inner letters sit two columns apart because each 2x glyph owns a 2x2
+/// block; the surrounding words share the block's top row.
+fn render_mixed_size_text(out: &mut Vec<u8>) {
+    let row = 16u16;
+    let prefix = b"a ";
+    let inner = [b'H', b'U', b'G', b'E'];
+    let suffix = b" word";
+
+    let inner_left = prefix.len() as u16;
+    let suffix_left = inner_left + inner.len() as u16 * 2;
+
+    cup(out, row + 1, 1);
+    out.extend_from_slice(prefix);
+
+    for (i, glyph) in inner.iter().enumerate() {
+        let col = inner_left + i as u16 * 2;
+        cup(out, row + 1, col + 1);
+        out.push(*glyph);
+    }
+
+    for i in 0..inner.len() as u16 {
+        out.extend_from_slice(&command::encode_scale(&command::ScaleCommand {
+            top: row,
+            left: inner_left + i * 2,
+            scale: 2,
+        }));
+    }
+
+    cup(out, row + 1, suffix_left + 1);
+    out.extend_from_slice(suffix);
 }
 
 /// Reveal a floating popover over the panel via a Gstoatty;popover frame,
