@@ -23,6 +23,26 @@ const VERTICAL: &str = "\u{2502}";
 /// Visible columns between the panel's side borders.
 const INNER: usize = 30;
 
+/// Lines the slow crawl emits each cycle before the darting bursts run.
+const SLOW_LINES: u64 = 8;
+
+/// Milliseconds between slow-crawl lines, the gentle steady cadence.
+const SLOW_INTERVAL_MS: u64 = 400;
+
+/// `(lines, pause-after-ms)` for each darting burst. Uneven sizes and gaps so
+/// the eased scroll jumps erratically instead of gliding, and fixed so the demo
+/// repeats identically without an RNG.
+const BURSTS: [(u64, u64); 8] = [
+    (7, 70),
+    (3, 220),
+    (12, 45),
+    (2, 260),
+    (9, 55),
+    (4, 180),
+    (11, 40),
+    (5, 130),
+];
+
 fn main() {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x1b[2J");
@@ -45,22 +65,56 @@ fn main() {
     scroll_text_forever(&mut stdout);
 }
 
-/// Emit a fresh line every few hundred ms so the screen fills and then scrolls,
-/// driving the renderer's eased grid scroll while the cursor rides the end of
-/// the growing text. Never returns, holding the shell open until the window
+/// Drive two contrasting scroll patterns forever so the renderer's eased grid
+/// scroll is shown both ways: a slow steady crawl that glides, then fast uneven
+/// bursts that dart. Never returns, holding the shell open until the window
 /// closes and kills this process.
 fn scroll_text_forever(stdout: &mut io::Stdout) {
     let mut line = 0u64;
     loop {
-        line += 1;
+        slow_crawl(stdout, &mut line);
+        darting_bursts(stdout, &mut line);
+    }
+}
+
+/// Emit [`SLOW_LINES`] single lines at [`SLOW_INTERVAL_MS`], each flushed on its
+/// own so the renderer eases every one-row scroll into a gentle glide.
+fn slow_crawl(stdout: &mut io::Stdout, line: &mut u64) {
+    for _ in 0..SLOW_LINES {
+        *line += 1;
 
         let mut step = Vec::new();
-        step.extend_from_slice(format!("scrolling line {line}\r\n").as_bytes());
+        push_line(&mut step, &format!("scrolling line {line}"));
         stdout.write_all(&step).expect("write scroll line");
         stdout.flush().expect("flush scroll line");
 
-        thread::sleep(Duration::from_millis(400));
+        thread::sleep(Duration::from_millis(SLOW_INTERVAL_MS));
     }
+}
+
+/// Emit each [`BURSTS`] entry as one multi-line write, so the whole burst lands
+/// in a single frame and the renderer seeds a large scroll offset that darts up.
+///
+/// The uneven burst sizes and pauses make the motion read as erratic, in
+/// contrast to [`slow_crawl`]'s steady glide.
+fn darting_bursts(stdout: &mut io::Stdout, line: &mut u64) {
+    for (count, pause_ms) in BURSTS {
+        let mut burst = Vec::new();
+        for _ in 0..count {
+            *line += 1;
+            push_line(&mut burst, &format!("darting line {line}"));
+        }
+        stdout.write_all(&burst).expect("write darting burst");
+        stdout.flush().expect("flush darting burst");
+
+        thread::sleep(Duration::from_millis(pause_ms));
+    }
+}
+
+/// Append `text` followed by CRLF to `out`.
+fn push_line(out: &mut Vec<u8>, text: &str) {
+    out.extend_from_slice(text.as_bytes());
+    out.extend_from_slice(b"\r\n");
 }
 
 /// Draw a bordered panel of SGR-styled lines with its top-left at (`top`, `left`).
