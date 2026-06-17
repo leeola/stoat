@@ -22,6 +22,10 @@ pub struct Grid {
     icons: Vec<Icon>,
     text_runs: Vec<TextRun>,
     bars: Vec<Bar>,
+    /// Height in rows of each logical line, indexed from the top. A line absent
+    /// from the vec is one row tall. The prefix sum gives a line's physical
+    /// start row, so an inline expansion pushes later lines down.
+    line_heights: Vec<u16>,
 }
 
 impl Grid {
@@ -36,6 +40,7 @@ impl Grid {
             icons: Vec::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
+            line_heights: Vec::new(),
         }
     }
 
@@ -77,6 +82,7 @@ impl Grid {
         self.icons.clear();
         self.text_runs.clear();
         self.bars.clear();
+        self.line_heights.clear();
     }
 
     /// The floating overlay regions drawn above the cells, in draw order.
@@ -145,6 +151,23 @@ impl Grid {
     /// untouched; the caller sets the full list each frame it changes.
     pub fn set_bars(&mut self, bars: Vec<Bar>) {
         self.bars = bars;
+    }
+
+    /// Replace the per-logical-line heights, in rows, indexed from the top.
+    ///
+    /// A line past the end of the list is one row tall. The cell projection is
+    /// unaffected; the layout exists for off-grid components to align to.
+    pub fn set_line_heights(&mut self, line_heights: Vec<u16>) {
+        self.line_heights = line_heights;
+    }
+
+    /// The physical row a logical line starts on: the sum of the heights of the
+    /// lines above it, with any line past the declared heights counting as one
+    /// row. With no expansions this is `line` itself.
+    pub fn line_start_row(&self, line: usize) -> usize {
+        (0..line)
+            .map(|above| self.line_heights.get(above).copied().unwrap_or(1) as usize)
+            .sum()
     }
 
     /// Claim a `scale` by `scale` block of cells for a glyph drawn at (`row`,
@@ -650,6 +673,26 @@ mod tests {
 
         grid.resize(2, 2);
         assert!(grid.bars().is_empty(), "resize clears the bars");
+    }
+
+    #[test]
+    fn line_start_row_is_the_prefix_sum_of_heights() {
+        let mut grid = Grid::new(8, 8);
+
+        // With no declared heights every line is one row, so the start row is
+        // the line index.
+        assert_eq!(grid.line_start_row(0), 0);
+        assert_eq!(grid.line_start_row(3), 3);
+
+        // Line 1 is three rows tall, so it adds two rows to every later line,
+        // while lines past the declared heights stay one row.
+        grid.set_line_heights(vec![1, 3, 1]);
+        assert_eq!(grid.line_start_row(1), 1, "the expanded line itself");
+        assert_eq!(grid.line_start_row(2), 4, "shifted past the expansion");
+        assert_eq!(grid.line_start_row(4), 6, "undeclared lines count as one");
+
+        grid.resize(2, 2);
+        assert_eq!(grid.line_start_row(3), 3, "resize clears the layout");
     }
 
     #[test]

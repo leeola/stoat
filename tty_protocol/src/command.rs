@@ -22,6 +22,7 @@ pub enum Command {
     Icon(IconCommand),
     TextRun(TextRunCommand),
     Bar(BarCommand),
+    LineLayout(LineLayoutCommand),
 }
 
 /// Frame a rectangular cell region with a border.
@@ -174,6 +175,20 @@ pub struct BarCommand {
     pub color: [u8; 3],
 }
 
+/// Declare the surface's logical-line layout: the height in rows of each logical
+/// line, indexed from the top.
+///
+/// Most lines are one row; a height greater than one is an integer-cell inline
+/// expansion (an inline diff, a multi-line diagnostic) that pushes every later
+/// line down. A line past the end of [`Self::heights`] defaults to one row. A
+/// non-cell component bound to a logical line reads the prefix sum of these
+/// heights to find the physical row it sits on, so it tracks expansions. The
+/// full layout is sent on each change.
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct LineLayoutCommand {
+    pub heights: Vec<u16>,
+}
+
 /// Decode a stoatty APC frame into a typed [`Command`], or `None` to ignore it.
 ///
 /// `None` covers both a malformed frame and a well-formed one whose
@@ -303,6 +318,23 @@ pub fn encode_bar(command: &BarCommand) -> Vec<u8> {
     })
 }
 
+/// Encode a [`LineLayoutCommand`] as a full `Gstoatty;line_layout` frame for an
+/// emitter.
+///
+/// The per-line heights ride in a single argument as consecutive big-endian
+/// `u16`s.
+pub fn encode_line_layout(command: &LineLayoutCommand) -> Vec<u8> {
+    let mut arg = Vec::with_capacity(command.heights.len() * 2);
+    for height in &command.heights {
+        arg.extend_from_slice(&height.to_be_bytes());
+    }
+
+    frame::encode(&Frame {
+        sub: "line_layout".to_owned(),
+        args: vec![arg],
+    })
+}
+
 /// Map a parsed [`Frame`] to its [`Command`] by sub-command name.
 ///
 /// An unknown sub-command, or a known one whose payload does not parse, yields
@@ -316,6 +348,7 @@ fn dispatch(frame: &Frame) -> Option<Command> {
         "icon" => decode_icon(&frame.args).map(Command::Icon),
         "text_run" => decode_text_run(&frame.args).map(Command::TextRun),
         "bar" => decode_bar(&frame.args).map(Command::Bar),
+        "line_layout" => decode_line_layout(&frame.args).map(Command::LineLayout),
         _ => None,
     }
 }
@@ -414,6 +447,19 @@ fn decode_bar(args: &[Vec<u8>]) -> Option<BarCommand> {
     })
 }
 
+fn decode_line_layout(args: &[Vec<u8>]) -> Option<LineLayoutCommand> {
+    let arg = args.first()?;
+    if arg.len() % 2 != 0 {
+        return None;
+    }
+
+    let heights = arg
+        .chunks_exact(2)
+        .map(|pair| u16::from_be_bytes([pair[0], pair[1]]))
+        .collect();
+    Some(LineLayoutCommand { heights })
+}
+
 fn decode_style(code: u8) -> Option<BorderStyle> {
     match code {
         0 => Some(BorderStyle::Light),
@@ -453,9 +499,10 @@ fn icon_kind_code(kind: IconKind) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::{
-        decode, encode_bar, encode_border, encode_icon, encode_popover, encode_scale,
-        encode_scroll_region, encode_text_run, BarCommand, BorderCommand, BorderStyle, Command,
-        IconCommand, IconKind, PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
+        decode, encode_bar, encode_border, encode_icon, encode_line_layout, encode_popover,
+        encode_scale, encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
+        BorderStyle, Command, IconCommand, IconKind, LineLayoutCommand, PopoverCommand,
+        ScaleCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     #[test]
@@ -627,6 +674,24 @@ mod tests {
     fn rejects_wrong_length_bar_payload() {
         // The single arg here decodes to 3 bytes, not the 11 a bar needs.
         assert!(decode(b"Gstoatty;bar;YWJj").is_none());
+    }
+
+    #[test]
+    fn line_layout_round_trips() {
+        let command = LineLayoutCommand {
+            heights: vec![1, 3, 1, 2],
+        };
+
+        assert_eq!(
+            decode(&encode_line_layout(&command)),
+            Some(Command::LineLayout(command))
+        );
+    }
+
+    #[test]
+    fn rejects_odd_length_line_layout_payload() {
+        // The single arg here decodes to 3 bytes, not a whole number of u16s.
+        assert!(decode(b"Gstoatty;line_layout;YWJj").is_none());
     }
 
     #[test]

@@ -26,8 +26,8 @@ use alacritty_terminal::{
 };
 use std::mem;
 use stoatty_protocol::command::{
-    self, BarCommand, BorderCommand, Command, IconCommand, PopoverCommand, ScaleCommand,
-    ScrollRegionCommand, TextRunCommand,
+    self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PopoverCommand,
+    ScaleCommand, ScrollRegionCommand, TextRunCommand,
 };
 
 const PALETTE_LEN: usize = 256;
@@ -78,6 +78,10 @@ pub struct Terminal {
     /// by [`Self::project`]. Off-grid components, accumulated and grid-level
     /// like the icons.
     bars: Vec<BarCommand>,
+    /// The logical-line layout set by `Gstoatty;line_layout` frames, applied to
+    /// the grid by [`Self::project`]. Replaced, not accumulated, like the scroll
+    /// region: the latest layout wins.
+    line_layout: Option<LineLayoutCommand>,
     /// Scrollback line count at the previous [`Self::project`], so the next one
     /// can report how many rows the content scrolled since.
     last_history: usize,
@@ -129,6 +133,7 @@ impl Terminal {
             icons: Vec::new(),
             text_runs: Vec::new(),
             bars: Vec::new(),
+            line_layout: None,
             last_history: 0,
         }
     }
@@ -166,6 +171,7 @@ impl Terminal {
             Command::Icon(icon) => self.icons.push(icon),
             Command::TextRun(text_run) => self.text_runs.push(text_run),
             Command::Bar(bar) => self.bars.push(bar),
+            Command::LineLayout(layout) => self.line_layout = Some(layout),
         }
     }
 
@@ -225,6 +231,7 @@ impl Terminal {
         apply_popovers(grid, &self.popovers);
         apply_scroll_region(grid, self.scroll_region);
         apply_icons(grid, &self.icons);
+        apply_line_layout(grid, self.line_layout.as_ref());
         apply_text_runs(grid, &self.text_runs);
         apply_bars(grid, &self.bars);
 
@@ -628,17 +635,28 @@ fn grid_icon_kind(kind: command::IconKind) -> IconKind {
     }
 }
 
+/// Apply the stored logical-line layout to the grid, or clear it when none is
+/// set, so [`apply_text_runs`] and [`apply_bars`] can resolve against it.
+fn apply_line_layout(grid: &mut Grid, command: Option<&LineLayoutCommand>) {
+    grid.set_line_heights(
+        command
+            .map(|command| command.heights.clone())
+            .unwrap_or_default(),
+    );
+}
+
 /// Replace the grid's text-run list with each stored text-run command's run.
 ///
 /// Grid-level like the overlays, so the full list is set each projection rather
-/// than stamped per cell. The renderer clamps an out-of-grid anchor, so wire
-/// coordinates need no guard here.
+/// than stamped per cell. The declared row is a logical row resolved through the
+/// line layout, so a run tracks expansions above it. The renderer clamps an
+/// out-of-grid anchor, so wire coordinates need no guard here.
 fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand]) {
     let text_runs = commands
         .iter()
         .map(|command| TextRun {
             col: command.col,
-            row: command.row,
+            row: resolve_logical_row(grid, command.row),
             scale: command.scale,
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
             bg: Rgb::new(command.bg[0], command.bg[1], command.bg[2]),
@@ -651,19 +669,37 @@ fn apply_text_runs(grid: &mut Grid, commands: &[TextRunCommand]) {
 /// Replace the grid's bar list with each stored bar command's rectangle.
 ///
 /// Grid-level like the overlays, so the full list is set each projection rather
-/// than stamped per cell.
+/// than stamped per cell. The declared `y` is a logical row resolved through the
+/// line layout, so a bar tracks expansions above it.
 fn apply_bars(grid: &mut Grid, commands: &[BarCommand]) {
     let bars = commands
         .iter()
         .map(|command| Bar {
             x: command.x,
-            y: command.y,
+            y: resolve_logical_row(grid, command.y),
             width: command.width,
             height: command.height,
             color: Rgb::new(command.color[0], command.color[1], command.color[2]),
         })
         .collect();
     grid.set_bars(bars);
+}
+
+/// Resolve a component's declared logical row, in sixteenth-cell units, to the
+/// physical row it sits on by adding the whole-row expansion above its line.
+///
+/// A negative row is off the top with no logical line, so it passes through.
+fn resolve_logical_row(grid: &Grid, row: i16) -> i16 {
+    if row < 0 {
+        return row;
+    }
+
+    let logical_line = (row / 16) as usize;
+    let expansion = grid
+        .line_start_row(logical_line)
+        .saturating_sub(logical_line);
+    let shift = i16::try_from(expansion.saturating_mul(16)).unwrap_or(i16::MAX);
+    row.saturating_add(shift)
 }
 
 fn popover_overlay(command: &PopoverCommand) -> Overlay {
@@ -749,10 +785,10 @@ mod tests {
         theme::Theme,
     };
     use stoatty_protocol::command::{
-        encode_bar, encode_border, encode_icon, encode_popover, encode_scale, encode_scroll_region,
-        encode_text_run, BarCommand, BorderCommand, BorderStyle as ProtoBorderStyle, IconCommand,
-        IconKind as ProtoIconKind, PopoverCommand, ScaleCommand, ScrollRegionCommand,
-        TextRunCommand,
+        encode_bar, encode_border, encode_icon, encode_line_layout, encode_popover, encode_scale,
+        encode_scroll_region, encode_text_run, BarCommand, BorderCommand,
+        BorderStyle as ProtoBorderStyle, IconCommand, IconKind as ProtoIconKind, LineLayoutCommand,
+        PopoverCommand, ScaleCommand, ScrollRegionCommand, TextRunCommand,
     };
 
     fn project(rows: usize, cols: usize, bytes: &[u8]) -> (Grid, Cursor) {
@@ -1202,5 +1238,39 @@ mod tests {
                 color: Rgb::new(220, 50, 47),
             }]
         );
+    }
+
+    #[test]
+    fn line_layout_shifts_a_bound_component_past_an_expansion() {
+        // Line 1 is three rows tall, so its two extra rows push logical line 3
+        // down to physical row 5 (80 sixteenths).
+        let layout = encode_line_layout(&LineLayoutCommand {
+            heights: vec![1, 3, 1],
+        });
+        let run = encode_text_run(&TextRunCommand {
+            col: 0,
+            row: 48,
+            scale: 256,
+            color: [150, 160, 170],
+            bg: [0, 0, 0],
+            text: "4".to_owned(),
+        });
+        let bar = encode_bar(&BarCommand {
+            x: 0,
+            y: 48,
+            width: 2,
+            height: 16,
+            color: [220, 50, 47],
+        });
+
+        let mut terminal = Terminal::new(8, 8, Theme::default());
+        let mut grid = Grid::new(8, 8);
+        terminal.advance(&layout);
+        terminal.advance(&run);
+        terminal.advance(&bar);
+        terminal.project(&mut grid);
+
+        assert_eq!(grid.text_runs()[0].row, 80, "run shifts down two rows");
+        assert_eq!(grid.bars()[0].y, 80, "bar shifts down two rows");
     }
 }
