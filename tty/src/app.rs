@@ -13,7 +13,7 @@ use crate::{
 use std::sync::Arc;
 use stoatty_render::gpu::{GpuContext, Scroll};
 use stoatty_term::{
-    grid::Grid,
+    grid::{Grid, Overlay},
     term::{Cursor, CursorShape, Terminal},
     theme::Theme,
 };
@@ -101,12 +101,13 @@ struct State {
     /// The cursor's animated position in fractional cell coordinates, eased
     /// toward the terminal's actual cursor cell each frame.
     cursor_anim: [f32; 2],
-    /// The popover content's eased vertical scroll offset, in rows. Ping-pongs
-    /// between the top and the overflow bottom while a popover overflows its box.
-    popover_scroll: f32,
-    /// Ping-pong direction: true while the scroll eases down toward the overflow
-    /// bottom, false while easing back up to the top.
-    popover_scroll_down: bool,
+    /// Each overlay's eased vertical scroll offset, in rows, indexed by overlay
+    /// order. An entry ping-pongs between the top and its overflow bottom while
+    /// that popover overflows its box, so several scroll independently.
+    popover_scrolls: Vec<f32>,
+    /// Each overlay's ping-pong direction: true while easing down toward the
+    /// overflow bottom, false while easing back up to the top.
+    popover_scroll_downs: Vec<bool>,
     /// The grid's eased vertical scroll offset, in rows. Seeded by the term's
     /// per-frame scroll delta and eased toward zero so content glides into place.
     grid_scroll: f32,
@@ -167,8 +168,8 @@ impl ApplicationHandler<PtyEvent> for App {
             font_size: self.font_size,
             modifiers: ModifiersState::empty(),
             cursor_anim: [0.0, 0.0],
-            popover_scroll: 0.0,
-            popover_scroll_down: true,
+            popover_scrolls: Vec::new(),
+            popover_scroll_downs: Vec::new(),
             grid_scroll: 0.0,
             region_scroll: 0.0,
             last_region_offset: 0.0,
@@ -208,22 +209,27 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::RedrawRequested => {
                 let (cursor, scroll_delta) = state.terminal.project(&mut state.grid);
 
-                let popover_scrolling = match popover_overflow(&state.grid) {
-                    Some(max) => {
-                        let (next, down) = step_popover_scroll(
-                            state.popover_scroll,
-                            state.popover_scroll_down,
-                            max,
-                        );
-                        state.popover_scroll = next;
-                        state.popover_scroll_down = down;
-                        true
-                    },
-                    None => {
-                        state.popover_scroll = 0.0;
-                        false
-                    },
-                };
+                let overflows: Vec<Option<f32>> =
+                    state.grid.overlays().iter().map(popover_overflow).collect();
+                state.popover_scrolls.resize(overflows.len(), 0.0);
+                state.popover_scroll_downs.resize(overflows.len(), true);
+
+                let mut popover_scrolling = false;
+                for (index, overflow) in overflows.into_iter().enumerate() {
+                    match overflow {
+                        Some(max) => {
+                            let (next, down) = step_popover_scroll(
+                                state.popover_scrolls[index],
+                                state.popover_scroll_downs[index],
+                                max,
+                            );
+                            state.popover_scrolls[index] = next;
+                            state.popover_scroll_downs[index] = down;
+                            popover_scrolling = true;
+                        },
+                        None => state.popover_scrolls[index] = 0.0,
+                    }
+                }
 
                 let (grid_scroll, grid_scrolling) =
                     step_grid_scroll(state.grid_scroll, scroll_delta);
@@ -251,9 +257,9 @@ impl ApplicationHandler<PtyEvent> for App {
                             &state.grid,
                             Some(next),
                             Scroll {
-                                popover: state.popover_scroll,
                                 grid: state.grid_scroll,
                                 region: state.region_scroll,
+                                popovers: &state.popover_scrolls,
                             },
                         );
                         !settled
@@ -263,9 +269,9 @@ impl ApplicationHandler<PtyEvent> for App {
                             &state.grid,
                             None,
                             Scroll {
-                                popover: state.popover_scroll,
                                 grid: state.grid_scroll,
                                 region: state.region_scroll,
+                                popovers: &state.popover_scrolls,
                             },
                         );
                         false
@@ -360,15 +366,11 @@ fn ease(current: [f32; 2], target: [f32; 2]) -> ([f32; 2], bool) {
     ([current[0] + dx * FACTOR, current[1] + dy * FACTOR], false)
 }
 
-/// The single popover's overflow height in rows, or `None` when there is not
-/// exactly one popover or it fits its box.
+/// A popover's content overflow height in rows, or `None` when its content fits
+/// its box.
 ///
 /// This is how far the content can scroll: the line count beyond the box height.
-fn popover_overflow(grid: &Grid) -> Option<f32> {
-    let [overlay] = grid.overlays() else {
-        return None;
-    };
-
+fn popover_overflow(overlay: &Overlay) -> Option<f32> {
     let lines = overlay.content.lines().count();
     let height = overlay.height as usize;
     (lines > height).then(|| (lines - height) as f32)
@@ -417,7 +419,7 @@ mod tests {
         ease, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
         step_region_scroll,
     };
-    use stoatty_term::grid::{Grid, Overlay, Rgb};
+    use stoatty_term::grid::{Overlay, Rgb};
     use winit::keyboard::Key;
 
     #[test]
@@ -447,19 +449,17 @@ mod tests {
 
     #[test]
     fn popover_overflow_reports_rows_past_the_box() {
-        let mut grid = Grid::new(10, 10);
-
-        grid.set_overlays(vec![popover(2, "a\nb\nc\nd")]);
-        assert_eq!(popover_overflow(&grid), Some(2.0));
-
-        grid.set_overlays(vec![popover(4, "a\nb")]);
-        assert_eq!(popover_overflow(&grid), None, "fits the box");
-
-        grid.set_overlays(vec![popover(2, "x"), popover(2, "y")]);
-        assert_eq!(popover_overflow(&grid), None, "not a single popover");
-
-        grid.set_overlays(vec![]);
-        assert_eq!(popover_overflow(&grid), None, "no popover");
+        assert_eq!(
+            popover_overflow(&popover(2, "a\nb\nc\nd")),
+            Some(2.0),
+            "two lines past the box"
+        );
+        assert_eq!(popover_overflow(&popover(4, "a\nb")), None, "fits the box");
+        assert_eq!(
+            popover_overflow(&popover(2, "a\nb")),
+            None,
+            "exactly fills the box"
+        );
     }
 
     #[test]

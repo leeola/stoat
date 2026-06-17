@@ -59,17 +59,33 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         style: BorderStyle::Rounded,
         color: Rgb::new(255, 0, 0),
     });
-    grid.set_overlays(vec![Overlay {
-        top: 1,
-        left: 1,
-        width: 6,
-        height: 3,
-        fill: Rgb::new(20, 20, 40),
-        border: Rgb::new(200, 200, 255),
-        content_fg: Rgb::new(255, 255, 255),
-        scale: 2,
-        content: "ok".to_owned(),
-    }]);
+    // Two overlays: a scaled one, and a taller one whose content overflows its
+    // box, so the per-overlay scissored sub-range draws and a non-zero per-overlay
+    // scroll offset both run against the real device.
+    grid.set_overlays(vec![
+        Overlay {
+            top: 1,
+            left: 1,
+            width: 6,
+            height: 3,
+            fill: Rgb::new(20, 20, 40),
+            border: Rgb::new(200, 200, 255),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 2,
+            content: "ok".to_owned(),
+        },
+        Overlay {
+            top: 1,
+            left: 9,
+            width: 5,
+            height: 2,
+            fill: Rgb::new(40, 20, 20),
+            border: Rgb::new(255, 200, 200),
+            content_fg: Rgb::new(255, 255, 255),
+            scale: 1,
+            content: "aa\nbb\ncc\ndd".to_owned(),
+        },
+    ]);
 
     // A scroll region with a glyph inside it, scrolled by a non-zero offset, so
     // the scissored region-text draw runs against the real device too.
@@ -93,9 +109,9 @@ fn builds_passes_and_draws_a_frame_off_screen() {
         &grid,
         Some([0.0, 0.0]),
         Scroll {
-            popover: 0.0,
             grid: 0.0,
             region: 1.5,
+            popovers: &[0.0, 1.0],
         },
     );
 }

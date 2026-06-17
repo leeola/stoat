@@ -105,10 +105,10 @@ pub struct TextPass {
     overlay_instances: Buffer,
     overlay_capacity: usize,
     overlay_count: u32,
-    /// Box pixel rect `[x, y, w, h]` the overlay-content draw scissors to, so
-    /// scrolled content is clipped to the popover. `None` unless exactly one
-    /// overlay is present.
-    overlay_scissor: Option<[u32; 4]>,
+    /// One scissored sub-range of [`Self::overlay_instances`] per overlay, in
+    /// overlay order, so each popover's content is clipped to its own box and
+    /// several can scroll independently.
+    overlay_draws: Vec<OverlayDraw>,
     region_instances: Buffer,
     region_capacity: usize,
     region_count: u32,
@@ -285,7 +285,7 @@ impl TextPass {
             overlay_instances,
             overlay_capacity: INITIAL_CAPACITY,
             overlay_count: 0,
-            overlay_scissor: None,
+            overlay_draws: Vec::new(),
             region_instances,
             region_capacity: INITIAL_CAPACITY,
             region_count: 0,
@@ -317,9 +317,11 @@ impl TextPass {
 
     /// Shape, rasterize, and upload the frame's glyph instances for `grid`.
     ///
-    /// `resolution` is the surface size in physical pixels. `scroll.popover`
-    /// shifts the overlay (popover) content up by that many rows, clipped to the
-    /// box by the scissor [`Self::draw_overlay_text`] applies.
+    /// `resolution` is the surface size in physical pixels. `scroll.popovers`
+    /// holds one offset per overlay, in overlay order, each shifting that
+    /// overlay's content up by that many rows and clipped to its own box by the
+    /// scissor [`Self::draw_overlay_text`] applies; a missing entry is treated as
+    /// zero.
     ///
     /// `scroll.grid` offsets the glyphs and underlines down by that many rows,
     /// the same offset the background and decoration passes apply, so the grid
@@ -339,7 +341,7 @@ impl TextPass {
         queue: &Queue,
         grid: &Grid,
         resolution: [f32; 2],
-        scroll: Scroll,
+        scroll: Scroll<'_>,
     ) {
         let globals = TextGlobals {
             resolution,
@@ -353,7 +355,7 @@ impl TextPass {
 
         self.atlas.begin_frame();
         let grid_pending = self.rasterize_visible(device, queue, grid);
-        let overlay_pending = self.rasterize_overlays(device, queue, grid);
+        let overlay_groups = self.rasterize_overlays(device, queue, grid);
 
         let region = grid.scroll_region();
         let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) = grid_pending
@@ -362,7 +364,6 @@ impl TextPass {
 
         let mut plain_instances = self.build_text_instances(device, queue, plain_pending);
         let mut region_instances = self.build_text_instances(device, queue, region_pending);
-        let mut overlay_instances = self.build_text_instances(device, queue, overlay_pending);
 
         let grid_scroll_px = scroll.grid * self.metrics.height;
         for instance in &mut plain_instances {
@@ -384,11 +385,36 @@ impl TextPass {
             )
         });
 
-        let popover_scroll_px = scroll.popover * self.metrics.height;
-        for instance in &mut overlay_instances {
-            instance.pos[1] -= popover_scroll_px;
+        // Each overlay's content is concatenated into one buffer but recorded as
+        // its own draw range, shifted by its own scroll offset and scissored to
+        // its own box, so several popovers scroll and clip independently.
+        let metrics = self.metrics;
+        let mut overlay_instances = Vec::new();
+        self.overlay_draws = Vec::with_capacity(overlay_groups.len());
+        for (index, (overlay, group)) in grid.overlays().iter().zip(overlay_groups).enumerate() {
+            let start = overlay_instances.len() as u32;
+            let mut group_instances = self.build_text_instances(device, queue, group);
+
+            let scroll_px = scroll.popovers.get(index).copied().unwrap_or(0.0) * metrics.height;
+            for instance in &mut group_instances {
+                instance.pos[1] -= scroll_px;
+            }
+
+            let count = group_instances.len() as u32;
+            overlay_instances.extend(group_instances);
+            self.overlay_draws.push(OverlayDraw {
+                start,
+                count,
+                scissor: cell_rect_scissor(
+                    overlay.top,
+                    overlay.left,
+                    overlay.width,
+                    overlay.height,
+                    resolution,
+                    metrics,
+                ),
+            });
         }
-        self.overlay_scissor = overlay_scissor(grid.overlays(), resolution, self.metrics);
 
         self.count = plain_instances.len() as u32;
         self.region_count = region_instances.len() as u32;
@@ -553,26 +579,34 @@ impl TextPass {
         render_pass.draw(0..6, 0..self.region_count);
     }
 
-    /// Record the popover-content glyph draw into `render_pass`, scissored to the
-    /// popover box so scrolled content is clipped to it.
+    /// Record each overlay's content glyph draw into `render_pass`, scissored to
+    /// that overlay's box so its scrolled content is clipped to it.
     ///
-    /// A no-op when no overlay carries content. Run after the overlay box so the
-    /// content sits inside it, on top of the fill. Must be the pass's last draw,
-    /// since it leaves the scissor rect set.
+    /// One scissored sub-range draw per overlay, so several popovers clip and
+    /// scroll independently. A no-op when no overlay carries content. Run after
+    /// the overlay boxes so the content sits inside them, on top of the fill.
+    /// Must be the pass's last draw, since it leaves the scissor rect set. An
+    /// overlay whose box clips to no area is skipped rather than drawn unclipped.
     pub fn draw_overlay_text(&self, render_pass: &mut RenderPass<'_>) {
         if self.overlay_count == 0 {
             return;
-        }
-
-        if let Some([x, y, w, h]) = self.overlay_scissor {
-            render_pass.set_scissor_rect(x, y, w, h);
         }
 
         render_pass.set_pipeline(&self.pipeline);
         render_pass.set_bind_group(0, &self.globals_bind_group, &[]);
         render_pass.set_bind_group(1, &self.atlas_bind_group, &[]);
         render_pass.set_vertex_buffer(0, self.overlay_instances.slice(..));
-        render_pass.draw(0..6, 0..self.overlay_count);
+
+        for draw in &self.overlay_draws {
+            let Some([x, y, w, h]) = draw.scissor else {
+                continue;
+            };
+            if draw.count == 0 {
+                continue;
+            }
+            render_pass.set_scissor_rect(x, y, w, h);
+            render_pass.draw(0..6, draw.start..draw.start + draw.count);
+        }
     }
 
     /// Phase one: shape and rasterize every visible cell glyph, returning their
@@ -626,22 +660,25 @@ impl TextPass {
         pending
     }
 
-    /// Shape and rasterize each overlay's content glyphs, returning their
-    /// placements.
+    /// Shape and rasterize each overlay's content glyphs, returning one group of
+    /// placements per overlay in overlay order.
     ///
     /// Content is laid out line by line down from the overlay's top-left at the
     /// overlay's scale and clipped to the box and the grid. The glyph color is
     /// the overlay's content color and it composites over the overlay fill.
+    /// Grouping by overlay lets each popover's content be drawn in its own
+    /// scissored sub-range.
     fn rasterize_overlays(
         &mut self,
         device: &Device,
         queue: &Queue,
         grid: &Grid,
-    ) -> Vec<PendingGlyph> {
-        let mut pending = Vec::new();
+    ) -> Vec<Vec<PendingGlyph>> {
+        let mut groups = Vec::with_capacity(grid.overlays().len());
 
         for overlay in grid.overlays() {
             let scale = overlay.scale.max(1);
+            let mut group = Vec::new();
 
             for (col, row, ch) in overlay_content_cells(overlay, scale as usize) {
                 if row >= grid.rows() || col >= grid.cols() || ch == ' ' {
@@ -663,7 +700,7 @@ impl TextPass {
                     )
                     .is_some()
                 {
-                    pending.push(PendingGlyph {
+                    group.push(PendingGlyph {
                         row,
                         col,
                         key,
@@ -673,9 +710,11 @@ impl TextPass {
                     });
                 }
             }
+
+            groups.push(group);
         }
 
-        pending
+        groups
     }
 
     /// The cached glyph cache key for `ch` at `scale`, shaping it on first use.
@@ -702,6 +741,17 @@ struct PendingGlyph {
     bg: Rgb,
     /// Integer multiple of the cell size this glyph is rasterized and drawn at.
     scale: u8,
+}
+
+/// One overlay's scissored slice of the shared overlay-content instance buffer.
+///
+/// `start` and `count` index [`TextPass::overlay_instances`]; `scissor` is the
+/// overlay's box clamped to the surface, or `None` when the box clips to no
+/// area and the content is skipped.
+struct OverlayDraw {
+    start: u32,
+    count: u32,
+    scissor: Option<[u32; 4]>,
 }
 
 fn texture_entry(binding: u32) -> BindGroupLayoutEntry {
@@ -960,30 +1010,6 @@ fn overlay_content_cells(overlay: &Overlay, scale: usize) -> Vec<(usize, usize, 
                 .map(move |(col, ch)| (left + col * scale, top + row * scale, ch))
         })
         .collect()
-}
-
-/// The box pixel rect `[x, y, w, h]` to scissor the overlay-content draw to.
-///
-/// `Some` only when exactly one overlay is present, so the scissor clips that
-/// popover's scrolled content to its box. Multiple overlays fall back to the
-/// unclipped batched draw.
-fn overlay_scissor(
-    overlays: &[Overlay],
-    resolution: [f32; 2],
-    metrics: CellMetrics,
-) -> Option<[u32; 4]> {
-    let [overlay] = overlays else {
-        return None;
-    };
-
-    cell_rect_scissor(
-        overlay.top,
-        overlay.left,
-        overlay.width,
-        overlay.height,
-        resolution,
-        metrics,
-    )
 }
 
 /// The pixel rect `[x, y, w, h]` to scissor a draw to a `width` by `height` cell

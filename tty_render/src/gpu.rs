@@ -107,9 +107,10 @@ impl Renderer {
     /// cursor cell, then draw overlays and their content on top.
     ///
     /// `cursor` is the cursor's position in fractional cell coordinates, or
-    /// `None` when it is hidden. `scroll` carries the eased popover and grid
-    /// scroll offsets. Submits the frame but does not present or poll; the caller
-    /// drives whichever it needs.
+    /// `None` when it is hidden. `scroll` carries the eased whole-grid and
+    /// scroll-region offsets; `popover_scrolls` carries one content offset per
+    /// overlay, in overlay order. Submits the frame but does not present or poll;
+    /// the caller drives whichever it needs.
     pub fn render_into(
         &mut self,
         device: &Device,
@@ -117,7 +118,7 @@ impl Renderer {
         view: &TextureView,
         grid: &Grid,
         cursor: Option<[f32; 2]>,
-        scroll: Scroll,
+        scroll: Scroll<'_>,
     ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare(
@@ -298,13 +299,14 @@ impl GpuContext {
 
     /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
     /// position in fractional cell coordinates, or `None` when it is hidden.
-    /// `scroll` carries the eased popover and grid scroll offsets.
+    /// `scroll` carries the eased whole-grid and scroll-region offsets;
+    /// `popover_scrolls` carries one content offset per overlay, in overlay order.
     ///
     /// Skips the frame when the surface is transiently unavailable (timed
     /// out, occluded, or a validation error already raised elsewhere) and
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
-    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>, scroll: Scroll) {
+    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>, scroll: Scroll<'_>) {
         let frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
