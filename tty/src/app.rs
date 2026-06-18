@@ -22,28 +22,29 @@ use winit::{
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState},
-    window::{Window, WindowId},
+    window::{Fullscreen, Window, WindowId},
 };
 
 /// Smallest font size the live zoom allows, so cells never collapse to an
 /// unreadable size.
 const FONT_SIZE_FLOOR: u32 = 6;
 
-/// Open the stoatty window running the user's default shell.
+/// Open a windowed stoatty running the user's default shell.
 ///
 /// Blocks the calling thread for the lifetime of the window. See
 /// [`run_with_shell`] for the behavior and for running a specific command.
 pub fn run() {
-    run_with_shell(pty::default_shell());
+    run_with_shell(pty::default_shell(), false);
 }
 
-/// Open the stoatty window running `shell` as the PTY command, and run the
-/// event loop until the window closes or that command exits.
+/// Open a stoatty window running `shell` as the PTY command, and run the event
+/// loop until the window closes or that command exits.
 ///
-/// Blocks the calling thread for the lifetime of the window. The loop is
-/// idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
+/// The window opens borderless-fullscreen when `fullscreen` is set, else
+/// windowed. Blocks the calling thread for the lifetime of the window. The loop
+/// is idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
 /// output arrives or the window is resized, not on a continuous timer.
-pub fn run_with_shell(shell: String) {
+pub fn run_with_shell(shell: String, fullscreen: bool) {
     let config = config::load().unwrap_or_else(|error| {
         eprintln!("stoatty: could not load config, using built-in defaults: {error}");
         config::embedded_default()
@@ -55,7 +56,13 @@ pub fn run_with_shell(shell: String) {
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(event_loop.create_proxy(), shell, theme, config.font_size);
+    let mut app = App::new(
+        event_loop.create_proxy(),
+        shell,
+        theme,
+        config.font_size,
+        fullscreen,
+    );
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -74,16 +81,24 @@ struct App {
     shell: String,
     theme: Theme,
     font_size: u32,
+    fullscreen: bool,
     state: Option<State>,
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String, theme: Theme, font_size: u32) -> App {
+    fn new(
+        proxy: EventLoopProxy<PtyEvent>,
+        shell: String,
+        theme: Theme,
+        font_size: u32,
+        fullscreen: bool,
+    ) -> App {
         App {
             proxy,
             shell,
             theme,
             font_size,
+            fullscreen,
             state: None,
         }
     }
@@ -134,11 +149,11 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
-        let window = Arc::new(
-            event_loop
-                .create_window(Window::default_attributes().with_title("stoatty"))
-                .expect("create window"),
-        );
+        let mut attributes = Window::default_attributes().with_title("stoatty");
+        if self.fullscreen {
+            attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
+        }
+        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
 
         let size = window.inner_size();
         let scale_factor = window.scale_factor();

@@ -13,7 +13,7 @@ use std::{env, ffi::OsStr, path::PathBuf, process::Command};
 /// render path.
 pub fn run(bin: &str) {
     let emitter = build_emitter(bin);
-    stoatty::app::run_with_shell(emitter.to_string_lossy().into_owned());
+    stoatty::app::run_with_shell(emitter.to_string_lossy().into_owned(), true);
 }
 
 /// Build the `bin` emitter and return the path to the compiled binary.
