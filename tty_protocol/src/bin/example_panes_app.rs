@@ -144,6 +144,95 @@ const LAYOUTS: &[&[Pane]] = &[
     ],
 ];
 
+/// Rust source shown in the `main.rs` pane.
+const MAIN_RS: &[&str] = &[
+    "use std::io::Write;",
+    "",
+    "fn main() {",
+    "    let grid = Grid::new(80, 24);",
+    "    let frame = render(&grid);",
+    "",
+    "    for row in frame.rows() {",
+    "        println!(\"{row}\");",
+    "    }",
+    "}",
+    "",
+    "fn render(grid: &Grid) -> Frame {",
+    "    Frame::from_grid(grid)",
+    "}",
+];
+
+/// Rust source shown in the `lib.rs` pane.
+const LIB_RS: &[&str] = &[
+    "pub struct Grid {",
+    "    rows: usize,",
+    "    cols: usize,",
+    "}",
+    "",
+    "impl Grid {",
+    "    pub fn new(rows: usize, cols: usize) -> Self {",
+    "        Grid { rows, cols }",
+    "    }",
+    "",
+    "    pub fn area(&self) -> usize {",
+    "        self.rows * self.cols",
+    "    }",
+    "}",
+];
+
+/// Manifest shown in the `Cargo.toml` pane.
+const CARGO_TOML: &[&str] = &[
+    "[package]",
+    "name = \"stoatty\"",
+    "version = \"0.1.0\"",
+    "edition = \"2024\"",
+    "",
+    "[dependencies]",
+    "wgpu = \"29\"",
+    "winit = \"0.30\"",
+    "cosmic-text = \"0.12\"",
+    "",
+    "[profile.release]",
+    "lto = true",
+];
+
+/// File tree shown in the `explorer` pane.
+const EXPLORER: &[&str] = &[
+    "src/",
+    "  main.rs",
+    "  lib.rs",
+    "  gpu.rs",
+    "  render/",
+    "    text.rs",
+    "    bar.rs",
+    "  config.rs",
+    "tests/",
+    "  headless.rs",
+    "Cargo.toml",
+    "stoatty.toml",
+    "README.md",
+];
+
+/// Run output shown in the `terminal` pane.
+const TERMINAL: &[&str] = &[
+    "$ cargo run --example panes",
+    "   Compiling stoatty v0.1.0",
+    "    Finished dev in 2.31s",
+    "     Running `examples/panes`",
+];
+
+/// Test output shown in the `output` pane.
+const OUTPUT: &[&str] = &[
+    "$ cargo test",
+    "   Compiling stoatty",
+    "    Finished test in 3.04s",
+    "     Running unittests",
+    "",
+    "running 24 tests",
+    "........................",
+    "test result: ok. 24 passed",
+];
+
 fn main() {
     let mut stdout = io::stdout();
     setup(&mut stdout);
@@ -182,8 +271,8 @@ fn render_step(out: &mut Vec<u8>, panes: &[Pane]) {
     }
 }
 
-/// Frame `pane` with a rounded border, brighter when focused, and write its label
-/// just inside the top-left corner.
+/// Frame `pane` with a rounded border, brighter when focused, write its label
+/// just inside the top-left corner, and fill the interior with the label's body.
 fn draw_pane(out: &mut Vec<u8>, pane: &Pane, focused: bool) {
     out.extend_from_slice(&command::encode_border(&BorderCommand {
         top: pane.top,
@@ -196,6 +285,39 @@ fn draw_pane(out: &mut Vec<u8>, pane: &Pane, focused: bool) {
 
     cup(out, pane.top + 1, pane.left + 2);
     out.extend_from_slice(pane.label.as_bytes());
+
+    draw_body(out, pane);
+}
+
+/// Write the pane's body text below its label, each line clipped to the frame's
+/// interior so nothing spills across the border.
+///
+/// The interior is the `height - 3` rows below the label and the `width - 4`
+/// columns inside the left and right borders, both starting one column past the
+/// border to match the label. A narrow pane shows a horizontally-clipped view,
+/// the same as a real editor that does not wrap.
+fn draw_body(out: &mut Vec<u8>, pane: &Pane) {
+    let rows = pane.height.saturating_sub(3) as usize;
+    let cols = pane.width.saturating_sub(4) as usize;
+
+    for (row, line) in pane_body(pane.label).iter().take(rows).enumerate() {
+        let clipped: String = line.chars().take(cols).collect();
+        cup(out, pane.top + 2 + row as u16, pane.left + 2);
+        out.extend_from_slice(clipped.as_bytes());
+    }
+}
+
+/// The body lines for a pane's label, or an empty slice for an unknown label.
+fn pane_body(label: &str) -> &'static [&'static str] {
+    match label {
+        "main.rs" => MAIN_RS,
+        "lib.rs" => LIB_RS,
+        "Cargo.toml" => CARGO_TOML,
+        "explorer" => EXPLORER,
+        "terminal" => TERMINAL,
+        "output" => OUTPUT,
+        _ => &[],
+    }
 }
 
 /// Emit a Cursor Position escape to the 0-based grid (`row`, `col`).
