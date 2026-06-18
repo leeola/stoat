@@ -209,6 +209,11 @@ pub struct GpuContext {
     device: Device,
     queue: Queue,
     config: SurfaceConfiguration,
+    /// The non-sRGB format the frame view is created with, so the passes'
+    /// in-shader sRGB encoding is stored verbatim. Equals the surface format
+    /// when that is already non-sRGB, or its non-sRGB sibling when only an sRGB
+    /// surface format is available.
+    view_format: TextureFormat,
     renderer: Renderer,
 }
 
@@ -265,33 +270,35 @@ impl GpuContext {
             executor::block_on(adapter.request_device(&DeviceDescriptor::default()))
                 .expect("GPU device creation failed on the selected adapter");
 
-        // A non-sRGB surface: the text pass encodes its gamma-correct composite
-        // to sRGB in the shader, and the background pass writes already-encoded
-        // colors, so the surface must store written values verbatim rather than
-        // re-encoding them.
+        // The text pass encodes its gamma-correct composite to sRGB in the
+        // shader and the background pass writes already-encoded colors, so the
+        // passes must render to a linear-store (non-sRGB) view. When only an
+        // sRGB surface format is available, the surface keeps it but views
+        // render through the non-sRGB sibling, so the hardware does not encode
+        // sRGB a second time on top of the shader.
         let caps = surface.get_capabilities(&adapter);
-        let format = caps
-            .formats
-            .iter()
-            .copied()
-            .find(|format| !format.is_srgb())
-            .unwrap_or(caps.formats[0]);
+        let (surface_format, view_format) = surface_formats(&caps.formats);
+        let view_formats = if view_format == surface_format {
+            vec![]
+        } else {
+            vec![view_format]
+        };
 
         let config = SurfaceConfiguration {
             usage: TextureUsages::RENDER_ATTACHMENT,
-            format,
+            format: surface_format,
             width,
             height,
             present_mode: PresentMode::Fifo,
             alpha_mode: CompositeAlphaMode::Auto,
-            view_formats: vec![],
+            view_formats,
             desired_maximum_frame_latency: 2,
         };
         surface.configure(&device, &config);
 
         let renderer = Renderer::new(
             &device,
-            format,
+            view_format,
             [width, height],
             font_size,
             scale_factor,
@@ -304,6 +311,7 @@ impl GpuContext {
             device,
             queue,
             config,
+            view_format,
             renderer,
         }
     }
@@ -363,7 +371,10 @@ impl GpuContext {
             | CurrentSurfaceTexture::Validation => return,
         };
 
-        let view = frame.texture.create_view(&TextureViewDescriptor::default());
+        let view = frame.texture.create_view(&TextureViewDescriptor {
+            format: Some(self.view_format),
+            ..Default::default()
+        });
         self.renderer
             .render_into(&self.device, &self.queue, &view, grid, cursor, scroll);
         frame.present();
@@ -379,6 +390,23 @@ fn grid_dims(width: u32, height: u32, metrics: CellMetrics) -> (usize, usize) {
     let rows = (height as f32 / metrics.height).floor().max(1.0) as usize;
     let cols = (width as f32 / metrics.width).floor().max(1.0) as usize;
     (rows, cols)
+}
+
+/// Choose the surface format and the format its views render through, from a
+/// surface's supported formats.
+///
+/// The passes write sRGB-encoded colors, so views must render to a non-sRGB
+/// target. Prefers a non-sRGB surface format, in which case the view format
+/// equals it. When only sRGB formats are available (some Linux/Vulkan drivers,
+/// never macOS/Metal), the surface keeps the sRGB format but views render
+/// through its non-sRGB sibling, so the hardware does not encode sRGB twice.
+fn surface_formats(available: &[TextureFormat]) -> (TextureFormat, TextureFormat) {
+    let surface = available
+        .iter()
+        .copied()
+        .find(|format| !format.is_srgb())
+        .unwrap_or(available[0]);
+    (surface, surface.remove_srgb_suffix())
 }
 
 /// Convert an [`Rgb`] to a wgpu [`Color`], normalizing each channel to 0..1
@@ -412,7 +440,7 @@ pub fn headless_device() -> Option<(Device, Queue)> {
 
 #[cfg(test)]
 mod tests {
-    use super::grid_dims;
+    use super::{grid_dims, surface_formats, TextureFormat};
     use crate::render::CellMetrics;
 
     #[test]
@@ -421,5 +449,20 @@ mod tests {
         assert_eq!(dims(15), (33, 88));
         assert_eq!(dims(30), (16, 44));
         assert_eq!(dims(60), (8, 22));
+    }
+
+    #[test]
+    fn surface_formats_prefer_non_srgb_then_fall_back_to_the_sibling() {
+        assert_eq!(
+            surface_formats(&[TextureFormat::Bgra8UnormSrgb, TextureFormat::Bgra8Unorm]),
+            (TextureFormat::Bgra8Unorm, TextureFormat::Bgra8Unorm),
+            "a non-sRGB format becomes both the surface and the view format"
+        );
+
+        assert_eq!(
+            surface_formats(&[TextureFormat::Bgra8UnormSrgb, TextureFormat::Rgba8UnormSrgb]),
+            (TextureFormat::Bgra8UnormSrgb, TextureFormat::Bgra8Unorm),
+            "an sRGB-only surface keeps its format but views through the non-sRGB sibling"
+        );
     }
 }
