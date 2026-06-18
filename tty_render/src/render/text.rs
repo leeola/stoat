@@ -136,12 +136,14 @@ pub struct TextPass {
 impl TextPass {
     /// Build the pipeline targeting `format`, with an empty instance buffer.
     ///
-    /// Loads the system fonts (cosmic-text [`FontSystem::new`]) and creates the
-    /// glyph atlas, so this is the heavy part of renderer startup. `format` must
+    /// Loads the system fonts (cosmic-text [`FontSystem::new`]) plus the bundled
+    /// JetBrains Mono default, and creates the glyph atlas, so this is the heavy
+    /// part of renderer startup. `format` must
     /// be the non-sRGB surface format the text pass composites into; the shader
     /// does its own sRGB encoding.
     pub(crate) fn new(device: &Device, format: TextureFormat, metrics: CellMetrics) -> TextPass {
         let mut font_system = FontSystem::new();
+        load_bundled_fonts(&mut font_system);
         let baseline = probe_baseline(&mut font_system, metrics);
         let swash_cache = SwashCache::new();
         let atlas = GlyphAtlas::new(device);
@@ -1026,6 +1028,20 @@ fn shape_char(
     Some(glyph.physical((0.0, 0.0), 1.0).cache_key)
 }
 
+/// Register the bundled JetBrains Mono variable faces into `font_system`'s font
+/// database so the `JetBrains Mono` family resolves regardless of which fonts
+/// are installed system-wide.
+fn load_bundled_fonts(font_system: &mut FontSystem) {
+    const REGULAR: &[u8] =
+        include_bytes!("../../assets/fonts/JetBrainsMono/JetBrainsMono[wght].ttf");
+    const ITALIC: &[u8] =
+        include_bytes!("../../assets/fonts/JetBrainsMono/JetBrainsMono-Italic[wght].ttf");
+
+    let db = font_system.db_mut();
+    db.load_font_data(REGULAR.to_vec());
+    db.load_font_data(ITALIC.to_vec());
+}
+
 /// Baseline offset from a cell's top, in physical pixels, measured once from the
 /// font so glyphs sit on a consistent baseline within their cell.
 fn probe_baseline(font_system: &mut FontSystem, metrics: CellMetrics) -> f32 {
@@ -1215,9 +1231,13 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_origin,
-        overlay_content_cells, text_run_origin, STYLE_DOTTED,
+        load_bundled_fonts, overlay_content_cells, text_run_origin, STYLE_DOTTED,
     };
     use crate::render::CellMetrics;
+    use cosmic_text::{
+        fontdb::{Database, Query},
+        Family, FontSystem,
+    };
     use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
     use wgpu::naga::{
         front::wgsl,
@@ -1422,6 +1442,23 @@ mod tests {
             cell_rect_scissor(5, 0, 2, 2, [0.0, 0.0], resolution, metrics),
             None,
             "an anchor at the bottom edge has no area"
+        );
+    }
+
+    #[test]
+    fn bundled_fonts_make_jetbrains_mono_resolvable() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+
+        assert!(
+            font_system
+                .db()
+                .query(&Query {
+                    families: &[Family::Name("JetBrains Mono")],
+                    ..Default::default()
+                })
+                .is_some(),
+            "bundled faces resolve JetBrains Mono in an otherwise empty font db"
         );
     }
 
