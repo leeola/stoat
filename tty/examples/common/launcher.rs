@@ -15,7 +15,11 @@ use std::{env, ffi::OsStr, path::PathBuf, process::Command};
 /// the content it shows.
 pub fn run(bin: &str, size: [u16; 2]) {
     let emitter = build_emitter(bin);
-    stoatty::app::run_with_shell(emitter.to_string_lossy().into_owned(), Some(size));
+    stoatty::app::run_with_shell(
+        emitter.to_string_lossy().into_owned(),
+        Vec::new(),
+        Some(size),
+    );
 }
 
 /// Build the `bin` emitter and return the path to the compiled binary.

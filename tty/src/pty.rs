@@ -34,13 +34,15 @@ pub(crate) struct Pty {
 }
 
 impl Pty {
-    /// Spawn `shell` over a fresh PTY sized `rows` by `cols` and start reading.
+    /// Spawn `program` with `args` over a fresh PTY sized `rows` by `cols` and
+    /// start reading.
     ///
     /// `sink` runs on the reader thread: it is called with [`PtyOutput::Data`]
     /// for each chunk the shell writes and once with [`PtyOutput::Eof`] when the
     /// shell exits. It must be `Send` since it runs off the main thread.
     pub(crate) fn spawn(
-        shell: &str,
+        program: &str,
+        args: &[String],
         rows: u16,
         cols: u16,
         mut sink: impl FnMut(PtyOutput) + Send + 'static,
@@ -54,7 +56,8 @@ impl Pty {
             })
             .map_err(io::Error::other)?;
 
-        let mut command = CommandBuilder::new(shell);
+        let mut command = CommandBuilder::new(program);
+        command.args(args);
         command.env("TERM", "xterm-256color");
 
         let child = pair

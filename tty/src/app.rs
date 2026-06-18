@@ -39,18 +39,18 @@ const FONT_SIZE_FLOOR: u32 = 6;
 /// Blocks the calling thread for the lifetime of the window. See
 /// [`run_with_shell`] for the behavior and for running a specific command.
 pub fn run() {
-    run_with_shell(pty::default_shell(), None);
+    run_with_shell(pty::default_shell(), Vec::new(), None);
 }
 
-/// Open the stoatty window running `shell` as the PTY command, and run the
-/// event loop until the window closes or that command exits.
+/// Open the stoatty window running `program` with `args` as the PTY command,
+/// and run the event loop until the window closes or that command exits.
 ///
 /// `size` is the window's content extent in cells (`[cols, rows]`); the window
 /// opens sized to it, and `None` keeps the winit default window. Blocks the
 /// calling thread for the lifetime of the window. The loop is idle-driven
 /// (`ControlFlow::Wait`): frames are drawn on demand when PTY output arrives or
 /// the window is resized, not on a continuous timer.
-pub fn run_with_shell(shell: String, size: Option<[u16; 2]>) {
+pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>) {
     let config = config::load().unwrap_or_else(|error| {
         eprintln!("stoatty: could not load config, using built-in defaults: {error}");
         config::embedded_default()
@@ -64,7 +64,8 @@ pub fn run_with_shell(shell: String, size: Option<[u16; 2]>) {
 
     let mut app = App::new(
         event_loop.create_proxy(),
-        shell,
+        program,
+        args,
         theme,
         config.font_size,
         config.font_family,
@@ -85,7 +86,8 @@ enum PtyEvent {
 
 struct App {
     proxy: EventLoopProxy<PtyEvent>,
-    shell: String,
+    program: String,
+    args: Vec<String>,
     theme: Theme,
     font_size: u32,
     /// Ordered font-family cascade from the config, resolved against the font db
@@ -100,7 +102,8 @@ struct App {
 impl App {
     fn new(
         proxy: EventLoopProxy<PtyEvent>,
-        shell: String,
+        program: String,
+        args: Vec<String>,
         theme: Theme,
         font_size: u32,
         font_family: Vec<String>,
@@ -108,7 +111,8 @@ impl App {
     ) -> App {
         App {
             proxy,
-            shell,
+            program,
+            args,
             theme,
             font_size,
             font_family,
@@ -194,13 +198,19 @@ impl ApplicationHandler<PtyEvent> for App {
 
         let pty = {
             let proxy = self.proxy.clone();
-            Pty::spawn(&self.shell, rows as u16, cols as u16, move |output| {
-                let event = match output {
-                    PtyOutput::Data(bytes) => PtyEvent::Output(bytes),
-                    PtyOutput::Eof => PtyEvent::Exited,
-                };
-                let _ = proxy.send_event(event);
-            })
+            Pty::spawn(
+                &self.program,
+                &self.args,
+                rows as u16,
+                cols as u16,
+                move |output| {
+                    let event = match output {
+                        PtyOutput::Data(bytes) => PtyEvent::Output(bytes),
+                        PtyOutput::Eof => PtyEvent::Exited,
+                    };
+                    let _ = proxy.send_event(event);
+                },
+            )
             .expect("spawn shell over pty")
         };
 
