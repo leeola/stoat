@@ -7,7 +7,7 @@
 //! the renderer toolkit-agnostic.
 
 use crate::{
-    config,
+    config::{self, Config},
     pty::{self, Pty, PtyOutput},
 };
 use std::sync::Arc;
@@ -33,17 +33,28 @@ use winit::{
 /// unreadable size.
 const FONT_SIZE_FLOOR: u32 = 6;
 
-/// Open the stoatty window running the user's default shell, at the winit
-/// default window size.
+/// Open the stoatty window running the configured command, or the user's
+/// default shell when the config sets none, at the winit default window size.
 ///
-/// Blocks the calling thread for the lifetime of the window. See
-/// [`run_with_shell`] for the behavior and for running a specific command.
+/// Reads the `[shell]` config override for the program and its arguments,
+/// falling back to the default shell with no arguments. Blocks the calling
+/// thread for the lifetime of the window. See [`run_with_shell`] to force a
+/// specific command instead.
 pub fn run() {
-    run_with_shell(pty::default_shell(), Vec::new(), None);
+    let mut config = load_config();
+    let (program, args) = match config.shell.take() {
+        Some(shell) => (shell.program, shell.args),
+        None => (pty::default_shell(), Vec::new()),
+    };
+    run_with_config(config, program, args, None);
 }
 
 /// Open the stoatty window running `program` with `args` as the PTY command,
 /// and run the event loop until the window closes or that command exits.
+///
+/// The command is the one passed in, not the `[shell]` config override; the
+/// config supplies only theme and font here. See [`run`] to launch the
+/// configured command.
 ///
 /// `size` is the window's content extent in cells (`[cols, rows]`); the window
 /// opens sized to it, and `None` keeps the winit default window. Blocks the
@@ -51,10 +62,15 @@ pub fn run() {
 /// (`ControlFlow::Wait`): frames are drawn on demand when PTY output arrives or
 /// the window is resized, not on a continuous timer.
 pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>) {
-    let config = config::load().unwrap_or_else(|error| {
-        eprintln!("stoatty: could not load config, using built-in defaults: {error}");
-        config::embedded_default()
-    });
+    run_with_config(load_config(), program, args, size);
+}
+
+/// Open the window running `program` with `args`, drawing with `config`'s theme
+/// and font, and run the event loop until the window closes.
+///
+/// The shared core of [`run`] and [`run_with_shell`]. It takes an
+/// already-loaded `config` so each entry point loads it exactly once.
+fn run_with_config(config: Config, program: String, args: Vec<String>, size: Option<[u16; 2]>) {
     let theme = config.resolve_theme();
 
     let event_loop = EventLoop::<PtyEvent>::with_user_event()
@@ -72,6 +88,15 @@ pub fn run_with_shell(program: String, args: Vec<String>, size: Option<[u16; 2]>
         size,
     );
     event_loop.run_app(&mut app).expect("run event loop");
+}
+
+/// Load the settled config, falling back to the built-in default (with a
+/// warning on stderr) when it cannot be read.
+fn load_config() -> Config {
+    config::load().unwrap_or_else(|error| {
+        eprintln!("stoatty: could not load config, using built-in defaults: {error}");
+        config::embedded_default()
+    })
 }
 
 /// Shell activity delivered from the reader thread to the event loop.
