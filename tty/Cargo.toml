@@ -7,6 +7,10 @@ publish.workspace = true
 [lints]
 workspace = true
 
+[[bin]]
+name = "stoatty"
+path = "src/main.rs"
+
 [dependencies]
 stoatty_protocol = { path = "../tty_protocol" }
 stoatty_term = { path = "../tty_term" }
