@@ -266,6 +266,12 @@ impl ApplicationHandler<PtyEvent> for App {
         match event {
             PtyEvent::Output(bytes) => {
                 state.terminal.advance(&bytes);
+
+                let responses = state.terminal.take_responses();
+                if !responses.is_empty() {
+                    let _ = state.pty.write(&responses);
+                }
+
                 state.window.request_redraw();
             },
             PtyEvent::Exited => event_loop.exit(),

@@ -14,7 +14,7 @@ use crate::{
     theme::Theme,
 };
 use alacritty_terminal::{
-    event::VoidListener,
+    event::{Event, EventListener},
     grid::Dimensions,
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
@@ -24,7 +24,7 @@ use alacritty_terminal::{
     vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor, Processor},
     Term,
 };
-use std::mem;
+use std::{cell::RefCell, mem, rc::Rc};
 use stoatty_protocol::command::{
     self, BarCommand, BorderCommand, Command, IconCommand, LineLayoutCommand, PopoverCommand,
     ScaleCommand, ScrollRegionCommand, TextRunCommand,
@@ -43,7 +43,10 @@ const PALETTE_LEN: usize = 256;
 /// 256-color palette derived from it. A color the program overrode (via OSC)
 /// takes precedence over the theme.
 pub struct Terminal {
-    term: Term<VoidListener>,
+    term: Term<ResponseSink>,
+    /// Shares the `term`'s response buffer so [`Self::take_responses`] can drain
+    /// the replies the terminal emits to host queries.
+    responses: ResponseSink,
     parser: Processor,
     /// Color set the projection resolves named and default colors against.
     theme: Theme,
@@ -117,11 +120,17 @@ impl Terminal {
     /// Create a `rows` by `cols` terminal with an empty screen, resolving colors
     /// against `theme`.
     pub fn new(rows: usize, cols: usize, theme: Theme) -> Terminal {
-        let term = Term::new(Config::default(), &GridSize { rows, cols }, VoidListener);
+        let responses = ResponseSink::default();
+        let term = Term::new(
+            Config::default(),
+            &GridSize { rows, cols },
+            responses.clone(),
+        );
         let palette = default_palette(&theme);
 
         Terminal {
             term,
+            responses,
             parser: Processor::new(),
             theme,
             palette,
@@ -155,6 +164,17 @@ impl Terminal {
         }
 
         self.parser.advance(&mut self.term, bytes);
+    }
+
+    /// Take the bytes the terminal wants written back to the PTY, leaving none
+    /// buffered.
+    ///
+    /// Host queries fed to [`Self::advance`] (device attributes, device-status
+    /// and cursor-position reports, keyboard-mode queries) produce replies the
+    /// shell blocks on; the caller must write them back to the PTY for an
+    /// interactive shell to start. Returns empty when the stream held no query.
+    pub fn take_responses(&mut self) -> Vec<u8> {
+        self.responses.take()
     }
 
     /// Apply a decoded stoatty command to the terminal.
@@ -282,6 +302,35 @@ impl Terminal {
                 }
                 Dirty::Partial(rows_dirty)
             },
+        }
+    }
+}
+
+/// Captures the bytes the terminal wants written back to the PTY.
+///
+/// `alacritty_terminal` reports replies to host queries (device attributes,
+/// device-status and cursor-position reports, keyboard-mode queries) as
+/// [`Event::PtyWrite`] events through its [`EventListener`]. The trait method
+/// takes `&self`, so the buffer lives behind an [`Rc`]/[`RefCell`]: the `Term`
+/// holds the listener while the owning [`Terminal`] keeps a clone to drain.
+/// Other event variants (title, clipboard, bell) are dropped.
+#[derive(Clone, Default)]
+struct ResponseSink {
+    bytes: Rc<RefCell<Vec<u8>>>,
+}
+
+impl ResponseSink {
+    /// Drain the buffered response bytes, leaving the buffer empty.
+    fn take(&self) -> Vec<u8> {
+        let mut bytes = self.bytes.borrow_mut();
+        mem::take(&mut *bytes)
+    }
+}
+
+impl EventListener for ResponseSink {
+    fn send_event(&self, event: Event) {
+        if let Event::PtyWrite(text) = event {
+            self.bytes.borrow_mut().extend_from_slice(text.as_bytes());
         }
     }
 }
@@ -913,6 +962,30 @@ mod tests {
                 col: 2,
                 shape: CursorShape::Block
             }
+        );
+    }
+
+    #[test]
+    fn captures_host_query_responses_for_the_pty() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b[6n");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b[1;1R".to_vec(),
+            "cursor position report"
+        );
+
+        terminal.advance(b"\x1b[c");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b[?6c".to_vec(),
+            "primary device attributes"
+        );
+
+        assert!(
+            terminal.take_responses().is_empty(),
+            "buffer drained after taking"
         );
     }
 
