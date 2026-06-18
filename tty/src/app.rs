@@ -25,7 +25,7 @@ use winit::{
     dpi::LogicalSize,
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
-    keyboard::{Key, ModifiersState},
+    keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
 };
 
@@ -361,23 +361,27 @@ impl ApplicationHandler<PtyEvent> for App {
                     state.modifiers.control_key()
                 };
 
-                let Some(delta) = font_step(platform_mod_held, &event.logical_key) else {
+                if let Some(delta) = font_step(platform_mod_held, &event.logical_key) {
+                    let font_size =
+                        (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
+                    state.font_size = font_size;
+                    state
+                        .gpu
+                        .set_font_size(font_size, state.scale_factor as f32);
+
+                    // The surface is unchanged, so skip `gpu.resize`; only the cell
+                    // metrics moved, so re-read the grid size and resize the rest.
+                    let (rows, cols) = state.gpu.grid_size();
+                    state.terminal.resize(rows, cols);
+                    let _ = state.pty.resize(rows as u16, cols as u16);
+
+                    state.window.request_redraw();
                     return;
-                };
+                }
 
-                let font_size = (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
-                state.font_size = font_size;
-                state
-                    .gpu
-                    .set_font_size(font_size, state.scale_factor as f32);
-
-                // The surface is unchanged, so skip `gpu.resize`; only the cell
-                // metrics moved, so re-read the grid size and resize the rest.
-                let (rows, cols) = state.gpu.grid_size();
-                state.terminal.resize(rows, cols);
-                let _ = state.pty.resize(rows as u16, cols as u16);
-
-                state.window.request_redraw();
+                if let Some(bytes) = encode_key(&event.logical_key, state.modifiers.control_key()) {
+                    let _ = state.pty.write(&bytes);
+                }
             },
             _ => {},
         }
@@ -409,6 +413,43 @@ fn font_step(platform_mod_held: bool, key: &Key) -> Option<i32> {
         Key::Character(s) if s.as_str() == "-" => Some(-1),
         _ => None,
     }
+}
+
+/// Encode a key press into the bytes a terminal sends to the shell, or `None`
+/// for a key with no terminal encoding (a bare modifier, a function key) so the
+/// caller writes nothing.
+///
+/// `ctrl` is whether Ctrl is held: with it, an ASCII letter becomes its C0
+/// control byte (Ctrl-C is `0x03`). Cursor keys use the normal-mode `CSI` forms
+/// (`\x1b[A` through `\x1b[D`); printable keys pass through as their own UTF-8
+/// bytes.
+fn encode_key(key: &Key, ctrl: bool) -> Option<Vec<u8>> {
+    match key {
+        Key::Named(NamedKey::Enter) => Some(vec![b'\r']),
+        Key::Named(NamedKey::Backspace) => Some(vec![0x7f]),
+        Key::Named(NamedKey::Tab) => Some(vec![b'\t']),
+        Key::Named(NamedKey::Space) => Some(vec![b' ']),
+        Key::Named(NamedKey::Escape) => Some(vec![0x1b]),
+        Key::Named(NamedKey::ArrowUp) => Some(b"\x1b[A".to_vec()),
+        Key::Named(NamedKey::ArrowDown) => Some(b"\x1b[B".to_vec()),
+        Key::Named(NamedKey::ArrowRight) => Some(b"\x1b[C".to_vec()),
+        Key::Named(NamedKey::ArrowLeft) => Some(b"\x1b[D".to_vec()),
+        Key::Character(s) if ctrl => ctrl_byte(s),
+        Key::Character(s) => Some(s.as_str().as_bytes().to_vec()),
+        _ => None,
+    }
+}
+
+/// The C0 control byte for Ctrl held with a single ASCII letter (Ctrl-C is
+/// `0x03`), or `None` when `s` is not one such letter.
+fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
+    let mut chars = s.chars();
+    let c = chars.next()?;
+    if chars.next().is_some() || !c.is_ascii_alphabetic() {
+        return None;
+    }
+
+    Some(vec![(c.to_ascii_uppercase() as u8) & 0x1f])
 }
 
 /// Step the animated cursor toward `target`, returning the new position and
@@ -482,11 +523,11 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ease, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
+        ease, encode_key, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
         step_region_scroll,
     };
     use stoatty_term::grid::{Overlay, Rgb};
-    use winit::keyboard::Key;
+    use winit::keyboard::{Key, NamedKey};
 
     #[test]
     fn ease_steps_toward_then_settles() {
@@ -582,6 +623,50 @@ mod tests {
             font_step(true, &Key::Character("+".into())),
             None,
             "shifted plus no longer zooms"
+        );
+    }
+
+    #[test]
+    fn encode_key_maps_keys_to_terminal_bytes() {
+        let named = |key| encode_key(&Key::Named(key), false);
+        let printable = |s: &str| encode_key(&Key::Character(s.into()), false);
+
+        assert_eq!(
+            printable("a"),
+            Some(b"a".to_vec()),
+            "printable passes through"
+        );
+        assert_eq!(
+            printable("A"),
+            Some(b"A".to_vec()),
+            "shifted char passes through"
+        );
+
+        assert_eq!(named(NamedKey::Enter), Some(vec![b'\r']));
+        assert_eq!(named(NamedKey::Backspace), Some(vec![0x7f]));
+        assert_eq!(named(NamedKey::Tab), Some(vec![b'\t']));
+        assert_eq!(named(NamedKey::Space), Some(vec![b' ']));
+        assert_eq!(named(NamedKey::Escape), Some(vec![0x1b]));
+
+        assert_eq!(named(NamedKey::ArrowUp), Some(b"\x1b[A".to_vec()));
+        assert_eq!(named(NamedKey::ArrowDown), Some(b"\x1b[B".to_vec()));
+        assert_eq!(named(NamedKey::ArrowRight), Some(b"\x1b[C".to_vec()));
+        assert_eq!(named(NamedKey::ArrowLeft), Some(b"\x1b[D".to_vec()));
+
+        assert_eq!(named(NamedKey::F1), None, "unmapped named key");
+    }
+
+    #[test]
+    fn encode_key_maps_ctrl_letters_to_control_bytes() {
+        let ctrl = |s: &str| encode_key(&Key::Character(s.into()), true);
+
+        assert_eq!(ctrl("c"), Some(vec![0x03]), "Ctrl-C");
+        assert_eq!(ctrl("a"), Some(vec![0x01]), "Ctrl-A");
+        assert_eq!(ctrl("C"), Some(vec![0x03]), "folds case");
+        assert_eq!(
+            ctrl("1"),
+            None,
+            "Ctrl with a non-letter has no control byte"
         );
     }
 

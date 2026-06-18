@@ -8,7 +8,7 @@
 
 use portable_pty::{self, Child, CommandBuilder, MasterPty, PtySize};
 use std::{
-    io::{self, Read},
+    io::{self, Read, Write},
     thread::{self, JoinHandle},
 };
 
@@ -22,11 +22,13 @@ pub(crate) enum PtyOutput {
 
 /// A running shell attached to a pseudoterminal.
 ///
-/// Owns the PTY master (for resizing), the child handle, and the reader thread.
-/// Dropping it kills the shell, which closes the slave and ends the reader
-/// thread, so closing the window tears the shell down.
+/// Owns the PTY master (for resizing), the writer to the shell's input (for
+/// forwarding key presses), the child handle, and the reader thread. Dropping
+/// it kills the shell, which closes the slave and ends the reader thread, so
+/// closing the window tears the shell down.
 pub(crate) struct Pty {
     master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
     child: Box<dyn Child + Send + Sync>,
     _reader: JoinHandle<()>,
 }
@@ -59,6 +61,7 @@ impl Pty {
             .slave
             .spawn_command(command)
             .map_err(io::Error::other)?;
+        let writer = pair.master.take_writer().map_err(io::Error::other)?;
         let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
 
         let reader_thread = thread::spawn(move || {
@@ -74,6 +77,7 @@ impl Pty {
 
         Ok(Pty {
             master: pair.master,
+            writer,
             child,
             _reader: reader_thread,
         })
@@ -89,6 +93,16 @@ impl Pty {
                 pixel_height: 0,
             })
             .map_err(io::Error::other)
+    }
+
+    /// Write `bytes` to the shell's input, flushing so the shell sees them
+    /// promptly.
+    ///
+    /// Encoded key presses flow through here, so typing in the window reaches
+    /// the shell.
+    pub(crate) fn write(&mut self, bytes: &[u8]) -> io::Result<()> {
+        self.writer.write_all(bytes)?;
+        self.writer.flush()
     }
 }
 
