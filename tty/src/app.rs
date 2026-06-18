@@ -22,29 +22,28 @@ use winit::{
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState},
-    window::{Fullscreen, Window, WindowId},
+    window::{Window, WindowId},
 };
 
 /// Smallest font size the live zoom allows, so cells never collapse to an
 /// unreadable size.
 const FONT_SIZE_FLOOR: u32 = 6;
 
-/// Open a windowed stoatty running the user's default shell.
+/// Open the stoatty window running the user's default shell.
 ///
 /// Blocks the calling thread for the lifetime of the window. See
 /// [`run_with_shell`] for the behavior and for running a specific command.
 pub fn run() {
-    run_with_shell(pty::default_shell(), false);
+    run_with_shell(pty::default_shell());
 }
 
-/// Open a stoatty window running `shell` as the PTY command, and run the event
-/// loop until the window closes or that command exits.
+/// Open the stoatty window running `shell` as the PTY command, and run the
+/// event loop until the window closes or that command exits.
 ///
-/// The window opens borderless-fullscreen when `fullscreen` is set, else
-/// windowed. Blocks the calling thread for the lifetime of the window. The loop
-/// is idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
+/// Blocks the calling thread for the lifetime of the window. The loop is
+/// idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
 /// output arrives or the window is resized, not on a continuous timer.
-pub fn run_with_shell(shell: String, fullscreen: bool) {
+pub fn run_with_shell(shell: String) {
     let config = config::load().unwrap_or_else(|error| {
         eprintln!("stoatty: could not load config, using built-in defaults: {error}");
         config::embedded_default()
@@ -56,13 +55,7 @@ pub fn run_with_shell(shell: String, fullscreen: bool) {
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(
-        event_loop.create_proxy(),
-        shell,
-        theme,
-        config.font_size,
-        fullscreen,
-    );
+    let mut app = App::new(event_loop.create_proxy(), shell, theme, config.font_size);
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -81,24 +74,16 @@ struct App {
     shell: String,
     theme: Theme,
     font_size: u32,
-    fullscreen: bool,
     state: Option<State>,
 }
 
 impl App {
-    fn new(
-        proxy: EventLoopProxy<PtyEvent>,
-        shell: String,
-        theme: Theme,
-        font_size: u32,
-        fullscreen: bool,
-    ) -> App {
+    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String, theme: Theme, font_size: u32) -> App {
         App {
             proxy,
             shell,
             theme,
             font_size,
-            fullscreen,
             state: None,
         }
     }
@@ -149,25 +134,18 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
-        let mut attributes = Window::default_attributes().with_title("stoatty");
-        if self.fullscreen {
-            attributes = attributes.with_fullscreen(Some(Fullscreen::Borderless(None)));
-        }
-        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
+        let window = Arc::new(
+            event_loop
+                .create_window(Window::default_attributes().with_title("stoatty"))
+                .expect("create window"),
+        );
 
-        let inner = window.inner_size();
-        let monitor = window.current_monitor().map(|monitor| {
-            let size = monitor.size();
-            [size.width, size.height]
-        });
-        let [seed_width, seed_height] =
-            seed_size(self.fullscreen, [inner.width, inner.height], monitor);
-
+        let size = window.inner_size();
         let scale_factor = window.scale_factor();
         let gpu = GpuContext::new(
             window.clone(),
-            seed_width.max(1),
-            seed_height.max(1),
+            size.width.max(1),
+            size.height.max(1),
             self.font_size,
             scale_factor as f32,
             self.theme.background,
@@ -370,25 +348,6 @@ impl ApplicationHandler<PtyEvent> for App {
     }
 }
 
-/// The physical surface size to seed the grid, terminal, and PTY from at window
-/// creation.
-///
-/// A windowed surface uses its own `inner` size. A borderless-fullscreen window
-/// fills the current monitor, but on macOS its `inner` size is the pre-fullscreen
-/// size or 0x0 until a later `Resized` after the space transition, so it seeds
-/// from the `monitor` size instead. A missing or degenerate monitor size falls
-/// back to `inner`, which the runtime resize chain still corrects.
-fn seed_size(fullscreen: bool, inner: [u32; 2], monitor: Option<[u32; 2]>) -> [u32; 2] {
-    if !fullscreen {
-        return inner;
-    }
-
-    match monitor {
-        Some([width, height]) if width > 0 && height > 0 => [width, height],
-        _ => inner,
-    }
-}
-
 /// The cursor's cell position for the renderer, or `None` when it is hidden.
 fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
     if cursor.shape == CursorShape::Hidden {
@@ -487,35 +446,11 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ease, font_step, popover_overflow, seed_size, step_grid_scroll, step_popover_scroll,
+        ease, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
         step_region_scroll,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::keyboard::Key;
-
-    #[test]
-    fn seed_size_prefers_the_monitor_when_fullscreen() {
-        assert_eq!(
-            seed_size(false, [800, 600], Some([1920, 1080])),
-            [800, 600],
-            "a windowed surface keeps its own size"
-        );
-        assert_eq!(
-            seed_size(true, [0, 0], Some([1920, 1080])),
-            [1920, 1080],
-            "a fullscreen window seeds from the monitor, not its 0x0 inner size"
-        );
-        assert_eq!(
-            seed_size(true, [800, 600], None),
-            [800, 600],
-            "no monitor falls back to the inner size"
-        );
-        assert_eq!(
-            seed_size(true, [800, 600], Some([0, 0])),
-            [800, 600],
-            "a degenerate monitor size falls back to the inner size"
-        );
-    }
 
     #[test]
     fn ease_steps_toward_then_settles() {
