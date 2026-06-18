@@ -15,7 +15,8 @@ use crate::{
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
     fontdb::{Query, Weight},
-    Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache,
+    Attrs, Buffer as CosmicBuffer, CacheKey, Family, Font, FontSystem, Metrics, Shaping,
+    SwashCache,
 };
 use std::collections::HashMap;
 use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
@@ -745,6 +746,11 @@ impl TextPass {
     /// Phase one: shape and rasterize every visible cell glyph, returning their
     /// placements.
     ///
+    /// Adjacent same-style cells the primary font covers are shaped together as
+    /// one run, so the font's ligatures form across cells. Each resulting glyph
+    /// maps back to the column it begins at. Scaled glyphs and characters outside
+    /// the primary font are shaped on their own.
+    ///
     /// Rasterizing here may grow the atlas, so the returned glyphs carry only
     /// their cache key; the caller reads each atlas sub-rect afterward, once the
     /// atlas has reached its final size and normalized coordinates are stable.
@@ -756,38 +762,106 @@ impl TextPass {
     ) -> Vec<PendingGlyph> {
         let mut pending = Vec::new();
 
+        // Resolve the primary face once, so each cell's coverage check is a
+        // charmap lookup rather than a font-database query.
+        let primary_name = self.family.clone();
+        let primary = shape_family(&primary_name);
+        let primary_font = {
+            let id = self.font_system.db().query(&Query {
+                families: &[primary],
+                ..Default::default()
+            });
+            id.and_then(|id| self.font_system.get_font(id, Weight::NORMAL))
+        };
+        let covers = |ch: char| {
+            primary_font
+                .as_ref()
+                .is_some_and(|font| font_covers(font, ch))
+        };
+
         for row in 0..grid.rows() {
-            for col in 0..grid.cols() {
-                let cell = grid.get(row, col);
-                let Some(scale) = cell_glyph_scale(cell) else {
-                    continue;
-                };
-                let scale = f32::from(scale);
-
-                let Some(key) = self.glyph_key(cell.ch, scale) else {
+            let mut col = 0;
+            while col < grid.cols() {
+                let cell = *grid.get(row, col);
+                let Some(scale) = cell_glyph_scale(&cell) else {
+                    col += 1;
                     continue;
                 };
 
-                if self
-                    .atlas
-                    .get_or_insert(
-                        device,
-                        queue,
-                        &mut self.font_system,
-                        &mut self.swash_cache,
-                        key,
-                    )
-                    .is_some()
-                {
-                    pending.push(PendingGlyph {
-                        row,
-                        col,
-                        key,
-                        fg: cell.fg,
-                        bg: cell.bg,
-                        scale,
-                    });
+                // A scaled glyph or a character the primary font lacks (icon,
+                // CJK) is shaped on its own through the single-char path, which
+                // keeps the symbols-font fallback. Only same-size primary-covered
+                // cells run-shape, where ligatures form.
+                if scale != 1 || !covers(cell.ch) {
+                    if let Some(key) = self.glyph_key(cell.ch, f32::from(scale))
+                        && self
+                            .atlas
+                            .get_or_insert(
+                                device,
+                                queue,
+                                &mut self.font_system,
+                                &mut self.swash_cache,
+                                key,
+                            )
+                            .is_some()
+                    {
+                        pending.push(PendingGlyph {
+                            row,
+                            col,
+                            key,
+                            fg: cell.fg,
+                            bg: cell.bg,
+                            scale: f32::from(scale),
+                        });
+                    }
+                    col += 1;
+                    continue;
                 }
+
+                let mut run = vec![(col, cell.ch)];
+                let mut end = col + 1;
+                while end < grid.cols() {
+                    let next = *grid.get(row, end);
+                    let groups = cell_glyph_scale(&next) == Some(1)
+                        && next.fg == cell.fg
+                        && next.bg == cell.bg
+                        && next.flags == cell.flags
+                        && covers(next.ch);
+                    if !groups {
+                        break;
+                    }
+                    run.push((end, next.ch));
+                    end += 1;
+                }
+
+                let (text, col_of_byte) = run_text_and_columns(&run);
+                for (offset, key) in shape_run(&mut self.font_system, &text, self.metrics, primary)
+                {
+                    let Some(&glyph_col) = col_of_byte.get(offset) else {
+                        continue;
+                    };
+                    if self
+                        .atlas
+                        .get_or_insert(
+                            device,
+                            queue,
+                            &mut self.font_system,
+                            &mut self.swash_cache,
+                            key,
+                        )
+                        .is_some()
+                    {
+                        pending.push(PendingGlyph {
+                            row,
+                            col: glyph_col,
+                            key,
+                            fg: cell.fg,
+                            bg: cell.bg,
+                            scale: 1.0,
+                        });
+                    }
+                }
+                col = end;
             }
         }
 
@@ -1059,6 +1133,60 @@ fn shape_char(
     Some(glyph.physical((0.0, 0.0), 1.0).cache_key)
 }
 
+/// Shape `text` as one run with `family`, returning each glyph's source byte
+/// offset paired with its cache key.
+///
+/// Shaping the run as a single string lets the font's contextual alternates
+/// merge adjacent characters into ligature glyphs. The returned byte offset is
+/// the start of each glyph's source cluster, which maps the glyph back to the
+/// column it begins at. A ligature glyph maps to the column of its first
+/// character. Each glyph is keyed at subpixel bin zero, since the grid draws it
+/// at an integer cell origin.
+fn shape_run(
+    font_system: &mut FontSystem,
+    text: &str,
+    metrics: CellMetrics,
+    family: Family<'_>,
+) -> Vec<(usize, CacheKey)> {
+    let mut buffer =
+        CosmicBuffer::new(font_system, Metrics::new(metrics.font_size, metrics.height));
+    buffer.set_text(
+        font_system,
+        text,
+        &Attrs::new().family(family),
+        Shaping::Advanced,
+        None,
+    );
+    buffer.shape_until_scroll(font_system, false);
+
+    let Some(run) = buffer.layout_runs().next() else {
+        return Vec::new();
+    };
+    run.glyphs
+        .iter()
+        .map(|glyph| {
+            let pixel_aligned = (-(glyph.x + glyph.font_size * glyph.x_offset), 0.0);
+            (glyph.start, glyph.physical(pixel_aligned, 1.0).cache_key)
+        })
+        .collect()
+}
+
+/// The run's shaping string and a per-byte map from string offset to grid column.
+///
+/// Each cell contributes its character. Every byte of that character maps to the
+/// cell's column, so a shaped glyph's [`start`](cosmic_text::LayoutGlyph::start)
+/// byte resolves to the column it originates at, even across multi-byte
+/// characters.
+fn run_text_and_columns(cells: &[(usize, char)]) -> (String, Vec<usize>) {
+    let mut text = String::new();
+    let mut col_of_byte = Vec::new();
+    for &(col, ch) in cells {
+        text.push(ch);
+        col_of_byte.resize(text.len(), col);
+    }
+    (text, col_of_byte)
+}
+
 /// The cosmic-text family to shape `ch` with: `primary` when it carries the
 /// glyph, otherwise the bundled symbols font so Private-Use-Area icons resolve
 /// to it ahead of cosmic-text's system fallback.
@@ -1085,7 +1213,12 @@ fn family_covers(font_system: &mut FontSystem, family: Family<'_>, ch: char) -> 
 
     font_system
         .get_font(id, Weight::NORMAL)
-        .is_some_and(|font| font.as_swash().charmap().map(ch) != 0)
+        .is_some_and(|font| font_covers(&font, ch))
+}
+
+/// Whether `font` has a glyph for `ch`, read from its character map.
+fn font_covers(font: &Font, ch: char) -> bool {
+    font.as_swash().charmap().map(ch) != 0
 }
 
 /// Register the bundled faces into `font_system`'s font database so they resolve
@@ -1317,8 +1450,8 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_family, glyph_origin,
-        load_bundled_fonts, overlay_content_cells, resolve_primary_family, shape_family,
-        text_run_origin, STYLE_DOTTED, SYMBOLS_FAMILY,
+        load_bundled_fonts, overlay_content_cells, resolve_primary_family, run_text_and_columns,
+        shape_family, shape_run, text_run_origin, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -1564,6 +1697,48 @@ mod tests {
             glyph_family(&mut font_system, '\u{e0b6}', primary),
             Family::Name(SYMBOLS_FAMILY),
             "a Private-Use-Area powerline glyph the primary lacks routes to the symbols font"
+        );
+    }
+
+    #[test]
+    fn shape_run_forms_ligatures_and_maps_clusters() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let metrics = CellMetrics::from_font_size(16, 1.0);
+        let jbm = Family::Name("JetBrains Mono");
+
+        let offsets: Vec<usize> = shape_run(&mut font_system, "ab", metrics, jbm)
+            .iter()
+            .map(|(offset, _)| *offset)
+            .collect();
+        assert_eq!(
+            offsets,
+            [0, 1],
+            "non-ligating characters map to their source byte offsets"
+        );
+
+        let alone = shape_run(&mut font_system, "=", metrics, jbm);
+        let ligated = shape_run(&mut font_system, "=>", metrics, jbm);
+        assert_eq!(alone.len(), 1, "a lone = shapes to one glyph");
+        assert_ne!(
+            alone[0].1.glyph_id, ligated[0].1.glyph_id,
+            "shaping => as a run substitutes the = via calt, so the ligature forms across cells"
+        );
+        assert_eq!(
+            ligated[0].0, 0,
+            "the ligature's first glyph maps back to the run's first column"
+        );
+    }
+
+    #[test]
+    fn run_text_and_columns_maps_each_byte_to_its_cell() {
+        let (text, col_of_byte) = run_text_and_columns(&[(3, 'a'), (4, '世'), (5, 'b')]);
+
+        assert_eq!(text, "a世b");
+        assert_eq!(
+            col_of_byte,
+            [3, 4, 4, 4, 5],
+            "the three bytes of 世 all map to its column, so a glyph's start byte resolves correctly"
         );
     }
 
