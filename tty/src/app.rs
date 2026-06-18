@@ -12,7 +12,7 @@ use crate::{
 };
 use std::sync::Arc;
 use stoatty_render::{
-    gpu::{FontConfig, GpuContext, Scroll},
+    gpu::{FontConfig, Frame, GpuContext, Scroll},
     render,
 };
 use stoatty_term::{
@@ -325,7 +325,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, scroll_delta, _damage) = state.terminal.project(&mut state.grid);
+                let (cursor, scroll_delta, damage) = state.terminal.project(&mut state.grid);
 
                 let overflows: Vec<Option<f32>> =
                     state.grid.overlays().iter().map(popover_overflow).collect();
@@ -373,11 +373,14 @@ impl ApplicationHandler<PtyEvent> for App {
                         state.cursor_anim = next;
                         state.gpu.render(
                             &state.grid,
-                            Some(next),
-                            Scroll {
-                                grid: state.grid_scroll,
-                                region: state.region_scroll,
-                                popovers: &state.popover_scrolls,
+                            Frame {
+                                cursor: Some(next),
+                                scroll: Scroll {
+                                    grid: state.grid_scroll,
+                                    region: state.region_scroll,
+                                    popovers: &state.popover_scrolls,
+                                },
+                                damage: &damage,
                             },
                         );
                         !settled
@@ -385,11 +388,14 @@ impl ApplicationHandler<PtyEvent> for App {
                     None => {
                         state.gpu.render(
                             &state.grid,
-                            None,
-                            Scroll {
-                                grid: state.grid_scroll,
-                                region: state.region_scroll,
-                                popovers: &state.popover_scrolls,
+                            Frame {
+                                cursor: None,
+                                scroll: Scroll {
+                                    grid: state.grid_scroll,
+                                    region: state.region_scroll,
+                                    popovers: &state.popover_scrolls,
+                                },
+                                damage: &damage,
                             },
                         );
                         false

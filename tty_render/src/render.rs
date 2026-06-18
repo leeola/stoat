@@ -1,5 +1,7 @@
 //! The grid render passes that draw [`stoatty_term`]'s cells.
 
+use stoatty_term::term::Damage;
+
 pub mod background;
 pub mod bar;
 pub mod decoration;
@@ -18,6 +20,18 @@ pub struct Scroll<'a> {
     /// One content scroll offset per overlay, in overlay order, so several
     /// popovers scroll independently. A missing entry is treated as zero.
     pub popovers: &'a [f32],
+}
+
+/// The per-frame dynamic inputs to render a grid.
+///
+/// Bundles the state that changes every frame: where the cursor block sits, the
+/// eased scroll offsets, and which rows the terminal changed since the previous
+/// frame. The damaged rows let the text pass rebuild only changed rows; the
+/// cursor position drives the cursor block and breaks ligatures on its cell.
+pub struct Frame<'a> {
+    pub cursor: Option<[f32; 2]>,
+    pub scroll: Scroll<'a>,
+    pub damage: &'a Damage,
 }
 
 /// Cell layout metrics in physical pixels, derived from the configured logical

@@ -9,7 +9,6 @@
 //! draws into any texture view, so a frame can target an off-screen texture as
 //! well as the window surface that [`GpuContext`] wraps.
 
-pub use crate::render::Scroll;
 use crate::render::{
     background::{BackgroundPass, CursorState},
     bar::BarPass,
@@ -19,6 +18,7 @@ use crate::render::{
     text::TextPass,
     CellMetrics,
 };
+pub use crate::render::{Frame, Scroll};
 use futures::executor;
 use raw_window_handle::{HasDisplayHandle, HasWindowHandle};
 use stoatty_term::grid::{Grid, Rgb};
@@ -143,8 +143,7 @@ impl Renderer {
         queue: &Queue,
         view: &TextureView,
         grid: &Grid,
-        cursor: Option<[f32; 2]>,
-        scroll: Scroll<'_>,
+        frame: Frame<'_>,
     ) {
         let resolution = [self.width as f32, self.height as f32];
         self.background.prepare(
@@ -153,15 +152,14 @@ impl Renderer {
             grid,
             resolution,
             CursorState {
-                pos: cursor,
+                pos: frame.cursor,
                 color: self.cursor_color,
             },
-            scroll.grid,
+            frame.scroll.grid,
         );
         self.decoration
-            .prepare(device, queue, grid, resolution, scroll.grid);
-        self.text
-            .prepare(device, queue, grid, resolution, scroll, cursor);
+            .prepare(device, queue, grid, resolution, frame.scroll.grid);
+        self.text.prepare(device, queue, grid, resolution, &frame);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon.prepare(device, queue, grid.icons(), resolution);
         self.bar.prepare(device, queue, grid.bars(), resolution);
@@ -371,8 +369,8 @@ impl GpuContext {
     /// out, occluded, or a validation error already raised elsewhere) and
     /// re-configures on an outdated or lost surface so the next frame
     /// recovers.
-    pub fn render(&mut self, grid: &Grid, cursor: Option<[f32; 2]>, scroll: Scroll<'_>) {
-        let frame = match self.surface.get_current_texture() {
+    pub fn render(&mut self, grid: &Grid, frame: Frame<'_>) {
+        let surface_frame = match self.surface.get_current_texture() {
             CurrentSurfaceTexture::Success(frame) | CurrentSurfaceTexture::Suboptimal(frame) => {
                 frame
             },
@@ -385,13 +383,13 @@ impl GpuContext {
             | CurrentSurfaceTexture::Validation => return,
         };
 
-        let view = frame.texture.create_view(&TextureViewDescriptor {
+        let view = surface_frame.texture.create_view(&TextureViewDescriptor {
             format: Some(self.view_format),
             ..Default::default()
         });
         self.renderer
-            .render_into(&self.device, &self.queue, &view, grid, cursor, scroll);
-        frame.present();
+            .render_into(&self.device, &self.queue, &view, grid, frame);
+        surface_frame.present();
     }
 }
 

@@ -10,7 +10,7 @@
 
 use crate::{
     atlas::{AtlasKind, GlyphAtlas},
-    render::{CellMetrics, Scroll},
+    render::{CellMetrics, Frame},
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
@@ -19,7 +19,10 @@ use cosmic_text::{
     SwashCache,
 };
 use std::collections::HashMap;
-use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
+use stoatty_term::{
+    grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+    term::Damage,
+};
 use wgpu::{
     vertex_attr_array, BindGroup, BindGroupDescriptor, BindGroupEntry, BindGroupLayout,
     BindGroupLayoutDescriptor, BindGroupLayoutEntry, BindingResource, BindingType, BlendState,
@@ -145,6 +148,18 @@ pub struct TextPass {
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
     /// alongside the integer cell scales.
     shape_cache: HashMap<(char, u32), Option<CacheKey>>,
+    /// The shaped glyphs of each grid row from the previous frame, indexed by
+    /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for
+    /// damaged rows, the cursor's old and new rows, and (wholesale) on resize or
+    /// when scaled cells are present. Holds [`CacheKey`]s, not atlas rects, so it
+    /// survives atlas growth.
+    glyph_row_cache: Vec<Vec<PendingGlyph>>,
+    /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
+    /// every cached row since columns shift.
+    glyph_cache_cols: usize,
+    /// The cursor cell at the previous frame, so a move can re-shape the row it
+    /// left and the row it entered (the cursor breaks ligatures on its cell).
+    last_cursor_cell: Option<(usize, usize)>,
     baseline: f32,
     metrics: CellMetrics,
 }
@@ -339,6 +354,9 @@ impl TextPass {
             ligatures,
             swash_cache,
             shape_cache: HashMap::new(),
+            glyph_row_cache: Vec::new(),
+            glyph_cache_cols: 0,
+            last_cursor_cell: None,
             baseline,
             metrics,
         }
@@ -382,9 +400,12 @@ impl TextPass {
         queue: &Queue,
         grid: &Grid,
         resolution: [f32; 2],
-        scroll: Scroll<'_>,
-        cursor: Option<[f32; 2]>,
+        frame: &Frame<'_>,
     ) {
+        let cursor = frame.cursor;
+        let scroll = frame.scroll;
+        let damage = frame.damage;
+
         let globals = TextGlobals {
             resolution,
             cell_size: [self.metrics.width, self.metrics.height],
@@ -396,7 +417,7 @@ impl TextPass {
         self.prepare_underlines(device, queue, grid, scroll.grid);
 
         self.atlas.begin_frame();
-        let grid_pending = self.rasterize_visible(device, queue, grid, cursor_cell(cursor));
+        let grid_pending = self.rasterize_visible(device, queue, grid, cursor_cell(cursor), damage);
         let overlay_groups = self.rasterize_overlays(device, queue, grid);
 
         let region = grid.scroll_region();
@@ -766,8 +787,10 @@ impl TextPass {
         queue: &Queue,
         grid: &Grid,
         cursor_cell: Option<(usize, usize)>,
+        damage: &Damage,
     ) -> Vec<PendingGlyph> {
-        let mut pending = Vec::new();
+        let rows = grid.rows();
+        let cols = grid.cols();
 
         // Resolve the primary face once, so each cell's coverage check is a
         // charmap lookup rather than a font-database query.
@@ -786,75 +809,79 @@ impl TextPass {
                 .is_some_and(|font| font_covers(font, ch))
         };
 
-        for row in 0..grid.rows() {
-            let mut col = 0;
-            while col < grid.cols() {
-                let cell = *grid.get(row, col);
-                let Some(scale) = cell_glyph_scale(&cell) else {
-                    col += 1;
-                    continue;
-                };
+        // The per-row cache holds the previous frame's glyphs. Every row rebuilds
+        // when the grid was resized, the terminal reported full damage, or scaled
+        // cells are present (whose scale changes outside VT damage); otherwise a
+        // row rebuilds only when its cells changed or the cursor entered or left
+        // it.
+        let rebuild_all = self.glyph_row_cache.len() != rows
+            || self.glyph_cache_cols != cols
+            || matches!(damage, Damage::Full)
+            || grid_has_scaled_cells(grid);
+        if self.glyph_row_cache.len() != rows {
+            self.glyph_row_cache = vec![Vec::new(); rows];
+        }
+        self.glyph_cache_cols = cols;
 
-                // With ligatures off, every cell is shaped on its own. A scaled
-                // glyph or a character the primary font lacks (icon, CJK) always
-                // is, through the single-char path that keeps the symbols-font
-                // fallback. The cursor cell is too, so a ligature never spans it
-                // and the character under the cursor stays visible. Only same-size
-                // primary-covered cells run-shape, where ligatures form.
-                if !self.ligatures
-                    || scale != 1
-                    || !covers(cell.ch)
-                    || cursor_cell == Some((row, col))
-                {
-                    if let Some(key) = self.glyph_key(cell.ch, f32::from(scale))
-                        && self
-                            .atlas
-                            .get_or_insert(
-                                device,
-                                queue,
-                                &mut self.font_system,
-                                &mut self.swash_cache,
-                                key,
-                            )
-                            .is_some()
-                    {
-                        pending.push(PendingGlyph {
-                            row,
-                            col,
-                            key,
-                            fg: cell.fg,
-                            bg: cell.bg,
-                            scale: f32::from(scale),
-                        });
-                    }
-                    col += 1;
-                    continue;
-                }
+        let cursor_moved = cursor_cell != self.last_cursor_cell;
+        let left_row = self.last_cursor_cell.map(|(row, _)| row);
+        let entered_row = cursor_cell.map(|(row, _)| row);
+        self.last_cursor_cell = cursor_cell;
 
-                let mut run = vec![(col, cell.ch)];
-                let mut end = col + 1;
-                while end < grid.cols() {
-                    let next = *grid.get(row, end);
-                    let groups = cell_glyph_scale(&next) == Some(1)
-                        && next.fg == cell.fg
-                        && next.bg == cell.bg
-                        && next.flags == cell.flags
-                        && covers(next.ch)
-                        && cursor_cell != Some((row, end));
-                    if !groups {
-                        break;
-                    }
-                    run.push((end, next.ch));
-                    end += 1;
-                }
+        let shaping = RowShaping {
+            primary,
+            covers: &covers,
+            cursor_cell,
+        };
+        for row in 0..rows {
+            let cursor_touched =
+                cursor_moved && (left_row == Some(row) || entered_row == Some(row));
+            if rebuild_all || damage.is_dirty(row) || cursor_touched {
+                let row_glyphs = self.rasterize_row(device, queue, grid, row, &shaping);
+                self.glyph_row_cache[row] = row_glyphs;
+            }
+        }
 
-                let (text, col_of_byte) = run_text_and_columns(&run);
-                for (offset, key) in shape_run(&mut self.font_system, &text, self.metrics, primary)
-                {
-                    let Some(&glyph_col) = col_of_byte.get(offset) else {
-                        continue;
-                    };
-                    if self
+        self.glyph_row_cache.iter().flatten().copied().collect()
+    }
+
+    /// Shape and rasterize one grid row's glyphs, returning its placements.
+    ///
+    /// The per-row body of [`Self::rasterize_visible`]: same-style primary-covered
+    /// runs shape together so ligatures form, while scaled glyphs, characters the
+    /// primary font lacks, and the cursor cell shape on their own. `shaping`
+    /// carries the primary family, its coverage test, and the cursor cell,
+    /// resolved once by the caller.
+    fn rasterize_row(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        grid: &Grid,
+        row: usize,
+        shaping: &RowShaping<'_>,
+    ) -> Vec<PendingGlyph> {
+        let mut pending = Vec::new();
+        let mut col = 0;
+        while col < grid.cols() {
+            let cell = *grid.get(row, col);
+            let Some(scale) = cell_glyph_scale(&cell) else {
+                col += 1;
+                continue;
+            };
+
+            // With ligatures off, every cell is shaped on its own. A scaled glyph
+            // or a character the primary font lacks (icon, CJK) always is, through
+            // the single-char path that keeps the symbols-font fallback. The
+            // cursor cell is too, so a ligature never spans it and the character
+            // under the cursor stays visible. Only same-size primary-covered cells
+            // run-shape, where ligatures form.
+            if !self.ligatures
+                || scale != 1
+                || !(shaping.covers)(cell.ch)
+                || shaping.cursor_cell == Some((row, col))
+            {
+                if let Some(key) = self.glyph_key(cell.ch, f32::from(scale))
+                    && self
                         .atlas
                         .get_or_insert(
                             device,
@@ -864,19 +891,66 @@ impl TextPass {
                             key,
                         )
                         .is_some()
-                    {
-                        pending.push(PendingGlyph {
-                            row,
-                            col: glyph_col,
-                            key,
-                            fg: cell.fg,
-                            bg: cell.bg,
-                            scale: 1.0,
-                        });
-                    }
+                {
+                    pending.push(PendingGlyph {
+                        row,
+                        col,
+                        key,
+                        fg: cell.fg,
+                        bg: cell.bg,
+                        scale: f32::from(scale),
+                    });
                 }
-                col = end;
+                col += 1;
+                continue;
             }
+
+            let mut run = vec![(col, cell.ch)];
+            let mut end = col + 1;
+            while end < grid.cols() {
+                let next = *grid.get(row, end);
+                let groups = cell_glyph_scale(&next) == Some(1)
+                    && next.fg == cell.fg
+                    && next.bg == cell.bg
+                    && next.flags == cell.flags
+                    && (shaping.covers)(next.ch)
+                    && shaping.cursor_cell != Some((row, end));
+                if !groups {
+                    break;
+                }
+                run.push((end, next.ch));
+                end += 1;
+            }
+
+            let (text, col_of_byte) = run_text_and_columns(&run);
+            for (offset, key) in
+                shape_run(&mut self.font_system, &text, self.metrics, shaping.primary)
+            {
+                let Some(&glyph_col) = col_of_byte.get(offset) else {
+                    continue;
+                };
+                if self
+                    .atlas
+                    .get_or_insert(
+                        device,
+                        queue,
+                        &mut self.font_system,
+                        &mut self.swash_cache,
+                        key,
+                    )
+                    .is_some()
+                {
+                    pending.push(PendingGlyph {
+                        row,
+                        col: glyph_col,
+                        key,
+                        fg: cell.fg,
+                        bg: cell.bg,
+                        scale: 1.0,
+                    });
+                }
+            }
+            col = end;
         }
 
         pending
@@ -960,8 +1034,18 @@ impl TextPass {
     }
 }
 
+/// The per-frame shaping context [`TextPass::rasterize_row`] needs, resolved
+/// once per frame and shared across rows: the primary family, a coverage test
+/// for the face it resolves to, and the cursor cell that breaks ligatures.
+struct RowShaping<'a> {
+    primary: Family<'a>,
+    covers: &'a dyn Fn(char) -> bool,
+    cursor_cell: Option<(usize, usize)>,
+}
+
 /// A glyph that has been rasterized into the atlas, awaiting its final atlas
 /// sub-rect once every glyph this frame is packed.
+#[derive(Clone, Copy, PartialEq, Debug)]
 struct PendingGlyph {
     row: usize,
     col: usize,
@@ -1372,6 +1456,17 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
     }
 }
 
+/// Whether any cell carries a non-[`Scale::Single`] scale.
+///
+/// Scaled-glyph blocks are stamped by the APC layer outside the terminal's VT
+/// damage, so the per-row glyph cache cannot trust the damage set while they are
+/// present and rebuilds every row instead.
+fn grid_has_scaled_cells(grid: &Grid) -> bool {
+    (0..grid.rows())
+        .flat_map(|row| (0..grid.cols()).map(move |col| (row, col)))
+        .any(|(row, col)| !matches!(grid.get(row, col).scale, Scale::Single))
+}
+
 /// The grid cell the cursor block sits on as `(row, col)`, or `None` when the
 /// cursor is hidden.
 ///
@@ -1476,18 +1571,24 @@ mod tests {
     use super::{
         build_underline_instances, cell_glyph_scale, cell_rect_scissor, cursor_cell, glyph_family,
         glyph_origin, load_bundled_fonts, overlay_content_cells, resolve_primary_family,
-        run_text_and_columns, shape_family, shape_run, text_run_origin, STYLE_DOTTED,
+        run_text_and_columns, shape_family, shape_run, text_run_origin, TextPass, STYLE_DOTTED,
         SYMBOLS_FAMILY,
     };
-    use crate::render::CellMetrics;
+    use crate::{gpu::headless_device, render::CellMetrics};
     use cosmic_text::{
         fontdb::{Database, Query},
         Family, FontSystem,
     };
-    use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
-    use wgpu::naga::{
-        front::wgsl,
-        valid::{Capabilities, ValidationFlags, Validator},
+    use stoatty_term::{
+        grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle},
+        term::Damage,
+    };
+    use wgpu::{
+        naga::{
+            front::wgsl,
+            valid::{Capabilities, ValidationFlags, Validator},
+        },
+        TextureFormat,
     };
 
     #[test]
@@ -1824,5 +1925,96 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate text.wgsl");
+    }
+
+    /// A text pass on the headless device, or `None` when no adapter is present.
+    fn headless_text_pass() -> Option<(wgpu::Device, wgpu::Queue, TextPass)> {
+        let (device, queue) = headless_device()?;
+        let pass = TextPass::new(
+            &device,
+            TextureFormat::Rgba8Unorm,
+            CellMetrics::from_font_size(16, 1.0),
+            &["JetBrains Mono".to_owned()],
+            true,
+        );
+        Some((device, queue, pass))
+    }
+
+    fn fill_row(grid: &mut Grid, row: usize, text: &str) {
+        for (col, ch) in text.chars().enumerate() {
+            grid.get_mut(row, col).ch = ch;
+        }
+    }
+
+    #[test]
+    fn caches_clean_rows_and_rebuilds_damaged() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(3, 12);
+        fill_row(&mut grid, 0, "a => b == c");
+        fill_row(&mut grid, 1, "hello world");
+
+        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+
+        // Change one row, then rebuild only it; the other rows come from the cache.
+        fill_row(&mut grid, 1, "GOODBYE all");
+        let incremental = pass.rasterize_visible(
+            &device,
+            &queue,
+            &grid,
+            None,
+            &Damage::Partial(vec![false, true, false]),
+        );
+        let full = pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+
+        assert_eq!(
+            incremental, full,
+            "rebuilding only the damaged row and reusing the rest matches a full rebuild"
+        );
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with: cargo test -p stoatty_render --lib -- --ignored caches"]
+    fn caching_skips_reshaping_clean_rows() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let (rows, cols) = (50, 200);
+        let mut grid = Grid::new(rows, cols);
+        for row in 0..rows {
+            let text: String = (0..cols)
+                .map(|col| char::from(b'a' + (col % 26) as u8))
+                .collect();
+            fill_row(&mut grid, row, &text);
+        }
+
+        // Warm the per-row cache and the atlas before timing.
+        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+
+        let one_dirty = {
+            let mut dirty = vec![false; rows];
+            dirty[rows / 2] = true;
+            Damage::Partial(dirty)
+        };
+
+        let iterations = 50;
+        let full_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        }
+        let full = full_start.elapsed();
+
+        let dirty_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            pass.rasterize_visible(&device, &queue, &grid, None, &one_dirty);
+        }
+        let dirty = dirty_start.elapsed();
+
+        eprintln!("rasterize_visible {rows}x{cols}: full {full:?}, one dirty row {dirty:?}");
+        assert!(
+            dirty * 2 < full,
+            "rebuilding one of {rows} rows ({dirty:?}) should beat a full rebuild ({full:?}) by over 2x"
+        );
     }
 }
