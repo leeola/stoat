@@ -222,8 +222,9 @@ impl GpuContext {
     /// takes ownership of it, so it must outlive the context (pass an
     /// `Arc`-wrapped window). Blocks on adapter and device acquisition.
     ///
-    /// Panics if no GPU adapter is available, device creation fails, or the
-    /// surface cannot be created. All three are unrecoverable at startup.
+    /// Panics if no GPU adapter is available even with the software fallback,
+    /// device creation fails, or the surface cannot be created. All three are
+    /// unrecoverable at startup.
     pub fn new<W>(
         window: W,
         width: u32,
@@ -241,16 +242,28 @@ impl GpuContext {
             .create_surface(window)
             .expect("create wgpu surface");
 
-        let adapter = executor::block_on(instance.request_adapter(&RequestAdapterOptions {
-            power_preference: PowerPreference::HighPerformance,
-            compatible_surface: Some(&surface),
-            force_fallback_adapter: false,
-        }))
-        .expect("request wgpu adapter");
+        // Prefer a hardware adapter, but retry with a software rasterizer
+        // (llvmpipe) before giving up, so a driverless or headless box still
+        // starts rather than panicking on the first request.
+        let adapter = {
+            let request = |force_fallback_adapter: bool| {
+                executor::block_on(instance.request_adapter(&RequestAdapterOptions {
+                    power_preference: PowerPreference::HighPerformance,
+                    compatible_surface: Some(&surface),
+                    force_fallback_adapter,
+                }))
+            };
+
+            request(false).or_else(|_| request(true)).expect(
+                "no compatible GPU adapter found: stoatty needs a hardware GPU \
+                 (Metal, Vulkan, or DX12) or a software fallback, and neither \
+                 was available",
+            )
+        };
 
         let (device, queue) =
             executor::block_on(adapter.request_device(&DeviceDescriptor::default()))
-                .expect("request wgpu device");
+                .expect("GPU device creation failed on the selected adapter");
 
         // A non-sRGB surface: the text pass encodes its gamma-correct composite
         // to sRGB in the shader, and the background pass writes already-encoded
