@@ -17,6 +17,13 @@ font_family = ["JetBrains Mono", "monospace"]
 # Name of the [themes.<name>] entry the terminal resolves colors against.
 theme = "zed"
 
+# Program to launch over the PTY instead of your default shell. Uncomment and
+# set `program` to override; `args` is optional and defaults to none. Left out,
+# stoatty runs your default shell.
+# [shell]
+# program = "/bin/bash"
+# args = ["--login"]
+
 # Zed's One Dark terminal palette. Colors are #rrggbb hex strings; an omitted
 # field keeps the built-in default for that slot.
 [themes.zed]

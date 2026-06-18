@@ -36,6 +36,11 @@ pub struct Config {
     #[serde(default)]
     pub theme: String,
 
+    /// Program to launch over the PTY instead of the default shell, with its
+    /// arguments. `None`, the default, launches the default shell.
+    #[serde(default)]
+    pub shell: Option<ShellConfig>,
+
     /// Named color themes, keyed by the name [`theme`](Self::theme) selects.
     #[serde(default)]
     pub themes: BTreeMap<String, ThemeColors>,
@@ -90,6 +95,21 @@ impl Config {
 
         theme
     }
+}
+
+/// A program to launch over the PTY instead of the default shell, with its
+/// arguments.
+///
+/// Set by a `[shell]` table in the config; absent leaves [`Config::shell`] as
+/// `None`. `args` is empty when the table omits it.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct ShellConfig {
+    /// Path or name of the program to launch over the PTY.
+    pub program: String,
+
+    /// Arguments passed to [`program`](Self::program).
+    #[serde(default)]
+    pub args: Vec<String>,
 }
 
 /// A named theme's colors as written in the config.
@@ -267,7 +287,7 @@ fn merge_tables(base: &mut toml::Table, overlay: toml::Table) {
 
 #[cfg(test)]
 mod tests {
-    use super::{embedded_default, merge_tables, settle, DEFAULT_CONFIG};
+    use super::{embedded_default, merge_tables, settle, ShellConfig, DEFAULT_CONFIG};
     use stoatty_term::grid::Rgb;
 
     #[test]
@@ -293,6 +313,27 @@ mod tests {
     fn absent_user_field_keeps_the_default() {
         let config = settle("font_size = 30", Some("# no overrides here\n")).unwrap();
         assert_eq!(config.font_size, 30);
+    }
+
+    #[test]
+    fn user_shell_override_sets_program_and_args() {
+        let config = settle(
+            DEFAULT_CONFIG,
+            Some("[shell]\nprogram = \"/bin/bash\"\nargs = [\"--login\"]\n"),
+        )
+        .unwrap();
+        assert_eq!(
+            config.shell,
+            Some(ShellConfig {
+                program: "/bin/bash".to_string(),
+                args: vec!["--login".to_string()],
+            })
+        );
+    }
+
+    #[test]
+    fn absent_shell_defaults_to_none() {
+        assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().shell, None);
     }
 
     #[test]
