@@ -36,6 +36,12 @@ pub struct Config {
     #[serde(default)]
     pub theme: String,
 
+    /// Whether the renderer shapes contiguous same-style cell runs together so
+    /// the font's ligatures form across cells. When off, each cell is shaped on
+    /// its own, so no ligatures appear.
+    #[serde(default)]
+    pub ligatures: bool,
+
     /// Program to launch over the PTY instead of the default shell, with its
     /// arguments. `None`, the default, launches the default shell.
     #[serde(default)]
@@ -334,6 +340,20 @@ mod tests {
     #[test]
     fn absent_shell_defaults_to_none() {
         assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().shell, None);
+    }
+
+    #[test]
+    fn ligatures_default_on_and_user_can_disable() {
+        assert!(
+            settle(DEFAULT_CONFIG, None).unwrap().ligatures,
+            "the embedded default ships ligatures on"
+        );
+        assert!(
+            !settle(DEFAULT_CONFIG, Some("ligatures = false\n"))
+                .unwrap()
+                .ligatures,
+            "a user file turns ligatures off"
+        );
     }
 
     #[test]

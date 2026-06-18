@@ -138,6 +138,9 @@ pub struct TextPass {
     /// entry present in the font db, or `None` to shape with the generic
     /// monospace fallback.
     family: Option<String>,
+    /// Whether adjacent same-style cells shape together so the font's ligatures
+    /// form across cells. When false, every cell is shaped on its own.
+    ligatures: bool,
     swash_cache: SwashCache,
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
     /// alongside the integer cell scales.
@@ -160,6 +163,7 @@ impl TextPass {
         format: TextureFormat,
         metrics: CellMetrics,
         font_family: &[String],
+        ligatures: bool,
     ) -> TextPass {
         let mut font_system = FontSystem::new();
         load_bundled_fonts(&mut font_system);
@@ -332,6 +336,7 @@ impl TextPass {
             atlas,
             font_system,
             family,
+            ligatures,
             swash_cache,
             shape_cache: HashMap::new(),
             baseline,
@@ -788,11 +793,12 @@ impl TextPass {
                     continue;
                 };
 
-                // A scaled glyph or a character the primary font lacks (icon,
-                // CJK) is shaped on its own through the single-char path, which
-                // keeps the symbols-font fallback. Only same-size primary-covered
-                // cells run-shape, where ligatures form.
-                if scale != 1 || !covers(cell.ch) {
+                // With ligatures off, every cell is shaped on its own. A scaled
+                // glyph or a character the primary font lacks (icon, CJK) always
+                // is, through the single-char path that keeps the symbols-font
+                // fallback. Only same-size primary-covered cells run-shape, where
+                // ligatures form.
+                if !self.ligatures || scale != 1 || !covers(cell.ch) {
                     if let Some(key) = self.glyph_key(cell.ch, f32::from(scale))
                         && self
                             .atlas

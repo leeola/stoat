@@ -83,8 +83,11 @@ fn run_with_config(config: Config, program: String, args: Vec<String>, size: Opt
         program,
         args,
         theme,
-        config.font_size,
-        config.font_family,
+        FontSettings {
+            size: config.font_size,
+            family: config.font_family,
+            ligatures: config.ligatures,
+        },
         size,
     );
     event_loop.run_app(&mut app).expect("run event loop");
@@ -109,6 +112,14 @@ enum PtyEvent {
     Exited,
 }
 
+/// The text-rendering configuration read from the config once, which [`App`]
+/// seeds the renderer's [`FontConfig`] with when the window opens.
+struct FontSettings {
+    size: u32,
+    family: Vec<String>,
+    ligatures: bool,
+}
+
 struct App {
     proxy: EventLoopProxy<PtyEvent>,
     program: String,
@@ -118,6 +129,9 @@ struct App {
     /// Ordered font-family cascade from the config, resolved against the font db
     /// at renderer creation to pick the shaping primary. Read once in `resumed`.
     font_family: Vec<String>,
+    /// Whether the renderer shapes cell runs together so ligatures form. Read
+    /// once in `resumed` into the renderer's [`FontConfig`].
+    ligatures: bool,
     /// The window's content size in cells (`[cols, rows]`) to open sized to, or
     /// `None` for the winit default window. Read once at window creation.
     size: Option<[u16; 2]>,
@@ -130,8 +144,7 @@ impl App {
         program: String,
         args: Vec<String>,
         theme: Theme,
-        font_size: u32,
-        font_family: Vec<String>,
+        font: FontSettings,
         size: Option<[u16; 2]>,
     ) -> App {
         App {
@@ -139,8 +152,9 @@ impl App {
             program,
             args,
             theme,
-            font_size,
-            font_family,
+            font_size: font.size,
+            font_family: font.family,
+            ligatures: font.ligatures,
             size,
             state: None,
         }
@@ -212,6 +226,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 size: self.font_size,
                 scale_factor: scale_factor as f32,
                 family: &self.font_family,
+                ligatures: self.ligatures,
             },
             self.theme.background,
             self.theme.cursor,

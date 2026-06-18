@@ -43,6 +43,9 @@ pub struct FontConfig<'a> {
     pub size: u32,
     pub scale_factor: f32,
     pub family: &'a [String],
+    /// Whether the text pass shapes contiguous same-style cell runs together so
+    /// the font's ligatures form. When false, each cell is shaped on its own.
+    pub ligatures: bool,
 }
 
 /// The grid render passes and the target size, independent of any window.
@@ -87,7 +90,7 @@ impl Renderer {
         Renderer {
             background: BackgroundPass::new(device, format, metrics),
             decoration: DecorationPass::new(device, format, metrics),
-            text: TextPass::new(device, format, metrics, font.family),
+            text: TextPass::new(device, format, metrics, font.family, font.ligatures),
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),

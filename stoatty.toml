@@ -17,6 +17,11 @@ font_family = ["JetBrains Mono", "monospace"]
 # Name of the [themes.<name>] entry the terminal resolves colors against.
 theme = "zed"
 
+# Shape contiguous same-style cell runs together so the font's ligatures (->,
+# =>, ==, ...) form across cells. Set to false to shape each cell on its own, so
+# no ligatures appear.
+ligatures = true
+
 # Program to launch over the PTY instead of your default shell. Uncomment and
 # set `program` to override; `args` is optional and defaults to none. Left out,
 # stoatty runs your default shell.
