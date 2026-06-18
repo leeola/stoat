@@ -155,12 +155,19 @@ impl ApplicationHandler<PtyEvent> for App {
         }
         let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
 
-        let size = window.inner_size();
+        let inner = window.inner_size();
+        let monitor = window.current_monitor().map(|monitor| {
+            let size = monitor.size();
+            [size.width, size.height]
+        });
+        let [seed_width, seed_height] =
+            seed_size(self.fullscreen, [inner.width, inner.height], monitor);
+
         let scale_factor = window.scale_factor();
         let gpu = GpuContext::new(
             window.clone(),
-            size.width.max(1),
-            size.height.max(1),
+            seed_width.max(1),
+            seed_height.max(1),
             self.font_size,
             scale_factor as f32,
             self.theme.background,
@@ -363,6 +370,25 @@ impl ApplicationHandler<PtyEvent> for App {
     }
 }
 
+/// The physical surface size to seed the grid, terminal, and PTY from at window
+/// creation.
+///
+/// A windowed surface uses its own `inner` size. A borderless-fullscreen window
+/// fills the current monitor, but on macOS its `inner` size is the pre-fullscreen
+/// size or 0x0 until a later `Resized` after the space transition, so it seeds
+/// from the `monitor` size instead. A missing or degenerate monitor size falls
+/// back to `inner`, which the runtime resize chain still corrects.
+fn seed_size(fullscreen: bool, inner: [u32; 2], monitor: Option<[u32; 2]>) -> [u32; 2] {
+    if !fullscreen {
+        return inner;
+    }
+
+    match monitor {
+        Some([width, height]) if width > 0 && height > 0 => [width, height],
+        _ => inner,
+    }
+}
+
 /// The cursor's cell position for the renderer, or `None` when it is hidden.
 fn cursor_position(cursor: Cursor) -> Option<[f32; 2]> {
     if cursor.shape == CursorShape::Hidden {
@@ -461,11 +487,35 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
 #[cfg(test)]
 mod tests {
     use super::{
-        ease, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
+        ease, font_step, popover_overflow, seed_size, step_grid_scroll, step_popover_scroll,
         step_region_scroll,
     };
     use stoatty_term::grid::{Overlay, Rgb};
     use winit::keyboard::Key;
+
+    #[test]
+    fn seed_size_prefers_the_monitor_when_fullscreen() {
+        assert_eq!(
+            seed_size(false, [800, 600], Some([1920, 1080])),
+            [800, 600],
+            "a windowed surface keeps its own size"
+        );
+        assert_eq!(
+            seed_size(true, [0, 0], Some([1920, 1080])),
+            [1920, 1080],
+            "a fullscreen window seeds from the monitor, not its 0x0 inner size"
+        );
+        assert_eq!(
+            seed_size(true, [800, 600], None),
+            [800, 600],
+            "no monitor falls back to the inner size"
+        );
+        assert_eq!(
+            seed_size(true, [800, 600], Some([0, 0])),
+            [800, 600],
+            "a degenerate monitor size falls back to the inner size"
+        );
+    }
 
     #[test]
     fn ease_steps_toward_then_settles() {
