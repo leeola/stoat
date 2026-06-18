@@ -160,6 +160,11 @@ pub struct TextPass {
     /// The cursor cell at the previous frame, so a move can re-shape the row it
     /// left and the row it entered (the cursor breaks ligatures on its cell).
     last_cursor_cell: Option<(usize, usize)>,
+    /// The grid and region scroll offsets the cached grid-glyph instance buffers
+    /// were built with. Scroll is baked into instance positions, so a change
+    /// forces a rebuild even when no row's glyphs changed.
+    last_grid_scroll: f32,
+    last_region_scroll: f32,
     baseline: f32,
     metrics: CellMetrics,
 }
@@ -357,6 +362,8 @@ impl TextPass {
             glyph_row_cache: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
+            last_grid_scroll: 0.0,
+            last_region_scroll: 0.0,
             baseline,
             metrics,
         }
@@ -417,26 +424,66 @@ impl TextPass {
         self.prepare_underlines(device, queue, grid, scroll.grid);
 
         self.atlas.begin_frame();
-        let grid_pending = self.rasterize_visible(device, queue, grid, cursor_cell(cursor), damage);
+        let atlas_dims = self.atlas.texture_dims();
+        let any_rebuilt = self.rasterize_visible(device, queue, grid, cursor_cell(cursor), damage);
         let overlay_groups = self.rasterize_overlays(device, queue, grid);
 
         let region = grid.scroll_region();
-        let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) = grid_pending
-            .into_iter()
-            .partition(|glyph| region.is_some_and(|region| region.contains(glyph.row, glyph.col)));
 
-        let mut plain_instances = self.build_text_instances(device, queue, plain_pending);
-        let mut region_instances = self.build_text_instances(device, queue, region_pending);
+        // The grid-glyph instance buffers from last frame stay valid when nothing
+        // that feeds them changed: no row was rebuilt, the scroll baked into their
+        // positions is unchanged, the atlas did not grow (its size drives every
+        // UV), and no text runs are present (those rasterize below, after the grid
+        // instances would be built, so a text-run grow could not be seen here). On
+        // such a frame the plain and region glyphs are neither rebuilt nor
+        // re-uploaded. Otherwise they are.
+        let grid_unchanged = !any_rebuilt
+            && scroll.grid == self.last_grid_scroll
+            && scroll.region == self.last_region_scroll
+            && self.atlas.texture_dims() == atlas_dims
+            && grid.text_runs().is_empty();
+        self.last_grid_scroll = scroll.grid;
+        self.last_region_scroll = scroll.region;
 
-        let grid_scroll_px = scroll.grid * self.metrics.height;
-        for instance in &mut plain_instances {
-            instance.pos[1] += grid_scroll_px;
+        if !grid_unchanged {
+            let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) =
+                self.collect_grid_glyphs().into_iter().partition(|glyph| {
+                    region.is_some_and(|region| region.contains(glyph.row, glyph.col))
+                });
+
+            let mut plain_instances = self.build_text_instances(device, queue, plain_pending);
+            let mut region_instances = self.build_text_instances(device, queue, region_pending);
+
+            let grid_scroll_px = scroll.grid * self.metrics.height;
+            for instance in &mut plain_instances {
+                instance.pos[1] += grid_scroll_px;
+            }
+
+            let region_scroll_px = scroll.region * self.metrics.height;
+            for instance in &mut region_instances {
+                instance.pos[1] += region_scroll_px;
+            }
+
+            self.count = plain_instances.len() as u32;
+            self.region_count = region_instances.len() as u32;
+            upload_instances(
+                device,
+                queue,
+                &plain_instances,
+                &mut self.instances,
+                &mut self.capacity,
+                "text instances",
+            );
+            upload_instances(
+                device,
+                queue,
+                &region_instances,
+                &mut self.region_instances,
+                &mut self.region_capacity,
+                "scroll region text instances",
+            );
         }
 
-        let region_scroll_px = scroll.region * self.metrics.height;
-        for instance in &mut region_instances {
-            instance.pos[1] += region_scroll_px;
-        }
         self.region_scissor = region.and_then(|region| {
             cell_rect_scissor(
                 region.top,
@@ -489,34 +536,11 @@ impl TextPass {
         // offset is applied, so they sit at their declared position.
         let text_run_instances = self.build_text_run_instances(device, queue, grid);
 
-        self.count = plain_instances.len() as u32;
-        self.region_count = region_instances.len() as u32;
+        // The plain and region grid glyphs are built and uploaded above, only
+        // when changed. Overlays and text runs change independently, so they
+        // rebuild every frame.
         self.overlay_count = overlay_instances.len() as u32;
         self.text_run_count = text_run_instances.len() as u32;
-        if plain_instances.is_empty()
-            && region_instances.is_empty()
-            && overlay_instances.is_empty()
-            && text_run_instances.is_empty()
-        {
-            return;
-        }
-
-        upload_instances(
-            device,
-            queue,
-            &plain_instances,
-            &mut self.instances,
-            &mut self.capacity,
-            "text instances",
-        );
-        upload_instances(
-            device,
-            queue,
-            &region_instances,
-            &mut self.region_instances,
-            &mut self.region_capacity,
-            "scroll region text instances",
-        );
         upload_instances(
             device,
             queue,
@@ -788,7 +812,7 @@ impl TextPass {
         grid: &Grid,
         cursor_cell: Option<(usize, usize)>,
         damage: &Damage,
-    ) -> Vec<PendingGlyph> {
+    ) -> bool {
         let rows = grid.rows();
         let cols = grid.cols();
 
@@ -833,15 +857,23 @@ impl TextPass {
             covers: &covers,
             cursor_cell,
         };
+        let mut any_rebuilt = false;
         for row in 0..rows {
             let cursor_touched =
                 cursor_moved && (left_row == Some(row) || entered_row == Some(row));
             if rebuild_all || damage.is_dirty(row) || cursor_touched {
                 let row_glyphs = self.rasterize_row(device, queue, grid, row, &shaping);
                 self.glyph_row_cache[row] = row_glyphs;
+                any_rebuilt = true;
             }
         }
 
+        any_rebuilt
+    }
+
+    /// The cached glyphs of every row, concatenated in row order, ready for
+    /// [`Self::build_text_instances`].
+    fn collect_grid_glyphs(&self) -> Vec<PendingGlyph> {
         self.glyph_row_cache.iter().flatten().copied().collect()
     }
 
@@ -1574,7 +1606,10 @@ mod tests {
         run_text_and_columns, shape_family, shape_run, text_run_origin, TextPass, STYLE_DOTTED,
         SYMBOLS_FAMILY,
     };
-    use crate::{gpu::headless_device, render::CellMetrics};
+    use crate::{
+        gpu::headless_device,
+        render::{CellMetrics, Frame, Scroll},
+    };
     use cosmic_text::{
         fontdb::{Database, Query},
         Family, FontSystem,
@@ -1959,14 +1994,17 @@ mod tests {
 
         // Change one row, then rebuild only it; the other rows come from the cache.
         fill_row(&mut grid, 1, "GOODBYE all");
-        let incremental = pass.rasterize_visible(
+        pass.rasterize_visible(
             &device,
             &queue,
             &grid,
             None,
             &Damage::Partial(vec![false, true, false]),
         );
-        let full = pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        let incremental = pass.collect_grid_glyphs();
+
+        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        let full = pass.collect_grid_glyphs();
 
         assert_eq!(
             incremental, full,
@@ -2015,6 +2053,56 @@ mod tests {
         assert!(
             dirty * 2 < full,
             "rebuilding one of {rows} rows ({dirty:?}) should beat a full rebuild ({full:?}) by over 2x"
+        );
+    }
+
+    #[test]
+    #[ignore = "timing benchmark; run with: cargo test -p stoatty_render --lib -- --ignored prepare_skips_unchanged_grid"]
+    fn prepare_skips_unchanged_grid() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let (rows, cols) = (50, 200);
+        let mut grid = Grid::new(rows, cols);
+        for row in 0..rows {
+            let text: String = (0..cols)
+                .map(|col| char::from(b'a' + (col % 26) as u8))
+                .collect();
+            fill_row(&mut grid, row, &text);
+        }
+        let resolution = [1280.0, 800.0];
+        let full_damage = Damage::Full;
+        let idle_damage = Damage::Partial(vec![false; rows]);
+        let frame = |damage| Frame {
+            cursor: None,
+            scroll: Scroll {
+                grid: 0.0,
+                region: 0.0,
+                popovers: &[],
+            },
+            damage,
+        };
+
+        // Warm the cache and atlas.
+        pass.prepare(&device, &queue, &grid, resolution, &frame(&full_damage));
+
+        let iterations = 50;
+        let full_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            pass.prepare(&device, &queue, &grid, resolution, &frame(&full_damage));
+        }
+        let full = full_start.elapsed();
+
+        let idle_start = std::time::Instant::now();
+        for _ in 0..iterations {
+            pass.prepare(&device, &queue, &grid, resolution, &frame(&idle_damage));
+        }
+        let idle = idle_start.elapsed();
+
+        eprintln!("prepare() {rows}x{cols}: full rebuild {full:?}, unchanged grid {idle:?}");
+        assert!(
+            idle * 4 < full,
+            "an unchanged-grid frame ({idle:?}) should beat a full rebuild ({full:?}) by over 4x"
         );
     }
 }

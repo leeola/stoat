@@ -104,6 +104,15 @@ impl GlyphAtlas {
     pub fn color_view(&self) -> &TextureView {
         &self.color.view
     }
+
+    /// The mask and color atlas texture dimensions, in texels.
+    ///
+    /// Each grows (doubles) only when a glyph no longer fits, which moves every
+    /// packed glyph's UV. A caller that caches glyph instances compares this
+    /// across a frame to tell whether reused UVs are still valid.
+    pub fn texture_dims(&self) -> (u32, u32) {
+        (self.mask.size, self.color.size)
+    }
 }
 
 struct Atlas {
