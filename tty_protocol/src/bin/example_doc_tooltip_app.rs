@@ -14,18 +14,17 @@ use std::{
 use stoatty_protocol::command::{self, PopoverCommand};
 
 /// The static code buffer, drawn from the top-left.
-const BUFFER: [&str; 6] = [
+const BUFFER: [&str; 5] = [
     "fn main() {",
+    "    let grid = Grid::new(80, 24);",
     "    let frame = render(&grid);",
     "    present(frame);",
     "}",
-    "",
-    "// hover render(...) for docs",
 ];
 
 /// 0-based grid row and column of the `render` call the tooltip documents, and
 /// the cursor's resting cell.
-const WORD_ROW: u16 = 1;
+const WORD_ROW: u16 = 2;
 const WORD_COL: u16 = 16;
 
 fn main() {
@@ -64,25 +63,28 @@ fn draw_buffer(out: &mut Vec<u8>) {
 /// auto-scrolls it.
 fn emit_tooltip(out: &mut Vec<u8>) {
     let content = [
-        "render(grid)",
-        "-> Frame",
+        "render(grid: &Grid) -> Frame",
         "",
-        "Draws the grid",
-        "into a frame,",
-        "compositing",
-        "glyphs over the",
-        "cell colors in",
-        "linear light.",
-        "Eased scroll",
-        "and cursor.",
+        "Draw the grid into a new",
+        "frame, compositing each",
+        "cell's glyph over its",
+        "background in linear light.",
+        "",
+        "Applies cursor and",
+        "selection styles, easing",
+        "scroll for smooth cursor",
+        "motion.",
+        "",
+        "Returns a Frame ready to",
+        "present to the surface.",
     ]
     .join("\n");
 
     out.extend_from_slice(&command::encode_popover(&PopoverCommand {
         top: WORD_ROW + 1,
         left: WORD_COL - 2,
-        width: 28,
-        height: 6,
+        width: 56,
+        height: 12,
         fill: [22, 24, 34],
         border: [120, 170, 255],
         content_fg: [228, 232, 240],
