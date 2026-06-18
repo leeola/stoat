@@ -21,7 +21,8 @@ const DEFAULT_CONFIG: &str = include_str!("../../stoatty.toml");
 /// default's value.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Config {
-    /// Font size in pixels the renderer rasterizes glyphs at.
+    /// Font size in logical points; the renderer scales it by the display's
+    /// scale factor to get the physical rasterization size.
     #[serde(default)]
     pub font_size: u32,
 
@@ -185,7 +186,7 @@ pub fn load() -> Result<Config, ConfigError> {
 /// The embedded default configuration, with no user overrides applied.
 ///
 /// The fallback when [`load`] fails. It carries the shipped defaults, a font
-/// size of 30 and the `zed` theme, rather than zeroed fields, so a window opened
+/// size of 15 and the `zed` theme, rather than zeroed fields, so a window opened
 /// after a bad user config still renders with the intended look. The embedded
 /// default ships with the binary and is trusted, so a malformed one panics.
 pub fn embedded_default() -> Config {
@@ -264,14 +265,14 @@ mod tests {
     use stoatty_term::grid::Rgb;
 
     #[test]
-    fn embedded_default_sets_the_doubled_font_size() {
-        assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().font_size, 30);
+    fn embedded_default_sets_the_logical_font_size() {
+        assert_eq!(settle(DEFAULT_CONFIG, None).unwrap().font_size, 15);
     }
 
     #[test]
     fn embedded_default_carries_the_shipped_config() {
         let config = embedded_default();
-        assert_eq!(config.font_size, 30);
+        assert_eq!(config.font_size, 15);
         assert_eq!(config.theme, "zed");
     }
 

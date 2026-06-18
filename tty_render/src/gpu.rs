@@ -57,19 +57,20 @@ pub struct Renderer {
 }
 
 impl Renderer {
-    /// Build the grid passes for `format` at `width`x`height` physical pixels,
-    /// with cells sized from `font_size`, clearing to `background` and drawing
-    /// the cursor block in `cursor`.
+    /// Build the grid passes for `format` at `size` (`[width, height]`) physical
+    /// pixels, with cells sized from the logical `font_size` scaled by
+    /// `scale_factor`, clearing to `background` and drawing the cursor block in
+    /// `cursor`.
     pub fn new(
         device: &Device,
         format: TextureFormat,
-        width: u32,
-        height: u32,
+        size: [u32; 2],
         font_size: u32,
+        scale_factor: f32,
         background: Rgb,
         cursor: Rgb,
     ) -> Renderer {
-        let metrics = CellMetrics::from_font_size(font_size);
+        let metrics = CellMetrics::from_font_size(font_size, scale_factor);
         Renderer {
             background: BackgroundPass::new(device, format, metrics),
             decoration: DecorationPass::new(device, format, metrics),
@@ -77,8 +78,8 @@ impl Renderer {
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),
-            width,
-            height,
+            width: size[0],
+            height: size[1],
             metrics,
             clear_color: rgb_to_color(background),
             cursor_color: cursor,
@@ -93,14 +94,15 @@ impl Renderer {
         grid_dims(self.width, self.height, self.metrics)
     }
 
-    /// Re-derive every pass's cell metrics from `font_size`, so the next frame
-    /// lays out and rasterizes the grid at the new size.
+    /// Re-derive every pass's cell metrics from the logical `font_size` and
+    /// `scale_factor`, so the next frame lays out and rasterizes the grid at the
+    /// new size.
     ///
     /// The surface is untouched: only the cell rectangle changes, so a later
     /// [`Self::grid_size`] yields fewer cells for a larger font and more for a
     /// smaller one at the same pixel size.
-    pub fn set_font_size(&mut self, font_size: u32) {
-        let metrics = CellMetrics::from_font_size(font_size);
+    pub fn set_font_size(&mut self, font_size: u32, scale_factor: f32) {
+        let metrics = CellMetrics::from_font_size(font_size, scale_factor);
         self.metrics = metrics;
         self.background.set_metrics(metrics);
         self.decoration.set_metrics(metrics);
@@ -212,8 +214,9 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// Build the context for `window`, sized to `width`x`height` physical
-    /// pixels with cells derived from `font_size`, clearing to `background` and
-    /// drawing the cursor block in `cursor`.
+    /// pixels with cells derived from the logical `font_size` scaled by
+    /// `scale_factor`, clearing to `background` and drawing the cursor block in
+    /// `cursor`.
     ///
     /// `window` is anything carrying window and display handles; the surface
     /// takes ownership of it, so it must outlive the context (pass an
@@ -226,6 +229,7 @@ impl GpuContext {
         width: u32,
         height: u32,
         font_size: u32,
+        scale_factor: f32,
         background: Rgb,
         cursor: Rgb,
     ) -> GpuContext
@@ -273,7 +277,13 @@ impl GpuContext {
         surface.configure(&device, &config);
 
         let renderer = Renderer::new(
-            &device, format, width, height, font_size, background, cursor,
+            &device,
+            format,
+            [width, height],
+            font_size,
+            scale_factor,
+            background,
+            cursor,
         );
 
         GpuContext {
@@ -308,12 +318,13 @@ impl GpuContext {
         self.renderer.grid_size()
     }
 
-    /// Re-derive the renderer's cell metrics from `font_size` for live resizing.
+    /// Re-derive the renderer's cell metrics from the logical `font_size` and
+    /// `scale_factor` for live resizing.
     ///
     /// The surface is left as-is, so the caller must re-read [`Self::grid_size`]
     /// and resize the terminal and PTY to match.
-    pub fn set_font_size(&mut self, font_size: u32) {
-        self.renderer.set_font_size(font_size);
+    pub fn set_font_size(&mut self, font_size: u32, scale_factor: f32) {
+        self.renderer.set_font_size(font_size, scale_factor);
     }
 
     /// Draw a frame of `grid` to the window surface. `cursor` is the cursor's
@@ -393,7 +404,7 @@ mod tests {
 
     #[test]
     fn grid_dims_shrink_as_font_grows() {
-        let dims = |font| grid_dims(800, 600, CellMetrics::from_font_size(font));
+        let dims = |font| grid_dims(800, 600, CellMetrics::from_font_size(font, 1.0));
         assert_eq!(dims(15), (33, 88));
         assert_eq!(dims(30), (16, 44));
         assert_eq!(dims(60), (8, 22));

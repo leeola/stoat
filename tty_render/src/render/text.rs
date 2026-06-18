@@ -1226,7 +1226,7 @@ mod tests {
 
     #[test]
     fn glyph_origin_offsets_from_cell_pen_and_baseline() {
-        let metrics = CellMetrics::from_font_size(30);
+        let metrics = CellMetrics::from_font_size(30, 1.0);
         let baseline = 14.0;
 
         let origin = glyph_origin(3, 2, [1, 10], baseline, metrics);
@@ -1244,7 +1244,7 @@ mod tests {
 
     #[test]
     fn text_run_origin_matches_glyph_origin_at_unit_scale() {
-        let metrics = CellMetrics::from_font_size(30);
+        let metrics = CellMetrics::from_font_size(30, 1.0);
         let baseline = 14.0;
 
         // The first glyph of a unit-scale run lands exactly on the cell grid, so
@@ -1257,7 +1257,7 @@ mod tests {
 
     #[test]
     fn text_run_origin_scales_advance_and_centers_in_row() {
-        let metrics = CellMetrics::from_font_size(30);
+        let metrics = CellMetrics::from_font_size(30, 1.0);
         let baseline = 14.0;
 
         let origin = text_run_origin(0.0, 0.0, 2, 0.5, [0, 0], baseline, metrics);
@@ -1279,7 +1279,7 @@ mod tests {
         grid.get_mut(0, 1).underline = UnderlineStyle::Dotted;
         grid.get_mut(0, 1).underline_color = Rgb::new(255, 0, 0);
 
-        let metrics = CellMetrics::from_font_size(30);
+        let metrics = CellMetrics::from_font_size(30, 1.0);
         let instances = build_underline_instances(&grid, metrics);
 
         assert_eq!(instances.len(), 1);
@@ -1389,7 +1389,7 @@ mod tests {
 
     #[test]
     fn cell_rect_scissor_clamps_to_surface() {
-        let metrics = CellMetrics::from_font_size(30);
+        let metrics = CellMetrics::from_font_size(30, 1.0);
         let resolution = [metrics.width * 10.0, metrics.height * 5.0];
 
         assert_eq!(

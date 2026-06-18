@@ -4,8 +4,10 @@
 # ~/.config/stoatty/config.toml) and edit it to override these defaults. Fields
 # left out there keep the values below.
 
-# Font size in pixels the renderer rasterizes glyphs at.
-font_size = 30
+# Font size in logical points. The renderer scales it by the display's scale
+# factor for the physical rasterization size, so it looks the same on a HiDPI
+# (Retina) and a standard display.
+font_size = 15
 
 # Name of the [themes.<name>] entry the terminal resolves colors against.
 theme = "zed"

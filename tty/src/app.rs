@@ -95,9 +95,14 @@ struct State {
     terminal: Terminal,
     grid: Grid,
     pty: Pty,
-    /// The live font size in pixels, seeded from the config and stepped by the
-    /// platform zoom combo. Drives the renderer's cell metrics on each change.
+    /// The live font size in logical points, seeded from the config and stepped
+    /// by the platform zoom combo. Drives the renderer's cell metrics on each
+    /// change, scaled by [`Self::scale_factor`].
     font_size: u32,
+    /// The window's display scale factor (physical pixels per logical point),
+    /// tracked from `ScaleFactorChanged` so the cell metrics re-derive when the
+    /// window moves to a display of a different density.
+    scale_factor: f64,
     /// The most recent modifier state, tracked from `ModifiersChanged` so a key
     /// press can tell whether the platform zoom modifier is held.
     modifiers: ModifiersState,
@@ -136,11 +141,13 @@ impl ApplicationHandler<PtyEvent> for App {
         );
 
         let size = window.inner_size();
+        let scale_factor = window.scale_factor();
         let gpu = GpuContext::new(
             window.clone(),
             size.width.max(1),
             size.height.max(1),
             self.font_size,
+            scale_factor as f32,
             self.theme.background,
             self.theme.cursor,
         );
@@ -169,6 +176,7 @@ impl ApplicationHandler<PtyEvent> for App {
             grid,
             pty,
             font_size: self.font_size,
+            scale_factor,
             modifiers: ModifiersState::empty(),
             cursor_anim: [0.0, 0.0],
             popover_scrolls: Vec::new(),
@@ -203,6 +211,21 @@ impl ApplicationHandler<PtyEvent> for App {
             WindowEvent::Resized(size) => {
                 state.gpu.resize(size.width, size.height);
 
+                let (rows, cols) = state.gpu.grid_size();
+                state.terminal.resize(rows, cols);
+                let _ = state.pty.resize(rows as u16, cols as u16);
+
+                state.window.request_redraw();
+            },
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                state.scale_factor = scale_factor;
+                state
+                    .gpu
+                    .set_font_size(state.font_size, scale_factor as f32);
+
+                // The cell metrics moved with the new density; the surface is
+                // re-fitted by the `Resized` that follows. Re-read the grid size
+                // and resize the rest now, mirroring the font-zoom chain.
                 let (rows, cols) = state.gpu.grid_size();
                 state.terminal.resize(rows, cols);
                 let _ = state.pty.resize(rows as u16, cols as u16);
@@ -308,7 +331,9 @@ impl ApplicationHandler<PtyEvent> for App {
 
                 let font_size = (state.font_size as i32 + delta).max(FONT_SIZE_FLOOR as i32) as u32;
                 state.font_size = font_size;
-                state.gpu.set_font_size(font_size);
+                state
+                    .gpu
+                    .set_font_size(font_size, state.scale_factor as f32);
 
                 // The surface is unchanged, so skip `gpu.resize`; only the cell
                 // metrics moved, so re-read the grid size and resize the rest.
