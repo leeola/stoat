@@ -29,16 +29,16 @@ use stoatty_protocol::command::{self, BarCommand, BorderCommand, BorderStyle, Te
 const EDITOR_BG: [u8; 3] = [40, 44, 52];
 const EDITOR_FG: [u8; 3] = [171, 178, 191];
 
-/// Color of the inline-expansion (diagnostic) text drawn beneath a line
-/// (`#828997`), dimmer than the code so it reads as secondary.
-const EXPANSION_FG: [u8; 3] = [130, 137, 151];
-
 /// Pane border color (`#4e5666`).
 const BORDER_COLOR: [u8; 3] = [78, 86, 102];
 
 /// Line-number glyph size in 256ths of a cell (160 = 0.625x), so the number is
 /// smaller than the body text.
 const NUMBER_SCALE: u16 = 160;
+
+/// Inline-expansion glyph size in 256ths of a cell (200 = 0.78x), so the inline
+/// diagnostic reads smaller than the full-cell body code.
+const EXPANSION_SCALE: u16 = 200;
 
 /// Line-number color (`#636d83`).
 const NUMBER_FG: [u8; 3] = [99, 109, 131];
@@ -269,8 +269,9 @@ fn draw_pane(out: &mut Vec<u8>, pane: &Pane) {
     draw_gutter(out, pane);
 }
 
-/// Write each line's code at its physical row inside the pane, then its
-/// inline-expansion rows just beneath it in [`EXPANSION_FG`].
+/// Write each line's code at its physical row inside the pane, then any
+/// inline-expansion rows just beneath it as smaller, error-colored text runs, so
+/// the inline diagnostic reads at a different size and color from the code.
 fn draw_body(out: &mut Vec<u8>, pane: &Pane) {
     let body_col = pane.left + 1 + pane.gutter.body_col();
 
@@ -279,16 +280,16 @@ fn draw_body(out: &mut Vec<u8>, pane: &Pane) {
         cup(out, row, body_col);
         out.extend_from_slice(line.code.as_bytes());
 
-        if line.expand.is_empty() {
-            continue;
+        for (offset, run) in line.expand.iter().enumerate() {
+            out.extend_from_slice(&command::encode_text_run(&TextRunCommand {
+                col: body_col as i16 * 16,
+                row: (row + 1 + offset as u16) as i16 * 16,
+                scale: EXPANSION_SCALE,
+                color: diag_color(Diag::Error),
+                bg: EDITOR_BG,
+                text: run.to_string(),
+            }));
         }
-
-        set_fg(out, EXPANSION_FG);
-        for (offset, text) in line.expand.iter().enumerate() {
-            cup(out, row + 1 + offset as u16, body_col);
-            out.extend_from_slice(text.as_bytes());
-        }
-        set_fg(out, EDITOR_FG);
     }
 }
 
@@ -400,11 +401,6 @@ fn set_palette(out: &mut Vec<u8>) {
         )
         .as_bytes(),
     );
-}
-
-/// Set the foreground color for the text that follows.
-fn set_fg(out: &mut Vec<u8>, color: [u8; 3]) {
-    out.extend_from_slice(format!("\x1b[38;2;{};{};{}m", color[0], color[1], color[2]).as_bytes());
 }
 
 /// Emit a Cursor Position escape to the 0-based grid (`row`, `col`).
