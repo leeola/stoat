@@ -221,8 +221,8 @@ impl Terminal {
         self.term.resize(GridSize { rows, cols });
     }
 
-    /// Copy the parsed screen onto `grid` and return the cursor and the number
-    /// of rows the content scrolled since the previous call.
+    /// Copy the parsed screen onto `grid` and return the cursor, the number of
+    /// rows the content scrolled since the previous call, and which rows changed.
     ///
     /// Only lines the terminal reports as damaged since the previous call are
     /// rewritten, so an unchanged line keeps whatever the prior projection left
@@ -233,7 +233,12 @@ impl Terminal {
     /// rows live output pushed off the top. It is the renderer's signal to ease
     /// vertical scrolling. User scrollback is not counted, and it saturates to
     /// zero once the scrollback history fills.
-    pub fn project(&mut self, grid: &mut Grid) -> (Cursor, usize) {
+    ///
+    /// The returned [`Damage`] reports the VT cell rows this call rewrote. It does
+    /// not account for the stoatty APC overlays (borders, scales, popovers, icons,
+    /// bars, line layout, text runs) re-stamped every projection, so a consumer
+    /// caching by row must treat those as able to change any row.
+    pub fn project(&mut self, grid: &mut Grid) -> (Cursor, usize, Damage) {
         let rows = self.term.screen_lines();
         let cols = self.term.columns();
 
@@ -278,21 +283,21 @@ impl Terminal {
         self.last_history = history;
 
         self.term.reset_damage();
-        (cursor, scrolled)
+        (cursor, scrolled, dirty)
     }
 
     /// Resolve which rows [`Self::project`] must rewrite this frame.
     ///
-    /// `force_full` short-circuits to [`Dirty::Full`] when the grid was just
+    /// `force_full` short-circuits to [`Damage::Full`] when the grid was just
     /// resized and holds no valid prior content, bypassing the terminal's own
     /// damage which may report only a partial change.
-    fn collect_damage(&mut self, rows: usize, force_full: bool) -> Dirty {
+    fn collect_damage(&mut self, rows: usize, force_full: bool) -> Damage {
         if force_full {
-            return Dirty::Full;
+            return Damage::Full;
         }
 
         match self.term.damage() {
-            TermDamage::Full => Dirty::Full,
+            TermDamage::Full => Damage::Full,
             TermDamage::Partial(lines) => {
                 let mut rows_dirty = vec![false; rows];
                 for bounds in lines {
@@ -300,7 +305,7 @@ impl Terminal {
                         *slot = true;
                     }
                 }
-                Dirty::Partial(rows_dirty)
+                Damage::Partial(rows_dirty)
             },
         }
     }
@@ -429,17 +434,23 @@ impl ApcScanner {
     }
 }
 
-/// The set of viewport rows a projection must rewrite.
-enum Dirty {
+/// The set of viewport rows a projection rewrote, returned by
+/// [`Terminal::project`] so a renderer can rebuild only the rows that changed.
+///
+/// [`Damage::Full`] means every row changed (a resize or a terminal-reported
+/// full damage); [`Damage::Partial`] carries a per-row flag indexed by row.
+pub enum Damage {
     Full,
     Partial(Vec<bool>),
 }
 
-impl Dirty {
-    fn is_dirty(&self, row: usize) -> bool {
+impl Damage {
+    /// Whether `row` changed this projection. Rows past the flag vector, and
+    /// every row under [`Damage::Full`], read as dirty.
+    pub fn is_dirty(&self, row: usize) -> bool {
         match self {
-            Dirty::Full => true,
-            Dirty::Partial(rows) => rows.get(row).copied().unwrap_or(false),
+            Damage::Full => true,
+            Damage::Partial(rows) => rows.get(row).copied().unwrap_or(false),
         }
     }
 }
@@ -863,7 +874,7 @@ mod tests {
         let mut grid = Grid::new(rows, cols);
 
         terminal.advance(bytes);
-        let (cursor, _scroll) = terminal.project(&mut grid);
+        let (cursor, _scroll, _damage) = terminal.project(&mut grid);
 
         (grid, cursor)
     }
@@ -996,11 +1007,11 @@ mod tests {
 
         // Four lines into a two-row screen push the top two off into history.
         terminal.advance(b"a\r\nb\r\nc\r\nd");
-        let (_, scrolled) = terminal.project(&mut grid);
+        let (_, scrolled, _) = terminal.project(&mut grid);
         assert_eq!(scrolled, 2, "rows scrolled into history");
 
         // A projection with no new output reports no scroll.
-        let (_, scrolled) = terminal.project(&mut grid);
+        let (_, scrolled, _) = terminal.project(&mut grid);
         assert_eq!(scrolled, 0, "no further scroll");
     }
 
@@ -1016,11 +1027,20 @@ mod tests {
         grid.get_mut(2, 0).ch = 'Z';
 
         terminal.advance(b"E");
-        terminal.project(&mut grid);
+        let (_, _, damage) = terminal.project(&mut grid);
 
         assert_eq!(grid.get(1, 2).ch, 'E');
         assert_eq!(grid.get(2, 0).ch, 'Z');
         assert_eq!(grid.get(0, 0).ch, 'A');
+
+        assert!(
+            damage.is_dirty(1),
+            "the row 'E' landed on is reported damaged"
+        );
+        assert!(
+            !damage.is_dirty(2),
+            "the untouched row is undamaged, so its manual 'Z' survives"
+        );
     }
 
     #[test]

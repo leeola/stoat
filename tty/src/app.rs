@@ -325,7 +325,7 @@ impl ApplicationHandler<PtyEvent> for App {
                 state.window.request_redraw();
             },
             WindowEvent::RedrawRequested => {
-                let (cursor, scroll_delta) = state.terminal.project(&mut state.grid);
+                let (cursor, scroll_delta, _damage) = state.terminal.project(&mut state.grid);
 
                 let overflows: Vec<Option<f32>> =
                     state.grid.overlays().iter().map(popover_overflow).collect();
