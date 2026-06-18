@@ -14,7 +14,8 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
-    Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache,
+    fontdb::Query, Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping,
+    SwashCache,
 };
 use std::collections::HashMap;
 use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
@@ -125,6 +126,10 @@ pub struct TextPass {
     underline_count: u32,
     atlas: GlyphAtlas,
     font_system: FontSystem,
+    /// The resolved primary shaping family: the first configured `font_family`
+    /// entry present in the font db, or `None` to shape with the generic
+    /// monospace fallback.
+    family: Option<String>,
     swash_cache: SwashCache,
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
     /// alongside the integer cell scales.
@@ -137,14 +142,21 @@ impl TextPass {
     /// Build the pipeline targeting `format`, with an empty instance buffer.
     ///
     /// Loads the system fonts (cosmic-text [`FontSystem::new`]) plus the bundled
-    /// JetBrains Mono default, and creates the glyph atlas, so this is the heavy
-    /// part of renderer startup. `format` must
+    /// JetBrains Mono default, resolves `font_family` against them to pick the
+    /// shaping primary, and creates the glyph atlas, so this is the heavy part of
+    /// renderer startup. `format` must
     /// be the non-sRGB surface format the text pass composites into; the shader
     /// does its own sRGB encoding.
-    pub(crate) fn new(device: &Device, format: TextureFormat, metrics: CellMetrics) -> TextPass {
+    pub(crate) fn new(
+        device: &Device,
+        format: TextureFormat,
+        metrics: CellMetrics,
+        font_family: &[String],
+    ) -> TextPass {
         let mut font_system = FontSystem::new();
         load_bundled_fonts(&mut font_system);
-        let baseline = probe_baseline(&mut font_system, metrics);
+        let family = resolve_primary_family(&font_system, font_family);
+        let baseline = probe_baseline(&mut font_system, metrics, shape_family(&family));
         let swash_cache = SwashCache::new();
         let atlas = GlyphAtlas::new(device);
 
@@ -311,6 +323,7 @@ impl TextPass {
             underline_count: 0,
             atlas,
             font_system,
+            family,
             swash_cache,
             shape_cache: HashMap::new(),
             baseline,
@@ -326,7 +339,7 @@ impl TextPass {
     /// the old size.
     pub(crate) fn set_metrics(&mut self, metrics: CellMetrics) {
         self.metrics = metrics;
-        self.baseline = probe_baseline(&mut self.font_system, metrics);
+        self.baseline = probe_baseline(&mut self.font_system, metrics, shape_family(&self.family));
         self.shape_cache.clear();
     }
 
@@ -840,7 +853,13 @@ impl TextPass {
             return *key;
         }
 
-        let key = shape_char(&mut self.font_system, ch, scale, self.metrics);
+        let key = shape_char(
+            &mut self.font_system,
+            ch,
+            scale,
+            self.metrics,
+            shape_family(&self.family),
+        );
         self.shape_cache.insert(cache_key, key);
         key
     }
@@ -1006,6 +1025,7 @@ fn shape_char(
     ch: char,
     scale: f32,
     metrics: CellMetrics,
+    family: Family<'_>,
 ) -> Option<CacheKey> {
     let size = scale;
     let mut buffer = CosmicBuffer::new(
@@ -1017,7 +1037,7 @@ fn shape_char(
     buffer.set_text(
         font_system,
         text,
-        &Attrs::new().family(Family::Monospace),
+        &Attrs::new().family(family),
         Shaping::Advanced,
         None,
     );
@@ -1042,15 +1062,37 @@ fn load_bundled_fonts(font_system: &mut FontSystem) {
     db.load_font_data(ITALIC.to_vec());
 }
 
+/// The first family in `cascade` present in `font_system`'s db, or `None` when
+/// none are installed so shaping falls back to the generic monospace.
+fn resolve_primary_family(font_system: &FontSystem, cascade: &[String]) -> Option<String> {
+    let db = font_system.db();
+    cascade
+        .iter()
+        .find(|name| {
+            db.query(&Query {
+                families: &[Family::Name(name.as_str())],
+                ..Default::default()
+            })
+            .is_some()
+        })
+        .cloned()
+}
+
+/// The cosmic-text family to shape with: the resolved primary by name, or the
+/// generic monospace when no configured family was present.
+fn shape_family(family: &Option<String>) -> Family<'_> {
+    family.as_deref().map_or(Family::Monospace, Family::Name)
+}
+
 /// Baseline offset from a cell's top, in physical pixels, measured once from the
 /// font so glyphs sit on a consistent baseline within their cell.
-fn probe_baseline(font_system: &mut FontSystem, metrics: CellMetrics) -> f32 {
+fn probe_baseline(font_system: &mut FontSystem, metrics: CellMetrics, family: Family<'_>) -> f32 {
     let mut buffer =
         CosmicBuffer::new(font_system, Metrics::new(metrics.font_size, metrics.height));
     buffer.set_text(
         font_system,
         "M",
-        &Attrs::new().family(Family::Monospace),
+        &Attrs::new().family(family),
         Shaping::Advanced,
         None,
     );
@@ -1231,7 +1273,8 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_origin,
-        load_bundled_fonts, overlay_content_cells, text_run_origin, STYLE_DOTTED,
+        load_bundled_fonts, overlay_content_cells, resolve_primary_family, shape_family,
+        text_run_origin, STYLE_DOTTED,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -1460,6 +1503,40 @@ mod tests {
                 .is_some(),
             "bundled faces resolve JetBrains Mono in an otherwise empty font db"
         );
+    }
+
+    #[test]
+    fn resolve_primary_family_picks_first_present_then_falls_back() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+
+        assert_eq!(
+            resolve_primary_family(
+                &font_system,
+                &["Nonexistent Face".to_owned(), "JetBrains Mono".to_owned()],
+            ),
+            Some("JetBrains Mono".to_owned()),
+            "skips the missing family and resolves the first present one"
+        );
+        assert_eq!(
+            resolve_primary_family(&font_system, &["Nonexistent Face".to_owned()]),
+            None,
+            "a cascade with no present family resolves to None"
+        );
+        assert_eq!(
+            resolve_primary_family(&font_system, &[]),
+            None,
+            "an empty cascade resolves to None"
+        );
+    }
+
+    #[test]
+    fn shape_family_maps_resolved_name_else_monospace() {
+        assert_eq!(
+            shape_family(&Some("JetBrains Mono".to_owned())),
+            Family::Name("JetBrains Mono")
+        );
+        assert_eq!(shape_family(&None), Family::Monospace);
     }
 
     #[test]

@@ -12,7 +12,7 @@ use crate::{
 };
 use std::sync::Arc;
 use stoatty_render::{
-    gpu::{GpuContext, Scroll},
+    gpu::{FontConfig, GpuContext, Scroll},
     render,
 };
 use stoatty_term::{
@@ -67,6 +67,7 @@ pub fn run_with_shell(shell: String, size: Option<[u16; 2]>) {
         shell,
         theme,
         config.font_size,
+        config.font_family,
         size,
     );
     event_loop.run_app(&mut app).expect("run event loop");
@@ -87,6 +88,9 @@ struct App {
     shell: String,
     theme: Theme,
     font_size: u32,
+    /// Ordered font-family cascade from the config, resolved against the font db
+    /// at renderer creation to pick the shaping primary. Read once in `resumed`.
+    font_family: Vec<String>,
     /// The window's content size in cells (`[cols, rows]`) to open sized to, or
     /// `None` for the winit default window. Read once at window creation.
     size: Option<[u16; 2]>,
@@ -99,6 +103,7 @@ impl App {
         shell: String,
         theme: Theme,
         font_size: u32,
+        font_family: Vec<String>,
         size: Option<[u16; 2]>,
     ) -> App {
         App {
@@ -106,6 +111,7 @@ impl App {
             shell,
             theme,
             font_size,
+            font_family,
             size,
             state: None,
         }
@@ -173,8 +179,11 @@ impl ApplicationHandler<PtyEvent> for App {
             window.clone(),
             size.width.max(1),
             size.height.max(1),
-            self.font_size,
-            scale_factor as f32,
+            FontConfig {
+                size: self.font_size,
+                scale_factor: scale_factor as f32,
+                family: &self.font_family,
+            },
             self.theme.background,
             self.theme.cursor,
         );

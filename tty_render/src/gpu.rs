@@ -30,6 +30,21 @@ use wgpu::{
     TextureViewDescriptor,
 };
 
+/// How the renderer renders text, passed to [`Renderer::new`] and
+/// [`GpuContext::new`].
+///
+/// `size` is the logical font size in points; the physical rasterization size
+/// is `size * scale_factor`, so a given `size` keeps its apparent size across
+/// displays of different density. `family` is an ordered cascade whose first
+/// entry present in the font db becomes the shaping primary, cosmic-text
+/// falling back per glyph for codepoints it lacks.
+#[derive(Clone, Copy)]
+pub struct FontConfig<'a> {
+    pub size: u32,
+    pub scale_factor: f32,
+    pub family: &'a [String],
+}
+
 /// The grid render passes and the target size, independent of any window.
 ///
 /// [`Self::render_into`] draws a frame into any texture view, so the same render
@@ -58,23 +73,21 @@ pub struct Renderer {
 
 impl Renderer {
     /// Build the grid passes for `format` at `size` (`[width, height]`) physical
-    /// pixels, with cells sized from the logical `font_size` scaled by
-    /// `scale_factor`, clearing to `background` and drawing the cursor block in
-    /// `cursor`.
+    /// pixels, with cells sized and text shaped per `font`, clearing to
+    /// `background` and drawing the cursor block in `cursor`.
     pub fn new(
         device: &Device,
         format: TextureFormat,
         size: [u32; 2],
-        font_size: u32,
-        scale_factor: f32,
+        font: FontConfig<'_>,
         background: Rgb,
         cursor: Rgb,
     ) -> Renderer {
-        let metrics = CellMetrics::from_font_size(font_size, scale_factor);
+        let metrics = CellMetrics::from_font_size(font.size, font.scale_factor);
         Renderer {
             background: BackgroundPass::new(device, format, metrics),
             decoration: DecorationPass::new(device, format, metrics),
-            text: TextPass::new(device, format, metrics),
+            text: TextPass::new(device, format, metrics, font.family),
             overlay: OverlayPass::new(device, format, metrics),
             icon: IconPass::new(device, format, metrics),
             bar: BarPass::new(device, format, metrics),
@@ -219,9 +232,8 @@ pub struct GpuContext {
 
 impl GpuContext {
     /// Build the context for `window`, sized to `width`x`height` physical
-    /// pixels with cells derived from the logical `font_size` scaled by
-    /// `scale_factor`, clearing to `background` and drawing the cursor block in
-    /// `cursor`.
+    /// pixels, with cells sized and text shaped per `font`, clearing to
+    /// `background` and drawing the cursor block in `cursor`.
     ///
     /// `window` is anything carrying window and display handles; the surface
     /// takes ownership of it, so it must outlive the context (pass an
@@ -234,8 +246,7 @@ impl GpuContext {
         window: W,
         width: u32,
         height: u32,
-        font_size: u32,
-        scale_factor: f32,
+        font: FontConfig<'_>,
         background: Rgb,
         cursor: Rgb,
     ) -> GpuContext
@@ -300,8 +311,7 @@ impl GpuContext {
             &device,
             view_format,
             [width, height],
-            font_size,
-            scale_factor,
+            font,
             background,
             cursor,
         );
