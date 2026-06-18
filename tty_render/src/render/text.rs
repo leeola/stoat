@@ -14,8 +14,8 @@ use crate::{
 };
 use bytemuck::{Pod, Zeroable};
 use cosmic_text::{
-    fontdb::Query, Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping,
-    SwashCache,
+    fontdb::{Query, Weight},
+    Attrs, Buffer as CosmicBuffer, CacheKey, Family, FontSystem, Metrics, Shaping, SwashCache,
 };
 use std::collections::HashMap;
 use stoatty_term::grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle};
@@ -44,6 +44,13 @@ const STYLE_DOUBLE: u32 = 1;
 const STYLE_CURLY: u32 = 2;
 const STYLE_DOTTED: u32 = 3;
 const STYLE_DASHED: u32 = 4;
+
+/// Family name of the bundled Nerd Font, registered by [`load_bundled_fonts`].
+///
+/// Carries the Private-Use-Area powerline separators and icon glyphs that
+/// programming fonts omit, so it serves as the symbol fallback ahead of any
+/// system font (see [`glyph_family`]).
+const SYMBOLS_FAMILY: &str = "Symbols Nerd Font Mono";
 
 /// Per-glyph instance: where to draw it, where to sample it, and how to color it.
 #[repr(C)]
@@ -1020,13 +1027,17 @@ fn create_atlas_bind_group(
 /// One character maps to one cell, so each is shaped independently rather than
 /// through proportional line layout. The cache key encodes the rasterization
 /// size, so each scale of a character keys a distinct atlas entry.
+///
+/// `primary` is the preferred family; glyphs it lacks are shaped with the
+/// bundled symbols font instead (see [`glyph_family`]).
 fn shape_char(
     font_system: &mut FontSystem,
     ch: char,
     scale: f32,
     metrics: CellMetrics,
-    family: Family<'_>,
+    primary: Family<'_>,
 ) -> Option<CacheKey> {
+    let family = glyph_family(font_system, ch, primary);
     let size = scale;
     let mut buffer = CosmicBuffer::new(
         font_system,
@@ -1048,18 +1059,51 @@ fn shape_char(
     Some(glyph.physical((0.0, 0.0), 1.0).cache_key)
 }
 
-/// Register the bundled JetBrains Mono variable faces into `font_system`'s font
-/// database so the `JetBrains Mono` family resolves regardless of which fonts
-/// are installed system-wide.
+/// The cosmic-text family to shape `ch` with: `primary` when it carries the
+/// glyph, otherwise the bundled symbols font so Private-Use-Area icons resolve
+/// to it ahead of cosmic-text's system fallback.
+fn glyph_family<'a>(font_system: &mut FontSystem, ch: char, primary: Family<'a>) -> Family<'a> {
+    if family_covers(font_system, primary, ch) {
+        primary
+    } else {
+        Family::Name(SYMBOLS_FAMILY)
+    }
+}
+
+/// Whether the face that `family` resolves to in `font_system` has a glyph for
+/// `ch`.
+///
+/// Checks the resolved face's character map directly, so the answer reflects the
+/// face that would actually shape `ch` rather than cosmic-text's fallback chain.
+fn family_covers(font_system: &mut FontSystem, family: Family<'_>, ch: char) -> bool {
+    let Some(id) = font_system.db().query(&Query {
+        families: &[family],
+        ..Default::default()
+    }) else {
+        return false;
+    };
+
+    font_system
+        .get_font(id, Weight::NORMAL)
+        .is_some_and(|font| font.as_swash().charmap().map(ch) != 0)
+}
+
+/// Register the bundled faces into `font_system`'s font database so they resolve
+/// regardless of which fonts are installed system-wide: the JetBrains Mono
+/// variable faces (the `JetBrains Mono` family) and the Symbols Nerd Font Mono
+/// symbol face ([`SYMBOLS_FAMILY`]) that backs the Private-Use-Area fallback.
 fn load_bundled_fonts(font_system: &mut FontSystem) {
     const REGULAR: &[u8] =
         include_bytes!("../../assets/fonts/JetBrainsMono/JetBrainsMono[wght].ttf");
     const ITALIC: &[u8] =
         include_bytes!("../../assets/fonts/JetBrainsMono/JetBrainsMono-Italic[wght].ttf");
+    const SYMBOLS: &[u8] =
+        include_bytes!("../../assets/fonts/SymbolsNerdFont/SymbolsNerdFontMono-Regular.ttf");
 
     let db = font_system.db_mut();
     db.load_font_data(REGULAR.to_vec());
     db.load_font_data(ITALIC.to_vec());
+    db.load_font_data(SYMBOLS.to_vec());
 }
 
 /// The first family in `cascade` present in `font_system`'s db, or `None` when
@@ -1272,9 +1316,9 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_origin,
+        build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_family, glyph_origin,
         load_bundled_fonts, overlay_content_cells, resolve_primary_family, shape_family,
-        text_run_origin, STYLE_DOTTED,
+        text_run_origin, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -1502,6 +1546,24 @@ mod tests {
                 })
                 .is_some(),
             "bundled faces resolve JetBrains Mono in an otherwise empty font db"
+        );
+    }
+
+    #[test]
+    fn glyph_family_falls_back_to_symbols_font_for_uncovered_glyphs() {
+        let mut font_system = FontSystem::new_with_locale_and_db("en-US".into(), Database::new());
+        load_bundled_fonts(&mut font_system);
+        let primary = Family::Name("JetBrains Mono");
+
+        assert_eq!(
+            glyph_family(&mut font_system, 'A', primary),
+            primary,
+            "a glyph the primary family carries shapes with the primary"
+        );
+        assert_eq!(
+            glyph_family(&mut font_system, '\u{e0b6}', primary),
+            Family::Name(SYMBOLS_FAMILY),
+            "a Private-Use-Area powerline glyph the primary lacks routes to the symbols font"
         );
     }
 
