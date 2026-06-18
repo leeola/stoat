@@ -17,6 +17,7 @@ stoatty_term = { path = "../tty_term" }
 stoatty_render = { path = "../tty_render" }
 winit.workspace = true
 portable-pty.workspace = true
+libc.workspace = true
 serde.workspace = true
 toml.workspace = true
 etcetera.workspace = true

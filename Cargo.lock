@@ -4075,6 +4075,7 @@ name = "stoatty"
 version = "0.1.0"
 dependencies = [
  "etcetera",
+ "libc",
  "portable-pty",
  "serde",
  "snafu",
