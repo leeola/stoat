@@ -6,14 +6,16 @@
 
 use std::{env, ffi::OsStr, path::PathBuf, process::Command};
 
-/// Build the `bin` emitter and open the stoatty window running it as the shell.
+/// Build the `bin` emitter and open the stoatty window, sized to `size` cells
+/// (`[cols, rows]`), running it as the shell.
 ///
 /// `bin` is an emitter binary in `stoatty_protocol`. The window renders that
 /// program's output end to end through the bytes to PTY to parse to grid to
-/// render path.
-pub fn run(bin: &str) {
+/// render path. `size` is the scene's cell extent, so the window opens close to
+/// the content it shows.
+pub fn run(bin: &str, size: [u16; 2]) {
     let emitter = build_emitter(bin);
-    stoatty::app::run_with_shell(emitter.to_string_lossy().into_owned());
+    stoatty::app::run_with_shell(emitter.to_string_lossy().into_owned(), Some(size));
 }
 
 /// Build the `bin` emitter and return the path to the compiled binary.

@@ -7,5 +7,5 @@
 mod launcher;
 
 fn main() {
-    launcher::run("example_doc_tooltip_app");
+    launcher::run("example_doc_tooltip_app", [72, 16]);
 }

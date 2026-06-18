@@ -8,5 +8,5 @@
 mod launcher;
 
 fn main() {
-    launcher::run("example_edit_app");
+    launcher::run("example_edit_app", [80, 24]);
 }

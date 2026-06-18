@@ -6,5 +6,5 @@
 mod launcher;
 
 fn main() {
-    launcher::run("example_hello_app");
+    launcher::run("example_hello_app", [80, 24]);
 }

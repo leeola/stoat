@@ -8,5 +8,5 @@
 mod launcher;
 
 fn main() {
-    launcher::run("example_gutter_app");
+    launcher::run("example_gutter_app", [71, 16]);
 }

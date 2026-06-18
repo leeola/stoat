@@ -11,7 +11,10 @@ use crate::{
     pty::{self, Pty, PtyOutput},
 };
 use std::sync::Arc;
-use stoatty_render::gpu::{GpuContext, Scroll};
+use stoatty_render::{
+    gpu::{GpuContext, Scroll},
+    render,
+};
 use stoatty_term::{
     grid::{Grid, Overlay},
     term::{Cursor, CursorShape, Terminal},
@@ -19,6 +22,7 @@ use stoatty_term::{
 };
 use winit::{
     application::ApplicationHandler,
+    dpi::LogicalSize,
     event::{ElementState, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState},
@@ -29,21 +33,24 @@ use winit::{
 /// unreadable size.
 const FONT_SIZE_FLOOR: u32 = 6;
 
-/// Open the stoatty window running the user's default shell.
+/// Open the stoatty window running the user's default shell, at the winit
+/// default window size.
 ///
 /// Blocks the calling thread for the lifetime of the window. See
 /// [`run_with_shell`] for the behavior and for running a specific command.
 pub fn run() {
-    run_with_shell(pty::default_shell());
+    run_with_shell(pty::default_shell(), None);
 }
 
 /// Open the stoatty window running `shell` as the PTY command, and run the
 /// event loop until the window closes or that command exits.
 ///
-/// Blocks the calling thread for the lifetime of the window. The loop is
-/// idle-driven (`ControlFlow::Wait`): frames are drawn on demand when PTY
-/// output arrives or the window is resized, not on a continuous timer.
-pub fn run_with_shell(shell: String) {
+/// `size` is the window's content extent in cells (`[cols, rows]`); the window
+/// opens sized to it, and `None` keeps the winit default window. Blocks the
+/// calling thread for the lifetime of the window. The loop is idle-driven
+/// (`ControlFlow::Wait`): frames are drawn on demand when PTY output arrives or
+/// the window is resized, not on a continuous timer.
+pub fn run_with_shell(shell: String, size: Option<[u16; 2]>) {
     let config = config::load().unwrap_or_else(|error| {
         eprintln!("stoatty: could not load config, using built-in defaults: {error}");
         config::embedded_default()
@@ -55,7 +62,13 @@ pub fn run_with_shell(shell: String) {
         .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(event_loop.create_proxy(), shell, theme, config.font_size);
+    let mut app = App::new(
+        event_loop.create_proxy(),
+        shell,
+        theme,
+        config.font_size,
+        size,
+    );
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -74,16 +87,26 @@ struct App {
     shell: String,
     theme: Theme,
     font_size: u32,
+    /// The window's content size in cells (`[cols, rows]`) to open sized to, or
+    /// `None` for the winit default window. Read once at window creation.
+    size: Option<[u16; 2]>,
     state: Option<State>,
 }
 
 impl App {
-    fn new(proxy: EventLoopProxy<PtyEvent>, shell: String, theme: Theme, font_size: u32) -> App {
+    fn new(
+        proxy: EventLoopProxy<PtyEvent>,
+        shell: String,
+        theme: Theme,
+        font_size: u32,
+        size: Option<[u16; 2]>,
+    ) -> App {
         App {
             proxy,
             shell,
             theme,
             font_size,
+            size,
             state: None,
         }
     }
@@ -134,11 +157,15 @@ impl ApplicationHandler<PtyEvent> for App {
             return;
         }
 
-        let window = Arc::new(
-            event_loop
-                .create_window(Window::default_attributes().with_title("stoatty"))
-                .expect("create window"),
-        );
+        let mut attributes = Window::default_attributes().with_title("stoatty");
+        if let Some([cols, rows]) = self.size {
+            let [cell_width, cell_height] = render::cell_size(self.font_size, 1.0);
+            attributes = attributes.with_inner_size(LogicalSize::new(
+                cols as f32 * cell_width,
+                rows as f32 * cell_height,
+            ));
+        }
+        let window = Arc::new(event_loop.create_window(attributes).expect("create window"));
 
         let size = window.inner_size();
         let scale_factor = window.scale_factor();

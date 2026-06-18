@@ -8,5 +8,5 @@
 mod launcher;
 
 fn main() {
-    launcher::run("example_diagnostics_app");
+    launcher::run("example_diagnostics_app", [48, 10]);
 }

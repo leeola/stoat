@@ -7,5 +7,5 @@
 mod launcher;
 
 fn main() {
-    launcher::run("example_split_scroll_app");
+    launcher::run("example_split_scroll_app", [60, 16]);
 }

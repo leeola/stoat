@@ -49,6 +49,18 @@ impl CellMetrics {
     }
 }
 
+/// The `[width, height]` of one cell, in pixels, for `font_size` at
+/// `scale_factor`.
+///
+/// A windowing layer sizes a window to a cols-by-rows cell extent by
+/// multiplying by this, matching the cell rectangle the renderer lays the grid
+/// out on. Pass `scale_factor` 1.0 for logical pixels, leaving the display
+/// scaling to the window toolkit.
+pub fn cell_size(font_size: u32, scale_factor: f32) -> [f32; 2] {
+    let metrics = CellMetrics::from_font_size(font_size, scale_factor);
+    [metrics.width, metrics.height]
+}
+
 #[cfg(test)]
 mod tests {
     use super::CellMetrics;

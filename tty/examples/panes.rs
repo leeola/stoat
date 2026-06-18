@@ -7,5 +7,5 @@
 mod launcher;
 
 fn main() {
-    launcher::run("example_panes_app");
+    launcher::run("example_panes_app", [74, 22]);
 }
