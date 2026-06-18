@@ -26,6 +26,12 @@ pub struct Config {
     #[serde(default)]
     pub font_size: u32,
 
+    /// Ordered cascade of font family names, most preferred first. The renderer
+    /// shapes text with the first family it finds installed, so later entries
+    /// are fallbacks for when an earlier one is missing.
+    #[serde(default)]
+    pub font_family: Vec<String>,
+
     /// Name of the [`themes`](Self::themes) entry colors resolve against.
     #[serde(default)]
     pub theme: String,
@@ -273,6 +279,7 @@ mod tests {
     fn embedded_default_carries_the_shipped_config() {
         let config = embedded_default();
         assert_eq!(config.font_size, 15);
+        assert_eq!(config.font_family, ["JetBrains Mono", "monospace"]);
         assert_eq!(config.theme, "zed");
     }
 

@@ -9,6 +9,11 @@
 # (Retina) and a standard display.
 font_size = 15
 
+# Ordered cascade of font family names, most preferred first. The renderer shapes
+# text with the first family installed; "monospace" is a generic fallback to the
+# system's default monospace.
+font_family = ["JetBrains Mono", "monospace"]
+
 # Name of the [themes.<name>] entry the terminal resolves colors against.
 theme = "zed"
 
