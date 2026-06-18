@@ -18,7 +18,7 @@ use cosmic_text::{
     Attrs, Buffer as CosmicBuffer, CacheKey, Family, Font, FontSystem, Metrics, Shaping,
     SwashCache,
 };
-use std::collections::HashMap;
+use rustc_hash::FxHashMap;
 use stoatty_term::{
     grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle},
     term::Damage,
@@ -147,7 +147,7 @@ pub struct TextPass {
     swash_cache: SwashCache,
     /// Keyed by the scale's bit pattern, so a fractional text-run scale caches
     /// alongside the integer cell scales.
-    shape_cache: HashMap<(char, u32), Option<CacheKey>>,
+    shape_cache: FxHashMap<(char, u32), Option<CacheKey>>,
     /// The shaped glyphs of each grid row from the previous frame, indexed by
     /// row, so an unchanged row reuses them instead of re-shaping. Rebuilt for
     /// damaged rows, the cursor's old and new rows, and (wholesale) on resize or
@@ -358,7 +358,7 @@ impl TextPass {
             family,
             ligatures,
             swash_cache,
-            shape_cache: HashMap::new(),
+            shape_cache: FxHashMap::default(),
             glyph_row_cache: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
@@ -2104,5 +2104,65 @@ mod tests {
             idle * 4 < full,
             "an unchanged-grid frame ({idle:?}) should beat a full rebuild ({full:?}) by over 4x"
         );
+    }
+
+    #[test]
+    #[ignore = "timing measurement; run with: cargo test -p stoatty_render --lib -- --ignored cache_lookup_cost"]
+    fn cache_lookup_cost() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let (rows, cols) = (50, 200);
+        let mut grid = Grid::new(rows, cols);
+        for row in 0..rows {
+            let text: String = (0..cols)
+                .map(|col| char::from(b'a' + (col % 26) as u8))
+                .collect();
+            fill_row(&mut grid, row, &text);
+        }
+        let resolution = [1280.0, 800.0];
+        let idle_damage = Damage::Partial(vec![false; rows]);
+        let frame = |scroll, damage| Frame {
+            cursor: None,
+            scroll,
+            damage,
+        };
+        let no_scroll = Scroll {
+            grid: 0.0,
+            region: 0.0,
+            popovers: &[],
+        };
+
+        // Warm the cache and atlas with a full build.
+        pass.prepare(
+            &device,
+            &queue,
+            &grid,
+            resolution,
+            &frame(no_scroll, &Damage::Full),
+        );
+
+        // A changing scroll forces the full grid-glyph build -- every glyph's atlas
+        // lookup -- each frame, but reshapes no row, isolating the cache lookups
+        // from harfbuzz.
+        let iterations = 100;
+        let start = std::time::Instant::now();
+        for i in 0..iterations {
+            let scroll = Scroll {
+                grid: i as f32 * 0.01,
+                region: 0.0,
+                popovers: &[],
+            };
+            pass.prepare(
+                &device,
+                &queue,
+                &grid,
+                resolution,
+                &frame(scroll, &idle_damage),
+            );
+        }
+        let per_call = start.elapsed() / iterations;
+
+        eprintln!("grid build without reshape {rows}x{cols}: {per_call:?} per frame");
     }
 }

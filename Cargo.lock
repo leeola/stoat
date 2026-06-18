@@ -4103,6 +4103,7 @@ dependencies = [
  "futures",
  "lru",
  "raw-window-handle",
+ "rustc-hash 2.1.2",
  "stoatty_term",
  "swash",
  "wgpu",

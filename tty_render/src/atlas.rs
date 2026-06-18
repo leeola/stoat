@@ -13,6 +13,7 @@
 use cosmic_text::{CacheKey, FontSystem, SwashCache, SwashImage};
 use etagere::{size2, AllocId, Allocation, BucketedAtlasAllocator};
 use lru::LruCache;
+use rustc_hash::FxBuildHasher;
 use std::collections::HashSet;
 use swash::scale::image::Content;
 use wgpu::{
@@ -122,7 +123,7 @@ struct Atlas {
     packer: BucketedAtlasAllocator,
     size: u32,
     max_dim: u32,
-    cache: LruCache<CacheKey, CachedGlyph>,
+    cache: LruCache<CacheKey, CachedGlyph, FxBuildHasher>,
     in_use: HashSet<CacheKey>,
 }
 
@@ -139,7 +140,7 @@ impl Atlas {
             packer: BucketedAtlasAllocator::new(size2(size as i32, size as i32)),
             size,
             max_dim,
-            cache: LruCache::unbounded(),
+            cache: LruCache::unbounded_with_hasher(FxBuildHasher),
             in_use: HashSet::new(),
         }
     }

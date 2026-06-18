@@ -17,3 +17,4 @@ cosmic-text.workspace = true
 swash.workspace = true
 etagere.workspace = true
 lru.workspace = true
+rustc-hash.workspace = true
