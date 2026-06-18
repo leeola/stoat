@@ -52,6 +52,9 @@ pub struct Terminal {
     theme: Theme,
     palette: [Rgb; PALETTE_LEN],
     apc: ApcScanner,
+    /// Recognizes XTVERSION queries the vte parser leaves unanswered, so
+    /// [`Self::advance`] can reply with [`XTVERSION_REPLY`].
+    xtversion: XtVersionScanner,
     /// Border regions set by `Gstoatty;border` frames, stamped onto the grid by
     /// [`Self::project`]. They persist until a `Gstoatty;reset` frame clears
     /// them, since the VT projection resets each cell's borders every frame.
@@ -135,6 +138,7 @@ impl Terminal {
             theme,
             palette,
             apc: ApcScanner::default(),
+            xtversion: XtVersionScanner::default(),
             borders: Vec::new(),
             scales: Vec::new(),
             popovers: Vec::new(),
@@ -156,11 +160,19 @@ impl Terminal {
     /// before the bytes reach the parser. The bytes are still fed to the parser
     /// verbatim: alacritty consumes the APC string and ignores it, so feeding it
     /// is harmless and avoids the desync that removing bytes would risk.
+    ///
+    /// XTVERSION queries (`CSI > Ps q`) are answered here too. The vte parser
+    /// dispatches every other host query, but not this one, so the driver
+    /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) {
         for payload in self.apc.scan(bytes) {
             if let Some(command) = command::decode(&payload) {
                 self.apply_command(command);
             }
+        }
+
+        for _ in 0..self.xtversion.scan(bytes) {
+            self.responses.push(XTVERSION_REPLY.as_bytes());
         }
 
         self.parser.advance(&mut self.term, bytes);
@@ -169,10 +181,11 @@ impl Terminal {
     /// Take the bytes the terminal wants written back to the PTY, leaving none
     /// buffered.
     ///
-    /// Host queries fed to [`Self::advance`] (device attributes, device-status
-    /// and cursor-position reports, keyboard-mode queries) produce replies the
-    /// shell blocks on; the caller must write them back to the PTY for an
-    /// interactive shell to start. Returns empty when the stream held no query.
+    /// Host queries fed to [`Self::advance`] (device attributes, XTVERSION,
+    /// device-status and cursor-position reports, keyboard-mode queries) produce
+    /// replies the shell blocks on; the caller must write them back to the PTY
+    /// for an interactive shell to start. Returns empty when the stream held no
+    /// query.
     pub fn take_responses(&mut self) -> Vec<u8> {
         self.responses.take()
     }
@@ -330,6 +343,12 @@ impl ResponseSink {
         let mut bytes = self.bytes.borrow_mut();
         mem::take(&mut *bytes)
     }
+
+    /// Append `bytes` to the buffer, for a reply the driver synthesizes itself
+    /// (XTVERSION) rather than receiving from the `Term` listener.
+    fn push(&self, bytes: &[u8]) {
+        self.bytes.borrow_mut().extend_from_slice(bytes);
+    }
 }
 
 impl EventListener for ResponseSink {
@@ -431,6 +450,77 @@ impl ApcScanner {
             self.payload.clear();
             self.state = ApcState::Ground;
         }
+    }
+}
+
+/// The XTVERSION reply naming this terminal, answering `CSI > Ps q`.
+///
+/// A DCS string (`ESC P > | name ESC \`) carrying the terminal name and version,
+/// the response xterm defined for XTVERSION. Programs such as fish query it at
+/// startup and gate optional features on the answer; the vte parser does not
+/// dispatch it, so the driver synthesizes this reply itself.
+const XTVERSION_REPLY: &str = concat!("\x1bP>|stoatty(", env!("CARGO_PKG_VERSION"), ")\x1b\\");
+
+/// Recognizes XTVERSION queries (`CSI > Ps q`) in a VT byte stream.
+///
+/// The vte parser dispatches `CSI Ps q` (DECSCUSR) but not the `>`-prefixed
+/// XTVERSION form, so the driver watches the bytes for it the way [`ApcScanner`]
+/// watches for APC frames, tracking the `ESC [ > ... q` framing across
+/// [`Terminal::advance`] calls. The parameter bytes are ignored since the reply
+/// is fixed; a `>`-CSI ending in any other final byte (such as the `\x1b[>4;1m`
+/// modify-other-keys sequence) is not mistaken for a query.
+#[derive(Default)]
+struct XtVersionScanner {
+    state: CsiState,
+}
+
+#[derive(Clone, Copy, Default)]
+enum CsiState {
+    #[default]
+    Ground,
+    Escape,
+    /// Seen `ESC [`, waiting on the `>` that marks the private query.
+    CsiEntry,
+    /// Seen `ESC [ >`, consuming parameter bytes until the final byte.
+    CsiGt,
+}
+
+impl XtVersionScanner {
+    /// Feed `bytes`, returning how many XTVERSION queries completed within them.
+    ///
+    /// A query split across calls is retained until its final `q` arrives.
+    fn scan(&mut self, bytes: &[u8]) -> usize {
+        let mut hits = 0;
+
+        for &byte in bytes {
+            self.state = match self.state {
+                CsiState::Ground => match byte {
+                    ESC => CsiState::Escape,
+                    _ => CsiState::Ground,
+                },
+                CsiState::Escape => match byte {
+                    b'[' => CsiState::CsiEntry,
+                    ESC => CsiState::Escape,
+                    _ => CsiState::Ground,
+                },
+                CsiState::CsiEntry => match byte {
+                    b'>' => CsiState::CsiGt,
+                    _ => CsiState::Ground,
+                },
+                CsiState::CsiGt => match byte {
+                    // CSI parameter and intermediate bytes keep the sequence open.
+                    0x20..=0x3f => CsiState::CsiGt,
+                    b'q' => {
+                        hits += 1;
+                        CsiState::Ground
+                    },
+                    ESC => CsiState::Escape,
+                    _ => CsiState::Ground,
+                },
+            };
+        }
+
+        hits
     }
 }
 
@@ -854,7 +944,7 @@ fn cube_channel(level: u8) -> u8 {
 
 #[cfg(test)]
 mod tests {
-    use super::{ApcScanner, Cursor, CursorShape, Terminal};
+    use super::{ApcScanner, Cursor, CursorShape, Terminal, XTVERSION_REPLY};
     use crate::{
         grid::{
             Bar, Border, BorderStyle, Cell, Flags, Grid, Icon, IconKind, Overlay, Rgb, Scale,
@@ -998,6 +1088,60 @@ mod tests {
             terminal.take_responses().is_empty(),
             "buffer drained after taking"
         );
+    }
+
+    #[test]
+    fn answers_da1_param_zero_form() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b[0c");
+        assert_eq!(
+            terminal.take_responses(),
+            b"\x1b[?6c".to_vec(),
+            "the param-0 DA1 form fish sends is answered like the bare form"
+        );
+    }
+
+    #[test]
+    fn answers_xtversion_query() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b[>0q");
+        assert_eq!(terminal.take_responses(), XTVERSION_REPLY.as_bytes());
+    }
+
+    #[test]
+    fn does_not_mistake_other_private_csi_for_xtversion() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        // modifyOtherKeys (`CSI > 4 ; 1 m`) is a `>`-prefixed CSI that does not
+        // end in `q`, so it must not draw an XTVERSION reply.
+        terminal.advance(b"\x1b[>4;1m");
+        assert!(terminal.take_responses().is_empty());
+    }
+
+    #[test]
+    fn answers_fish_startup_handshake() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        // fish's startup burst: kitty-keyboard query (unanswered by default),
+        // XTVERSION, then DA1 as its sentinel. The replies come back in order.
+        terminal.advance(b"\x1b[?u\x1b[>0q\x1b[0c");
+
+        let mut expected = XTVERSION_REPLY.as_bytes().to_vec();
+        expected.extend_from_slice(b"\x1b[?6c");
+        assert_eq!(terminal.take_responses(), expected);
+    }
+
+    #[test]
+    fn xtversion_query_split_across_advances_is_answered() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+
+        terminal.advance(b"\x1b[>0");
+        assert!(terminal.take_responses().is_empty(), "query incomplete");
+
+        terminal.advance(b"q");
+        assert_eq!(terminal.take_responses(), XTVERSION_REPLY.as_bytes());
     }
 
     #[test]
