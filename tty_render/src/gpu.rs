@@ -160,7 +160,8 @@ impl Renderer {
         );
         self.decoration
             .prepare(device, queue, grid, resolution, scroll.grid);
-        self.text.prepare(device, queue, grid, resolution, scroll);
+        self.text
+            .prepare(device, queue, grid, resolution, scroll, cursor);
         self.overlay.prepare(device, queue, grid, resolution);
         self.icon.prepare(device, queue, grid.icons(), resolution);
         self.bar.prepare(device, queue, grid.bars(), resolution);

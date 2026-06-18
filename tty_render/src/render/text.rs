@@ -383,6 +383,7 @@ impl TextPass {
         grid: &Grid,
         resolution: [f32; 2],
         scroll: Scroll<'_>,
+        cursor: Option<[f32; 2]>,
     ) {
         let globals = TextGlobals {
             resolution,
@@ -395,7 +396,7 @@ impl TextPass {
         self.prepare_underlines(device, queue, grid, scroll.grid);
 
         self.atlas.begin_frame();
-        let grid_pending = self.rasterize_visible(device, queue, grid);
+        let grid_pending = self.rasterize_visible(device, queue, grid, cursor_cell(cursor));
         let overlay_groups = self.rasterize_overlays(device, queue, grid);
 
         let region = grid.scroll_region();
@@ -764,6 +765,7 @@ impl TextPass {
         device: &Device,
         queue: &Queue,
         grid: &Grid,
+        cursor_cell: Option<(usize, usize)>,
     ) -> Vec<PendingGlyph> {
         let mut pending = Vec::new();
 
@@ -796,9 +798,14 @@ impl TextPass {
                 // With ligatures off, every cell is shaped on its own. A scaled
                 // glyph or a character the primary font lacks (icon, CJK) always
                 // is, through the single-char path that keeps the symbols-font
-                // fallback. Only same-size primary-covered cells run-shape, where
-                // ligatures form.
-                if !self.ligatures || scale != 1 || !covers(cell.ch) {
+                // fallback. The cursor cell is too, so a ligature never spans it
+                // and the character under the cursor stays visible. Only same-size
+                // primary-covered cells run-shape, where ligatures form.
+                if !self.ligatures
+                    || scale != 1
+                    || !covers(cell.ch)
+                    || cursor_cell == Some((row, col))
+                {
                     if let Some(key) = self.glyph_key(cell.ch, f32::from(scale))
                         && self
                             .atlas
@@ -832,7 +839,8 @@ impl TextPass {
                         && next.fg == cell.fg
                         && next.bg == cell.bg
                         && next.flags == cell.flags
-                        && covers(next.ch);
+                        && covers(next.ch)
+                        && cursor_cell != Some((row, end));
                     if !groups {
                         break;
                     }
@@ -1364,6 +1372,17 @@ fn cell_glyph_scale(cell: &Cell) -> Option<u8> {
     }
 }
 
+/// The grid cell the cursor block sits on as `(row, col)`, or `None` when the
+/// cursor is hidden.
+///
+/// `cursor` is the eased block position in fractional cell coordinates
+/// (`[col, row]`). Rounding to the nearest cell tracks the cell the block mostly
+/// covers, so the break follows the visible block as it eases.
+fn cursor_cell(cursor: Option<[f32; 2]>) -> Option<(usize, usize)> {
+    let [col, row] = cursor?;
+    Some((row.round() as usize, col.round() as usize))
+}
+
 /// The `(col, row, char)` cells an overlay's content occupies, laid out at
 /// `scale` times the cell size.
 ///
@@ -1455,9 +1474,10 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::{
-        build_underline_instances, cell_glyph_scale, cell_rect_scissor, glyph_family, glyph_origin,
-        load_bundled_fonts, overlay_content_cells, resolve_primary_family, run_text_and_columns,
-        shape_family, shape_run, text_run_origin, STYLE_DOTTED, SYMBOLS_FAMILY,
+        build_underline_instances, cell_glyph_scale, cell_rect_scissor, cursor_cell, glyph_family,
+        glyph_origin, load_bundled_fonts, overlay_content_cells, resolve_primary_family,
+        run_text_and_columns, shape_family, shape_run, text_run_origin, STYLE_DOTTED,
+        SYMBOLS_FAMILY,
     };
     use crate::render::CellMetrics;
     use cosmic_text::{
@@ -1550,6 +1570,21 @@ mod tests {
             "covered cell draws no glyph"
         );
         assert_eq!(cell_glyph_scale(&Cell::default()), None, "blank cell");
+    }
+
+    #[test]
+    fn cursor_cell_rounds_position_to_row_col() {
+        assert_eq!(cursor_cell(None), None, "a hidden cursor breaks no run");
+        assert_eq!(
+            cursor_cell(Some([3.0, 5.0])),
+            Some((5, 3)),
+            "the [col, row] position maps to a (row, col) cell"
+        );
+        assert_eq!(
+            cursor_cell(Some([3.4, 5.6])),
+            Some((6, 3)),
+            "a position mid-ease rounds to the nearest cell"
+        );
     }
 
     #[test]
