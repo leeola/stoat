@@ -70,6 +70,52 @@ const SIDEBAR: [&str; 7] = [
     "Cargo.toml",
 ];
 
+/// The `render.rs` the sidebar lists, shown in the scrolling pane as one
+/// coherent file so the scroll reads as real source rather than a repeating
+/// cycle. Each line fits the pane's 25-column interior so none clips.
+const RENDER_RS: [&str; BUFFER_LINES] = [
+    "use crate::grid::Grid;",
+    "use crate::cell::Rgb;",
+    "",
+    "/// Draws a cell grid.",
+    "pub struct Renderer {",
+    "    grid: Grid,",
+    "    bg: Rgb,",
+    "}",
+    "",
+    "impl Renderer {",
+    "    pub fn new(",
+    "        grid: Grid,",
+    "    ) -> Renderer {",
+    "        let bg =",
+    "            Rgb::black();",
+    "        Self { grid, bg }",
+    "    }",
+    "",
+    "    /// Paint one frame.",
+    "    pub fn frame(",
+    "        &self,",
+    "    ) -> Vec<u8> {",
+    "        let mut out =",
+    "            Vec::new();",
+    "        for c in",
+    "            self.cells()",
+    "        {",
+    "            out.push(c);",
+    "        }",
+    "        out",
+    "    }",
+    "",
+    "    /// Grid width.",
+    "    pub fn cols(",
+    "        &self,",
+    "    ) -> usize {",
+    "        self.grid.cols()",
+    "    }",
+    "}",
+    "",
+];
+
 fn main() {
     let mut out = Vec::new();
     out.extend_from_slice(b"\x1b[2J");
@@ -157,21 +203,10 @@ fn draw_viewport(out: &mut Vec<u8>, cursor_line: usize) {
     cup(out, inner_top + (cursor_line - scroll) as u16, inner_left);
 }
 
-/// The text of buffer line `index`: a line number and a cycling code fragment,
-/// so the scroll is legible as the numbers and content move.
+/// The text of buffer line `index`: a line number and the source line at that
+/// position in [`RENDER_RS`], so the scroll reads as one continuous file.
 fn buffer_line(index: usize) -> String {
-    const SNIPPETS: [&str; 8] = [
-        "fn render(&self) {",
-        "    let mut out = Vec::new();",
-        "    for cell in self.cells() {",
-        "        out.push(cell.glyph);",
-        "    }",
-        "    out",
-        "}",
-        "",
-    ];
-
-    format!("{:>3}  {}", index + 1, SNIPPETS[index % SNIPPETS.len()])
+    format!("{:>3}  {}", index + 1, RENDER_RS[index])
 }
 
 /// Emit a Cursor Position escape to the 0-based grid (`row`, `col`).
