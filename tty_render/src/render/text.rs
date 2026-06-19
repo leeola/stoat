@@ -19,6 +19,7 @@ use cosmic_text::{
     SwashCache,
 };
 use rustc_hash::FxHashMap;
+use std::sync::Arc;
 use stoatty_term::{
     grid::{Cell, Grid, Overlay, Rgb, Scale, UnderlineStyle},
     term::Damage,
@@ -143,6 +144,12 @@ pub struct TextPass {
     /// entry present in the font db, or `None` to shape with the generic
     /// monospace fallback.
     family: Option<String>,
+    /// The face [`Self::family`] resolves to, looked up once at construction and
+    /// reused so a frame's per-cell coverage test is a charmap lookup, not a
+    /// font-database query. `None` when no family resolves, so coverage falls
+    /// through to the fallback font. Fixed for the pass's lifetime, as the
+    /// family is.
+    primary_font: Option<Arc<Font>>,
     /// Whether adjacent same-style cells shape together so the font's ligatures
     /// form across cells. When false, every cell is shaped on its own.
     ligatures: bool,
@@ -188,6 +195,7 @@ impl TextPass {
     ) -> TextPass {
         let family = resolve_primary_family(&font_system, font_family);
         let baseline = probe_baseline(&mut font_system, metrics, shape_family(&family));
+        let primary_font = resolve_primary_font(&mut font_system, &family);
         let swash_cache = SwashCache::new();
         let atlas = GlyphAtlas::new(device);
 
@@ -355,6 +363,7 @@ impl TextPass {
             atlas,
             font_system,
             family,
+            primary_font,
             ligatures,
             swash_cache,
             shape_cache: FxHashMap::default(),
@@ -870,17 +879,11 @@ impl TextPass {
         let rows = grid.rows();
         let cols = grid.cols();
 
-        // Resolve the primary face once, so each cell's coverage check is a
-        // charmap lookup rather than a font-database query.
+        // Reuse the face resolved once at construction, so each cell's coverage
+        // check is a charmap lookup rather than a per-frame font-database query.
         let primary_name = self.family.clone();
         let primary = shape_family(&primary_name);
-        let primary_font = {
-            let id = self.font_system.db().query(&Query {
-                families: &[primary],
-                ..Default::default()
-            });
-            id.and_then(|id| self.font_system.get_font(id, Weight::NORMAL))
-        };
+        let primary_font = self.primary_font.clone();
         let covers = |ch: char| {
             primary_font
                 .as_ref()
@@ -1468,6 +1471,21 @@ fn family_covers(font_system: &mut FontSystem, family: Family<'_>, ch: char) -> 
 /// Whether `font` has a glyph for `ch`, read from its character map.
 fn font_covers(font: &Font, ch: char) -> bool {
     font.as_swash().charmap().map(ch) != 0
+}
+
+/// Resolve the primary shaping `family` to its face, for the per-cell coverage
+/// test. `None` when no family resolves, so coverage falls through to the
+/// fallback font. Looked up once when the family is set, since it is fixed for
+/// the pass's lifetime.
+fn resolve_primary_font(
+    font_system: &mut FontSystem,
+    family: &Option<String>,
+) -> Option<Arc<Font>> {
+    let id = font_system.db().query(&Query {
+        families: &[shape_family(family)],
+        ..Default::default()
+    })?;
+    font_system.get_font(id, Weight::NORMAL)
 }
 
 /// Build the [`FontSystem`] a [`TextPass`] shapes with: cosmic-text's system
