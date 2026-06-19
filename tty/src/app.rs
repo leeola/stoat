@@ -23,7 +23,7 @@ use stoatty_term::{
 use winit::{
     application::ApplicationHandler,
     dpi::LogicalSize,
-    event::{ElementState, WindowEvent},
+    event::{ElementState, MouseScrollDelta, WindowEvent},
     event_loop::{ActiveEventLoop, ControlFlow, EventLoop, EventLoopProxy},
     keyboard::{Key, ModifiersState, NamedKey},
     window::{Window, WindowId},
@@ -198,6 +198,10 @@ struct State {
     /// The scroll region's declared offset at the previous frame, so the next
     /// one can seed the ease with the change since.
     last_region_offset: f32,
+    /// Unspent vertical wheel travel in physical pixels, accumulated from
+    /// high-resolution `PixelDelta` events until it reaches a whole cell so a
+    /// trackpad scrolls scrollback smoothly without losing sub-line motion.
+    wheel_pixels: f64,
 }
 
 impl ApplicationHandler<PtyEvent> for App {
@@ -276,6 +280,7 @@ impl ApplicationHandler<PtyEvent> for App {
             grid_scroll: 0.0,
             region_scroll: 0.0,
             last_region_offset: 0.0,
+            wheel_pixels: 0.0,
         });
     }
 
@@ -449,6 +454,18 @@ impl ApplicationHandler<PtyEvent> for App {
 
                 if let Some(bytes) = encode_key(&event.logical_key, state.modifiers.control_key()) {
                     let _ = state.pty.write(&bytes);
+                    // Typing jumps the view back to the live prompt, the way a
+                    // terminal resets scrollback on input.
+                    state.terminal.scroll_to_bottom();
+                }
+            },
+            WindowEvent::MouseWheel { delta, .. } => {
+                let cell_height =
+                    render::cell_size(state.font_size, state.scale_factor as f32)[1] as f64;
+                let lines = wheel_lines(delta, &mut state.wheel_pixels, cell_height);
+                if lines != 0 {
+                    state.terminal.scroll_display(lines);
+                    state.window.request_redraw();
                 }
             },
             _ => {},
@@ -518,6 +535,25 @@ fn ctrl_byte(s: &str) -> Option<Vec<u8>> {
     }
 
     Some(vec![(c.to_ascii_uppercase() as u8) & 0x1f])
+}
+
+/// Resolve a wheel `delta` to whole lines of scrollback to move, positive
+/// scrolling up into history.
+///
+/// A `LineDelta` is already in lines. A high-resolution `PixelDelta` accrues in
+/// `pixels` against `cell_height` and yields whole lines once a cell's worth has
+/// built up, carrying the sub-line remainder so successive small deltas are not
+/// lost. `LineDelta` leaves the accumulator untouched.
+fn wheel_lines(delta: MouseScrollDelta, pixels: &mut f64, cell_height: f64) -> i32 {
+    match delta {
+        MouseScrollDelta::LineDelta(_, y) => y.round() as i32,
+        MouseScrollDelta::PixelDelta(position) => {
+            *pixels += position.y;
+            let lines = (*pixels / cell_height) as i32;
+            *pixels -= f64::from(lines) * cell_height;
+            lines
+        },
+    }
 }
 
 /// Step the animated cursor toward `target`, returning the new position and
@@ -592,10 +628,14 @@ fn step_region_scroll(scroll: f32, delta: f32) -> (f32, bool) {
 mod tests {
     use super::{
         ease, encode_key, font_step, popover_overflow, step_grid_scroll, step_popover_scroll,
-        step_region_scroll,
+        step_region_scroll, wheel_lines,
     };
     use stoatty_term::grid::{Overlay, Rgb};
-    use winit::keyboard::{Key, NamedKey};
+    use winit::{
+        dpi::PhysicalPosition,
+        event::MouseScrollDelta,
+        keyboard::{Key, NamedKey},
+    };
 
     #[test]
     fn ease_steps_toward_then_settles() {
@@ -691,6 +731,43 @@ mod tests {
             font_step(true, &Key::Character("+".into())),
             None,
             "shifted plus no longer zooms"
+        );
+    }
+
+    #[test]
+    fn wheel_lines_resolves_line_and_pixel_deltas() {
+        // A LineDelta is lines directly and does not touch the accumulator.
+        let mut pixels = 0.0;
+        assert_eq!(
+            wheel_lines(MouseScrollDelta::LineDelta(0.0, 3.0), &mut pixels, 20.0),
+            3
+        );
+        assert_eq!(
+            pixels, 0.0,
+            "LineDelta leaves the pixel accumulator untouched"
+        );
+
+        // A PixelDelta steps whole lines once a cell's worth accrues, carrying
+        // the remainder so a following small delta completes the next line.
+        let mut pixels = 0.0;
+        let px = |y| MouseScrollDelta::PixelDelta(PhysicalPosition::new(0.0, y));
+        assert_eq!(
+            wheel_lines(px(50.0), &mut pixels, 20.0),
+            2,
+            "50px over a 20px cell is two lines"
+        );
+        assert_eq!(pixels, 10.0, "the sub-line remainder carries over");
+        assert_eq!(
+            wheel_lines(px(10.0), &mut pixels, 20.0),
+            1,
+            "the carried 10px completes a line"
+        );
+        assert_eq!(pixels, 0.0);
+
+        assert_eq!(
+            wheel_lines(px(5.0), &mut pixels, 20.0),
+            0,
+            "below a line scrolls nothing yet"
         );
     }
 

@@ -286,8 +286,10 @@ impl Terminal {
     ///
     /// The scroll delta is the growth in scrollback since the previous call: the
     /// rows live output pushed off the top. It is the renderer's signal to ease
-    /// vertical scrolling. User scrollback is not counted, and it saturates to
-    /// zero once the scrollback history fills.
+    /// vertical scrolling. It is reported as zero while the user has scrolled
+    /// back (a non-zero display offset), since the viewport is then pinned to its
+    /// content as history grows and must not glide, and it saturates to zero once
+    /// the scrollback history fills.
     ///
     /// The returned [`Damage`] reports the VT cell rows this call rewrote. It does
     /// not account for the stoatty APC overlays (borders, scales, popovers, icons,
@@ -334,8 +336,12 @@ impl Terminal {
         apply_bars(grid, &self.bars);
 
         let history = self.term.history_size();
-        let scrolled = history.saturating_sub(self.last_history);
+        let grew = history.saturating_sub(self.last_history);
         self.last_history = history;
+        // A non-zero display offset means the user has scrolled back: the
+        // viewport is pinned to its content as history grows, so report no
+        // scroll and leave the renderer's auto-scroll ease idle.
+        let scrolled = if offset > 0 { 0 } else { grew };
 
         self.term.reset_damage();
         (cursor, scrolled, dirty)
@@ -1230,6 +1236,27 @@ mod tests {
             ('c', 'd'),
             "scroll_to_bottom restores the live view"
         );
+    }
+
+    #[test]
+    fn project_reports_no_scroll_while_scrolled_back() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        terminal.advance(b"a\r\nb\r\nc\r\nd");
+        terminal.project(&mut grid);
+
+        // Scrolled back, output grows history but the pinned view must not ease.
+        terminal.scroll_display(1);
+        terminal.advance(b"\r\ne\r\nf");
+        let (_, scrolled, _) = terminal.project(&mut grid);
+        assert_eq!(scrolled, 0, "no auto-scroll while the view is pinned back");
+
+        // Back at the bottom, live growth counts again.
+        terminal.scroll_to_bottom();
+        terminal.advance(b"\r\ng");
+        let (_, scrolled, _) = terminal.project(&mut grid);
+        assert!(scrolled > 0, "live growth resumes counting at the bottom");
     }
 
     #[test]
