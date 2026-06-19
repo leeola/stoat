@@ -181,6 +181,12 @@ pub struct TextPass {
     /// when scaled cells are present. Holds [`CacheKey`]s, not atlas rects, so it
     /// survives atlas growth.
     glyph_row_cache: Vec<Vec<PendingGlyph>>,
+    /// The built plain-glyph instances of each row from the previous frame, so a
+    /// damaged frame rebuilds and re-uploads only the rows that changed rather
+    /// than every glyph on screen. Holds resolved atlas rects, so an atlas grow
+    /// (which moves every UV) rebuilds all rows. Used only when no scroll region
+    /// is active; a region falls back to the whole-grid build and clears this.
+    plain_row_instances: Vec<Vec<TextInstance>>,
     /// The grid width [`Self::glyph_row_cache`] was built at; a change invalidates
     /// every cached row since columns shift.
     glyph_cache_cols: usize,
@@ -378,6 +384,7 @@ impl TextPass {
             swash_cache,
             shape_cache: FxHashMap::default(),
             glyph_row_cache: Vec::new(),
+            plain_row_instances: Vec::new(),
             glyph_cache_cols: 0,
             last_cursor_cell: None,
             baseline,
@@ -456,47 +463,59 @@ impl TextPass {
 
         self.atlas.begin_frame();
         let atlas_dims = self.atlas.texture_dims();
-        let any_rebuilt = self.rasterize_visible(device, queue, grid, cursor_cell(cursor), damage);
+        let rebuilt = self.rasterize_visible(device, queue, grid, cursor_cell(cursor), damage);
         let overlay_groups = self.rasterize_overlays(device, queue, grid);
 
         let region = grid.scroll_region();
 
-        // The grid-glyph instance buffers from last frame stay valid when nothing
-        // that feeds them changed: no row was rebuilt, the atlas did not grow (its
-        // size drives every UV), and no text runs are present (those rasterize
-        // below, after the grid instances would be built, so a text-run grow could
-        // not be seen here). Scroll no longer counts -- it rides the globals
-        // uniform, so a scroll-only frame reuses these buffers untouched.
-        let grid_unchanged =
-            !any_rebuilt && self.atlas.texture_dims() == atlas_dims && grid.text_runs().is_empty();
+        // The grid-glyph instances from last frame stay valid when nothing that
+        // feeds them changed: no row was rebuilt, the atlas did not grow (its size
+        // drives every UV), and no text runs are present (those rasterize below,
+        // after the grid instances are built, so a text-run grow could not be seen
+        // here). Scroll no longer counts -- it rides the globals uniform.
+        let atlas_grew = self.atlas.texture_dims() != atlas_dims;
+        let grid_unchanged = rebuilt.is_empty() && !atlas_grew && grid.text_runs().is_empty();
 
         if !grid_unchanged {
-            let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) =
-                self.collect_grid_glyphs().into_iter().partition(|glyph| {
-                    region.is_some_and(|region| region.contains(glyph.row, glyph.col))
-                });
+            match region {
+                // A scroll region splits each row's glyphs across the plain and
+                // region buffers, so build the whole grid and drop the per-row
+                // cache; the next region-free frame rebuilds it. Regions are rare,
+                // so this falls back rather than tracking the split per row.
+                Some(region) => {
+                    let (region_pending, plain_pending): (Vec<PendingGlyph>, Vec<PendingGlyph>) =
+                        self.collect_grid_glyphs()
+                            .into_iter()
+                            .partition(|glyph| region.contains(glyph.row, glyph.col));
 
-            let plain_instances = self.build_text_instances(device, queue, plain_pending);
-            let region_instances = self.build_text_instances(device, queue, region_pending);
+                    let plain_instances = self.build_text_instances(device, queue, plain_pending);
+                    let region_instances = self.build_text_instances(device, queue, region_pending);
 
-            self.count = plain_instances.len() as u32;
-            self.region_count = region_instances.len() as u32;
-            upload_instances(
-                device,
-                queue,
-                &plain_instances,
-                &mut self.instances,
-                &mut self.capacity,
-                "text instances",
-            );
-            upload_instances(
-                device,
-                queue,
-                &region_instances,
-                &mut self.region_instances,
-                &mut self.region_capacity,
-                "scroll region text instances",
-            );
+                    self.count = plain_instances.len() as u32;
+                    self.region_count = region_instances.len() as u32;
+                    upload_instances(
+                        device,
+                        queue,
+                        &plain_instances,
+                        &mut self.instances,
+                        &mut self.capacity,
+                        "text instances",
+                    );
+                    upload_instances(
+                        device,
+                        queue,
+                        &region_instances,
+                        &mut self.region_instances,
+                        &mut self.region_capacity,
+                        "scroll region text instances",
+                    );
+                    self.plain_row_instances.clear();
+                },
+                None => {
+                    let rebuild_all = atlas_grew || !grid.text_runs().is_empty();
+                    self.patch_plain_rows(device, queue, &rebuilt, rebuild_all);
+                },
+            }
         }
 
         self.region_scissor = region.and_then(|region| {
@@ -882,7 +901,7 @@ impl TextPass {
         grid: &Grid,
         cursor_cell: Option<(usize, usize)>,
         damage: &Damage,
-    ) -> bool {
+    ) -> Vec<usize> {
         let rows = grid.rows();
         let cols = grid.cols();
 
@@ -921,24 +940,90 @@ impl TextPass {
             covers: &covers,
             cursor_cell,
         };
-        let mut any_rebuilt = false;
+        let mut rebuilt = Vec::new();
         for row in 0..rows {
             let cursor_touched =
                 cursor_moved && (left_row == Some(row) || entered_row == Some(row));
             if rebuild_all || damage.is_dirty(row) || cursor_touched {
                 let row_glyphs = self.rasterize_row(device, queue, grid, row, &shaping);
                 self.glyph_row_cache[row] = row_glyphs;
-                any_rebuilt = true;
+                rebuilt.push(row);
             }
         }
 
-        any_rebuilt
+        rebuilt
     }
 
     /// The cached glyphs of every row, concatenated in row order, ready for
     /// [`Self::build_text_instances`].
     fn collect_grid_glyphs(&self) -> Vec<PendingGlyph> {
         self.glyph_row_cache.iter().flatten().copied().collect()
+    }
+
+    /// Rebuild and re-upload only the changed rows' plain-glyph instances.
+    ///
+    /// Unchanged rows reuse last frame's [`Self::plain_row_instances`]; the rows
+    /// in `rebuilt` rebuild from their cached glyphs, and `rebuild_all` rebuilds
+    /// every row (an atlas grow moved every UV, or text runs may grow it). Only
+    /// the buffer from the first changed row to the end is uploaded, since the
+    /// rows before it keep their bytes; a buffer that must grow is fully
+    /// re-uploaded. Used only with no scroll region, so every glyph is plain.
+    fn patch_plain_rows(
+        &mut self,
+        device: &Device,
+        queue: &Queue,
+        rebuilt: &[usize],
+        rebuild_all: bool,
+    ) {
+        self.region_count = 0;
+
+        let rows = self.glyph_row_cache.len();
+        let stale = self.plain_row_instances.len() != rows;
+        if stale {
+            self.plain_row_instances = vec![Vec::new(); rows];
+        }
+
+        let rows_to_build: Vec<usize> = if rebuild_all || stale {
+            (0..rows).collect()
+        } else {
+            rebuilt.to_vec()
+        };
+        let Some(&first) = rows_to_build.iter().min() else {
+            return;
+        };
+
+        for &row in &rows_to_build {
+            let glyphs = self.glyph_row_cache[row].clone();
+            self.plain_row_instances[row] = self.build_text_instances(device, queue, glyphs);
+        }
+
+        let offset: usize = self.plain_row_instances[..first].iter().map(Vec::len).sum();
+        let tail_len: usize = self.plain_row_instances[first..].iter().map(Vec::len).sum();
+        self.count = (offset + tail_len) as u32;
+        if offset + tail_len == 0 {
+            return;
+        }
+
+        if offset + tail_len > self.capacity {
+            // Growing the buffer drops its contents, so re-upload every row.
+            self.capacity = (offset + tail_len).next_power_of_two();
+            self.instances = alloc_instances(
+                device,
+                "text instances",
+                instance_bytes::<TextInstance>(self.capacity),
+            );
+            let all: Vec<TextInstance> =
+                self.plain_row_instances.iter().flatten().copied().collect();
+            queue.write_buffer(&self.instances, 0, bytemuck::cast_slice(&all));
+        } else {
+            let tail: Vec<TextInstance> = self.plain_row_instances[first..]
+                .iter()
+                .flatten()
+                .copied()
+                .collect();
+            let byte_offset = (offset * size_of::<TextInstance>()) as u64;
+            queue.write_buffer(&self.instances, byte_offset, bytemuck::cast_slice(&tail));
+        }
     }
 
     /// Shape and rasterize one grid row's glyphs, returning its placements.
