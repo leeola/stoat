@@ -15,11 +15,11 @@ use crate::{
 };
 use alacritty_terminal::{
     event::{Event, EventListener},
-    grid::Dimensions,
+    grid::{Dimensions, Scroll},
     term::{
         cell::{Cell as TermCell, Flags as TermFlags},
         color::Colors,
-        Config, RenderableCursor, TermDamage,
+        Config, RenderableCursor, TermDamage, TermMode,
     },
     vte::ansi::{Color, CursorShape as TermCursorShape, NamedColor, Processor},
     Term,
@@ -232,6 +232,48 @@ impl Terminal {
     /// it wholesale at the new size, so the grid follows without a separate call.
     pub fn resize(&mut self, rows: usize, cols: usize) {
         self.term.resize(GridSize { rows, cols });
+    }
+
+    /// Move the viewport `delta` lines through scrollback history: positive
+    /// scrolls up toward older output, negative scrolls back down toward the
+    /// live bottom, clamped to the saved history.
+    ///
+    /// The offset change fully damages the screen, so the next [`Self::project`]
+    /// repaints the scrolled-back view through the usual path.
+    pub fn scroll_display(&mut self, delta: i32) {
+        self.term.scroll_display(Scroll::Delta(delta));
+    }
+
+    /// Reset the viewport to the live bottom of history, so the next
+    /// [`Self::project`] shows current output again. Used to pin the view on
+    /// keyboard input.
+    pub fn scroll_to_bottom(&mut self) {
+        self.term.scroll_display(Scroll::Bottom);
+    }
+
+    /// Whether the alternate screen is active: a fullscreen app (a pager, an
+    /// editor) holds it and owns its own scrolling.
+    pub fn is_alt_screen(&self) -> bool {
+        self.term.mode().contains(TermMode::ALT_SCREEN)
+    }
+
+    /// Whether alternate-scroll (DECSET 1007) is on, so wheel motion on the
+    /// alternate screen should drive the app's arrow keys rather than local
+    /// scrollback.
+    pub fn alternate_scroll(&self) -> bool {
+        self.term.mode().contains(TermMode::ALTERNATE_SCROLL)
+    }
+
+    /// Whether the program enabled any mouse reporting, so wheel events should
+    /// be reported to it rather than scrolling the local viewport.
+    pub fn mouse_mode(&self) -> bool {
+        self.term.mode().intersects(TermMode::MOUSE_MODE)
+    }
+
+    /// Whether SGR mouse encoding (DECSET 1006) is on, selecting the SGR form
+    /// for a mouse report.
+    pub fn sgr_mouse(&self) -> bool {
+        self.term.mode().contains(TermMode::SGR_MOUSE)
     }
 
     /// Copy the parsed screen onto `grid` and return the cursor, the number of
@@ -1157,6 +1199,59 @@ mod tests {
         // A projection with no new output reports no scroll.
         let (_, scrolled, _) = terminal.project(&mut grid);
         assert_eq!(scrolled, 0, "no further scroll");
+    }
+
+    #[test]
+    fn scroll_display_moves_the_viewport_into_history_and_back() {
+        let mut terminal = Terminal::new(2, 4, Theme::default());
+        let mut grid = Grid::new(2, 4);
+
+        // Four lines into a two-row screen push "a" and "b" into history.
+        terminal.advance(b"a\r\nb\r\nc\r\nd");
+        terminal.project(&mut grid);
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(1, 0).ch),
+            ('c', 'd'),
+            "the live view shows the bottom of output"
+        );
+
+        terminal.scroll_display(1);
+        terminal.project(&mut grid);
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(1, 0).ch),
+            ('b', 'c'),
+            "scrolling up one line slides the prior line into view"
+        );
+
+        terminal.scroll_to_bottom();
+        terminal.project(&mut grid);
+        assert_eq!(
+            (grid.get(0, 0).ch, grid.get(1, 0).ch),
+            ('c', 'd'),
+            "scroll_to_bottom restores the live view"
+        );
+    }
+
+    #[test]
+    fn mode_queries_reflect_terminal_mode() {
+        let mut terminal = Terminal::new(4, 8, Theme::default());
+        // alacritty enables alternate-scroll by default; the rest start off.
+        assert!(!terminal.is_alt_screen(), "alt screen off at startup");
+        assert!(
+            terminal.alternate_scroll(),
+            "alternate scroll on by default"
+        );
+        assert!(!terminal.mouse_mode(), "mouse reporting off at startup");
+        assert!(!terminal.sgr_mouse(), "sgr mouse off at startup");
+
+        // Enter the alt screen (1049), enable mouse click reporting (1000) and
+        // SGR encoding (1006), and turn alternate scroll off (1007), so every
+        // query flips from its startup value.
+        terminal.advance(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?1007l");
+        assert!(terminal.is_alt_screen(), "alt screen on");
+        assert!(!terminal.alternate_scroll(), "alternate scroll off");
+        assert!(terminal.mouse_mode(), "mouse reporting on");
+        assert!(terminal.sgr_mouse(), "sgr mouse on");
     }
 
     #[test]
