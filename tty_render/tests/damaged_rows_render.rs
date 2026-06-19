@@ -13,7 +13,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Grid, Rgb},
+    grid::{Grid, Rgb, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -75,6 +75,10 @@ fn patched_rows_match_a_full_rebuild() {
     fill_row(&mut grid, 0, "first row", white, black);
     fill_row(&mut grid, 1, "middle", white, black);
     fill_row(&mut grid, 2, "last row", white, black);
+    // Underline a cell in row 0, which stays unchanged across the edit below, so
+    // the comparison also checks the cached underline row is preserved.
+    grid.get_mut(0, 0).underline = UnderlineStyle::Straight;
+    grid.get_mut(0, 0).underline_color = Rgb::new(0, 200, 255);
 
     let render = |renderer: &mut Renderer, grid: &Grid, damage: &Damage| {
         renderer.render_into(

@@ -13,7 +13,7 @@ use stoatty_render::{
     render::cell_size,
 };
 use stoatty_term::{
-    grid::{Grid, Rgb},
+    grid::{Grid, Rgb, UnderlineStyle},
     term::Damage,
 };
 use wgpu::{
@@ -77,6 +77,10 @@ fn grid_scroll_moves_glyph_down_without_rebuild() {
     grid.get_mut(0, 0).ch = 'M';
     grid.get_mut(0, 0).fg = white;
     grid.get_mut(0, 0).bg = black;
+    // Underline the cell too: it must scroll with the glyph, so the row-0-cleared
+    // assertion below also catches a stale (non-scrolling) underline.
+    grid.get_mut(0, 0).underline = UnderlineStyle::Straight;
+    grid.get_mut(0, 0).underline_color = white;
 
     let frame = |grid_scroll, damage| Frame {
         cursor: None,
