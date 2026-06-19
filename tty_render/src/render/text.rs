@@ -1449,6 +1449,10 @@ fn probe_baseline(font_system: &mut FontSystem, metrics: CellMetrics, family: Fa
 /// The pen sits at the cell's left edge on the row baseline; `placement` is the
 /// swash bitmap offset from that pen (`left` rightward, `top` upward from the
 /// baseline).
+///
+/// The cell origin is snapped to whole pixels (the cell metrics are fractional)
+/// so glyphs land on the same integer grid the background pass snaps its cells
+/// to. The within-cell baseline offset is left unrounded.
 fn glyph_origin(
     col: usize,
     row: usize,
@@ -1456,8 +1460,8 @@ fn glyph_origin(
     baseline: f32,
     metrics: CellMetrics,
 ) -> [f32; 2] {
-    let pen_x = col as f32 * metrics.width;
-    let baseline_y = row as f32 * metrics.height + baseline;
+    let pen_x = (col as f32 * metrics.width).round();
+    let baseline_y = (row as f32 * metrics.height).round() + baseline;
     [
         pen_x + placement[0] as f32,
         baseline_y - placement[1] as f32,
@@ -1493,7 +1497,7 @@ fn fill_cell_box(
     metrics: CellMetrics,
 ) -> ([f32; 2], [f32; 2]) {
     let scale_y = metrics.height / metrics.font_size;
-    let baseline_y = row as f32 * metrics.height + baseline * scale;
+    let baseline_y = (row as f32 * metrics.height).round() + baseline * scale;
     (
         [pos[0], baseline_y + (pos[1] - baseline_y) * scale_y],
         [dim[0], dim[1] * scale_y],
@@ -1711,6 +1715,17 @@ mod tests {
 
         let origin = glyph_origin(0, 0, [-2, -3], baseline, metrics);
         assert_eq!(origin, [-2.0, baseline + 3.0]);
+    }
+
+    #[test]
+    fn glyph_origin_snaps_the_cell_origin_to_whole_pixels() {
+        // font_size 13 -> width 7.8, height 15.6, so cell origins are fractional.
+        let metrics = CellMetrics::from_font_size(13, 1.0);
+
+        // col 3 -> round(23.4) = 23, row 2 -> round(31.2) = 31; unsnapped the
+        // origin would be the fractional [24.4, 39.2].
+        let origin = glyph_origin(3, 2, [1, 2], 10.0, metrics);
+        assert_eq!(origin, [24.0, 39.0]);
     }
 
     #[test]
@@ -2071,6 +2086,14 @@ mod tests {
         Validator::new(ValidationFlags::all(), Capabilities::all())
             .validate(&module)
             .expect("validate text.wgsl");
+    }
+
+    #[test]
+    fn bg_shader_is_valid_wgsl() {
+        let module = wgsl::parse_str(include_str!("../shaders/bg.wgsl")).expect("parse bg.wgsl");
+        Validator::new(ValidationFlags::all(), Capabilities::all())
+            .validate(&module)
+            .expect("validate bg.wgsl");
     }
 
     /// A text pass on the headless device, or `None` when no adapter is present.

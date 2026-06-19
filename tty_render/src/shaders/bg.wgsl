@@ -34,7 +34,11 @@ fn vs_main(
         vec2<f32>(1.0, 1.0)
     );
 
-    let pixel = (cell + corners[vertex_index]) * globals.cell_size
+    // Snap each cell edge to a whole pixel so consecutive cells share an exact
+    // integer boundary and each spans whole pixels, leaving no fractional sliver
+    // (the dark seam) between same-color cells. Scroll is added after the snap so
+    // smooth scrolling stays fractional and the grid only snaps once it settles.
+    let pixel = round((cell + corners[vertex_index]) * globals.cell_size)
         + vec2<f32>(0.0, globals.scroll_y);
     let ndc = vec2<f32>(
         pixel.x / globals.resolution.x * 2.0 - 1.0,
