@@ -583,15 +583,29 @@ impl TextPass {
             ) else {
                 continue;
             };
-            instances.push(TextInstance {
-                pos: glyph_origin(
-                    glyph.col,
+            let pos = glyph_origin(
+                glyph.col,
+                glyph.row,
+                info.placement,
+                self.baseline * glyph.scale,
+                self.metrics,
+            );
+            let dim = [info.size[0] as f32, info.size[1] as f32];
+            let (pos, dim) = if glyph.cell_fill {
+                fill_cell_box(
+                    pos,
+                    dim,
                     glyph.row,
-                    info.placement,
-                    self.baseline * glyph.scale,
+                    glyph.scale,
+                    self.baseline,
                     self.metrics,
-                ),
-                dim: [info.size[0] as f32, info.size[1] as f32],
+                )
+            } else {
+                (pos, dim)
+            };
+            instances.push(TextInstance {
+                pos,
+                dim,
                 uv: info.uv,
                 fg: rgb_f32(glyph.fg),
                 bg: rgb_f32(glyph.bg),
@@ -900,13 +914,15 @@ impl TextPass {
 
             // With ligatures off, every cell is shaped on its own. A scaled glyph
             // or a character the primary font lacks (icon, CJK) always is, through
-            // the single-char path that keeps the symbols-font fallback. The
-            // cursor cell is too, so a ligature never spans it and the character
-            // under the cursor stays visible. Only same-size primary-covered cells
-            // run-shape, where ligatures form.
+            // the single-char path that keeps the symbols-font fallback. A
+            // cell-fill codepoint is too, so its quad scales to the cell box on
+            // its own. The cursor cell is too, so a ligature never spans it and
+            // the character under the cursor stays visible. Only same-size
+            // primary-covered cells run-shape, where ligatures form.
             if !self.ligatures
                 || scale != 1
                 || !(shaping.covers)(cell.ch)
+                || is_cell_fill(cell.ch)
                 || shaping.cursor_cell == Some((row, col))
             {
                 if let Some(key) = self.glyph_key(cell.ch, f32::from(scale))
@@ -928,6 +944,7 @@ impl TextPass {
                         fg: cell.fg,
                         bg: cell.bg,
                         scale: f32::from(scale),
+                        cell_fill: is_cell_fill(cell.ch),
                     });
                 }
                 col += 1;
@@ -943,6 +960,7 @@ impl TextPass {
                     && next.bg == cell.bg
                     && next.flags == cell.flags
                     && (shaping.covers)(next.ch)
+                    && !is_cell_fill(next.ch)
                     && shaping.cursor_cell != Some((row, end));
                 if !groups {
                     break;
@@ -976,6 +994,7 @@ impl TextPass {
                         fg: cell.fg,
                         bg: cell.bg,
                         scale: 1.0,
+                        cell_fill: false,
                     });
                 }
             }
@@ -1032,6 +1051,7 @@ impl TextPass {
                         fg: overlay.content_fg,
                         bg: overlay.fill,
                         scale: f32::from(scale),
+                        cell_fill: false,
                     });
                 }
             }
@@ -1084,6 +1104,9 @@ struct PendingGlyph {
     /// Multiple of the cell size this glyph is rasterized and drawn at. Integer
     /// for cell and overlay glyphs; the text-run path uses fractional scales.
     scale: f32,
+    /// Whether this is a cell-fill codepoint whose quad is scaled to the cell
+    /// box by [`fill_cell_box`] rather than drawn at its bitmap size.
+    cell_fill: bool,
 }
 
 /// One overlay's scissored slice of the shared overlay-content instance buffer.
@@ -1441,6 +1464,42 @@ fn glyph_origin(
     ]
 }
 
+/// Whether `ch` is a cell-fill codepoint: box-drawing (U+2500-257F), block
+/// elements (U+2580-259F), or powerline (U+E0B0-E0D4).
+///
+/// These are designed to fill the cell box rather than sit on the text
+/// baseline, so [`TextPass::build_text_instances`] scales their quad to the cell
+/// via [`fill_cell_box`] instead of drawing them at their bitmap size.
+fn is_cell_fill(ch: char) -> bool {
+    matches!(ch, '\u{2500}'..='\u{257F}' | '\u{2580}'..='\u{259F}' | '\u{E0B0}'..='\u{E0D4}')
+}
+
+/// Scale a cell-fill glyph's quad vertically so its em-height design fills the
+/// taller cell, leaving the horizontal extent unchanged.
+///
+/// The glyph is rasterized at em `font_size`, but the cell is `height` (1.2x em)
+/// tall, so a full-em glyph sits short of the cell with a gap above and below.
+/// Scaling by `height / font_size` about the glyph's baseline maps the em box
+/// onto the cell box: a full-em shape (a powerline separator, a full block)
+/// fills the cell, while a line keeps its shape rather than stretching to a
+/// solid fill. `scale` is the glyph's cell multiple, so a scaled block fills its
+/// whole block.
+fn fill_cell_box(
+    pos: [f32; 2],
+    dim: [f32; 2],
+    row: usize,
+    scale: f32,
+    baseline: f32,
+    metrics: CellMetrics,
+) -> ([f32; 2], [f32; 2]) {
+    let scale_y = metrics.height / metrics.font_size;
+    let baseline_y = row as f32 * metrics.height + baseline * scale;
+    (
+        [pos[0], baseline_y + (pos[1] - baseline_y) * scale_y],
+        [dim[0], dim[1] * scale_y],
+    )
+}
+
 /// Screen position of glyph `index` in a fractional, vertically-centered text
 /// run, in physical pixels.
 ///
@@ -1612,9 +1671,9 @@ fn underline_style_flag(style: UnderlineStyle) -> Option<u32> {
 mod tests {
     use super::{
         build_font_system, build_underline_instances, cell_glyph_scale, cell_rect_scissor,
-        cursor_cell, glyph_family, glyph_origin, load_bundled_fonts, overlay_content_cells,
-        resolve_primary_family, run_text_and_columns, shape_family, shape_run, text_run_origin,
-        TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
+        cursor_cell, fill_cell_box, glyph_family, glyph_origin, is_cell_fill, load_bundled_fonts,
+        overlay_content_cells, resolve_primary_family, run_text_and_columns, shape_family,
+        shape_run, text_run_origin, TextPass, STYLE_DOTTED, SYMBOLS_FAMILY,
     };
     use crate::{
         gpu::headless_device,
@@ -1652,6 +1711,48 @@ mod tests {
 
         let origin = glyph_origin(0, 0, [-2, -3], baseline, metrics);
         assert_eq!(origin, [-2.0, baseline + 3.0]);
+    }
+
+    #[test]
+    fn is_cell_fill_covers_box_block_and_powerline_ranges() {
+        assert!(is_cell_fill('\u{2500}'), "box-drawing start");
+        assert!(is_cell_fill('\u{257F}'), "box-drawing end");
+        assert!(is_cell_fill('\u{2580}'), "block start");
+        assert!(is_cell_fill('\u{259F}'), "block end");
+        assert!(is_cell_fill('\u{E0B0}'), "powerline separator");
+        assert!(is_cell_fill('\u{E0D4}'), "powerline end");
+
+        assert!(!is_cell_fill('\u{24FF}'), "just below box-drawing");
+        assert!(!is_cell_fill('\u{25A0}'), "just above block");
+        assert!(!is_cell_fill('\u{E0AF}'), "just below powerline");
+        assert!(!is_cell_fill('\u{E0D5}'), "just above powerline");
+        assert!(!is_cell_fill('A'), "letter");
+        assert!(!is_cell_fill('='), "ligature char");
+    }
+
+    #[test]
+    fn fill_cell_box_scales_a_full_em_glyph_onto_the_cell() {
+        // font_size 30 -> width 18, height 36, em 30, so scale_y = 1.2.
+        let metrics = CellMetrics::from_font_size(30, 1.0);
+        let baseline = 30.0;
+        let approx =
+            |a: [f32; 2], b: [f32; 2]| (a[0] - b[0]).abs() < 1e-3 && (a[1] - b[1]).abs() < 1e-3;
+
+        // A full-em glyph spanning [5, 35] at row 0 scales to fill the 36px cell.
+        let (pos, dim) = fill_cell_box([2.0, 5.0], [8.0, 30.0], 0, 1.0, baseline, metrics);
+        assert!(
+            approx(pos, [2.0, 0.0]),
+            "x unchanged, top at cell top: {pos:?}"
+        );
+        assert!(
+            approx(dim, [8.0, 36.0]),
+            "width kept, height fills cell: {dim:?}"
+        );
+
+        // A scaled 2x glyph fills its two-cell block.
+        let (pos, dim) = fill_cell_box([0.0, 10.0], [8.0, 60.0], 0, 2.0, baseline, metrics);
+        assert!(approx(pos, [0.0, 0.0]), "{pos:?}");
+        assert!(approx(dim, [8.0, 72.0]), "fills two cells: {dim:?}");
     }
 
     #[test]
@@ -2021,6 +2122,27 @@ mod tests {
             incremental, full,
             "rebuilding only the damaged row and reusing the rest matches a full rebuild"
         );
+    }
+
+    #[test]
+    fn flags_cell_fill_codepoints_through_shaping() {
+        let Some((device, queue, mut pass)) = headless_text_pass() else {
+            return;
+        };
+        let mut grid = Grid::new(1, 4);
+        grid.get_mut(0, 0).ch = '\u{E0B0}'; // powerline separator
+        grid.get_mut(0, 1).ch = 'M'; // ordinary glyph
+
+        pass.rasterize_visible(&device, &queue, &grid, None, &Damage::Full);
+        let glyphs = pass.collect_grid_glyphs();
+
+        let separator = glyphs.iter().find(|g| g.col == 0).expect("separator glyph");
+        let letter = glyphs.iter().find(|g| g.col == 1).expect("letter glyph");
+        assert!(
+            separator.cell_fill,
+            "powerline separator scales to the cell"
+        );
+        assert!(!letter.cell_fill, "an ordinary letter does not");
     }
 
     #[test]
