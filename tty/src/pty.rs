@@ -49,7 +49,7 @@ impl Pty {
         args: &[String],
         rows: u16,
         cols: u16,
-        mut sink: impl FnMut(PtyOutput) + Send + 'static,
+        sink: impl FnMut(PtyOutput) + Send + 'static,
     ) -> io::Result<Pty> {
         let pair = portable_pty::native_pty_system()
             .openpty(PtySize {
@@ -69,18 +69,9 @@ impl Pty {
             .spawn_command(command)
             .map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
-        let mut reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+        let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
 
-        let reader_thread = thread::spawn(move || {
-            let mut buf = [0u8; 4096];
-            loop {
-                match reader.read(&mut buf) {
-                    Ok(0) | Err(_) => break,
-                    Ok(n) => sink(PtyOutput::Data(buf[..n].to_vec())),
-                }
-            }
-            sink(PtyOutput::Eof);
-        });
+        let reader_thread = thread::spawn(move || read_loop(reader, sink));
 
         Ok(Pty {
             master: pair.master,
@@ -117,6 +108,27 @@ impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.child.kill();
     }
+}
+
+/// Size of the reader thread's buffer. Each read fills up to this many bytes
+/// before a chunk is handed on, so a larger buffer means proportionally fewer
+/// reads, allocations, and sink calls under firehose output. Sized in tens of
+/// KiB to batch a `yes`/`cat` flood without large per-chunk allocations or
+/// latency, and to stay well within the thread stack.
+const READ_BUF_SIZE: usize = 64 * 1024;
+
+/// Pump `reader` to `sink` until end of input: read into a reused buffer and
+/// hand each fill on as a [`PtyOutput::Data`] chunk, then one [`PtyOutput::Eof`]
+/// once the shell closes its end or the read errors.
+fn read_loop(mut reader: impl Read, mut sink: impl FnMut(PtyOutput)) {
+    let mut buf = [0u8; READ_BUF_SIZE];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) | Err(_) => break,
+            Ok(n) => sink(PtyOutput::Data(buf[..n].to_vec())),
+        }
+    }
+    sink(PtyOutput::Eof);
 }
 
 /// The shell to launch, in order of preference: `$SHELL`, the passwd entry's
@@ -183,7 +195,11 @@ fn passwd_shell() -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::shell_or_default;
+    use super::{read_loop, shell_or_default, PtyOutput, READ_BUF_SIZE};
+    use std::{
+        io::{self, Cursor, Write},
+        thread,
+    };
 
     fn shell(path: &str) -> Option<String> {
         Some(path.to_string())
@@ -207,5 +223,60 @@ mod tests {
     fn shell_or_default_falls_back_to_bin_sh() {
         assert_eq!(shell_or_default(None, None), "/bin/sh");
         assert_eq!(shell_or_default(shell(""), shell("")), "/bin/sh");
+    }
+
+    #[test]
+    fn read_loop_chunks_at_the_buffer_boundary_then_signals_eof() {
+        let data = vec![b'a'; READ_BUF_SIZE + 100];
+        let mut sizes = Vec::new();
+        let mut eof = false;
+        read_loop(Cursor::new(data), |out| match out {
+            PtyOutput::Data(chunk) => sizes.push(chunk.len()),
+            PtyOutput::Eof => eof = true,
+        });
+
+        assert_eq!(
+            sizes,
+            vec![READ_BUF_SIZE, 100],
+            "a full buffer, then the remainder"
+        );
+        assert!(eof, "ends with Eof");
+    }
+
+    #[test]
+    #[ignore = "throughput benchmark; run with: cargo test -p stoatty --lib -- --ignored pty_read_throughput"]
+    fn pty_read_throughput() {
+        let total = 64 * 1024 * 1024;
+        let (reader, mut writer) = io::pipe().unwrap();
+
+        let feeder = thread::spawn(move || {
+            let block = vec![b'x'; 64 * 1024];
+            let mut left = total;
+            while left > 0 {
+                let n = block.len().min(left);
+                if writer.write_all(&block[..n]).is_err() {
+                    break;
+                }
+                left -= n;
+            }
+        });
+
+        let mut chunks = 0usize;
+        let mut bytes = 0usize;
+        let start = std::time::Instant::now();
+        read_loop(reader, |out| {
+            if let PtyOutput::Data(chunk) = out {
+                chunks += 1;
+                bytes += chunk.len();
+            }
+        });
+        let elapsed = start.elapsed();
+        feeder.join().unwrap();
+
+        let mb = bytes as f64 / (1024.0 * 1024.0);
+        eprintln!(
+            "pty read {mb:.0}MB: {chunks} chunks, {elapsed:?}, {:.0} MB/s",
+            mb / elapsed.as_secs_f64()
+        );
     }
 }
