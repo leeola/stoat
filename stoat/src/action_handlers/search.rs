@@ -232,6 +232,16 @@ mod tests {
         buf_snap.resolve_anchor(&head)
     }
 
+    fn cached_match_count(h: &mut TestHarness) -> usize {
+        crate::action_handlers::focused_editor_mut(&mut h.stoat)
+            .expect("focused editor")
+            .search_match_cache
+            .as_ref()
+            .expect("search active so the render populated the match cache")
+            .matches
+            .len()
+    }
+
     #[test]
     fn forward_search_jumps_to_first_match_after_cursor() {
         let mut h = TestHarness::with_size(40, 10);
@@ -398,5 +408,29 @@ mod tests {
         h.type_text("\\d+");
         h.type_keys("enter");
         h.assert_snapshot("regex_variable_length_match_highlight");
+    }
+
+    #[test]
+    fn search_match_cache_recomputes_on_query_change() {
+        let mut h = TestHarness::with_size(40, 10);
+        seed(&mut h, "aaa\n");
+
+        h.type_keys("/");
+        h.type_text("aa");
+        h.type_keys("enter");
+        assert_eq!(
+            cached_match_count(&mut h),
+            1,
+            "non-overlapping 'aa' in 'aaa' matches once",
+        );
+
+        h.type_keys("/");
+        h.type_text("a");
+        h.type_keys("enter");
+        assert_eq!(
+            cached_match_count(&mut h),
+            3,
+            "changing the query recomputes the cache: 'a' matches three times",
+        );
     }
 }

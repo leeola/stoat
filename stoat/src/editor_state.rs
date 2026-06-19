@@ -12,6 +12,20 @@ use stoat_scheduler::Executor;
 
 new_key_type! { pub struct EditorId; }
 
+/// Cached in-buffer search matches for one `(version, query)`.
+///
+/// Lets `render_editor` reuse match byte-ranges across frames instead of
+/// re-materializing the rope and re-scanning with the regex every frame a
+/// search is active. Recomputed only when the buffer content version or the
+/// query changes. The per-match display mapping stays per-frame, so folds and
+/// scroll still re-map without invalidating the cache.
+pub(crate) struct SearchMatchCache {
+    pub(crate) version: u64,
+    pub(crate) query: String,
+    /// Byte ranges `[start, end)` of each non-empty match in the buffer.
+    pub(crate) matches: Vec<(usize, usize)>,
+}
+
 pub(crate) struct EditorState {
     pub(crate) buffer_id: BufferId,
     pub(crate) display_map: DisplayMap,
@@ -47,6 +61,9 @@ pub(crate) struct EditorState {
     /// scoped to this editor's single buffer; cross-buffer jumps
     /// would need a workspace-level structure. Transient.
     pub(crate) jumplist: JumpList,
+    /// Cached search-match byte ranges for the current `(version, query)`.
+    /// See [`SearchMatchCache`]. Transient render state, not persisted.
+    pub(crate) search_match_cache: Option<SearchMatchCache>,
 }
 
 /// Snapshot of an [`EditorState`] suitable for workspace save/load.
@@ -78,6 +95,7 @@ impl EditorState {
             expansion_history: Vec::new(),
             expansion_tip: None,
             jumplist: JumpList::new(),
+            search_match_cache: None,
         }
     }
 
@@ -98,6 +116,7 @@ impl EditorState {
             expansion_history: Vec::new(),
             expansion_tip: None,
             jumplist: JumpList::new(),
+            search_match_cache: None,
         }
     }
 

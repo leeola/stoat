@@ -1,4 +1,7 @@
-use crate::{editor_state::EditorState, render::review::render_review};
+use crate::{
+    editor_state::{EditorState, SearchMatchCache},
+    render::review::render_review,
+};
 use lsp_types::DiagnosticSeverity;
 use ratatui::{
     buffer::Buffer,
@@ -110,18 +113,35 @@ pub(crate) fn render_editor_with_overlay(
 
     let buffer_snapshot = snapshot.buffer_snapshot();
 
-    if let Some(query) = search_query.filter(|q| !q.is_empty())
-        && let Ok(regex) = crate::action_handlers::search::compile_search_regex(query)
-    {
+    if let Some(query) = search_query.filter(|q| !q.is_empty()) {
+        let version = buffer_snapshot.version();
+        let stale = match &editor.search_match_cache {
+            Some(cache) => cache.version != version || cache.query != query,
+            None => true,
+        };
+        if stale {
+            let matches = match crate::action_handlers::search::compile_search_regex(query) {
+                Ok(regex) => {
+                    let text = buffer_snapshot.rope().to_string();
+                    regex
+                        .find_iter(&text)
+                        .filter(|m| m.end() > m.start())
+                        .map(|m| (m.start(), m.end()))
+                        .collect()
+                },
+                Err(_) => Vec::new(),
+            };
+            editor.search_match_cache = Some(SearchMatchCache {
+                version,
+                query: query.to_string(),
+                matches,
+            });
+        }
+
         let match_style = theme.get(crate::theme::scope::UI_SEARCH_MATCH);
         let rope = buffer_snapshot.rope();
-        let text = rope.to_string();
-        for m in regex.find_iter(&text) {
-            let match_start = m.start();
-            let match_end = m.end();
-            if match_end == match_start {
-                continue;
-            }
+        let cache = editor.search_match_cache.as_ref().expect("set above");
+        for &(match_start, match_end) in &cache.matches {
             let mut offset = match_start;
             let mut chars = rope.chars_at(offset);
             while offset < match_end {
