@@ -13,7 +13,10 @@ use crate::{
     pty::{self, Pty, PtyOutput},
 };
 use alacritty_terminal::sync::FairMutex;
-use std::sync::Arc;
+use std::sync::{
+    atomic::{AtomicBool, Ordering},
+    Arc,
+};
 use stoatty_render::{
     gpu::{FontConfig, FontLoad, Frame, GpuContext, Scroll},
     render,
@@ -111,10 +114,15 @@ fn load_config() -> Config {
 /// sends these through the [`EventLoopProxy`] to wake the idle main thread for
 /// the follow-up it cannot do off-thread: writing query responses and redrawing.
 enum PtyEvent {
-    /// A batch was parsed into the terminal. Carries the host-query responses
-    /// the parse produced, for the main thread to write back to the PTY; an
-    /// empty buffer still signals that the screen changed and should redraw.
-    Parsed(Vec<u8>),
+    /// Host-query responses a parse produced, for the main thread to write back
+    /// to the PTY. Sent only when a parse yields replies, so it never doubles as
+    /// the redraw signal.
+    Responses(Vec<u8>),
+    /// The reader parsed output that changed the screen and asks for a redraw.
+    /// Coalesced: the reader sends this on the clean-to-dirty edge of
+    /// [`State::dirty`], so a burst of chunks collapses into one wakeup per
+    /// render cycle rather than one per read chunk.
+    Redraw,
     Exited,
 }
 
@@ -174,6 +182,11 @@ struct State {
     /// [`FairMutex`] lets the main thread lock it to project while the reader
     /// locks it to parse, neither starving the other under heavy output.
     terminal: Arc<FairMutex<Terminal>>,
+    /// Set by the reader when it parses output not yet redrawn, cleared when the
+    /// main thread services a [`PtyEvent::Redraw`]. The reader sends a redraw
+    /// wakeup only on the clean-to-dirty edge, so a flood of chunks coalesces
+    /// into one wakeup per render cycle instead of one per chunk.
+    dirty: Arc<AtomicBool>,
     grid: Grid,
     pty: Pty,
     /// The live font size in logical points, seeded from the config and stepped
@@ -257,10 +270,12 @@ impl ApplicationHandler<PtyEvent> for App {
         let (rows, cols) = gpu.grid_size();
         let grid = Grid::new(rows, cols);
         let terminal = Arc::new(FairMutex::new(Terminal::new(rows, cols, self.theme)));
+        let dirty = Arc::new(AtomicBool::new(false));
 
         let pty = {
             let proxy = self.proxy.clone();
             let terminal = terminal.clone();
+            let dirty = dirty.clone();
             Pty::spawn(
                 &self.program,
                 &self.args,
@@ -268,14 +283,21 @@ impl ApplicationHandler<PtyEvent> for App {
                 cols as u16,
                 move |output| match output {
                     PtyOutput::Data(bytes) => {
-                        // Parse on the reader thread under the shared lock, then
-                        // wake the main thread to write any responses and redraw.
+                        // Parse on the reader thread under the shared lock.
                         let responses = {
                             let mut terminal = terminal.lock();
                             terminal.advance(&bytes);
                             terminal.take_responses()
                         };
-                        let _ = proxy.send_event(PtyEvent::Parsed(responses));
+                        if !responses.is_empty() {
+                            let _ = proxy.send_event(PtyEvent::Responses(responses));
+                        }
+                        // Wake the main thread to redraw, but only on the
+                        // clean-to-dirty edge so a burst of chunks collapses
+                        // into one wakeup per render cycle.
+                        if !dirty.swap(true, Ordering::Relaxed) {
+                            let _ = proxy.send_event(PtyEvent::Redraw);
+                        }
                     },
                     PtyOutput::Eof => {
                         let _ = proxy.send_event(PtyEvent::Exited);
@@ -290,6 +312,7 @@ impl ApplicationHandler<PtyEvent> for App {
             window,
             gpu,
             terminal,
+            dirty,
             grid,
             pty,
             font_size: self.font_size,
@@ -312,11 +335,13 @@ impl ApplicationHandler<PtyEvent> for App {
         };
 
         match event {
-            PtyEvent::Parsed(responses) => {
-                if !responses.is_empty() {
-                    let _ = state.pty.write(&responses);
-                }
-
+            PtyEvent::Responses(responses) => {
+                let _ = state.pty.write(&responses);
+            },
+            PtyEvent::Redraw => {
+                // Clear before requesting so a chunk parsed during this cycle
+                // re-arms the next wakeup; the redraw projects the latest state.
+                state.dirty.store(false, Ordering::Relaxed);
                 state.window.request_redraw();
             },
             PtyEvent::Exited => event_loop.exit(),
