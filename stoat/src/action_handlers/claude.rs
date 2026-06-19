@@ -102,6 +102,7 @@ fn create_claude_session(stoat: &mut Stoat) -> crate::host::ClaudeSessionId {
             cancelled_tool_uses: std::collections::HashSet::new(),
             focused_tool_id: None,
             expanded_tool_ids: std::collections::HashSet::new(),
+            layout_cache: std::cell::RefCell::default(),
         },
     );
 

@@ -62,6 +62,10 @@ pub struct ClaudeChatState {
     /// `ToolUse.id`s whose card is rendered in expanded form (raw input
     /// + full result body) instead of the collapsed header + preview.
     pub expanded_tool_ids: HashSet<String>,
+    /// Memoized chat-scrollback layout, refreshed by the render path when its
+    /// fingerprint changes. Interior-mutable so rendering, which holds
+    /// `&ClaudeChatState`, can update it. Render-only and not persisted.
+    pub(crate) layout_cache: std::cell::RefCell<crate::render::claude_pane::ChatLayoutCache>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

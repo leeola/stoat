@@ -556,6 +556,7 @@ mod tests {
                 expanded_tool_ids: std::collections::HashSet::new(),
                 usage: crate::host::TokenUsage::default(),
                 cancelled_tool_uses: std::collections::HashSet::new(),
+                layout_cache: std::cell::RefCell::default(),
             },
         );
 

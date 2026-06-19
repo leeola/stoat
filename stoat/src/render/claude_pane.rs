@@ -27,6 +27,19 @@ pub(crate) struct ChatPaneLayout {
     pub(crate) message_ranges: Vec<Option<(usize, usize)>>,
 }
 
+/// Memoized committed-message portion of [`build_chat_pane_layout`].
+///
+/// The committed messages re-wrap only when their fingerprint changes, so
+/// the keepalive's ~10fps redraws reuse this instead of re-wrapping the whole
+/// conversation each frame. The streaming text and throbber are the live tail
+/// and are appended fresh, so they are never stored here.
+#[derive(Default)]
+pub(crate) struct ChatLayoutCache {
+    fingerprint: Option<u64>,
+    lines: Vec<(Style, String)>,
+    ranges: Vec<Option<(usize, usize)>>,
+}
+
 pub(crate) fn render_claude_pane(
     chat: &ClaudeChatState,
     ctx: PaneCtx<'_>,
@@ -154,8 +167,6 @@ pub(crate) fn build_chat_pane_layout(
     const TOOL_RESULT_TEE: &str = "\u{251c}\u{2500}";
 
     let result_map = build_tool_result_map(&chat.messages);
-    let mut lines: Vec<(Style, String)> = Vec::new();
-    let mut message_ranges: Vec<Option<(usize, usize)>> = Vec::with_capacity(chat.messages.len());
 
     let push_block =
         |lines: &mut Vec<(Style, String)>, block: Vec<(Style, String)>| -> Option<(usize, usize)> {
@@ -200,88 +211,122 @@ pub(crate) fn build_chat_pane_layout(
             block
         };
 
-    for msg in &chat.messages {
-        let range = match (&msg.role, &msg.content) {
-            (ChatRole::User, ChatMessageContent::Text(t)) => {
-                let prefix = if msg.checkpoint_sha.is_some() {
-                    RESTORABLE_USER_PREFIX
-                } else {
-                    STANDARD_USER_PREFIX
-                };
-                push_block(
-                    &mut lines,
-                    render_flowing(t, user_style, body_width, prefix),
-                )
-            },
-            (ChatRole::Assistant, ChatMessageContent::Text(t)) => {
-                push_block(&mut lines, render_flowing(t, text_style, body_width, ""))
-            },
-            (ChatRole::Assistant, ChatMessageContent::Thinking { text }) => {
-                let n = text.lines().count().max(1);
-                push_block(
-                    &mut lines,
-                    vec![(thinking_style, format!("~ Thinking... ({n} lines)"))],
-                )
-            },
-            (ChatRole::Assistant, ChatMessageContent::ToolUse { id, name, input }) => {
-                let header = format_tool_header(name, input);
-                let status = tool_card_status(chat, id);
-                let is_focused = chat.focused_tool_id.as_deref() == Some(id.as_str());
-                let is_expanded = chat.expanded_tool_ids.contains(id);
+    let fingerprint = layout_fingerprint(
+        chat,
+        body_width,
+        [
+            user_style,
+            text_style,
+            thinking_style,
+            tool_header_style,
+            tool_focused_style,
+            tool_body_style,
+            error_style,
+            turn_sep_style,
+        ],
+    );
 
-                let header_style = if is_focused {
-                    tool_focused_style
-                } else {
-                    tool_header_style
-                };
-                let mut block = vec![
-                    (header_style, format!("{TOOL_MARK} {header}")),
-                    (
-                        status_style_for(status, theme),
-                        format!("  {}", status_label(status)),
-                    ),
-                ];
+    let (mut lines, message_ranges) = {
+        let mut cache = chat.layout_cache.borrow_mut();
+        if cache.fingerprint != Some(fingerprint) {
+            let mut lines: Vec<(Style, String)> = Vec::new();
+            let mut message_ranges: Vec<Option<(usize, usize)>> =
+                Vec::with_capacity(chat.messages.len());
+            for msg in &chat.messages {
+                let range = match (&msg.role, &msg.content) {
+                    (ChatRole::User, ChatMessageContent::Text(t)) => {
+                        let prefix = if msg.checkpoint_sha.is_some() {
+                            RESTORABLE_USER_PREFIX
+                        } else {
+                            STANDARD_USER_PREFIX
+                        };
+                        push_block(
+                            &mut lines,
+                            render_flowing(t, user_style, body_width, prefix),
+                        )
+                    },
+                    (ChatRole::Assistant, ChatMessageContent::Text(t)) => {
+                        push_block(&mut lines, render_flowing(t, text_style, body_width, ""))
+                    },
+                    (ChatRole::Assistant, ChatMessageContent::Thinking { text }) => {
+                        let n = text.lines().count().max(1);
+                        push_block(
+                            &mut lines,
+                            vec![(thinking_style, format!("~ Thinking... ({n} lines)"))],
+                        )
+                    },
+                    (ChatRole::Assistant, ChatMessageContent::ToolUse { id, name, input }) => {
+                        let header = format_tool_header(name, input);
+                        let status = tool_card_status(chat, id);
+                        let is_focused = chat.focused_tool_id.as_deref() == Some(id.as_str());
+                        let is_expanded = chat.expanded_tool_ids.contains(id);
 
-                let result_content = result_map.get(id.as_str()).copied();
-                if is_expanded {
-                    block.push((
-                        tool_body_style,
-                        format!("  {TOOL_RESULT_TEE} input: {}", format_tool_input(input)),
-                    ));
-                    if let Some(content) = result_content {
-                        block.push((tool_body_style, format!("  {TOOL_RESULT_ELBOW} output:")));
-                        for raw_line in content.lines() {
-                            for wrapped in wrap_text(raw_line, body_width.saturating_sub(5)) {
-                                block.push((tool_body_style, format!("     {wrapped}")));
+                        let header_style = if is_focused {
+                            tool_focused_style
+                        } else {
+                            tool_header_style
+                        };
+                        let mut block = vec![
+                            (header_style, format!("{TOOL_MARK} {header}")),
+                            (
+                                status_style_for(status, theme),
+                                format!("  {}", status_label(status)),
+                            ),
+                        ];
+
+                        let result_content = result_map.get(id.as_str()).copied();
+                        if is_expanded {
+                            block.push((
+                                tool_body_style,
+                                format!("  {TOOL_RESULT_TEE} input: {}", format_tool_input(input)),
+                            ));
+                            if let Some(content) = result_content {
+                                block.push((
+                                    tool_body_style,
+                                    format!("  {TOOL_RESULT_ELBOW} output:"),
+                                ));
+                                for raw_line in content.lines() {
+                                    for wrapped in wrap_text(raw_line, body_width.saturating_sub(5))
+                                    {
+                                        block.push((tool_body_style, format!("     {wrapped}")));
+                                    }
+                                }
                             }
+                        } else if let Some(content) = result_content {
+                            let preview = format_tool_result_preview(content);
+                            block.push((
+                                tool_body_style,
+                                format!("  {TOOL_RESULT_ELBOW} {preview}"),
+                            ));
                         }
-                    }
-                } else if let Some(content) = result_content {
-                    let preview = format_tool_result_preview(content);
-                    block.push((tool_body_style, format!("  {TOOL_RESULT_ELBOW} {preview}")));
-                }
-                push_block(&mut lines, block)
-            },
-            (ChatRole::Assistant, ChatMessageContent::ToolResult { .. }) => None,
-            (ChatRole::Assistant, ChatMessageContent::Error(m)) => {
-                push_block(&mut lines, vec![(error_style, format!("! {m}"))])
-            },
-            (ChatRole::Assistant, ChatMessageContent::TurnComplete { duration_ms, .. }) => {
-                push_block(
-                    &mut lines,
-                    vec![
-                        (turn_sep_style, "-".repeat(body_width)),
-                        (
-                            time_style_for(theme),
-                            format!("  {:.1}s", *duration_ms as f64 / 1000.0),
-                        ),
-                    ],
-                )
-            },
-            (ChatRole::User, _) => None,
-        };
-        message_ranges.push(range);
-    }
+                        push_block(&mut lines, block)
+                    },
+                    (ChatRole::Assistant, ChatMessageContent::ToolResult { .. }) => None,
+                    (ChatRole::Assistant, ChatMessageContent::Error(m)) => {
+                        push_block(&mut lines, vec![(error_style, format!("! {m}"))])
+                    },
+                    (ChatRole::Assistant, ChatMessageContent::TurnComplete { duration_ms, .. }) => {
+                        push_block(
+                            &mut lines,
+                            vec![
+                                (turn_sep_style, "-".repeat(body_width)),
+                                (
+                                    time_style_for(theme),
+                                    format!("  {:.1}s", *duration_ms as f64 / 1000.0),
+                                ),
+                            ],
+                        )
+                    },
+                    (ChatRole::User, _) => None,
+                };
+                message_ranges.push(range);
+            }
+            cache.fingerprint = Some(fingerprint);
+            cache.lines = lines;
+            cache.ranges = message_ranges;
+        }
+        (cache.lines.clone(), cache.ranges.clone())
+    };
 
     if let Some(partial) = &chat.streaming_text {
         push_block(
@@ -304,6 +349,39 @@ pub(crate) fn build_chat_pane_layout(
         lines,
         message_ranges,
     }
+}
+
+/// Fingerprint of every input the committed-message layout depends on.
+///
+/// Message content is append-only and immutable, so `messages.len()` stands
+/// in for the absent per-message version: it changes on any append, including
+/// the `ToolResult`s that drive tool-card status and the result map. The tool
+/// interaction sets and the resolved styles cover the rest, so an unchanged
+/// fingerprint means the committed layout is byte-identical.
+fn layout_fingerprint(chat: &ClaudeChatState, body_width: usize, styles: [Style; 8]) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    body_width.hash(&mut h);
+    chat.messages.len().hash(&mut h);
+    chat.focused_tool_id.hash(&mut h);
+    set_fingerprint(&chat.expanded_tool_ids).hash(&mut h);
+    set_fingerprint(&chat.cancelled_tool_uses).hash(&mut h);
+    styles.hash(&mut h);
+    h.finish()
+}
+
+/// Order-independent hash of a string set. The committed layout depends on
+/// `expanded_tool_ids` and `cancelled_tool_uses` only through membership, so
+/// XORing element hashes plus the length captures any change without sorting.
+fn set_fingerprint(set: &std::collections::HashSet<String>) -> u64 {
+    use std::hash::{Hash, Hasher};
+    let mut acc = set.len() as u64;
+    for s in set {
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        s.hash(&mut h);
+        acc ^= h.finish();
+    }
+    acc
 }
 
 fn time_style_for(theme: &Theme) -> Style {
