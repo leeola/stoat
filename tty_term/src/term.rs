@@ -165,14 +165,26 @@ impl Terminal {
     /// dispatches every other host query, but not this one, so the driver
     /// recognizes it and buffers [`XTVERSION_REPLY`] for [`Self::take_responses`].
     pub fn advance(&mut self, bytes: &[u8]) {
-        for payload in self.apc.scan(bytes) {
-            if let Some(command) = command::decode(&payload) {
-                self.apply_command(command);
-            }
-        }
+        // The APC and XTVERSION scanners only act on ESC-prefixed sequences, so
+        // when neither holds a partial frame a chunk with no ESC carries nothing
+        // for them. A SIMD memchr for the first ESC lets the bulk of plain output
+        // (cat, yes) skip the two per-byte scans, leaving only the vte parse.
+        let scan = if self.apc.is_idle() && self.xtversion.is_idle() {
+            memchr::memchr(ESC, bytes).map(|esc| &bytes[esc..])
+        } else {
+            Some(bytes)
+        };
 
-        for _ in 0..self.xtversion.scan(bytes) {
-            self.responses.push(XTVERSION_REPLY.as_bytes());
+        if let Some(scan) = scan {
+            for payload in self.apc.scan(scan) {
+                if let Some(command) = command::decode(&payload) {
+                    self.apply_command(command);
+                }
+            }
+
+            for _ in 0..self.xtversion.scan(scan) {
+                self.responses.push(XTVERSION_REPLY.as_bytes());
+            }
         }
 
         self.parser.advance(&mut self.term, bytes);
@@ -442,6 +454,12 @@ enum ApcState {
 }
 
 impl ApcScanner {
+    /// Whether the scanner holds no partial frame, so a caller may skip feeding
+    /// it a chunk that contains no `ESC` without missing a frame.
+    fn is_idle(&self) -> bool {
+        matches!(self.state, ApcState::Ground)
+    }
+
     /// Feed `bytes`, returning every APC payload that completes within them.
     ///
     /// A payload split across calls is retained until its terminator arrives.
@@ -534,6 +552,12 @@ enum CsiState {
 }
 
 impl XtVersionScanner {
+    /// Whether the scanner holds no partial query, so a caller may skip a chunk
+    /// that contains no `ESC` without missing a query.
+    fn is_idle(&self) -> bool {
+        matches!(self.state, CsiState::Ground)
+    }
+
     /// Feed `bytes`, returning how many XTVERSION queries completed within them.
     ///
     /// A query split across calls is retained until its final `q` arrives.
@@ -1422,6 +1446,40 @@ mod tests {
     }
 
     #[test]
+    fn memchr_prescan_preserves_frame_and_query_detection() {
+        let frame = encode_border(&BorderCommand {
+            top: 0,
+            left: 0,
+            width: 3,
+            height: 2,
+            style: ProtoBorderStyle::Light,
+            color: [255, 0, 0],
+        });
+        let edge = Some(Border {
+            style: BorderStyle::Light,
+            color: Rgb::new(255, 0, 0),
+        });
+
+        // An ESC-free chunk takes the memchr fast path; a frame in the next
+        // chunk is still detected.
+        let mut terminal = Terminal::new(2, 3, Theme::default());
+        let mut grid = Grid::new(2, 3);
+        terminal.advance(b"hi");
+        terminal.advance(&frame);
+        terminal.project(&mut grid);
+        assert_eq!(grid.get(0, 0).borders.top, edge, "frame after plain output");
+
+        // A query preceded by plain bytes in one chunk: memchr seeks to the ESC.
+        let mut terminal = Terminal::new(2, 8, Theme::default());
+        terminal.advance(b"ab\x1b[>0q");
+        assert_eq!(
+            terminal.take_responses(),
+            XTVERSION_REPLY.as_bytes(),
+            "query after a plain prefix"
+        );
+    }
+
+    #[test]
     fn reset_clears_accumulated_borders() {
         let border = encode_border(&BorderCommand {
             top: 0,
@@ -1670,5 +1728,24 @@ mod tests {
 
         assert_eq!(grid.text_runs()[0].row, 80, "run shifts down two rows");
         assert_eq!(grid.bars()[0].y, 80, "bar shifts down two rows");
+    }
+
+    #[test]
+    #[ignore = "throughput benchmark; run with: cargo test -p stoatty_term --lib -- --ignored advance_plain_throughput"]
+    fn advance_plain_throughput() {
+        let mut terminal = Terminal::new(50, 200, Theme::default());
+        let mut buf = Vec::with_capacity(64 * 1024);
+        while buf.len() < 64 * 1024 {
+            buf.extend_from_slice(b"the quick brown fox jumps over the lazy dog 0123456789\r\n");
+        }
+
+        let iterations = 400;
+        let start = std::time::Instant::now();
+        for _ in 0..iterations {
+            terminal.advance(&buf);
+        }
+        let per = start.elapsed() / iterations;
+
+        eprintln!("advance() {}KB ESC-free: {per:?}/call", buf.len() / 1024);
     }
 }
