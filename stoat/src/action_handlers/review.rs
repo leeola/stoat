@@ -982,8 +982,9 @@ fn scan_agent_edits(
 /// buffer contents are equal.
 ///
 /// Takes the language registry directly rather than `&Stoat` so it runs
-/// inside the off-loop scan closures.
-fn build_session_from_trees(
+/// inside the off-loop scan closures, including the commit-preview build in
+/// the sibling `commits` module.
+pub(super) fn build_session_from_trees(
     langs: &LanguageRegistry,
     source: ReviewSource,
     workdir: &Path,

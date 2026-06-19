@@ -1,9 +1,8 @@
 use crate::{
     app::{Stoat, UpdateEffect},
-    review::ReviewFileInput,
     review_session::{ReviewSession, ReviewSource},
 };
-use std::{path::Path, sync::Arc};
+use std::sync::Arc;
 
 const COMMITS_INITIAL_PAGE: usize = 64;
 const COMMITS_PREFETCH_GAP: usize = 8;
@@ -267,50 +266,12 @@ fn spawn_commit_preview_load(
             workdir: workdir.clone(),
             sha: sha.clone(),
         };
-        build_session_from_trees_pure(source, &workdir, &base_tree, &new_tree, &language_registry)
+        super::review::build_session_from_trees(
+            &language_registry,
+            source,
+            &workdir,
+            &base_tree,
+            &new_tree,
+        )
     })
-}
-
-/// Stateless variant of `build_session_from_trees` usable from async
-/// preview tasks that do not hold a `&Stoat`.
-fn build_session_from_trees_pure(
-    source: ReviewSource,
-    workdir: &Path,
-    base_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
-    new_tree: &std::collections::BTreeMap<std::path::PathBuf, String>,
-    language_registry: &stoat_language::LanguageRegistry,
-) -> Option<ReviewSession> {
-    let mut paths: std::collections::BTreeSet<&Path> = std::collections::BTreeSet::new();
-    for p in base_tree.keys() {
-        paths.insert(p.as_path());
-    }
-    for p in new_tree.keys() {
-        paths.insert(p.as_path());
-    }
-    if paths.is_empty() {
-        return None;
-    }
-    let mut session = ReviewSession::new(source);
-    let mut inputs: Vec<ReviewFileInput> = Vec::new();
-    for rel in paths {
-        let base = base_tree.get(rel).cloned().unwrap_or_default();
-        let buffer = new_tree.get(rel).cloned().unwrap_or_default();
-        if base == buffer {
-            continue;
-        }
-        let abs = workdir.join(rel);
-        let lang = language_registry.for_path(&abs);
-        inputs.push(ReviewFileInput {
-            path: abs,
-            rel_path: rel.display().to_string(),
-            language: lang,
-            base_text: Arc::new(base),
-            buffer_text: Arc::new(buffer),
-        });
-    }
-    session.add_files(inputs);
-    if session.order.is_empty() {
-        return None;
-    }
-    Some(session)
 }
